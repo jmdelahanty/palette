@@ -92,6 +92,13 @@ def _worker_init_fn(_: int) -> None:
     torch.set_num_threads(1)
 
 
+def _summarize_source_run(meta: Dict[str, object], *, source_key: str, local_key: str) -> str:
+    source_value = str(meta.get(source_key) or "").strip()
+    if source_value:
+        return source_value
+    return str(meta.get(local_key, "unknown"))
+
+
 def _collate_triplets(batch: Sequence[Dict[str, np.ndarray]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     imgs = torch.from_numpy(np.stack([sample["img"] for sample in batch], axis=0)).float()
     masks = torch.from_numpy(np.stack([sample["masks"] for sample in batch], axis=0)).float()
@@ -366,16 +373,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     summary_table = Table(title="Loaded Subject-Mask Training Artifacts", show_header=True)
     summary_table.add_column("Dataset", style="cyan")
-    summary_table.add_column("Subject Run", style="magenta")
-    summary_table.add_column("Crop Run", style="magenta")
+    summary_table.add_column("Source Subject Run", style="magenta")
+    summary_table.add_column("Source Crop Run", style="magenta")
     summary_table.add_column("Train", justify="right", style="green")
     summary_table.add_column("Val", justify="right", style="green")
     summary_table.add_column("Schema", style="yellow")
     for meta in bundle.meta_list:
         summary_table.add_row(
             str(meta.get("dataset_name", "unknown")),
-            str(meta.get("subject_mask_run", "unknown")),
-            str(meta.get("crop_run", "unknown")),
+            _summarize_source_run(meta, source_key="source_subject_mask_run", local_key="subject_mask_run"),
+            _summarize_source_run(meta, source_key="source_crop_run", local_key="crop_run"),
             f"{int(meta.get('train_rows', 0)):,}",
             f"{int(meta.get('val_rows', 0)):,}",
             str(meta.get("label_schema_id", "unknown")),

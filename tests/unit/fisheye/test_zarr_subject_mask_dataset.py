@@ -59,6 +59,10 @@ def _build_training_root() -> _FakeGroup:
     root.attrs["training_task"] = "subject_masks"
     root.attrs["training_export"] = {
         "input_format": "gray",
+        "source_subject_mask_run": "subject_masks_source_001",
+        "source_subject_mask_runs": ["subject_masks_source_001"],
+        "source_crop_run": "crop_source_001",
+        "source_crop_runs": ["crop_source_001"],
         "channel_supervision_summary": {
             "coverage_class": "partial_subject_masks",
         },
@@ -116,6 +120,38 @@ def test_load_subject_mask_training_artifact_reads_schema_and_splits(
     assert tuple(store.meta["mask_labels"]) == ("subject_body", "eyes_union", "swim_bladder")
     assert store.train_indices.tolist() == [0, 1, 2]
     assert store.val_indices.tolist() == [3]
+    assert store.meta["source_subject_mask_run"] == "subject_masks_source_001"
+    assert store.meta["source_crop_run"] == "crop_source_001"
+
+
+def test_load_subject_mask_training_artifact_falls_back_to_source_index_run_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "subject_training.zarr"
+    artifact.mkdir()
+    (artifact / "zarr.json").write_text("{}", encoding="utf-8")
+    fake_root = _build_training_root()
+    fake_root.attrs["training_export"].pop("source_subject_mask_run", None)
+    fake_root.attrs["training_export"].pop("source_subject_mask_runs", None)
+    source_index = fake_root.create_group("source_index")
+    source_index.create_array(
+        "source_run_name",
+        data=np.asarray(["subject_masks_source_legacy"], dtype=object),
+        chunks=(1,),
+    )
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(mod.zarr, "Group", _FakeGroup)
+
+    store = mod.load_subject_mask_training_artifact(
+        artifact,
+        subject_mask_run=None,
+        crop_run=None,
+        expected_label_schema_id="subject_v1_union",
+    )
+
+    assert store.meta["source_subject_mask_run"] == "subject_masks_source_legacy"
+    assert store.meta["source_crop_run"] == "crop_source_001"
 
 
 def test_build_subject_mask_training_datasets_returns_valid_channel_batches(

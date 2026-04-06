@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -98,6 +99,30 @@ def _normalize_roi_batch(batch: np.ndarray) -> np.ndarray:
     return np.clip(arr, 0.0, 1.0)
 
 
+def _normalize_str_list(value: object) -> List[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, np.ndarray):
+        return _normalize_str_list(value.reshape(-1).tolist())
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        result: List[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                result.append(text)
+        return result
+    return []
+
+
+def _collapse_source_values(values: Sequence[str]) -> Optional[str]:
+    normalized = [str(value).strip() for value in values if str(value).strip()]
+    if not normalized:
+        return None
+    unique = list(dict.fromkeys(normalized))
+    return unique[0] if len(unique) == 1 else "mixed"
+
+
 def load_subject_mask_training_artifact(
     zarr_path: str | Path,
     *,
@@ -158,24 +183,51 @@ def load_subject_mask_training_artifact(
 
     train_indices = _require_1d_indices(root, "train_indices")
     val_indices = _require_1d_indices(root, "val_indices")
+    training_export = root.attrs.get("training_export")
+    training_export_meta = training_export if isinstance(training_export, Mapping) else {}
+    source_subject_mask_runs = _normalize_str_list(training_export_meta.get("source_subject_mask_runs"))
+    source_crop_runs = _normalize_str_list(training_export_meta.get("source_crop_runs"))
+    source_index = root.get("source_index")
+    if not source_subject_mask_runs and isinstance(source_index, zarr.Group) and "source_run_name" in source_index:
+        source_subject_mask_runs = _normalize_str_list(np.asarray(source_index["source_run_name"][:]))
+    source_subject_mask_run = (
+        str(value).strip()
+        if (value := training_export_meta.get("source_subject_mask_run")) is not None and str(value).strip()
+        else None
+    )
+    source_crop_run = (
+        str(value).strip()
+        if (value := training_export_meta.get("source_crop_run")) is not None and str(value).strip()
+        else None
+    )
+    source_subject_mask_run = (
+        source_subject_mask_run
+        or _collapse_source_values(source_subject_mask_runs)
+        or str(mask_group.attrs.get("source_subject_mask_run") or "").strip()
+        or None
+    )
+    source_crop_run = (
+        source_crop_run
+        or _collapse_source_values(source_crop_runs)
+        or str(mask_group.attrs.get("source_crop_run") or "").strip()
+        or None
+    )
 
     meta = {
         "zarr_path": str(source_path),
         "crop_run": crop_name,
         "subject_mask_run": mask_name,
+        "source_crop_run": source_crop_run,
+        "source_subject_mask_run": source_subject_mask_run,
+        "source_crop_runs": source_crop_runs,
+        "source_subject_mask_runs": source_subject_mask_runs,
         "label_schema_id": label_schema_id,
         "mask_labels": list(mask_labels),
         "length": int(roi_array.shape[0]),
         "roi_shape": tuple(int(v) for v in roi_array.shape[1:]),
         "target_shape": tuple(int(v) for v in masks_array.shape[1:]),
-        "input_format": root.attrs.get("training_export", {}).get("input_format")
-        if isinstance(root.attrs.get("training_export"), dict)
-        else None,
-        "channel_supervision_summary": (
-            root.attrs.get("training_export", {}).get("channel_supervision_summary")
-            if isinstance(root.attrs.get("training_export"), dict)
-            else None
-        ),
+        "input_format": training_export_meta.get("input_format"),
+        "channel_supervision_summary": training_export_meta.get("channel_supervision_summary"),
     }
 
     return SubjectMaskTargetStore(

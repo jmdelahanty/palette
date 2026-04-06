@@ -49,6 +49,14 @@ def _clean_slug(value: Optional[str], fallback: str) -> str:
     return cleaned or fallback
 
 
+def _collapse_source_attr(values: Sequence[str], *, mixed_value: str = "mixed") -> str:
+    normalized = [str(value).strip() for value in values if str(value).strip()]
+    if not normalized:
+        return ""
+    unique = list(dict.fromkeys(normalized))
+    return unique[0] if len(unique) == 1 else mixed_value
+
+
 def _normalize_input_format(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -740,6 +748,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
         target_valid_channels=valid_final,
         mask_labels=target_labels,
     )
+    source_subject_mask_run = _collapse_source_attr(source_run_names)
+    source_crop_run = _collapse_source_attr(source_crop_runs)
 
     crop_group.attrs.update(
         {
@@ -754,7 +764,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
             "mask_labels": target_labels,
             "allow_partial_supervision": True,
             "source_mask_stage": "subject_mask_runs" if len(set(source_stage_groups)) == 1 else "mixed",
-            "source_crop_run": source_crop_runs[0] if len(set(source_crop_runs)) == 1 else "mixed",
+            "source_subject_mask_run": source_subject_mask_run,
+            "source_crop_run": source_crop_run,
             "valid_channel_counts": supervision_summary["supervised_row_counts"],
             "positive_channel_counts": supervision_summary["positive_row_counts"],
             "dense_channel_counts": supervision_summary["supervised_row_counts"],
@@ -784,6 +795,10 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "source_stage": "subject_mask_runs" if len(set(source_stage_groups)) == 1 else "mixed",
         "source_count": int(len(resolved_sources)),
         "source_zarr_paths": source_paths,
+        "source_subject_mask_run": source_subject_mask_run,
+        "source_subject_mask_runs": list(source_run_names),
+        "source_crop_run": source_crop_run,
+        "source_crop_runs": list(source_crop_runs),
         "split_seed": int(split_seed),
         "split": {
             "train_ratio": float(train_ratio),
@@ -823,6 +838,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "source_count": int(len(resolved_sources)),
         "registry_registration": registry_summary,
         "channel_supervision_summary": training_summary,
+        "source_subject_mask_run": source_subject_mask_run or None,
+        "source_crop_run": source_crop_run or None,
     }
 
 

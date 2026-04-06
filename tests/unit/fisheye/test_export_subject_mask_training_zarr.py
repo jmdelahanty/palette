@@ -118,6 +118,8 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
     assert summary["total_samples"] == 4
     assert summary["channels"] == 4
     assert summary["coverage_class"] == "eyes_only"
+    assert summary["source_subject_mask_run"] == "subject_masks_001"
+    assert summary["source_crop_run"] == "crop_001"
 
     recheck = validate_merged_subject_mask_training_zarr(
         out_path,
@@ -139,6 +141,10 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
     assert target_valid[:, 3].tolist() == [False, False, False, False]
 
     export_meta = root.attrs["training_export"]
+    assert export_meta["source_subject_mask_run"] == "subject_masks_001"
+    assert export_meta["source_subject_mask_runs"] == ["subject_masks_001"]
+    assert export_meta["source_crop_run"] == "crop_001"
+    assert export_meta["source_crop_runs"] == ["crop_001"]
     assert export_meta["channel_supervision_summary"]["contains_only_eye_masks"] is True
     assert export_meta["channel_supervision_summary"]["supervised_row_counts"] == {
         "subject_body": 0,
