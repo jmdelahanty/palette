@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
@@ -131,6 +131,71 @@ def _resolve_swim_bladder_center_with_source(
     return (float(roi_w) / 2.0, float(roi_h) / 2.0), "roi_center"
 
 
+def _resolve_swim_bladder_keypoint_center(
+    keypoints_row: Optional[np.ndarray],
+    keypoint_labels: Optional[Sequence[str]],
+    *,
+    success_flag: Optional[bool],
+) -> Tuple[Optional[Tuple[float, float]], str]:
+    if success_flag is False:
+        return None, "unsuccessful_keypoint"
+    kp_idx = _resolve_swim_bladder_keypoint_index(keypoint_labels, keypoints_row)
+    if kp_idx is not None and keypoints_row is not None and keypoints_row.ndim == 2 and kp_idx < int(keypoints_row.shape[0]):
+        kp = np.asarray(keypoints_row[kp_idx], dtype=np.float32)
+        if kp.shape[0] >= 2 and np.all(np.isfinite(kp[:2])):
+            return (float(kp[0]), float(kp[1])), "keypoint"
+    return None, "missing_keypoint"
+
+
+def _parse_roi_indices_arg(raw: str) -> list[int]:
+    text = str(raw).strip()
+    if not text:
+        raise argparse.ArgumentTypeError("ROI index list must not be empty.")
+    values: list[int] = []
+    for token in text.split(","):
+        item = token.strip()
+        if not item:
+            continue
+        try:
+            values.append(int(item))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid ROI index {item!r}.") from exc
+    if not values:
+        raise argparse.ArgumentTypeError("ROI index list must include at least one integer.")
+    return values
+
+
+def _normalize_visible_roi_indices(
+    roi_indices: Optional[Sequence[int]],
+    *,
+    total_rois: int,
+) -> list[int]:
+    if roi_indices is None:
+        return list(range(int(total_rois)))
+
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for value in roi_indices:
+        roi_idx = int(value)
+        if roi_idx < 0 or roi_idx >= int(total_rois):
+            raise RuntimeError(
+                f"ROI index {roi_idx} is out of range for crop ROI rows 0..{int(total_rois) - 1}."
+            )
+        if roi_idx in seen:
+            continue
+        seen.add(roi_idx)
+        normalized.append(roi_idx)
+    if not normalized:
+        raise RuntimeError("No ROI indices remain after normalization.")
+    return normalized
+
+
+def _clamp_queue_pos(queue_pos: int, *, queue_size: int) -> int:
+    if queue_size <= 0:
+        raise RuntimeError("ROI queue is empty.")
+    return max(0, min(int(queue_pos), int(queue_size) - 1))
+
+
 def _labeled_panel(image_bgr: np.ndarray, label: str) -> np.ndarray:
     h, w = image_bgr.shape[:2]
     canvas = np.zeros((h + PANEL_LABEL_HEIGHT, w, 3), dtype=np.uint8)
@@ -186,6 +251,83 @@ def _stack_v(panels: Sequence[np.ndarray], gap: int = 8) -> np.ndarray:
     return out
 
 
+def _is_group_like(value: object) -> bool:
+    return hasattr(value, "attrs") and hasattr(value, "get")
+
+
+def _iter_group_names(group: Any) -> List[str]:
+    if hasattr(group, "group_keys"):
+        return [str(name) for name in group.group_keys()]
+    return [str(name) for name in group.keys()]
+
+
+def _candidate_run_names(parent: Any) -> List[str]:
+    names: List[str] = []
+    latest = parent.attrs.get("latest") if hasattr(parent, "attrs") else None
+    if isinstance(latest, str) and latest in parent:
+        names.append(latest)
+    for name in sorted(_iter_group_names(parent), reverse=True):
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _required_array_equal(name: str, left: Any, right: Any) -> None:
+    left_arr = np.asarray(left[:])
+    right_arr = np.asarray(right[:])
+    if left_arr.shape != right_arr.shape or not np.array_equal(left_arr, right_arr):
+        raise RuntimeError(f"Alignment mismatch for {name}.")
+
+
+def _optional_array_equal(name: str, left: Any | None, right: Any | None) -> bool:
+    if left is None and right is None:
+        return False
+    if left is None or right is None:
+        raise RuntimeError(f"Alignment mismatch for optional {name}: one source is missing it.")
+    _required_array_equal(name, left, right)
+    return True
+
+
+def _validate_keypoint_group_alignment(
+    crop_group: Any,
+    crop_run: str,
+    keypoint_group: Any,
+    *,
+    total_rois: int,
+) -> None:
+    if "keypoints_roi" not in keypoint_group:
+        raise RuntimeError("Resolved keypoint run is missing keypoints_roi.")
+    if int(keypoint_group["keypoints_roi"].shape[0]) != int(total_rois):
+        raise RuntimeError(
+            f"Keypoint rows {int(keypoint_group['keypoints_roi'].shape[0])} "
+            f"do not match crop ROI rows {int(total_rois)}."
+        )
+
+    source_crop_run = keypoint_group.attrs.get("source_crop_run") if hasattr(keypoint_group, "attrs") else None
+    if source_crop_run is not None and str(source_crop_run) != str(crop_run):
+        raise RuntimeError(
+            "Resolved keypoint run is not aligned to the selected crop run: "
+            f"source_crop_run={source_crop_run!r}, crop_run={crop_run!r}."
+        )
+
+    validated = False
+    validated |= _optional_array_equal(
+        "frame_indices",
+        crop_group.get("frame_indices"),
+        keypoint_group.get("frame_indices"),
+    )
+    validated |= _optional_array_equal(
+        "detection_indices",
+        crop_group.get("detection_indices"),
+        keypoint_group.get("detection_indices"),
+    )
+    if source_crop_run is None and not validated:
+        raise RuntimeError(
+            "Resolved keypoint run is missing source_crop_run and alignment arrays; "
+            "cannot verify crop/keypoint alignment."
+        )
+
+
 def _resolve_keypoint_group(
     root: zarr.Group,
     *,
@@ -193,43 +335,130 @@ def _resolve_keypoint_group(
     refined_group: Optional[zarr.Group],
     explicit_run: Optional[str],
     explicit_group: Optional[str],
+    expected_crop_run: Optional[str] = None,
 ) -> Tuple[Optional[zarr.Group], Optional[str], Optional[str]]:
     if explicit_group and explicit_run:
         parent = root.get(explicit_group)
-        if isinstance(parent, zarr.Group) and explicit_run in parent:
+        if _is_group_like(parent) and explicit_run in parent:
             return parent[explicit_run], explicit_group, explicit_run
         return None, None, None
 
     if explicit_run and not explicit_group:
         for group_name in ("refined_keypoints_runs", "keypoints_runs"):
             parent = root.get(group_name)
-            if isinstance(parent, zarr.Group) and explicit_run in parent:
+            if _is_group_like(parent) and explicit_run in parent:
                 return parent[explicit_run], group_name, explicit_run
         return None, None, None
 
     for attrs in (
-        dict(refined_group.attrs) if isinstance(refined_group, zarr.Group) else {},
-        dict(subject_group.attrs) if isinstance(subject_group, zarr.Group) else {},
+        dict(refined_group.attrs) if _is_group_like(refined_group) else {},
+        dict(subject_group.attrs) if _is_group_like(subject_group) else {},
     ):
         source_group = attrs.get("source_keypoint_group")
         source_run = resolve_source_keypoints_run(attrs)
         if isinstance(source_group, str) and isinstance(source_run, str):
             parent = root.get(source_group)
-            if isinstance(parent, zarr.Group) and source_run in parent:
+            if _is_group_like(parent) and source_run in parent:
                 return parent[source_run], source_group, source_run
+
+    if expected_crop_run:
+        for group_name in ("refined_keypoints_runs", "keypoints_runs"):
+            parent = root.get(group_name)
+            if not _is_group_like(parent):
+                continue
+            for run_name in _candidate_run_names(parent):
+                candidate = parent[run_name]
+                source_crop_run = candidate.attrs.get("source_crop_run")
+                if source_crop_run is not None and str(source_crop_run) == str(expected_crop_run):
+                    return candidate, group_name, run_name
 
     for group_name in ("refined_keypoints_runs", "keypoints_runs"):
         parent = root.get(group_name)
-        if not isinstance(parent, zarr.Group):
+        if not _is_group_like(parent):
             continue
-        latest = parent.attrs.get("latest")
-        if isinstance(latest, str) and latest in parent:
-            return parent[latest], group_name, latest
-        keys = sorted(parent.group_keys()) if hasattr(parent, "group_keys") else sorted(parent.keys())
-        if keys:
-            run_name = str(keys[-1])
+        for run_name in _candidate_run_names(parent):
             return parent[run_name], group_name, run_name
     return None, None, None
+
+
+def _load_keypoint_success_flags(
+    kp_group: zarr.Group,
+    *,
+    total_rois: int,
+) -> np.ndarray:
+    raw: Optional[np.ndarray] = None
+    for name in ("refined_success", "detection_success", "source_success"):
+        if name not in kp_group:
+            continue
+        raw = np.asarray(kp_group[name][:], dtype=bool)
+        break
+    if raw is None:
+        raw = np.ones((total_rois,), dtype=bool)
+    if int(raw.shape[0]) != int(total_rois):
+        raise RuntimeError(
+            f"Keypoint success rows {int(raw.shape[0])} do not match crop ROI rows {int(total_rois)}."
+        )
+    return raw
+
+
+def _message_panel(
+    shape: Tuple[int, int],
+    *,
+    title: str,
+    message: str,
+) -> np.ndarray:
+    h, w = int(shape[0]), int(shape[1])
+    panel = np.zeros((max(24, h), max(24, w), 3), dtype=np.uint8)
+    cv2.putText(panel, title, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 1, cv2.LINE_AA)
+    for idx, line in enumerate(str(message).splitlines()[:3]):
+        cv2.putText(
+            panel,
+            line,
+            (8, 42 + idx * 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
+    return panel
+
+
+def _build_missing_keypoint_view(
+    roi_img: np.ndarray,
+    source_mask: np.ndarray,
+    current_mask: np.ndarray,
+    *,
+    center_source: str,
+) -> Tuple[np.ndarray, None]:
+    roi_panel = cv2.cvtColor(np.asarray(roi_img, dtype=np.uint8), cv2.COLOR_GRAY2BGR)
+    roi_overlay = roi_panel.copy()
+    overlay_full = roi_overlay.copy()
+    overlay_full[np.asarray(current_mask, dtype=np.uint8) > 0] = MASK_COLOR
+    roi_overlay = cv2.addWeighted(overlay_full, 0.45, roi_overlay, 0.55, 0.0)
+
+    message = (
+        "Swim bladder keypoint row is marked unsuccessful."
+        if center_source == "unsuccessful_keypoint"
+        else "Swim bladder keypoint is missing or non-finite."
+    )
+    top = _stack_h(
+        [
+            _labeled_panel(roi_panel, f"Crop ROI ({center_source})"),
+            _labeled_panel(roi_overlay, "ROI Overlay"),
+        ],
+        gap=6,
+    )
+    bottom = _stack_h(
+        [
+            _message_panel(roi_img.shape, title="Swim Bladder Patch", message=message),
+            _labeled_panel(cv2.cvtColor((np.asarray(source_mask, dtype=np.uint8) * 255), cv2.COLOR_GRAY2BGR), "Source Mask"),
+            _labeled_panel(cv2.cvtColor((np.asarray(current_mask, dtype=np.uint8) * 255), cv2.COLOR_GRAY2BGR), "Stored Mask"),
+            _message_panel(roi_img.shape, title="Edit Patch", message="Editing is disabled until a valid swim-bladder keypoint exists."),
+        ],
+        gap=6,
+    )
+    return _stack_v([top, bottom], gap=8), None
 
 
 def _build_view(
@@ -339,6 +568,7 @@ def create_viewer(
     keypoint_run: Optional[str],
     keypoint_group: Optional[str],
     start_roi: int,
+    roi_indices: Optional[Sequence[int]],
     padding: int,
     scale_percent: int,
     edit_zoom: int,
@@ -367,6 +597,9 @@ def create_viewer(
     total_rois = int(crop_source.total_rois)
     if total_rois <= 0:
         raise RuntimeError("No ROIs found in crop run.")
+    visible_roi_indices = _normalize_visible_roi_indices(roi_indices, total_rois=total_rois)
+    queue_size = len(visible_roi_indices)
+    subset_active = roi_indices is not None
 
     kp_group, _kp_group_name, _kp_run_name = _resolve_keypoint_group(
         root,
@@ -374,16 +607,22 @@ def create_viewer(
         refined_group=refined.group,
         explicit_run=keypoint_run,
         explicit_group=keypoint_group,
+        expected_crop_run=crop_run_name,
     )
-    keypoints_roi = None
+    if kp_group is None or "keypoints_roi" not in kp_group:
+        raise RuntimeError("No keypoint run resolved for swim-bladder patch review.")
+    _validate_keypoint_group_alignment(
+        crop_source.crop_group,
+        crop_run_name,
+        kp_group,
+        total_rois=total_rois,
+    )
+    keypoints_roi = np.asarray(kp_group["keypoints_roi"][:], dtype=np.float32)
+    keypoint_success = _load_keypoint_success_flags(kp_group, total_rois=total_rois)
     keypoint_labels: Optional[Sequence[str]] = None
-    if kp_group is not None and "keypoints_roi" in kp_group:
-        candidate = np.asarray(kp_group["keypoints_roi"][:], dtype=np.float32)
-        if int(candidate.shape[0]) == total_rois:
-            keypoints_roi = candidate
-            labels_raw = kp_group.attrs.get("keypoint_labels")
-            if isinstance(labels_raw, (list, tuple)):
-                keypoint_labels = [str(item) for item in labels_raw]
+    labels_raw = kp_group.attrs.get("keypoint_labels")
+    if isinstance(labels_raw, (list, tuple)):
+        keypoint_labels = [str(item) for item in labels_raw]
 
     masks_arr = refined.group["masks_roi"]
     if int(masks_arr.shape[0]) != total_rois:
@@ -396,7 +635,29 @@ def create_viewer(
     def _noop(_value: int) -> None:
         return
 
-    cv2.createTrackbar("ROI", WINDOW_NAME, max(0, min(int(start_roi), total_rois - 1)), total_rois - 1, _noop)
+    initial_actual_roi = max(0, min(int(start_roi), total_rois - 1))
+    if initial_actual_roi in visible_roi_indices:
+        current_pos = visible_roi_indices.index(initial_actual_roi)
+    else:
+        current_pos = 0
+    current_pos = _clamp_queue_pos(current_pos, queue_size=queue_size)
+    last_loaded_pos = -1
+    # Track mouse-driven trackbar drags via callback instead of polling
+    # getTrackbarPos, which returns stale values on GTK backends.
+    _trackbar_drag_pos: List[int] = [current_pos]
+    _setting_trackbar = [False]
+
+    def _on_roi_trackbar(value: int) -> None:
+        if not _setting_trackbar[0]:
+            _trackbar_drag_pos[0] = _clamp_queue_pos(value, queue_size=queue_size)
+
+    def _set_roi_trackbar(pos: int) -> None:
+        _setting_trackbar[0] = True
+        cv2.setTrackbarPos("ROI", WINDOW_NAME, pos)
+        _setting_trackbar[0] = False
+
+    roi_trackbar_max = max(1, queue_size - 1)
+    cv2.createTrackbar("ROI", WINDOW_NAME, current_pos, roi_trackbar_max, _on_roi_trackbar)
     cv2.createTrackbar("Padding", WINDOW_NAME, max(1, min(int(padding), MAX_PADDING)), MAX_PADDING, _noop)
     cv2.createTrackbar("Brush", WINDOW_NAME, max(1, min(int(DEFAULT_BRUSH), BRUSH_MAX)), BRUSH_MAX, _noop)
     cv2.createTrackbar("Edit Zoom", WINDOW_NAME, max(1, min(int(edit_zoom), MAX_EDIT_ZOOM)), MAX_EDIT_ZOOM, _noop)
@@ -410,6 +671,7 @@ def create_viewer(
 
     state: Dict[str, object] = {
         "loaded_roi_idx": -1,
+        "loaded_queue_pos": -1,
         "roi_img": None,
         "stored_masks_row": None,
         "edit_masks_row": None,
@@ -417,23 +679,23 @@ def create_viewer(
         "display_scale": 1.0,
         "cursor_patch_xy": None,
         "center_source": "unknown",
-        "center_xy": (0.0, 0.0),
+        "center_xy": None,
         "drawing": False,
         "erase_mode": False,
     }
-    current_pos = max(0, min(int(start_roi), total_rois - 1))
 
-    def _load_roi(roi_idx: int) -> None:
+    def _load_roi(queue_pos: int) -> None:
+        roi_idx = int(visible_roi_indices[int(queue_pos)])
         roi_img = np.asarray(crop_source.read_slice(int(roi_idx), int(roi_idx) + 1)[0], dtype=np.uint8)
         masks_row = np.asarray(masks_arr[int(roi_idx)], dtype=np.uint8)
-        keypoints_row = keypoints_roi[int(roi_idx)] if keypoints_roi is not None else None
-        center_xy, center_source = _resolve_swim_bladder_center_with_source(
+        keypoints_row = keypoints_roi[int(roi_idx)]
+        center_xy, center_source = _resolve_swim_bladder_keypoint_center(
             keypoints_row,
             keypoint_labels,
-            masks_row[component_idx],
-            tuple(roi_img.shape),
+            success_flag=bool(keypoint_success[int(roi_idx)]),
         )
         state["loaded_roi_idx"] = int(roi_idx)
+        state["loaded_queue_pos"] = int(queue_pos)
         state["roi_img"] = roi_img
         state["stored_masks_row"] = masks_row.copy()
         state["edit_masks_row"] = masks_row.copy()
@@ -461,24 +723,37 @@ def create_viewer(
         scale_percent_val = max(25, int(cv2.getTrackbarPos("Scale %", WINDOW_NAME)))
         state["display_scale"] = max(0.25, float(scale_percent_val) / 100.0)
 
-        canvas, edit_meta = _build_view(
-            roi_arr,
-            source_mask,
-            masks_row[component_idx],
-            center_xy=tuple(state["center_xy"]),
-            center_source=str(state["center_source"]),
-            padding=padding_val,
-            edit_zoom=edit_zoom_val,
-            brush_radius=brush_val,
-            cursor_patch_xy=state.get("cursor_patch_xy"),
-        )
+        center_xy = state.get("center_xy")
+        if center_xy is None:
+            canvas, edit_meta = _build_missing_keypoint_view(
+                roi_arr,
+                source_mask,
+                masks_row[component_idx],
+                center_source=str(state["center_source"]),
+            )
+        else:
+            canvas, edit_meta = _build_view(
+                roi_arr,
+                source_mask,
+                masks_row[component_idx],
+                center_xy=tuple(center_xy),
+                center_source=str(state["center_source"]),
+                padding=padding_val,
+                edit_zoom=edit_zoom_val,
+                brush_radius=brush_val,
+                cursor_patch_xy=state.get("cursor_patch_xy"),
+            )
         review_payload = dict(refined.group.attrs.get("component_review_statuses") or {}).get("swim_bladder", {})
         review_state_text = str(review_payload.get("state") or "pending")
         brush_mode_text = "erase" if bool(state.get("erase_mode")) else "paint"
+        queue_pos = int(state.get("loaded_queue_pos") or 0)
+        roi_position_text = f"ROI {int(state['loaded_roi_idx']) + 1}/{total_rois}"
+        if subset_active:
+            roi_position_text = f"Queue {queue_pos + 1}/{queue_size}  {roi_position_text}"
         cv2.putText(
             canvas,
             (
-                f"ROI {int(state['loaded_roi_idx']) + 1}/{total_rois}  "
+                f"{roi_position_text}  "
                 f"Center={state['center_source']}  "
                 f"Brush={brush_val} ({brush_mode_text})  Review={review_state_text}"
             ),
@@ -501,6 +776,12 @@ def create_viewer(
         cv2.imshow(WINDOW_NAME, canvas)
 
     def _save_current() -> None:
+        if state.get("center_xy") is None:
+            print(
+                "Cannot save swim-bladder patch edits for this ROI: "
+                f"{state.get('center_source')}."
+            )
+            return
         save_refined_subject_roi(
             source=source,
             refined=refined,
@@ -580,6 +861,8 @@ def create_viewer(
     print(f"  Source run: subject_mask_runs/{source.run_name}")
     print(f"  Refined run: refined_subject_masks_runs/{refined.run_name}")
     print(f"  Crop run: {crop_run_name}")
+    if subset_active:
+        print(f"  ROI subset: {queue_size} rows")
     print("Controls:")
     print("  Mouse on Edit Patch: hold Ctrl+LMB to paint")
     print("  Mouse while drawing: hold Shift to temporarily invert brush mode")
@@ -596,7 +879,18 @@ def create_viewer(
         key = cv2.waitKey(30) & 0xFF
         if key in (ord("q"), 27):
             break
-        if key == ord("["):
+
+        if key == ord("n"):
+            if current_pos < queue_size - 1:
+                current_pos += 1
+                _trackbar_drag_pos[0] = current_pos
+                _set_roi_trackbar(current_pos)
+        elif key == ord("p"):
+            if current_pos > 0:
+                current_pos -= 1
+                _trackbar_drag_pos[0] = current_pos
+                _set_roi_trackbar(current_pos)
+        elif key == ord("["):
             current = max(1, int(cv2.getTrackbarPos("Brush", WINDOW_NAME)))
             cv2.setTrackbarPos("Brush", WINDOW_NAME, max(1, current - 1))
             _update_display()
@@ -614,18 +908,17 @@ def create_viewer(
             _update_display()
         elif key == ord("s"):
             _save_current()
-        elif key == ord("n"):
-            if current_pos < total_rois - 1:
-                current_pos += 1
-                cv2.setTrackbarPos("ROI", WINDOW_NAME, current_pos)
-                _load_roi(current_pos)
-                _update_display()
-        elif key == ord("p"):
-            if current_pos > 0:
-                current_pos -= 1
-                cv2.setTrackbarPos("ROI", WINDOW_NAME, current_pos)
-                _load_roi(current_pos)
-                _update_display()
+
+        # Accept mouse-driven trackbar drags (callback updates
+        # _trackbar_drag_pos without going through getTrackbarPos).
+        if _trackbar_drag_pos[0] != current_pos:
+            current_pos = _trackbar_drag_pos[0]
+
+        if current_pos != last_loaded_pos:
+            _set_roi_trackbar(current_pos)
+            last_loaded_pos = current_pos
+            _load_roi(current_pos)
+            _update_display()
         elif key in (ord("a"), ord("N"), ord("R"), ord("P")):
             state_value = {
                 ord("a"): "approved",
@@ -650,12 +943,6 @@ def create_viewer(
                 f"(run={run_payload.get('state')})"
             )
             _update_display()
-        else:
-            roi_slider = int(cv2.getTrackbarPos("ROI", WINDOW_NAME))
-            if roi_slider != current_pos:
-                current_pos = roi_slider
-                _load_roi(current_pos)
-                _update_display()
 
     cv2.destroyAllWindows()
     return refined.run_name
@@ -670,6 +957,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--keypoint-run", help="Optional keypoint run to anchor swim-bladder patch centers.")
     parser.add_argument("--keypoint-group", help="Optional keypoint parent group for --keypoint-run.")
     parser.add_argument("--roi-index", type=int, default=0, help="Initial ROI index.")
+    parser.add_argument(
+        "--roi-indices",
+        type=_parse_roi_indices_arg,
+        help="Optional comma-separated ROI indices to review as the active queue.",
+    )
     parser.add_argument("--padding", type=int, default=DEFAULT_PADDING)
     parser.add_argument("--scale-percent", type=int, default=DEFAULT_SCALE_PERCENT)
     parser.add_argument("--edit-zoom", type=int, default=DEFAULT_EDIT_ZOOM)
@@ -691,6 +983,7 @@ def main(argv: Optional[Sequence[str]] = None) -> str:
         keypoint_run=args.keypoint_run,
         keypoint_group=args.keypoint_group,
         start_roi=args.roi_index,
+        roi_indices=args.roi_indices,
         padding=args.padding,
         scale_percent=args.scale_percent,
         edit_zoom=args.edit_zoom,
