@@ -62,9 +62,15 @@ from .training_console import (
     print_training_start,
 )
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
-from ..shared.refined_detect_review import (
-    DEFAULT_DETECT_GROUP_PREFERENCE,
-    resolve_refined_detect_group,
+from ..shared.refined_detect_curation import (
+    build_source_detection_decision_summary,
+    extract_present_curated_rows,
+    has_curated_refined_source_detections_projection,
+    has_curated_refined_detect_surface,
+    has_sparse_curated_refined_detect_instances_arrays,
+)
+from ..shared.refined_detect_resolution import (
+    resolve_detection_read_source,
 )
 from ..utils.system import get_git_info, build_invocation_record
 
@@ -531,7 +537,52 @@ def get_zarr_metadata(zarr_paths, console=None):
                     zarr_meta['data_quality']['has_refinement'] = True
                     zarr_meta['data_quality']['refined_run'] = latest_refined
                     
-                    # Check what stages exist
+                    if has_curated_refined_detect_surface(refined_group):
+                        if has_sparse_curated_refined_detect_instances_arrays(refined_group):
+                            refined_path = f"{parent_name}/{latest_refined}/instances"
+                        else:
+                            refined_path = f"{parent_name}/{latest_refined}"
+                        zarr_meta['detect_source_options']['refined'] = refined_path
+                        summary_stats = refined_group.attrs.get("summary_statistics")
+                        if isinstance(summary_stats, dict):
+                            zarr_meta['data_quality']['refined_detections'] = summary_stats.get(
+                                "sparse_instance_rows",
+                                summary_stats.get("rows_present"),
+                            )
+                            zarr_meta['data_quality']['refined_filtered_rows'] = summary_stats.get(
+                                "rows_filtered_out",
+                                summary_stats.get("source_detection_filtered"),
+                            )
+                            zarr_meta['data_quality']['refined_missing_rows'] = summary_stats.get("rows_missing")
+                            zarr_meta['data_quality']['manual_edited_rows'] = summary_stats.get("rows_manual_edited")
+                        try:
+                            present_rows = extract_present_curated_rows(refined_group)
+                            detection_source = np.asarray(present_rows["detection_source"], dtype=np.int8)
+                            zarr_meta['data_quality']['interpolated_detections'] = int(
+                                np.count_nonzero(detection_source != 0)
+                            )
+                            manual_flags = present_rows.get("manual_edit_flags")
+                            if manual_flags is not None:
+                                zarr_meta['data_quality']['manual_edited_detections'] = int(
+                                    np.count_nonzero(np.asarray(manual_flags, dtype=bool))
+                                )
+                        except Exception:
+                            pass
+                        if has_curated_refined_source_detections_projection(refined_group):
+                            try:
+                                source_summary = build_source_detection_decision_summary(refined_group)
+                                if source_summary:
+                                    zarr_meta['data_quality']['source_detection_candidates'] = int(
+                                        source_summary.get('total_candidates', 0) or 0
+                                    )
+                                    for label in ("accepted", "filtered", "duplicate", "manual_clear"):
+                                        zarr_meta['data_quality'][f'source_detection_{label}'] = int(
+                                            source_summary.get(f'decision_{label}', 0) or 0
+                                        )
+                            except Exception:
+                                pass
+
+                    # Check what sparse legacy stages exist
                     if 'filtered' in refined_group:
                         filtered_grp = refined_group['filtered']
                         zarr_meta['data_quality']['filtered_detections'] = filtered_grp.attrs.get('total_detections', 0)
@@ -549,15 +600,19 @@ def get_zarr_metadata(zarr_paths, console=None):
                     elif "manual" in refined_group:
                         zarr_meta['detect_source_options']['manual'] = f"{parent_name}/{latest_refined}/manual"
 
-                    resolution = resolve_refined_detect_group(
-                        refined_group,
-                        preference=DEFAULT_DETECT_GROUP_PREFERENCE,
+                    resolution = resolve_detection_read_source(
+                        root,
+                        prefer_curated=True,
+                        refined_run=str(latest_refined),
+                        allow_sparse_fallback=True,
                     )
-                    if resolution.group:
-                        label = str(resolution.label or resolution.group).lower()
+                    if resolution.detection_path:
+                        label = "detect" if resolution.detection_kind == "raw" else str(
+                            resolution.detection_kind or "detect"
+                        ).lower()
                         zarr_meta['detect_source_default'] = {
                             "source_type": label,
-                            "source_path": f"{parent_name}/{latest_refined}/{resolution.group}",
+                            "source_path": resolution.detection_path,
                         }
 
             if not zarr_meta['detect_source_default'] and 'detect' in zarr_meta['detect_source_options']:

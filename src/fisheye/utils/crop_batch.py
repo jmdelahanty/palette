@@ -46,7 +46,7 @@ class CropPlan:
     source_path: Optional[str] = None
     roi_size: Optional[Tuple[int, int]] = None
     crop_storage_mode: Optional[str] = None
-    preferred_policy: Optional[str] = None
+    selection_policy: Optional[str] = None
     latest_crop: Optional[str] = None
     latest_pointer: Optional[str] = None
     latest_signature: Optional[Dict[str, object]] = None
@@ -181,7 +181,10 @@ def _latest_crop_signature(
     signature = {
         "detection_source_path": crop_group.attrs.get("detection_source_path"),
         "detection_source_type": crop_group.attrs.get("detection_source_type"),
-        "detection_preferred_policy": crop_group.attrs.get("detection_preferred_policy"),
+        "detection_selection_policy": crop_group.attrs.get(
+            "detection_selection_policy",
+            crop_group.attrs.get("detection_preferred_policy"),
+        ),
         "roi_size": crop_group.attrs.get("roi_size"),
         "crop_storage_mode": _infer_crop_run_storage_mode(crop_group),
         "status": crop_group.attrs.get("status"),
@@ -212,10 +215,10 @@ def _diff_signature(
     if desired_storage_mode != existing_storage_mode:
         diffs.append("crop_storage_mode")
     if compare_policy:
-        desired_policy = _normalize_str(desired.get("detection_preferred_policy"))
-        existing_policy = _normalize_str(existing.get("detection_preferred_policy"))
+        desired_policy = _normalize_str(desired.get("detection_selection_policy"))
+        existing_policy = _normalize_str(existing.get("detection_selection_policy"))
         if desired_policy != existing_policy:
-            diffs.append("preferred_policy")
+            diffs.append("selection_policy")
     return diffs
 
 
@@ -224,7 +227,7 @@ def _build_plan(
     config: Dict[str, Any],
     source_type: str,
     source_path: Optional[str],
-    preferred_policy: Optional[str],
+    selection_policy: Optional[str],
     force_new: bool,
     crop_storage_mode: Optional[str],
 ) -> CropPlan:
@@ -238,7 +241,7 @@ def _build_plan(
             source_type=source_type,
             source_path_override=source_path,
             console=None,
-            preferred_policy=preferred_policy,
+            selection_policy=selection_policy,
         )
     except ValueError as exc:
         return CropPlan(
@@ -262,13 +265,13 @@ def _build_plan(
             source_path=resolved_path,
             roi_size=roi_size,
             crop_storage_mode=desired_crop_storage_mode,
-            preferred_policy=preferred_policy,
+            selection_policy=selection_policy,
         )
 
     desired = {
         "detection_source_path": resolved_path,
         "detection_source_type": resolved_type,
-        "detection_preferred_policy": preferred_policy,
+        "detection_selection_policy": selection_policy,
         "roi_size": roi_size,
         "crop_storage_mode": desired_crop_storage_mode,
     }
@@ -288,7 +291,7 @@ def _build_plan(
             diffs = _diff_signature(
                 desired,
                 latest_signature,
-                compare_policy=preferred_policy is not None,
+                compare_policy=selection_policy is not None,
             )
             if not diffs and not force_new:
                 status = "skipped"
@@ -306,7 +309,7 @@ def _build_plan(
         source_path=resolved_path,
         roi_size=roi_size,
         crop_storage_mode=desired_crop_storage_mode,
-        preferred_policy=preferred_policy,
+        selection_policy=selection_policy,
         latest_crop=latest_crop,
         latest_pointer=latest_pointer,
         latest_signature=latest_signature,
@@ -318,7 +321,7 @@ def _build_plans(
     config: Dict[str, Any],
     source_type: str,
     source_path: Optional[str],
-    preferred_policy: Optional[str],
+    selection_policy: Optional[str],
     force_new: bool,
     zarr_use_filter: str,
     crop_storage_mode: Optional[str],
@@ -354,7 +357,7 @@ def _build_plans(
                 config=config,
                 source_type=source_type,
                 source_path=source_path,
-                preferred_policy=preferred_policy,
+                selection_policy=selection_policy,
                 force_new=force_new,
                 crop_storage_mode=crop_storage_mode,
             )
@@ -433,21 +436,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--source-type",
         type=str,
         default=None,
-        choices=["detect", "filtered", "interpolated", "manual", "preferred", "auto"],
-        help="Detection source (default: config value, otherwise preferred).",
+        choices=["detect", "filtered", "interpolated", "manual", "refined", "auto"],
+        help=(
+            "Detection source (default: config value, otherwise auto). "
+            "'refined' targets the canonical curated refined surface; "
+            "'filtered'/'interpolated'/'manual' are legacy sparse "
+            "compatibility modes."
+        ),
     )
     parser.add_argument(
         "--source-path",
         type=str,
         default=None,
-        help="Explicit detection source path (e.g. detect_runs/<run> or refined_detect_runs/<run>/manual).",
+        help=(
+            "Explicit detection source path (e.g. detect_runs/<run> or the "
+            "preferred current refined override "
+            "refined_detect_runs/<run>/instances)."
+        ),
     )
     parser.add_argument(
-        "--preferred-policy",
+        "--selection-policy",
         type=str,
         default=None,
         choices=["training", "full_recording"],
-        help="Policy for preferred/auto source selection.",
+        help="Policy for auto source selection.",
     )
     parser.add_argument(
         "--config",
@@ -527,10 +539,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     config = _load_config(args.config)
     crop_cfg = config.get("crop", {}) or {}
-    raw_source_type = args.source_type or crop_cfg.get("source_type") or "preferred"
+    raw_source_type = args.source_type or crop_cfg.get("source_type") or "auto"
     source_path = _normalize_path(args.source_path or crop_cfg.get("source_path"))
     source_type = infer_detection_source_type(source_path, raw_source_type)
-    preferred_policy = args.preferred_policy or crop_cfg.get("preferred_policy")
+    selection_policy = args.selection_policy or crop_cfg.get("selection_policy")
     external_use_sharding = None
     if args.external_use_sharding and args.no_external_use_sharding:
         raise SystemExit("Choose either --external-use-sharding or --no-external-use-sharding, not both.")
@@ -573,7 +585,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         config=config,
         source_type=source_type,
         source_path=source_path,
-        preferred_policy=preferred_policy,
+        selection_policy=selection_policy,
         force_new=bool(args.force_new),
         zarr_use_filter=str(args.zarr_use),
         crop_storage_mode=args.crop_storage_mode,
@@ -677,7 +689,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 source_type=plan.source_type,
                 source_path=plan.source_path,
                 roi_size=list(plan.roi_size) if plan.roi_size else None,
-                preferred_policy=plan.preferred_policy,
+                selection_policy=plan.selection_policy,
                 crop_storage_mode=plan.crop_storage_mode,
             )
             try:
@@ -686,7 +698,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     config=config,
                     source_type=plan.source_type or source_type,
                     source_path=plan.source_path,
-                    preferred_policy=plan.preferred_policy,
+                    selection_policy=plan.selection_policy,
                     scheduler=args.scheduler,
                     num_workers=args.num_workers,
                     console=console,

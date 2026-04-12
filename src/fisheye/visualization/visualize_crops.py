@@ -117,7 +117,10 @@ def _build_crop_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
         "signature_version": 1,
         "detection_source_path": attrs.get("detection_source_path"),
         "detection_source_type": attrs.get("detection_source_type"),
-        "detection_preferred_policy": attrs.get("detection_preferred_policy"),
+        "detection_selection_policy": attrs.get(
+            "detection_selection_policy",
+            attrs.get("detection_preferred_policy"),
+        ),
         "source_detect_run": attrs.get("source_detect_run"),
         "source_refined_run": attrs.get("source_refined_run"),
         "roi_size": attrs.get("roi_size"),

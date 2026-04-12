@@ -14,6 +14,11 @@ from typing import Any, List, Mapping, Optional, Sequence
 import numpy as np
 from fisheye.diagnostics import prepare_detect_training as pdt
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.refined_detect_curation import (
+    extract_present_curated_rows,
+    has_curated_refined_detect_surface,
+)
+from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 
 
@@ -351,44 +356,82 @@ def _resolve_detect_quality_from_zarr(
     review_use = _decode_attr(review_status.get("intended_use")) if review_status else None
     source_detect_run = _decode_attr(refined_group.attrs.get("source_detect_run"))
 
-    resolved_group = _decode_attr(review_status.get("resolved_group")) if review_status else None
-    if not resolved_group:
-        manual_latest = _decode_attr(refined_group.attrs.get("manual_review_latest"))
-        if manual_latest and manual_latest in refined_group:
-            resolved_group = manual_latest
-        elif "interpolated" in refined_group:
-            resolved_group = "interpolated"
-        elif "filtered" in refined_group:
-            resolved_group = "filtered"
-        else:
-            resolved_group = "raw"
-
-    resolved = refined_group.get(resolved_group) if resolved_group else None
-    if resolved is None:
+    resolution = resolve_detection_read_source(
+        root,
+        prefer_curated=True,
+        refined_run=expected_refined_run,
+        allow_sparse_fallback=True,
+    )
+    if resolution.refined_detect_run != expected_refined_run:
         raise ValueError(
-            f"{zarr_path.name}: refined run '{expected_refined_run}' missing resolved group '{resolved_group}'."
+            f"{zarr_path.name}: stale detect_quality row: refined run '{expected_refined_run}' resolved to "
+            f"'{resolution.refined_detect_run}'."
         )
+    if not resolution.detection_path or resolution.detection_path not in root:
+        raise ValueError(
+            f"{zarr_path.name}: refined run '{expected_refined_run}' missing resolved detection path "
+            f"'{resolution.detection_path}'."
+        )
+    resolved_group = (
+        "refined"
+        if resolution.curated_root
+        else _decode_attr(resolution.refined_sparse_group or resolution.detection_kind) or "raw"
+    )
+    resolved = root[resolution.detection_path]
+    curated_resolved = resolved
 
     total_detections: Optional[int] = None
     real_detections: Optional[int] = None
     interpolated_detections: Optional[int] = None
     interpolated_detections_rate: Optional[float] = None
 
-    if "bbox_norm_coords" in resolved:
+    if resolution.curated_root:
+        if has_curated_refined_detect_surface(resolved):
+            curated_resolved = resolved
+        else:
+            refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
+            if (
+                refined_parent is not None
+                and resolution.refined_detect_run is not None
+                and resolution.refined_detect_run in refined_parent
+            ):
+                candidate = refined_parent[resolution.refined_detect_run]
+                if has_curated_refined_detect_surface(candidate):
+                    curated_resolved = candidate
+        if has_curated_refined_detect_surface(curated_resolved):
+            present_rows = extract_present_curated_rows(curated_resolved)
+            detection_source = np.asarray(present_rows["detection_source"], dtype=np.int8).reshape(-1)
+            total_detections = int(detection_source.shape[0])
+            real_detections = int(np.sum(detection_source == 0))
+            interpolated_detections = int(np.sum(detection_source != 0))
+    elif "bbox_norm_coords" in resolved:
         total_detections = int(resolved["bbox_norm_coords"].shape[0])
 
-    if "detection_source" in resolved:
+    if (
+        "detection_source" in resolved
+        and (total_detections is None or real_detections is None or interpolated_detections is None)
+    ):
         source_arr = np.asarray(resolved["detection_source"][:], dtype=np.int64)
         real_detections = int(np.sum(source_arr == 0))
         interpolated_detections = int(np.sum(source_arr != 0))
         total_detections = int(source_arr.shape[0])
+    elif (
+        "source_kind_codes" in resolved
+        and (total_detections is None or real_detections is None or interpolated_detections is None)
+    ):
+        source_kind_arr = np.asarray(resolved["source_kind_codes"][:], dtype=np.int64)
+        interpolated_detections = int(np.sum(source_kind_arr == 2))
+        total_detections = int(source_kind_arr.shape[0])
+        real_detections = int(total_detections - interpolated_detections)
     else:
         if total_detections is None:
             total_detections = _as_int(resolved.attrs.get("total_detections"))
-        interpolated_detections = _as_int(resolved.attrs.get("interpolated_detections"))
-        if interpolated_detections is None and _decode_attr(resolved_group) == "filtered":
-            interpolated_detections = 0
-        real_detections = _as_int(resolved.attrs.get("original_detections"))
+        if interpolated_detections is None:
+            interpolated_detections = _as_int(resolved.attrs.get("interpolated_detections"))
+            if interpolated_detections is None and _decode_attr(resolved_group) == "filtered":
+                interpolated_detections = 0
+        if real_detections is None:
+            real_detections = _as_int(resolved.attrs.get("original_detections"))
         if real_detections is None and total_detections is not None and interpolated_detections is not None:
             real_detections = int(total_detections) - int(interpolated_detections)
 
@@ -449,7 +492,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 
     # prepare_detect_training passthroughs
-    parser.add_argument("--source-type", choices=["detect", "filtered", "interpolated", "manual"], default="manual")
+    parser.add_argument(
+        "--source-type",
+        choices=["detect", "filtered", "interpolated", "manual", "refined"],
+        default="refined",
+    )
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
         "--model-input",

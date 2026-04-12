@@ -190,7 +190,7 @@ class TestZarrSchema:
         expected = {
             "detection_source_type",
             "detection_source_path",
-            "detection_preferred_policy",
+            "detection_selection_policy",
             "detect_review_status",
             "detect_review_status_ref",
             "source_detect_run",

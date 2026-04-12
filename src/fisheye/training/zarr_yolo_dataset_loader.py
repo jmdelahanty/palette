@@ -20,6 +20,12 @@ from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
 )
+from ..shared.refined_detect_curation import (
+    REFINED_DETECT_STATUS_CODE_MAP,
+    build_curated_detection_source_array,
+    has_curated_refined_detect_surface,
+    has_sparse_curated_refined_detect_instances_arrays,
+)
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
 
 # Setup logging
@@ -38,7 +44,7 @@ class SamplingStrategy(Enum):
 class SingleDatasetConfig:
     """Configuration for a single dataset."""
     zarr_path: str
-    source_type: str = 'filtered'  # 'detect', 'filtered', 'interpolated', or 'manual'
+    source_type: str = 'refined'  # 'detect', 'refined', 'filtered', 'interpolated', or 'manual'
     input_format: str = 'gray'  # 'gray' or 'rgb'
     split: Optional[Dict[str, float]] = None  # {'train': 0.8, 'val': 0.2}
     keypoint_run: Optional[str] = None  # Optional specific keypoints run
@@ -116,7 +122,7 @@ class ZarrDatasetConfig:
             for zarr_path in self.zarr_paths:
                 dataset_name = Path(zarr_path).stem
                 # Determine source_type based on filter_interpolated flag
-                source_type = 'detect' if self.filter_interpolated else 'filtered'
+                source_type = 'detect' if self.filter_interpolated else 'refined'
                 self.datasets[dataset_name] = SingleDatasetConfig(
                     zarr_path=zarr_path,
                     source_type=source_type,
@@ -150,12 +156,12 @@ class ZarrDatasetConfig:
         """Get source_type for a specific zarr path."""
         for config in self.datasets.values():
             if config.zarr_path == zarr_path:
-                value = getattr(config, "source_type", "filtered")
+                value = getattr(config, "source_type", "refined")
                 if hasattr(value, "value"):
                     value = value.value
                 text = str(value).strip().lower()
-                return text if text else "filtered"
-        return 'filtered'  # Default
+                return text if text else "refined"
+        return 'refined'  # Default
 
     def get_keypoint_run(self, zarr_path: str) -> Optional[str]:
         """Get configured keypoint run for a specific zarr path, if provided."""
@@ -250,13 +256,14 @@ class DatasetMetadata:
     has_interpolated: bool = False
     n_real_rois: int = 0
     n_interpolated_rois: int = 0
-    requested_source_type: str = 'filtered'  # NEW: What user requested
+    requested_source_type: str = 'refined'  # NEW: What user requested
     roi_shape: Tuple[int, int] = (0, 0)
     keypoint_run: Optional[str] = None
     requested_keypoint_run: Optional[str] = None
     bbox_array_path: str = ""
     frame_indices_path: Optional[str] = None
     detection_source_path: Optional[str] = None
+    status_codes_path: Optional[str] = None
     uses_crop_data: bool = True
     input_format: str = "gray"
     frame_array_path: str = "raw_video/images_ds"
@@ -345,6 +352,7 @@ class GlobalIndexManager:
                 bbox_array_path: Optional[str] = None
                 frame_indices_path: Optional[str] = None
                 detection_source_path: Optional[str] = None
+                status_codes_path: Optional[str] = None
                 actual_source_type = requested_source
                 has_interpolated = False
                 n_real_rois = 0
@@ -381,7 +389,17 @@ class GlobalIndexManager:
                         if refined_parent is not None and refined_run_name and refined_run_name in refined_parent:
                             refined_run = refined_parent[refined_run_name]
                             preferred_group: Optional[str] = None
-                            if requested_source == "manual":
+                            if requested_source == "refined" and has_curated_refined_detect_surface(refined_run):
+                                selected_source_type = "refined"
+                                if has_sparse_curated_refined_detect_instances_arrays(refined_run):
+                                    selected_group_path = f"{refined_parent_name}/{refined_run_name}/instances"
+                                    selected_group = refined_run["instances"]
+                                else:
+                                    selected_group_path = f"{refined_parent_name}/{refined_run_name}"
+                                    selected_group = refined_run
+                                source_detect_attr = refined_run.attrs.get("source_detect_run")
+                                selected_detect_run = str(source_detect_attr) if source_detect_attr else None
+                            elif requested_source == "manual":
                                 manual_latest = refined_run.attrs.get("manual_review_latest")
                                 if manual_latest and manual_latest in refined_run:
                                     preferred_group = str(manual_latest)
@@ -469,8 +487,11 @@ class GlobalIndexManager:
                             )
 
                     bbox_array_path = f"{selected_group_path}/bbox_norm_coords"
+                    status_codes_path = None
                     if "frame_indices" in selected_group:
                         frame_indices_path = f"{selected_group_path}/frame_indices"
+                    if has_curated_refined_detect_surface(selected_group):
+                        status_codes_path = f"{selected_group_path}/status_codes"
                     if "detection_source" in selected_group:
                         detection_source_path = f"{selected_group_path}/detection_source"
 
@@ -483,12 +504,34 @@ class GlobalIndexManager:
                             f"Available formats: {available_formats or 'none'}."
                         )
 
-                    n_total = int(selected_group["bbox_norm_coords"].shape[0])
-                    if detection_source_path and detection_source_path in root:
+                    if has_curated_refined_detect_surface(selected_group):
+                        n_total = int(
+                            np.sum(
+                                np.asarray(selected_group["status_codes"][:], dtype=np.int8).reshape(-1)
+                                == REFINED_DETECT_STATUS_CODE_MAP["present"]
+                            )
+                        )
+                        detection_source = build_curated_detection_source_array(selected_group, present_only=True)
+                        n_interpolated_rois = int(np.count_nonzero(detection_source != 0))
+                        n_real_rois = int(max(0, detection_source.shape[0] - n_interpolated_rois))
+                    elif (
+                        actual_source_type == "refined"
+                        and "bbox_norm_coords" in selected_group
+                        and "source_kind_codes" in selected_group
+                    ):
+                        n_total = int(selected_group["bbox_norm_coords"].shape[0])
+                        source_kind_codes = np.asarray(selected_group["source_kind_codes"][:], dtype=np.int8)
+                        n_interpolated_rois = int(
+                            np.count_nonzero(source_kind_codes == 2)
+                        )
+                        n_real_rois = int(max(0, n_total - n_interpolated_rois))
+                    elif detection_source_path and detection_source_path in root:
+                        n_total = int(selected_group["bbox_norm_coords"].shape[0])
                         detection_source = np.asarray(root[detection_source_path][:], dtype=np.int8)
                         n_interpolated_rois = int(np.count_nonzero(detection_source != 0))
                         n_real_rois = int(max(0, detection_source.shape[0] - n_interpolated_rois))
                     else:
+                        n_total = int(selected_group["bbox_norm_coords"].shape[0])
                         n_interpolated_rois = 0
                         n_real_rois = n_total
 
@@ -579,6 +622,9 @@ class GlobalIndexManager:
 
                 source_coords = root[bbox_array_path][:]
                 valid_mask = np.zeros(source_coords.shape[0], dtype=bool) if source_coords.size == 0 else ~np.isnan(source_coords[:, 0])
+                if status_codes_path and status_codes_path in root:
+                    status_codes = np.asarray(root[status_codes_path][:], dtype=np.int8)
+                    valid_mask = valid_mask & (status_codes == REFINED_DETECT_STATUS_CODE_MAP["present"])
 
                 if requested_source in ['filtered', 'detect', 'manual'] and has_interpolated and detection_source_path:
                     detection_source = root[detection_source_path][:]
@@ -609,10 +655,11 @@ class GlobalIndexManager:
                     roi_shape=roi_shape,
                     keypoint_run=keypoint_run_name,
                     requested_keypoint_run=requested_kp_run,
-                    bbox_array_path=bbox_array_path,
-                    frame_indices_path=frame_indices_path,
-                    detection_source_path=detection_source_path,
-                    uses_crop_data=uses_crop_data,
+                        bbox_array_path=bbox_array_path,
+                        frame_indices_path=frame_indices_path,
+                        detection_source_path=detection_source_path,
+                        status_codes_path=status_codes_path,
+                        uses_crop_data=uses_crop_data,
                     input_format=requested_input_format,
                     frame_array_path=frame_array_path,
                 )
@@ -642,6 +689,9 @@ class GlobalIndexManager:
         if coords.size == 0:
             return np.empty(0, dtype=int)
         valid_mask = ~np.isnan(coords[:, 0])
+        if metadata.status_codes_path and metadata.status_codes_path in root:
+            status_codes = np.asarray(root[metadata.status_codes_path][:], dtype=np.int8)
+            valid_mask = valid_mask & (status_codes == REFINED_DETECT_STATUS_CODE_MAP["present"])
         
         # Filter out interpolated data if source_type is 'filtered', 'detect', or 'manual'
         if (

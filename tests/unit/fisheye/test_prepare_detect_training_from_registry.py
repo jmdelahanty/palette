@@ -3,7 +3,9 @@
 from pathlib import Path
 import sys
 
+import numpy as np
 import pytest
+import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -67,6 +69,50 @@ def _upsert_detect_quality(
     )
 
 
+def test_resolve_detect_quality_from_zarr_handles_sparse_instances(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "dataset_1.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_run_1"
+    refined = refined_parent.create_group("refined_run_1")
+    refined.attrs["source_detect_run"] = "detect_run_1"
+    refined.attrs["detect_review_status"] = {
+        "state": "approved",
+        "intended_use": "training",
+        "resolved_group": "refined",
+    }
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", data=np.array([0, 1], dtype=np.int64))
+    instances.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32))
+    instances.create_array("frame_offsets", data=np.array([0, 1, 2], dtype=np.int64))
+    instances.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[1.0, 1.0, 4.0, 4.0], [2.0, 2.0, 5.0, 5.0]], dtype=np.float64),
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.2, 0.2], [0.4, 0.4, 0.2, 0.2]], dtype=np.float64),
+    )
+    instances.create_array("source_kind_codes", data=np.array([1, 2], dtype=np.int8))
+    instances.create_array("manual_edit_flags", data=np.array([0, 1], dtype=np.int8))
+    instances.create_array("source_detect_row_index", data=np.array([0, 1], dtype=np.int32))
+    instances.create_array("frame_counts", data=np.array([1, 1], dtype=np.int32))
+
+    resolved = wrapper._resolve_detect_quality_from_zarr(
+        zarr_path,
+        expected_refined_run="refined_run_1",
+    )
+
+    assert resolved["source_detect_run"] == "detect_run_1"
+    assert resolved["review_state"] == "approved"
+    assert resolved["review_intended_use"] == "training"
+    assert resolved["review_resolved_group"] == "refined"
+    assert resolved["total_detections"] == 2
+    assert resolved["real_detections"] == 1
+    assert resolved["interpolated_detections"] == 1
+    assert resolved["interpolated_detections_rate"] == pytest.approx(0.5)
+
+
 def test_auto_set_name_is_generated_when_missing(tmp_path: Path, monkeypatch) -> None:
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, tmp_path / "dataset_1.zarr")
@@ -90,7 +136,7 @@ def test_auto_set_name_is_generated_when_missing(tmp_path: Path, monkeypatch) ->
     first_name = first_cli[first_cli.index("--set-name") + 1]
     second_name = second_cli[second_cli.index("--set-name") + 1]
     assert first_name == second_name
-    assert first_name.startswith("cedar_defaultscreen_omnifin0_manual_gray_")
+    assert first_name.startswith("cedar_defaultscreen_omnifin0_refined_gray_")
     assert len(first_name.rsplit("_", 1)[-1]) == 8
 
 
@@ -124,7 +170,7 @@ def _naming_args(**overrides):
         "arena_id": None,
         "path_contains": None,
         "limit": None,
-        "source_type": "manual",
+        "source_type": "refined",
         "input_format": "gray",
     }
     defaults.update(overrides)
@@ -137,7 +183,7 @@ def test_default_set_name_includes_rig_token_for_single_rig() -> None:
         {"dish_design": "cedar", "canvas_name": "shadow", "rig_id": "omnifin0"},
     ]
     name = wrapper._default_set_name(_naming_args(), rows, model_input="gray")
-    assert name.startswith("cedar_shadow_omnifin0_manual_gray_")
+    assert name.startswith("cedar_shadow_omnifin0_refined_gray_")
     assert len(name.rsplit("_", 1)[-1]) == 8
 
 
@@ -147,7 +193,7 @@ def test_default_set_name_uses_mixed_rigs_token_for_multiple_rigs() -> None:
         {"dish_design": "cedar", "canvas_name": "shadow", "rig_id": "omnifin1"},
     ]
     name = wrapper._default_set_name(_naming_args(), rows, model_input="gray")
-    assert name.startswith("cedar_shadow_mixed_rigs_manual_gray_")
+    assert name.startswith("cedar_shadow_mixed_rigs_refined_gray_")
     assert len(name.rsplit("_", 1)[-1]) == 8
 
 

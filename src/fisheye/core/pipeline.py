@@ -62,7 +62,7 @@ class PipelineConfig:
     dry_run: bool = False
     crop_source: Optional[str] = None
     crop_source_path: Optional[str] = None
-    crop_preferred_policy: Optional[str] = None
+    crop_selection_policy: Optional[str] = None
     crop_acceleration: str = "auto"
     refine_max_gap: Optional[int] = None
     refine_method: Optional[str] = None
@@ -99,7 +99,7 @@ class PipelineConfig:
             dry_run=getattr(args, 'dry_run', False),
             crop_source=getattr(args, 'crop_source', None),
             crop_source_path=getattr(args, 'crop_source_path', None),
-            crop_preferred_policy=getattr(args, 'crop_preferred_policy', None),
+            crop_selection_policy=getattr(args, 'crop_selection_policy', None),
             crop_acceleration=getattr(args, 'crop_acceleration', 'auto'),
             refine_max_gap=getattr(args, 'refine_max_gap', None),
             refine_method=getattr(args, 'refine_method', None),
@@ -532,7 +532,7 @@ class Pipeline:
         crop_params = self.pipeline_params.get('crop', {}) or {}
         config_source_type = crop_params.get('source_type')
         config_source_path = crop_params.get('source_path')
-        preferred_policy = self.config.crop_preferred_policy or crop_params.get('preferred_policy')
+        selection_policy = self.config.crop_selection_policy or crop_params.get('selection_policy')
         
         cli_source_type = self.config.crop_source
         cli_source_path = self.config.crop_source_path
@@ -552,7 +552,7 @@ class Pipeline:
             config=self.pipeline_params,
             source_type=source_type,
             source_path=source_path,
-            preferred_policy=preferred_policy,
+            selection_policy=selection_policy,
             scheduler=self.config.scheduler,
             num_workers=self.config.num_workers,
             console=self.console,
@@ -1666,23 +1666,32 @@ Examples:
         "--crop-source",
         type=str,
         default=None,
-        choices=["detect", "filtered", "interpolated", "manual", "preferred", "auto"],
-        help="Detection source stage for cropping (default: config value)"
+        choices=["detect", "filtered", "interpolated", "manual", "refined", "auto"],
+        help=(
+            "Detection source stage for cropping (default: config value). "
+            "'refined' targets the canonical curated refined surface; "
+            "'filtered'/'interpolated'/'manual' are legacy sparse "
+            "compatibility modes."
+        )
     )
 
     parser.add_argument(
         "--crop-source-path",
         type=str,
         default=None,
-        help="Explicit detection source path inside the zarr (e.g. detect_runs/<run> or refined_detect_runs/<run>/interpolated)"
+        help=(
+            "Explicit detection source path inside the zarr (e.g. "
+            "detect_runs/<run> or the preferred current refined override "
+            "refined_detect_runs/<run>/instances)"
+        )
     )
 
     parser.add_argument(
-        "--crop-preferred-policy",
+        "--crop-selection-policy",
         type=str,
         default=None,
         choices=["training", "full_recording"],
-        help="Policy for preferred crop source selection (default: config value)"
+        help="Policy for auto crop source selection (default: config value)"
     )
     
     parser.add_argument(

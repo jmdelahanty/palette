@@ -12,6 +12,11 @@ import zarr
 
 from fisheye.utils.apply_tuning_by_camera import _normalize_subject_mask_tuning_payload
 from fisheye.registry.db import Registry
+from fisheye.shared.refined_detect_curation import (
+    extract_present_curated_rows,
+    has_curated_refined_detect_surface,
+)
+from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
@@ -1282,6 +1287,26 @@ def _extract_refined_coverage(
     refined_group: zarr.Group,
     root: Optional[zarr.Group] = None,
 ) -> tuple[Optional[float], Optional[str]]:
+    if has_curated_refined_detect_surface(refined_group):
+        total_frames = refined_group.attrs.get("coverage_frames_total")
+        if total_frames is None:
+            total_frames = _sampled_total_frames(root)
+        try:
+            total_frames = int(total_frames) if total_frames is not None else None
+        except Exception:
+            total_frames = None
+
+        frame_indices = np.asarray(
+            extract_present_curated_rows(refined_group)["frame_indices"],
+            dtype=np.int64,
+        ).reshape(-1)
+        present_frames = int(np.unique(frame_indices).shape[0])
+        if total_frames is None:
+            total_frames = int(np.unique(frame_indices).shape[0]) if frame_indices.size else 0
+        if total_frames and total_frames > 0:
+            return (float(present_frames) / float(total_frames)) * 100.0, "refined"
+        return None, "refined"
+
     manual_group_name = _normalize_attr(refined_group.attrs.get("manual_review_latest"))
     if manual_group_name and manual_group_name in refined_group:
         manual_group = refined_group[manual_group_name]
@@ -1781,10 +1806,20 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             refined_detect_present = True
             refined_group = refined_parent[candidate_run]
             refined_detect_coverage, refined_detect_method = _extract_refined_coverage(refined_group, root)
-            resolution = resolve_refined_detect_group(
-                refined_group, preference=DEFAULT_DETECT_GROUP_PREFERENCE
-            )
-            refined_detect_resolved_group = resolution.group or resolution.label
+            if has_curated_refined_detect_surface(refined_group):
+                resolution = resolve_detection_read_source(
+                    root,
+                    prefer_curated=True,
+                    refined_run=str(candidate_run),
+                    allow_sparse_fallback=True,
+                )
+                refined_detect_resolved_group = resolution.detection_path or resolution.detection_kind
+                refined_detect_method = refined_detect_method or resolution.detection_kind
+            else:
+                resolution = resolve_refined_detect_group(
+                    refined_group, preference=DEFAULT_DETECT_GROUP_PREFERENCE
+                )
+                refined_detect_resolved_group = resolution.group or resolution.label
             detect_review_status = _coerce_mapping(refined_group.attrs.get("detect_review_status"))
 
     crop_present = False

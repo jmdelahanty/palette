@@ -47,13 +47,33 @@ def _create_minimal_detect_zarr(path: Path, *, session_uuid: str = "session_smok
 
     refined_parent = root.create_group("refined_detect_runs")
     refined_parent.attrs["latest"] = "refined_detect_smoke_001"
-    refined_parent.create_group("refined_detect_smoke_001").create_group("manual")
+    refined = refined_parent.create_group("refined_detect_smoke_001")
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", data=np.array([0], dtype=np.int64), chunks=(1,))
+    instances.create_array("frame_indices", data=np.array([0], dtype=np.int32), chunks=(1,))
+    instances.create_array("frame_offsets", data=np.array([0, 1], dtype=np.int64), chunks=(2,))
+    instances.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[2.0, 2.0, 8.0, 8.0]], dtype=np.float64),
+        chunks=(1, 4),
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.2, 0.2]], dtype=np.float64),
+        chunks=(1, 4),
+    )
+    instances.create_array("source_kind_codes", data=np.array([1], dtype=np.int8), chunks=(1,))
+    instances.create_array("manual_edit_flags", data=np.array([True], dtype=bool), chunks=(1,))
+    instances.create_array("source_detect_row_index", data=np.array([0], dtype=np.int32), chunks=(1,))
+    instances.create_array("frame_counts", data=np.array([1], dtype=np.int32), chunks=(1,))
+    refined.attrs["source_detect_run"] = "detect_smoke_001"
+    refined.attrs["detect_review_status"] = {"state": "approved", "resolved_group": "refined"}
 
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_smoke_001"
     crop_group = crop_parent.create_group("crop_smoke_001")
-    crop_group.attrs["detection_source_type"] = "manual"
-    crop_group.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_smoke_001/manual"
+    crop_group.attrs["detection_source_type"] = "refined"
+    crop_group.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_smoke_001/instances"
     crop_group.attrs["detect_review_status"] = {"state": "approved"}
     crop_group.attrs["crop_review_status"] = {"state": "approved"}
     crop_group.create_array(
@@ -135,6 +155,7 @@ def test_prepare_detect_training_persists_invocation_metadata(monkeypatch, tmp_p
     assert invocation.get("args", {}).get("set_name") == "smoke_set"
     assert invocation.get("git", {}).get("commit_hash") == "abc123"
     assert invocation.get("environment", {}).get("environment_name") == "pytest-env"
+    assert manifest["datasets"][0]["manual_edited_bboxes"] == 1
 
     with sqlite3.connect(registry_path) as conn:
         row = conn.execute(

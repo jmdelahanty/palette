@@ -146,7 +146,7 @@ def test_check_crop_runs_reports_failed_runs_separately() -> None:
     crop = parent.create_group("crop_failed")
     crop.attrs["crop_storage_mode"] = "geometry_only"
     crop.attrs["status"] = "failed"
-    crop.attrs["error_message"] = "NameError: preferred_policy"
+    crop.attrs["error_message"] = "NameError: selection_policy"
     crop.attrs["detection_source_path"] = "detect_runs/detect_001"
     crop.create_array(
         "roi_coordinates_full",
@@ -160,7 +160,7 @@ def test_check_crop_runs_reports_failed_runs_separately() -> None:
 
     assert "failed" in text
     assert "pipeline_status: failed" in text
-    assert "error: NameError: preferred_policy" in text
+    assert "error: NameError: selection_policy" in text
     assert "missing 'frame_indices'" not in text
 
 

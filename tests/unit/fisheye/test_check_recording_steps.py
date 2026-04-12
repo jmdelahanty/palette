@@ -127,6 +127,93 @@ def test_check_zarr_reads_detect_quality_summary(tmp_path: Path) -> None:
     assert info["detect_quality_artifacts"] == 6
 
 
+def test_check_zarr_reads_curated_refined_detect_coverage(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "curated_refined_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array("images_full", data=np.zeros((4,), dtype=np.uint8))
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["detect_review_status"] = {"state": "approved", "resolved_group": "refined"}
+    refined.create_array("refined_row_ids", data=np.array([0, 1, 2, 3], dtype=np.int64))
+    refined.create_array("frame_indices", data=np.array([0, 1, 2, 3], dtype=np.int32))
+    refined.create_array("entity_ids", data=np.array([0, 0, 0, 0], dtype=np.int32))
+    refined.create_array(
+        "bbox_img_xyxy",
+        data=np.array(
+            [
+                [1.0, 1.0, 4.0, 4.0],
+                [np.nan, np.nan, np.nan, np.nan],
+                [1.0, 1.0, 4.0, 4.0],
+                [np.nan, np.nan, np.nan, np.nan],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    refined.create_array(
+        "bbox_norm_coords",
+        data=np.array(
+            [
+                [0.5, 0.5, 0.2, 0.2],
+                [np.nan, np.nan, np.nan, np.nan],
+                [0.5, 0.5, 0.2, 0.2],
+                [np.nan, np.nan, np.nan, np.nan],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    refined.create_array("status_codes", data=np.array([0, 1, 0, 2], dtype=np.int8))
+    refined.create_array("source_kind_codes", data=np.array([1, 0, 1, 0], dtype=np.int8))
+    refined.create_array("review_state_codes", data=np.array([1, 1, 1, 1], dtype=np.int8))
+    refined.create_array("keypoints_state_codes", data=np.array([0, 0, 0, 0], dtype=np.int8))
+    refined.create_array("subject_mask_state_codes", data=np.array([0, 0, 0, 0], dtype=np.int8))
+    refined.create_array("eye_mask_state_codes", data=np.array([0, 0, 0, 0], dtype=np.int8))
+    refined.create_array("swim_bladder_state_codes", data=np.array([0, 0, 0, 0], dtype=np.int8))
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["refined_detect_present"] is True
+    assert info["refined_detect_coverage"] == pytest.approx(50.0)
+    assert info["refined_detect_method"] == "refined"
+    assert info["refined_detect_resolved_group"] == "refined_detect_runs/refined_detect_001"
+
+
+def test_check_zarr_reads_sparse_refined_instances_path(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sparse_refined_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array("images_full", data=np.zeros((4,), dtype=np.uint8))
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["detect_review_status"] = {"state": "approved", "resolved_group": "refined"}
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", data=np.array([0, 1], dtype=np.int64))
+    instances.create_array("frame_indices", data=np.array([0, 2], dtype=np.int32))
+    instances.create_array("frame_offsets", data=np.array([0, 1, 1, 2, 2], dtype=np.int64))
+    instances.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[1.0, 1.0, 4.0, 4.0], [1.0, 1.0, 4.0, 4.0]], dtype=np.float64),
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.2, 0.2], [0.5, 0.5, 0.2, 0.2]], dtype=np.float64),
+    )
+    instances.create_array("source_kind_codes", data=np.array([1, 2], dtype=np.int8))
+    instances.create_array("manual_edit_flags", data=np.array([0, 1], dtype=np.int8))
+    instances.create_array("source_detect_row_index", data=np.array([0, 2], dtype=np.int32))
+    instances.create_array("frame_counts", data=np.array([1, 0, 1, 0], dtype=np.int32))
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["refined_detect_present"] is True
+    assert info["refined_detect_method"] == "refined"
+    assert info["refined_detect_resolved_group"] == "refined_detect_runs/refined_detect_001/instances"
+
+
 def test_check_zarr_reads_crop_status_from_latest_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "crop_status_latest_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")

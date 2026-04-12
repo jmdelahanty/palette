@@ -4,10 +4,13 @@ Part of the FishEye tracking pipeline.
 
 This version supports multiple detection sources:
 - 'detect': Original blob/YOLO detections
-- 'filtered': Refined detections with jumps removed
-- 'interpolated': Refined detections with gaps filled
-- 'manual': Manually reviewed detections (refined detect review)
-- 'preferred'/'auto': Resolve from detect_review_status or preference chain
+- 'filtered': Legacy refined sparse compatibility surface
+- 'interpolated': Legacy refined sparse compatibility surface
+- 'manual': Legacy refined sparse compatibility surface
+- 'refined': Canonical refined detect surface; current runs read curated rows
+  from refined_detect_runs/<run>/instances
+- 'auto': Resolve to the canonical refined detect surface first, else fall
+  back to the legacy sparse preference chain
 
 Streams work with Dask and writes directly from workers to Zarr
 to avoid accumulating large results in driver memory.
@@ -35,6 +38,12 @@ from ..utils.metadata import has_raw_video, get_video_source_path, get_total_fra
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
+)
+from ..shared.refined_detect_curation import (
+    build_curated_detection_source_array,
+    extract_present_curated_rows,
+    has_curated_refined_detect_surface,
+    has_sparse_curated_refined_detect_instances_arrays,
 )
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.crop_signature import build_crop_signature
@@ -371,16 +380,18 @@ def infer_detection_source_type(
     fallback: Optional[str] = None
 ) -> str:
     """
-    Infer the detection source type ('detect', 'filtered', 'interpolated', 'manual', 'preferred', 'auto') from a path.
+    Infer the detection source type ('detect', 'filtered', 'interpolated',
+    'manual', 'refined', 'auto') from a path.
     
     Args:
-        source_path: Path like 'detect_runs/<run>' or 'refined_detect_runs/<run>/interpolated'
+        source_path: Path like 'detect_runs/<run>' or the preferred current
+            refined override 'refined_detect_runs/<run>/instances'
         fallback: Optional fallback type if the path does not encode it
     
     Returns:
         Normalized detection source type
     """
-    valid = {'detect', 'filtered', 'interpolated', 'manual', 'preferred', 'auto'}
+    valid = {'detect', 'filtered', 'interpolated', 'manual', 'refined', 'auto'}
     fallback_type = fallback if fallback in valid else None
     
     if not source_path:
@@ -398,8 +409,7 @@ def infer_detection_source_type(
         return 'detect'
     
     if canonical.startswith(REFINED_DETECT_GROUP) or canonical.startswith(LEGACY_REFINED_DETECT_GROUP):
-        # Assume refined detections default to filtered if stage missing
-        return fallback_type or 'filtered'
+        return fallback_type or 'refined'
     
     return fallback_type or 'detect'
 
@@ -434,6 +444,21 @@ def _ensure_numpy_array(
     if dtype is not None:
         arr_obj = arr_obj.astype(dtype, copy=False)
     return arr_obj
+
+
+def _extract_detection_rows(
+    source_group: zarr.Group,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if has_curated_refined_detect_surface(source_group):
+        curated_rows = extract_present_curated_rows(source_group)
+        return (
+            _ensure_numpy_array(curated_rows["frame_indices"], dtype="i4", name="frame_indices"),
+            _ensure_numpy_array(curated_rows["bbox_norm_coords"], dtype="f8", name="bbox_norm_coords"),
+        )
+    return (
+        _ensure_numpy_array(source_group["frame_indices"][:], dtype="i4", name="frame_indices"),
+        _ensure_numpy_array(source_group["bbox_norm_coords"][:], dtype="f8", name="bbox_norm_coords"),
+    )
 
 
 def resolve_source_run_info(
@@ -511,7 +536,7 @@ def get_video_source(root: zarr.Group, console: Console) -> Tuple[str, Optional[
     """
     from ..utils.metadata import has_raw_video, get_video_source_path
     
-    # Try zarr first (preferred for speed)
+    # Try zarr first because it is typically faster.
     if has_raw_video(root):
         console.print("[green]✓[/green] Video source: zarr (raw_video)")
         return 'zarr', None
@@ -1375,7 +1400,7 @@ def crop_from_external_video(
     roi_sz: Tuple[int, int],
     use_gpu: bool,
     console: Console,
-    preferred_policy: Optional[str] = None,
+    selection_policy: Optional[str] = None,
     external_write_backend: str = "standard",
     external_roi_storage: str = "compressed",
     external_use_sharding: bool = False,
@@ -1451,8 +1476,7 @@ def crop_from_external_video(
     actual_use_gpu = use_gpu
     try:
         # Load detection data
-        frame_indices = source_group['frame_indices'][:]
-        bbox_coords = source_group['bbox_norm_coords'][:]
+        frame_indices, bbox_coords = _extract_detection_rows(source_group)
         total_detections = frame_indices.shape[0]
         
         if total_detections == 0:
@@ -1596,8 +1620,8 @@ def crop_from_external_video(
             crop_group.attrs['detect_review_status_ref'] = review_ref
         if review_status:
             crop_group.attrs['detect_review_status'] = review_status
-        if preferred_policy:
-            crop_group.attrs['detection_preferred_policy'] = preferred_policy
+        if selection_policy:
+            crop_group.attrs['detection_selection_policy'] = selection_policy
         crop_group.attrs['crop_signature'] = build_crop_signature(crop_group.attrs)
         effective_backend = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
         crop_group.attrs['write_backend'] = effective_backend
@@ -2018,26 +2042,54 @@ def get_detection_source_info(
     source_type: str = 'detect',
     source_path_override: Optional[str] = None,
     console: Optional[Console] = None,
-    preferred_policy: Optional[str] = None,
+    selection_policy: Optional[str] = None,
 ) -> Tuple[str, zarr.Group, Optional[np.ndarray], str]:
     """
     Get information about the detection source to use for cropping.
     
     Args:
         root: Zarr root group
-        source_type: 'detect', 'filtered', 'interpolated', 'manual', 'preferred', or 'auto' (hint)
-        source_path_override: Explicit path like 'detect_runs/<run>' or 'refined_detect_runs/<run>/interpolated'
+        source_type: 'detect', 'filtered', 'interpolated', 'manual',
+            'refined', or 'auto' (hint)
+        source_path_override: Explicit path like 'detect_runs/<run>' or the
+            preferred current refined override
+            'refined_detect_runs/<run>/instances'
         console: Optional Rich console for output
-        preferred_policy: Optional policy label for preferred selection (e.g., training/full_recording)
+        selection_policy: Optional policy label for auto source selection (e.g., training/full_recording)
         
     Returns:
         Tuple of (source_path, source_group, detection_source_array, resolved_source_type)
-        - source_path: Path string like 'detect_runs/latest' or 'refined_detect_runs/latest/filtered'
-        - source_group: Zarr group containing the detection data
+        - source_path: Path string like 'detect_runs/latest',
+          or 'refined_detect_runs/latest/instances'
+        - source_group: Zarr group containing the detection data and metadata
         - detection_source_array: Array indicating real (0) vs interpolated (1), or None
         - resolved_source_type: Normalized detection source label
     """
+    def _maybe_resolve_curated_instances_override(
+        normalized_path: str,
+    ) -> Optional[Tuple[str, zarr.Group, Optional[np.ndarray], str]]:
+        parts = normalized_path.split("/")
+        if len(parts) != 3:
+            return None
+        parent_name, refined_label, tail = parts
+        if tail != "instances":
+            return None
+        if parent_name not in {REFINED_DETECT_GROUP, LEGACY_REFINED_DETECT_GROUP}:
+            return None
+        refined_parent = root.get(parent_name)
+        if refined_parent is None or refined_label not in refined_parent:
+            return None
+        refined_group = refined_parent[refined_label]
+        if not has_curated_refined_detect_surface(refined_group):
+            raise ValueError(
+                f"Refined detect run '{refined_label}' does not have a canonical curated detect surface."
+            )
+        detection_source = build_curated_detection_source_array(refined_group, present_only=True)
+        return normalized_path, refined_group, detection_source, "refined"
+
     def _validate_detection_group(path_label: str, group: zarr.Group) -> None:
+        if has_curated_refined_detect_surface(group):
+            return
         required = ("frame_indices", "bbox_norm_coords")
         missing = [name for name in required if name not in group]
         if missing:
@@ -2052,6 +2104,11 @@ def get_detection_source_info(
             raise ValueError("Empty detection source path provided for cropping.")
         if normalized_path not in root:
             raise ValueError(f"Detection source '{normalized_path}' not found in zarr file.")
+        curated_override = _maybe_resolve_curated_instances_override(normalized_path)
+        if curated_override is not None:
+            if console:
+                console.print(f"[cyan]Using detections:[/cyan] {normalized_path}")
+            return curated_override
         source_group = root[normalized_path]
         resolved_type = infer_detection_source_type(normalized_path, None)
         _validate_detection_group(normalized_path, source_group)
@@ -2073,6 +2130,12 @@ def get_detection_source_info(
                     dtype='i1',
                     name=f"{normalized_path}/detection_source",
                 )
+            else:
+                total = int(source_group['frame_indices'].shape[0])
+                detection_source = np.zeros(total, dtype='i1')
+        elif resolved_type == 'refined' and is_refined:
+            if has_curated_refined_detect_surface(source_group):
+                detection_source = build_curated_detection_source_array(source_group, present_only=True)
             else:
                 total = int(source_group['frame_indices'].shape[0])
                 detection_source = np.zeros(total, dtype='i1')
@@ -2128,11 +2191,28 @@ def get_detection_source_info(
                 detection_source = np.zeros(total, dtype='i1')
         return source_path, source_group, detection_source, source_key
 
+    def _build_curated_refined_source(
+        refined_root: zarr.Group,
+        refined_group: zarr.Group,
+        refined_label: str,
+    ) -> Tuple[str, zarr.Group, Optional[np.ndarray], str]:
+        if not has_curated_refined_detect_surface(refined_group):
+            raise ValueError(
+                f"Refined run '{refined_label}' is missing a canonical curated detect surface."
+            )
+        if has_sparse_curated_refined_detect_instances_arrays(refined_group):
+            source_path = f"{refined_root.path}/{refined_label}/instances"
+        else:
+            source_path = f"{refined_root.path}/{refined_label}"
+        _validate_detection_group(source_path, refined_group)
+        detection_source = build_curated_detection_source_array(refined_group, present_only=True)
+        return source_path, refined_group, detection_source, 'refined'
+
     if source_type == 'detect':
         return _select_detect_run()
         
-    elif source_type in ['filtered', 'interpolated', 'manual', 'preferred', 'auto']:
-        if source_type in ('preferred', 'auto'):
+    elif source_type in ['filtered', 'interpolated', 'manual', 'refined', 'auto']:
+        if source_type == 'auto':
             try:
                 refined_root, _ = _load_refined_root()
             except ValueError:
@@ -2148,6 +2228,20 @@ def get_detection_source_info(
 
         refined_group = refined_root[latest_refined]
 
+        if source_type in ('refined', 'auto') and has_curated_refined_detect_surface(refined_group):
+            source_path, source_group, detection_source, resolved_type = _build_curated_refined_source(
+                refined_root,
+                refined_group,
+                latest_refined,
+            )
+            if console:
+                console.print(f"[cyan]Using canonical refined detections:[/cyan] {latest_refined}")
+            return source_path, source_group, detection_source, resolved_type
+        if source_type == 'refined':
+            raise ValueError(
+                f"Refined detect run '{latest_refined}' does not have a canonical curated detect surface."
+            )
+
         manual_label = refined_group.attrs.get('manual_review_latest')
         if not manual_label and 'manual' in refined_group:
             manual_label = 'manual'
@@ -2155,7 +2249,7 @@ def get_detection_source_info(
         resolved_source_type = source_type
         resolved_key = None
 
-        if source_type in ('preferred', 'auto'):
+        if source_type == 'auto':
             review_status = refined_group.attrs.get('detect_review_status')
             hint = None
             if isinstance(review_status, dict):
@@ -2174,14 +2268,14 @@ def get_detection_source_info(
                     resolved_key = hint
 
             if resolved_key is None:
-                policy = (preferred_policy or "training").strip().lower()
+                policy = (selection_policy or "training").strip().lower()
                 preference = DEFAULT_DETECT_GROUP_PREFERENCE
                 if policy != "training":
                     preference = DEFAULT_DETECT_GROUP_PREFERENCE
                 resolution = resolve_refined_detect_group(refined_group, preference=preference)
                 if resolution.label == "raw":
                     if console:
-                        console.print("[cyan]Using original detections (preferred fallback).[/cyan]")
+                        console.print("[cyan]Using original detections (auto fallback).[/cyan]")
                     return _select_detect_run()
                 resolved_key = resolution.group
                 resolved_source_type = resolution.label or resolution.group or source_type
@@ -2195,10 +2289,10 @@ def get_detection_source_info(
                 raise ValueError(f"Stage '{source_type}' not found in refined detection run {latest_refined}")
 
         if resolved_key not in refined_group:
-            if source_type in ('preferred', 'auto'):
+            if source_type == 'auto':
                 if console:
                     console.print(
-                        f"[yellow]Preferred refined stage '{resolved_key}' not found in "
+                        f"[yellow]Auto-selected refined stage '{resolved_key}' not found in "
                         f"{latest_refined}; falling back to original detections.[/yellow]"
                     )
                 return _select_detect_run()
@@ -2209,10 +2303,10 @@ def get_detection_source_info(
                 refined_root, refined_group, latest_refined, resolved_key
             )
         except ValueError as exc:
-            if source_type in ('preferred', 'auto'):
+            if source_type == 'auto':
                 if console:
                     console.print(
-                        f"[yellow]Preferred refined stage '{resolved_key}' is unusable "
+                        f"[yellow]Auto-selected refined stage '{resolved_key}' is unusable "
                         f"({exc}); falling back to original detections.[/yellow]"
                     )
                 return _select_detect_run()
@@ -2242,7 +2336,7 @@ def get_detection_source_info(
     else:
         raise ValueError(
             f"Invalid source_type: {source_type}. Must be 'detect', 'filtered', "
-            "'interpolated', 'manual', 'preferred', or 'auto'"
+            "'interpolated', 'manual', 'refined', or 'auto'"
         )
 
 
@@ -2333,13 +2427,14 @@ def save_crop_metadata(
         crop_group: Target crop group
         source_group: Source detection group
         source_path: Path to source (for provenance)
-        source_type: 'detect', 'filtered', 'interpolated', or 'manual'
+        source_type: 'detect', legacy sparse refined subgroup label, or
+            'refined'
         detection_source: Array indicating real (0) vs interpolated (1), or None
         total_detections: Total number of detections
         num_frames: Total number of frames in video  # ADD THIS
     """
     # Copy bbox coordinates
-    bbox_coords = source_group['bbox_norm_coords'][:]
+    frame_indices, bbox_coords = _extract_detection_rows(source_group)
     crop_group.create_array(
         'bbox_norm_coords',
         chunks=(min(1000, len(bbox_coords)), 4),
@@ -2348,7 +2443,6 @@ def save_crop_metadata(
     )
     
     # Copy frame_indices directly
-    frame_indices = source_group['frame_indices'][:]
     crop_group.create_array(
         'frame_indices',
         chunks=(min(1000, len(frame_indices)),),
@@ -2421,7 +2515,9 @@ def crop_and_store_chunk_delayed(
         out_slice: (start_det, end_det) in the flattened detection space for this chunk
         roi_sz: (H, W) of the crop
         scale_factor: ds/full scale for coordinates_ds
-        source_path: Path to detection source (e.g., 'detect_runs/latest' or 'refined_detect_runs/latest/filtered')
+        source_path: Path to detection source (e.g., 'detect_runs/latest',
+            the preferred current refined override
+            'refined_detect_runs/latest/instances')
 
     Returns:
         Tiny dict with counts/indices for bookkeeping.
@@ -2443,8 +2539,7 @@ def crop_and_store_chunk_delayed(
     
     # Load frame indices and bbox coordinates
     # Load only the slice of frame indices/bboxes we need
-    frame_indices = source_group['frame_indices'][:]
-    bbox_coords = source_group['bbox_norm_coords'][:]
+    frame_indices, bbox_coords = _extract_detection_rows(source_group)
     chunk_frames = np.arange(chunk_slice.start, chunk_slice.stop)
     
     # Determine which detections fall into this chunk
@@ -2532,7 +2627,7 @@ def crop_detections(
     config: Dict[str, Any],
     source_type: str = 'detect',
     source_path: Optional[str] = None,
-    preferred_policy: Optional[str] = None,
+    selection_policy: Optional[str] = None,
     scheduler: str = None,
     num_workers: Optional[int] = None,
     console: Optional[Console] = None,
@@ -2559,9 +2654,9 @@ def crop_detections(
     Args:
         zarr_path: Path to zarr file
         config: Configuration dictionary
-        source_type: Detection source - 'detect', 'filtered', 'interpolated', 'manual', or 'preferred'
+        source_type: Detection source - 'detect', 'filtered', 'interpolated', 'manual', 'refined', or 'auto'
         source_path: Explicit detection source path override (optional)
-        preferred_policy: Optional policy label for preferred selection
+        selection_policy: Optional policy label for auto source selection
         scheduler: Dask scheduler ('processes', 'threads', or 'distributed')
         num_workers: Number of workers (None = auto)
         console: Optional Rich console for output
@@ -2590,8 +2685,8 @@ def crop_detections(
     root = zarr.open_group(zarr_path, mode='a')
 
     crop_params_cfg = config.get('crop', {}) or {}
-    if preferred_policy is None:
-        preferred_policy = crop_params_cfg.get('preferred_policy')
+    if selection_policy is None:
+        selection_policy = crop_params_cfg.get('selection_policy')
 
     # Get detection source information
     source_path, source_group, detection_source, resolved_source_type = get_detection_source_info(
@@ -2599,7 +2694,7 @@ def crop_detections(
         source_type=source_type,
         source_path_override=source_path,
         console=console,
-        preferred_policy=preferred_policy,
+        selection_policy=selection_policy,
     )
     source_type = resolved_source_type
 
@@ -2621,7 +2716,7 @@ def crop_detections(
     
     # Route to appropriate implementation
     if video_source_type == 'external':
-        total_detections = int(source_group['frame_indices'].shape[0])
+        total_detections = int(_extract_detection_rows(source_group)[0].shape[0])
         accel_choice = (acceleration or crop_params.get('acceleration', 'auto') or 'auto').lower()
         gpu_threshold = int(crop_params.get('gpu_min_detections', 200))
         valid_accels = {'auto', 'gpu', 'cpu'}
@@ -2727,7 +2822,7 @@ def crop_detections(
             roi_sz=roi_sz,
             use_gpu=use_gpu,
             console=console,
-            preferred_policy=preferred_policy,
+            selection_policy=selection_policy,
             external_write_backend=backend,
             external_roi_storage=storage,
             external_use_sharding=use_sharding_value,
@@ -2833,8 +2928,7 @@ def crop_detections(
             raise ValueError("Cannot determine total frames")
 
     # Get detection info using frame_indices (BEFORE metadata collection)
-    frame_indices = source_group['frame_indices'][:]
-    bbox_coords = source_group['bbox_norm_coords'][:]
+    frame_indices, bbox_coords = _extract_detection_rows(source_group)
     total_detections = len(frame_indices)
     
     if total_detections == 0:
@@ -2946,8 +3040,8 @@ def crop_detections(
         crop_group.attrs['detect_review_status_ref'] = review_ref
     if review_status:
         crop_group.attrs['detect_review_status'] = review_status
-    if preferred_policy:
-        crop_group.attrs['detection_preferred_policy'] = preferred_policy
+    if selection_policy:
+        crop_group.attrs['detection_selection_policy'] = selection_policy
     provenance_record = _build_crop_stage_provenance(
         created_at_utc=str(crop_group.attrs.get("created_at_utc")),
         command=" ".join(sys.argv),
@@ -3451,17 +3545,25 @@ def main():
         "--source-type",
         type=str,
         default=None,
-        choices=['detect', 'filtered', 'interpolated', 'manual', 'preferred', 'auto'],
-        help="Detection source to use (defaults to config)",
+        choices=['detect', 'filtered', 'interpolated', 'manual', 'refined', 'auto'],
+        help=(
+            "Detection source to use. 'refined' targets the canonical curated "
+            "refined surface; 'filtered'/'interpolated'/'manual' are legacy "
+            "sparse compatibility modes."
+        ),
     )
     parser.add_argument("--source-path", type=str, default=None,
-                       help="Explicit detection source path (e.g. detect_runs/<run> or refined_detect_runs/<run>/interpolated)")
+                       help=(
+                           "Explicit detection source path (e.g. "
+                           "detect_runs/<run> or the preferred current refined "
+                           "override refined_detect_runs/<run>/instances)"
+                       ))
     parser.add_argument(
-        "--preferred-policy",
+        "--selection-policy",
         type=str,
         default=None,
         choices=["training", "full_recording"],
-        help="Policy for preferred source selection (when source-type is preferred/auto).",
+        help="Policy for auto source selection.",
     )
     parser.add_argument("--scheduler", type=str, default=None,
                        choices=['processes', 'threads', 'distributed'],
@@ -3561,7 +3663,7 @@ def main():
     raw_source_type = cli_source_type or config_source_type
     resolved_source_type = infer_detection_source_type(source_path, raw_source_type)
 
-    preferred_policy = args.preferred_policy or crop_params.get('preferred_policy')
+    selection_policy = args.selection_policy or crop_params.get('selection_policy')
     external_use_sharding = None
     if args.external_use_sharding and args.no_external_use_sharding:
         raise SystemExit("Choose either --external-use-sharding or --no-external-use-sharding, not both.")
@@ -3576,7 +3678,7 @@ def main():
             config=config,
             source_type=resolved_source_type,
             source_path=source_path,
-            preferred_policy=preferred_policy,
+            selection_policy=selection_policy,
             scheduler=args.scheduler,
             num_workers=args.num_workers,
             console=console,

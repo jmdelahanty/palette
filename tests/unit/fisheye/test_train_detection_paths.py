@@ -119,6 +119,50 @@ def test_get_zarr_metadata_reads_merged_layout_counts(tmp_path: Path) -> None:
     assert entry["crop_info"]["source_type"] == "manual"
 
 
+def test_get_zarr_metadata_exposes_curated_refined_default(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "refined_detect.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    raw = root.require_group("raw_video")
+    raw.require_array("images_ds", shape=(2, 8, 8), dtype=np.uint8, overwrite=True)[:] = 0
+    refined_parent = root.require_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.require_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    instances = refined.require_group("instances")
+    instances.create_array("refined_row_ids", data=np.array([0], dtype=np.int64), overwrite=True)
+    instances.create_array("frame_indices", data=np.array([0], dtype=np.int32), overwrite=True)
+    instances.create_array("frame_offsets", data=np.array([0, 1, 1], dtype=np.int64), overwrite=True)
+    instances.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[1.0, 1.0, 4.0, 4.0]], dtype=np.float64),
+        overwrite=True,
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.2, 0.2]], dtype=np.float64),
+        overwrite=True,
+    )
+    instances.create_array("source_kind_codes", data=np.array([1], dtype=np.int8), overwrite=True)
+    instances.create_array("manual_edit_flags", data=np.array([True], dtype=bool), overwrite=True)
+    instances.create_array("source_detect_row_index", data=np.array([0], dtype=np.int32), overwrite=True)
+    instances.create_array("frame_counts", data=np.array([1, 0], dtype=np.int32), overwrite=True)
+    refined.attrs["summary_statistics"] = {
+        "rows_present": 1,
+        "rows_filtered_out": 1,
+        "rows_missing": 0,
+        "rows_manual_edited": 1,
+    }
+
+    metadata = get_zarr_metadata([str(zarr_path)])
+    entry = metadata[zarr_path.name]
+
+    assert entry["detect_source_options"]["refined"] == "refined_detect_runs/refined_detect_001/instances"
+    assert entry["detect_source_default"]["source_type"] == "refined"
+    assert entry["detect_source_default"]["source_path"] == "refined_detect_runs/refined_detect_001/instances"
+    assert entry["data_quality"]["manual_edited_rows"] == 1
+    assert entry["data_quality"]["manual_edited_detections"] == 1
+
+
 def test_should_enable_rect_for_non_square_inputs() -> None:
     metadata = {
         "square.zarr": {"frame_height": 640, "frame_width": 640},

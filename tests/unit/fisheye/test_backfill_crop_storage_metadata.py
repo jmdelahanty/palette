@@ -363,7 +363,7 @@ def test_main_uses_direct_crop_parent_metadata_when_root_consolidated_is_stale(
         "signature_version": 1,
         "detection_source_path": "detect_runs/detect_001",
         "detection_source_type": "detect",
-        "detection_preferred_policy": None,
+        "detection_selection_policy": None,
         "source_detect_run": "detect_001",
         "source_refined_run": None,
         "roi_size": [8, 8],

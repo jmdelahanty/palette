@@ -61,6 +61,41 @@ def _write_detect_zarr(path: Path, *, num_frames: int = 2, frame_chunk: int = 1)
     )
 
 
+def _write_curated_refined_detect_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array(
+        "images_ds",
+        data=np.zeros((2, 32, 32), dtype=np.uint8),
+        chunks=(1, 32, 32),
+    )
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.create_array("refined_row_ids", data=np.array([0, 1], dtype=np.int64), chunks=(2,))
+    refined.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32), chunks=(2,))
+    refined.create_array("entity_ids", data=np.array([0, 0], dtype=np.int32), chunks=(2,))
+    refined.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[2.0, 2.0, 8.0, 8.0], [np.nan, np.nan, np.nan, np.nan]], dtype=np.float64),
+        chunks=(2, 4),
+    )
+    refined.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.2, 0.2], [np.nan, np.nan, np.nan, np.nan]], dtype=np.float64),
+        chunks=(2, 4),
+    )
+    refined.create_array("status_codes", data=np.array([0, 2], dtype=np.int8), chunks=(2,))
+    refined.create_array("source_kind_codes", data=np.array([1, 0], dtype=np.int8), chunks=(2,))
+    refined.create_array("review_state_codes", data=np.array([1, 1], dtype=np.int8), chunks=(2,))
+    refined.create_array("keypoints_state_codes", data=np.array([0, 0], dtype=np.int8), chunks=(2,))
+    refined.create_array("subject_mask_state_codes", data=np.array([0, 0], dtype=np.int8), chunks=(2,))
+    refined.create_array("eye_mask_state_codes", data=np.array([0, 0], dtype=np.int8), chunks=(2,))
+    refined.create_array("swim_bladder_state_codes", data=np.array([0, 0], dtype=np.int8), chunks=(2,))
+    refined.create_array("detection_source", data=np.array([0, 0], dtype=np.int8), chunks=(2,))
+
+
 def _write_pose_merged_zarr_with_box_only(path: Path) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["zarr_purpose"] = "training"
@@ -257,3 +292,28 @@ def test_pose_loader_supports_box_only_rows_with_visibility_zero(tmp_path: Path)
     full_sample = ds[full_pos]
     full_vis = full_sample["keypoints"].reshape(1, 3, 3)[0, :, 2]
     assert np.allclose(full_vis, np.full((3,), 2.0, dtype=np.float32))
+
+
+def test_detect_loader_supports_curated_refined_root_source(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "refined_source.zarr"
+    _write_curated_refined_detect_zarr(zarr_path)
+
+    cfg = ZarrDatasetConfig(
+        datasets={
+            "sample": {
+                "zarr_path": str(zarr_path),
+                "source_type": "refined",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            }
+        },
+        task="detect",
+        random_seed=3,
+        sampling_strategy="proportional",
+    )
+    ds = create_zarr_dataset(cfg, mode="train")
+
+    assert len(ds) == 1
+    sample = ds[0]
+    assert sample["bboxes"].shape == (1, 4)
+    assert np.allclose(sample["bboxes"][0], np.array([0.5, 0.5, 0.2, 0.2], dtype=np.float32))

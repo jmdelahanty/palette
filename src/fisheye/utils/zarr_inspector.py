@@ -947,7 +947,11 @@ def display_crop_metadata(zarr_path, console):
 
             meta_table.add_row("Detection source type", str(latest.attrs.get("detection_source_type", "unknown")))
             meta_table.add_row("Detection source path", str(latest.attrs.get("detection_source_path", "unknown")))
-            meta_table.add_row("Preferred policy", str(latest.attrs.get("detection_preferred_policy", "none")))
+            selection_policy = latest.attrs.get(
+                "detection_selection_policy",
+                latest.attrs.get("detection_preferred_policy", "none"),
+            )
+            meta_table.add_row("Selection policy", str(selection_policy))
             meta_table.add_row("Review status", _format_review_status(latest.attrs.get("detect_review_status")))
             meta_table.add_row("Review status ref", str(latest.attrs.get("detect_review_status_ref", "none")))
             meta_table.add_row("Source detect run", str(latest.attrs.get("source_detect_run", "unknown")))

@@ -80,6 +80,64 @@ def write_reason_columns(
     return written_fields
 
 
+def update_reason_rows(
+    group: zarr.Group,
+    row_indices: np.ndarray,
+    reason: np.ndarray,
+) -> None:
+    row_indices_arr = np.asarray(row_indices, dtype=np.int64).reshape(-1)
+    labels = np.asarray(reason, dtype=str).reshape(-1)
+    if row_indices_arr.shape[0] != labels.shape[0]:
+        raise ValueError("row_indices and reason must have the same length.")
+    if row_indices_arr.size == 0:
+        return
+
+    row_count = int(group["frame_indices"].shape[0]) if "frame_indices" in group else int(np.max(row_indices_arr)) + 1
+    if np.any(row_indices_arr < 0) or np.any(row_indices_arr >= row_count):
+        raise ValueError("row_indices contain out-of-range values.")
+
+    reason_arr = group.get("reason")
+    if reason_arr is not None:
+        reason_arr[row_indices_arr] = np.asarray(labels, dtype=object)
+
+    reason_bytes_arr = group.get("reason_bytes")
+    if reason_bytes_arr is None:
+        full_labels = (
+            np.asarray(reason_arr[:], dtype=object).reshape(-1)
+            if reason_arr is not None
+            else np.full(row_count, "", dtype=object)
+        )
+        full_labels[row_indices_arr] = np.asarray(labels, dtype=object)
+        write_reason_columns(
+            group,
+            full_labels,
+            max(1, row_count),
+            include_reason_text=reason_arr is not None,
+            overwrite=True,
+        )
+        return
+
+    width = int(reason_bytes_arr.shape[1]) if len(reason_bytes_arr.shape) > 1 else REASON_BYTES_MIN_WIDTH
+    encoded = encode_reason_bytes(labels, min_width=width)
+    if encoded.shape[1] > width:
+        full_labels = (
+            np.asarray(reason_arr[:], dtype=object).reshape(-1)
+            if reason_arr is not None
+            else decode_reason_bytes(reason_bytes_arr[:]).reshape(-1)
+        )
+        full_labels[row_indices_arr] = np.asarray(labels, dtype=object)
+        write_reason_columns(
+            group,
+            full_labels,
+            max(1, row_count),
+            include_reason_text=reason_arr is not None,
+            overwrite=True,
+        )
+        return
+
+    reason_bytes_arr[row_indices_arr, :] = encoded[:, :width]
+
+
 def read_reason_labels(group: zarr.Group) -> Optional[np.ndarray]:
     reason_bytes = group.get("reason_bytes")
     if reason_bytes is not None:

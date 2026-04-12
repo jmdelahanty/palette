@@ -4,8 +4,9 @@ Predict what the crop stage would do without actually writing ROIs.
 
 This diagnostic mirrors the crop stage's detection-source resolution logic and
 reports the detection run, frame counts, and interpolated metadata that would
-be used. It is helpful for confirming that the pipeline will consume refined
-interpolations before launching the expensive crop job.
+be used. It is helpful for confirming that the pipeline will consume the
+canonical refined detect surface when available, with legacy sparse fallback
+only on historical archives.
 """
 
 from __future__ import annotations
@@ -48,14 +49,14 @@ def simulate_crop(
     config_path: Optional[Path],
     cli_source_type: Optional[str],
     cli_source_path: Optional[str],
-    cli_preferred_policy: Optional[str],
+    cli_selection_policy: Optional[str],
 ) -> None:
     console = Console()
     root = zarr.open(str(zarr_path), mode="r")
 
     config = _load_config(config_path) if config_path else {}
     crop_params = dict(config.get("crop", {}) or {})
-    preferred_policy = cli_preferred_policy or crop_params.get("preferred_policy")
+    selection_policy = cli_selection_policy or crop_params.get("selection_policy")
 
     config_source_type = crop_params.get("source_type")
     config_source_path = crop_params.get("source_path")
@@ -69,8 +70,8 @@ def simulate_crop(
     if config_path:
         console.print(f"[dim]Config:[/dim] {config_path}")
     console.print(f"[dim]Requested source_type:[/dim] {source_type}")
-    if preferred_policy:
-        console.print(f"[dim]Preferred policy:[/dim] {preferred_policy}")
+    if selection_policy:
+        console.print(f"[dim]Selection policy:[/dim] {selection_policy}")
     if source_path:
         console.print(f"[dim]Requested source_path:[/dim] {source_path}")
 
@@ -80,7 +81,7 @@ def simulate_crop(
             source_type=source_type,
             source_path_override=source_path,
             console=console,
-            preferred_policy=preferred_policy,
+            selection_policy=selection_policy,
         )
     except ValueError as exc:
         console.print(f"[red]Unable to resolve detection source: {exc}[/red]")
@@ -118,8 +119,8 @@ def simulate_crop(
 
     table.add_row("Resolved source type", resolved_type)
     table.add_row("Resolved source path", resolved_path)
-    if preferred_policy:
-        table.add_row("Preferred policy", preferred_policy)
+    if selection_policy:
+        table.add_row("Selection policy", selection_policy)
     table.add_row("Total detections", f"{total_detections:,}")
     table.add_row("Frames with detections", f"{frames_with_detections:,}")
     table.add_row("Total frames", f"{total_frames:,}")
@@ -137,7 +138,9 @@ def simulate_crop(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Show the detection source and stats that the crop stage would use."
+        description=(
+            "Show the detection source and stats that the crop stage would use."
+        )
     )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
     parser.add_argument(
@@ -148,17 +151,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--crop-source",
-        choices=["detect", "filtered", "interpolated", "manual", "preferred", "auto"],
-        help="Override crop source type (mirrors --crop-source in the pipeline).",
+        choices=["detect", "filtered", "interpolated", "manual", "refined", "auto"],
+        help=(
+            "Override crop source type. 'refined' targets the canonical "
+            "curated refined surface; 'filtered'/'interpolated'/'manual' are "
+            "legacy sparse compatibility modes."
+        ),
     )
     parser.add_argument(
         "--crop-source-path",
-        help="Explicit detection source path (detect_runs/<run> or refined_detect_runs/<run>/interpolated).",
+        help=(
+            "Explicit detection source path (detect_runs/<run> or the "
+            "preferred current refined override "
+            "refined_detect_runs/<run>/instances)."
+        ),
     )
     parser.add_argument(
-        "--preferred-policy",
+        "--selection-policy",
         choices=["training", "full_recording"],
-        help="Policy for preferred source selection (overrides config).",
+        help="Policy for auto source selection (overrides config).",
     )
 
     args = parser.parse_args()
@@ -167,7 +178,7 @@ def main() -> None:
         config_path=args.config,
         cli_source_type=args.crop_source,
         cli_source_path=args.crop_source_path,
-        cli_preferred_policy=args.preferred_policy,
+        cli_selection_policy=args.selection_policy,
     )
 
 

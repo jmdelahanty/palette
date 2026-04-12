@@ -4,6 +4,8 @@ Prepare a YOLO detection training config + manifest from Palette Zarr archives.
 
 Validates crop provenance, bbox integrity, and downsample frame availability.
 Optionally captures experiment provenance (arena/camera/calibration) for auditing.
+Current refined-detect training should point at the canonical curated surface
+on `refined_detect_runs/<run>/instances`.
 """
 
 from __future__ import annotations
@@ -26,6 +28,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
 from ..registry.db import Registry, RegistryPaths
 from ..shared.registry_stage_complete import extract_dataset_metadata
+from ..shared.refined_detect_curation import (
+    build_source_detection_decision_summary,
+    extract_present_curated_rows,
+    has_curated_refined_source_detections_projection,
+    has_curated_refined_detect_surface,
+)
 from ..utils.system import build_invocation_record
 
 
@@ -118,6 +126,8 @@ class DatasetManifest(BaseModel):
     input_format: str
     images_ds_shape: List[int]
     total_bboxes: int
+    manual_edited_bboxes: int = 0
+    source_detection_decision_counts: Dict[str, int] = Field(default_factory=dict)
     invalid_bboxes: int
     invalid_bbox_sample: List[int] = Field(default_factory=list)
     detection_source_counts: Dict[str, int] = Field(default_factory=dict)
@@ -749,6 +759,10 @@ def _print_summary(manifest: TrainingManifest) -> None:
         print(f"  Detection source: {dataset.detection_source_type}")
         print(f"  Detection source path: {dataset.detection_source_path}")
         print(f"  Total bboxes: {dataset.total_bboxes}")
+        if dataset.manual_edited_bboxes:
+            print(f"  Manual-edited bboxes: {dataset.manual_edited_bboxes}")
+        if dataset.source_detection_decision_counts:
+            print(f"  Source detection decisions: {dataset.source_detection_decision_counts}")
         print(f"  Invalid bboxes: {dataset.invalid_bboxes}")
         if dataset.invalid_bbox_sample:
             print(f"  Invalid bbox sample: {dataset.invalid_bbox_sample}")
@@ -766,9 +780,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("zarr_paths", nargs="+", type=Path, help="One or more Palette Zarr paths.")
     parser.add_argument(
         "--source-type",
-        choices=["detect", "filtered", "interpolated", "manual"],
-        default="manual",
-        help="Detection source type to train on (default: manual).",
+        choices=["detect", "filtered", "interpolated", "manual", "refined"],
+        default="refined",
+        help=(
+            "Detection source type to train on (default: refined canonical "
+            "curated surface on refined_detect_runs/<run>/instances)."
+        ),
     )
     parser.add_argument(
         "--input-format",
@@ -836,12 +853,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--prefer-manual",
         action="store_true",
-        help="Prefer manual detections when available (default).",
+        help="Legacy sparse-mode policy: prefer manual subgroups when available.",
     )
     parser.add_argument(
         "--no-prefer-manual",
         action="store_true",
-        help="Do not enforce manual preference.",
+        help="Disable legacy sparse manual-subgroup preference checks.",
     )
     parser.add_argument(
         "--dry-run",
@@ -955,6 +972,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         detection_source_counts: Dict[str, int] = {}
         frame_indices_present = False
         detection_source_present = False
+        manual_edited_bboxes = 0
+        source_detection_decision_counts: Dict[str, int] = {}
 
         if "crop_runs" in root and root["crop_runs"].attrs.get("latest"):
             crop_run = root["crop_runs"].attrs.get("latest")
@@ -985,6 +1004,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
         refined_group = _resolve_refined_group(root, crop_group)
         manual_group = _manual_group_name(refined_group)
+        if (
+            detection_source_type == "refined"
+            and refined_group is not None
+            and has_curated_refined_detect_surface(refined_group)
+        ):
+            try:
+                present_rows = extract_present_curated_rows(refined_group)
+                manual_flags = present_rows.get("manual_edit_flags")
+                if manual_flags is not None:
+                    manual_edited_bboxes = int(np.count_nonzero(np.asarray(manual_flags, dtype=bool)))
+            except Exception:
+                manual_edited_bboxes = 0
+            if has_curated_refined_source_detections_projection(refined_group):
+                try:
+                    source_summary = build_source_detection_decision_summary(refined_group)
+                    if source_summary:
+                        source_detection_decision_counts = {
+                            str(key): int(value)
+                            for key, value in source_summary.items()
+                            if value is not None
+                        }
+                except Exception:
+                    source_detection_decision_counts = {}
         detect_review_status = None
         if crop_group is not None:
             detect_review_status = crop_group.attrs.get("detect_review_status")
@@ -1003,7 +1045,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 _log_timing(args.timing, f"{dataset_label}: skipped (crop review not approved)", dataset_started)
                 continue
 
-        if prefer_manual and manual_group and crop_group is not None:
+        if prefer_manual and args.source_type != "refined" and manual_group and crop_group is not None:
             if detection_source_type != "manual":
                 skipped.append(
                     f"{zarr_path.name}: manual detections available but crop source is '{detection_source_type}'"
@@ -1018,7 +1060,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     f"requested '{args.source_type}'. Re-run crop or pass --allow-source-mismatch."
                 )
 
-        if detection_source_type in {"filtered", "interpolated"} and detection_source_path:
+        if detection_source_type in {"filtered", "interpolated", "refined"} and detection_source_path:
             if detection_source_path not in root:
                 raise ValueError(
                     f"{zarr_path.name}: detection_source_path '{detection_source_path}' not found in Zarr."
@@ -1071,6 +1113,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 input_format=args.input_format,
                 images_ds_shape=[height, width],
                 total_bboxes=int(bboxes.shape[0]),
+                manual_edited_bboxes=manual_edited_bboxes,
+                source_detection_decision_counts=source_detection_decision_counts,
                 invalid_bboxes=invalid_count,
                 invalid_bbox_sample=invalid_sample,
                 detection_source_counts=detection_source_counts,
