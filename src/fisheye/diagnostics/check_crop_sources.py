@@ -9,7 +9,7 @@ For each `crop_runs/<run>` entry this diagnostic reports:
   * whether `detection_source` metadata (real vs interpolated) is present
 
 This helps catch cases where a crop run was accidentally created from the
-original detect run even though interpolated refined detections were available.
+original detect run even though the canonical refined detect surface was available.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ import numpy as np
 import zarr
 from rich.console import Console
 from rich.table import Table
+
+from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
 
 
 def _normalize_path(path: Optional[str]) -> Optional[str]:
@@ -52,7 +54,7 @@ def _latest(parent: Optional[zarr.Group]) -> Optional[str]:
 
 def _expected_refined_path(root: zarr.Group) -> Tuple[Optional[str], Optional[str]]:
     """
-    Returns (parent_name, interpolated_path) for the latest refined run, if present.
+    Returns (parent_name, canonical_refined_path) for the latest refined run, if present.
     """
     parent_name = None
     refined_parent = None
@@ -66,15 +68,37 @@ def _expected_refined_path(root: zarr.Group) -> Tuple[Optional[str], Optional[st
     if refined_parent is None:
         return None, None
 
-    latest = _latest(refined_parent)
-    if latest is None:
+    if _latest(refined_parent) is None:
         return parent_name, None
 
-    manual_label = refined_parent[latest].attrs.get("manual_review_latest")
-    if not manual_label and "manual" in refined_parent[latest]:
-        manual_label = "manual"
-    expected_path = f"{parent_name}/{latest}/{manual_label or 'interpolated'}"
-    return parent_name, expected_path
+    try:
+        resolution = resolve_detection_read_source(
+            root,
+            prefer_curated=True,
+            allow_sparse_fallback=True,
+        )
+    except Exception:
+        return parent_name, None
+
+    detection_path = _normalize_path(resolution.detection_path)
+    if (
+        resolution.refined_detect_run is None
+        or detection_path is None
+        or not detection_path.startswith(f"{parent_name}/")
+    ):
+        return parent_name, None
+    return parent_name, detection_path
+
+
+def _is_stale_refined_root_alias(
+    normalized_path: Optional[str],
+    expected_refined_path: Optional[str],
+) -> bool:
+    if not normalized_path or not expected_refined_path:
+        return False
+    if not expected_refined_path.endswith("/instances"):
+        return False
+    return normalized_path == expected_refined_path.removesuffix("/instances")
 
 
 def _arrays_match(a: zarr.Array, b: zarr.Array, chunk: int = 500_000) -> bool:
@@ -108,6 +132,13 @@ def analyze_crop_run(
     frame_match = "—"
 
     source_group = _resolve_group(root, source_path)
+    comparison_group = source_group
+    stale_refined_root_alias = _is_stale_refined_root_alias(normalized_path, expected_refined_path)
+    if stale_refined_root_alias and source_group is not None and "instances" in source_group:
+        try:
+            comparison_group = source_group["instances"]
+        except Exception:
+            comparison_group = source_group
     if normalized_path is None:
         issues.append("missing detection_source_path attr")
     elif source_group is None:
@@ -116,6 +147,8 @@ def analyze_crop_run(
         path_exists = True
         if expected_refined_path and normalized_path == expected_refined_path:
             path_status = "latest refined"
+        elif stale_refined_root_alias:
+            path_status = "stale refined root"
         elif normalized_path.startswith("detect_runs/"):
             path_status = "detect"
         elif source_type == "manual":
@@ -124,9 +157,13 @@ def analyze_crop_run(
             path_status = "custom"
 
         # Compare frame indices when source data is available
-        if "frame_indices" in crop_group and "frame_indices" in source_group:
+        if (
+            comparison_group is not None
+            and "frame_indices" in crop_group
+            and "frame_indices" in comparison_group
+        ):
             try:
-                match = _arrays_match(crop_group["frame_indices"], source_group["frame_indices"])
+                match = _arrays_match(crop_group["frame_indices"], comparison_group["frame_indices"])
                 frame_match = "yes" if match else "no"
                 if not match:
                     issues.append("frame_indices differ from source run")
@@ -148,7 +185,11 @@ def analyze_crop_run(
     elif source_type in {"filtered", "interpolated"}:
         issues.append("expected detection_source array for refined data but none found")
 
-    if normalized_path and expected_refined_path and normalized_path != expected_refined_path:
+    if stale_refined_root_alias:
+        issues.append(
+            f"path uses refined run root alias; expected canonical sparse path {expected_refined_path}"
+        )
+    elif normalized_path and expected_refined_path and normalized_path != expected_refined_path:
         issues.append(
             f"path mismatch (expected {expected_refined_path}, found {normalized_path})"
         )

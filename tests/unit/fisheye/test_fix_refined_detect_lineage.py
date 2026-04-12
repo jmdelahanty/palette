@@ -66,6 +66,27 @@ def _add_refined_run(
         manual.create_array("bbox_norm_coords", shape=(1, 4))
 
 
+def _add_sparse_refined_run(root: _FakeGroup, run_name: str) -> None:
+    parent = root.get("refined_detect_runs")
+    if parent is None:
+        parent = root.create_group("refined_detect_runs")
+    assert isinstance(parent, _FakeGroup)
+    run = parent.create_group(run_name)
+    instances = run.create_group("instances")
+    for name, shape in (
+        ("refined_row_ids", (1,)),
+        ("frame_indices", (1,)),
+        ("frame_offsets", (2,)),
+        ("bbox_img_xyxy", (1, 4)),
+        ("bbox_norm_coords", (1, 4)),
+        ("source_kind_codes", (1,)),
+        ("manual_edit_flags", (1,)),
+        ("source_detect_row_index", (1,)),
+        ("frame_counts", (1,)),
+    ):
+        instances.create_array(name, shape=shape)
+
+
 def _set_refined_latest(root: _FakeGroup, run_name: str) -> None:
     parent = root["refined_detect_runs"]
     assert isinstance(parent, _FakeGroup)
@@ -79,6 +100,8 @@ def _add_crop_run(
     detection_source_path: str | None,
     source_refined_run: str | None,
     detection_source_type: str | None,
+    source_coords_path: str | None = None,
+    crop_signature: dict[str, Any] | None = None,
 ) -> None:
     parent = root.get("crop_runs")
     if parent is None:
@@ -91,6 +114,10 @@ def _add_crop_run(
         run.attrs["source_refined_run"] = source_refined_run
     if detection_source_type is not None:
         run.attrs["detection_source_type"] = detection_source_type
+    if source_coords_path is not None:
+        run.attrs["source_coords_path"] = source_coords_path
+    if crop_signature is not None:
+        run.attrs["crop_signature"] = crop_signature
     parent.attrs["latest"] = run_name
 
 
@@ -143,13 +170,14 @@ def test_main_apply_aligns_crop_source_with_canonical_latest(monkeypatch, capsys
 
     out = capsys.readouterr().out
     assert "apply:" in out
-    assert "applied_repairs: 2" in out
+    assert "applied_repairs: 3" in out
 
     crop_parent = root["crop_runs"]
     assert isinstance(crop_parent, _FakeGroup)
     crop = crop_parent["crop_001"]
     assert isinstance(crop, _FakeGroup)
     assert crop.attrs["detection_source_path"] == "refined_detect_runs/refined_detect_new/manual"
+    assert crop.attrs["source_coords_path"] == "refined_detect_runs/refined_detect_new/manual"
     assert crop.attrs["source_refined_run"] == "refined_detect_new"
     assert crop.attrs["detection_source_type"] == "manual"
 
@@ -223,16 +251,19 @@ def test_main_writes_json_report_in_dry_run_mode(monkeypatch, capsys, tmp_path: 
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["mode"] == "dry-run"
     assert payload["summary"]["zarr_with_changes"] == 1
-    assert payload["summary"]["planned_repairs"] == 1
+    assert payload["summary"]["planned_repairs"] == 2
     assert payload["summary"]["applied_repairs"] == 0
-    assert len(payload["repairs"]) == 1
-    repair = payload["repairs"][0]
-    assert repair["zarr_path"] == str(zarr_path)
-    assert repair["target_path"] == "refined_detect_runs"
-    assert repair["field"] == "latest"
-    assert repair["old_value"] == "refined_detect_new"
-    assert repair["new_value"] == "refined_detect_old"
-    assert repair["applied"] is False
+    assert len(payload["repairs"]) == 2
+    fields = {repair["field"]: repair for repair in payload["repairs"]}
+    assert set(fields.keys()) == {"latest", "source_coords_path"}
+    assert fields["latest"]["zarr_path"] == str(zarr_path)
+    assert fields["latest"]["target_path"] == "refined_detect_runs"
+    assert fields["latest"]["old_value"] == "refined_detect_new"
+    assert fields["latest"]["new_value"] == "refined_detect_old"
+    assert fields["latest"]["applied"] is False
+    assert fields["source_coords_path"]["target_path"] == "crop_runs/crop_001"
+    assert fields["source_coords_path"]["new_value"] == "refined_detect_runs/refined_detect_old/manual"
+    assert fields["source_coords_path"]["applied"] is False
 
 
 def test_main_writes_json_report_with_applied_flags(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -258,9 +289,53 @@ def test_main_writes_json_report_with_applied_flags(monkeypatch, capsys, tmp_pat
 
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["mode"] == "apply"
-    assert payload["summary"]["planned_repairs"] == 2
-    assert payload["summary"]["applied_repairs"] == 2
+    assert payload["summary"]["planned_repairs"] == 3
+    assert payload["summary"]["applied_repairs"] == 3
     fields = {repair["field"]: repair for repair in payload["repairs"]}
-    assert set(fields.keys()) == {"detection_source_path", "source_refined_run"}
+    assert set(fields.keys()) == {"detection_source_path", "source_coords_path", "source_refined_run"}
     assert fields["detection_source_path"]["applied"] is True
+    assert fields["source_coords_path"]["applied"] is True
     assert fields["source_refined_run"]["applied"] is True
+
+
+def test_main_apply_normalizes_sparse_refined_root_alias_paths(monkeypatch, capsys, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec_analysis.zarr"
+    root = _FakeGroup()
+    root.attrs["zarr_use"] = "analysis"
+    _add_sparse_refined_run(root, "refined_detect_new")
+    _set_refined_latest(root, "refined_detect_new")
+    _add_crop_run(
+        root,
+        "crop_001",
+        detection_source_path="refined_detect_runs/refined_detect_new",
+        source_coords_path="refined_detect_runs/refined_detect_new",
+        source_refined_run="refined_detect_new",
+        detection_source_type="refined",
+        crop_signature={
+            "signature_version": 2,
+            "detection_source_path": "refined_detect_runs/refined_detect_new",
+            "source_coords_path": "refined_detect_runs/refined_detect_new",
+            "detection_source_type": "refined",
+            "source_refined_run": "refined_detect_new",
+        },
+    )
+    _patch_scan(monkeypatch, {zarr_path: root})
+
+    rc = mod.main([str(zarr_path), "--apply"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "applied_repairs: 3" in out
+
+    crop_parent = root["crop_runs"]
+    assert isinstance(crop_parent, _FakeGroup)
+    crop = crop_parent["crop_001"]
+    assert isinstance(crop, _FakeGroup)
+    assert crop.attrs["detection_source_path"] == "refined_detect_runs/refined_detect_new/instances"
+    assert crop.attrs["source_coords_path"] == "refined_detect_runs/refined_detect_new/instances"
+    assert crop.attrs["crop_signature"]["detection_source_path"] == (
+        "refined_detect_runs/refined_detect_new/instances"
+    )
+    assert crop.attrs["crop_signature"]["source_coords_path"] == (
+        "refined_detect_runs/refined_detect_new/instances"
+    )

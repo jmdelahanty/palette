@@ -15,18 +15,22 @@ from typing import Any, Iterable, Mapping, Optional
 
 import zarr
 
+from fisheye.shared.refined_detect_curation import (
+    has_curated_refined_detect_surface,
+    has_sparse_curated_refined_detect_instances_arrays,
+)
 from fisheye.shared.refined_detect_review import resolve_refined_detect_group
 
 
 REFINED_PARENT_NAMES = ("refined_detect_runs", "refined_runs")
 REQUIRED_BBOX_ARRAYS = ("bbox_norm_coords", "bbox_coords", "bbox")
-REFINED_SOURCE_TYPES = {"manual", "interpolated", "filtered"}
+REFINED_SOURCE_TYPES = {"manual", "interpolated", "filtered", "refined"}
 
 
 @dataclass(frozen=True)
 class ResolvedRefinedRun:
     run_name: str
-    subgroup_name: str
+    source_path: str
     source_type: str
 
 
@@ -139,12 +143,26 @@ def _review_override(run_group: zarr.Group) -> Optional[str]:
     return None
 
 
-def _resolved_refined_runs(parent: zarr.Group) -> dict[str, ResolvedRefinedRun]:
+def _resolved_refined_runs(parent_name: str, parent: zarr.Group) -> dict[str, ResolvedRefinedRun]:
     resolved: dict[str, ResolvedRefinedRun] = {}
     for run_name in _group_keys(parent):
         if run_name not in parent:
             continue
         run_group = parent[run_name]
+        if has_sparse_curated_refined_detect_instances_arrays(run_group):
+            resolved[run_name] = ResolvedRefinedRun(
+                run_name=run_name,
+                source_path=f"{parent_name}/{run_name}/instances",
+                source_type="refined",
+            )
+            continue
+        if has_curated_refined_detect_surface(run_group):
+            resolved[run_name] = ResolvedRefinedRun(
+                run_name=run_name,
+                source_path=f"{parent_name}/{run_name}",
+                source_type="refined",
+            )
+            continue
         override = _review_override(run_group)
         selection = resolve_refined_detect_group(run_group, override_group=override)
         if selection.group is None or selection.group not in run_group:
@@ -155,7 +173,7 @@ def _resolved_refined_runs(parent: zarr.Group) -> dict[str, ResolvedRefinedRun]:
         source_type = selection.label or selection.group
         resolved[run_name] = ResolvedRefinedRun(
             run_name=run_name,
-            subgroup_name=selection.group,
+            source_path=f"{parent_name}/{run_name}/{selection.group}",
             source_type=source_type,
         )
     return resolved
@@ -169,16 +187,17 @@ def _normalize_path(path: Any) -> Optional[str]:
     return normalized or None
 
 
-def _parse_refined_source_path(path: Optional[str], parent_name: str) -> Optional[tuple[str, str]]:
+def _parse_refined_source_path(path: Optional[str], parent_name: str) -> Optional[tuple[str, Optional[str]]]:
     if not path:
         return None
     parts = path.split("/")
-    if len(parts) != 3:
+    if len(parts) not in {2, 3}:
         return None
     if parts[0] != parent_name:
         return None
-    run_name, subgroup_name = parts[1], parts[2]
-    if not run_name or not subgroup_name:
+    run_name = parts[1]
+    subgroup_name = parts[2] if len(parts) == 3 else None
+    if not run_name:
         return None
     return run_name, subgroup_name
 
@@ -223,11 +242,21 @@ def _choose_run_from_crop(
     valid_runs: dict[str, ResolvedRefinedRun],
 ) -> Optional[str]:
     for _run_name, crop_group in crop_runs:
-        source_path = _normalize_path(crop_group.attrs.get("detection_source_path"))
-        parsed = _parse_refined_source_path(source_path, parent_name) if source_path else None
-        if parsed and parsed[0] in valid_runs:
-            return parsed[0]
-        source_refined = _normalize_str(crop_group.attrs.get("source_refined_run"))
+        signature = crop_group.attrs.get("crop_signature")
+        signature_map = dict(signature) if isinstance(signature, Mapping) else {}
+        candidate_paths = [
+            _normalize_path(crop_group.attrs.get("detection_source_path")),
+            _normalize_path(crop_group.attrs.get("source_coords_path")),
+            _normalize_path(signature_map.get("detection_source_path")),
+            _normalize_path(signature_map.get("source_coords_path")),
+        ]
+        for source_path in candidate_paths:
+            parsed = _parse_refined_source_path(source_path, parent_name) if source_path else None
+            if parsed and parsed[0] in valid_runs:
+                return parsed[0]
+        source_refined = _normalize_str(crop_group.attrs.get("source_refined_run")) or _normalize_str(
+            signature_map.get("source_refined_run")
+        )
         if source_refined and source_refined in valid_runs:
             return source_refined
     return None
@@ -249,11 +278,17 @@ def _choose_canonical_run(
 
 
 def _build_crop_expected_path(parent_name: str, resolved: ResolvedRefinedRun) -> str:
-    return f"{parent_name}/{resolved.run_name}/{resolved.subgroup_name}"
+    return resolved.source_path
 
 
 def _is_refined_source_path(path: Optional[str], parent_name: str) -> bool:
     return _parse_refined_source_path(path, parent_name) is not None
+
+
+def _coerce_mapping(value: Any) -> Optional[dict[str, Any]]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    return None
 
 
 def _plan_repairs(
@@ -267,7 +302,7 @@ def _plan_repairs(
     warnings: list[str] = []
     repairs: list[PlannedRepair] = []
 
-    valid_runs = _resolved_refined_runs(parent_group)
+    valid_runs = _resolved_refined_runs(parent_name, parent_group)
     if not valid_runs:
         warnings.append("no refined runs with valid detection arrays were found")
         return repairs, warnings
@@ -312,10 +347,25 @@ def _plan_repairs(
     for crop_run_name, crop_group in crop_runs:
         crop_path = f"crop_runs/{crop_run_name}"
         current_path = _normalize_path(crop_group.attrs.get("detection_source_path"))
+        current_coords_path = _normalize_path(crop_group.attrs.get("source_coords_path"))
         current_source_refined = _normalize_str(crop_group.attrs.get("source_refined_run"))
         current_source_type = _normalize_str(crop_group.attrs.get("detection_source_type"))
+        signature_map = _coerce_mapping(crop_group.attrs.get("crop_signature"))
+        signature_path = _normalize_path(signature_map.get("detection_source_path")) if signature_map else None
+        signature_coords_path = (
+            _normalize_path(signature_map.get("source_coords_path")) if signature_map else None
+        )
 
-        references_refined = _is_refined_source_path(current_path, parent_name)
+        references_refined = any(
+            _is_refined_source_path(path_value, parent_name)
+            for path_value in (
+                current_path,
+                current_coords_path,
+                signature_path,
+                signature_coords_path,
+            )
+            if path_value
+        )
         if current_path is None and current_source_refined:
             references_refined = True
 
@@ -328,6 +378,18 @@ def _plan_repairs(
                     old_value=current_path,
                     new_value=expected_path,
                     reason="align crop source path with canonical refined run",
+                )
+            )
+
+        if references_refined and current_coords_path != expected_path:
+            repairs.append(
+                PlannedRepair(
+                    target_group=crop_group,
+                    target_path=crop_path,
+                    field="source_coords_path",
+                    old_value=current_coords_path,
+                    new_value=expected_path,
+                    reason="align source_coords_path with canonical refined run",
                 )
             )
 
@@ -353,6 +415,39 @@ def _plan_repairs(
                         old_value=current_source_type,
                         new_value=expected_source_type,
                         reason="align detection_source_type with canonical refined subgroup",
+                    )
+                )
+
+        if references_refined and signature_map is not None:
+            updated_signature = dict(signature_map)
+            signature_changed = False
+            if "detection_source_path" in updated_signature and signature_path != expected_path:
+                updated_signature["detection_source_path"] = expected_path
+                signature_changed = True
+            if "source_coords_path" in updated_signature and signature_coords_path != expected_path:
+                updated_signature["source_coords_path"] = expected_path
+                signature_changed = True
+            if (
+                "source_refined_run" in updated_signature
+                and _normalize_str(updated_signature.get("source_refined_run")) != canonical_run
+            ):
+                updated_signature["source_refined_run"] = canonical_run
+                signature_changed = True
+            if (
+                "detection_source_type" in updated_signature
+                and _normalize_str(updated_signature.get("detection_source_type")) != expected_source_type
+            ):
+                updated_signature["detection_source_type"] = expected_source_type
+                signature_changed = True
+            if signature_changed:
+                repairs.append(
+                    PlannedRepair(
+                        target_group=crop_group,
+                        target_path=crop_path,
+                        field="crop_signature",
+                        old_value=signature_map,
+                        new_value=updated_signature,
+                        reason="align crop_signature refined lineage snapshot",
                     )
                 )
 
