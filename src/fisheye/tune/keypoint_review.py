@@ -20,6 +20,7 @@ import numpy as np
 import zarr
 
 from ..shared.detect_reason_codec import read_reason_labels
+from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..utils.zarr_io import open_zarr_root
 
 
@@ -154,16 +155,31 @@ def _parse_targets_arg(
 def _update_postprocess_summary(
     refined: zarr.Group,
     *,
+    root: Optional[zarr.Group] = None,
     print_summary: bool = True,
 ) -> Dict[str, object]:
+    temporal_heading = refresh_refined_keypoint_heading_fields(refined, root=root)
     total_rois = int(refined["keypoints_roi"].shape[0])
     refined_success = _count_truthy(refined.get("refined_success"))
     usable = _count_truthy(refined.get("usable_keypoints"))
     confidence_valid = _count_truthy(refined.get("confidence_valid"))
     geometry_valid = _count_truthy(refined.get("geometry_valid"))
     flip_corrected = _count_truthy(refined.get("flip_corrected"))
-    heading_finite = _count_truthy(refined.get("heading_finite"))
-    heading_usable = _count_truthy(refined.get("heading_usable"))
+    heading_finite = (
+        int(temporal_heading["heading_finite"])
+        if bool(temporal_heading.get("available"))
+        else _count_truthy(refined.get("heading_finite"))
+    )
+    heading_usable = (
+        int(temporal_heading["heading_usable"])
+        if bool(temporal_heading.get("available"))
+        else _count_truthy(refined.get("heading_usable"))
+    )
+    heading_temporal_evaluable = int(temporal_heading.get("heading_temporal_evaluable", 0))
+    heading_temporal_outlier = int(temporal_heading.get("heading_temporal_outlier_count", 0))
+    heading_temporal_outlier_rate = float(temporal_heading.get("heading_temporal_outlier_rate_percent", 0.0))
+    temporal_heading_status = str(temporal_heading.get("temporal_heading_status", "enabled"))
+    temporal_heading_disabled_reason = temporal_heading.get("temporal_heading_disabled_reason")
     source_success = _count_truthy(refined.get("source_success"))
 
     remaining_failures = max(0, total_rois - refined_success)
@@ -188,6 +204,13 @@ def _update_postprocess_summary(
         "flip_corrected": flip_corrected,
         "heading_finite": heading_finite,
         "heading_usable": heading_usable,
+        "heading_temporal_evaluable": heading_temporal_evaluable,
+        "heading_temporal_outlier": heading_temporal_outlier,
+        "heading_temporal_outlier_rate_percent": heading_temporal_outlier_rate,
+        "temporal_heading_threshold_deg": float(temporal_heading["temporal_heading_threshold_deg"]),
+        "temporal_heading_max_frame_gap": int(temporal_heading["temporal_heading_max_frame_gap"]),
+        "temporal_heading_status": temporal_heading_status,
+        "temporal_heading_disabled_reason": temporal_heading_disabled_reason,
         "detection_source_counts": detection_source_counts,
         "reason_counts": reason_counts,
         "retune_id_counts": retune_id_counts,
@@ -216,6 +239,15 @@ def _update_postprocess_summary(
         print(f"  Refined success: {refined_success}/{total_rois} ({success_rate:.2f}%)")
         print(f"  Remaining failures: {remaining_failures}")
         print(f"  Trainable (QC): {usable}/{total_rois} ({usable_rate:.2f}%)")
+        if temporal_heading_status != "enabled":
+            disabled_reason_text = str(temporal_heading_disabled_reason or temporal_heading_status)
+            print(f"  Heading temporal heuristic: disabled ({disabled_reason_text})")
+        elif heading_temporal_evaluable:
+            print(
+                "  Heading temporal outliers: "
+                f"{heading_temporal_outlier}/{heading_temporal_evaluable} "
+                f"({heading_temporal_outlier_rate:.2f}%)"
+            )
         low_conf = int(reason_counts.get("low_confidence", 0))
         if low_conf:
             print(f"  Low confidence: {low_conf} (excluded from training)")
@@ -268,7 +300,7 @@ def run_manual_review(
     # Re-open to pick up review_status written by the UI before updating summary.
     root = open_zarr_root(zarr_path, mode="a")
     refined = root[f"refined_keypoints_runs/{refined_run}"]
-    return _update_postprocess_summary(refined, print_summary=True)
+    return _update_postprocess_summary(refined, root=root, print_summary=True)
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
@@ -380,7 +412,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             detect_flag_file=args.detect_flag_file,
             detect_frame_flag_file=args.detect_frame_flag_file,
         )
-        _update_postprocess_summary(refined, print_summary=True)
+        _update_postprocess_summary(refined, root=root, print_summary=True)
     elif args.manual:
         run_manual_review(
             str(args.zarr_path),
@@ -399,7 +431,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             detect_frame_flag_file=args.detect_frame_flag_file,
         )
     else:
-        _update_postprocess_summary(refined, print_summary=True)
+        _update_postprocess_summary(refined, root=root, print_summary=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

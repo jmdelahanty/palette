@@ -2,6 +2,87 @@
 
 This workflow keeps keypoint training selection deterministic and fail-closed.
 
+Related future quality heuristic:
+
+- [keypoint_temporal_heading_heuristic_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_temporal_heading_heuristic_todo.md)
+
+## Temporal Heading Review
+
+Temporal heading review is intended for temporally contiguous refined-keypoint
+runs, such as analysis/full-recording review surfaces.
+
+It is explicitly disabled for sampled imports, including typical training zarrs
+created with `import_mode="sampled"` / `frame_step > 1`. In those archives:
+
+- temporal-heading arrays are omitted
+- `summary_statistics.postprocess.temporal_heading_status` is
+  `disabled_sampled_import`
+- `summary_statistics.postprocess.temporal_heading_disabled_reason` is
+  `sampled_import`
+
+### One-time backfill
+
+When temporal-heading fields or policy metadata need to be refreshed on
+existing refined-keypoint runs:
+
+```bash
+scripts/py -m fisheye.utils.backfill_keypoint_heading_fields \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use training
+```
+
+Apply changes:
+
+```bash
+scripts/py -m fisheye.utils.backfill_keypoint_heading_fields \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use training \
+  --apply
+```
+
+### Review flagged temporal outliers
+
+For contiguous archives where the heuristic is enabled, open only ROIs flagged
+by `heading_temporal_outlier`:
+
+```bash
+scripts/py -m fisheye.utils.review_keypoints_batch \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use analysis \
+  --manual \
+  --jump-temporal-outliers
+```
+
+The manual reviewer will use the flagged ROI subset as its queue, so `n` / `p`
+walk only those targeted rows.
+
+### Export and sort by temporal outliers
+
+To inspect which archives have the most temporal-heading outliers:
+
+```bash
+scripts/py -m fisheye.utils.export_keypoint_quality_overview \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use analysis \
+  --list \
+  --sort-by temporal-outliers
+```
+
+Or sort by rate instead of count:
+
+```bash
+scripts/py -m fisheye.utils.export_keypoint_quality_overview \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use analysis \
+  --list \
+  --sort-by temporal-outlier-rate
+```
+
 ## 1. Review keypoints in Zarr
 
 Run keypoint review so refined runs have:

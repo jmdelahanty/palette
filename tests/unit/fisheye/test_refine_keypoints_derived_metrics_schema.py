@@ -243,6 +243,19 @@ def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -
             },
         },
     )
+    monkeypatch.setattr(
+        mod,
+        "refresh_refined_keypoint_heading_fields",
+        lambda *_args, **_kwargs: {
+            "heading_temporal_evaluable": 0,
+            "heading_temporal_outlier_count": 0,
+            "heading_temporal_outlier_rate_percent": 0.0,
+            "temporal_heading_threshold_deg": 30.0,
+            "temporal_heading_max_frame_gap": 1,
+            "temporal_heading_status": "disabled",
+            "temporal_heading_disabled_reason": "unit_test",
+        },
+    )
     monkeypatch.setattr(mod, "_run_post_refinement_diagnostics", lambda **_kwargs: {})
     monkeypatch.setattr(
         mod,

@@ -5,6 +5,10 @@ explicit heading quality fields.
 
 Date anchored: 2026-02-11.
 
+Related follow-up:
+
+- [keypoint_temporal_heading_heuristic_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_temporal_heading_heuristic_todo.md)
+
 ## Status (2026-02-25)
 
 - [x] Phase 1 complete: runtime cutover (`heading_finite` + `heading_usable` writes in all detection/refinement/manual/patch paths; `heading_valid` writes removed from all files).

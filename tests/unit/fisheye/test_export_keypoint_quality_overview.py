@@ -19,6 +19,8 @@ def _make_zarr_with_refined_run(
     zarr_use: str = "training",
     latest_run: str = "refined_keypoints_1",
     include_artifact: bool = True,
+    heading_temporal_outlier: int = 0,
+    heading_temporal_evaluable: int = 0,
 ) -> Path:
     zarr_path = root / name / "zarr" / f"{name}_{zarr_use}.zarr"
     group = zarr.open_group(str(zarr_path), mode="w")
@@ -27,7 +29,20 @@ def _make_zarr_with_refined_run(
     refined_parent = group.create_group("refined_keypoints_runs")
     refined_parent.attrs["latest"] = latest_run
     refined_run = refined_parent.create_group(latest_run)
-    refined_run.attrs["summary_statistics"] = {"total_rois": 1, "refined_success": 1, "usable_keypoints": 1}
+    refined_run.attrs["summary_statistics"] = {
+        "total_rois": 1,
+        "refined_success": 1,
+        "usable_keypoints": 1,
+        "postprocess": {
+            "heading_temporal_outlier": heading_temporal_outlier,
+            "heading_temporal_evaluable": heading_temporal_evaluable,
+            "heading_temporal_outlier_rate_percent": (
+                float(heading_temporal_outlier) / float(heading_temporal_evaluable) * 100.0
+                if heading_temporal_evaluable
+                else 0.0
+            ),
+        },
+    }
     refined_run.attrs["parameters"] = {
         "confidence_threshold": 0.3,
         "min_triangle_angle": 10.0,
@@ -157,3 +172,45 @@ def test_export_keypoint_quality_overview_skips_when_artifact_missing(tmp_path: 
     row = payload["rows"][0]
     assert row["status"] == "skip"
     assert row["reason"] in {"no_visualizations_group", "artifact_missing"}
+
+
+def test_export_keypoint_quality_overview_json_report_includes_temporal_heading_counts(tmp_path: Path) -> None:
+    zarr_path = _make_zarr_with_refined_run(
+        tmp_path,
+        "rec_temporal",
+        heading_temporal_outlier=4,
+        heading_temporal_evaluable=10,
+    )
+    report = tmp_path / "report.json"
+
+    rc = mod.main([str(zarr_path), "--list", "--json-report", str(report)])
+    assert rc == 0
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    row = payload["rows"][0]
+    assert row["heading_temporal_outlier"] == 4
+    assert row["heading_temporal_evaluable"] == 10
+    assert row["heading_temporal_outlier_rate_percent"] == 40.0
+
+
+def test_export_keypoint_quality_overview_sorts_by_temporal_outlier_count(tmp_path: Path) -> None:
+    _make_zarr_with_refined_run(tmp_path, "rec_low", heading_temporal_outlier=1, heading_temporal_evaluable=10)
+    _make_zarr_with_refined_run(tmp_path, "rec_high", heading_temporal_outlier=5, heading_temporal_evaluable=10)
+    report = tmp_path / "report.json"
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--list",
+            "--sort-by",
+            "temporal-outliers",
+            "--json-report",
+            str(report),
+        ]
+    )
+    assert rc == 0
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    names = [Path(row["zarr_path"]).name for row in payload["rows"]]
+    assert names[0].startswith("rec_high")

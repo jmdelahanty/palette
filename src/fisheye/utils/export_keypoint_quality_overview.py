@@ -36,6 +36,9 @@ class ExportRow:
     reason: str
     output_path: Optional[str]
     bytes_written: Optional[int]
+    heading_temporal_outlier: int
+    heading_temporal_evaluable: int
+    heading_temporal_outlier_rate_percent: Optional[float]
 
 
 def _resolve_roots(paths: List[Path]) -> List[Path]:
@@ -125,6 +128,28 @@ def _resolve_refined_run(parent_group: zarr.Group, requested_refined_run: Option
     return str(names[-1])
 
 
+def _extract_temporal_heading_summary(run_group: zarr.Group) -> tuple[int, int, Optional[float]]:
+    summary_raw = run_group.attrs.get("summary_statistics", {})
+    if not isinstance(summary_raw, dict):
+        return 0, 0, None
+    postprocess = summary_raw.get("postprocess")
+    source = postprocess if isinstance(postprocess, dict) else summary_raw
+    try:
+        outlier = int(source.get("heading_temporal_outlier", 0))
+    except Exception:
+        outlier = 0
+    try:
+        evaluable = int(source.get("heading_temporal_evaluable", 0))
+    except Exception:
+        evaluable = 0
+    try:
+        rate_raw = source.get("heading_temporal_outlier_rate_percent")
+        rate = float(rate_raw) if rate_raw is not None else None
+    except Exception:
+        rate = None
+    return outlier, evaluable, rate
+
+
 def _collect_rows(
     roots: List[Path],
     *,
@@ -133,6 +158,7 @@ def _collect_rows(
     refined_run: Optional[str],
     output_dir: Path,
     artifact_name: str,
+    sort_by: str,
 ) -> List[ExportRow]:
     rows: List[ExportRow] = []
     for zarr_path in _iter_zarr(roots, recursive=recursive):
@@ -151,6 +177,9 @@ def _collect_rows(
             reason="unknown",
             output_path=None,
             bytes_written=None,
+            heading_temporal_outlier=0,
+            heading_temporal_evaluable=0,
+            heading_temporal_outlier_rate_percent=None,
         )
 
         try:
@@ -176,6 +205,10 @@ def _collect_rows(
         row.refined_run = selected_run
 
         run_group = parent_group[selected_run]
+        outlier_count, evaluable_count, outlier_rate = _extract_temporal_heading_summary(run_group)
+        row.heading_temporal_outlier = outlier_count
+        row.heading_temporal_evaluable = evaluable_count
+        row.heading_temporal_outlier_rate_percent = outlier_rate
         if "visualizations" not in run_group:
             row.reason = "no_visualizations_group"
             rows.append(row)
@@ -192,7 +225,17 @@ def _collect_rows(
         row.output_path = str(output_dir / safe_name)
         rows.append(row)
 
-    rows.sort(key=lambda row: row.zarr_path)
+    if sort_by == "temporal-outliers":
+        rows.sort(key=lambda row: (-int(row.heading_temporal_outlier), row.zarr_path))
+    elif sort_by == "temporal-outlier-rate":
+        rows.sort(
+            key=lambda row: (
+                -(float(row.heading_temporal_outlier_rate_percent) if row.heading_temporal_outlier_rate_percent is not None else -1.0),
+                row.zarr_path,
+            )
+        )
+    else:
+        rows.sort(key=lambda row: row.zarr_path)
     return rows
 
 
@@ -260,6 +303,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="View artifacts directly from zarr without exporting files.",
     )
     parser.add_argument("--open", action="store_true", help="Open exported files with xdg-open.")
+    parser.add_argument(
+        "--sort-by",
+        choices=["path", "temporal-outliers", "temporal-outlier-rate"],
+        default="path",
+        help="Sort rows by path or temporal-heading outlier severity.",
+    )
     parser.add_argument("--json-report", type=Path, help="Optional path to write a JSON report.")
     args = parser.parse_args(argv)
 
@@ -276,6 +325,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         refined_run=args.refined_run,
         output_dir=output_dir,
         artifact_name=str(args.artifact),
+        sort_by=str(args.sort_by),
     )
 
     scanned = len(rows)
@@ -300,7 +350,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             listed += 1
             row.status = "listed"
             row.reason = "list_mode"
-            print(f"list: {row.zarr_path}: {row.output_path}")
+            print(
+                "list: "
+                f"{row.zarr_path}: {row.output_path} "
+                f"(temporal_outliers={row.heading_temporal_outlier}/{row.heading_temporal_evaluable})"
+            )
             continue
 
         if args.view:

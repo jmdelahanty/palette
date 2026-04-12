@@ -41,10 +41,12 @@ try:
     from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
     from ..refinement.keypoint_quality import compute_geometry_metrics
     from ..refinement.refine_keypoints import _compute_heading_from_points, _detect_eye_flip
+    from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 except ImportError:  # pragma: no cover - fallback for script execution
     from fisheye.detection.detect_keypoints_traditional import detect_keypoints_traditional
     from fisheye.refinement.keypoint_quality import compute_geometry_metrics
     from fisheye.refinement.refine_keypoints import _compute_heading_from_points, _detect_eye_flip
+    from fisheye.shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 
 # Global variables for trackbar values
 current_frame = 1
@@ -1370,6 +1372,7 @@ def run_failure_tuner(
             cv2.setTrackbarPos("Failure", window_name, max(0, current_frame - 1))
 
     cv2.destroyAllWindows()
+    refresh_refined_keypoint_heading_fields(refined, root=zarr_root)
 
 
 def main(zarr_path, start_frame=1):

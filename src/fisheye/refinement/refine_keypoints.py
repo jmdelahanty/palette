@@ -46,6 +46,7 @@ from ..pose.metric_schema import (
 )
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.derived_metrics_schema import build_refined_keypoint_derived_metrics_schema
+from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.registry_stage_complete import (
     DatasetMetadata,
     emit_stage_completion,
@@ -1554,15 +1555,24 @@ def create_refined_keypoint_run(
         kp_refined.attrs, parameters_info
     )
 
-    refined_success_values = refined_success_dst[:]
-    heading_values = np.asarray(heading_dst[:], dtype=np.float64)
-    heading_finite_values = np.isfinite(heading_values)
-    heading_usable_values = refined_success_values.astype(bool)
-    if detection_source_values.size:
-        heading_usable_values &= (detection_source_values == 0)
-    heading_usable_values &= heading_finite_values
-    heading_finite_dst[:] = heading_finite_values
-    heading_usable_dst[:] = heading_usable_values
+    temporal_heading_summary = refresh_refined_keypoint_heading_fields(kp_refined, root=root)
+    summary_statistics.update(
+        {
+            "heading_temporal_evaluable": int(temporal_heading_summary["heading_temporal_evaluable"]),
+            "heading_temporal_outlier": int(temporal_heading_summary["heading_temporal_outlier_count"]),
+            "heading_temporal_outlier_rate_percent": float(
+                temporal_heading_summary["heading_temporal_outlier_rate_percent"]
+            ),
+            "temporal_heading_threshold_deg": float(
+                temporal_heading_summary["temporal_heading_threshold_deg"]
+            ),
+            "temporal_heading_max_frame_gap": int(
+                temporal_heading_summary["temporal_heading_max_frame_gap"]
+            ),
+            "temporal_heading_status": str(temporal_heading_summary.get("temporal_heading_status", "enabled")),
+            "temporal_heading_disabled_reason": temporal_heading_summary.get("temporal_heading_disabled_reason"),
+        }
+    )
     kp_refined.attrs["summary_statistics"] = summary_statistics
     kp_refined.attrs["derived_metrics_schema"] = build_refined_keypoint_derived_metrics_schema(
         keypoint_labels=keypoint_labels
@@ -1580,6 +1590,14 @@ def create_refined_keypoint_run(
         f"  Geometry issues: {stats['geometry_issues']}",
         f"  Clean: {stats['clean']}",
         f"  Usable keypoints: {stats['usable']}",
+        (
+            "  Heading temporal heuristic: disabled "
+            f"({temporal_heading_summary.get('temporal_heading_disabled_reason') or temporal_heading_summary.get('temporal_heading_status')})"
+            if str(temporal_heading_summary.get("temporal_heading_status", "enabled")) != "enabled"
+            else "  Heading temporal outliers: "
+            f"{int(temporal_heading_summary['heading_temporal_outlier_count'])}/"
+            f"{int(temporal_heading_summary['heading_temporal_evaluable'])}"
+        ),
         f"  Pass rate: {pass_rate:.1f}%",
         f"  Duration: {duration:.2f}s",
     ]

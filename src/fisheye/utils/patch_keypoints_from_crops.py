@@ -14,6 +14,7 @@ import zarr
 
 from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
 from ..refinement.refine_keypoints import _process_refinement_chunk
+from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
 
@@ -575,37 +576,11 @@ def _patch_refined_keypoints(
         overwrite=True,
     )
 
-    detection_source = refined.get("detection_source")
-    refined_success = np.asarray(refined["refined_success"][:], dtype=bool)
-    source_is_real = np.ones_like(refined_success, dtype=bool)
-    if detection_source is not None:
-        source_is_real = np.asarray(detection_source[:], dtype=np.int8) == 0
-    heading_finite = np.isfinite(np.asarray(refined["heading"][:], dtype=np.float64))
-    heading_usable = refined_success & source_is_real & heading_finite
-
-    bool_chunks = refined["refined_success"].chunks or (max(1, min(1024, refined_success.size)),)
-    if "heading_finite" in refined:
-        refined["heading_finite"][:] = heading_finite
-    else:
-        refined.create_array(
-            "heading_finite",
-            data=heading_finite,
-            chunks=bool_chunks,
-            overwrite=True,
-        )
-    if "heading_usable" in refined:
-        refined["heading_usable"][:] = heading_usable
-    else:
-        refined.create_array(
-            "heading_usable",
-            data=heading_usable,
-            chunks=bool_chunks,
-            overwrite=True,
-        )
+    refresh_refined_keypoint_heading_fields(refined, root=root)
     if "heading_valid" in refined:
         del refined["heading_valid"]
 
-    _update_postprocess_summary(refined, print_summary=False)
+    _update_postprocess_summary(refined, root=root, print_summary=False)
 
     frame_indices = keypoint_group["frame_indices"][:].astype(np.int64, copy=False)
     patched_idx = _update_index_array(refined, "patched_keypoint_indices", target_indices)

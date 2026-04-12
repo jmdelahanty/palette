@@ -25,6 +25,7 @@ from ..pose.metric_schema import (
     resolve_metric_schema_for_group,
 )
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
@@ -1562,6 +1563,7 @@ def launch_review(
     plt.show()
     if reason_arr is not None:
         _write_reason_labels(refined, np.asarray(reason_arr[:], dtype=object))
+    refresh_refined_keypoint_heading_fields(refined, root=root)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

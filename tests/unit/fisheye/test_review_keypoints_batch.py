@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from fisheye.utils import review_keypoints_batch as mod
 
@@ -26,6 +29,14 @@ class _FakeGroup:
 
     def __getitem__(self, key: str):
         return self._children[key]
+
+
+class _FakeArray:
+    def __init__(self, data: np.ndarray) -> None:
+        self._data = np.asarray(data)
+
+    def __getitem__(self, key):
+        return self._data[key]
 
 
 def _write_registry_for_latest(path: Path, recordings_root: Path) -> None:
@@ -399,3 +410,77 @@ def test_main_registry_mode_passes_review_state_filter(monkeypatch, tmp_path: Pa
     )
     assert rc == 0
     assert captured["review_state_filter"] == "not_approved"
+
+
+def test_build_plans_selects_only_temporal_outlier_runs(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sample_training.zarr"
+    refined_parent = _FakeGroup(
+        attrs={"latest": "refined_temporal"},
+        children={
+            "refined_temporal": _FakeGroup(
+                attrs={"keypoint_review_status": {"state": "pending"}},
+                children={
+                    "heading_temporal_outlier": _FakeArray(np.array([False, True, False], dtype=bool)),
+                    "frame_indices": _FakeArray(np.array([10, 11, 12], dtype=np.int32)),
+                },
+            ),
+        },
+    )
+    root = _FakeGroup(attrs={"zarr_use": "training"}, children={"refined_keypoints_runs": refined_parent})
+
+    monkeypatch.setattr(mod, "_iter_zarr", lambda _paths, _recursive: [zarr_path])
+    monkeypatch.setattr(mod.zarr, "open", lambda _path, mode="r": root)
+
+    plans = mod._build_plans(
+        roots=[tmp_path],
+        recursive=False,
+        refined_run=None,
+        zarr_use="training",
+        jump_temporal_outliers=True,
+    )
+
+    ok = [plan for plan in plans if plan.status == "ok"]
+    assert len(ok) == 1
+    assert ok[0].target_roi_indices == [1]
+    assert ok[0].target_frames == [11]
+
+
+def test_main_manual_mode_writes_temporal_outlier_target_file(monkeypatch, tmp_path: Path) -> None:
+    plans = [
+        mod.ReviewPlan(
+            zarr_path=tmp_path / "recordings" / "a_analysis.zarr",
+            refined_run="refined_a",
+            status="ok",
+            review_state=None,
+            target_roi_indices=[5, 8],
+            target_frames=[100, 103],
+        )
+    ]
+    monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: plans)
+    monkeypatch.setattr(mod, "_build_plans_from_registry", lambda *_args, **_kwargs: [])
+
+    seen_runs: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], check: bool = False, **kwargs: object) -> None:  # noqa: ARG001
+        seen_runs.append(cmd)
+        frame_arg = cmd[cmd.index("--frames") + 1]
+        payload = json.loads(Path(frame_arg).read_text(encoding="utf-8"))
+        targets = payload[str(plans[0].zarr_path)]
+        assert targets == [
+            {"frame_idx": 100, "roi_idx": 5},
+            {"frame_idx": 103, "roi_idx": 8},
+        ]
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+
+    rc = mod.main(
+        [
+            str(tmp_path / "recordings"),
+            "--manual",
+            "--jump-temporal-outliers",
+            "--no-prompt",
+        ]
+    )
+    assert rc == 0
+    assert len(seen_runs) == 1
+    assert "--frames" in seen_runs[0]

@@ -6,12 +6,14 @@ Batch wrapper for keypoint review (manual/retune/audit) across many recordings.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Iterable, List, Optional
 
 import numpy as np
@@ -27,6 +29,48 @@ class ReviewPlan:
     status: str
     reason: Optional[str] = None
     review_state: Optional[str] = None
+    target_roi_indices: Optional[List[int]] = None
+    target_frames: Optional[List[int]] = None
+
+
+def _extract_temporal_outlier_indices(refined_group: zarr.Group) -> Optional[np.ndarray]:
+    outlier_arr = refined_group.get("heading_temporal_outlier")
+    if outlier_arr is None:
+        return None
+    values = np.asarray(outlier_arr[:], dtype=bool)
+    return np.where(values)[0].astype("i4", copy=False)
+
+
+def _resolve_temporal_outlier_targets(zarr_path: Path, refined_run: str) -> Optional[List[dict[str, int]]]:
+    if not zarr_path.exists():
+        return None
+    try:
+        root = zarr.open(str(zarr_path), mode="r")
+    except Exception:
+        return None
+
+    refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
+    if refined_parent is None or refined_run not in refined_parent:
+        return None
+    refined_group = refined_parent[refined_run]
+    outlier_indices = _extract_temporal_outlier_indices(refined_group)
+    if outlier_indices is None:
+        return None
+    if outlier_indices.size == 0:
+        return []
+
+    frame_indices = None
+    frame_indices_arr = refined_group.get("frame_indices")
+    if frame_indices_arr is not None:
+        frame_indices = np.asarray(frame_indices_arr[:], dtype=np.int64)
+
+    targets: List[dict[str, int]] = []
+    for roi_idx in outlier_indices.tolist():
+        item = {"roi_idx": int(roi_idx)}
+        if frame_indices is not None and frame_indices.shape[0] > int(roi_idx):
+            item["frame_idx"] = int(frame_indices[int(roi_idx)])
+        targets.append(item)
+    return targets
 
 
 def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
@@ -285,6 +329,7 @@ def _build_plans_from_registry(
     pose_schema: Optional[str] = None,
     require_failures: bool = False,
     review_state_filter: str = "any",
+    jump_temporal_outliers: bool = False,
 ) -> List[ReviewPlan]:
     scope_roots = _normalize_scope_roots(roots)
     plans: List[ReviewPlan] = []
@@ -436,6 +481,8 @@ def _build_plans_from_registry(
                     review_state=review_state,
                     status="error",
                     reason="missing zarr_path in registry row",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -447,6 +494,8 @@ def _build_plans_from_registry(
                     review_state=review_state,
                     status="error",
                     reason="missing refined_run in registry row",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -464,6 +513,8 @@ def _build_plans_from_registry(
                         review_state=review_state,
                         status="error",
                         reason="unable to verify pose_schema on refined run",
+                        target_roi_indices=None,
+                        target_frames=None,
                     )
                 )
                 continue
@@ -475,6 +526,8 @@ def _build_plans_from_registry(
                     review_state=review_state,
                     status="filtered",
                     reason="outside requested scope",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -488,11 +541,32 @@ def _build_plans_from_registry(
                     review_state=review_state,
                     status="filtered",
                     reason=f"zarr_use={observed_use or 'unknown'}",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
         if dataset_id and dataset_id in selected_dataset_ids:
             continue
+
+        temporal_targets: Optional[List[dict[str, int]]] = None
+        if jump_temporal_outliers:
+            temporal_targets = _resolve_temporal_outlier_targets(zarr_path, str(raw_refined_run))
+            if temporal_targets is None:
+                plans.append(
+                    ReviewPlan(
+                        zarr_path=zarr_path,
+                        refined_run=str(raw_refined_run),
+                        review_state=review_state,
+                        status="error",
+                        reason="unable to resolve temporal heading outliers",
+                        target_roi_indices=None,
+                        target_frames=None,
+                    )
+                )
+                continue
+            if not temporal_targets:
+                continue
 
         plans.append(
             ReviewPlan(
@@ -500,6 +574,12 @@ def _build_plans_from_registry(
                 refined_run=str(raw_refined_run),
                 review_state=review_state,
                 status="ok",
+                target_roi_indices=[int(item["roi_idx"]) for item in temporal_targets] if temporal_targets else None,
+                target_frames=(
+                    [int(item["frame_idx"]) for item in temporal_targets]
+                    if temporal_targets and all("frame_idx" in item for item in temporal_targets)
+                    else None
+                ),
             )
         )
         if dataset_id:
@@ -520,6 +600,7 @@ def _build_plans(
     zarr_use: str,
     pose_schema: Optional[str] = None,
     review_state_filter: str = "any",
+    jump_temporal_outliers: bool = False,
 ) -> List[ReviewPlan]:
     plans: List[ReviewPlan] = []
     for zarr_path in _iter_zarr(roots, recursive):
@@ -532,6 +613,8 @@ def _build_plans(
                     refined_run=None,
                     status="error",
                     reason=str(exc),
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -545,6 +628,8 @@ def _build_plans(
                     review_state=None,
                     status="filtered",
                     reason=f"zarr_use={observed_use or 'unknown'}",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -558,6 +643,8 @@ def _build_plans(
                     review_state=None,
                     status="missing",
                     reason="no refined_keypoints_runs",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -575,6 +662,8 @@ def _build_plans(
                         if pose_schema is not None
                         else "no refined keypoints runs"
                     ),
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -586,6 +675,8 @@ def _build_plans(
                     review_state=None,
                     status="missing",
                     reason="refined keypoints run not found",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
@@ -599,18 +690,54 @@ def _build_plans(
                     review_state=None,
                     status="filtered",
                     reason=f"pose_schema={_extract_pose_schema_name(run_group.attrs.get('pose_schema')) or 'unknown'}",
+                    target_roi_indices=None,
+                    target_frames=None,
                 )
             )
             continue
         review_state = _normalize_review_state(run_group.attrs.get("keypoint_review_status"))
         if not _matches_review_state_filter(review_state, review_state_filter):
             continue
+        temporal_targets: Optional[List[dict[str, int]]] = None
+        if jump_temporal_outliers:
+            outlier_indices = _extract_temporal_outlier_indices(run_group)
+            if outlier_indices is None:
+                plans.append(
+                    ReviewPlan(
+                        zarr_path=zarr_path,
+                        refined_run=run_name,
+                        review_state=review_state,
+                        status="error",
+                        reason="temporal heading arrays missing",
+                        target_roi_indices=None,
+                        target_frames=None,
+                    )
+                )
+                continue
+            if outlier_indices.size == 0:
+                continue
+            frame_indices = None
+            frame_indices_arr = run_group.get("frame_indices")
+            if frame_indices_arr is not None:
+                frame_indices = np.asarray(frame_indices_arr[:], dtype=np.int64)
+            temporal_targets = []
+            for roi_idx in outlier_indices.tolist():
+                item = {"roi_idx": int(roi_idx)}
+                if frame_indices is not None and frame_indices.shape[0] > int(roi_idx):
+                    item["frame_idx"] = int(frame_indices[int(roi_idx)])
+                temporal_targets.append(item)
         plans.append(
             ReviewPlan(
                 zarr_path=zarr_path,
                 refined_run=run_name,
                 review_state=review_state,
                 status="ok",
+                target_roi_indices=[int(item["roi_idx"]) for item in temporal_targets] if temporal_targets else None,
+                target_frames=(
+                    [int(item["frame_idx"]) for item in temporal_targets]
+                    if temporal_targets and all("frame_idx" in item for item in temporal_targets)
+                    else None
+                ),
             )
         )
     return sorted(plans, key=lambda p: str(p.zarr_path))
@@ -700,6 +827,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--jump-temporal-outliers",
+        action="store_true",
+        help="Manual-mode convenience: open only ROIs flagged by heading_temporal_outlier.",
+    )
+    parser.add_argument(
         "--apply-batch-size",
         type=int,
         default=128,
@@ -769,6 +901,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.jump_temporal_outliers and not args.manual:
+        parser.error("--jump-temporal-outliers is only supported with --manual.")
+    if args.jump_temporal_outliers and args.frames:
+        parser.error("Choose either --frames or --jump-temporal-outliers, not both.")
+
     file_list_paths: List[Path] = []
     if args.file_list:
         for path in args.file_list:
@@ -790,7 +927,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     plans: List[ReviewPlan]
     review_state_filter = str(args.review_state_filter)
     if args.registry:
-        require_failures = bool(args.retune or (args.manual and not args.all))
+        require_failures = bool(args.retune or (args.manual and not args.all and not args.jump_temporal_outliers))
         try:
             plans = _build_plans_from_registry(
                 Path(args.registry),
@@ -800,6 +937,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 zarr_use=str(args.zarr_use),
                 require_failures=require_failures,
                 review_state_filter=review_state_filter,
+                jump_temporal_outliers=bool(args.jump_temporal_outliers),
             )
         except RuntimeError as exc:
             if args.registry_only:
@@ -813,6 +951,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 pose_schema=args.pose_schema,
                 zarr_use=str(args.zarr_use),
                 review_state_filter=review_state_filter,
+                jump_temporal_outliers=bool(args.jump_temporal_outliers),
             )
     else:
         plans = _build_plans(
@@ -822,6 +961,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             pose_schema=args.pose_schema,
             zarr_use=str(args.zarr_use),
             review_state_filter=review_state_filter,
+            jump_temporal_outliers=bool(args.jump_temporal_outliers),
         )
 
     if not plans:
@@ -843,7 +983,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         status = plan.status
         reason = f" ({plan.reason})" if plan.reason else ""
         run = plan.refined_run or "none"
-        print(f"{marker} [{idx:03d}] {plan.zarr_path} | refined={run} | {status}{reason}")
+        target_suffix = ""
+        if plan.target_roi_indices:
+            target_suffix = f" | temporal_outliers={len(plan.target_roi_indices)}"
+        print(f"{marker} [{idx:03d}] {plan.zarr_path} | refined={run} | {status}{reason}{target_suffix}")
 
     if args.list:
         return 0
@@ -886,8 +1029,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cmd.extend(["--reviewer", args.reviewer])
             if args.review_notes:
                 cmd.extend(["--review-notes", args.review_notes])
+        temp_target_path: Optional[Path] = None
         if args.frames and (args.manual or args.retune):
             cmd.extend(["--frames", args.frames])
+        elif args.jump_temporal_outliers and args.manual and plan.target_roi_indices:
+            targets: list[dict[str, int]] = []
+            for pos, roi_idx in enumerate(plan.target_roi_indices):
+                item = {"roi_idx": int(roi_idx)}
+                if plan.target_frames and pos < len(plan.target_frames):
+                    item["frame_idx"] = int(plan.target_frames[pos])
+                targets.append(item)
+            fd, raw_path = tempfile.mkstemp(prefix="keypoint_temporal_targets_", suffix=".json")
+            os.close(fd)
+            temp_target_path = Path(raw_path)
+            temp_target_path.write_text(
+                json.dumps({str(plan.zarr_path): targets}, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            cmd.extend(["--frames", str(temp_target_path)])
         if args.frame_flag_file and (args.manual or args.retune):
             cmd.extend(["--frame-flag-file", args.frame_flag_file])
         if args.detect_flag_file and (args.manual or args.retune):
@@ -899,7 +1058,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.registry:
             env = os.environ.copy()
             env["PALETTE_REGISTRY_PATH"] = str(Path(args.registry).expanduser().resolve())
-        subprocess.run(cmd, check=False, env=env)
+        try:
+            subprocess.run(cmd, check=False, env=env)
+        finally:
+            if temp_target_path is not None:
+                try:
+                    temp_target_path.unlink()
+                except FileNotFoundError:
+                    pass
         if idx < end - 1 and not args.no_prompt:
             if not _prompt_continue():
                 break

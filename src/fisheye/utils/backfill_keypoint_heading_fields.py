@@ -8,6 +8,8 @@ from typing import Iterable, Optional
 import numpy as np
 import zarr
 
+from ..tune.keypoint_review import _update_postprocess_summary
+
 
 @dataclass
 class BackfillResult:
@@ -83,9 +85,46 @@ def _compute_chunks(run_group: zarr.Group, size: int) -> tuple[int, ...]:
     return (max(1, min(1024, int(size))),)
 
 
+def _has_temporal_heading_arrays(run_group: zarr.Group) -> bool:
+    return all(
+        name in run_group
+        for name in ("heading_delta_prev_deg", "heading_delta_next_deg", "heading_temporal_outlier")
+    )
+
+
+def _has_temporal_heading_summary(run_group: zarr.Group) -> bool:
+    summary_raw = run_group.attrs.get("summary_statistics", {})
+    if not isinstance(summary_raw, dict):
+        return False
+    postprocess = summary_raw.get("postprocess")
+    source = postprocess if isinstance(postprocess, dict) else summary_raw
+    return all(
+        key in source
+        for key in (
+            "heading_temporal_evaluable",
+            "heading_temporal_outlier",
+            "heading_temporal_outlier_rate_percent",
+        )
+    )
+
+
+def _temporal_heading_status(run_group: zarr.Group) -> Optional[str]:
+    summary_raw = run_group.attrs.get("summary_statistics", {})
+    if not isinstance(summary_raw, dict):
+        return None
+    postprocess = summary_raw.get("postprocess")
+    source = postprocess if isinstance(postprocess, dict) else summary_raw
+    value = source.get("temporal_heading_status")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _backfill_heading_columns(
     run_group: zarr.Group,
     *,
+    root: Optional[zarr.Group],
     success_array_name: str,
     overwrite_existing: bool,
     apply: bool,
@@ -116,13 +155,23 @@ def _backfill_heading_columns(
     else:
         source_vals = np.zeros(heading_vals.shape[0], dtype=np.int8)
 
+    is_refined_run = success_array_name == "refined_success"
     has_heading_finite = "heading_finite" in run_group
     has_heading_usable = "heading_usable" in run_group
     has_legacy = "heading_valid" in run_group
+    temporal_status = _temporal_heading_status(run_group) if is_refined_run else None
+    has_temporal_arrays = _has_temporal_heading_arrays(run_group) if is_refined_run else True
+    has_temporal_summary = _has_temporal_heading_summary(run_group) if is_refined_run else True
+    temporal_ready = (
+        temporal_status == "disabled_sampled_import"
+        if is_refined_run and temporal_status == "disabled_sampled_import"
+        else has_temporal_arrays and has_temporal_summary and temporal_status == "enabled"
+    )
     if (
         has_heading_finite
         and has_heading_usable
         and not has_legacy
+        and temporal_ready
         and not overwrite_existing
     ):
         return BackfillResult(status="skipped_existing")
@@ -131,27 +180,33 @@ def _backfill_heading_columns(
     heading_usable = success_vals & (source_vals == 0) & heading_finite
 
     if apply:
-        chunks = _compute_chunks(run_group, int(heading_vals.shape[0]))
-        if has_heading_finite:
-            run_group["heading_finite"][:] = heading_finite
-        else:
-            run_group.create_array(
-                "heading_finite",
-                data=heading_finite,
-                chunks=chunks,
-                overwrite=True,
-            )
-        if has_heading_usable:
-            run_group["heading_usable"][:] = heading_usable
-        else:
-            run_group.create_array(
-                "heading_usable",
-                data=heading_usable,
-                chunks=chunks,
-                overwrite=True,
-            )
         if has_legacy:
             del run_group["heading_valid"]
+        if is_refined_run:
+            try:
+                _update_postprocess_summary(run_group, root=root, print_summary=False)
+            except Exception as exc:
+                return BackfillResult(status="summary_error", reason=str(exc))
+        else:
+            chunks = _compute_chunks(run_group, int(heading_vals.shape[0]))
+            if has_heading_finite:
+                run_group["heading_finite"][:] = heading_finite
+            else:
+                run_group.create_array(
+                    "heading_finite",
+                    data=heading_finite,
+                    chunks=chunks,
+                    overwrite=True,
+                )
+            if has_heading_usable:
+                run_group["heading_usable"][:] = heading_usable
+            else:
+                run_group.create_array(
+                    "heading_usable",
+                    data=heading_usable,
+                    chunks=chunks,
+                    overwrite=True,
+                )
 
     return BackfillResult(status="ok")
 
@@ -159,8 +214,9 @@ def _backfill_heading_columns(
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Backfill keypoint heading fields: heading_finite and heading_usable, "
-            "and drop legacy heading_valid."
+            "Backfill keypoint heading fields. Raw runs get heading_finite/heading_usable "
+            "and legacy heading_valid removal; refined runs also refresh temporal heading "
+            "arrays and postprocess summary statistics."
         )
     )
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
@@ -190,6 +246,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "no_heading": 0,
         "no_success": 0,
         "shape_mismatch": 0,
+        "summary_error": 0,
         "missing_runs": 0,
         "filtered_zarr_use": 0,
         "errors": 0,
@@ -214,6 +271,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 counts["runs_considered"] += 1
                 result = _backfill_heading_columns(
                     run_group,
+                    root=root,
                     success_array_name=success_name,
                     overwrite_existing=bool(args.overwrite_existing),
                     apply=bool(args.apply),
@@ -237,7 +295,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(
         f"{mode}: ok={counts['ok']} skipped_existing={counts['skipped_existing']} "
         f"no_heading={counts['no_heading']} no_success={counts['no_success']} "
-        f"shape_mismatch={counts['shape_mismatch']}"
+        f"shape_mismatch={counts['shape_mismatch']} summary_error={counts['summary_error']}"
     )
     return 0 if counts["errors"] == 0 else 1
 
