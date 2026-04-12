@@ -22,6 +22,14 @@
     "version": 2,
     "skeleton_id": "pose_skel_traditional_v2",
     "migration_from": "traditional_v1",
-    "notes": "Ordered as swim_bladder, eye_left, eye_right, snout_tip, tail_tip so traditional_v1 indices are preserved and new points append cleanly."
+    "notes": "Ordered as swim_bladder, eye_left, eye_right, snout_tip, tail_tip so traditional_v1 indices are preserved and new points append cleanly.",
+    "heading_computation": {
+      "version": 1,
+      "enabled": true,
+      "origin": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+      "direction_from": {"op": "keypoint", "label": "swim_bladder"},
+      "direction_to": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+      "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"]
+    }
   }
 }

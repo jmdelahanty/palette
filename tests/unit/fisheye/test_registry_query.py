@@ -247,10 +247,45 @@ def _seed_registry_for_detect_filters(registry_path: Path) -> None:
         arena_id,
         camera_id,
         dish_design,
+        genotype,
+        dpf_at_acquisition,
     ) in (
-        ("dataset_a", "session_a", "recording_a", "a.zarr", "rig_a", "arena_x", "cam_1", "cedar"),
-        ("dataset_b", "session_b", "recording_b", "b.zarr", "rig_a", "arena_x", "cam_2", "cedar"),
-        ("dataset_c", "session_c", "recording_c", "c.zarr", "rig_b", "arena_y", "cam_3", "maple"),
+        (
+            "dataset_a",
+            "session_a",
+            "recording_a",
+            "a.zarr",
+            "rig_a",
+            "arena_x",
+            "cam_1",
+            "cedar",
+            "Tg(elavl3:gcamp7f)",
+            7,
+        ),
+        (
+            "dataset_b",
+            "session_b",
+            "recording_b",
+            "b.zarr",
+            "rig_a",
+            "arena_x",
+            "cam_2",
+            "cedar",
+            "Tg(elavl3:gcamp7f)",
+            8,
+        ),
+        (
+            "dataset_c",
+            "session_c",
+            "recording_c",
+            "c.zarr",
+            "rig_b",
+            "arena_y",
+            "cam_3",
+            "maple",
+            "WT",
+            9,
+        ),
     ):
         registry.upsert_dataset(
             dataset_id,
@@ -262,7 +297,10 @@ def _seed_registry_for_detect_filters(registry_path: Path) -> None:
         )
         registry.upsert_provenance(
             dataset_id,
-            provenance={},
+            provenance={
+                "genotype": genotype,
+                "dpf_at_acquisition": dpf_at_acquisition,
+            },
             context={
                 "rig_id": rig_id,
                 "arena_id": arena_id,
@@ -1256,6 +1294,10 @@ def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
             "source_keypoint_run": "keypoint_a_v1",
             "skeleton_id": "fish_v1",
             "kpt_shape": "[3,3]",
+            "pose_schema_name": "traditional_v1",
+            "pose_schema_json": json.dumps({"name": "traditional_v1", "kpt_shape": [3, 3]}),
+            "heading_computation_source": "pose_schema.metadata.heading_computation",
+            "heading_computation_json": json.dumps({"enabled": True, "version": 1}, sort_keys=True),
             "profile_created_utc": "2026-02-12T00:00:00+00:00",
             "rows_total": 100,
             "rows_usable": 80,
@@ -1293,6 +1335,10 @@ def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
             "source_keypoint_run": "keypoint_a_v2",
             "skeleton_id": "fish_v1",
             "kpt_shape": "[3,3]",
+            "pose_schema_name": "traditional_v1",
+            "pose_schema_json": json.dumps({"name": "traditional_v1", "kpt_shape": [3, 3]}),
+            "heading_computation_source": "pose_schema.metadata.heading_computation",
+            "heading_computation_json": json.dumps({"enabled": True, "version": 1}, sort_keys=True),
             "profile_created_utc": "2026-02-12T02:00:00+00:00",
             "rows_total": 100,
             "rows_usable": 92,
@@ -1330,6 +1376,10 @@ def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
             "source_keypoint_run": "keypoint_b_v1",
             "skeleton_id": "fish_v1",
             "kpt_shape": "[3,3]",
+            "pose_schema_name": "traditional_v1",
+            "pose_schema_json": json.dumps({"name": "traditional_v1", "kpt_shape": [3, 3]}),
+            "heading_computation_source": "pose_schema.metadata.heading_computation",
+            "heading_computation_json": json.dumps({"enabled": True, "version": 1}, sort_keys=True),
             "profile_created_utc": "2026-02-12T01:00:00+00:00",
             "rows_total": 100,
             "rows_usable": 95,
@@ -1370,6 +1420,10 @@ def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
             source_keypoint_run,
             skeleton_id,
             kpt_shape,
+            pose_schema_name,
+            pose_schema_json,
+            heading_computation_source,
+            heading_computation_json,
             profile_created_utc,
             zarr_mtime_ns,
             updated_utc,
@@ -1407,6 +1461,10 @@ def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
             :source_keypoint_run,
             :skeleton_id,
             :kpt_shape,
+            :pose_schema_name,
+            :pose_schema_json,
+            :heading_computation_source,
+            :heading_computation_json,
             :profile_created_utc,
             :zarr_mtime_ns,
             datetime('now'),
@@ -2146,8 +2204,6 @@ def test_registry_query_detection_data_profile_latest_mode_json(tmp_path: Path, 
     assert row["profile_run"] == "profile_a_v2"
     assert row["detection_type"] == "manual"
     assert row["coverage_percent"] == pytest.approx(97.0)
-    assert row["genotype"] == "Tg(elavl3:gcamp7f)"
-    assert row["dpf_at_acquisition"] == 7
 
 
 def test_registry_query_recording_detection_data_profile_latest_mode_json(tmp_path: Path, capsys) -> None:
@@ -2236,9 +2292,9 @@ def test_registry_query_keypoint_data_profile_latest_mode_json(tmp_path: Path, c
     row = payload[0]
     assert row["profile_run"] == "kp_profile_a_v2"
     assert row["keypoint_method"] == "traditional_pose"
+    assert row["pose_schema_name"] == "traditional_v1"
+    assert row["heading_computation_source"] == "pose_schema.metadata.heading_computation"
     assert row["usable_rate"] == pytest.approx(0.92)
-    assert row["genotype"] == "Tg(elavl3:gcamp7f)"
-    assert row["dpf_at_acquisition"] == 7
 
 
 def test_registry_query_recording_keypoint_data_profile_latest_mode_json(
@@ -2267,6 +2323,7 @@ def test_registry_query_recording_keypoint_data_profile_latest_mode_json(
     assert row["recording_id"] == "recording_b"
     assert row["dataset_id"] == "dataset_b"
     assert row["profile_run"] == "kp_profile_b_v1"
+    assert row["pose_schema_name"] == "traditional_v1"
 
 
 def test_registry_query_keypoint_data_profile_modes_are_mutually_exclusive(tmp_path: Path) -> None:

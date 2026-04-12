@@ -2428,6 +2428,10 @@ def _keypoint_profile_row_signature(row: Dict[str, object]) -> tuple[object, ...
         row.get("source_keypoint_run"),
         row.get("skeleton_id"),
         row.get("kpt_shape"),
+        row.get("pose_schema_name"),
+        row.get("pose_schema_json"),
+        row.get("heading_computation_source"),
+        row.get("heading_computation_json"),
         row.get("profile_created_utc"),
         row.get("zarr_mtime_ns"),
         row.get("rows_total"),
@@ -3348,6 +3352,10 @@ def _backfill_keypoint_profiles(
                     dpf_at_acquisition=extracted.get("dpf_at_acquisition"),
                     zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
                     updated_utc=extracted.get("updated_utc"),
+                    pose_schema_name=extracted.get("pose_schema_name"),
+                    pose_schema_json=extracted.get("pose_schema_json"),
+                    heading_computation_source=extracted.get("heading_computation_source"),
+                    heading_computation_json=extracted.get("heading_computation_json"),
                 )
 
     return summary

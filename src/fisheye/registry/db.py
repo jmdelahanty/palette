@@ -432,18 +432,35 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
         )
 
         resolved_group = _decode_attr(review_status.get("resolved_group")) if review_status else None
-        if not resolved_group:
-            manual_latest = _decode_attr(refined_group.attrs.get("manual_review_latest"))
-            if manual_latest and manual_latest in refined_group:
-                resolved_group = manual_latest
-            elif "interpolated" in refined_group:
-                resolved_group = "interpolated"
-            elif "filtered" in refined_group:
-                resolved_group = "filtered"
-            else:
-                resolved_group = "raw"
+        resolved = None
+        if resolved_group == "refined":
+            resolved = refined_group.get("instances")
+            if resolved is None:
+                active_sparse_group = _decode_attr(refined_group.attrs.get("active_sparse_group"))
+                if active_sparse_group and active_sparse_group in refined_group:
+                    resolved = refined_group.get(active_sparse_group)
+        elif resolved_group:
+            resolved = refined_group.get(resolved_group)
 
-        resolved = refined_group.get(resolved_group) if resolved_group else None
+        if resolved is None and not resolved_group:
+            if "instances" in refined_group:
+                resolved_group = "refined"
+                resolved = refined_group.get("instances")
+            else:
+                manual_latest = _decode_attr(refined_group.attrs.get("manual_review_latest"))
+                if manual_latest and manual_latest in refined_group:
+                    resolved_group = manual_latest
+                    resolved = refined_group.get(manual_latest)
+                elif "interpolated" in refined_group:
+                    resolved_group = "interpolated"
+                    resolved = refined_group.get("interpolated")
+                elif "filtered" in refined_group:
+                    resolved_group = "filtered"
+                    resolved = refined_group.get("filtered")
+                else:
+                    resolved_group = "raw"
+                    resolved = refined_group.get("raw")
+
         total_detections: Optional[int] = None
         real_detections: Optional[int] = None
         interpolated_detections: Optional[int] = None
@@ -457,6 +474,11 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
             real_detections = int(np.sum(source_arr == 0))
             interpolated_detections = int(np.sum(source_arr != 0))
             total_detections = int(source_arr.shape[0])
+        elif resolved is not None and "source_kind_codes" in resolved:
+            source_kind_arr = np.asarray(resolved["source_kind_codes"][:], dtype=np.int64)
+            interpolated_detections = int(np.sum(source_kind_arr == 2))
+            total_detections = int(source_kind_arr.shape[0])
+            real_detections = int(total_detections - interpolated_detections)
         elif resolved is not None:
             if total_detections is None:
                 total_detections = _as_int(resolved.attrs.get("total_detections"))
@@ -936,6 +958,28 @@ def _normalize_kpt_shape_text(value: Any) -> Optional[str]:
     return _decode_attr(value)
 
 
+def _normalize_json_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+        return text or None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, Mapping):
+        return _canonical_json_text(dict(value))
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        try:
+            return _canonical_json_text(list(value))
+        except Exception:
+            return None
+    try:
+        return _canonical_json_text(value)
+    except Exception:
+        return _decode_attr(value)
+
+
 def _extract_keypoint_profile_rows(
     root: zarr.Group,
     *,
@@ -1018,6 +1062,28 @@ def _extract_keypoint_profile_rows(
                 ),
                 "kpt_shape": _normalize_kpt_shape_text(
                     run_group.attrs.get("source_kpt_shape") or source_map.get("kpt_shape")
+                ),
+                "pose_schema_name": (
+                    _decode_attr(run_group.attrs.get("source_pose_schema_name"))
+                    or _decode_attr(source_map.get("pose_schema_name"))
+                    or _decode_attr(
+                        (_coerce_mapping(run_group.attrs.get("source_pose_schema")) or {}).get("name")
+                    )
+                    or _decode_attr((_coerce_mapping(source_map.get("pose_schema")) or {}).get("name"))
+                ),
+                "pose_schema_json": _normalize_json_text(
+                    run_group.attrs.get("source_pose_schema")
+                    if run_group.attrs.get("source_pose_schema") is not None
+                    else source_map.get("pose_schema")
+                ),
+                "heading_computation_source": (
+                    _decode_attr(run_group.attrs.get("source_heading_computation_source"))
+                    or _decode_attr(source_map.get("heading_computation_source"))
+                ),
+                "heading_computation_json": _normalize_json_text(
+                    run_group.attrs.get("source_heading_computation")
+                    if run_group.attrs.get("source_heading_computation") is not None
+                    else source_map.get("heading_computation")
                 ),
                 "profile_created_utc": (
                     _decode_attr(run_group.attrs.get("created_at_utc"))
@@ -6626,6 +6692,10 @@ class Registry:
                 "source_keypoint_run": "TEXT",
                 "skeleton_id": "TEXT",
                 "kpt_shape": "TEXT",
+                "pose_schema_name": "TEXT",
+                "pose_schema_json": "TEXT",
+                "heading_computation_source": "TEXT",
+                "heading_computation_json": "TEXT",
                 "profile_created_utc": "TEXT",
                 "zarr_mtime_ns": "INTEGER",
                 "updated_utc": "TEXT",
@@ -6690,6 +6760,10 @@ class Registry:
                     kdp.source_keypoint_run AS source_keypoint_run,
                     kdp.skeleton_id AS skeleton_id,
                     kdp.kpt_shape AS kpt_shape,
+                    kdp.pose_schema_name AS pose_schema_name,
+                    kdp.pose_schema_json AS pose_schema_json,
+                    kdp.heading_computation_source AS heading_computation_source,
+                    kdp.heading_computation_json AS heading_computation_json,
                     kdp.profile_created_utc AS profile_created_utc,
                     kdp.zarr_mtime_ns AS zarr_mtime_ns,
                     kdp.updated_utc AS updated_utc,
@@ -6736,6 +6810,10 @@ class Registry:
                 source_keypoint_run,
                 skeleton_id,
                 kpt_shape,
+                pose_schema_name,
+                pose_schema_json,
+                heading_computation_source,
+                heading_computation_json,
                 profile_created_utc,
                 zarr_mtime_ns,
                 updated_utc,
@@ -6798,6 +6876,10 @@ class Registry:
                 source_keypoint_run,
                 skeleton_id,
                 kpt_shape,
+                pose_schema_name,
+                pose_schema_json,
+                heading_computation_source,
+                heading_computation_json,
                 profile_created_utc,
                 zarr_mtime_ns,
                 updated_utc,
@@ -10338,6 +10420,10 @@ class Registry:
         dpf_at_acquisition: Optional[int] = None,
         zarr_mtime_ns: Optional[int] = None,
         updated_utc: Optional[str] = None,
+        pose_schema_name: Optional[str] = None,
+        pose_schema_json: Optional[str] = None,
+        heading_computation_source: Optional[str] = None,
+        heading_computation_json: Optional[str] = None,
     ) -> None:
         write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
             self._profile_duplicate_context_write_policy(str(dataset_id))
@@ -10358,6 +10444,10 @@ class Registry:
                 "source_keypoint_run": source_keypoint_run,
                 "skeleton_id": skeleton_id,
                 "kpt_shape": kpt_shape,
+                "pose_schema_name": pose_schema_name,
+                "pose_schema_json": pose_schema_json,
+                "heading_computation_source": heading_computation_source,
+                "heading_computation_json": heading_computation_json,
                 "profile_created_utc": profile_created_utc,
                 "zarr_mtime_ns": zarr_mtime_ns,
                 "updated_utc": updated_utc or _utc_now(),
@@ -10394,7 +10484,8 @@ class Registry:
             INSERT INTO keypoint_data_profile (
                 dataset_id, profile_run, recording_id, zarr_use,
                 keypoint_method, source_keypoint_path, source_keypoint_run,
-                skeleton_id, kpt_shape, profile_created_utc,
+                skeleton_id, kpt_shape, pose_schema_name, pose_schema_json,
+                heading_computation_source, heading_computation_json, profile_created_utc,
                 zarr_mtime_ns, updated_utc,
                 rows_total, rows_usable, usable_keypoints_total, usable_rate,
                 confidence_valid_rate, geometry_valid_rate,
@@ -10408,7 +10499,8 @@ class Registry:
             VALUES (
                 :dataset_id, :profile_run, :recording_id, :zarr_use,
                 :keypoint_method, :source_keypoint_path, :source_keypoint_run,
-                :skeleton_id, :kpt_shape, :profile_created_utc,
+                :skeleton_id, :kpt_shape, :pose_schema_name, :pose_schema_json,
+                :heading_computation_source, :heading_computation_json, :profile_created_utc,
                 :zarr_mtime_ns, :updated_utc,
                 :rows_total, :rows_usable, :usable_keypoints_total, :usable_rate,
                 :confidence_valid_rate, :geometry_valid_rate,
@@ -10427,6 +10519,10 @@ class Registry:
                 source_keypoint_run=excluded.source_keypoint_run,
                 skeleton_id=excluded.skeleton_id,
                 kpt_shape=excluded.kpt_shape,
+                pose_schema_name=excluded.pose_schema_name,
+                pose_schema_json=excluded.pose_schema_json,
+                heading_computation_source=excluded.heading_computation_source,
+                heading_computation_json=excluded.heading_computation_json,
                 profile_created_utc=excluded.profile_created_utc,
                 zarr_mtime_ns=excluded.zarr_mtime_ns,
                 updated_utc=excluded.updated_utc,
@@ -11043,6 +11139,10 @@ class Registry:
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
                 for key in (
+                    "pose_schema_name",
+                    "pose_schema_json",
+                    "heading_computation_source",
+                    "heading_computation_json",
                     "rig_id",
                     "camera_id",
                     "arena_id",
@@ -11063,7 +11163,8 @@ class Registry:
                     INSERT INTO keypoint_data_profile (
                         dataset_id, profile_run, recording_id, zarr_use,
                         keypoint_method, source_keypoint_path, source_keypoint_run,
-                        skeleton_id, kpt_shape, profile_created_utc,
+                        skeleton_id, kpt_shape, pose_schema_name, pose_schema_json,
+                        heading_computation_source, heading_computation_json, profile_created_utc,
                         zarr_mtime_ns, updated_utc,
                         rows_total, rows_usable, usable_keypoints_total, usable_rate,
                         confidence_valid_rate, geometry_valid_rate,
@@ -11077,7 +11178,8 @@ class Registry:
                     VALUES (
                         :dataset_id, :profile_run, :recording_id, :zarr_use,
                         :keypoint_method, :source_keypoint_path, :source_keypoint_run,
-                        :skeleton_id, :kpt_shape, :profile_created_utc,
+                        :skeleton_id, :kpt_shape, :pose_schema_name, :pose_schema_json,
+                        :heading_computation_source, :heading_computation_json, :profile_created_utc,
                         :zarr_mtime_ns, :updated_utc,
                         :rows_total, :rows_usable, :usable_keypoints_total, :usable_rate,
                         :confidence_valid_rate, :geometry_valid_rate,

@@ -281,6 +281,10 @@ def _insert_keypoint_profile(
         source_keypoint_run=f"keypoint_{profile_run}",
         skeleton_id="fish_v1",
         kpt_shape="[3,3]",
+        pose_schema_name="traditional_v1",
+        pose_schema_json='{"name":"traditional_v1","kpt_shape":[3,3]}',
+        heading_computation_source="pose_schema.metadata.heading_computation",
+        heading_computation_json='{"enabled":true,"version":1}',
         profile_created_utc=profile_created_utc,
         rows_total=200,
         rows_usable=180,
@@ -457,6 +461,11 @@ def test_schema_has_keypoint_data_profile_table_views_and_indexes(tmp_path: Path
         """
     ).fetchone()
     assert table is not None
+    keypoint_columns = {
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(keypoint_data_profile);").fetchall()
+    }
+    assert {"pose_schema_name", "pose_schema_json", "heading_computation_source", "heading_computation_json"} <= keypoint_columns
 
     views = registry.conn.execute(
         """
@@ -763,6 +772,8 @@ def test_query_keypoint_data_profile_latest_and_recording_latest(tmp_path: Path)
     assert str(dataset_latest[0]["dataset_id"]) == "dataset_a"
     assert str(dataset_latest[0]["profile_run"]) == "kp_new"
     assert str(dataset_latest[0]["keypoint_method"]) == "traditional_pose"
+    assert str(dataset_latest[0]["pose_schema_name"]) == "traditional_v1"
+    assert str(dataset_latest[0]["heading_computation_source"]) == "pose_schema.metadata.heading_computation"
     assert float(dataset_latest[0]["usable_rate"]) == 0.91
     assert dataset_latest[0]["genotype"] is None
     assert int(dataset_latest[0]["dpf_at_acquisition"]) == 7
@@ -784,6 +795,7 @@ def test_query_keypoint_data_profile_latest_and_recording_latest(tmp_path: Path)
     assert str(recording_latest[0]["recording_id"]) == "rec_shared"
     assert str(recording_latest[0]["dataset_id"]) == "dataset_b"
     assert str(recording_latest[0]["profile_run"]) == "kp_b"
+    assert str(recording_latest[0]["pose_schema_name"]) == "traditional_v1"
     assert recording_latest[0]["genotype"] is None
     assert int(recording_latest[0]["dpf_at_acquisition"]) == 7
     registry.close()

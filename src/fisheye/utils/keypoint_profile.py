@@ -53,6 +53,10 @@ class ResolvedKeypointSource:
     review_timestamp_utc: Optional[str]
     skeleton_id: Optional[str]
     kpt_shape: Optional[Sequence[int]]
+    pose_schema_name: Optional[str]
+    pose_schema: Optional[dict[str, Any]]
+    heading_computation_source: Optional[str]
+    heading_computation: Optional[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,83 @@ def _coerce_int_sequence(value: Any) -> Optional[list[int]]:
             out.append(int(parsed))
         return out
     return None
+
+
+def _normalize_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            text_key = _normalize_text(key)
+            if text_key is None:
+                continue
+            normalized[text_key] = _normalize_json_value(item)
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(item) for item in value]
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "ignore")
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    text = _normalize_text(value)
+    return text
+
+
+def _coerce_json_mapping(value: Any) -> Optional[dict[str, Any]]:
+    payload = _coerce_mapping(value)
+    if not payload:
+        return None
+    normalized = _normalize_json_value(payload)
+    return dict(normalized) if isinstance(normalized, dict) else None
+
+
+def _resolve_source_metadata(
+    group: zarr.Group,
+) -> tuple[
+    Optional[str],
+    Optional[list[int]],
+    Optional[str],
+    Optional[dict[str, Any]],
+    Optional[str],
+    Optional[dict[str, Any]],
+]:
+    pose_schema = _coerce_json_mapping(group.attrs.get("pose_schema"))
+    pose_schema_name = _normalize_text(pose_schema.get("name")) if pose_schema else None
+
+    skeleton_id = _normalize_text(group.attrs.get("skeleton_id"))
+    if skeleton_id is None and pose_schema is not None:
+        skeleton_id = _normalize_text(pose_schema.get("skeleton_id"))
+    if skeleton_id is None and pose_schema_name is not None:
+        skeleton_id = f"pose_schema:{pose_schema_name}"
+
+    kpt_shape = _coerce_int_sequence(group.attrs.get("kpt_shape"))
+    if kpt_shape is None and pose_schema is not None:
+        kpt_shape = _coerce_int_sequence(pose_schema.get("kpt_shape"))
+
+    heading_computation_source = None
+    heading_computation = _coerce_json_mapping(group.attrs.get("heading_computation_override"))
+    if heading_computation is not None:
+        heading_computation_source = "heading_computation_override"
+    else:
+        metadata = _coerce_json_mapping(pose_schema.get("metadata")) if pose_schema else None
+        if metadata is not None:
+            heading_computation = _coerce_json_mapping(metadata.get("heading_computation"))
+            if heading_computation is not None:
+                heading_computation_source = "pose_schema.metadata.heading_computation"
+        if heading_computation is None:
+            heading_computation = _coerce_json_mapping(group.attrs.get("heading_computation"))
+            if heading_computation is not None:
+                heading_computation_source = "heading_computation"
+
+    return (
+        skeleton_id,
+        kpt_shape,
+        pose_schema_name,
+        pose_schema,
+        heading_computation_source,
+        heading_computation,
+    )
 
 
 def _select_latest_run(parent: zarr.Group) -> Optional[str]:
@@ -251,6 +332,14 @@ def resolve_keypoint_source(
         if keypoints_parent is None or run_name not in keypoints_parent:
             raise KeypointSourceError(f"keypoint run not found: {run_name}")
         kp_group = keypoints_parent[run_name]
+        (
+            skeleton_id,
+            kpt_shape,
+            pose_schema_name,
+            pose_schema,
+            heading_computation_source,
+            heading_computation,
+        ) = _resolve_source_metadata(kp_group)
         return ResolvedKeypointSource(
             keypoint_path=f"keypoints_runs/{run_name}",
             keypoint_type="keypoints",
@@ -261,8 +350,12 @@ def resolve_keypoint_source(
             review_method=None,
             review_intended_use=None,
             review_timestamp_utc=None,
-            skeleton_id=_normalize_text(kp_group.attrs.get("skeleton_id")),
-            kpt_shape=_coerce_int_sequence(kp_group.attrs.get("kpt_shape")),
+            skeleton_id=skeleton_id,
+            kpt_shape=kpt_shape,
+            pose_schema_name=pose_schema_name,
+            pose_schema=pose_schema,
+            heading_computation_source=heading_computation_source,
+            heading_computation=heading_computation,
         )
 
     if source_keypoint_path:
@@ -285,6 +378,14 @@ def resolve_keypoint_source(
             if source_run and keypoints_parent is not None and source_run in keypoints_parent:
                 method = _normalize_text(keypoints_parent[source_run].attrs.get("method"))
             review_state, review_method, review_use, review_timestamp = _resolve_review_fields(refined_group)
+            (
+                skeleton_id,
+                kpt_shape,
+                pose_schema_name,
+                pose_schema,
+                heading_computation_source,
+                heading_computation,
+            ) = _resolve_source_metadata(refined_group)
             return ResolvedKeypointSource(
                 keypoint_path=f"{parent_name}/{refined_name}",
                 keypoint_type="refined",
@@ -295,8 +396,12 @@ def resolve_keypoint_source(
                 review_method=review_method,
                 review_intended_use=review_use,
                 review_timestamp_utc=review_timestamp,
-                skeleton_id=_normalize_text(refined_group.attrs.get("skeleton_id")),
-                kpt_shape=_coerce_int_sequence(refined_group.attrs.get("kpt_shape")),
+                skeleton_id=skeleton_id,
+                kpt_shape=kpt_shape,
+                pose_schema_name=pose_schema_name,
+                pose_schema=pose_schema,
+                heading_computation_source=heading_computation_source,
+                heading_computation=heading_computation,
             )
         raise KeypointSourceError(f"unsupported source_keypoint_path format: {source_path}")
 
@@ -320,6 +425,14 @@ def resolve_keypoint_source(
             if source_run and keypoints_parent is not None and source_run in keypoints_parent:
                 method = _normalize_text(keypoints_parent[source_run].attrs.get("method"))
             review_state, review_method, review_use, review_timestamp = _resolve_review_fields(refined_group)
+            (
+                skeleton_id,
+                kpt_shape,
+                pose_schema_name,
+                pose_schema,
+                heading_computation_source,
+                heading_computation,
+            ) = _resolve_source_metadata(refined_group)
             return ResolvedKeypointSource(
                 keypoint_path=f"{refined_parent_name}/{chosen_refined}",
                 keypoint_type="refined",
@@ -330,8 +443,12 @@ def resolve_keypoint_source(
                 review_method=review_method,
                 review_intended_use=review_use,
                 review_timestamp_utc=review_timestamp,
-                skeleton_id=_normalize_text(refined_group.attrs.get("skeleton_id")),
-                kpt_shape=_coerce_int_sequence(refined_group.attrs.get("kpt_shape")),
+                skeleton_id=skeleton_id,
+                kpt_shape=kpt_shape,
+                pose_schema_name=pose_schema_name,
+                pose_schema=pose_schema,
+                heading_computation_source=heading_computation_source,
+                heading_computation=heading_computation,
             )
 
     if keypoints_parent is None:
@@ -609,6 +726,9 @@ def build_keypoint_profile_summary(
     )
     if edge_distance_payload is not None:
         geometry_payload["edge_distance"] = edge_distance_payload
+    derived_metrics_schema = _coerce_json_mapping(source_group.attrs.get("derived_metrics_schema"))
+    if derived_metrics_schema is not None:
+        geometry_payload["derived_metrics_schema"] = derived_metrics_schema
     derived_metric_payload = _build_derived_metric_payload(
         source_group,
         rows_total=rows_total,
@@ -647,6 +767,10 @@ def build_keypoint_profile_summary(
             "review_timestamp_utc": source.review_timestamp_utc,
             "skeleton_id": source.skeleton_id,
             "kpt_shape": list(source.kpt_shape) if source.kpt_shape is not None else None,
+            "pose_schema_name": source.pose_schema_name,
+            "pose_schema": source.pose_schema,
+            "heading_computation_source": source.heading_computation_source,
+            "heading_computation": source.heading_computation,
         },
         "quality": {
             "rows_total": rows_total,
@@ -762,6 +886,10 @@ def write_keypoint_profile(
             "source_refined_run": source.get("refined_run"),
             "source_skeleton_id": source.get("skeleton_id"),
             "source_kpt_shape": source.get("kpt_shape"),
+            "source_pose_schema_name": source.get("pose_schema_name"),
+            "source_pose_schema": source.get("pose_schema"),
+            "source_heading_computation_source": source.get("heading_computation_source"),
+            "source_heading_computation": source.get("heading_computation"),
             "source_row_count": _as_int(quality.get("rows_total")),
             "profile_summary": summary,
         }

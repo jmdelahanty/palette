@@ -147,6 +147,27 @@ def _make_keypoint_root() -> _FakeGroup:
     keypoints_run.attrs["method"] = "traditional_pose"
     keypoints_run.attrs["skeleton_id"] = "fish_v1"
     keypoints_run.attrs["kpt_shape"] = [3, 2]
+    keypoints_run.attrs["pose_schema"] = {
+        "name": "traditional_v1",
+        "skeleton_id": "fish_v1",
+        "kpt_shape": [3, 2],
+        "nodes": [
+            {"id": 0, "name": "swim_bladder"},
+            {"id": 1, "name": "eye_left"},
+            {"id": 2, "name": "eye_right"},
+        ],
+        "edges": [[0, 1], [0, 2], [1, 2]],
+        "metadata": {
+            "heading_computation": {
+                "version": 1,
+                "enabled": True,
+                "origin": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+                "direction_from": {"op": "keypoint", "label": "swim_bladder"},
+                "direction_to": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+                "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"],
+            }
+        },
+    }
     keypoints_run.create_array("keypoints_roi", data=np.asarray(np.arange(30).reshape((5, 3, 2)), dtype=np.float64))
     keypoints_run.create_array("usable_keypoints", data=np.asarray([True, True, False, True, False], dtype=np.bool_))
     keypoints_run.create_array("confidence_valid", data=np.asarray([True, True, False, True, True], dtype=np.bool_))
@@ -175,6 +196,14 @@ def test_build_keypoint_profile_summary_invariants() -> None:
     assert source["keypoint_run"] == "keypoints_001"
     assert source["skeleton_id"] == "fish_v1"
     assert source["kpt_shape"] == [3, 2]
+    assert source["pose_schema_name"] == "traditional_v1"
+    assert source["pose_schema"]["edges"] == [[0, 1], [0, 2], [1, 2]]
+    assert source["heading_computation_source"] == "pose_schema.metadata.heading_computation"
+    assert source["heading_computation"]["dependent_keypoints"] == [
+        "swim_bladder",
+        "eye_left",
+        "eye_right",
+    ]
 
     assert quality["rows_total"] == 5
     assert quality["rows_usable"] == 3
@@ -284,6 +313,34 @@ def test_build_keypoint_profile_summary_includes_edge_distance_metrics() -> None
 def test_build_keypoint_profile_summary_includes_derived_metrics() -> None:
     root = _make_keypoint_root()
     keypoints_run = root["keypoints_runs/keypoints_001"]
+    keypoints_run.attrs["derived_metrics_schema"] = {
+        "schema_version": 1,
+        "entity_kind": "keypoint_roi",
+        "metrics": [
+            {
+                "name": "eye_triangle_geometry",
+                "kind": "triangle_3pt",
+                "source": {"array": "keypoints_roi", "value_kind": "point_xy"},
+                "selectors": {
+                    "indices": [0, 1, 2],
+                    "labels": ["swim_bladder", "eye_left", "eye_right"],
+                },
+                "outputs": [
+                    {"name": "triangle_area", "array": "triangle_area"},
+                    {"name": "triangle_angles", "array": "triangle_angles"},
+                    {"name": "min_angle", "array": "min_angle"},
+                ],
+            }
+        ],
+        "quality_gates": [
+            {
+                "name": "geometry_valid",
+                "kind": "boolean_gate",
+                "output": {"array": "geometry_valid", "value_kind": "bool"},
+                "conditions": [],
+            }
+        ],
+    }
     keypoints_run.attrs["derived_metric_schema_id"] = "traditional_v2_derived_metrics"
     keypoints_run.attrs["derived_metric_schema_version"] = "1.0"
     keypoints_run.attrs["derived_metric_labels"] = [
@@ -340,8 +397,12 @@ def test_build_keypoint_profile_summary_includes_derived_metrics() -> None:
         root,
         zarr_path=Path("/tmp/rec_001_analysis.zarr"),
     )
+    derived_schema = summary["geometry"]["derived_metrics_schema"]
     derived = summary["geometry"]["derived_metrics"]
 
+    assert derived_schema["entity_kind"] == "keypoint_roi"
+    assert derived_schema["metrics"][0]["kind"] == "triangle_3pt"
+    assert derived_schema["quality_gates"][0]["name"] == "geometry_valid"
     assert derived["schema_id"] == "traditional_v2_derived_metrics"
     assert derived["labels"] == ["total_length", "tail_length", "head_length", "eye_span"]
     assert derived["normalization"]["mode"] == "roi_diagonal"
@@ -379,6 +440,10 @@ def test_write_keypoint_profile_writes_run_attrs_and_latest_pointer() -> None:
     assert run_group.attrs["source_keypoint_run"] == "keypoints_001"
     assert run_group.attrs["source_skeleton_id"] == "fish_v1"
     assert run_group.attrs["source_kpt_shape"] == [3, 2]
+    assert run_group.attrs["source_pose_schema_name"] == "traditional_v1"
+    assert run_group.attrs["source_pose_schema"]["metadata"]["heading_computation"]["enabled"] is True
+    assert run_group.attrs["source_heading_computation_source"] == "pose_schema.metadata.heading_computation"
+    assert run_group.attrs["source_heading_computation"]["direction_from"]["label"] == "swim_bladder"
     assert run_group.attrs["source_row_count"] == 5
     assert isinstance(run_group.attrs["profile_summary"], dict)
 

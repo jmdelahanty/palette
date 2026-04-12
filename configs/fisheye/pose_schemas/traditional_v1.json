@@ -15,6 +15,14 @@
     "units": "pixels",
     "coordinate_system": "roi",
     "version": 1,
-    "notes": "Ordered as swim_bladder, eye_left, eye_right to match keypoints_roi layout."
+    "notes": "Ordered as swim_bladder, eye_left, eye_right to match keypoints_roi layout.",
+    "heading_computation": {
+      "version": 1,
+      "enabled": true,
+      "origin": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+      "direction_from": {"op": "keypoint", "label": "swim_bladder"},
+      "direction_to": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+      "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"]
+    }
   }
 }

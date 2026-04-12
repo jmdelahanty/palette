@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-04-10
 -->
 
 ## Purpose
@@ -107,6 +107,10 @@ At `analysis/keypoint_profile_runs/<run_name>.attrs`:
 - `source_refined_run`
 - `source_skeleton_id`
 - `source_kpt_shape`
+- `source_pose_schema_name`
+- `source_pose_schema`
+- `source_heading_computation_source`
+- `source_heading_computation`
 - `source_row_count`
 - `profile_summary` (canonical full payload)
 
@@ -136,7 +140,27 @@ Canonical top-level shape:
     "review_intended_use": "training",
     "review_timestamp_utc": "2026-02-04T18:14:00+00:00",
     "skeleton_id": "traditional_v1",
-    "kpt_shape": [3, 2]
+    "kpt_shape": [3, 2],
+    "pose_schema_name": "traditional_v1",
+    "pose_schema": {
+      "name": "traditional_v1",
+      "skeleton_id": "traditional_v1",
+      "kpt_shape": [3, 2],
+      "edges": [[0, 1], [0, 2], [1, 2]],
+      "metadata": {
+        "heading_computation": {
+          "version": 1,
+          "enabled": true,
+          "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"]
+        }
+      }
+    },
+    "heading_computation_source": "pose_schema.metadata.heading_computation",
+    "heading_computation": {
+      "version": 1,
+      "enabled": true,
+      "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"]
+    }
   },
   "quality": {
     "rows_total": 231,
@@ -150,6 +174,10 @@ Canonical top-level shape:
     "triangle_area": {"stats": {}},
     "min_angle": {"stats": {}},
     "heading": {"stats": {}},
+    "derived_metrics_schema": {
+      "schema_version": 1,
+      "entity_kind": "keypoint_roi"
+    },
     "derived_metrics": {
       "schema_id": "traditional_v2_derived_metrics",
       "metrics": []
@@ -186,6 +214,7 @@ For `geometry.<metric>.stats` (`triangle_area`, `min_angle`, `heading`):
 When a refined run exposes schema-driven derived metrics, `profile_summary` may
 also include:
 
+- `geometry.derived_metrics_schema`
 - `geometry.derived_metrics.schema_id`
 - `geometry.derived_metrics.schema_version`
 - `geometry.derived_metrics.labels`
@@ -236,6 +265,13 @@ Geometry summary:
 - `triangle_area_p10`, `triangle_area_p50`, `triangle_area_p90`
 - `min_angle_p10`, `min_angle_p50`, `min_angle_p90`
 - `heading_p10`, `heading_p50`, `heading_p90`
+
+Skeleton/heading metadata:
+
+- `pose_schema_name`
+- `pose_schema_json`
+- `heading_computation_source`
+- `heading_computation_json`
 
 Deferred in `v1`:
 

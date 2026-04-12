@@ -64,6 +64,22 @@ def _to_json_text(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _to_json_text_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return _to_json_text(dict(value))
+    if isinstance(value, (list, tuple)):
+        return json.dumps(list(value), sort_keys=True, separators=(",", ":"), default=str)
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+        return text or None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _to_kpt_shape_text(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -212,6 +228,17 @@ def _build_profile_payload(
     if dpf_at_acquisition is None:
         dpf_at_acquisition = fallback_dpf_at_acquisition
 
+    pose_schema_map = _coerce_mapping(
+        run_attrs_map.get("source_pose_schema")
+        if run_attrs_map.get("source_pose_schema") is not None
+        else source_map.get("pose_schema")
+    )
+    heading_computation_map = _coerce_mapping(
+        run_attrs_map.get("source_heading_computation")
+        if run_attrs_map.get("source_heading_computation") is not None
+        else source_map.get("heading_computation")
+    )
+
     return {
         "dataset_id": dataset_id,
         "profile_run": profile_run,
@@ -246,6 +273,17 @@ def _build_profile_payload(
             if run_attrs_map.get("source_kpt_shape") is not None
             else source_map.get("kpt_shape")
         ),
+        "pose_schema_name": (
+            _normalize_text(run_attrs_map.get("source_pose_schema_name"))
+            or _normalize_text(source_map.get("pose_schema_name"))
+            or (_normalize_text(pose_schema_map.get("name")) if pose_schema_map is not None else None)
+        ),
+        "pose_schema_json": _to_json_text_or_none(pose_schema_map),
+        "heading_computation_source": (
+            _normalize_text(run_attrs_map.get("source_heading_computation_source"))
+            or _normalize_text(source_map.get("heading_computation_source"))
+        ),
+        "heading_computation_json": _to_json_text_or_none(heading_computation_map),
         "profile_created_utc": (
             _normalize_text(run_attrs_map.get("created_at_utc"))
             or _normalize_text(summary.get("created_at_utc"))
@@ -490,6 +528,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         dpf_at_acquisition=_as_int(payload.get("dpf_at_acquisition")),
                         profile_json=_normalize_text(payload.get("profile_json")),
                         zarr_mtime_ns=_as_int(payload.get("zarr_mtime_ns")),
+                        pose_schema_name=_normalize_text(payload.get("pose_schema_name")),
+                        pose_schema_json=_normalize_text(payload.get("pose_schema_json")),
+                        heading_computation_source=_normalize_text(payload.get("heading_computation_source")),
+                        heading_computation_json=_normalize_text(payload.get("heading_computation_json")),
                     )
                     counts["updated"] += 1
                     print(

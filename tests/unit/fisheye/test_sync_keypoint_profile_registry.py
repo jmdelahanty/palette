@@ -100,6 +100,26 @@ def _summary_payload(*, dataset_id: str, recording_id: str, zarr_use: str) -> di
             "keypoint_run": "keypoints_2026-02-12",
             "skeleton_id": "fish_v1",
             "kpt_shape": [3, 2],
+            "pose_schema_name": "traditional_v1",
+            "pose_schema": {
+                "name": "traditional_v1",
+                "skeleton_id": "fish_v1",
+                "kpt_shape": [3, 2],
+                "edges": [[0, 1], [0, 2], [1, 2]],
+                "metadata": {
+                    "heading_computation": {
+                        "version": 1,
+                        "enabled": True,
+                        "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"],
+                    }
+                },
+            },
+            "heading_computation_source": "pose_schema.metadata.heading_computation",
+            "heading_computation": {
+                "version": 1,
+                "enabled": True,
+                "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"],
+            },
         },
         "quality": {
             "rows_total": 100,
@@ -166,6 +186,10 @@ def test_sync_keypoint_profile_registry_apply_upserts_latest_row(tmp_path: Path,
         assert row["source_keypoint_run"] == "keypoints_2026-02-12"
         assert row["skeleton_id"] == "fish_v1"
         assert row["kpt_shape"] == "[3,2]"
+        assert row["pose_schema_name"] == "traditional_v1"
+        assert '"name":"traditional_v1"' in str(row["pose_schema_json"])
+        assert row["heading_computation_source"] == "pose_schema.metadata.heading_computation"
+        assert '"enabled":true' in str(row["heading_computation_json"])
         assert row["rows_total"] == 100
         assert row["rows_usable"] == 90
         assert row["usable_keypoints_total"] == 90
@@ -240,6 +264,14 @@ def test_sync_keypoint_profile_registry_prefers_run_attrs_for_source_lineage(
             "source_keypoint_run": "keypoints_attrs",
             "source_skeleton_id": "fish_v2",
             "source_kpt_shape": [3, 2],
+            "source_pose_schema_name": "traditional_v2",
+            "source_pose_schema": {
+                "name": "traditional_v2",
+                "skeleton_id": "fish_v2",
+                "kpt_shape": [3, 2],
+            },
+            "source_heading_computation_source": "heading_computation_override",
+            "source_heading_computation": {"version": 1, "enabled": False},
         },
     )
 
@@ -264,6 +296,9 @@ def test_sync_keypoint_profile_registry_prefers_run_attrs_for_source_lineage(
         assert row["source_keypoint_run"] == "keypoints_attrs"
         assert row["skeleton_id"] == "fish_v2"
         assert row["kpt_shape"] == "[3,2]"
+        assert row["pose_schema_name"] == "traditional_v2"
+        assert row["heading_computation_source"] == "heading_computation_override"
+        assert str(row["heading_computation_json"]) == '{"enabled":false,"version":1}'
 
         raw_row = registry.conn.execute(
             """
@@ -282,6 +317,8 @@ def test_sync_keypoint_profile_registry_prefers_run_attrs_for_source_lineage(
         assert raw_row["source_keypoint_run"] == "keypoints_attrs"
         assert raw_row["skeleton_id"] == "fish_v2"
         assert raw_row["kpt_shape"] == "[3,2]"
+        assert raw_row["pose_schema_name"] == "traditional_v2"
+        assert raw_row["heading_computation_source"] == "heading_computation_override"
     finally:
         registry.close()
 
