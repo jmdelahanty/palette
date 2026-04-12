@@ -23,6 +23,13 @@ keypoint-profile artifacts:
 - schema-driven `edge_distances` remain the generic geometry base layer
 - named derived metrics become a second, anatomy-aware layer
 
+This document covers the columnar `derived_metric_values*` arrays only.
+
+It is separate from the run-level `derived_metrics_schema` contract in
+[derived_metrics_schema_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/derived_metrics_schema_contract.md),
+which describes the semantic meaning of derived arrays and boolean/status gates
+for a run.
+
 ## Scope
 
 In scope:

@@ -45,6 +45,7 @@ from ..pose.metric_schema import (
     update_derived_metric_rows,
 )
 from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.derived_metrics_schema import build_refined_keypoint_derived_metrics_schema
 from ..shared.registry_stage_complete import (
     DatasetMetadata,
     emit_stage_completion,
@@ -1431,7 +1432,7 @@ def create_refined_keypoint_run(
     duration = time.perf_counter() - start_time
 
     pass_rate = stats["refined_success"] / stats["total"] * 100 if stats["total"] else 0.0
-    kp_refined.attrs["summary_statistics"] = {
+    summary_statistics = {
         "total_rois": stats["total"],
         "source_success": stats["source_success"],
         "source_failures": stats["source_failures"],
@@ -1562,6 +1563,10 @@ def create_refined_keypoint_run(
     heading_usable_values &= heading_finite_values
     heading_finite_dst[:] = heading_finite_values
     heading_usable_dst[:] = heading_usable_values
+    kp_refined.attrs["summary_statistics"] = summary_statistics
+    kp_refined.attrs["derived_metrics_schema"] = build_refined_keypoint_derived_metrics_schema(
+        keypoint_labels=keypoint_labels
+    )
 
     report_lines = [
         "[bold]Results[/bold]",
