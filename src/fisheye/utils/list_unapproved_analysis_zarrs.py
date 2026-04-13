@@ -150,6 +150,14 @@ def _object_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def _preferred_detect_review_view_name(conn: sqlite3.Connection) -> str | None:
+    if _object_exists(conn, "refined_detect_review_current"):
+        return "refined_detect_review_current"
+    if _object_exists(conn, "detect_quality_current"):
+        return "detect_quality_current"
+    return None
+
+
 def _collect_unapproved_rows_from_registry(
     registry_path: Path,
     *,
@@ -163,8 +171,8 @@ def _collect_unapproved_rows_from_registry(
         if not _object_exists(conn, "datasets"):
             raise RuntimeError(f"{registry_path}: missing datasets table")
 
-        has_detect_quality_current = _object_exists(conn, "detect_quality_current")
-        if has_detect_quality_current:
+        detect_review_view = _preferred_detect_review_view_name(conn)
+        if detect_review_view is not None:
             sql = [
                 "WITH detect_choice AS (",
                 "  SELECT",
@@ -180,7 +188,7 @@ def _collect_unapproved_rows_from_registry(
                 "        COALESCE(dqc.refined_created_utc, '') DESC,",
                 "        dqc.refined_run DESC",
                 "    ) AS _rn",
-                "  FROM detect_quality_current dqc",
+                f"  FROM {detect_review_view} dqc",
                 ")",
                 "SELECT",
                 "  d.zarr_path AS zarr_path,",

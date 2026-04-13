@@ -72,6 +72,11 @@ review metadata in each type's quality/profile registry view.
 
 Source: `src/fisheye/utils/prepare_detect_training_from_registry.py`
 
+Naming note: `refined_detect_review_current` is the preferred registry view for
+reviewed refined-detect gating rows. `detect_quality_current` remains a
+compatibility alias. Both are distinct from raw detect quality reports under
+`detect_runs/<run>/quality_reports/<quality_run>`.
+
 ### Parameters
 
 | Parameter | Type | Allowed values | Default |
@@ -79,6 +84,10 @@ Source: `src/fisheye/utils/prepare_detect_training_from_registry.py`
 | `--require-review-state` | `str` (choice) | `approved`, `pending`, `rejected`, `needs_review` | `None` |
 | `--require-review-intended-use` | `str` (choice) | `training`, `full_recording` | `None` |
 | `--max-interpolated-detections-rate` | `float` | 0.0 -- 1.0 | `None` |
+
+`--max-interpolated-detections-rate` is a legacy-compatibility gate. Current
+sparse refined-detect runs should normally rely on review-state/use gating and
+carry zero or no interpolation in the curated surface.
 
 ### Activation condition
 
@@ -92,7 +101,7 @@ quality_gate_active = (
 
 ### Filtering phases
 
-1. **SQL pre-filter**: `registry.query_detect_quality_current()` is called
+1. **SQL pre-filter**: `registry.query_refined_detect_review_current()` is called
    twice -- once with all gate params (filtered) and once with only
    `dataset_ids` (unfiltered). Datasets absent from the filtered result set
    are diagnosed against the unfiltered result to determine the specific
@@ -102,7 +111,8 @@ quality_gate_active = (
    is opened on disk. Registry metadata is compared field-by-field against the
    zarr's on-disk attrs (`source_detect_run`, `review_state`,
    `review_intended_use`, `review_resolved_group`, detection counts,
-   `interpolated_detections_rate` within tolerance 1e-9, `zarr_mtime_ns`).
+   `interpolated_detections_rate` within tolerance 1e-9 for legacy-compatible
+   runs, `zarr_mtime_ns`).
    Any mismatch raises `ValueError` and aborts the run.
 
 ## Keypoint Dataset-Level Gates
@@ -234,11 +244,11 @@ stage, else `None`.
 
 | Reason string | Meaning |
 |---|---|
-| `missing_quality_row` | No row exists in `detect_quality_current` for this dataset. |
+| `missing_quality_row` | No row exists in `refined_detect_review_current` for this dataset. |
 | `review_state_mismatch:{actual}!={expected}` | `--require-review-state` set; actual state differs. `{actual}` is the observed value or `missing` if null. |
 | `review_use_mismatch:{actual}!={expected}` | `--require-review-intended-use` set; actual intended use differs. |
-| `missing_interpolated_detections_rate` | `--max-interpolated-detections-rate` set but rate is null for this dataset. |
-| `interpolated_rate_above_threshold:{rate:.6f}>{threshold:.6f}` | Interpolated detection rate exceeds the threshold. Formatted to 6 decimal places. |
+| `missing_interpolated_detections_rate` | Legacy compatibility gate only: `--max-interpolated-detections-rate` set but rate is null for this dataset. |
+| `interpolated_rate_above_threshold:{rate:.6f}>{threshold:.6f}` | Legacy compatibility gate only: interpolated detection rate exceeds the threshold. Formatted to 6 decimal places. |
 | `excluded_by_quality_filters` | Catch-all: SQL filter excluded the dataset but no specific condition matched. |
 
 ### Keypoint exclusion reasons
@@ -282,6 +292,10 @@ before quality gates run. These are not recorded in `quality_exclusions`.
 | `--eye-mask-method` | -- | -- | yes | dataset |
 | `--profile-stage-group` | -- | -- | yes | dataset |
 | `--row-gate-policy` | -- | yes | -- | row |
+
+For detection, `--max-interpolated-detections-rate` is retained mainly for
+historical refined runs. Review-state and review-intended-use are the primary
+current gates for sparse refined-detect data.
 
 Zarr divergence verification (hard-fail assertion, not soft exclusion) is
 implemented by detection and keypoints. Eye masks do not perform post-SQL zarr

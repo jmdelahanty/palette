@@ -109,6 +109,12 @@ def _view_exists(registry: Registry, *, view_name: str) -> bool:
     return row is not None
 
 
+def _preferred_detect_review_view_name(registry: Registry) -> str:
+    if _view_exists(registry, view_name="refined_detect_review_current"):
+        return "refined_detect_review_current"
+    return "detect_quality_current"
+
+
 def _optional_select_exprs(*, available_columns: set[str], column_names: tuple[str, ...]) -> list[str]:
     exprs: list[str] = []
     for column_name in column_names:
@@ -178,7 +184,7 @@ def _query_detect_quality_map(
 ) -> dict[str, list[dict[str, Any]]]:
     rows = _query_quality_rows(
         registry,
-        view_name="detect_quality_current",
+        view_name=_preferred_detect_review_view_name(registry),
         dataset_ids=dataset_ids,
         fixed_columns=(
             "refined_run",

@@ -3,7 +3,7 @@
 Audit of the registry operations, CLI commands, and data schemas across the
 three training data pipelines: **detection**, **keypoints**, and **eye masks**.
 
-Generated 2025-02-25.
+Updated 2026-04-12 for the sparse-first refined-detect workflow.
 
 ---
 
@@ -59,7 +59,7 @@ Each data type has three core tables plus associated views:
 | Quality | `detect_quality` | `keypoint_quality` | `eye_mask_quality` |
 | Performance | `detect_performance` | `keypoint_performance` | `eye_mask_performance` |
 | Profile latest view | `detection_data_profile_latest` | `keypoint_data_profile_latest` | `eye_mask_data_profile_latest` |
-| Quality current view | `detect_quality_current` | `keypoint_quality_current` | `eye_mask_quality_current` |
+| Quality current view | `refined_detect_review_current` (compat alias: `detect_quality_current`) | `keypoint_quality_current` | `eye_mask_quality_current` |
 | Performance latest view | `detect_performance_latest` | `keypoint_performance_latest` | `eye_mask_performance_latest` |
 
 Primary key for all profile tables: `(dataset_id, profile_run)`.
@@ -105,12 +105,14 @@ threshold when filtering datasets for training:
 
 | Pipeline | Argument | Semantics |
 |----------|----------|-----------|
-| Detection | `--max-interpolated-detections-rate` | Upper bound on interpolation fraction |
+| Detection | `--max-interpolated-detections-rate` | Legacy upper bound on interpolation fraction for compatibility archives |
 | Keypoints | `--min-usable-keypoints-rate` | Lower bound on usable keypoint fraction |
 | Eye Masks | `--min-usable-rate` | Lower bound on usable row fraction |
 
 Detection's gate is an upper bound (max bad), while keypoints and eye masks
-use lower bounds (min good). The argument names are also inconsistent.
+use lower bounds (min good). For current sparse refined-detect runs, the
+detection gate is mostly a legacy-compatibility filter; review state and
+intended-use are the primary current gates.
 
 ### 6b. Source selection
 
@@ -119,7 +121,7 @@ use as training source:
 
 | Pipeline | Argument(s) | Options |
 |----------|-------------|---------|
-| Detection | `--source-type` | `detect`, `filtered`, `interpolated`, `manual` |
+| Detection | `--source-type` | `refined`, `detect`, `filtered`, `interpolated`, `manual` |
 | Keypoints | `--keypoint-run` | `latest_traditional`, `latest_yolo`, explicit name |
 | Eye Masks | `--eye-stage` + `--eye-run` | `auto`, `eye_masks_runs`, `refined_eye_masks_runs` + explicit run |
 
@@ -156,6 +158,16 @@ Detection's prepare script includes `--provenance-policy`
 (`warn`/`strict`/`ignore`) and the data card aggregator includes
 `--subject-lineage-policy` (`warn`/`require`/`ignore`). Neither keypoints
 nor eye masks have these.
+
+### 6g. Detection review naming
+
+Detection now separates two concepts that were historically both described as
+"detect quality":
+
+- `detect_quality` stage: raw detect artifact labeling on
+  `detect_runs/<run>/quality_reports/<quality_run>`
+- `refined_detect_review_current`: reviewed refined-detect gating rows in the
+  registry, with `detect_quality_current` retained as a compatibility alias
 
 ---
 

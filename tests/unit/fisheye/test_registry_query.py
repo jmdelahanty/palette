@@ -1675,6 +1675,64 @@ def _rewrite_detect_quality_current_view(
     registry.close()
 
 
+def _rewrite_refined_detect_review_current_view(
+    registry_path: Path,
+    *,
+    include_shared_review_columns: bool,
+    use_legacy_timestamp_column: bool,
+) -> None:
+    registry = Registry(registry_path)
+    select_columns = [
+        "dataset_id",
+        "refined_run",
+        "refined_created_utc",
+        "source_detect_run",
+        "detect_method",
+        "review_state",
+        "review_intended_use",
+        "review_reviewer",
+        "review_timestamp_utc AS timestamp" if use_legacy_timestamp_column else "review_timestamp_utc",
+        "review_resolved_group",
+        "total_detections",
+        "real_detections",
+        "interpolated_detections",
+        "interpolated_detections_rate",
+        "quality_updated_utc",
+        "zarr_mtime_ns",
+    ]
+    if include_shared_review_columns:
+        select_columns.extend(
+            [
+                "'manual' AS review_method",
+                "'detect-shared-note' AS review_notes",
+            ]
+        )
+    registry.conn.execute("DROP VIEW IF EXISTS refined_detect_review_current;")
+    registry.conn.execute(
+        f"""
+        CREATE VIEW refined_detect_review_current AS
+        WITH ranked AS (
+            SELECT
+                dq.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY dq.dataset_id, COALESCE(dq.detect_method, '')
+                    ORDER BY
+                        COALESCE(dq.review_timestamp_utc, dq.refined_created_utc, dq.quality_updated_utc) DESC,
+                        COALESCE(dq.refined_created_utc, '') DESC,
+                        dq.refined_run DESC
+                ) AS _rn
+            FROM detect_quality dq
+        )
+        SELECT
+            {", ".join(select_columns)}
+        FROM ranked
+        WHERE _rn = 1;
+        """
+    )
+    registry.conn.commit()
+    registry.close()
+
+
 def _rewrite_keypoint_quality_current_view(
     registry_path: Path,
     *,
@@ -2975,6 +3033,44 @@ def test_registry_query_filters_by_keypoint_runtime_and_model_like(tmp_path: Pat
     assert payload[0]["keypoint_model_run_id"] == "run_pose_model_v1"
     assert payload[0]["keypoint_success_rate_percent"] == pytest.approx(96.0)
     assert payload[0]["keypoint_keypoints_per_second"] == pytest.approx(240.0)
+
+
+def test_registry_query_prefers_refined_detect_review_current_alias_when_available(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detect_quality_rows(registry_path)
+    _rewrite_detect_quality_current_view(
+        registry_path,
+        include_shared_review_columns=False,
+        use_legacy_timestamp_column=True,
+    )
+    _rewrite_refined_detect_review_current_view(
+        registry_path,
+        include_shared_review_columns=True,
+        use_legacy_timestamp_column=False,
+    )
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--detect-coverage-min",
+            "90",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    row = payload[0]
+    assert row["detect_review_state"] == "approved"
+    assert row["detect_review_intended_use"] == "training"
+    assert row["detect_review_method"] == "manual"
+    assert row["detect_review_notes"] == "detect-shared-note"
+    assert row["detect_review_timestamp_utc"] == "2026-02-11T00:30:00+00:00"
 
 
 def test_registry_query_keypoint_group_by_method_json_includes_percentiles(tmp_path: Path, capsys) -> None:

@@ -108,6 +108,9 @@ def _write_registry_fixture(path: Path) -> None:
                 review_timestamp_utc TEXT,
                 quality_updated_utc TEXT
             );
+
+            CREATE VIEW refined_detect_review_current AS
+            SELECT * FROM detect_quality_current;
             """
         )
         conn.executemany(

@@ -161,7 +161,7 @@ Attributes:
   `geometry_only`.
 - `detect_review_status` (snapshot of refined review status when crop ran)
 - `detect_review_status_ref` (refined run path where review status lives)
-- `detection_preferred_policy` (policy label used for preferred/auto resolution)
+- `detection_selection_policy` (policy label used for auto source selection)
 - `crop_signature` (signature of crop inputs: source path/type, ROI size, parameters hash)
 - `crop_review_status` (review status payload for this crop run, optional)
 - `crop_review_signature` (signature snapshot stored when crop review was set)
@@ -187,12 +187,15 @@ Current policy note:
   `roi_images` even though mixed-mode readers now exist for some ROI-model
   workflows.
 
-Cropping resolves the ROI source via `crop.source_type` (`detect`, `filtered`,
-`interpolated`, `manual`, `preferred`, `auto`) or an explicit `crop.source_path`
-override such as `detect_runs/<run>` or `refined_detect_runs/<run>/interpolated`,
-and the chosen path is recorded in `detection_source_path`. When `preferred` or
-`auto` is used, the resolved group is stored in `detection_source_type` and the
-policy label is recorded in `detection_preferred_policy`.
+Cropping resolves the ROI source via `crop.source_type` (`detect`, `refined`,
+`filtered`, `interpolated`, `manual`, `auto`) or an explicit
+`crop.source_path` override such as `detect_runs/<run>` or the preferred
+current refined override `refined_detect_runs/<run>/instances`. Legacy sparse
+subgroup overrides such as `refined_detect_runs/<run>/manual` remain
+compatibility-only for historical archives. The chosen path is recorded in
+`detection_source_path`.
+`auto` resolves to the canonical curated refined surface when it exists, then
+falls back to the legacy sparse chain only for historical archives.
 
 ---
 
@@ -225,14 +228,31 @@ Produced by the keypoint detection stage (traditional or YOLO-based).
 
 Attributes: `source_crop_run`, `source_background_run`, `source_detect_run`,
 `source_refined_run` (if available), `method`, `parameter_source`, `parameters`,
-`keypoint_labels`, `keypoint_confidence_labels`, `triangle_angle_order`,
-`triangle_angle_raw_order`, scheduler configuration, timing, QA summaries.
+`skeleton_id`, `kpt_shape`, `pose_schema`, `keypoint_labels`,
+`keypoint_confidence_labels`, `triangle_angle_order`,
+`triangle_angle_raw_order`, `heading_computation_override`,
+scheduler configuration, timing, QA summaries.
+
+Heading metadata note:
+
+- `pose_schema.metadata.heading_computation` is the canonical heading
+  definition for the skeleton.
+- `heading_computation_override` is an optional run-level override/disable
+  payload.
+- Readers should resolve in this order:
+  1. run attr `heading_computation_override`
+  2. `pose_schema.metadata.heading_computation`
+  3. deprecated run attr `heading_computation`
+  4. heading semantics unavailable
+- See `docs/keypoint_heading_computation_contract.md`.
 
 ---
 
 ## `detect_runs/<run>/quality_reports/<qrun>/`
 
 Produced by `fisheye.refinement.detect_quality`.
+This is a raw detect artifact-label surface used by `refine_detect`; it is not
+the refined detect review/approval surface.
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
@@ -311,24 +331,29 @@ Lineage compatibility policy for eye-mask runs:
 
 ## `refined_detect_runs/`
 
-Created by `fisheye.refinement.refine_detect`. Each refined run is a **group**
-containing multiple subgroups (filtered/interpolated and optional manual/retune).
+Created by `fisheye.refinement.refine_detect`.
+
+Each refined run contains the canonical curated detect surface. Primary writes
+land on the sparse refined subgroups. Shared readers should prefer the
+`instances/` sparse surface when it exists.
 
 ### Run-level attributes
 
 Common attrs on `refined_detect_runs/<run>`:
 - `source_detect_run`, `source_quality_run`
 - `refinement_timestamp`, `processing_time_seconds`
-- `operations` (`["filter","interpolate"]` or `["passthrough"]`)
-- `parameters` (includes `max_gap`, `interpolation_method`, `filters_applied`,
-  `parameter_source`, `refine_mode`, `sampled_import`, `sampled_import_meta`)
-- `coverage_comparison` (original/filtered/interpolated coverage + counts)
+- `operations`
+- `parameters`
 - `coverage_frames_total` (frame universe used for coverage percent)
 - `coverage_frame_source` (`full` or `sampled`)
 - `coverage_frames_full` (full frame count when sampled coverage is used)
-- `manual_review_latest` (when manual/retune corrections exist)
 - `detect_review_status` (review metadata dict; see below)
-- `retune_params` (mapping retune_id → parameter set, when retune is used)
+- `summary_statistics`
+- `curated_row_storage`
+- `entity_assignment_policy`
+- `coordinate_space`
+- `row_identity_policy`
+- status/source/review/artifact code maps
 - provenance/environment metadata
 
 Parent attrs on `refined_detect_runs/`:
@@ -340,64 +365,100 @@ Parent attrs on `refined_detect_runs/`:
 - `method` (manual/retune/auto)
 - `intended_use` (training/analysis/etc.)
 - `timestamp`
-- `resolved_group` (manual/interpolated/filtered/raw)
+- `resolved_group` (`refined` for current runs; legacy runs may still use manual/interpolated/filtered/raw)
 - `preference_chain` (ordered list used for resolution)
 - optional `reviewer`, `notes`
 
-### `filtered/`
+### Metadata-Only Run Root
 
-| Array | Shape | Notes |
-| ----- | ----- | ----- |
-| `frame_indices` | `(n_detections,)` | Frame index per detection |
-| `frame_counts` | `(n_frames,)` | Detections per frame |
-| `n_detections` | `(n_frames,)` | Alias of `frame_counts` |
-| `bbox_norm_coords` | `(n_detections, 4)` | Normalized boxes (`[cx, cy, w, h]`) |
-| `scores` | `(n_detections,)` | Scores (or placeholder for blob) |
-| `class_ids` | `(n_detections,)` | Class labels |
-| `frame_mapping` | `(n_detections,)` | Legacy alias of `frame_indices` |
-| `detection_source` | `(n_detections,)` | 0 = real/clean |
-| `reason_bytes` | `(n_detections, width)` | Null-terminated UTF-8 reason labels (`uint8`) |
-| `reason` | `(n_detections,)` | UTF-8 tags (currently `clean`) |
+The run root is now metadata-only for current sparse refined detect runs.
+Canonical bbox data lives in the `instances/` and `source_detections/`
+subgroups below.
 
-Attrs: `total_detections`, `dropped_detections`, `drop_reasons`, `column_fields`,
-`storage_layout`, `field_names`, `reason_encoding`,
-`reason_fallback_order=["reason_bytes","reason","detection_source"]`.
+Explicit downstream overrides should target `instances/` when they need a
+stable current-run curated bbox path.
 
-### `interpolated/`
+Current review/runtime note:
 
-Same arrays as `filtered/`, plus:
+- `fisheye.tune.detect_review` edits the sparse refined surfaces directly
+- when fixed sub-arena ROI definitions are present, review operates on one slot
+  per `(frame, arena_id)`
+- unconstrained multiple curated detections inside the same arena/ROI are not
+  yet supported by the manual detect-review UI
 
-| Array | Shape | Notes |
-| ----- | ----- | ----- |
-| `detection_source` | `(n_detections,)` | 0 = real, 1 = interpolated |
-| `reason_bytes` | `(n_detections, width)` | Null-terminated UTF-8 reason labels (`uint8`) |
-| `reason` | `(n_detections,)` | UTF-8 tags (`clean` or `interpolated`) |
+### Sparse Curated Read Surfaces
 
-Attrs: `original_detections`, `interpolated_detections`, `gaps_filled`,
-`interpolation_stats`, plus columnar metadata and
-`reason_fallback_order=["reason_bytes","reason","detection_source"]`.
+When present, the active curated refined-detect surfaces are:
 
-### Manual / Retune subgroups (e.g. `manual/`)
+- `refined_detect_runs/<run>/instances`
+- `refined_detect_runs/<run>/source_detections`
 
-Written by `fisheye.tune.detect_review` (manual corrections or retune).
-These subgroups mirror the detection arrays and may include:
+#### `instances/`
 
-| Array | Shape | Notes |
-| ----- | ----- | ----- |
-| `retune_id` *(optional)* | `(n_detections,)` | Retune parameter set label (`-1` = none) |
-| `reason_bytes` *(optional)* | `(n_detections, width)` | Null-terminated UTF-8 reason labels (`uint8`) |
-| `reason` *(optional)* | `(n_detections,)` | UTF-8 labels (e.g. `retune`, `manual_correction`) |
+Primary curated bbox read surface for current runs.
 
-Attrs include `detection_source_type` (`manual`/`retune`), `detection_source_path`,
-and retune metadata such as `retune_parameters` and `retune_base_group`.
+Required arrays:
 
-`manual_review_latest` is the authoritative pointer used by status reporters
-and downstream consumers to prefer manual/retune corrections. When set, it
-should reference the active manual subgroup (typically `manual`).
+- `refined_row_ids`
+- `frame_indices`
+- `frame_offsets`
+- `bbox_img_xyxy`
+- `bbox_norm_coords`
+- `source_kind_codes`
+- `manual_edit_flags`
 
-Note: even in passthrough/no-op refinement, `filtered/` and `interpolated/` are
-still created to keep the schema stable; the status reporter uses explicit labels
-(`passthrough`, `unchanged`, etc.) to indicate when refinement did not alter data.
+Common optional arrays:
+
+- `confidence_scores`
+- `class_ids`
+- `source_detect_row_index`
+- `reason_bytes`
+- `reason`
+- `review_notes`
+
+Reader rule:
+
+- rows in `instances/` are already the curated accepted detections; render only
+  rows with finite bbox geometry
+
+#### `source_detections/`
+
+Candidate-audit surface mirroring the exact bound raw detect rowset for current
+refined runs.
+
+Required arrays:
+
+- `source_detect_row_index`
+- `frame_indices`
+- `bbox_norm_coords`
+- `decision_codes`
+- `resolved_refined_row_id`
+
+Common optional arrays:
+
+- `bbox_img_xyxy`
+- `confidence_scores`
+- `class_ids`
+- `reason_bytes`
+- `reason`
+- `review_notes`
+
+Reader rule:
+
+- treat `source_detections/` as an audit/provenance surface, not the primary
+  bbox render surface
+
+### Legacy Sparse Subgroups
+
+Older archives may still contain sparse subgroups such as:
+
+- `filtered`
+- `interpolated`
+- `manual`
+- `manual_*`
+
+These remain compatibility/provenance artifacts for legacy runs. They are no
+longer the primary detect contract for new runs.
 
 ---
 
@@ -430,6 +491,9 @@ Outputs from `fisheye.refinement.refine_keypoints`.
 | `flip_corrected` | `(n_rois,)` | `bool` | True if left/right eyes were swapped |
 | `heading_finite` | `(n_rois,)` | `bool` | True when `heading` is finite |
 | `heading_usable` | `(n_rois,)` | `bool` | True when refined succeeded, source is real, and heading is finite |
+| `heading_delta_prev_deg` *(optional)* | `(n_rois,)` | `float32` | Circular absolute heading delta to previous usable temporal neighbor; omitted when temporal-heading review is disabled |
+| `heading_delta_next_deg` *(optional)* | `(n_rois,)` | `float32` | Circular absolute heading delta to next usable temporal neighbor; omitted when temporal-heading review is disabled |
+| `heading_temporal_outlier` *(optional)* | `(n_rois,)` | `bool` | True when both temporal deltas exceed the configured outlier threshold; omitted when temporal-heading review is disabled |
 | `confidence_valid` | `(n_rois,)` | `bool` | All per-keypoint confidences >= threshold |
 | `geometry_valid` | `(n_rois,)` | `bool` | Triangle angle/area pass thresholds |
 | `usable_keypoints` | `(n_rois,)` | `bool` | Confidence + geometry valid |
@@ -438,9 +502,48 @@ Outputs from `fisheye.refinement.refine_keypoints`.
 | `failure_indices` | `(n_failures,)` | `int32` | ROI indices where source keypoints failed |
 
 Attributes: `source_keypoints_run`, `source_crop_run`, `source_detect_run`,
-refinement parameters (thresholds), `summary_statistics`, `retune_params`,
-`keypoint_signature`, `keypoint_review_status`, `keypoint_review_signature`,
-scheduler config, environment/provenance metadata.
+`skeleton_id`, `kpt_shape`, `pose_schema`, `heading_computation_override`,
+`derived_metrics_schema`, refinement parameters (thresholds),
+`summary_statistics`, `retune_params`, `keypoint_signature`,
+`keypoint_review_status`, `keypoint_review_signature`, scheduler config,
+environment/provenance metadata.
+
+Heading metadata note:
+
+- `pose_schema.metadata.heading_computation` is the canonical heading
+  definition for the skeleton.
+- `heading_computation_override` is an optional run-level override/disable
+  payload for exceptional cases.
+- Readers should resolve in this order:
+  1. run attr `heading_computation_override`
+  2. `pose_schema.metadata.heading_computation`
+  3. deprecated run attr `heading_computation`
+  4. unavailable
+- If the override payload exists and `enabled=false`, that disables heading
+  semantics for the run even if `pose_schema.metadata.heading_computation`
+  exists.
+- See `docs/keypoint_heading_computation_contract.md`.
+
+Derived-metrics metadata note:
+
+- `derived_metrics_schema` is a run-level semantic contract for derived arrays
+  and boolean/status gates.
+- For current refined keypoint runs, it declares the triangle geometry metric
+  semantics behind `triangle_area`, `triangle_angles`, `min_angle`, and
+  `geometry_valid`.
+- It is separate from the entity schema (`pose_schema`, `keypoint_labels`) and
+  separate from heading semantics.
+- See `docs/derived_metrics_schema_contract.md`.
+
+Temporal-heading policy notes:
+
+- Temporal-heading review is intended for temporally contiguous refined runs.
+- Sampled imports (for example `raw_video/import_mode="sampled"` or archives
+  with `original_frame_indices`) disable temporal-heading review.
+- When disabled, the optional temporal arrays above are omitted and
+  `summary_statistics.postprocess` records:
+  - `temporal_heading_status`
+  - `temporal_heading_disabled_reason`
 
 Post-refinement coordinate-space diagnostics attrs (when audit is enabled):
 
@@ -904,6 +1007,105 @@ Eye angle analysis results:
 - Per-ROI and per-frame eye-angle metrics
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
+
+### `analysis/stimulus_response_runs/`
+
+Per-step behavioral metrics across stimulus types. Consumes identity-resolved
+track data from `track_kinematics_runs` and stimulus metadata from
+`stimulus_runs`. See `docs/stimulus_response_run_design.md` for full metric
+definitions and `docs/stimulus_response_implementation_plan.md` for design
+decisions.
+
+**Structure**: `analysis/stimulus_response_runs/<run_name>/`
+
+**Run Attributes**:
+- `provenance`: Stage provenance contract (`palette_stage_provenance`)
+- `source_track_kinematics_run`: Source kinematics run name
+- `source_track_kinematics_type`: `"online"` or `"offline"`
+- `source_stimulus_run`: Source stimulus run name
+- `source_bout_run`: Source bout run name (optional, present when bout data used)
+- `n_steps`, `n_fish`, `fish_ids`: Recording summary
+
+**`global/`** — recording-wide per-fish movement summary:
+
+| Array | Shape | DType | Notes |
+|-------|-------|-------|-------|
+| `fish_id` | `(n_fish,)` | `int32` | Track IDs |
+| `total_distance_mm` | `(n_fish,)` | `float32` | |
+| `mean_speed_mm_s` | `(n_fish,)` | `float32` | |
+| `total_active_s` | `(n_fish,)` | `float32` | Time above moving threshold |
+| `fraction_moving` | `(n_fish,)` | `float32` | |
+
+**`steps/step_{i}/`** — one group per protocol step:
+
+Step attributes: `step_index`, `step_name`, `stimulus_mode`, `stimulus_mode_id`,
+`start_frame`, `end_frame`, `duration_s`, `stimulus_params`.
+
+**`steps/step_{i}/per_fish/`** — base movement metrics (all stimulus types):
+
+| Array | Shape | DType | Notes |
+|-------|-------|-------|-------|
+| `fish_id` | `(n_fish,)` | `int32` | |
+| `total_distance_mm` | `(n_fish,)` | `float32` | |
+| `mean_speed_mm_s` | `(n_fish,)` | `float32` | |
+| `median_speed_mm_s` | `(n_fish,)` | `float32` | |
+| `max_speed_mm_s` | `(n_fish,)` | `float32` | |
+| `fraction_moving` | `(n_fish,)` | `float32` | |
+| `coverage` | `(n_fish,)` | `float32` | Fraction of step frames with valid detection |
+| `num_bouts` | `(n_fish,)` | `int32` | Optional, present when bout data available |
+| `mean_bout_duration_s` | `(n_fish,)` | `float32` | Optional |
+| `mean_interbout_interval_s` | `(n_fish,)` | `float32` | Optional |
+
+**`steps/step_{i}/per_bout/`** — bout-level metrics (optional):
+
+| Array | Shape | DType | Notes |
+|-------|-------|-------|-------|
+| `fish_id` | `(n_bouts,)` | `int32` | |
+| `bout_id` | `(n_bouts,)` | `int32` | |
+| `start_frame` | `(n_bouts,)` | `int64` | |
+| `end_frame` | `(n_bouts,)` | `int64` | |
+| `duration_s` | `(n_bouts,)` | `float32` | |
+| `mean_speed_mm_s` | `(n_bouts,)` | `float32` | |
+| `peak_speed_mm_s` | `(n_bouts,)` | `float32` | |
+
+**`steps/step_{i}/grating/`** — MOVING_GRATING steps only:
+
+This group only exists when `stimulus_mode == "MOVING_GRATING"`.
+
+`grating/per_frame/`:
+
+| Array | Shape | DType | Notes |
+|-------|-------|-------|-------|
+| `frame_indices` | `(n_step_frames,)` | `int64` | |
+| `alignment_angle_deg` | `(n_fish, n_step_frames)` | `float32` | 0 = following, ±180 = opposing |
+| `alignment_cos` | `(n_fish, n_step_frames)` | `float32` | +1 = following, -1 = opposing |
+| `speed_along_grating_mm_s` | `(n_fish, n_step_frames)` | `float32` | Speed projected onto grating direction |
+| `angular_velocity_deg_s` | `(n_fish, n_step_frames)` | `float32` | |
+
+`grating/per_fish/`:
+
+| Array | Shape | DType | Notes |
+|-------|-------|-------|-------|
+| `mean_alignment_cos` | `(n_fish,)` | `float32` | |
+| `resultant_vector_length` | `(n_fish,)` | `float32` | Circular mean resultant (0=random, 1=consistent) |
+| `fraction_following` | `(n_fish,)` | `float32` | |
+| `fraction_opposing` | `(n_fish,)` | `float32` | |
+| `fraction_perpendicular` | `(n_fish,)` | `float32` | |
+| `speed_weighted_alignment` | `(n_fish,)` | `float32` | |
+| `optomotor_gain` | `(n_fish,)` | `float32` | mean(speed_along) / grating_speed |
+| `drift_along_grating_mm` | `(n_fish,)` | `float32` | Net displacement in grating direction |
+| `drift_perp_grating_mm` | `(n_fish,)` | `float32` | Net displacement perpendicular to grating |
+| `latency_to_follow_s` | `(n_fish,)` | `float32` | Time to first sustained following (NaN if never) |
+
+`grating/time_series/`:
+
+| Array | Shape | DType | Notes |
+|-------|-------|-------|-------|
+| `bin_center_s` | `(n_bins,)` | `float32` | |
+| `alignment_cos` | `(n_fish, n_bins)` | `float32` | |
+| `speed_mm_s` | `(n_fish, n_bins)` | `float32` | |
+| `fraction_following` | `(n_fish, n_bins)` | `float32` | |
+| `optomotor_gain` | `(n_fish, n_bins)` | `float32` | |
 
 ### Additional Analysis Groups
 

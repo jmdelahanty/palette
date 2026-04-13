@@ -14,8 +14,9 @@ Phase 1 read-only browser is complete:
 - [x] 3-pane layout: view selector (left), data table (center), details/lineage (right)
 - [x] 11 curated views: `datasets`, `dataset_lineage_current`, `training_sets`,
       `training_runs`, `training_models`, `onnx_models`, `tensorrt_models`,
-      `keypoint_quality_current`, `detect_quality_current`, `pose_skeleton_specs`,
-      plus dynamic raw-table browser
+      `keypoint_quality_current`, `refined_detect_review_current`
+      (compat alias: `detect_quality_current`), `pose_skeleton_specs`, plus
+      dynamic raw-table browser
 - [x] Keyboard navigation: `q` quit, `r` refresh, `/` filter, `n`/`p` cycle views, `c` clear
 - [x] Substring filter across visible columns
 - [x] Relationship/details panel with smart lineage hints (dataset→sets→runs→models)
@@ -141,14 +142,14 @@ this phase integrates that capability into the registry TUI.
 
 ### Job types (scoped to selected dataset)
 
-- [ ] Run detection (`python -m fisheye <zarr> --stages detect`).
-- [ ] Run refinement (`python -m fisheye <zarr> --stages refine`).
-- [ ] Run crop (`python -m fisheye <zarr> --stages crop`).
-- [ ] Run keypoint inference (`python -m fisheye <zarr> --stages keypoints`).
-- [ ] Run keypoint refinement (`python -m fisheye <zarr> --stages keypoints_refine`).
-- [ ] Run eye mask inference (`python -m fisheye <zarr> --stages eye_masks`).
-- [ ] Run eye mask refinement (`python -m fisheye <zarr> --stages refined_eye_masks`).
-- [ ] Run arena assignment + tracking (`python -m fisheye <zarr> --stages assign_ids track`).
+- [ ] Run detection (`scripts/py -m fisheye <zarr> --stages detect`).
+- [ ] Run refinement (`scripts/py -m fisheye <zarr> --stages refine`).
+- [ ] Run crop (`scripts/py -m fisheye <zarr> --stages crop`).
+- [ ] Run keypoint inference (`scripts/py -m fisheye <zarr> --stages keypoints`).
+- [ ] Run keypoint refinement (`scripts/py -m fisheye <zarr> --stages keypoints_refine`).
+- [ ] Run eye mask inference (`scripts/py -m fisheye <zarr> --stages eye_masks`).
+- [ ] Run eye mask refinement (`scripts/py -m fisheye <zarr> --stages refined_eye_masks`).
+- [ ] Run arena assignment + tracking (`scripts/py -m fisheye <zarr> --stages assign_ids track`).
 - [ ] Run full pipeline (all stages in dependency order).
 - [ ] Run "fix stale" — automatically determine which stages need re-running from
       `recording_step_status` and execute only those.

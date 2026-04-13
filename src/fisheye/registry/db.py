@@ -3313,6 +3313,13 @@ class Registry:
             WHERE _rn = 1;
             """
         )
+        cur.execute("DROP VIEW IF EXISTS refined_detect_review_current;")
+        cur.execute(
+            """
+            CREATE VIEW refined_detect_review_current AS
+            SELECT * FROM detect_quality_current;
+            """
+        )
         cur.execute("DROP VIEW IF EXISTS merged_training_datasets;")
         cur.execute(
             """
@@ -6367,6 +6374,13 @@ class Registry:
                 zarr_mtime_ns
             FROM ranked
             WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS refined_detect_review_current;")
+        cur.execute(
+            """
+            CREATE VIEW refined_detect_review_current AS
+            SELECT * FROM detect_quality_current;
             """
         )
 
@@ -11849,16 +11863,17 @@ class Registry:
         sql.append("ORDER BY dataset_id, keypoint_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
-    def query_detect_quality_current(
+    def _query_detect_review_current_view(
         self,
         *,
+        view_name: str,
         dataset_ids: Optional[Sequence[str]] = None,
         detect_method: Optional[str] = None,
         review_state: Optional[str] = None,
         review_intended_use: Optional[str] = None,
         max_interpolated_detections_rate: Optional[float] = None,
     ) -> List[sqlite3.Row]:
-        sql = ["SELECT * FROM detect_quality_current WHERE 1=1"]
+        sql = [f"SELECT * FROM {view_name} WHERE 1=1"]
         params: List[Any] = []
 
         if dataset_ids:
@@ -11885,6 +11900,42 @@ class Registry:
             params.append(float(max_interpolated_detections_rate))
         sql.append("ORDER BY dataset_id, detect_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_detect_quality_current(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        detect_method: Optional[str] = None,
+        review_state: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        max_interpolated_detections_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        return self._query_detect_review_current_view(
+            view_name="detect_quality_current",
+            dataset_ids=dataset_ids,
+            detect_method=detect_method,
+            review_state=review_state,
+            review_intended_use=review_intended_use,
+            max_interpolated_detections_rate=max_interpolated_detections_rate,
+        )
+
+    def query_refined_detect_review_current(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        detect_method: Optional[str] = None,
+        review_state: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        max_interpolated_detections_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        return self._query_detect_review_current_view(
+            view_name="refined_detect_review_current",
+            dataset_ids=dataset_ids,
+            detect_method=detect_method,
+            review_state=review_state,
+            review_intended_use=review_intended_use,
+            max_interpolated_detections_rate=max_interpolated_detections_rate,
+        )
 
     def query_eye_mask_quality_current(
         self,

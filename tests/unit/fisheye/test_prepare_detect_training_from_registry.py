@@ -271,7 +271,7 @@ def test_rejects_legacy_export_flags() -> None:
     ("observed_patch", "expected_error"),
     [
         ({"source_detect_run": "wrong_detect_run"}, "source_detect_run divergence"),
-        ({"zarr_mtime_ns": 202}, "detect_quality row is stale"),
+        ({"zarr_mtime_ns": 202}, "refined detect review row is stale"),
     ],
 )
 def test_detect_quality_gate_rejects_stale_or_divergent_rows(
@@ -369,7 +369,7 @@ def test_detect_quality_exclusion_reasons_are_concrete(tmp_path: Path, capsys) -
     )
     db.close()
 
-    with pytest.raises(SystemExit, match="No datasets remain after detect quality filtering."):
+    with pytest.raises(SystemExit, match="No datasets remain after refined detect review filtering."):
         wrapper.main(
             [
                 "--registry",
@@ -384,8 +384,8 @@ def test_detect_quality_exclusion_reasons_are_concrete(tmp_path: Path, capsys) -
         )
 
     output = capsys.readouterr().out
-    assert "Detect quality SQL filter excluded 5 dataset(s):" in output
-    assert "Detect quality filter summary: passed=0 excluded=5 reasons=" in output
+    assert "Refined detect review SQL filter excluded 5 dataset(s):" in output
+    assert "Refined detect review filter summary: passed=0 excluded=5 reasons=" in output
     assert "missing_quality_row=1" in output
     assert "missing_quality_row" in output
     assert "review_state_mismatch:pending!=approved=1" in output

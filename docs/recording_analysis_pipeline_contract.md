@@ -31,14 +31,18 @@ Related detect batch contract:
   - Responsibility: append one detect run to analysis Zarr.
 - Stage 3 detect-quality tool (required before refine for production):
   - Module: `fisheye.refinement.detect_quality`
-  - Responsibility: append one quality report under the selected detect run with
-    `quality_flags` and `detection_quality_labels`.
+  - Responsibility: append one raw-detect quality report under the selected
+    detect run with `quality_flags` and `detection_quality_labels`.
   - Current behavior note:
     - blob/traditional detect path writes quality as part of detect.
     - YOLO detect path requires explicit `detect_quality` stage invocation.
 - Stage 4 refine tool:
   - Module: `fisheye.refinement.refine_detect`
-  - Responsibility: append refined detect outputs; keep raw detect immutable.
+  - Responsibility: consume raw-detect quality labels, filter raw detections,
+    and append sparse curated refined detect outputs; keep raw detect
+    immutable.
+  - Current behavior note:
+    - interpolation is disabled in the normal sparse-first refined-detect path.
 - Stage 5 registry tool:
   - Module: `fisheye.registry.db.Registry.scan_zarr`
   - Responsibility: rescan/update registry metadata for the resulting analysis Zarr.
@@ -75,6 +79,8 @@ analysis purpose and imported metadata context.
 
 - Always run `detect_quality` after each new detect run and before refine.
 - Auto-run `detect_quality` when missing (or fail closed in strict mode).
+- Treat `detect_quality` as a raw artifact-labeling stage, not as the refined
+  review/approval stage.
 - Treat quality as stale when detect run identity changes:
   - mismatch between `refined_detect_runs/<run>.attrs["source_detect_run"]` and
     the detect run you intend to refine.

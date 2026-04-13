@@ -51,7 +51,8 @@ Owns:
 - `tests/unit/fisheye/test_registry_query.py`
 
 Must deliver:
-- deterministic `detect_quality_current` selection when multiple refined runs exist.
+- deterministic `refined_detect_review_current` selection when multiple refined runs exist
+  (`detect_quality_current` remains the compatibility alias).
 - tie-break tests for:
   - `review_timestamp_utc`
   - fallback to `refined_created_utc`

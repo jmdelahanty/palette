@@ -1,12 +1,16 @@
 # src/fisheye/refinement/detect_quality.py
 """
-Detection quality assessment and artifact identification.
+Detection quality assessment and raw artifact labeling.
 
 Evaluates the quality of detection data from detect_runs by:
 1. Analyzing coverage and gaps
 2. Identifying temporal artifacts (jumps and blips)
-3. Validating bounding boxes
-4. Computing overall quality score
+3. Emitting per-frame and per-detection artifact labels
+4. Recording summary statistics and provenance for downstream filtering
+
+This stage labels raw detect artifacts for `refine_detect`. It is not the
+refined-detect review/approval stage, and it is no longer the primary place
+where interpolation behavior is defined.
 """
 
 import numpy as np
@@ -804,21 +808,21 @@ if __name__ == "__main__":
     from rich.console import Console
 
     parser = argparse.ArgumentParser(
-        description="Analyze detection quality and identify artifacts",
+        description="Analyze raw-detect quality and identify artifacts",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Analyze latest detect run
-  python -m fisheye.refinement.detect_quality data.zarr
+  scripts/py -m fisheye.refinement.detect_quality data.zarr
 
   # Analyze specific detect run
-  python -m fisheye.refinement.detect_quality data.zarr --run detect_2025-01-15_12-00-00
+  scripts/py -m fisheye.refinement.detect_quality data.zarr --run detect_2025-01-15_12-00-00
 
   # Use custom jump threshold and save report
-  python -m fisheye.refinement.detect_quality data.zarr --threshold 150 --save
+  scripts/py -m fisheye.refinement.detect_quality data.zarr --threshold 150 --save
 
   # Quick check without saving
-  python -m fisheye.refinement.detect_quality data.zarr --no-save
+  scripts/py -m fisheye.refinement.detect_quality data.zarr --no-save
         """,
     )
 

@@ -1707,7 +1707,8 @@ def _load_detect_quality_rows(
     set_filter: Optional[str],
     limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    if not _view_exists(registry, "detect_quality_current"):
+    detect_review_view = _preferred_detect_review_view_name(registry)
+    if detect_review_view is None:
         return []
     sql = [
         "SELECT",
@@ -1728,7 +1729,7 @@ def _load_detect_quality_rows(
         "  dqc.review_timestamp_utc AS review_timestamp_utc,",
         "  dqc.quality_updated_utc AS quality_updated_utc,",
         "  dqc.zarr_mtime_ns AS zarr_mtime_ns",
-        "FROM detect_quality_current dqc",
+        f"FROM {detect_review_view} dqc",
         "LEFT JOIN datasets d ON d.dataset_id = dqc.dataset_id",
         "WHERE 1=1",
     ]
@@ -1950,6 +1951,14 @@ def _view_exists(registry: Registry, view_name: str) -> bool:
         (view_name,),
     ).fetchone()
     return row is not None
+
+
+def _preferred_detect_review_view_name(registry: Registry) -> Optional[str]:
+    if _view_exists(registry, "refined_detect_review_current"):
+        return "refined_detect_review_current"
+    if _view_exists(registry, "detect_quality_current"):
+        return "detect_quality_current"
+    return None
 
 
 def _load_recording_step_overview_rows(

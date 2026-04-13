@@ -162,7 +162,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 
-    parser.add_argument("--source-type", choices=["detect", "filtered", "interpolated", "manual"], default="manual")
+    parser.add_argument(
+        "--source-type",
+        choices=["detect", "filtered", "interpolated", "manual", "refined"],
+        default="refined",
+        help="Detection source family to export. `refined` is the current canonical curated surface; `filtered`/`interpolated`/`manual` are legacy compatibility options.",
+    )
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
         "--model-input",
@@ -189,17 +194,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--require-review-state",
         choices=["approved", "pending", "rejected", "needs_review"],
-        help="Require refined detect review state via detect_quality_current.",
+        help="Require refined detect review state via refined_detect_review_current.",
     )
     parser.add_argument(
         "--require-review-intended-use",
         choices=["training", "full_recording"],
-        help="Require refined detect review intended_use via detect_quality_current.",
+        help="Require refined detect review intended_use via refined_detect_review_current.",
     )
     parser.add_argument(
         "--max-interpolated-detections-rate",
         type=float,
-        help="Require interpolated_detections_rate <= threshold (0-1) via detect_quality_current.",
+        help="Legacy compatibility gate: require interpolated_detections_rate <= threshold (0-1) via refined_detect_review_current.",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -406,7 +411,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     quality_exclusions = []
     if quality_gate_active:
         dataset_ids_all = [str(row["dataset_id"]) for row in rows if row["dataset_id"]]
-        selected_quality_rows = registry.query_detect_quality_current(
+        selected_quality_rows = registry.query_refined_detect_review_current(
             dataset_ids=dataset_ids_all,
             review_state=args.require_review_state,
             review_intended_use=args.require_review_intended_use,
@@ -415,7 +420,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         selected_quality_rows_by_dataset = {
             str(row["dataset_id"]): dict(row) for row in selected_quality_rows if row["dataset_id"]
         }
-        all_quality_rows = registry.query_detect_quality_current(dataset_ids=dataset_ids_all)
+        all_quality_rows = registry.query_refined_detect_review_current(dataset_ids=dataset_ids_all)
         all_quality_by_dataset = {}
         for quality_row in all_quality_rows:
             dataset_id = str(quality_row["dataset_id"])
@@ -494,7 +499,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         rows = filtered_rows
 
         if quality_exclusions:
-            print(f"Detect quality SQL filter excluded {len(quality_exclusions)} dataset(s):")
+            print(f"Refined detect review SQL filter excluded {len(quality_exclusions)} dataset(s):")
             for exclusion in quality_exclusions[:20]:
                 print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
             if len(quality_exclusions) > 20:
@@ -507,7 +512,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
     if not rows:
-        raise SystemExit("No datasets remain after detect quality filtering.")
+        raise SystemExit("No datasets remain after refined detect review filtering.")
 
     zarr_paths = [Path(row["zarr_path"]) for row in rows]
 
@@ -518,11 +523,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             quality_row = selected_quality_rows_by_dataset.get(dataset_id)
             if quality_row is None:
                 raise ValueError(
-                    f"{zarr_path.name}: missing detect_quality row after SQL selection for dataset_id '{dataset_id}'."
+                    f"{zarr_path.name}: missing refined detect review row after SQL selection for dataset_id '{dataset_id}'."
                 )
             expected_refined_run = prepare_from_registry._decode_attr(quality_row["refined_run"])
             if expected_refined_run is None:
-                raise ValueError(f"{zarr_path.name}: detect_quality row missing refined_run.")
+                raise ValueError(f"{zarr_path.name}: refined detect review row missing refined_run.")
             observed = prepare_from_registry._resolve_detect_quality_from_zarr(
                 zarr_path,
                 expected_refined_run=expected_refined_run,
@@ -567,7 +572,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             expected_mtime_ns = prepare_from_registry._as_int(quality_row.get("zarr_mtime_ns"))
             if expected_mtime_ns is not None and observed["zarr_mtime_ns"] != expected_mtime_ns:
                 raise ValueError(
-                    f"{zarr_path.name}: detect_quality row is stale for filesystem mtime "
+                    f"{zarr_path.name}: refined detect review row is stale for filesystem mtime "
                     f"(registry={expected_mtime_ns}, actual={observed['zarr_mtime_ns']})."
                 )
     registry.close()

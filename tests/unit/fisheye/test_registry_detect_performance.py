@@ -111,14 +111,14 @@ def _build_fake_detect_quality_root(*, timestamp_key: str = "timestamp_utc") -> 
                 "intended_use": "training",
                 "reviewer": "reviewer_detect",
                 "notes": "checked",
-                "resolved_group": "filtered",
+                "resolved_group": "refined",
                 timestamp_key: "2026-02-10T00:01:00+00:00",
             },
         },
     )
-    filtered = refined.add_group("filtered")
-    filtered.add_array("bbox_norm_coords", np.zeros((4, 4), dtype=np.float32))
-    filtered.add_array("detection_source", np.array([0, 0, 1, 0], dtype=np.int8))
+    instances = refined.add_group("instances")
+    instances.add_array("bbox_norm_coords", np.zeros((4, 4), dtype=np.float32))
+    instances.add_array("source_kind_codes", np.array([1, 1, 2, 1], dtype=np.int8))
     return root
 
 
@@ -179,7 +179,7 @@ def test_extract_detect_quality_rows_populates_shared_review_fields(tmp_path: Pa
     assert row["review_reviewer"] == "reviewer_detect"
     assert row["review_notes"] == "checked"
     assert row["review_timestamp_utc"] == "2026-02-10T00:01:00+00:00"
-    assert row["review_resolved_group"] == "filtered"
+    assert row["review_resolved_group"] == "refined"
     assert row["interpolated_detections_rate"] == 0.25
 
 
@@ -463,6 +463,42 @@ def test_detect_quality_current_falls_back_to_lexical_refined_run_when_timestamp
     assert str(row["refined_run"]) == "refined_zeta"
     assert row["review_timestamp_utc"] is None
     assert row["refined_created_utc"] is None
+    registry.close()
+
+
+def test_refined_detect_review_current_alias_matches_detect_quality_current(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    registry.upsert_detect_quality(
+        dataset_id="dataset_detect",
+        refined_run="refined_001",
+        refined_created_utc="2026-02-10T00:00:00+00:00",
+        source_detect_run="detect_001",
+        detect_method="yolo",
+        review_state="approved",
+        review_intended_use="training",
+        review_reviewer="reviewer_detect",
+        review_timestamp_utc="2026-02-10T00:01:00+00:00",
+        review_resolved_group="refined",
+        total_detections=4,
+        real_detections=4,
+        interpolated_detections=0,
+        interpolated_detections_rate=0.0,
+        review_method="manual",
+        review_notes="approved curated refined surface",
+    )
+    old_rows = registry.query_detect_quality_current(dataset_ids=["dataset_detect"], detect_method="yolo")
+    new_rows = registry.query_refined_detect_review_current(dataset_ids=["dataset_detect"], detect_method="yolo")
+    assert len(old_rows) == 1
+    assert len(new_rows) == 1
+    old_row = dict(old_rows[0])
+    new_row = dict(new_rows[0])
+    assert new_row == old_row
+    alias_count = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM refined_detect_review_current WHERE dataset_id=?",
+        ("dataset_detect",),
+    ).fetchone()["n"]
+    assert int(alias_count) == 1
     registry.close()
 
 

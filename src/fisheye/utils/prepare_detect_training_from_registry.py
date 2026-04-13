@@ -261,7 +261,7 @@ def _reject_legacy_orchestration_flags(args: argparse.Namespace) -> None:
         raise SystemExit(
             "prepare_detect_training_from_registry is now prepare-only and does not run merge/train/export. "
             f"Received orchestration flags: {msg}. "
-            "Use: python -m fisheye.utils.run_detect_training_pipeline ..."
+            "Use: scripts/py -m fisheye.utils.run_detect_training_pipeline ..."
         )
 
 
@@ -325,7 +325,7 @@ def _format_detect_quality_summary_line(
         if len(ordered) > len(shown):
             reason_text += f", ... (+{len(ordered) - len(shown)} more)"
     return (
-        "Detect quality filter summary: "
+        "Refined detect review filter summary: "
         f"passed={int(passed_count)} excluded={len(exclusions)} reasons={reason_text}"
     )
 
@@ -347,7 +347,7 @@ def _resolve_detect_quality_from_zarr(
         raise ValueError(f"{zarr_path.name}: missing refined_detect_runs/refined_runs group.")
     if expected_refined_run not in refined_parent:
         raise ValueError(
-            f"{zarr_path.name}: stale detect_quality row: refined run '{expected_refined_run}' is missing."
+            f"{zarr_path.name}: stale refined detect review row: refined run '{expected_refined_run}' is missing."
         )
 
     refined_group = refined_parent[expected_refined_run]
@@ -364,7 +364,7 @@ def _resolve_detect_quality_from_zarr(
     )
     if resolution.refined_detect_run != expected_refined_run:
         raise ValueError(
-            f"{zarr_path.name}: stale detect_quality row: refined run '{expected_refined_run}' resolved to "
+            f"{zarr_path.name}: stale refined detect review row: refined run '{expected_refined_run}' resolved to "
             f"'{resolution.refined_detect_run}'."
         )
     if not resolution.detection_path or resolution.detection_path not in root:
@@ -496,6 +496,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--source-type",
         choices=["detect", "filtered", "interpolated", "manual", "refined"],
         default="refined",
+        help="Detection source family to export. `refined` is the current canonical curated surface; `filtered`/`interpolated`/`manual` are legacy compatibility options.",
     )
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
@@ -523,17 +524,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--require-review-state",
         choices=["approved", "pending", "rejected", "needs_review"],
-        help="Require refined detect review state via detect_quality_current.",
+        help="Require refined detect review state via refined_detect_review_current.",
     )
     parser.add_argument(
         "--require-review-intended-use",
         choices=["training", "full_recording"],
-        help="Require refined detect review intended_use via detect_quality_current.",
+        help="Require refined detect review intended_use via refined_detect_review_current.",
     )
     parser.add_argument(
         "--max-interpolated-detections-rate",
         type=float,
-        help="Require interpolated_detections_rate <= threshold (0-1) via detect_quality_current.",
+        help="Legacy compatibility gate: require interpolated_detections_rate <= threshold (0-1) via refined_detect_review_current.",
     )
     # Legacy orchestration flags are intentionally hidden and rejected.
     parser.add_argument("--export-onnx", action="store_true", help=argparse.SUPPRESS)
@@ -643,7 +644,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     quality_exclusions: List[dict[str, Any]] = []
     if quality_gate_active:
         dataset_ids_all = [str(row["dataset_id"]) for row in rows if row["dataset_id"]]
-        selected_quality_rows = registry.query_detect_quality_current(
+        selected_quality_rows = registry.query_refined_detect_review_current(
             dataset_ids=dataset_ids_all,
             review_state=args.require_review_state,
             review_intended_use=args.require_review_intended_use,
@@ -652,7 +653,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         selected_quality_rows_by_dataset = {
             str(row["dataset_id"]): dict(row) for row in selected_quality_rows if row["dataset_id"]
         }
-        all_quality_rows = registry.query_detect_quality_current(dataset_ids=dataset_ids_all)
+        all_quality_rows = registry.query_refined_detect_review_current(dataset_ids=dataset_ids_all)
         all_quality_by_dataset: dict[str, List[Mapping[str, Any]]] = {}
         for quality_row in all_quality_rows:
             dataset_id = str(quality_row["dataset_id"])
@@ -730,7 +731,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
         rows = filtered_rows
         if quality_exclusions:
-            print(f"Detect quality SQL filter excluded {len(quality_exclusions)} dataset(s):")
+            print(f"Refined detect review SQL filter excluded {len(quality_exclusions)} dataset(s):")
             for exclusion in quality_exclusions[:20]:
                 print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
             if len(quality_exclusions) > 20:
@@ -745,7 +746,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     registry.close()
 
     if not rows:
-        raise SystemExit("No datasets remain after detect quality filtering.")
+        raise SystemExit("No datasets remain after refined detect review filtering.")
 
     zarr_paths = [Path(row["zarr_path"]) for row in rows]
 
@@ -756,11 +757,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             quality_row = selected_quality_rows_by_dataset.get(dataset_id)
             if quality_row is None:
                 raise ValueError(
-                    f"{zarr_path.name}: missing detect_quality row after SQL selection for dataset_id '{dataset_id}'."
+                    f"{zarr_path.name}: missing refined detect review row after SQL selection for dataset_id '{dataset_id}'."
                 )
             expected_refined_run = _decode_attr(quality_row["refined_run"])
             if expected_refined_run is None:
-                raise ValueError(f"{zarr_path.name}: detect_quality row missing refined_run.")
+                raise ValueError(f"{zarr_path.name}: refined detect review row missing refined_run.")
             observed = _resolve_detect_quality_from_zarr(
                 zarr_path,
                 expected_refined_run=expected_refined_run,
@@ -807,7 +808,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             expected_mtime_ns = _as_int(quality_row.get("zarr_mtime_ns"))
             if expected_mtime_ns is not None and observed["zarr_mtime_ns"] != expected_mtime_ns:
                 raise ValueError(
-                    f"{zarr_path.name}: detect_quality row is stale for filesystem mtime "
+                    f"{zarr_path.name}: refined detect review row is stale for filesystem mtime "
                     f"(registry={expected_mtime_ns}, actual={observed['zarr_mtime_ns']})."
                 )
 

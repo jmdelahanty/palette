@@ -42,7 +42,10 @@ CURATED_VIEWS: List[Tuple[str, str]] = [
     ("onnx_models", "SELECT * FROM onnx_models ORDER BY created_utc DESC"),
     ("tensorrt_models", "SELECT * FROM tensorrt_models ORDER BY created_utc DESC"),
     ("keypoint_quality_current", "SELECT * FROM keypoint_quality_current ORDER BY quality_updated_utc DESC"),
-    ("detect_quality_current", "SELECT * FROM detect_quality_current ORDER BY quality_updated_utc DESC"),
+    (
+        "refined_detect_review_current",
+        "SELECT * FROM detect_quality_current ORDER BY quality_updated_utc DESC",
+    ),
     ("detect_perf", "SELECT * FROM detect_performance_latest"),
     ("keypoint_perf", "SELECT * FROM keypoint_performance_latest"),
     ("eye_mask_perf", "SELECT * FROM eye_mask_performance_latest"),
@@ -74,7 +77,22 @@ _STATUS_COLORIZED_VIEWS: frozenset = frozenset({
     "eye_mask_perf",
     "keypoint_quality_current",
     "detect_quality_current",
+    "refined_detect_review_current",
 })
+
+
+def _view_exists(conn: sqlite3.Connection, view_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ? LIMIT 1;",
+        (view_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _preferred_detect_review_view_name(conn: sqlite3.Connection) -> str:
+    if _view_exists(conn, "refined_detect_review_current"):
+        return "refined_detect_review_current"
+    return "detect_quality_current"
 
 
 def _style_cell_value(value: Any, view_name: str) -> Any:
@@ -255,8 +273,9 @@ class RegistryClient:
                 "SELECT refined_run, keypoint_method, review_state, usable_keypoints_rate FROM keypoint_quality_current WHERE dataset_id=?",
                 (dataset_id,),
             ).fetchall()
+            detect_review_view = _preferred_detect_review_view_name(self.conn)
             dq = self.conn.execute(
-                "SELECT refined_run, detect_method, review_state, interpolated_detections_rate FROM detect_quality_current WHERE dataset_id=?",
+                f"SELECT refined_run, detect_method, review_state, interpolated_detections_rate FROM {detect_review_view} WHERE dataset_id=?",
                 (dataset_id,),
             ).fetchall()
             if kq:
@@ -266,7 +285,7 @@ class RegistryClient:
                         f"  - run={r['refined_run']} method={r['keypoint_method']} state={r['review_state']} usable_rate={r['usable_keypoints_rate']}"
                     )
             if dq:
-                lines.append("detect_quality_current:")
+                lines.append(f"{detect_review_view}:")
                 for r in dq[:5]:
                     lines.append(
                         f"  - run={r['refined_run']} method={r['detect_method']} state={r['review_state']} interp_rate={r['interpolated_detections_rate']}"
