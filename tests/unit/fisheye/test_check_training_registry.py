@@ -449,8 +449,8 @@ def test_detect_quality_view_outputs_summary_and_details(tmp_path: Path, capsys)
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "Detect Quality" in out
-    assert "passing rows (approved/training, interpolated_rate<=0.25, fresh mtime): 1" in out
+    assert "Refined Detect Review" in out
+    assert "passing rows (approved/training, legacy interp_rate<=0.25 (compat), fresh mtime): 1" in out
     assert "excluded rows: 1" in out
     assert "top exclusion reasons: wrong state/use=1" in out
     assert "dataset_pass" in out

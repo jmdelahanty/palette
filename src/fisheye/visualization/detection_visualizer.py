@@ -31,11 +31,15 @@ def _resolve_manual_label(refined_group_root) -> Optional[str]:
 
 def _pick_refined_group(refined_group_root, requested: Optional[str]) -> Optional[str]:
     if requested and requested != "auto":
+        if requested == "refined" and has_curated_refined_detect_surface(refined_group_root):
+            return "refined"
         if requested == "manual":
             return _resolve_manual_label(refined_group_root)
         if requested in refined_group_root:
             return requested
         return None
+    if has_curated_refined_detect_surface(refined_group_root):
+        return "refined"
     manual_label = _resolve_manual_label(refined_group_root)
     if manual_label:
         return manual_label
@@ -44,6 +48,30 @@ def _pick_refined_group(refined_group_root, requested: Optional[str]) -> Optiona
     if "filtered" in refined_group_root:
         return "filtered"
     return None
+
+
+def _describe_refined_variant(group_name: Optional[str], *, is_manual: bool = False) -> str:
+    if not group_name or group_name == "refined":
+        return "canonical curated surface"
+    if is_manual:
+        return "legacy manual subgroup"
+    if group_name == "filtered":
+        return "legacy filtered subgroup"
+    if group_name == "interpolated":
+        return "legacy interpolated subgroup"
+    return f"legacy subgroup {group_name}"
+
+
+def _format_refined_stage_label(
+    run_name: Optional[str],
+    group_name: Optional[str],
+    *,
+    is_manual: bool = False,
+) -> str:
+    label = run_name or "unknown"
+    if group_name and group_name != "refined":
+        label = f"{label}/{group_name}"
+    return f"{label} ({_describe_refined_variant(group_name, is_manual=is_manual)})"
 
 
 def _append_flagged_path() -> None:
@@ -439,6 +467,15 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.widgets import Slider
 
+from fisheye.shared.refined_detect_curation import (
+    build_source_detection_decision_summary,
+    extract_present_curated_rows,
+    has_curated_refined_source_detections_projection,
+    has_curated_refined_detect_surface,
+    resolve_curated_refined_detect_run,
+)
+from fisheye.shared.refined_detect_resolution import resolve_active_curated_refined_run_name
+
 try:
     from decord import VideoReader, cpu, gpu
     _HAVE_DECORD = True
@@ -470,8 +507,17 @@ refined_detection_source = None
 refined_interpolated_count = 0
 refined_variant_label = None
 refined_is_manual = False
+refined_manual_edited_count = 0
 using_refined_as_primary = False  # Track if we're using refined detections as primary source
+using_curated_as_primary = False
 primary_detection_source = None  # Source array for primary detections (0=original, 1=interpolated)
+curated_enabled = False
+curated_detect_run_name = None
+curated_crop_run_name = None
+curated_bbox_coords = None
+curated_frame_indices = None
+curated_frame_map = None
+curated_manual_edited_count = 0
 
 
 class VideoFrameSource:
@@ -575,11 +621,73 @@ class VideoFrameSource:
         self.release()
 
 
+def _build_frame_to_detection_map(frame_indices):
+    mapping = {}
+    for det_idx, frame_idx in enumerate(np.asarray(frame_indices, dtype=np.int64)):
+        mapping.setdefault(int(frame_idx), []).append(det_idx)
+    return mapping
+
+
+def _format_source_detection_summary(summary) -> Optional[str]:
+    if not summary:
+        return None
+    total_candidates = int(summary.get("total_candidates", 0) or 0)
+    parts = []
+    if total_candidates > 0:
+        parts.append(f"candidates: {total_candidates}")
+    for label in ("accepted", "filtered", "duplicate", "manual_clear"):
+        count = int(summary.get(f"decision_{label}", 0) or 0)
+        if count > 0:
+            parts.append(f"{label}: {count}")
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
+def _load_curated_detection_source(zarr_root, requested_run: Optional[str] = None):
+    curated_run_name = resolve_active_curated_refined_run_name(
+        zarr_root,
+        run_name=requested_run,
+    )
+    if curated_run_name is None:
+        return None
+
+    curated_group, _ = resolve_curated_refined_detect_run(
+        zarr_root,
+        run_name=curated_run_name,
+    )
+    if not has_curated_refined_detect_surface(curated_group):
+        raise ValueError(
+            f"Curated refined run '{curated_run_name}' is missing a curated detect surface."
+        )
+
+    present_rows = extract_present_curated_rows(curated_group)
+    bbox = np.asarray(present_rows["bbox_norm_coords"], dtype=np.float64)
+    frames = np.asarray(present_rows["frame_indices"], dtype=np.int64)
+    manual_flags = present_rows.get("manual_edit_flags")
+    manual_edited_count = int(np.count_nonzero(np.asarray(manual_flags, dtype=bool))) if manual_flags is not None else 0
+    source_detection_summary = (
+        build_source_detection_decision_summary(curated_group)
+        if has_curated_refined_source_detections_projection(curated_group)
+        else {}
+    )
+    return {
+        "curated_detect_run": curated_run_name,
+        "curated_crop_run": None,
+        "bbox_coords": bbox,
+        "frame_indices": frames,
+        "frame_map": _build_frame_to_detection_map(frames),
+        "manual_edited_count": manual_edited_count,
+        "source_detection_summary": source_detection_summary,
+    }
+
+
 def update_frame(frame_idx):
     """
     Called when the slider moves. Draws a circle on 'clean' frames and dots on previous detections.
     """
-    global detection_history, refined_enabled, using_refined_as_primary, primary_detection_source
+    global detection_history, refined_enabled, curated_enabled
+    global using_refined_as_primary, using_curated_as_primary, primary_detection_source
     
     frame_idx = int(frame_idx)
     
@@ -675,6 +783,8 @@ def update_frame(frame_idx):
                 id_text = f"ID: {assigned_id}"
                 if is_interpolated:
                     id_text += " [INTERP]"
+            elif using_curated_as_primary:
+                id_text = "Curated"
             else:
                 id_text = "Unassigned"
             # Keep label inside the frame by flipping below the box if needed
@@ -738,6 +848,42 @@ def update_frame(frame_idx):
                 label_y = y1 + box_h + 15
                 ax.text(x1, label_y, label, color='black', fontsize=9,
                         bbox=dict(facecolor=color, alpha=0.7, edgecolor='none', pad=2))
+
+    if curated_enabled and curated_frame_map is not None:
+        curated_indices = curated_frame_map.get(frame_idx, [])
+        if curated_indices:
+            curated_bboxes = curated_bbox_coords[curated_indices]
+
+            for bbox in curated_bboxes:
+                center_x_norm, center_y_norm, width_norm, height_norm = bbox
+                img_height, img_width = image.shape[:2]
+                center_x = float(center_x_norm) * img_width
+                center_y = float(center_y_norm) * img_height
+                box_w = float(width_norm) * img_width
+                box_h = float(height_norm) * img_height
+
+                x1 = center_x - (box_w / 2)
+                y1 = center_y - (box_h / 2)
+
+                rect = patches.Rectangle(
+                    (x1, y1),
+                    box_w,
+                    box_h,
+                    linewidth=1.5,
+                    edgecolor='deepskyblue',
+                    facecolor='none',
+                    linestyle=':'
+                )
+                ax.add_patch(rect)
+                label_y = y1 + box_h + 28
+                ax.text(
+                    x1,
+                    label_y,
+                    "Preferred",
+                    color='black',
+                    fontsize=9,
+                    bbox=dict(facecolor='deepskyblue', alpha=0.7, edgecolor='none', pad=2)
+                )
 
     # Clean up old history entries outside the window
     detection_history = [(f, x, y, clean) for f, x, y, clean in detection_history 
@@ -850,14 +996,20 @@ def main(args):
     global output_dir, frame_slider, detection_ids
     global refined_enabled, refined_run_name, refined_bbox_coords, refined_frame_indices
     global refined_frame_map, refined_detection_source, refined_interpolated_count
-    global refined_variant_label, refined_is_manual
+    global refined_variant_label, refined_is_manual, refined_manual_edited_count
     global flag_file_path, frame_flag_file_path, current_zarr_path, current_zarr_dir
-    global using_refined_as_primary, primary_detection_source
+    global using_refined_as_primary, using_curated_as_primary, primary_detection_source
+    global curated_enabled, curated_detect_run_name, curated_crop_run_name
+    global curated_bbox_coords, curated_frame_indices, curated_frame_map
+    global curated_manual_edited_count
 
     current_zarr_path = str(Path(args.zarr_path).expanduser().resolve(strict=False))
     current_zarr_dir = os.getcwd()
     flag_file_path = args.flag_file
     frame_flag_file_path = args.frame_flag_file
+    show_curated = bool(getattr(args, "show_curated", False))
+    curated_only = bool(getattr(args, "curated_only", False))
+    curated_detect_run = getattr(args, "curated_detect_run", None)
 
     if args.output_dir:
         output_dir = Path(args.output_dir)
@@ -973,12 +1125,66 @@ def main(args):
         refined_interpolated_count = 0
         refined_variant_label = None
         refined_is_manual = False
+        refined_manual_edited_count = 0
+        curated_enabled = False
+        curated_detect_run_name = None
+        curated_crop_run_name = None
+        curated_bbox_coords = np.empty((0, 4), dtype=np.float64)
+        curated_frame_indices = np.empty(0, dtype=np.int64)
+        curated_frame_map = {}
+        curated_manual_edited_count = 0
+        curated_source_detection_summary = {}
+        refined_source_detection_summary = {}
+        using_curated_as_primary = False
 
         # Determine which detection source to use as primary
         # Strategy: When --show-refined is set, prioritize using refined detections if they exist and match IDs
+        if curated_only:
+            show_curated = True
+        if show_curated:
+            print("\n🔍 Checking for curated refined root detections...")
+            try:
+                curated_payload = _load_curated_detection_source(
+                    zarr_root,
+                    requested_run=curated_detect_run,
+                )
+            except Exception as exc:
+                curated_payload = None
+                print(f"  Curated detect resolution failed: {exc}")
+
+            if curated_payload is None:
+                print("  No curated refined runs found")
+            else:
+                curated_detect_run_name = curated_payload["curated_detect_run"]
+                curated_crop_run_name = curated_payload["curated_crop_run"]
+                curated_bbox_coords = curated_payload["bbox_coords"]
+                curated_frame_indices = curated_payload["frame_indices"]
+                curated_frame_map = curated_payload["frame_map"]
+                curated_manual_edited_count = int(curated_payload.get("manual_edited_count", 0) or 0)
+                curated_source_detection_summary = dict(curated_payload.get("source_detection_summary") or {})
+                print(f"  Loaded curated refined run: {curated_detect_run_name}")
+                print(f"    • Total curated rows: {len(curated_frame_indices)}")
+                if curated_manual_edited_count > 0:
+                    print(f"    • Manual-edited detections: {curated_manual_edited_count}")
+                formatted_source_summary = _format_source_detection_summary(curated_source_detection_summary)
+                if formatted_source_summary:
+                    print(f"    • Source decisions: {formatted_source_summary}")
+
+                if curated_only:
+                    print("  Using curated refined detections as primary; arena assignments disabled.")
+                    bbox_coords = curated_bbox_coords
+                    frame_indices = curated_frame_indices
+                    using_refined_as_primary = False
+                    using_curated_as_primary = True
+                    primary_detection_source = None
+                    detection_ids = None
+                    curated_enabled = False
+                else:
+                    curated_enabled = True
+
         if args.refined_only:
             args.show_refined = True
-        if args.show_refined:
+        if bbox_coords is None and args.show_refined:
             print("\n🔍 Checking for refined detections to use as primary source...")
 
             # Try to load refined detections
@@ -1013,13 +1219,32 @@ def main(args):
                             f"({args.refined_variant}) - will use original detections"
                         )
                     else:
-                        refined_group = refined_group_root[refined_group_name]
+                        refined_group = refined_group_root if refined_group_name == "refined" else refined_group_root[refined_group_name]
                         # Load refined detection data
-                        refined_bbox_coords = refined_group['bbox_norm_coords'][:]
-                        refined_frame_indices = refined_group['frame_indices'][:]
-                        refined_detection_source = refined_group.get('detection_source', None)
-                        if refined_detection_source is not None:
-                            refined_detection_source = refined_detection_source[:]
+                        if refined_group_name == "refined":
+                            refined_rows = extract_present_curated_rows(refined_group_root)
+                            refined_bbox_coords = np.asarray(refined_rows["bbox_norm_coords"], dtype=np.float64)
+                            refined_frame_indices = np.asarray(refined_rows["frame_indices"], dtype=np.int64)
+                            refined_detection_source = np.asarray(refined_rows["detection_source"], dtype=np.int8)
+                            manual_flags = refined_rows.get("manual_edit_flags")
+                            refined_manual_edited_count = (
+                                int(np.count_nonzero(np.asarray(manual_flags, dtype=bool)))
+                                if manual_flags is not None
+                                else 0
+                            )
+                            refined_source_detection_summary = (
+                                build_source_detection_decision_summary(refined_group_root)
+                                if has_curated_refined_source_detections_projection(refined_group_root)
+                                else {}
+                            )
+                        else:
+                            refined_bbox_coords = refined_group['bbox_norm_coords'][:]
+                            refined_frame_indices = refined_group['frame_indices'][:]
+                            refined_detection_source = refined_group.get('detection_source', None)
+                            if refined_detection_source is not None:
+                                refined_detection_source = refined_detection_source[:]
+                            refined_manual_edited_count = 0
+                            refined_source_detection_summary = {}
 
                         refined_run_name = candidate_run
                         refined_variant_label = refined_group_name
@@ -1027,10 +1252,20 @@ def main(args):
                         total_refined = refined_bbox_coords.shape[0]
                         refined_interpolated_count = int(np.sum(refined_detection_source == 1)) if refined_detection_source is not None else 0
 
-                        print(f"  Loaded refined detections from {candidate_run}/{refined_group_name}:")
+                        refined_stage_label = _format_refined_stage_label(
+                            candidate_run,
+                            refined_group_name,
+                            is_manual=refined_is_manual,
+                        )
+                        print(f"  Loaded refined detections from {refined_stage_label}:")
                         print(f"    • Total: {total_refined}")
-                        if refined_detection_source is not None:
-                            print(f"    • Interpolated: {refined_interpolated_count}")
+                        if refined_detection_source is not None and refined_interpolated_count > 0:
+                            print(f"    • Legacy interpolated rows: {refined_interpolated_count}")
+                        if refined_manual_edited_count > 0:
+                            print(f"    • Manual-edited: {refined_manual_edited_count}")
+                        formatted_source_summary = _format_source_detection_summary(refined_source_detection_summary)
+                        if formatted_source_summary:
+                            print(f"    • Source decisions: {formatted_source_summary}")
 
                         refined_available = True
 
@@ -1059,6 +1294,7 @@ def main(args):
                             bbox_coords = refined_bbox_coords
                             frame_indices = refined_frame_indices
                             using_refined_as_primary = True
+                            using_curated_as_primary = False
                             primary_detection_source = refined_detection_source
                             detection_ids = raw_detection_ids
                             refined_enabled = False  # Not showing as overlay since it's primary
@@ -1072,6 +1308,7 @@ def main(args):
                                 bbox_coords = refined_bbox_coords
                                 frame_indices = refined_frame_indices
                                 using_refined_as_primary = True
+                                using_curated_as_primary = False
                                 primary_detection_source = refined_detection_source
                                 detection_ids = None
                                 refined_enabled = False
@@ -1093,6 +1330,7 @@ def main(args):
             bbox_coords = original_bbox_coords
             frame_indices = original_frame_indices
             using_refined_as_primary = False
+            using_curated_as_primary = False
             primary_detection_source = None
 
             # Validate arena assignments against original detections
@@ -1114,11 +1352,7 @@ def main(args):
         # Build frame to detection mapping for primary source
         if frame_to_detection_map is None:
             print("Building frame to detection mapping...")
-            frame_to_detection_map = {}
-            for det_idx, frame_idx in enumerate(frame_indices):
-                if frame_idx not in frame_to_detection_map:
-                    frame_to_detection_map[frame_idx] = []
-                frame_to_detection_map[frame_idx].append(det_idx)
+            frame_to_detection_map = _build_frame_to_detection_map(frame_indices)
 
         # Load quality data
         if 'detect_runs' in zarr_root:
@@ -1138,24 +1372,65 @@ def main(args):
         print(f"  - Average detections per frame (with dets): {avg_per_frame:.2f}")
         print(f"  - Frames without detections: {num_frames - frames_with_detections}")
         if refined_enabled:
-            label = refined_run_name or "unknown"
-            if refined_variant_label:
-                label = f"{label}/{refined_variant_label}"
+            label = _format_refined_stage_label(
+                refined_run_name,
+                refined_variant_label,
+                is_manual=refined_is_manual,
+            )
             if refined_detection_source is not None:
-                print(f"  - Refined overlay: {label} (interpolated: {refined_interpolated_count})")
+                detail_parts = []
+                if refined_interpolated_count > 0:
+                    detail_parts.append(f"legacy interpolated rows: {refined_interpolated_count}")
+                if refined_manual_edited_count > 0:
+                    detail_parts.append(f"manual-edited: {refined_manual_edited_count}")
+                if detail_parts:
+                    print(f"  - Refined overlay: {label} ({', '.join(detail_parts)})")
+                else:
+                    print(f"  - Refined overlay: {label}")
             else:
-                print(f"  - Refined overlay: {label}")
+                if refined_manual_edited_count > 0:
+                    print(f"  - Refined overlay: {label} (manual-edited: {refined_manual_edited_count})")
+                else:
+                    print(f"  - Refined overlay: {label}")
+        if curated_enabled:
+            label = curated_detect_run_name or "unknown"
+            if curated_crop_run_name:
+                label = f"{label} (crop: {curated_crop_run_name})"
+            if curated_manual_edited_count > 0:
+                print(f"  - Canonical curated overlay: {label} (manual-edited: {curated_manual_edited_count})")
+            else:
+                print(f"  - Canonical curated overlay: {label}")
+            formatted_source_summary = _format_source_detection_summary(curated_source_detection_summary)
+            if formatted_source_summary:
+                print(f"    • Source decisions: {formatted_source_summary}")
         if using_refined_as_primary:
             interpolated_count = int(np.sum(primary_detection_source == 1)) if primary_detection_source is not None else 0
-            original_count = total_detections - interpolated_count
-            print(f"  - Using refined detections as primary source:")
-            if primary_detection_source is not None:
-                print(f"    • Original detections: {original_count}")
-                print(f"    • Interpolated detections: {interpolated_count} (shown in orange)")
-            if refined_variant_label:
-                print(f"    • Source run: {refined_run_name}/{refined_variant_label}")
-            else:
-                print(f"    • Source run: {refined_run_name}")
+            primary_label = _format_refined_stage_label(
+                refined_run_name,
+                refined_variant_label,
+                is_manual=refined_is_manual,
+            )
+            print(f"  - Using refined detections as primary source: {primary_label}")
+            print(f"    • Present rows: {total_detections}")
+            if primary_detection_source is not None and interpolated_count > 0:
+                print(f"    • Legacy interpolated rows: {interpolated_count} (shown in orange)")
+            if refined_manual_edited_count > 0:
+                print(f"    • Manual-edited detections: {refined_manual_edited_count}")
+            formatted_source_summary = _format_source_detection_summary(refined_source_detection_summary)
+            if formatted_source_summary:
+                print(f"    • Source decisions: {formatted_source_summary}")
+            print(f"    • Source run: {primary_label}")
+        if using_curated_as_primary:
+            print(f"  - Using canonical curated refined detections as primary source:")
+            print(f"    • Present rows: {total_detections}")
+            print(f"    • Curated detect run: {curated_detect_run_name}")
+            if curated_manual_edited_count > 0:
+                print(f"    • Manual-edited detections: {curated_manual_edited_count}")
+            formatted_source_summary = _format_source_detection_summary(curated_source_detection_summary)
+            if formatted_source_summary:
+                print(f"    • Source decisions: {formatted_source_summary}")
+            if curated_crop_run_name:
+                print(f"    • Curated crop run: {curated_crop_run_name}")
 
     except Exception as e:
         print(f"Error opening Zarr file or finding data: {e}")
@@ -1244,9 +1519,12 @@ if __name__ == "__main__":
                     inline=_pre_args.inline,
                     debug_ids=False,
                     show_refined=False,
+                    show_curated=False,
                     refined_run=None,
+                    curated_detect_run=None,
                     refined_variant="auto",
                     refined_only=False,
+                    curated_only=False,
                     flag_file=None,
                     frame_flag_file=None
                 )
@@ -1278,19 +1556,37 @@ if __name__ == "__main__":
     parser.add_argument("--debug-ids", action="store_true",
                         help="Print detailed ID alignment diagnostics.")
     parser.add_argument("--show-refined", action="store_true",
-                        help="Overlay detections from the latest (or specified) refined run.")
+                        help="Overlay detections from the selected refined surface. In auto mode this prefers the canonical curated surface; use --refined-variant for legacy subgroup overlays.")
+    parser.add_argument(
+        "--show-curated",
+        dest="show_curated",
+        action="store_true",
+        help="Overlay detections from the canonical curated refined surface resolved from the latest (or specified) refined detect run.",
+    )
     parser.add_argument("--refined-run", type=str,
-                        help="Specific refined run name to use for overlay.")
+                        help="Specific refined run name to use for overlay or primary selection.")
+    parser.add_argument(
+        "--curated-detect-run",
+        dest="curated_detect_run",
+        type=str,
+        help="Specific refined detect run name to use for curated-root overlay/primary selection.",
+    )
     parser.add_argument(
         "--refined-variant",
-        choices=["auto", "interpolated", "filtered", "manual"],
+        choices=["auto", "refined", "interpolated", "filtered", "manual"],
         default="auto",
-        help="Refined group to visualize (default: auto prefers manual if available).",
+        help="Refined source to visualize (default: auto prefers the canonical curated surface; manual/filtered/interpolated are legacy compatibility variants).",
     )
     parser.add_argument(
         "--refined-only",
         action="store_true",
-        help="Use refined detections as primary when available (disables IDs if they don't match).",
+        help="Use the selected refined surface as primary when available (disables IDs if they don't match). Auto/refined use the canonical curated surface when present.",
+    )
+    parser.add_argument(
+        "--curated-only",
+        dest="curated_only",
+        action="store_true",
+        help="Use canonical curated refined detections as primary when available (arena IDs disabled).",
     )
     parser.add_argument(
         "--flag-file",

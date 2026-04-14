@@ -3647,7 +3647,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 (
                     "passing rows "
                     f"({DETECT_GATE_REVIEW_STATE}/{DETECT_GATE_REVIEW_INTENDED_USE}, "
-                    f"interpolated_rate<={DETECT_GATE_MAX_INTERPOLATED_RATE:.2f}, fresh mtime): "
+                    f"legacy interp_rate<={DETECT_GATE_MAX_INTERPOLATED_RATE:.2f} (compat), fresh mtime): "
                     f"{detect_quality_summary.passing_rows}"
                 ),
                 f"excluded rows: {detect_quality_summary.excluded_rows}",
@@ -3660,17 +3660,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 detect_reason_text = "none"
             detect_lines.append(f"top exclusion reasons: {detect_reason_text}")
-            console.print("[bold]Detect Quality[/bold]")
+            console.print("[bold]Refined Detect Review[/bold]")
             for line in detect_lines:
                 console.print(f"- {line}")
             if show_detect_details and detect_quality_rows:
-                detect_table = Table(title="Detect Quality Details", show_lines=False)
+                detect_table = Table(title="Refined Detect Review Details", show_lines=False)
                 detect_table.add_column("Dataset", style="cyan")
                 detect_table.add_column("Use")
                 detect_table.add_column("Method")
                 detect_table.add_column("Review")
-                detect_table.add_column("Interp/Total")
-                detect_table.add_column("InterpRate")
+                detect_table.add_column("LegacyInterp/Total")
+                detect_table.add_column("LegacyInterpRate")
                 detect_table.add_column("Stale")
                 detect_table.add_column("Gate")
                 detect_table.add_column("Reason")
@@ -4396,12 +4396,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  host: {row.system_hostname or '—'}")
                 print(f"  onnx: {_status_text(_path_ok(row.onnx_path))}")
         if not summary_only_mode:
-            print("Detect Quality")
+            print("Refined Detect Review")
             print(f"  total rows: {detect_quality_summary.total_rows}")
             print(
                 "  passing rows "
                 f"({DETECT_GATE_REVIEW_STATE}/{DETECT_GATE_REVIEW_INTENDED_USE}, "
-                f"interpolated_rate<={DETECT_GATE_MAX_INTERPOLATED_RATE:.2f}, fresh mtime): "
+                f"legacy interp_rate<={DETECT_GATE_MAX_INTERPOLATED_RATE:.2f} (compat), fresh mtime): "
                 f"{detect_quality_summary.passing_rows}"
             )
             print(f"  excluded rows: {detect_quality_summary.excluded_rows}")
@@ -4440,14 +4440,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                         f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
                     )
                     print(
-                        "      interpolated/total: "
+                        "      legacy_interpolated/total: "
                         f"{interpolated if interpolated is not None else '—'}/"
                         f"{total if total is not None else '—'}"
                     )
                     print(
-                        f"      interpolated_rate: {float(rate):.3f}"
+                        f"      legacy_interp_rate: {float(rate):.3f}"
                         if rate is not None
-                        else "      interpolated_rate: —"
+                        else "      legacy_interp_rate: —"
                     )
                     print(f"      quality_stale: {1 if stale is not None else 0}")
                     print(f"      gate: {'PASS' if passes else 'EXCLUDE'}")

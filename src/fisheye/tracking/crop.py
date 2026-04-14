@@ -2052,7 +2052,7 @@ def get_detection_source_info(
         source_type: 'detect', 'filtered', 'interpolated', 'manual',
             'refined', or 'auto' (hint)
         source_path_override: Explicit path like 'detect_runs/<run>' or the
-            preferred current refined override
+            canonical refined path
             'refined_detect_runs/<run>/instances'
         console: Optional Rich console for output
         selection_policy: Optional policy label for auto source selection (e.g., training/full_recording)
@@ -2516,7 +2516,7 @@ def crop_and_store_chunk_delayed(
         roi_sz: (H, W) of the crop
         scale_factor: ds/full scale for coordinates_ds
         source_path: Path to detection source (e.g., 'detect_runs/latest',
-            the preferred current refined override
+            the canonical refined path
             'refined_detect_runs/latest/instances')
 
     Returns:
@@ -3545,18 +3545,20 @@ def main():
         "--source-type",
         type=str,
         default=None,
-        choices=['detect', 'filtered', 'interpolated', 'manual', 'refined', 'auto'],
+        choices=['auto', 'refined', 'detect', 'manual', 'filtered', 'interpolated'],
         help=(
-            "Detection source to use. 'refined' targets the canonical curated "
-            "refined surface; 'filtered'/'interpolated'/'manual' are legacy "
-            "sparse compatibility modes."
+            "Detection source to use. 'auto' prefers the canonical current "
+            "refined surface and falls back to raw detect; 'refined' requires "
+            "the canonical curated refined surface. "
+            "'manual'/'filtered'/'interpolated' are legacy sparse "
+            "compatibility modes for older archives."
         ),
     )
     parser.add_argument("--source-path", type=str, default=None,
                        help=(
                            "Explicit detection source path (e.g. "
-                           "detect_runs/<run> or the preferred current refined "
-                           "override refined_detect_runs/<run>/instances)"
+                           "detect_runs/<run> or the canonical refined path "
+                           "refined_detect_runs/<run>/instances)"
                        ))
     parser.add_argument(
         "--selection-policy",

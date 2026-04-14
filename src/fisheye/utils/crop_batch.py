@@ -436,12 +436,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--source-type",
         type=str,
         default=None,
-        choices=["detect", "filtered", "interpolated", "manual", "refined", "auto"],
+        choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         help=(
             "Detection source (default: config value, otherwise auto). "
-            "'refined' targets the canonical curated refined surface; "
-            "'filtered'/'interpolated'/'manual' are legacy sparse "
-            "compatibility modes."
+            "'auto' prefers the canonical current refined surface and falls back "
+            "to raw detect; 'refined' requires the canonical curated refined "
+            "surface. 'manual'/'filtered'/'interpolated' are legacy sparse "
+            "compatibility modes for older archives."
         ),
     )
     parser.add_argument(
@@ -450,7 +451,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help=(
             "Explicit detection source path (e.g. detect_runs/<run> or the "
-            "preferred current refined override "
+            "canonical refined path "
             "refined_detect_runs/<run>/instances)."
         ),
     )

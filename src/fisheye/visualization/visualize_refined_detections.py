@@ -4,11 +4,10 @@ Refinement Pipeline Visualizer
 
 Visualizes the results of the refinement pipeline:
 - Original detections
-- After filtering (filtered/)
-- After interpolation (interpolated/)
-- Manual/retune variants when present (e.g., manual_review_latest)
+- Canonical curated refined surface
+- Legacy sparse subgroups when present (filtered/interpolated/manual)
 
-Shows trajectories, coverage, interpolated vs real detections, gap diagnostics,
+Shows trajectories, coverage, curated-row provenance, source-decision summaries,
 and supports listing runs or focusing on a specific frame window.
 """
 
@@ -29,6 +28,15 @@ from matplotlib.patches import Patch
 import numpy as np
 import zarr
 
+from fisheye.shared.refined_detect_curation import (
+    build_source_detection_decision_summary,
+    extract_present_curated_rows,
+    has_curated_refined_source_detections_projection,
+    has_curated_refined_detect_surface,
+    resolve_curated_refined_detect_run,
+)
+from fisheye.shared.refined_detect_resolution import resolve_active_curated_refined_run_name
+
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 
@@ -47,18 +55,39 @@ def _clip_frame_range(frame_counts: np.ndarray,
 
 
 def load_refined_stage(group, stage_name: str, fps: float,
-                       frame_range: Optional[Tuple[int, int]] = None) -> Dict:
+                       frame_range: Optional[Tuple[int, int]] = None,
+                       total_frames: Optional[int] = None) -> Dict:
     """Load data from a refinement stage (filtered or interpolated)."""
-    bbox_coords = group['bbox_norm_coords'][:]
-    frame_indices = group['frame_indices'][:]
+    manual_edit_flags = None
+    manual_edited_count = 0
+    source_detection_summary = None
+    if has_curated_refined_detect_surface(group):
+        curated_rows = extract_present_curated_rows(group)
+        bbox_coords = curated_rows['bbox_norm_coords']
+        frame_indices = curated_rows['frame_indices']
+        detection_source = curated_rows['detection_source']
+        manual_edit_flags = curated_rows.get('manual_edit_flags')
+        if manual_edit_flags is not None:
+            manual_edit_flags = np.asarray(manual_edit_flags, dtype=bool)
+            manual_edited_count = int(np.count_nonzero(manual_edit_flags))
+        if has_curated_refined_source_detections_projection(group):
+            source_detection_summary = build_source_detection_decision_summary(group)
+    else:
+        bbox_coords = group['bbox_norm_coords'][:]
+        frame_indices = group['frame_indices'][:]
+        detection_source = None
+        if 'detection_source' in group:
+            detection_source = group['detection_source'][:]
     if 'frame_counts' in group:
         frame_counts = group['frame_counts'][:]
     else:
-        frame_counts = np.bincount(frame_indices.astype(np.int64, copy=False))
-
-    detection_source = None
-    if 'detection_source' in group:
-        detection_source = group['detection_source'][:]
+        if total_frames is not None:
+            frame_counts = np.bincount(
+                frame_indices.astype(np.int64, copy=False),
+                minlength=max(int(total_frames), 0),
+            )
+        else:
+            frame_counts = np.bincount(frame_indices.astype(np.int64, copy=False))
 
     start_offset = 0
     if frame_range is not None:
@@ -68,6 +97,9 @@ def load_refined_stage(group, stage_name: str, fps: float,
         frame_indices = frame_indices[mask]
         if detection_source is not None:
             detection_source = detection_source[mask]
+        if manual_edit_flags is not None:
+            manual_edit_flags = manual_edit_flags[mask]
+            manual_edited_count = int(np.count_nonzero(manual_edit_flags))
         frame_counts = frame_counts[clipped_start:clipped_end]
         start_offset = clipped_start
 
@@ -86,6 +118,9 @@ def load_refined_stage(group, stage_name: str, fps: float,
         'frames': frame_indices,
         'time_seconds': time_seconds,
         'detection_source': detection_source,
+        'manual_edit_flags': manual_edit_flags,
+        'manual_edited_detections': manual_edited_count,
+        'source_detection_summary': source_detection_summary,
         'coverage': coverage,
         'total_detections': len(bbox_coords),
         'stage': stage_name,
@@ -160,6 +195,8 @@ def compute_stage_stats(dataset: Dict) -> Dict:
         'frames_with_detections': frames_with_detections,
         'coverage_percent': coverage_percent,
         'total_detections': total_detections,
+        'manual_edited_detections': int(dataset.get('manual_edited_detections', 0) or 0),
+        'source_detection_summary': dict(dataset.get('source_detection_summary') or {}),
     }
 
 
@@ -187,17 +224,21 @@ def _iter_refined_stage_names(refined_group) -> List[str]:
     """
     Return refined subgroup names to plot, in display order.
 
-    Preferred order: filtered, interpolated, active manual group, then other
-    valid stage groups in lexical order.
+    Preferred order: canonical curated surface, active manual subgroup, then
+    legacy filtered/interpolated subgroups, followed by other valid stage
+    groups in lexical order.
     """
     ordered: List[str] = []
-    for default_name in ('filtered', 'interpolated'):
-        if default_name in refined_group and _is_detection_stage_group(refined_group[default_name]):
-            ordered.append(default_name)
+    if has_curated_refined_detect_surface(refined_group):
+        ordered.append("refined")
 
     manual_name = _resolve_manual_group_name(refined_group)
     if manual_name and manual_name not in ordered and _is_detection_stage_group(refined_group[manual_name]):
         ordered.append(manual_name)
+
+    for default_name in ('filtered', 'interpolated'):
+        if default_name in refined_group and _is_detection_stage_group(refined_group[default_name]):
+            ordered.append(default_name)
 
     extras = sorted(
         name
@@ -214,15 +255,49 @@ def _stage_display_name(stage_name: str, manual_group_name: Optional[str]) -> st
     """Build a user-facing title for a stage key."""
     if stage_name == 'original':
         return 'Original Detections'
+    if stage_name == 'curated':
+        return 'Canonical Curated Refined Surface'
+    if stage_name == 'refined':
+        return 'Canonical Curated Refined Surface'
     if stage_name == 'filtered':
-        return 'Filtered (Jumps Removed)'
+        return 'Legacy Filtered Subgroup'
     if stage_name == 'interpolated':
-        return 'Interpolated (Gaps Filled)'
+        return 'Legacy Interpolated Subgroup'
     if manual_group_name and stage_name == manual_group_name:
         if stage_name == 'manual':
-            return 'Manual Corrections'
-        return f'Manual Corrections ({stage_name})'
+            return 'Legacy Manual Subgroup'
+        return f'Legacy Manual Subgroup ({stage_name})'
     return f'Refined ({stage_name})'
+
+
+def _coverage_stage_display_name(stage_name: str) -> str:
+    if stage_name == "original":
+        return "Original"
+    if stage_name == "refined":
+        return "Canonical refined"
+    if stage_name == "filtered":
+        return "Legacy filtered"
+    if stage_name == "interpolated":
+        return "Legacy interpolated"
+    return stage_name.title()
+
+
+def _resolve_curated_stage(
+    root,
+    *,
+    requested_run: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str], Optional[object]]:
+    curated_detect_run = resolve_active_curated_refined_run_name(
+        root,
+        run_name=requested_run,
+    )
+    if curated_detect_run is None:
+        return None, None, None
+    curated_detect_group, _ = resolve_curated_refined_detect_run(
+        root,
+        run_name=curated_detect_run,
+    )
+    return curated_detect_run, None, curated_detect_group
 
 
 def summarize_refined_runs(zarr_path: str) -> int:
@@ -259,22 +334,29 @@ def summarize_refined_runs(zarr_path: str) -> int:
 
         print(f"\n{name}{latest_tag}")
         if params:
-            max_gap = params.get('max_gap', '?')
-            method = params.get('interpolation_method', '?')
             filters = params.get('filters_applied', [])
-            print(f"  Max gap: {max_gap} frames | Method: {method}")
+            if params.get('interpolation_enabled') is False:
+                print("  Canonical surface: sparse curated instances (no gap interpolation)")
+            else:
+                max_gap = params.get('max_gap', '?')
+                method = params.get('interpolation_method', '?')
+                print(f"  Max gap: {max_gap} frames | Method: {method}")
             if filters:
                 print(f"  Filters: {filters}")
         if coverage:
-            for stage in ('original', 'filtered', 'interpolated'):
+            for stage in ('original', 'refined', 'filtered', 'interpolated'):
                 stage_cov = coverage.get(stage, {})
                 if isinstance(stage_cov, dict) and stage_cov:
                     cov_pct = stage_cov.get('coverage_percent')
                     frames = stage_cov.get('frames_with_detections')
                     dets = stage_cov.get('total_detections')
                     if cov_pct is not None:
-                        print(f"  {stage.title():<13}: {cov_pct:.2f}% "
+                        stage_label = _coverage_stage_display_name(stage)
+                        print(f"  {stage_label:<20}: {cov_pct:.2f}% "
                               f"({frames} frames, {dets} detections)")
+        summary_stats = run_group.attrs.get('summary_statistics')
+        if isinstance(summary_stats, dict) and summary_stats.get('rows_manual_edited') is not None:
+            print(f"  Manual edited rows: {int(summary_stats['rows_manual_edited'])}")
 
     print()
     return 0
@@ -284,7 +366,9 @@ def visualize_refinement_pipeline(zarr_path: str,
                                   refined_run: Optional[str] = None,
                                   save_path: Optional[str] = None,
                                   frame_range: Optional[Tuple[int, int]] = None,
-                                  show: bool = True) -> None:
+                                  show: bool = True,
+                                  show_curated: bool = False,
+                                  curated_detect_run: Optional[str] = None) -> None:
     """
     Visualize the refinement pipeline results.
 
@@ -334,8 +418,11 @@ def visualize_refinement_pipeline(zarr_path: str,
     params = dict(refined_group.attrs.get('parameters', {}))
     if params:
         print(f"\nParameters:")
-        print(f"  Max gap: {params.get('max_gap', '?')} frames")
-        print(f"  Method: {params.get('interpolation_method', '?')}")
+        if params.get('interpolation_enabled') is False:
+            print("  Interpolation: disabled")
+        else:
+            print(f"  Max gap: {params.get('max_gap', '?')} frames")
+            print(f"  Method: {params.get('interpolation_method', '?')}")
         print(f"  Filters: {params.get('filters_applied', [])}")
 
     detect_group = root[f'detect_runs/{source_detect}']
@@ -373,12 +460,34 @@ def visualize_refinement_pipeline(zarr_path: str,
 
     datasets: Dict[str, Dict] = {}
     datasets['original'] = load_original_detections(detect_group, quality_group, fps, frame_range)
+    curated_detect_run_name: Optional[str] = None
+    curated_crop_run_name: Optional[str] = None
+    curated_detect_group = None
+    if show_curated:
+        try:
+            curated_detect_run_name, curated_crop_run_name, curated_detect_group = _resolve_curated_stage(
+                root,
+                requested_run=curated_detect_run,
+            )
+        except Exception as exc:
+            print(f"Warning: unable to resolve curated refined run: {exc}")
+            curated_detect_group = None
+        if curated_detect_group is not None:
+            print(f"Curated refined run: {curated_detect_run_name}")
+            datasets['curated'] = load_refined_stage(
+                curated_detect_group,
+                'curated',
+                fps,
+                frame_range,
+                total_frames=datasets['original']['total_frames'],
+            )
     for stage_name in refined_stage_names:
         datasets[stage_name] = load_refined_stage(
-            refined_group[stage_name],
+            refined_group if stage_name == 'refined' else refined_group[stage_name],
             stage_name,
             fps,
             frame_range,
+            total_frames=datasets['original']['total_frames'],
         )
 
     stage_stats = {stage: compute_stage_stats(data) for stage, data in datasets.items()}
@@ -398,6 +507,8 @@ def visualize_refinement_pipeline(zarr_path: str,
 
     stage_colors = {
         'original': '#1f77b4',
+        'curated': '#8c564b',
+        'refined': '#8c564b',
         'filtered': '#2ca02c',
         'interpolated': '#9467bd',
     }
@@ -489,6 +600,12 @@ def visualize_refinement_pipeline(zarr_path: str,
             delta = stats['total_detections'] - stage_stats[prev_stage]['total_detections']
             cov_delta = stats['coverage_percent'] - stage_stats[prev_stage]['coverage_percent']
             title += f"\nΔ vs prev: {delta:+d} ({cov_delta:+.2f}%)"
+        if stats['manual_edited_detections'] > 0:
+            title += f"\nManual edited: {stats['manual_edited_detections']}"
+        source_detection_summary = stats.get('source_detection_summary') or {}
+        total_candidates = int(source_detection_summary.get('total_candidates', 0) or 0)
+        if total_candidates > 0:
+            title += f"\nSource candidates: {total_candidates}"
 
         ax.set_title(title, fontweight='bold', fontsize=10)
         ax.set_xlabel('X Position (normalized)')
@@ -727,6 +844,16 @@ def visualize_refinement_pipeline(zarr_path: str,
         print(f"  Coverage: {stats['coverage_percent']:.2f}% "
               f"({stats['frames_with_detections']} frames)")
         print(f"  Detections: {stats['total_detections']}")
+        if stats['manual_edited_detections'] > 0:
+            print(f"  Manual edited detections: {stats['manual_edited_detections']}")
+        source_detection_summary = stats.get('source_detection_summary') or {}
+        total_candidates = int(source_detection_summary.get('total_candidates', 0) or 0)
+        if total_candidates > 0:
+            print(f"  Source candidates: {total_candidates}")
+            for label in ("accepted", "filtered", "duplicate", "manual_clear"):
+                count = int(source_detection_summary.get(f"decision_{label}", 0) or 0)
+                if count > 0:
+                    print(f"  {label}: {count}")
     if 'filtered' in stage_stats:
         removed = stage_stats['original']['total_detections'] - stage_stats['filtered']['total_detections']
         print(f"\nDetections removed by filtering: {removed}")
@@ -734,6 +861,8 @@ def visualize_refinement_pipeline(zarr_path: str,
         baseline_stage = 'filtered' if 'filtered' in stage_stats else 'original'
         added = stage_stats['interpolated']['total_detections'] - stage_stats[baseline_stage]['total_detections']
         print(f"Detections added by interpolation: {added}")
+    if 'curated' in stage_stats:
+        print(f"Curated refined run used: {curated_detect_run_name}")
 
 
 def render_refinement_pipeline_png(
@@ -741,6 +870,8 @@ def render_refinement_pipeline_png(
     *,
     refined_run: Optional[str] = None,
     frame_range: Optional[Tuple[int, int]] = None,
+    show_curated: bool = False,
+    curated_detect_run: Optional[str] = None,
 ) -> Tuple[bytes, Dict[str, Optional[str]]]:
     """
     Render refinement pipeline visualization to PNG bytes (no interactive window).
@@ -760,13 +891,18 @@ def render_refinement_pipeline_png(
                 save_path=tmp_path,
                 frame_range=frame_range,
                 show=False,
+                show_curated=show_curated,
+                curated_detect_run=curated_detect_run,
             )
         if tmp_path is None or not os.path.exists(tmp_path):
             raise RuntimeError("refinement pipeline render did not produce a PNG file")
         png_bytes = Path(tmp_path).read_bytes()
         if not png_bytes:
             raise RuntimeError("refinement pipeline render produced an empty PNG file")
-        return png_bytes, {"refined_run": refined_run}
+        return png_bytes, {
+            "refined_run": refined_run,
+            "curated_detect_run": curated_detect_run,
+        }
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -800,6 +936,17 @@ Examples:
                         help='Frame range to visualize (inclusive start, exclusive end)')
     parser.add_argument('--list-runs', action='store_true',
                         help='List available refined runs and exit')
+    parser.add_argument(
+        '--show-curated',
+        dest='show_curated',
+        action='store_true',
+        help='Include the canonical curated refined surface as an additional comparison stage when available.',
+    )
+    parser.add_argument(
+        '--curated-detect-run',
+        dest='curated_detect_run',
+        help='Specific refined detect run to visualize when --show-curated is set.',
+    )
 
     args = parser.parse_args()
 
@@ -818,6 +965,8 @@ Examples:
         refined_run=args.refined_run,
         save_path=args.save,
         frame_range=frame_range,
+        show_curated=args.show_curated,
+        curated_detect_run=args.curated_detect_run,
     )
 
     return 0

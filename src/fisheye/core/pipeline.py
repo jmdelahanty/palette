@@ -1687,12 +1687,13 @@ Examples:
         "--crop-source",
         type=str,
         default=None,
-        choices=["detect", "filtered", "interpolated", "manual", "refined", "auto"],
+        choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         help=(
             "Detection source stage for cropping (default: config value). "
-            "'refined' targets the canonical curated refined surface; "
-            "'filtered'/'interpolated'/'manual' are legacy sparse "
-            "compatibility modes."
+            "'auto' prefers the canonical current refined surface and falls back "
+            "to raw detect; 'refined' requires the canonical curated refined "
+            "surface. 'manual'/'filtered'/'interpolated' are legacy sparse "
+            "compatibility modes for older archives."
         )
     )
 
@@ -1702,7 +1703,7 @@ Examples:
         default=None,
         help=(
             "Explicit detection source path inside the zarr (e.g. "
-            "detect_runs/<run> or the preferred current refined override "
+            "detect_runs/<run> or the canonical refined path "
             "refined_detect_runs/<run>/instances)"
         )
     )

@@ -151,18 +151,20 @@ def main() -> None:
     )
     parser.add_argument(
         "--crop-source",
-        choices=["detect", "filtered", "interpolated", "manual", "refined", "auto"],
+        choices=["auto", "refined", "detect", "manual", "filtered", "interpolated"],
         help=(
-            "Override crop source type. 'refined' targets the canonical "
-            "curated refined surface; 'filtered'/'interpolated'/'manual' are "
-            "legacy sparse compatibility modes."
+            "Override crop source type. 'auto' prefers the canonical current "
+            "refined surface and falls back to raw detect; 'refined' requires "
+            "the canonical curated refined surface. "
+            "'manual'/'filtered'/'interpolated' are legacy sparse "
+            "compatibility modes."
         ),
     )
     parser.add_argument(
         "--crop-source-path",
         help=(
             "Explicit detection source path (detect_runs/<run> or the "
-            "preferred current refined override "
+            "canonical refined path "
             "refined_detect_runs/<run>/instances)."
         ),
     )
