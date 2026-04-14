@@ -36,6 +36,10 @@ class RefinePlan:
 
 _utc_now = utc_now
 JsonLogger = SharedJsonLogger
+_DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE = (
+    "Interpolation overrides are deprecated and unsupported for refine_detect_batch. "
+    "The current sparse-first refine_detect workflow always runs with interpolation disabled."
+)
 
 
 def _resolve_root(paths: Optional[List[Path]]) -> List[Path]:
@@ -194,10 +198,6 @@ def _build_cmd(args: argparse.Namespace, zarr_path: Path, detect_run: Optional[s
         cmd.extend(["--detect-run", detect_run])
     if args.quality_run:
         cmd.extend(["--quality-run", args.quality_run])
-    if args.max_gap is not None:
-        cmd.extend(["--max-gap", str(args.max_gap)])
-    if args.method is not None:
-        cmd.extend(["--method", args.method])
     if args.remove_jumps:
         cmd.append("--remove-jumps")
     if args.no_remove_jumps:
@@ -215,6 +215,17 @@ def _build_cmd(args: argparse.Namespace, zarr_path: Path, detect_run: Optional[s
     return cmd
 
 
+def _reject_deprecated_interpolation_args(args: argparse.Namespace) -> None:
+    if args.max_gap is None and args.method is None:
+        return
+    flags: list[str] = []
+    if args.max_gap is not None:
+        flags.append("--max-gap")
+    if args.method is not None:
+        flags.append("--method")
+    raise SystemExit(f"{_DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE} Remove {' and '.join(flags)}.")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Batch refine detections for Palette Zarr archives.")
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
@@ -230,8 +241,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--detect-run", help="Detect run name to refine (defaults to latest).")
     parser.add_argument("--quality-run", help="Quality run to use (defaults to latest).")
     parser.add_argument("--config", default="pipeline_config.yaml", help="Config path.")
-    parser.add_argument("--max-gap", type=int, default=None, help="Max gap override for interpolation.")
-    parser.add_argument("--method", choices=["linear"], default=None, help="Interpolation method override.")
+    parser.add_argument("--max-gap", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--method", choices=["linear"], default=None, help=argparse.SUPPRESS)
     parser.add_argument("--remove-jumps", action="store_true", help="Remove jumps (override config).")
     parser.add_argument("--no-remove-jumps", action="store_true", help="Keep jumps (override config).")
     parser.add_argument("--remove-blips", action="store_true", help="Remove blips (override config).")
@@ -242,6 +253,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--log-dir", type=Path, default=None, help="Directory to store JSONL logs.")
 
     args = parser.parse_args(argv)
+    _reject_deprecated_interpolation_args(args)
 
     roots = _resolve_root(args.paths)
     skip_existing = not args.no_skip_existing

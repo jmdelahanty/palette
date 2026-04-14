@@ -74,7 +74,7 @@ STAGE_INFO = {
         'color': 'green'
     },
     'refine': {
-        'desc': 'Refine detections (filter & interpolate)',
+        'desc': 'Refine detections (filter artifacts, write curated instances)',
         'requires': ['detect'],
         'color': 'blue'
     },
@@ -113,6 +113,82 @@ VIZ_INFO = {
         'requires': ['detect']
     }
 }
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except Exception:
+        return int(default)
+
+
+def _build_refine_status_lines(refined_group: object) -> List[str]:
+    status_lines = ['✓ Complete']
+    attrs = getattr(refined_group, "attrs", {})
+    summary = attrs.get("summary_statistics") if isinstance(attrs, dict) else None
+
+    if "instances" in refined_group:  # type: ignore[operator]
+        instances = refined_group["instances"]  # type: ignore[index]
+        summary_map = summary if isinstance(summary, dict) else {}
+        rows_present = summary_map.get("rows_present")
+        if rows_present is None:
+            try:
+                rows_present = instances["frame_indices"].shape[0]
+            except Exception:
+                rows_present = 0
+        detail_parts: List[str] = []
+        filtered_out = summary_map.get("rows_filtered_out")
+        manual_edits = summary_map.get("rows_manual_edited")
+        multi_frames = summary_map.get("frames_multi_instance")
+        if _as_int(filtered_out, 0) > 0:
+            detail_parts.append(f"{_as_int(filtered_out):,} filtered out")
+        if _as_int(manual_edits, 0) > 0:
+            detail_parts.append(f"{_as_int(manual_edits):,} manual edits")
+        if _as_int(multi_frames, 0) > 0:
+            detail_parts.append(f"{_as_int(multi_frames):,} multi-instance frames")
+        detail_text = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        status_lines.append(f"  └─ instances: {_as_int(rows_present):,} curated rows{detail_text}")
+
+        if "source_detections" in refined_group:  # type: ignore[operator]
+            source_detections = refined_group["source_detections"]  # type: ignore[index]
+            source_candidates = summary_map.get("source_detection_candidates")
+            if source_candidates is None:
+                try:
+                    source_candidates = source_detections["frame_indices"].shape[0]
+                except Exception:
+                    source_candidates = 0
+            accepted = summary_map.get("source_detection_accepted")
+            accepted_text = ""
+            if accepted is not None:
+                accepted_text = f" ({_as_int(accepted):,} accepted)"
+            status_lines.append(
+                f"  └─ source_detections: {_as_int(source_candidates):,} candidates{accepted_text}"
+            )
+        return status_lines
+
+    if "filtered" in refined_group:  # type: ignore[operator]
+        filtered_grp = refined_group['filtered']  # type: ignore[index]
+        filtered_attrs = getattr(filtered_grp, "attrs", {})
+        total_dets = filtered_attrs.get('total_detections', 0) if isinstance(filtered_attrs, dict) else 0
+        dropped_dets = filtered_attrs.get('dropped_detections', 0) if isinstance(filtered_attrs, dict) else 0
+        status_lines.append(
+            f'  └─ filtered (legacy): {_as_int(total_dets):,} detections ({_as_int(dropped_dets):,} jumps removed)'
+        )
+
+    if "interpolated" in refined_group:  # type: ignore[operator]
+        interp_grp = refined_group['interpolated']  # type: ignore[index]
+        interp_attrs = getattr(interp_grp, "attrs", {})
+        total_dets = interp_attrs.get('total_detections', 0) if isinstance(interp_attrs, dict) else 0
+        interpolated_dets = (
+            interp_attrs.get('interpolated_detections', 0) if isinstance(interp_attrs, dict) else 0
+        )
+        gaps_filled = interp_attrs.get('gaps_filled', 0) if isinstance(interp_attrs, dict) else 0
+        status_lines.append(
+            f'  └─ interpolated (legacy): {_as_int(total_dets):,} detections '
+            f'({_as_int(interpolated_dets):,} added, {_as_int(gaps_filled):,} gaps filled)'
+        )
+
+    return status_lines
 
 
 class PipelineLauncherApp(App):
@@ -402,33 +478,7 @@ class PipelineLauncherApp(App):
                 if latest and latest in refined_root:
                     refined_group = refined_root[latest]
                 
-                # Build detailed status with sub-items
-                status_lines = ['✓ Complete']
-                
-                # Check filtered stage
-                if 'filtered' in refined_group:
-                    filtered_grp = refined_group['filtered']
-                    filtered_attrs = filtered_grp.attrs
-                    
-                    total_dets = filtered_attrs.get('total_detections', 0)
-                    dropped_dets = filtered_attrs.get('dropped_detections', 0)
-                    
-                    status_lines.append(f'  └─ filtered: {total_dets:,} detections ({dropped_dets} jumps removed)')
-                
-                # Check interpolated stage
-                if 'interpolated' in refined_group:
-                    interp_grp = refined_group['interpolated']
-                    interp_attrs = interp_grp.attrs
-                    
-                    total_dets = interp_attrs.get('total_detections', 0)
-                    original_dets = interp_attrs.get('original_detections', 0)
-                    interpolated_dets = interp_attrs.get('interpolated_detections', 0)
-                    gaps_filled = interp_attrs.get('gaps_filled', 0)
-                    
-                    status_lines.append(f'  └─ interpolated: {total_dets:,} detections ({interpolated_dets} added, {gaps_filled} gaps filled)')
-                
-                # Join all lines
-                status['refine'] = '\n'.join(status_lines)
+                status['refine'] = '\n'.join(_build_refine_status_lines(refined_group))
             
             # Check arena assignment
             if 'arena_assignment_runs' in root and len(list(root['arena_assignment_runs'].group_keys())) > 0:
@@ -618,35 +668,19 @@ class PipelineLauncherApp(App):
                         yield Label("  └─ Crop source:", classes="info_text")
                         yield Select(
                         [
+                            ("Auto (prefer refined current runs)", "auto"),
+                            ("Refined curated instances (canonical)", "refined"),
                             ("Original detections", "detect"),
-                            ("Filtered (jumps removed)", "filtered"),
-                            ("Gaps filled (interpolated)", "interpolated"),
-                            ("Manual (reviewed)", "manual"),
-                            ("Preferred (review status)", "preferred"),
-                            ("Auto (preferred fallback)", "auto"),
+                            ("Manual sparse group (legacy)", "manual"),
+                            ("Filtered sparse group (legacy)", "filtered"),
+                            ("Interpolated sparse group (legacy)", "interpolated"),
                         ],
-                        value="detect",
+                        value="auto",
                         id="crop_source_select",
                         classes="stage_option"
                     )
                     if stage == 'refine':
-                        yield Label("  └─ Refinement parameters:", classes="info_text")
-                        yield Label("      Max gap (frames):", classes="info_text")
-                        yield Input(
-                            placeholder="e.g. 50",
-                            value="50",
-                            id="refine_max_gap_input",
-                            classes="stage_option"
-                        )
-                        yield Label("      Interpolation method:", classes="info_text")
-                        yield Select(
-                            [
-                                ("Linear", "linear"),
-                            ],
-                            value="linear",
-                            id="refine_method_select",
-                            classes="stage_option"
-                        )
+                        yield Label("  └─ Refinement filters:", classes="info_text")
                         yield Checkbox(
                             "      Remove jumps",
                             value=True,
@@ -682,7 +716,7 @@ class PipelineLauncherApp(App):
 
                 yield Button("Open Visualizer", id="run_viz_button", variant="primary")
                 yield Checkbox(
-                    "Show refined/interpolated detections (orange overlay)",
+                    "Show refined detections (orange overlay)",
                     value=True,
                     id="show_refined_checkbox",
                     classes="stage_option"
@@ -839,10 +873,10 @@ class PipelineLauncherApp(App):
         """Get the selected crop source from dropdown."""
         try:
             crop_source_select = self.query_one("#crop_source_select", Select)
-            return crop_source_select.value if crop_source_select.value != Select.BLANK else "detect"
+            return crop_source_select.value if crop_source_select.value != Select.BLANK else "auto"
         except Exception:
             # Fallback if widget not found
-            return "detect"
+            return "auto"
     
     def _get_training_data_options(self) -> Dict[str, Optional[Any]]:
         """Read training data sampling options from the UI."""
@@ -870,24 +904,10 @@ class PipelineLauncherApp(App):
     def _get_refine_options(self) -> Dict[str, Optional[Any]]:
         """Read refinement parameter overrides from the UI."""
         options: Dict[str, Optional[Any]] = {
-            "max_gap": None,
-            "method": None,
             "remove_jumps": None,
             "remove_blips": None,
         }
         try:
-            max_gap_input = self.query_one("#refine_max_gap_input", Input)
-            max_gap_str = max_gap_input.value.strip()
-            if max_gap_str:
-                try:
-                    options["max_gap"] = max(0, int(max_gap_str))
-                except ValueError:
-                    self.status_message = "⚠️ Refinement max gap must be an integer."
-                    if self.progress_log:
-                        self.progress_log.write("[yellow]⚠️ Refinement max gap must be an integer.[/yellow]\n")
-            method_select = self.query_one("#refine_method_select", Select)
-            if method_select.value and method_select.value != Select.BLANK:
-                options["method"] = method_select.value
             jumps_checkbox = self.query_one("#refine_remove_jumps_checkbox", Checkbox)
             options["remove_jumps"] = bool(jumps_checkbox.value)
             blips_checkbox = self.query_one("#refine_remove_blips_checkbox", Checkbox)
@@ -1074,7 +1094,7 @@ class PipelineLauncherApp(App):
             crop_source = self._get_crop_source_selection()
             
             # Check if refined source is available
-            if crop_source in ['filtered', 'interpolated', 'manual']:
+            if crop_source in ['filtered', 'interpolated', 'manual', 'refined']:
                 if not self._check_refined_runs_exist(zarr_path):
                     self.status_message = f" Error: No refined detection runs found for '{crop_source}' source"
                     if self.progress_log:
@@ -1091,10 +1111,6 @@ class PipelineLauncherApp(App):
         
         if 'refine' in stages:
             refine_opts = self._get_refine_options()
-            if refine_opts['max_gap'] is not None:
-                cmd.extend(["--refine-max-gap", str(refine_opts['max_gap'])])
-            if refine_opts['method']:
-                cmd.extend(["--refine-method", refine_opts['method']])
             if refine_opts['remove_jumps'] is not None:
                 cmd.append("--refine-remove-jumps" if refine_opts['remove_jumps'] else "--refine-keep-jumps")
             if refine_opts['remove_blips'] is not None:
@@ -1103,10 +1119,6 @@ class PipelineLauncherApp(App):
             if self.progress_log and not dry_run:
                 msg = "[cyan]  Refinement overrides:";
                 parts = []
-                if refine_opts['max_gap'] is not None:
-                    parts.append(f"max_gap={refine_opts['max_gap']}")
-                if refine_opts['method']:
-                    parts.append(f"method={refine_opts['method']}")
                 if refine_opts['remove_jumps'] is not None:
                     parts.append("remove_jumps=" + ("true" if refine_opts['remove_jumps'] else "false"))
                 if refine_opts['remove_blips'] is not None:
@@ -1694,7 +1706,7 @@ class PipelineLauncherApp(App):
             if show_refined_checkbox.value:
                 cmd.append("--show-refined")
                 if self.progress_log:
-                    self.progress_log.write("[dim]  └─ With refined/interpolated overlay[/dim]\n")
+                    self.progress_log.write("[dim]  └─ With refined overlay[/dim]\n")
         except Exception:
             pass  # Checkbox might not exist for all visualizers
 

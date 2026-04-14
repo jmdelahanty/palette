@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
 import zarr
 
+from fisheye.utils import refine_detect_batch as mod
 from fisheye.utils.refine_detect_batch import _build_plans
 
 
@@ -105,3 +107,9 @@ def test_build_plans_filter_uses_name_suffix_when_attr_missing(tmp_path: Path) -
     assert by_name[inferred_analysis.name].status == "ok"
     assert by_name[unknown.name].status == "skipped"
     assert "found=unknown" in (by_name[unknown.name].reason or "")
+
+
+@pytest.mark.parametrize("argv", [["--max-gap", "5"], ["--method", "linear"]])
+def test_main_rejects_deprecated_interpolation_args(argv: list[str]) -> None:
+    with pytest.raises(SystemExit, match="Interpolation overrides are deprecated and unsupported"):
+        mod.main(argv)

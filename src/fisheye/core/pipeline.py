@@ -37,6 +37,28 @@ REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
 LEGACY_REFINED_KEYPOINT_GROUP = "keypoints_refined_runs"
+_DEPRECATED_REFINE_INTERPOLATION_OVERRIDE_MESSAGE = (
+    "Interpolation overrides are deprecated and unsupported for refine_detect. "
+    "The current sparse-first refine_detect workflow always runs with interpolation disabled."
+)
+
+
+def _reject_deprecated_refine_interpolation_overrides(
+    *,
+    refine_max_gap: Optional[int] = None,
+    refine_method: Optional[str] = None,
+) -> None:
+    if refine_max_gap is None and refine_method is None:
+        return
+    flags: list[str] = []
+    if refine_max_gap is not None:
+        flags.append("--refine-max-gap")
+    if refine_method is not None:
+        flags.append("--refine-method")
+    raise ValueError(
+        f"{_DEPRECATED_REFINE_INTERPOLATION_OVERRIDE_MESSAGE} "
+        f"Remove {' and '.join(flags)}."
+    )
 
 
 def _get_group_with_fallback(root: zarr.Group, primary: str, legacy: str) -> Optional[zarr.Group]:
@@ -264,8 +286,6 @@ class Pipeline:
             },
             'refine_detect': {
                 'filters': {'remove_jumps': True, 'remove_blips': False},
-                'max_gap': 20,
-                'interpolation_method': 'linear'
             },
             'refine_keypoints': {
                 'chunk_size': 4096,
@@ -875,15 +895,17 @@ class Pipeline:
         )
     
     def _run_refine(self) -> None:
-        """Run detection refinement stage (filter & interpolate detections)."""
+        """Run detection refinement stage (filter artifacts, write curated instances)."""
+        _reject_deprecated_refine_interpolation_overrides(
+            refine_max_gap=self.config.refine_max_gap,
+            refine_method=self.config.refine_method,
+        )
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
         
         run_name = create_refined_run(
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
-            max_gap=self.config.refine_max_gap,
-            interpolation_method=self.config.refine_method,
             remove_jumps=self.config.refine_remove_jumps,
             remove_blips=self.config.refine_remove_blips,
             console=self.console,
@@ -1327,8 +1349,7 @@ class Pipeline:
                 root = zarr.open(self.config.zarr_path, mode='r')
                 experiment_setup = root.attrs.get('experiment_setup', {})
                 
-                # Suggest interpolation and analysis
-                status_text += "\n  • Run interpolation: python batch_roi_interpolator.py"
+                # Suggest downstream analysis
                 status_text += "\n  • Analyze behavior: python fish_behavior_metrics.py"
                 status_text += "\n  • Visualize: python roi_heatmap_generator.py"
         
@@ -1465,19 +1486,19 @@ def main():
         epilog="""
 Examples:
   # Run full pipeline
-  python -m fisheye data.zarr --video-path video.mp4 --stages all
+  scripts/py -m fisheye data.zarr --video-path video.mp4 --stages all
   
   # Run specific stages
-  python -m fisheye data.zarr --stages import background detect
+  scripts/py -m fisheye data.zarr --stages import background detect
   
   # Tune parameters before running pipeline
-  python -m fisheye data.zarr --tune mask
-  python -m fisheye data.zarr --tune detect --frame 100
-  python -m fisheye data.zarr --tune subject-mask --frame 250
-  python -m fisheye data.zarr --tune keypoint --frame 50
+  scripts/py -m fisheye data.zarr --tune mask
+  scripts/py -m fisheye data.zarr --tune detect --frame 100
+  scripts/py -m fisheye data.zarr --tune subject-mask --frame 250
+  scripts/py -m fisheye data.zarr --tune keypoint --frame 50
   
   # List available tuners
-  python -m fisheye --list-tuners
+  scripts/py -m fisheye --list-tuners
         """
     )
     
@@ -1599,14 +1620,14 @@ Examples:
     parser.add_argument(
         "--refine-max-gap",
         type=int,
-        help="Override maximum gap (in frames) for refinement"
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
         "--refine-method",
         type=str,
         choices=['linear'],
-        help="Interpolation method for refinement"
+        help=argparse.SUPPRESS,
     )
 
     parser.set_defaults(refine_remove_jumps=None, refine_remove_blips=None)
@@ -1773,6 +1794,14 @@ Examples:
         parser.error(
             "--aggregate-training-data-card cannot be combined with --no-aggregate-training-data-card."
         )
+
+    try:
+        _reject_deprecated_refine_interpolation_overrides(
+            refine_max_gap=args.refine_max_gap,
+            refine_method=args.refine_method,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     
     # Validate requirements for normal pipeline operation
     if not args.zarr_path:

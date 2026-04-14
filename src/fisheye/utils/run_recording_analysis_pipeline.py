@@ -45,7 +45,6 @@ class RecordingPipelineOptions:
     top_k: int
     refine_detect: bool
     refine_config: Optional[Path]
-    refine_max_gap: Optional[int]
     register: bool
     registry_path: Path
     import_opts: RecordingImportOptions
@@ -147,8 +146,6 @@ def run_refine_detect(plan: RecordingAnalysisPlan, opts: RecordingPipelineOption
     ]
     if opts.refine_config is not None:
         cmd.extend(["--config", str(opts.refine_config)])
-    if opts.refine_max_gap is not None:
-        cmd.extend(["--max-gap", str(opts.refine_max_gap)])
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, check=False)
     return result.returncode == 0, result.returncode, cmd
@@ -347,7 +344,6 @@ def _build_pipeline_options(args: argparse.Namespace, registry_path: Path) -> Re
         top_k=int(args.top_k),
         refine_detect=bool(args.refine_detect),
         refine_config=args.refine_config,
-        refine_max_gap=args.refine_max_gap,
         register=bool(args.register),
         registry_path=registry_path,
         import_opts=_build_import_options(args),
@@ -446,7 +442,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=Path("configs/fisheye/default.yaml"),
         help="Config passed to refine_detect.",
     )
-    parser.add_argument("--refine-max-gap", type=int, help="Optional max-gap override for refine_detect.")
+    parser.add_argument("--refine-max-gap", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--keypoints", action="store_true", help="Run keypoints after detect/refine_detect.")
     parser.add_argument(
         "--refine-keypoints",
@@ -464,6 +460,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
 
     args = parser.parse_args(argv)
+    if args.refine_max_gap is not None:
+        raise SystemExit(
+            "Interpolation overrides are deprecated and unsupported for the recording analysis pipeline. "
+            "Remove --refine-max-gap; refine_detect now always runs with interpolation disabled."
+        )
     if not args.apply:
         args.dry_run = True
 

@@ -219,3 +219,13 @@ def test_main_forwards_keypoint_stage_toggles_to_pipeline(monkeypatch, tmp_path:
     assert captured["run_keypoints"] is True
     assert captured["refine_keypoints"] is True
     assert captured["keypoints_config"] == Path("configs/fisheye/default.yaml")
+
+
+def test_main_rejects_deprecated_refine_max_gap(tmp_path: Path) -> None:
+    try:
+        analysis_import.main([str(tmp_path), "--refine-max-gap", "5"])
+    except SystemExit as exc:
+        assert "Interpolation overrides are deprecated and unsupported" in str(exc)
+        assert "--refine-max-gap" in str(exc)
+    else:  # pragma: no cover - defensive branch
+        raise AssertionError("Expected SystemExit when --refine-max-gap is passed.")

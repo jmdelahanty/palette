@@ -2,13 +2,13 @@
 """
 Detection Refinement Pipeline
 
-Filters and interpolates detection data based on quality labels.
+Builds canonical refined-detect surfaces from raw detections.
 
 Workflow:
 1. Load detection data and quality labels
-2. Filter: Remove jumps/artifacts (creates filtered/)
-3. Interpolate: Fill gaps between clean detections (creates interpolated/)
-4. Save both stages with full metadata and traceability
+2. Filter: Remove jumps/artifacts from the curated surface
+3. Write sparse curated `instances/` and `source_detections/`
+4. Refresh the dense compatibility root and save metadata
 """
 
 import numpy as np
@@ -22,7 +22,7 @@ from rich.console import Console
 
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
-from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.refined_detect_curation import write_curated_refined_detect_surfaces
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
@@ -30,6 +30,25 @@ from ..shared.type_conversions import normalize_attr
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 _REFINED_DETECT_STATUS_SOURCE = "runtime_refine_detect"
+_DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE = (
+    "Interpolation overrides are deprecated and unsupported for refine_detect. "
+    "The current sparse-first refine_detect workflow always runs with interpolation disabled."
+)
+
+
+def _reject_deprecated_interpolation_overrides(
+    *,
+    max_gap: Optional[int] = None,
+    interpolation_method: Optional[str] = None,
+) -> None:
+    if max_gap is None and interpolation_method is None:
+        return
+    flags: list[str] = []
+    if max_gap is not None:
+        flags.append("--max-gap")
+    if interpolation_method is not None:
+        flags.append("--method")
+    raise ValueError(f"{_DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE} Remove {' and '.join(flags)}.")
 
 
 def _emit_refined_detect_status(
@@ -483,26 +502,86 @@ def interpolate_detections(
     )
 
 
-def _build_filtered_reason_labels(total_detections: int) -> np.ndarray:
-    """Build per-detection reason labels for filtered detections."""
-    return np.full(int(total_detections), "clean", dtype=object)
+def _filtered_reason_from_quality_label(label: int) -> str:
+    if label == 4:
+        return "multi_detection"
+    if label == 2:
+        return "filtered_blip"
+    if label == 3:
+        return "filtered_jump"
+    return f"filtered_quality_{int(label)}"
 
 
-def _build_interpolated_reason_labels(detection_source: np.ndarray) -> np.ndarray:
-    """Build per-detection reason labels for interpolated detections."""
-    source = np.asarray(detection_source, dtype=np.int8)
-    return np.where(source == 1, "interpolated", "clean").astype(object)
+def _build_sparse_refined_inputs_from_filtered(
+    *,
+    raw_bboxes: np.ndarray,
+    raw_scores: np.ndarray,
+    raw_frame_indices: np.ndarray,
+    raw_class_ids: np.ndarray,
+    detection_quality_labels: np.ndarray,
+    interp_bboxes: np.ndarray,
+    interp_scores: np.ndarray,
+    interp_frame_indices: np.ndarray,
+    interp_class_ids: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    raw_bboxes_arr = np.asarray(raw_bboxes, dtype=np.float64).reshape(-1, 4)
+    raw_scores_arr = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
+    raw_frame_indices_arr = np.asarray(raw_frame_indices, dtype=np.int32).reshape(-1)
+    raw_class_ids_arr = np.asarray(raw_class_ids, dtype=np.int32).reshape(-1)
+    quality_labels_arr = np.asarray(detection_quality_labels, dtype=np.int8).reshape(-1)
+    filtered_bboxes_arr = np.asarray(interp_bboxes, dtype=np.float64).reshape(-1, 4)
+    filtered_scores_arr = np.asarray(interp_scores, dtype=np.float32).reshape(-1)
+    filtered_frame_indices_arr = np.asarray(interp_frame_indices, dtype=np.int32).reshape(-1)
+    filtered_class_ids_arr = np.asarray(interp_class_ids, dtype=np.int32).reshape(-1)
 
+    if not (
+        raw_bboxes_arr.shape[0]
+        == raw_scores_arr.shape[0]
+        == raw_frame_indices_arr.shape[0]
+        == raw_class_ids_arr.shape[0]
+        == quality_labels_arr.shape[0]
+    ):
+        raise ValueError("Raw detect arrays and quality labels must agree on row count.")
+    if not (
+        filtered_bboxes_arr.shape[0]
+        == filtered_scores_arr.shape[0]
+        == filtered_frame_indices_arr.shape[0]
+        == filtered_class_ids_arr.shape[0]
+    ):
+        raise ValueError("Filtered detect arrays must agree on row count.")
 
-def _write_reason_array(group: zarr.Group, reason: np.ndarray, chunk_size: int) -> None:
-    """Write reason labels in both string and Crimson-compatible byte formats."""
-    write_reason_columns(
-        group,
-        np.asarray(reason, dtype=object),
-        chunk_size,
-        include_reason_text=True,
-        overwrite=False,
+    kept_raw_indices = np.flatnonzero(quality_labels_arr == 0).astype(np.int32, copy=False)
+    if kept_raw_indices.shape[0] != filtered_frame_indices_arr.shape[0]:
+        raise ValueError(
+            "Filtered detection rows do not match the raw keep-mask derived from detection_quality_labels."
+        )
+
+    source_decision_labels = np.full(raw_frame_indices_arr.shape[0], "filtered", dtype=object)
+    source_reason_labels = np.asarray(
+        [_filtered_reason_from_quality_label(int(label)) for label in quality_labels_arr.tolist()],
+        dtype=object,
     )
+    if kept_raw_indices.size:
+        source_decision_labels[kept_raw_indices] = "accepted"
+        source_reason_labels[kept_raw_indices] = "clean"
+
+    return {
+        "instance_frame_indices": filtered_frame_indices_arr,
+        "instance_bbox_norm_coords": filtered_bboxes_arr,
+        "instance_source_kind_labels": np.full(filtered_frame_indices_arr.shape[0], "raw_detect", dtype=object),
+        "instance_reason_labels": np.full(filtered_frame_indices_arr.shape[0], "clean", dtype=object),
+        "instance_source_detect_row_index": kept_raw_indices,
+        "instance_manual_edit_flags": np.zeros(filtered_frame_indices_arr.shape[0], dtype=bool),
+        "instance_confidence_scores": filtered_scores_arr,
+        "instance_class_ids": filtered_class_ids_arr,
+        "source_detection_source_detect_row_index": np.arange(raw_frame_indices_arr.shape[0], dtype=np.int32),
+        "source_detection_frame_indices": raw_frame_indices_arr,
+        "source_detection_bbox_norm_coords": raw_bboxes_arr,
+        "source_detection_decision_labels": source_decision_labels,
+        "source_detection_reason_labels": source_reason_labels,
+        "source_detection_confidence_scores": raw_scores_arr,
+        "source_detection_class_ids": raw_class_ids_arr,
+    }
 
 
 def get_refinement_parameters(
@@ -521,9 +600,11 @@ def get_refinement_parameters(
     """
     # Start with config defaults
     refine_params = config.get('refine_detect', {}).copy()
+    refine_params.pop('max_gap', None)
+    refine_params.pop('interpolation_method', None)
     refine_params.setdefault('filters', {'remove_jumps': True, 'remove_blips': False})
-    refine_params.setdefault('max_gap', 50)
-    refine_params.setdefault('interpolation_method', 'linear')
+    refine_params.setdefault('max_gap', 0)
+    refine_params.setdefault('interpolation_method', 'disabled')
     
     # Apply CLI overrides if provided
     if cli_overrides:
@@ -552,15 +633,15 @@ def create_refined_run(
     require_detect_quality: bool = True,
 ) -> str:
     """
-    Create a refined detection run with filtered and interpolated data.
+    Create a refined detection run with sparse-first curated detect surfaces.
     
     Args:
         zarr_path: Path to zarr file
         detect_run: Source detect run (default: latest)
         quality_run: Source quality run (default: latest)
         config: Config dictionary (optional, will load if not provided)
-        max_gap: Maximum gap size for interpolation (overrides config)
-        interpolation_method: Method for interpolation (overrides config)
+        max_gap: Deprecated compatibility argument; ignored because interpolation is disabled
+        interpolation_method: Deprecated compatibility argument; ignored because interpolation is disabled
         remove_jumps: Remove jump artifacts (overrides config)
         remove_blips: Remove blip artifacts (overrides config)
         console: Rich console for output
@@ -571,7 +652,7 @@ def create_refined_run(
     """
     if console is None:
         console = Console()
-    
+
     console.rule("[bold]Detection Refinement[/bold]")
     
     import time
@@ -586,16 +667,28 @@ def create_refined_run(
                 config = yaml.safe_load(f)
         else:
             config = {}
-    
-    # Build CLI overrides
-    cli_overrides = {}
-    if max_gap is not None:
-        cli_overrides['max_gap'] = max_gap
-    if interpolation_method is not None:
-        cli_overrides['interpolation_method'] = interpolation_method
+
+    _reject_deprecated_interpolation_overrides(
+        max_gap=max_gap,
+        interpolation_method=interpolation_method,
+    )
+
+    refine_config = config.get("refine_detect", {}) if isinstance(config, dict) else {}
+    configured_max_gap = refine_config.get("max_gap")
+    configured_method = refine_config.get("interpolation_method")
+    if configured_max_gap not in (None, 0):
+        console.print(
+            "[yellow]Warning:[/yellow] refine_detect.max_gap is deprecated and ignored; "
+            "the sparse-first refine_detect workflow no longer interpolates gaps."
+        )
+    if configured_method not in (None, "disabled"):
+        console.print(
+            "[yellow]Warning:[/yellow] refine_detect.interpolation_method is deprecated and ignored; "
+            "the sparse-first refine_detect workflow no longer interpolates gaps."
+        )
     
     # Get parameters
-    params, param_source = get_refinement_parameters(config, cli_overrides if cli_overrides else None)
+    params, param_source = get_refinement_parameters(config, None)
     
     # Handle filter overrides
     filters_config = params.get('filters', {'remove_jumps': True, 'remove_blips': False})
@@ -613,8 +706,8 @@ def create_refined_run(
     if filters_config.get('remove_blips', False):
         filters.append('remove_blips')
     
-    max_gap_val = params['max_gap']
-    interp_method = params['interpolation_method']
+    max_gap_val = 0
+    interp_method = 'disabled'
     refine_mode = "standard"
     
     # Open zarr
@@ -650,16 +743,14 @@ def create_refined_run(
         console=console,
     )
     if sampled_import:
-        console.print("[yellow]⚠ Sampled training import detected; disabling refine filters and interpolation.[/yellow]")
+        console.print("[yellow]⚠ Sampled training import detected; disabling refine filters.[/yellow]")
         detection_quality_labels = np.zeros_like(detection_quality_labels)
         filters = []
-        max_gap_val = 0
         refine_mode = "passthrough"
         param_source = "sampled_import_guard"
 
     console.print(f"Parameters source: [cyan]{param_source}[/cyan]")
-    console.print(f"  Max gap: {max_gap_val}")
-    console.print(f"  Interpolation: {interp_method}")
+    console.print("  Interpolation: disabled")
     console.print(f"  Filters: {filters}")
     if sampled_import:
         console.print("  Refine mode: passthrough (sampled import)")
@@ -733,32 +824,25 @@ def create_refined_run(
     for reason, count in drop_stats['reasons'].items():
         console.print(f"    - {reason}: {count}")
     
-    # Step 2: Interpolate
-    console.print(f"\n[bold]Step 2: Interpolation[/bold]")
-    console.print(f"  Max gap: {max_gap_val} frames")
-    console.print(f"  Method: {interp_method}")
-    
-    (interp_bboxes, interp_scores, interp_counts,
-     interp_frame_indices, interp_class_ids, detection_source, interp_stats) = interpolate_detections(
-        filtered_bboxes,
-        filtered_scores,
-        filtered_frame_indices,
-        filtered_class_ids,
-        num_frames,
-        max_gap_val,
-        interp_method,
+    # Step 2: Build sparse curated surfaces
+    console.print(f"\n[bold]Step 2: Sparse Curated Surfaces[/bold]")
+    console.print("  Interpolation: disabled")
+
+    sparse_refined = _build_sparse_refined_inputs_from_filtered(
+        raw_bboxes=bbox_coords,
+        raw_scores=scores,
+        raw_frame_indices=frame_indices,
+        raw_class_ids=class_ids,
+        detection_quality_labels=detection_quality_labels,
+        interp_bboxes=filtered_bboxes,
+        interp_scores=filtered_scores,
+        interp_frame_indices=filtered_frame_indices,
+        interp_class_ids=filtered_class_ids,
     )
-    
-    console.print(f"  Gaps filled: {interp_stats['gaps_filled']}")
-    console.print(f"  Interpolated detections: {interp_stats['interpolated_detections']}")
-    if interp_stats['gaps_filled'] > 0:
-        console.print(f"  Gap sizes: {interp_stats['min_gap_size']}-{interp_stats['max_gap_size']} "
-                     f"(mean: {interp_stats['mean_gap_size']:.1f}) frames")
-    
+
     # Calculate coverage comparison
     original_coverage = (np.sum(frame_counts > 0) / num_frames) * 100
-    filtered_coverage = (np.sum(filtered_counts > 0) / num_frames) * 100
-    interpolated_coverage = (np.sum(interp_counts > 0) / num_frames) * 100
+    refined_coverage = (np.sum(filtered_counts > 0) / num_frames) * 100
     
     comparison_stats = {
         'original': {
@@ -766,19 +850,12 @@ def create_refined_run(
             'frames_with_detections': int(np.sum(frame_counts > 0)),
             'coverage_percent': float(original_coverage)
         },
-        'filtered': {
+        'refined': {
             'total_detections': int(len(filtered_bboxes)),
             'frames_with_detections': int(np.sum(filtered_counts > 0)),
-            'coverage_percent': float(filtered_coverage),
+            'coverage_percent': float(refined_coverage),
             'detections_removed': int(drop_stats['total_dropped']),
-            'coverage_loss': float(filtered_coverage - original_coverage)
-        },
-        'interpolated': {
-            'total_detections': int(len(interp_bboxes)),
-            'frames_with_detections': int(np.sum(interp_counts > 0)),
-            'coverage_percent': float(interpolated_coverage),
-            'detections_added': int(interp_stats['interpolated_detections']),
-            'coverage_gain': float(interpolated_coverage - filtered_coverage)
+            'coverage_delta': float(refined_coverage - original_coverage),
         }
     }
     
@@ -803,11 +880,12 @@ def create_refined_run(
     created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
 
     parameters_payload = {
-        'max_gap': max_gap_val,
-        'interpolation_method': interp_method,
         'filters_applied': filters,
         'parameter_source': param_source,
         'refine_mode': refine_mode,
+        'interpolation_enabled': False,
+        'interpolation_method': 'disabled',
+        'max_gap': 0,
         'sampled_import': sampled_import,
         'sampled_import_meta': sampled_meta,
         'detect_quality_guardrail_requested': bool(require_detect_quality),
@@ -818,7 +896,7 @@ def create_refined_run(
     refined_group.attrs['source_quality_run'] = resolved_quality_run or 'N/A'
     refined_group.attrs['refinement_timestamp'] = created_timestamp
     refined_group.attrs['processing_time_seconds'] = float(duration)
-    refined_group.attrs['operations'] = ['filter', 'interpolate'] if refine_mode == "standard" else ['passthrough']
+    refined_group.attrs['operations'] = ['filter'] if refine_mode == "standard" else ['passthrough']
     refined_group.attrs['parameters'] = parameters_payload
     refined_group.attrs['coverage_comparison'] = comparison_stats
     refined_group.attrs['coverage_frames_total'] = int(num_frames)
@@ -880,82 +958,49 @@ def create_refined_run(
     )
     write_stage_provenance(refined_group, provenance_record)
     
-    # Save filtered data
-    filtered_grp = refined_group.create_group('filtered')
-    filtered_grp.create_array('bbox_norm_coords', data=filtered_bboxes, chunks=(1000, 4))
-    filtered_grp.create_array('scores', data=filtered_scores, chunks=(1000,))
-    filtered_grp.create_array('frame_indices', data=filtered_frame_indices, chunks=(1000,))
-    filtered_grp.create_array('class_ids', data=filtered_class_ids, chunks=(1000,))
-    filtered_grp.create_array('frame_counts', data=filtered_counts, chunks=(10000,))
-    filtered_grp.create_array('n_detections', data=filtered_counts, chunks=(10000,))
-    filtered_grp.create_array('frame_mapping', data=filtered_frame_indices, chunks=(1000,))
-    filtered_detection_source = np.zeros(len(filtered_bboxes), dtype='i1')
-    filtered_grp.create_array('detection_source', data=filtered_detection_source, chunks=(1000,))
-    filtered_reason = _build_filtered_reason_labels(len(filtered_bboxes))
-    _write_reason_array(filtered_grp, filtered_reason, 1000)
-    filtered_column_fields = [
-        'frame_indices',
-        'bbox_norm_coords',
-        'scores',
-        'class_ids',
-        'detection_source',
-        'reason_bytes',
-        'reason',
-    ]
-    filtered_grp.attrs['storage_layout'] = 'columnar'
-    filtered_grp.attrs['column_fields'] = filtered_column_fields
-    filtered_grp.attrs['field_names'] = filtered_column_fields
-    
-    filtered_grp.attrs['total_detections'] = int(len(filtered_bboxes))
-    filtered_grp.attrs['dropped_detections'] = drop_stats['total_dropped']
-    filtered_grp.attrs['drop_reasons'] = drop_stats['reasons']
-    
-    # Save interpolated data
-    interp_grp = refined_group.create_group('interpolated')
-    interp_grp.create_array('bbox_norm_coords', data=interp_bboxes, chunks=(1000, 4))
-    interp_grp.create_array('scores', data=interp_scores, chunks=(1000,))
-    interp_grp.create_array('frame_indices', data=interp_frame_indices, chunks=(1000,))
-    interp_grp.create_array('class_ids', data=interp_class_ids, chunks=(1000,))
-    interp_grp.create_array('frame_counts', data=interp_counts, chunks=(10000,))
-    interp_grp.create_array('n_detections', data=interp_counts, chunks=(10000,))
-    interp_grp.create_array('frame_mapping', data=interp_frame_indices, chunks=(1000,))
-    interp_grp.create_array('detection_source', data=detection_source, chunks=(1000,))
-    interp_reason = _build_interpolated_reason_labels(detection_source)
-    _write_reason_array(interp_grp, interp_reason, 1000)
-    interpolated_column_fields = [
-        'frame_indices',
-        'bbox_norm_coords',
-        'scores',
-        'class_ids',
-        'detection_source',
-        'reason_bytes',
-        'reason',
-    ]
-    interp_grp.attrs['storage_layout'] = 'columnar'
-    interp_grp.attrs['column_fields'] = interpolated_column_fields
-    interp_grp.attrs['field_names'] = interpolated_column_fields
-    
-    interp_grp.attrs['total_detections'] = int(len(interp_bboxes))
-    interp_grp.attrs['original_detections'] = int(len(filtered_bboxes))
-    interp_grp.attrs['interpolated_detections'] = interp_stats['interpolated_detections']
-    interp_grp.attrs['gaps_filled'] = interp_stats['gaps_filled']
-    interp_grp.attrs['interpolation_stats'] = interp_stats
-    
+    write_curated_refined_detect_surfaces(
+        root,
+        zarr_path=Path(zarr_path).expanduser().resolve(),
+        refined_run_name=run_name,
+        instance_frame_indices=np.asarray(sparse_refined["instance_frame_indices"], dtype=np.int32),
+        instance_bbox_norm_coords=np.asarray(sparse_refined["instance_bbox_norm_coords"], dtype=np.float64),
+        instance_source_kind_labels=np.asarray(sparse_refined["instance_source_kind_labels"], dtype=object),
+        instance_reason_labels=np.asarray(sparse_refined["instance_reason_labels"], dtype=object),
+        instance_source_detect_row_index=np.asarray(sparse_refined["instance_source_detect_row_index"], dtype=np.int32),
+        instance_manual_edit_flags=np.asarray(sparse_refined["instance_manual_edit_flags"], dtype=bool),
+        instance_confidence_scores=np.asarray(sparse_refined["instance_confidence_scores"], dtype=np.float32),
+        instance_class_ids=np.asarray(sparse_refined["instance_class_ids"], dtype=np.int32),
+        source_detection_source_detect_row_index=np.asarray(
+            sparse_refined["source_detection_source_detect_row_index"], dtype=np.int32
+        ),
+        source_detection_frame_indices=np.asarray(sparse_refined["source_detection_frame_indices"], dtype=np.int32),
+        source_detection_bbox_norm_coords=np.asarray(sparse_refined["source_detection_bbox_norm_coords"], dtype=np.float64),
+        source_detection_decision_labels=np.asarray(sparse_refined["source_detection_decision_labels"], dtype=object),
+        source_detection_reason_labels=np.asarray(sparse_refined["source_detection_reason_labels"], dtype=object),
+        source_detection_confidence_scores=np.asarray(
+            sparse_refined["source_detection_confidence_scores"], dtype=np.float32
+        ),
+        source_detection_class_ids=np.asarray(sparse_refined["source_detection_class_ids"], dtype=np.int32),
+        command=command or ' '.join(sys.argv),
+        env_info=env_info,
+        source_context={
+            "source_detect_run": detect_run,
+            "quality_run": resolved_quality_run or "N/A",
+            "selection_policy": "quality_filtered_sparse_instances_no_interpolation",
+        },
+    )
+
     console.print(f"[green]✓[/green] Refined run saved: {refined_group.path}")
     console.print(f"[green]✓[/green] Processing completed in {duration:.2f} seconds")
     
     console.print(f"\n[bold green]Coverage Comparison:[/bold green]")
     console.print(f"  Original:     {comparison_stats['original']['frames_with_detections']:5d} frames ({comparison_stats['original']['coverage_percent']:.2f}%)")
-    console.print(f"  Filtered:     {comparison_stats['filtered']['frames_with_detections']:5d} frames ({comparison_stats['filtered']['coverage_percent']:.2f}%) "
-                 f"[red]{comparison_stats['filtered']['coverage_loss']:+.2f}%[/red]")
-    console.print(f"  Interpolated: {comparison_stats['interpolated']['frames_with_detections']:5d} frames ({comparison_stats['interpolated']['coverage_percent']:.2f}%) "
-                 f"[green]{comparison_stats['interpolated']['coverage_gain']:+.2f}%[/green]")
+    console.print(f"  Refined:      {comparison_stats['refined']['frames_with_detections']:5d} frames ({comparison_stats['refined']['coverage_percent']:.2f}%) "
+                 f"[red]{comparison_stats['refined']['coverage_delta']:+.2f}%[/red]")
     
     console.print(f"\n[bold green]Detection Summary:[/bold green]")
-    console.print(f"  Filtered: {len(filtered_bboxes)} detections")
-    console.print(f"  Interpolated: {len(interp_bboxes)} detections")
-    console.print(f"    - Real: {len(filtered_bboxes)}")
-    console.print(f"    - Synthetic: {interp_stats['interpolated_detections']}")
+    console.print(f"  Refined present detections: {len(filtered_bboxes)}")
+    console.print(f"  Filtered out detections: {drop_stats['total_dropped']}")
 
     if save_visuals or show_visuals:
         if quality_group is None:
@@ -1011,7 +1056,7 @@ def create_refined_run(
             (normalize_attr(refined_group.attrs.get("method")) if hasattr(refined_group, "attrs") else None)
             or refine_mode
         ),
-        coverage_pct=comparison_stats.get("interpolated", {}).get("coverage_percent"),
+        coverage_pct=comparison_stats.get("refined", {}).get("coverage_percent"),
         review_status=detect_review_status,
         details={
             "reason": "present",
@@ -1023,8 +1068,9 @@ def create_refined_run(
             "coverage_frame_source": coverage_frame_source,
             "coverage_frames_total": num_frames,
             "coverage_frames_full": full_frame_count,
-            "gaps_filled": interp_stats.get("gaps_filled"),
-            "interpolated_detections": interp_stats.get("interpolated_detections"),
+            "refined_present_detections": int(len(filtered_bboxes)),
+            "filtered_out_detections": int(drop_stats["total_dropped"]),
+            "interpolation_enabled": False,
         },
         console=console,
     )
@@ -1037,35 +1083,29 @@ if __name__ == "__main__":
     import sys
     
     parser = argparse.ArgumentParser(
-        description="Refine detection data by filtering and interpolating",
+        description="Refine detection data into a sparse curated detect surface",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Basic refinement (uses config defaults)
-  python -m fisheye.refinement.refine_detect data.zarr
-
-  # Override max gap
-  python -m fisheye.refinement.refine_detect data.zarr --max-gap 15
+  scripts/py -m fisheye.refinement.refine_detect data.zarr
 
   # Remove both jumps and blips
-  python -m fisheye.refinement.refine_detect data.zarr --remove-jumps --remove-blips
+  scripts/py -m fisheye.refinement.refine_detect data.zarr --remove-jumps --remove-blips
 
   # Keep jumps (don't filter them)
-  python -m fisheye.refinement.refine_detect data.zarr --no-remove-jumps
+  scripts/py -m fisheye.refinement.refine_detect data.zarr --no-remove-jumps
 
   # Specify source runs
-  python -m fisheye.refinement.refine_detect data.zarr --detect-run detect_2025-10-03_20-28-11
+  scripts/py -m fisheye.refinement.refine_detect data.zarr --detect-run detect_2025-10-03_20-28-11
         """
     )
     
     parser.add_argument('zarr_path', help='Path to zarr file')
     parser.add_argument('--detect-run', help='Source detect run (default: latest)')
     parser.add_argument('--quality-run', help='Source quality run (default: latest)')
-    parser.add_argument('--max-gap', type=int, default=None,
-                       help='Maximum gap size for interpolation (overrides config)')
-    parser.add_argument('--method', default=None,
-                       choices=['linear'],
-                       help='Interpolation method (overrides config)')
+    parser.add_argument('--max-gap', type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--method', default=None, choices=['linear'], help=argparse.SUPPRESS)
     parser.add_argument('--remove-jumps', action='store_true', default=None,
                        help='Remove jump artifacts (overrides config)')
     parser.add_argument('--no-remove-jumps', action='store_false', dest='remove_jumps',

@@ -55,7 +55,7 @@ crop:
   - 512
   - 512
   scheduler: distributed
-  source_type: preferred           # detect | filtered | interpolated | manual | preferred | auto
+  source_type: auto                # detect | filtered | interpolated | manual | refined | auto
   num_workers: 5
   # External-video crop write path (analysis zarrs without imported raw frames)
   external_write_backend: kvikio
@@ -83,9 +83,8 @@ refine_detect:
   filters:
     remove_jumps: true
     remove_blips: false  # Usually keep blips, they're just after gaps
-  
-  max_gap: 50
-  interpolation_method: linear
+  # Interpolation settings are deprecated. Sparse-first refine_detect writes
+  # curated instances without gap interpolation.
 refine_eye_masks:
   enabled: true
   source_run: null

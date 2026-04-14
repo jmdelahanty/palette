@@ -22,7 +22,6 @@ def _opts(tmp_path: Path) -> mod.RecordingPipelineOptions:
         top_k=5,
         refine_detect=False,
         refine_config=None,
-        refine_max_gap=None,
         register=False,
         registry_path=tmp_path / "registry.sqlite",
         import_opts=RecordingImportOptions(
@@ -204,6 +203,19 @@ def test_main_dry_run_with_register_does_not_open_registry(monkeypatch, tmp_path
     rc = mod.main(["--recording-dir", str(rec), "--register"])
 
     assert rc == 0
+
+
+def test_main_rejects_deprecated_refine_max_gap(tmp_path: Path) -> None:
+    rec = tmp_path / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
+    rec.mkdir(parents=True, exist_ok=True)
+
+    try:
+        mod.main(["--recording-dir", str(rec), "--refine-max-gap", "5"])
+    except SystemExit as exc:
+        assert "Interpolation overrides are deprecated and unsupported" in str(exc)
+        assert "--refine-max-gap" in str(exc)
+    else:  # pragma: no cover - defensive branch
+        raise AssertionError("Expected SystemExit when --refine-max-gap is passed.")
 
 
 def test_process_pipeline_happy_path_runs_stages_in_order(monkeypatch, tmp_path: Path) -> None:

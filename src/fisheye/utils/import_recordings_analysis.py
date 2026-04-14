@@ -330,7 +330,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=Path("configs/fisheye/default.yaml"),
         help="Config passed to refine_detect.",
     )
-    parser.add_argument("--refine-max-gap", type=int, help="Optional max-gap override for refine_detect.")
+    parser.add_argument("--refine-max-gap", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--keypoints", action="store_true", help="Run keypoints after detect/refine_detect.")
     parser.add_argument(
         "--refine-keypoints",
@@ -355,6 +355,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging.")
 
     args = parser.parse_args(argv)
+    if args.refine_max_gap is not None:
+        raise SystemExit(
+            "Interpolation overrides are deprecated and unsupported for batch analysis import. "
+            "Remove --refine-max-gap; refine_detect now always runs with interpolation disabled."
+        )
 
     if not args.apply:
         args.dry_run = True
@@ -450,7 +455,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         top_k=int(args.top_k),
         refine_detect=bool(args.refine_detect),
         refine_config=args.refine_config,
-        refine_max_gap=args.refine_max_gap,
         register=bool(args.register),
         registry_path=registry_path,
         run_keypoints=bool(args.keypoints),
