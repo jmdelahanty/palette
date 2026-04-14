@@ -125,6 +125,10 @@ use as training source:
 | Keypoints | `--keypoint-run` | `latest_traditional`, `latest_yolo`, explicit name |
 | Eye Masks | `--eye-stage` + `--eye-run` | `auto`, `eye_masks_runs`, `refined_eye_masks_runs` + explicit run |
 
+For detection, `refined` is the current canonical curated source family.
+`filtered`, `interpolated`, and `manual` remain legacy compatibility options
+for older refined archives.
+
 ### 6c. Split configuration location
 
 | Pipeline | Where splits are configured |

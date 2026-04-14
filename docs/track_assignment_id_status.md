@@ -62,7 +62,10 @@ Persisted outputs under `arena_assignment_runs/<run>`:
 
 Important provenance note:
 
-- the stage prefers the latest refined/interpolated detections when present
+- the stage prefers the latest canonical curated refined detections at
+  `refined_detect_runs/<run>/instances` when present
+- legacy subgroup-era refined inputs may still appear only for historical
+  archives
 - otherwise it falls back to the latest raw detect run
 
 ## Consumer Model

@@ -189,8 +189,8 @@ Current policy note:
 
 Cropping resolves the ROI source via `crop.source_type` (`detect`, `refined`,
 `filtered`, `interpolated`, `manual`, `auto`) or an explicit
-`crop.source_path` override such as `detect_runs/<run>` or the preferred
-current refined override `refined_detect_runs/<run>/instances`. Legacy sparse
+`crop.source_path` override such as `detect_runs/<run>` or the canonical
+refined path `refined_detect_runs/<run>/instances`. Legacy sparse
 subgroup overrides such as `refined_detect_runs/<run>/manual` remain
 compatibility-only for historical archives. The chosen path is recorded in
 `detection_source_path`.
