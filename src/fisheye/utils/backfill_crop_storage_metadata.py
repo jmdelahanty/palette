@@ -33,10 +33,12 @@ CANONICAL_GEOMETRY_ARRAYS = ("roi_coordinates_full", "bbox_norm_coords", "frame_
 SIGNATURE_CANONICAL_KEYS = (
     "signature_version",
     "detection_source_path",
+    "source_coords_path",
     "detection_source_type",
-    "detection_preferred_policy",
+    "detection_selection_policy",
     "source_detect_run",
     "source_refined_run",
+    "source_background_run",
     "roi_size",
     "parameter_source",
     "parameters_hash",

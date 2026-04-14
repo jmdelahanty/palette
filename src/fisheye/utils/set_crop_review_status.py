@@ -84,7 +84,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     signature = crop_run.attrs.get("crop_signature")
     if not isinstance(signature, dict):
-        signature = _build_crop_signature(crop_run.attrs)
+        signature = build_crop_signature(crop_run.attrs)
         crop_run.attrs["crop_signature"] = signature
     crop_run.attrs["crop_review_signature"] = signature
 

@@ -13,11 +13,10 @@ Relevant provenance attributes:
 | Stage | Primary Array | Key Attrs |
 | --- | --- | --- |
 | `detect_runs/<run>` | `bbox_norm_coords` | `detect_timestamp_utc`, `total_detections` |
-| `refined_detect_runs/<run>/interpolated` | `bbox_norm_coords`, `detection_source`, `reason_bytes` | `source_detect_run`, `interpolated_roi_path`, `detect_review_status` |
-| `refined_detect_runs/<run>/<manual_group>` | `bbox_norm_coords`, `reason_bytes`, `reason`, `retune_id` | `manual_review_latest`, `detection_source_type`, `retune_base_group` |
-| `crop_runs/<run>` | `roi_images` | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_preferred_policy`, `crop_signature`, `crop_review_status` |
+| `refined_detect_runs/<run>` | `instances/bbox_norm_coords`, `source_detections/bbox_norm_coords` | `source_detect_run`, `detect_review_status`, `refined_storage_semantics`, `source_detection_decision_code_map` |
+| `crop_runs/<run>` | `roi_images` | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_selection_policy`, `crop_signature`, `crop_review_status` |
 | `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run` |
-| `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order` |
+| `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
 | `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
@@ -38,14 +37,43 @@ follow the contract in `docs/eye_mask_row_mapping_contract.md`:
 - keypoint lineage arrays are used for cross-check/fallback compatibility;
 - refinement copies lineage arrays from the source eye-mask run.
 
-`bbox_norm_coords` in detect/refined-detect groups use normalized `[cx, cy, w, h]`.
+Legacy refined-detect sparse subgroups such as `interpolated` and `manual_*`
+may still exist in older archives, but they are no longer the primary current
+provenance surface for detect.
+
+For in-place crop repair runs (`patch_crops_from_refined`), provenance is
+captured at two levels:
+
+- run-level cumulative arrays: `patched_detection_indices`,
+  `patched_frame_indices`
+- per-event history entries in `crop_patch_history`, including exact
+  `patched_detection_indices`, `patched_frame_indices`, and when the source is
+  curated refined detect, `patched_refined_row_ids`
+
+`bbox_norm_coords` in detect/refined-detect groups use normalized
+`[cx, cy, w, h]`.
 
 For refined detect/keypoint reason labels, use fallback order:
 `reason_bytes` -> `reason` -> labels derived from `detection_source`.
 
-## Regenerating Interpolated Crops
+For keypoint heading semantics, resolve metadata in this order:
 
-When refined detections introduce interpolated boxes, we need matching ROI imagery.
+1. run attr `heading_computation_override`
+2. `pose_schema.metadata.heading_computation`
+3. deprecated run attr `heading_computation`
+4. no heading metadata available
+
+See `docs/keypoint_heading_computation_contract.md`.
+
+For run-level derived metric semantics and boolean/status gates, prefer
+`derived_metrics_schema` when present.
+
+See `docs/derived_metrics_schema_contract.md`.
+
+## Legacy: Regenerating Interpolated Crops
+
+This section is for legacy archives that still carry interpolated detect boxes.
+It is not part of the normal current detect-refinement workflow.
 
 1. **Regenerate crops** (GPU decode will be used when available):
    ```bash
@@ -143,7 +171,7 @@ training config + manifest:
 ```bash
 scripts/py -m fisheye.diagnostics.prepare_detect_training \
   <archive>.zarr \
-  --source-type filtered \
+  --source-type refined \
   --input-format gray \
   --out-config configs/fisheye/detect_config_<dataset>.yaml \
   --project runs/detect
@@ -152,4 +180,5 @@ scripts/py -m fisheye.diagnostics.prepare_detect_training \
 Use `--dry-run` to print the generated config + manifest without writing files,
 or `--provenance-policy strict` to fail if arena/camera metadata is missing.
 
-Following these steps keeps provenance clean and prevents downstream stage failures when interpolated detections are added. 
+Following these steps keeps provenance clean and prevents downstream stage
+failures when refined detect state changes propagate downstream.

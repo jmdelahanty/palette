@@ -27,6 +27,7 @@ def build_crop_signature(attrs: Mapping[str, object]) -> Dict[str, object]:
     return {
         "signature_version": 2,
         "detection_source_path": attrs.get("detection_source_path"),
+        "source_coords_path": attrs.get("source_coords_path"),
         "detection_source_type": attrs.get("detection_source_type"),
         "detection_selection_policy": attrs.get(
             "detection_selection_policy",
@@ -35,6 +36,7 @@ def build_crop_signature(attrs: Mapping[str, object]) -> Dict[str, object]:
         "crop_storage_mode": attrs.get("crop_storage_mode"),
         "source_detect_run": attrs.get("source_detect_run"),
         "source_refined_run": attrs.get("source_refined_run"),
+        "source_background_run": attrs.get("source_background_run"),
         "roi_size": attrs.get("roi_size"),
         "crop_revision": current_crop_revision(attrs),
         "parameter_source": attrs.get("parameter_source"),

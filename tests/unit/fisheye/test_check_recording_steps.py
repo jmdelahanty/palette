@@ -241,6 +241,61 @@ def test_check_zarr_reads_crop_status_from_fallback_latest_name(tmp_path: Path) 
     assert info["crop_status"] == "running"
 
 
+def test_check_zarr_reports_crop_drift_against_current_refined_instances(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "crop_drift_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array("images_full", data=np.zeros((4,), dtype=np.uint8))
+
+    detect_parent = root.create_group("detect_runs")
+    detect_parent.attrs["latest"] = "detect_001"
+    detect = detect_parent.create_group("detect_001")
+    detect.create_array("bbox_norm_coords", data=np.zeros((2, 4), dtype=np.float64))
+
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["detect_review_status"] = {"state": "approved", "resolved_group": "refined"}
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", data=np.array([0, 1], dtype=np.int64))
+    instances.create_array("frame_indices", data=np.array([100, 100], dtype=np.int32))
+    instances.create_array("frame_offsets", data=np.array([0, 0, 0, 0], dtype=np.int64))
+    instances.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[1.0, 1.0, 4.0, 4.0], [2.0, 2.0, 5.0, 5.0]], dtype=np.float64),
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.25, 0.25, 0.2, 0.2], [0.75, 0.75, 0.2, 0.2]], dtype=np.float64),
+    )
+    instances.create_array("source_kind_codes", data=np.array([1, 2], dtype=np.int8))
+    instances.create_array("manual_edit_flags", data=np.array([0, 1], dtype=np.int8))
+    instances.create_array("source_detect_row_index", data=np.array([0, 1], dtype=np.int32))
+    instances.create_array("frame_counts", data=np.array([0, 0, 0, 0], dtype=np.int32))
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.create_group("crop_001")
+    crop.attrs["status"] = "completed"
+    crop.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_001/instances"
+    crop.create_array("roi_images", data=np.zeros((2, 4, 4), dtype=np.uint8))
+    crop.create_array("frame_indices", data=np.array([100, 100], dtype=np.int32))
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.25, 0.25, 0.2, 0.2], [0.70, 0.75, 0.2, 0.2]], dtype=np.float64),
+    )
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["crop_present"] is True
+    assert info["crop_drift_present"] is True
+    assert info["crop_drift_summary"] == "DRIFT (1 issue)"
+    details = info["crop_drift_details"]
+    assert isinstance(details, list)
+    assert any("bbox_norm_coords differ for 1 row(s) across 1 frame(s)." in issue for issue in details)
+
+
 def test_crop_status_format_helpers() -> None:
     assert mod._crop_status_text(False, None) == "MISS"  # noqa: SLF001
     assert mod._crop_status_text(True, None) == "OK"  # noqa: SLF001
@@ -248,6 +303,10 @@ def test_crop_status_format_helpers() -> None:
     assert mod._crop_status_rich(True, "completed") == "[chartreuse1]completed[/chartreuse1]"  # noqa: SLF001
     assert mod._crop_status_rich(True, "running") == "[yellow]running[/yellow]"  # noqa: SLF001
     assert mod._crop_status_rich(True, "failed") == "[red]failed[/red]"  # noqa: SLF001
+    assert mod._crop_drift_text(False, None) == "OK"  # noqa: SLF001
+    assert mod._crop_drift_text(True, "DRIFT (1 issue)") == "DRIFT (1 issue)"  # noqa: SLF001
+    assert mod._crop_drift_rich(False, None) == "[chartreuse1]OK[/chartreuse1]"  # noqa: SLF001
+    assert mod._crop_drift_rich(True, "DRIFT (1 issue)") == "[yellow]DRIFT (1 issue)[/yellow]"  # noqa: SLF001
 
 
 def test_track_status_format_helpers() -> None:

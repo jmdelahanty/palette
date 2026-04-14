@@ -208,6 +208,60 @@ def _update_index_array(group: zarr.Group, name: str, values: np.ndarray) -> np.
     return values
 
 
+def _int_list(values: np.ndarray) -> List[int]:
+    return [int(v) for v in np.asarray(values, dtype=np.int64).reshape(-1).tolist()]
+
+
+def _values_by_frame(frame_indices: np.ndarray, values: np.ndarray) -> Dict[str, List[int]]:
+    grouped: Dict[str, List[int]] = {}
+    frames_arr = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    values_arr = np.asarray(values, dtype=np.int64).reshape(-1)
+    for frame_idx, value in zip(frames_arr.tolist(), values_arr.tolist()):
+        grouped.setdefault(str(int(frame_idx)), []).append(int(value))
+    return grouped
+
+
+def _build_patch_audit_entry(
+    *,
+    timestamp_utc: str,
+    frame_indices: np.ndarray,
+    target_indices: np.ndarray,
+    patch_context: Optional[Dict[str, object]] = None,
+    refined_row_ids: Optional[np.ndarray] = None,
+) -> Dict[str, object]:
+    target_indices_arr = np.asarray(target_indices, dtype=np.int64).reshape(-1)
+    target_frame_indices = np.asarray(frame_indices, dtype=np.int64).reshape(-1)[target_indices_arr]
+    unique_target_frames = np.unique(target_frame_indices)
+
+    patch_entry: Dict[str, object] = {
+        "timestamp_utc": str(timestamp_utc),
+        "patched_detections": int(target_indices_arr.size),
+        "patched_frames": int(unique_target_frames.size),
+        "patched_detection_indices": _int_list(target_indices_arr),
+        "patched_frame_indices": _int_list(unique_target_frames),
+        "patched_detection_indices_by_frame": _values_by_frame(
+            target_frame_indices,
+            target_indices_arr,
+        ),
+    }
+    if refined_row_ids is not None:
+        refined_row_ids_arr = np.asarray(refined_row_ids, dtype=np.int64).reshape(-1)
+        if refined_row_ids_arr.shape[0] == np.asarray(frame_indices).shape[0]:
+            patched_refined_row_ids = refined_row_ids_arr[target_indices_arr]
+            valid_mask = patched_refined_row_ids >= 0
+            if np.any(valid_mask):
+                valid_frames = target_frame_indices[valid_mask]
+                valid_row_ids = patched_refined_row_ids[valid_mask]
+                patch_entry["patched_refined_row_ids"] = _int_list(valid_row_ids)
+                patch_entry["patched_refined_row_ids_by_frame"] = _values_by_frame(
+                    valid_frames,
+                    valid_row_ids,
+                )
+    if patch_context:
+        patch_entry.update(patch_context)
+    return patch_entry
+
+
 def _patch_crop_run(
     root: zarr.Group,
     crop_group: zarr.Group,
@@ -222,6 +276,9 @@ def _patch_crop_run(
 ) -> Dict[str, object]:
     frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
     bbox_norm = detect_group["bbox_norm_coords"][:]
+    refined_row_ids = None
+    if "refined_row_ids" in detect_group:
+        refined_row_ids = detect_group["refined_row_ids"][:].astype(np.int64, copy=False)
 
     roi_images = crop_group["roi_images"]
     total_detections = int(roi_images.shape[0])
@@ -291,13 +348,14 @@ def _patch_crop_run(
     history = attrs.get("crop_patch_history")
     if not isinstance(history, list):
         history = []
-    patch_entry: Dict[str, object] = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "patched_detections": int(target_indices.size),
-        "patched_frames": int(np.unique(frame_indices[target_indices]).size),
-    }
-    if patch_context:
-        patch_entry.update(patch_context)
+    patch_timestamp = datetime.now(timezone.utc).isoformat()
+    patch_entry = _build_patch_audit_entry(
+        timestamp_utc=patch_timestamp,
+        frame_indices=frame_indices,
+        target_indices=target_indices,
+        patch_context=patch_context,
+        refined_row_ids=refined_row_ids,
+    )
     history.append(patch_entry)
     attrs["crop_patch_history"] = history
     attrs["crop_patch_count"] = len(history)

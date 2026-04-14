@@ -995,6 +995,7 @@ def create_refined_keypoint_run(
 
     source_crop_run = kp_source.attrs.get("source_crop_run")
     source_detect_run = kp_source.attrs.get("source_detect_run")
+    source_refined_run = kp_source.attrs.get("source_refined_run")
 
     kp_refined.attrs.update(
         {
@@ -1011,6 +1012,8 @@ def create_refined_keypoint_run(
         kp_refined.attrs["source_crop_run"] = source_crop_run
     if source_detect_run:
         kp_refined.attrs["source_detect_run"] = source_detect_run
+    if source_refined_run:
+        kp_refined.attrs["source_refined_run"] = source_refined_run
 
     if "keypoint_labels" in kp_source.attrs:
         kp_refined.attrs["keypoint_labels"] = kp_source.attrs["keypoint_labels"]
@@ -1544,6 +1547,7 @@ def create_refined_keypoint_run(
         inputs={
             "keypoints_run": keypoint_run,
             "source_crop_run": source_crop_run,
+            "source_refined_run": source_refined_run,
             "frame_source": frame_source,
             "source_video_path": source_video_path,
         },
@@ -1617,6 +1621,7 @@ def create_refined_keypoint_run(
             "source_keypoints_run": keypoint_run,
             "source_crop_run": normalize_attr(kp_refined.attrs.get("source_crop_run")),
             "source_detect_run": normalize_attr(kp_refined.attrs.get("source_detect_run")),
+            "source_refined_run": normalize_attr(kp_refined.attrs.get("source_refined_run")),
             "total_rois": stats["total"],
             "refined_success": stats["refined_success"],
             "usable_keypoints": stats["usable"],

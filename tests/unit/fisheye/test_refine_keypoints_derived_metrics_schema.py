@@ -134,6 +134,7 @@ def _make_keypoint_root() -> _FakeGroup:
     run.attrs["method"] = "traditional_pose"
     run.attrs["source_crop_run"] = "crop_001"
     run.attrs["source_detect_run"] = "detect_001"
+    run.attrs["source_refined_run"] = "refined_detect_001"
     run.attrs["keypoint_labels"] = ["swim_bladder", "eye_left", "eye_right"]
     run.attrs["pose_schema"] = {
         "name": "traditional_v1",
@@ -300,6 +301,10 @@ def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -
 
     refined = root["refined_keypoints_runs"][run_name]
     schema = dict(refined.attrs["derived_metrics_schema"])
+
+    assert refined.attrs["source_refined_run"] == "refined_detect_001"
+    assert refined.attrs["keypoint_signature"]["source_refined_run"] == "refined_detect_001"
+    assert refined.attrs["provenance"]["inputs"]["source_refined_run"] == "refined_detect_001"
 
     assert schema["schema_version"] == 1
     assert schema["entity_kind"] == "keypoint_roi"

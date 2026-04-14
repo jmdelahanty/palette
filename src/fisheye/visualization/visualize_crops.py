@@ -14,8 +14,6 @@ comparisons are consistent across frames (avoids per-frame auto-scaling).
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
@@ -25,6 +23,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from matplotlib.widgets import Slider
+
+from ..shared.crop_signature import build_crop_signature as _build_shared_crop_signature
 
 
 def get_latest_run(root: zarr.Group, group_name: str, explicit: Optional[str]) -> str:
@@ -102,31 +102,8 @@ def _cycle_intended_use(current: str) -> str:
     return values[(idx + 1) % len(values)]
 
 
-def _hash_parameters(params: object) -> Optional[str]:
-    if params is None:
-        return None
-    try:
-        payload = json.dumps(params, sort_keys=True, default=str).encode("utf-8")
-    except (TypeError, ValueError):
-        payload = str(params).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _build_crop_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
-    return {
-        "signature_version": 1,
-        "detection_source_path": attrs.get("detection_source_path"),
-        "detection_source_type": attrs.get("detection_source_type"),
-        "detection_selection_policy": attrs.get(
-            "detection_selection_policy",
-            attrs.get("detection_preferred_policy"),
-        ),
-        "source_detect_run": attrs.get("source_detect_run"),
-        "source_refined_run": attrs.get("source_refined_run"),
-        "roi_size": attrs.get("roi_size"),
-        "parameter_source": attrs.get("parameter_source"),
-        "parameters_hash": _hash_parameters(attrs.get("parameters")),
-    }
+    return dict(_build_shared_crop_signature(attrs))
 
 
 def _format_review_status(status: Optional[Dict[str, object]]) -> Optional[str]:

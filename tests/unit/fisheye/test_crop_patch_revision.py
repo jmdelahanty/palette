@@ -3,7 +3,26 @@ from __future__ import annotations
 import numpy as np
 import zarr
 
-from fisheye.utils.patch_crops_from_refined import _patch_crop_run
+from fisheye.utils.patch_crops_from_refined import _build_patch_audit_entry, _patch_crop_run
+
+
+def test_build_patch_audit_entry_groups_multi_instance_rows_by_frame() -> None:
+    entry = _build_patch_audit_entry(
+        timestamp_utc="2026-04-14T12:00:00+00:00",
+        frame_indices=np.array([100, 100, 101, 102], dtype=np.int64),
+        target_indices=np.array([0, 1, 3], dtype=np.int64),
+        refined_row_ids=np.array([2000, 2001, 2002, 2003], dtype=np.int64),
+        patch_context={"reason": "keypoint_detection_issue"},
+    )
+
+    assert entry["patched_detections"] == 3
+    assert entry["patched_frames"] == 2
+    assert entry["patched_detection_indices"] == [0, 1, 3]
+    assert entry["patched_frame_indices"] == [100, 102]
+    assert entry["patched_detection_indices_by_frame"] == {"100": [0, 1], "102": [3]}
+    assert entry["patched_refined_row_ids"] == [2000, 2001, 2003]
+    assert entry["patched_refined_row_ids_by_frame"] == {"100": [2000, 2001], "102": [2003]}
+    assert entry["reason"] == "keypoint_detection_issue"
 
 
 def test_patch_crop_run_bumps_revision_and_signature(tmp_path) -> None:
@@ -59,6 +78,11 @@ def test_patch_crop_run_bumps_revision_and_signature(tmp_path) -> None:
     assert crop.attrs["detection_source_path"] == "refined_detect_runs/refined_001/manual"
     assert crop.attrs["detection_source_type"] == "manual"
     assert crop.attrs["source_refined_run"] == "refined_001"
+    history = crop.attrs["crop_patch_history"]
+    assert isinstance(history, list)
+    assert history[0]["patched_detection_indices"] == [0]
+    assert history[0]["patched_frame_indices"] == [0]
+    assert history[0]["patched_detection_indices_by_frame"] == {"0": [0]}
 
     signature = crop.attrs["crop_signature"]
     assert signature["signature_version"] == 2

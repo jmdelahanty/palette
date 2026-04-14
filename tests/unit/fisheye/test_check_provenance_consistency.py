@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from fisheye.diagnostics import check_provenance_consistency as mod
 
 
 class _FakeArray:
-    def __init__(self, shape: tuple[int, ...]) -> None:
-        self.shape = shape
+    def __init__(self, *, shape: tuple[int, ...] | None = None, data: Any | None = None) -> None:
+        if data is None:
+            if shape is None:
+                raise ValueError("shape or data is required")
+            data = np.zeros(shape, dtype=np.float32)
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+
+    def __getitem__(self, item):
+        return self._data[item]
 
 
 class _FakeGroup:
@@ -22,8 +32,8 @@ class _FakeGroup:
         self._children[name] = child
         return child
 
-    def create_array(self, name: str, shape: tuple[int, ...]) -> _FakeArray:
-        arr = _FakeArray(shape)
+    def create_array(self, name: str, shape: tuple[int, ...] | None = None, data: Any | None = None) -> _FakeArray:
+        arr = _FakeArray(shape=shape, data=data)
         self._children[name] = arr
         return arr
 
@@ -82,6 +92,46 @@ def test_collect_provenance_handles_missing_refined_interpolated_bbox() -> None:
     assert any("missing detection arrays" in issue for issue in record.issues)
 
 
+def test_collect_provenance_prefers_sparse_refined_instances_for_current_runs() -> None:
+    root = _build_root_with_detect()
+
+    refined_runs = root.create_group("refined_detect_runs")
+    refined = refined_runs.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["detect_review_status"] = {"resolved_group": "refined"}
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", shape=(2,))
+    instances.create_array("bbox_norm_coords", shape=(2, 4))
+    instances.create_array("bbox_img_xyxy", shape=(2, 4))
+    instances.create_array("frame_indices", shape=(2,))
+    instances.create_array("frame_offsets", shape=(4,))
+    instances.create_array("source_kind_codes", shape=(2,))
+    instances.create_array("manual_edit_flags", shape=(2,))
+    instances.create_array("source_detect_row_index", shape=(2,))
+    instances.create_array("frame_counts", shape=(3,))
+    refined_runs.attrs["latest"] = "refined_detect_001"
+
+    crop_runs = root.create_group("crop_runs")
+    crop = crop_runs.create_group("crop_001")
+    crop.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_001/instances"
+    crop.create_array("roi_images", shape=(2, 4, 4))
+    crop_runs.attrs["latest"] = "crop_001"
+
+    arena_runs = root.create_group("arena_assignment_runs")
+    arena = arena_runs.create_group("arena_001")
+    arena.attrs["source_detect_run"] = "detect_001"
+    arena.attrs["source_refined_run"] = "refined_detect_001"
+    arena.create_array("arena_ids", shape=(2,))
+    arena_runs.attrs["latest"] = "arena_001"
+
+    record = mod.collect_provenance(root)  # type: ignore[arg-type]
+
+    assert record.refined_rows == 2
+    assert record.crop_source_rows == 2
+    assert record.arena_assignment_rows == 2
+    assert record.issues == []
+
+
 def test_collect_provenance_handles_missing_optional_stage_arrays() -> None:
     root = _build_root_with_detect()
 
@@ -105,3 +155,42 @@ def test_collect_provenance_handles_missing_optional_stage_arrays() -> None:
     assert record.crop_rois is None
     assert record.keypoint_rows is None
     assert record.arena_assignment_rows is None
+
+
+def test_collect_provenance_reports_crop_snapshot_drift_from_upstream_refined_source() -> None:
+    root = _build_root_with_detect()
+
+    refined_runs = root.create_group("refined_detect_runs")
+    refined = refined_runs.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["detect_review_status"] = {"resolved_group": "refined"}
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", data=np.asarray([10, 11], dtype=np.int64))
+    instances.create_array("frame_indices", data=np.asarray([100, 100], dtype=np.int32))
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.asarray([[0.25, 0.25, 0.2, 0.2], [0.75, 0.75, 0.2, 0.2]], dtype=np.float64),
+    )
+    instances.create_array("bbox_img_xyxy", shape=(2, 4))
+    instances.create_array("frame_offsets", shape=(102,))
+    instances.create_array("source_kind_codes", shape=(2,))
+    instances.create_array("manual_edit_flags", shape=(2,))
+    instances.create_array("source_detect_row_index", shape=(2,))
+    instances.create_array("frame_counts", shape=(101,))
+    refined_runs.attrs["latest"] = "refined_detect_001"
+
+    crop_runs = root.create_group("crop_runs")
+    crop = crop_runs.create_group("crop_001")
+    crop.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_001/instances"
+    crop.create_array("roi_images", shape=(2, 4, 4))
+    crop.create_array("frame_indices", data=np.asarray([100, 100], dtype=np.int32))
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.asarray([[0.25, 0.25, 0.2, 0.2], [0.70, 0.75, 0.2, 0.2]], dtype=np.float64),
+    )
+    crop_runs.attrs["latest"] = "crop_001"
+
+    record = mod.collect_provenance(root)  # type: ignore[arg-type]
+
+    assert any("snapshot drifted from upstream source" in issue for issue in record.issues)
+    assert any("bbox_norm_coords differ for 1 row(s) across 1 frame(s)." in issue for issue in record.issues)

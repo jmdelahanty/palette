@@ -4,13 +4,19 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import zarr
 from rich.console import Console
 from rich.table import Table
+
+from ..shared.refined_detect_curation import (
+    has_curated_refined_detect_surface,
+    has_sparse_curated_refined_detect_instances_arrays,
+)
 
 
 @dataclass
@@ -28,6 +34,7 @@ class ProvenanceRecord:
     keypoint_rows: Optional[int]
     arena_assignment_rows: Optional[int]
     issues: list[str]
+    crop_source_drift_issues: list[str] = field(default_factory=list)
 
 
 def _safe_len(arr: Optional[zarr.Array]) -> Optional[int]:
@@ -71,6 +78,16 @@ def _count_detections(group: Optional[zarr.Group]) -> Optional[int]:
     return _safe_len(arr)
 
 
+def _safe_array_data(group: Optional[zarr.Group], key: str) -> Optional[np.ndarray]:
+    arr = _safe_get(group, key)
+    if arr is None:
+        return None
+    try:
+        return np.asarray(arr[:])
+    except Exception:
+        return None
+
+
 def _latest(group: Optional[zarr.Group]) -> Optional[str]:
     if group is None:
         return None
@@ -82,6 +99,201 @@ def _first_matching_run(group: Optional[zarr.Group], name: Optional[str]) -> Opt
     if group is None or not name:
         return None
     return group.get(name)
+
+
+def _normalize_label(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text or None
+
+
+def _legacy_sparse_refined_label(refined_group: zarr.Group) -> Optional[str]:
+    manual_label = refined_group.attrs.get("manual_review_latest")
+    if isinstance(manual_label, str) and manual_label in refined_group:
+        return manual_label
+    for candidate in ("manual", "interpolated", "filtered"):
+        if candidate in refined_group:
+            return candidate
+    return None
+
+
+def _canonical_refined_surface_path(
+    refined_parent_name: str,
+    refined_run_name: str,
+    refined_group: zarr.Group,
+) -> Optional[str]:
+    if has_sparse_curated_refined_detect_instances_arrays(refined_group):
+        return f"{refined_parent_name}/{refined_run_name}/instances"
+    if has_curated_refined_detect_surface(refined_group):
+        return f"{refined_parent_name}/{refined_run_name}"
+    return None
+
+
+def _preferred_refined_rowset_path(
+    refined_parent_name: str,
+    refined_run_name: str,
+    refined_group: zarr.Group,
+) -> Optional[str]:
+    canonical = _canonical_refined_surface_path(
+        refined_parent_name,
+        refined_run_name,
+        refined_group,
+    )
+    if canonical is not None:
+        return canonical
+    legacy_label = _legacy_sparse_refined_label(refined_group)
+    if legacy_label is not None:
+        return f"{refined_parent_name}/{refined_run_name}/{legacy_label}"
+    return None
+
+
+def _expected_crop_source_path(
+    *,
+    refined_parent_name: str,
+    refined_run_name: str,
+    refined_group: zarr.Group,
+    detect_latest: Optional[str],
+) -> Optional[str]:
+    review_status = refined_group.attrs.get("detect_review_status")
+    resolved_group = None
+    if isinstance(review_status, dict):
+        resolved_group = _normalize_label(
+            review_status.get("target_group") or review_status.get("resolved_group")
+        )
+
+    if resolved_group in {"raw", "detect"}:
+        if detect_latest:
+            return f"detect_runs/{detect_latest}"
+        source_detect = refined_group.attrs.get("source_detect_run")
+        if source_detect:
+            return f"detect_runs/{source_detect}"
+        return None
+
+    if resolved_group in {"refined", "instances"}:
+        canonical = _canonical_refined_surface_path(
+            refined_parent_name,
+            refined_run_name,
+            refined_group,
+        )
+        if canonical is not None:
+            return canonical
+
+    if resolved_group == "manual":
+        manual_label = _legacy_sparse_refined_label(refined_group)
+        if manual_label is not None and manual_label.startswith("manual"):
+            return f"{refined_parent_name}/{refined_run_name}/{manual_label}"
+
+    if resolved_group and resolved_group in refined_group:
+        return f"{refined_parent_name}/{refined_run_name}/{resolved_group}"
+
+    return _preferred_refined_rowset_path(
+        refined_parent_name,
+        refined_run_name,
+        refined_group,
+    )
+
+
+def _format_drift_issue(
+    *,
+    crop_run: Optional[str],
+    source_path: Optional[str],
+    field_name: str,
+    changed_rows: int,
+    changed_frames: Optional[int] = None,
+) -> str:
+    run_label = f"Crop run '{crop_run}'" if crop_run else "Crop run"
+    source_label = f"upstream source '{source_path}'" if source_path else "upstream source"
+    detail = f"{field_name} differ for {changed_rows} row(s)"
+    if changed_frames is not None:
+        detail += f" across {changed_frames} frame(s)"
+    return f"{run_label} snapshot drifted from {source_label}: {detail}."
+
+
+def _collect_crop_source_drift_issues(
+    *,
+    crop_run: Optional[str],
+    crop_group: zarr.Group,
+    source_group: Optional[zarr.Group],
+    source_path: Optional[str],
+) -> list[str]:
+    if source_group is None:
+        return []
+
+    issues: list[str] = []
+    crop_source_drift_issues: list[str] = []
+    crop_frame_indices = _safe_array_data(crop_group, "frame_indices")
+    source_frame_indices = _safe_array_data(source_group, "frame_indices")
+    if crop_frame_indices is not None and source_frame_indices is not None:
+        if crop_frame_indices.shape != source_frame_indices.shape:
+            issues.append(
+                _format_drift_issue(
+                    crop_run=crop_run,
+                    source_path=source_path,
+                    field_name="frame_indices shapes",
+                    changed_rows=abs(int(np.prod(crop_frame_indices.shape or (0,))) - int(np.prod(source_frame_indices.shape or (0,)))),
+                )
+            )
+        else:
+            changed_rows = np.where(
+                np.asarray(crop_frame_indices, dtype=np.int64).reshape(-1)
+                != np.asarray(source_frame_indices, dtype=np.int64).reshape(-1)
+            )[0]
+            if changed_rows.size:
+                changed_frames = np.unique(
+                    np.concatenate(
+                        [
+                            np.asarray(crop_frame_indices, dtype=np.int64).reshape(-1)[changed_rows],
+                            np.asarray(source_frame_indices, dtype=np.int64).reshape(-1)[changed_rows],
+                        ]
+                    )
+                )
+                issues.append(
+                    _format_drift_issue(
+                        crop_run=crop_run,
+                        source_path=source_path,
+                        field_name="frame_indices",
+                        changed_rows=int(changed_rows.size),
+                        changed_frames=int(changed_frames.size),
+                    )
+                )
+
+    crop_bbox = _safe_array_data(crop_group, "bbox_norm_coords")
+    source_bbox = _safe_array_data(source_group, "bbox_norm_coords")
+    if crop_bbox is not None and source_bbox is not None:
+        if crop_bbox.shape != source_bbox.shape:
+            issues.append(
+                f"Crop run '{crop_run}' snapshot drifted from upstream source '{source_path}': "
+                f"bbox_norm_coords shape {tuple(crop_bbox.shape)} != {tuple(source_bbox.shape)}."
+            )
+        else:
+            bbox_drift_mask = ~np.isclose(
+                np.asarray(crop_bbox, dtype=np.float64),
+                np.asarray(source_bbox, dtype=np.float64),
+                rtol=1e-6,
+                atol=1e-8,
+                equal_nan=True,
+            )
+            changed_bbox_rows = np.where(np.any(bbox_drift_mask, axis=1))[0]
+            if changed_bbox_rows.size:
+                changed_frames = None
+                if source_frame_indices is not None and source_frame_indices.shape[0] == source_bbox.shape[0]:
+                    changed_frames = int(
+                        np.unique(
+                            np.asarray(source_frame_indices, dtype=np.int64).reshape(-1)[changed_bbox_rows]
+                        ).size
+                    )
+                issues.append(
+                    _format_drift_issue(
+                        crop_run=crop_run,
+                        source_path=source_path,
+                        field_name="bbox_norm_coords",
+                        changed_rows=int(changed_bbox_rows.size),
+                        changed_frames=changed_frames,
+                    )
+                )
+
+    return issues
 
 
 def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
@@ -101,13 +313,17 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     refined_group = _first_matching_run(refined_parent, refined_latest)
     refined_rows = None
     if refined_group is not None:
-        interp = _safe_get(refined_group, "interpolated")
-        if interp is not None and hasattr(interp, "get"):
-            refined_rows = _count_detections(interp)
+        refined_source_path = _preferred_refined_rowset_path(
+            refined_parent_name,
+            refined_latest,
+            refined_group,
+        ) if refined_latest else None
+        if refined_source_path is not None:
+            refined_rows = _count_detections(_group_for_path(root, refined_source_path))
             if refined_rows is None:
                 issues.append(
                     f"Refined detect run '{refined_latest}' is missing detection arrays under "
-                    f"{refined_parent_name}/{refined_latest}/interpolated "
+                    f"{refined_source_path} "
                     "(expected one of: bbox_norm_coords, bbox_coords, bbox)."
                 )
         source_detect = refined_group.attrs.get("source_detect_run")
@@ -123,6 +339,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     crop_rois = _safe_len(_safe_get(crop_group, "roi_images")) if crop_group else None
     crop_source_rows = None
     crop_source_path = None
+    crop_source_drift_issues: list[str] = []
     if crop_group is not None:
         crop_source = crop_group.attrs.get("detection_source_path")
         crop_source_path = crop_source
@@ -133,39 +350,30 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
                     return f"detect_runs/{detect_latest}"
                 return None
 
-            manual_label = refined_group.attrs.get("manual_review_latest")
-            if not manual_label and "manual" in refined_group:
-                manual_label = "manual"
-
-            review_status = refined_group.attrs.get("detect_review_status")
-            resolved_group = None
-            if isinstance(review_status, dict):
-                resolved_group = review_status.get("target_group") or review_status.get("resolved_group")
-            if resolved_group:
-                resolved_group = str(resolved_group)
-                if resolved_group in {"raw", "detect"}:
-                    if detect_latest:
-                        return f"detect_runs/{detect_latest}"
-                    source_detect = refined_group.attrs.get("source_detect_run")
-                    if source_detect:
-                        return f"detect_runs/{source_detect}"
-                    return None
-                if resolved_group == "manual" and manual_label:
-                    return refined_group.path + f"/{manual_label}"
-                if resolved_group in refined_group:
-                    return refined_group.path + f"/{resolved_group}"
-
-            return refined_group.path + (f"/{manual_label}" if manual_label else "/interpolated")
+            return _expected_crop_source_path(
+                refined_parent_name=refined_parent_name,
+                refined_run_name=refined_latest,
+                refined_group=refined_group,
+                detect_latest=detect_latest,
+            )
 
         expected_path = _expected_crop_path()
         source_path = crop_source or expected_path
         if source_path:
             crop_source_path = source_path
-        crop_source_rows = _count_detections(_group_for_path(root, source_path))
+        crop_source_group = _group_for_path(root, source_path)
+        crop_source_rows = _count_detections(crop_source_group)
         if crop_source and expected_path and crop_source != expected_path:
             issues.append(
                 f"Crop run '{crop_latest}' sourced from '{crop_source}' but expected '{expected_path}'."
             )
+        crop_source_drift_issues = _collect_crop_source_drift_issues(
+            crop_run=crop_latest,
+            crop_group=crop_group,
+            source_group=crop_source_group,
+            source_path=source_path,
+        )
+        issues.extend(crop_source_drift_issues)
 
     keypoint_parent = root.get("refined_keypoints_runs") or root.get("keypoints_runs")
     keypoint_latest = _latest(keypoint_parent)
@@ -195,10 +403,18 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
                 f"Arena assignment run '{arena_latest}' references refined detect '{arena_source_refined}' but latest refined detect is '{refined_latest}'."
             )
         if arena_source_refined:
-            arena_source_rows = _count_detections(
-                _group_for_path(root, f"refined_detect_runs/{arena_source_refined}/interpolated")
-                or _group_for_path(root, f"refined_runs/{arena_source_refined}/interpolated")
+            arena_refined_group = _first_matching_run(refined_parent, arena_source_refined)
+            arena_refined_path = (
+                _preferred_refined_rowset_path(
+                    refined_parent_name,
+                    arena_source_refined,
+                    arena_refined_group,
+                )
+                if arena_refined_group is not None
+                else None
             )
+            if arena_refined_path is not None:
+                arena_source_rows = _count_detections(_group_for_path(root, arena_refined_path))
         if arena_source_rows is None and arena_source_detect:
             arena_source_rows = _count_detections(_group_for_path(root, f"detect_runs/{arena_source_detect}"))
 
@@ -230,6 +446,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
         keypoint_rows=keypoint_rows,
         arena_assignment_rows=arena_rows,
         issues=issues,
+        crop_source_drift_issues=crop_source_drift_issues,
     )
 
 

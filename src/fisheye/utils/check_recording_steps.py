@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 import zarr
 
+from fisheye.diagnostics.check_provenance_consistency import collect_provenance
 from fisheye.utils.apply_tuning_by_camera import _normalize_subject_mask_tuning_payload
 from fisheye.registry.db import Registry
 from fisheye.shared.refined_detect_curation import (
@@ -142,6 +143,9 @@ class RecordingStatus:
     detect_review_status: Optional[Dict[str, object]]
     crop_present: bool
     crop_status: Optional[str]
+    crop_drift_present: bool
+    crop_drift_summary: Optional[str]
+    crop_drift_details: List[str]
     crop_review_status: Optional[Dict[str, object]]
     keypoints_present: bool
     refined_keypoints_present: bool
@@ -523,6 +527,9 @@ def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[s
         "detect_review_status": None,
         "crop_present": False,
         "crop_status": None,
+        "crop_drift_present": False,
+        "crop_drift_summary": None,
+        "crop_drift_details": [],
         "crop_review_status": None,
         "keypoints_present": False,
         "refined_keypoints_present": False,
@@ -881,6 +888,9 @@ def _registry_status_payload(
     payload["crop_review_status"] = _parse_step_json(
         crop_row.get("review_status_json") if crop_row else None
     )
+    payload["crop_drift_present"] = False
+    payload["crop_drift_summary"] = None
+    payload["crop_drift_details"] = []
 
     keypoints_row = selected_rows.get("keypoints")
     payload["keypoints_present"] = _step_row_status_ok(keypoints_row)
@@ -1048,6 +1058,9 @@ def _build_recording_status(
         detect_review_status=zarr_info["detect_review_status"],  # type: ignore[arg-type]
         crop_present=bool(zarr_info["crop_present"]),
         crop_status=zarr_info["crop_status"],  # type: ignore[arg-type]
+        crop_drift_present=bool(zarr_info["crop_drift_present"]),
+        crop_drift_summary=zarr_info["crop_drift_summary"],  # type: ignore[arg-type]
+        crop_drift_details=list(zarr_info["crop_drift_details"]),  # type: ignore[arg-type]
         crop_review_status=zarr_info["crop_review_status"],  # type: ignore[arg-type]
         keypoints_present=bool(zarr_info["keypoints_present"]),
         refined_keypoints_present=bool(zarr_info["refined_keypoints_present"]),
@@ -1135,6 +1148,14 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
         status = "na" if is_production else plan.tuning_status.get(key, "miss")
         snapshot[f"tuning:{key}"] = _tuning_status_text(status)
     return snapshot
+
+
+def _summarize_crop_drift(issues: List[str]) -> Optional[str]:
+    if not issues:
+        return None
+    count = len(issues)
+    label = "issue" if count == 1 else "issues"
+    return f"DRIFT ({count} {label})"
 
 
 def _extract_coverage_from_group(group: zarr.Group) -> Optional[float]:
@@ -1824,6 +1845,9 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
 
     crop_present = False
     crop_status: Optional[str] = None
+    crop_drift_present = False
+    crop_drift_summary: Optional[str] = None
+    crop_drift_details: List[str] = []
     crop_review_status: Optional[Dict[str, object]] = None
     crop_parent = root.get("crop_runs")
     if crop_parent is not None:
@@ -1846,6 +1870,16 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
                     crop_status = _normalize_attr(crop_parent[fallback_crop].attrs.get("status"))
                 except Exception:
                     crop_status = None
+
+    if crop_present:
+        try:
+            provenance_record = collect_provenance(root)
+        except Exception:
+            provenance_record = None
+        if provenance_record is not None:
+            crop_drift_details = list(provenance_record.crop_source_drift_issues)
+            crop_drift_present = bool(crop_drift_details)
+            crop_drift_summary = _summarize_crop_drift(crop_drift_details)
 
     keypoints_present = False
     keypoints_parent = root.get("keypoints_runs")
@@ -2138,6 +2172,9 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "detect_review_status": detect_review_status,
         "crop_present": crop_present,
         "crop_status": crop_status,
+        "crop_drift_present": crop_drift_present,
+        "crop_drift_summary": crop_drift_summary,
+        "crop_drift_details": crop_drift_details,
         "crop_review_status": crop_review_status,
         "keypoints_present": keypoints_present,
         "refined_keypoints_present": refined_keypoints_present,
@@ -2193,6 +2230,12 @@ def _crop_status_text(present: bool, status: Optional[str]) -> str:
         return "MISS"
     normalized = str(status or "").strip().lower()
     return normalized or "OK"
+
+
+def _crop_drift_text(present: bool, summary: Optional[str]) -> str:
+    if not present:
+        return "OK"
+    return summary or "DRIFT"
 
 
 def _format_one_decimal(value: float) -> str:
@@ -2262,6 +2305,12 @@ def _crop_status_rich(present: bool, status: Optional[str]) -> str:
     if normalized:
         return f"[dim]{normalized}[/dim]"
     return "[chartreuse1]OK[/chartreuse1]"
+
+
+def _crop_drift_rich(present: bool, summary: Optional[str]) -> str:
+    if not present:
+        return "[chartreuse1]OK[/chartreuse1]"
+    return f"[yellow]{summary or 'DRIFT'}[/yellow]"
 
 
 def _tuning_status_rich(value: str) -> str:
@@ -2771,6 +2820,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         table.add_column("Detect Group")
         table.add_column("Detect Review")
         table.add_column("Crop")
+        table.add_column("Crop Drift")
         table.add_column("Crop Review")
         table.add_column("Keypoints")
         table.add_column("Refined Keypoints (analysis/train)")
@@ -2827,6 +2877,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _resolved_group_rich(plan.refined_detect_resolved_group),
                 _review_status_rich(plan.detect_review_status),
                 _crop_status_rich(plan.crop_present, plan.crop_status),
+                _crop_drift_rich(plan.crop_drift_present, plan.crop_drift_summary),
                 _review_status_rich(plan.crop_review_status),
                 _status_rich(plan.keypoints_present),
                 _keypoint_status_rich(plan.refined_keypoints_success, plan.refined_keypoints_coverage),
@@ -2902,6 +2953,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  detect_group: {_resolved_group_text(plan.refined_detect_resolved_group)}")
             print(f"  detect_review_status: {_review_status_text(plan.detect_review_status)}")
             print(f"  crop: {_crop_status_text(plan.crop_present, plan.crop_status)}")
+            print(f"  crop_drift: {_crop_drift_text(plan.crop_drift_present, plan.crop_drift_summary)}")
+            for issue in plan.crop_drift_details:
+                print(f"    - {issue}")
             print(f"  crop_review_status: {_review_status_text(plan.crop_review_status)}")
             print(f"  keypoints: {_status_text(plan.keypoints_present)}")
             print(
