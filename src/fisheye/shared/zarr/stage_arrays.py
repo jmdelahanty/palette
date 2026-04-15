@@ -319,13 +319,44 @@ _REFINED_DETECT_ARRAYS: Tuple[ArraySpec, ...] = (
     ),
 )
 
+_REFINED_DETECT_SOURCE_DETECTIONS_ARRAYS: Tuple[ArraySpec, ...] = (
+    ArraySpec("source_detect_row_index", "int32", ("n_source_detections",)),
+    ArraySpec("frame_indices", "int32", ("n_source_detections",)),
+    ArraySpec("bbox_img_xyxy", "float64", ("n_source_detections", 4)),
+    ArraySpec("bbox_norm_coords", "float64", ("n_source_detections", 4)),
+    ArraySpec("decision_codes", "int8", ("n_source_detections",)),
+    ArraySpec("resolved_refined_row_id", "int64", ("n_source_detections",)),
+    ArraySpec("reason_bytes", "uint8", ("n_source_detections", "width")),
+    ArraySpec("reason", "string", ("n_source_detections",)),
+    ArraySpec("confidence_scores", "float32", ("n_source_detections",), required=False),
+    ArraySpec("class_ids", "int32", ("n_source_detections",), required=False),
+    ArraySpec("review_notes", "string", ("n_source_detections",), required=False),
+)
+
+_REFINED_DETECT_INSTANCES_ARRAYS: Tuple[ArraySpec, ...] = (
+    ArraySpec("refined_row_ids", "int64", ("n_instances",)),
+    ArraySpec("frame_indices", "int32", ("n_instances",)),
+    ArraySpec("frame_offsets", "int64", ("n_frame_offsets",)),
+    ArraySpec("bbox_img_xyxy", "float64", ("n_instances", 4)),
+    ArraySpec("bbox_norm_coords", "float64", ("n_instances", 4)),
+    ArraySpec("source_kind_codes", "int8", ("n_instances",)),
+    ArraySpec("manual_edit_flags", "bool", ("n_instances",)),
+    ArraySpec("source_detect_row_index", "int32", ("n_instances",)),
+    ArraySpec("frame_counts", "int32", ("n_frames",)),
+    ArraySpec("reason_bytes", "uint8", ("n_instances", "width")),
+    ArraySpec("reason", "string", ("n_instances",)),
+    ArraySpec("confidence_scores", "float32", ("n_instances",), required=False),
+    ArraySpec("class_ids", "int32", ("n_instances",), required=False),
+    ArraySpec("review_notes", "string", ("n_instances",), required=False),
+)
+
 REFINED_DETECT_SPEC = StageSpec(
     stage_name="refined_detect",
     zarr_group="refined_detect_runs/<run>/",
     specs=(),
     subgroups={
-        "filtered": _REFINED_DETECT_ARRAYS,
-        "interpolated": _REFINED_DETECT_ARRAYS,
+        "source_detections": _REFINED_DETECT_SOURCE_DETECTIONS_ARRAYS,
+        "instances": _REFINED_DETECT_INSTANCES_ARRAYS,
     },
 )
 

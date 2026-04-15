@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Dict, Tuple
 
 import numpy as np
+import pytest
 import zarr
+import zarr.api.synchronous as zarr_sync_api
+import zarr.core.sync as zarr_sync
 from zarr.core.dtype import VariableLengthUTF8
+from zarr.storage import MemoryStore
 
 from fisheye.shared.zarr.stage_arrays import (
     CROP_SPEC,
@@ -23,6 +29,10 @@ DEFAULT_DIMS: Dict[str, int] = {
     "n_frames": 3,
     "n_detections": 5,
     "n_refined": 5,
+    "n_rows": 5,
+    "n_source_detections": 5,
+    "n_instances": 3,
+    "n_frame_offsets": 4,
     "n_rois": 4,
     "n_import_frames": 2,
     "n_samples": 3,
@@ -36,6 +46,36 @@ DEFAULT_DIMS: Dict[str, int] = {
     "w": 8,
     "width": 16,
 }
+
+
+@pytest.fixture(autouse=True)
+def _patch_zarr_sync(monkeypatch):
+    def _sync_via_asyncio_run(coro, loop=None, timeout=None):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result = {}
+        error = {}
+
+        def _runner():
+            try:
+                result["value"] = asyncio.run(coro)
+            except Exception as exc:  # pragma: no cover - defensive
+                error["exc"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "exc" in error:
+            raise error["exc"]
+        return result.get("value")
+
+    monkeypatch.setattr(zarr_sync, "sync", _sync_via_asyncio_run)
+    monkeypatch.setattr(zarr_sync_api, "sync", _sync_via_asyncio_run)
+    monkeypatch.setattr(zarr, "group", lambda *args, **kwargs: zarr.open_group(store=MemoryStore(), mode="a"))
 
 
 def _shape_from_template(shape_template: Tuple[str | int, ...]) -> Tuple[int, ...]:
@@ -115,7 +155,12 @@ def test_all_stage_specs_define_arrays() -> None:
 
 
 def test_validate_run_accepts_detect_crop_keypoints_and_eye_masks_groups() -> None:
-    for stage_spec in (DETECT_SPEC, CROP_SPEC, KEYPOINTS_SPEC, EYE_MASKS_SPEC):
+    for stage_spec in (
+        DETECT_SPEC,
+        CROP_SPEC,
+        KEYPOINTS_SPEC,
+        EYE_MASKS_SPEC,
+    ):
         group = zarr.group()
         _write_required_arrays(group, stage_spec)
 
@@ -168,20 +213,36 @@ def test_validate_run_accepts_geometry_only_crop_group() -> None:
     assert any("optional array 'detection_source'" in msg for msg in result.warnings)
 
 
-def test_validate_run_refined_detect_subgroups_happy_path() -> None:
+def test_validate_run_refined_detect_dense_root_happy_path() -> None:
     group = zarr.group()
-    _write_required_arrays(group, REFINED_DETECT_SPEC)
+    for subgroup_name, subgroup_specs in REFINED_DETECT_SPEC.subgroups.items():
+        _write_required_arrays(
+            group.require_group(subgroup_name),
+            StageSpec(
+                stage_name=f"refined_detect/{subgroup_name}",
+                zarr_group=subgroup_name,
+                specs=subgroup_specs,
+            ),
+        )
 
     result = validate_run(group, REFINED_DETECT_SPEC)
     assert result.valid
     assert not result.errors
 
 
-def test_validate_run_refined_detect_reports_missing_subgroup() -> None:
+def test_validate_run_refined_detect_reports_missing_root_array() -> None:
     group = zarr.group()
-    filtered = group.require_group("filtered")
-    _write_required_specs(filtered, REFINED_DETECT_SPEC.subgroups["filtered"])
+    for subgroup_name, subgroup_specs in REFINED_DETECT_SPEC.subgroups.items():
+        _write_required_arrays(
+            group.require_group(subgroup_name),
+            StageSpec(
+                stage_name=f"refined_detect/{subgroup_name}",
+                zarr_group=subgroup_name,
+                specs=subgroup_specs,
+            ),
+        )
+    del group["instances"]["source_kind_codes"]
 
     result = validate_run(group, REFINED_DETECT_SPEC)
     assert not result.valid
-    assert any("missing required subgroup 'interpolated'" in msg for msg in result.errors)
+    assert any("missing required array 'source_kind_codes'" in msg for msg in result.errors)
