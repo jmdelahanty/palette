@@ -21,7 +21,7 @@ import zarr
 from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.inference_timing import InferenceTimingProfiler
-from fisheye.shared.provenance_attrs import build_source_keypoints_attrs
+from fisheye.shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_keypoints_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -1632,13 +1632,15 @@ def write_sam_subject_mask_run(
         (source_crop_source.frame_source_path if source_crop_source is not None else None)
         or source_crop_group.attrs.get("video_source_path")
     )
+    crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+        source_crop_group.attrs,
+        source_crop_storage_mode=source_crop_storage_mode,
+    )
 
     run_group.attrs.update(
         {
             "source_crop_run": inputs.crop_run,
-            "source_crop_storage_mode": source_crop_storage_mode,
-            "source_crop_signature": source_crop_group.attrs.get("crop_signature"),
-            "source_crop_revision": source_crop_group.attrs.get("crop_revision"),
+            **crop_snapshot_attrs,
             "source_roi_read_mode": source_roi_read_mode,
             "roi_cache_policy": source_roi_cache_policy,
             "source_roi_cache_used": source_roi_cache_used,
@@ -1829,9 +1831,7 @@ def write_sam_subject_mask_run(
         },
         inputs={
             "source_crop_run": inputs.crop_run,
-            "source_crop_storage_mode": source_crop_storage_mode,
-            "source_crop_signature": source_crop_group.attrs.get("crop_signature"),
-            "source_crop_revision": source_crop_group.attrs.get("crop_revision"),
+            **crop_snapshot_attrs,
             "source_roi_read_mode": source_roi_read_mode,
             "roi_cache_policy": source_roi_cache_policy,
             "roi_cache_used": source_roi_cache_used,

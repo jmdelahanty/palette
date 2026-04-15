@@ -87,6 +87,8 @@ def _build_fake_root() -> _FakeGroup:
     crop = crop_parent.create_group("crop_geometry")
     crop.attrs["crop_storage_mode"] = "geometry_only"
     crop.attrs["crop_signature"] = "sig-001"
+    crop.attrs["crop_revision"] = 4
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_001/review_status"
     crop.attrs["source_detect_run"] = "detect_001"
     crop.attrs["detection_source_path"] = "detect_runs/detect_001"
     crop.attrs["video_source_path"] = "/tmp/source-video.mp4"
@@ -256,6 +258,9 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
 
     assert run_group.attrs["source_crop_run"] == "crop_geometry"
     assert run_group.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run_group.attrs["source_crop_signature"] == "sig-001"
+    assert run_group.attrs["source_crop_revision"] == 4
+    assert run_group.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run_group.attrs["source_roi_read_mode"] == "temporary_cache"
     assert run_group.attrs["roi_cache_policy"] == "always"
     assert run_group.attrs["source_roi_cache_used"] is True
@@ -268,5 +273,9 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert run_group.attrs["method"] == "unet_subject_mask_segmenter"
     assert run_group.attrs["run_semantics"] == "unet_subject_mask_inference"
     assert run_group.attrs["profile_timings_enabled"] is True
+    provenance_inputs = run_group.attrs["provenance"]["inputs"]
+    assert provenance_inputs["source_crop_signature"] == "sig-001"
+    assert provenance_inputs["source_crop_revision"] == 4
+    assert provenance_inputs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
     assert run_group["masks_roi"].shape == (2, 3, 4, 4)

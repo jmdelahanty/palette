@@ -179,6 +179,9 @@ def _fake_crop_group(*, detection_source: np.ndarray | None = None) -> FakeGroup
     group["detection_indices"] = FakeArray(np.asarray([10, 11, 12], dtype=np.int32))
     group["detection_source"] = FakeArray(np.asarray(detection_source, dtype=np.int8))
     group.attrs["crop_storage_mode"] = "materialized"
+    group.attrs["crop_signature"] = {"version": 1, "source": "crop_001"}
+    group.attrs["crop_revision"] = 2
+    group.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_001/review_status"
     return group
 
 
@@ -887,8 +890,12 @@ def test_compute_channel_metrics_reports_area_centroid_and_bbox() -> None:
 
 def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch) -> None:
     root = FakeGroup()
+    expected_crop_signature = str({"version": 1, "source": "crop_001"})
     crop_parent = root.create_group("crop_runs")
     crop_group = crop_parent.create_group("crop_001")
+    crop_group.attrs["crop_signature"] = {"version": 1, "source": "crop_001"}
+    crop_group.attrs["crop_revision"] = 2
+    crop_group.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_001/review_status"
     crop_group.attrs["video_source_type"] = "video"
     crop_group.attrs["video_source_path"] = "/tmp/source.mp4"
     crop_group.create_array("frame_indices", data=np.asarray([0, 1], dtype=np.int32))
@@ -1018,6 +1025,9 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
     assert summary["checkpoint_path"] == "/tmp/sam3.pt"
 
     run = root["subject_mask_runs"]["sam_subject_masks_test_001"]
+    assert run.attrs["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["source_crop_revision"] == 2
+    assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run.attrs["source_keypoints_run"] == "refined_001"
     assert run.attrs["source_keypoint_run"] == "refined_001"
     assert run.attrs["git_commit"] == "a" * 40
@@ -1050,6 +1060,9 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
     assert provenance["platform"]["hostname"] == "test-host"
     assert provenance["parameters"]["run_semantics"] == "sam_body_mask_inference"
     assert provenance["parameters"]["input_format"] == "gray"
+    assert provenance["inputs"]["source_crop_signature"] == expected_crop_signature
+    assert provenance["inputs"]["source_crop_revision"] == 2
+    assert provenance["inputs"]["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert provenance["inputs"]["source_keypoints_run"] == "refined_001"
     assert provenance["inputs"]["source_keypoint_group"] == "refined_keypoints_runs"
     assert provenance["inputs"]["source_video_path"] == "/tmp/source.mp4"

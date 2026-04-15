@@ -113,6 +113,9 @@ def _make_root() -> _FakeGroup:
     crop_parent.attrs["latest_materialized"] = "crop_001"
     crop = crop_parent.create_group("crop_001")
     crop.attrs["crop_storage_mode"] = "materialized"
+    crop.attrs["crop_signature"] = {"version": 1, "source": "crop_001"}
+    crop.attrs["crop_revision"] = 6
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_001/review_status"
     crop.create_array(
         "roi_images",
         data=np.asarray(
@@ -202,6 +205,7 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
 ) -> None:
     root = _make_root()
     console = Console(file=io.StringIO(), force_terminal=False)
+    expected_crop_signature = str({"version": 1, "source": "crop_001"})
     keypoint_source = mod.subject_tuning.EyeKeypointSource(
         group_name="refined_keypoints_runs",
         run_name="refined_keypoints_canary_001",
@@ -233,6 +237,9 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert run.attrs["probability_semantics"] == "normalized_patch_darkness"
     assert run.attrs["source_keypoints_run"] == "refined_keypoints_canary_001"
     assert run.attrs["source_keypoint_group"] == "refined_keypoints_runs"
+    assert run.attrs["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["source_crop_revision"] == 6
+    assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run.attrs["tuning_source"] == "analysis_metadata.subject_mask_tuning.components.swim_bladder"
     assert run.attrs["tuning_override_keys"] == []
     assert run.attrs["tuning_entry_snapshot"]["method"] == "global_threshold_otsu"
@@ -266,6 +273,12 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert swim_provenance["source_method"] == "global_threshold_otsu"
     assert swim_provenance["source_channels"] == ["swim_bladder"]
     assert swim_provenance["source_label_schema_id"] == "subject_v1_union"
+    assert run.attrs["provenance"]["inputs"]["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["provenance"]["inputs"]["source_crop_revision"] == 6
+    assert (
+        run.attrs["provenance"]["inputs"]["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_001/review_status"
+    )
     assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_swim_bladder_inference"
     assert run.attrs["provenance"]["parameters"]["tuning_timestamp"] == "2026-03-12T10:00:00+00:00"
     assert run.attrs["provenance"]["parameters"]["tuning_override_keys"] == []
@@ -435,6 +448,7 @@ def test_segment_swim_bladder_masks_supports_geometry_only_crop_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _make_root()
+    expected_crop_signature = str({"version": 1, "source": "crop_001"})
     crop_group = root["crop_runs"]["crop_001"]
     crop_group.attrs["crop_storage_mode"] = "geometry_only"
     crop_source = _FakeCropSource(
@@ -475,9 +489,18 @@ def test_segment_swim_bladder_masks_supports_geometry_only_crop_source(
 
     run = root["subject_mask_runs"][run_name]
     assert run.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run.attrs["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["source_crop_revision"] == 6
+    assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run.attrs["source_roi_read_mode"] == "temporary_cache"
     assert run.attrs["source_roi_cache_used"] is True
     assert run.attrs["source_roi_cache_key"] == "cache-key-002"
     assert run.attrs["source_roi_cache_path"] == "/tmp/swim-cache.zarr"
     assert run.attrs["provenance"]["inputs"]["frame_source"] == "source_video_path"
     assert run.attrs["provenance"]["inputs"]["source_video_path"] == "/tmp/source.mp4"
+    assert run.attrs["provenance"]["inputs"]["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["provenance"]["inputs"]["source_crop_revision"] == 6
+    assert (
+        run.attrs["provenance"]["inputs"]["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_001/review_status"
+    )

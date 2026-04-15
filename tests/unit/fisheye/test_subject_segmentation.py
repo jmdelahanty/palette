@@ -116,6 +116,9 @@ def _make_root(
     crop_parent.attrs["latest_materialized"] = "crop_001"
     crop = crop_parent.create_group("crop_001")
     crop.attrs["crop_storage_mode"] = "materialized"
+    crop.attrs["crop_signature"] = {"version": 1, "source": "crop_001"}
+    crop.attrs["crop_revision"] = 3
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_001/review_status"
     crop.create_array(
         "roi_images",
         data=np.asarray(
@@ -223,6 +226,7 @@ def _stub_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_segment_subject_masks_from_root_writes_body_only_run_using_saved_tuning() -> None:
     root = _make_root()
     console = Console(file=io.StringIO(), force_terminal=False)
+    expected_crop_signature = str({"version": 1, "source": "crop_001"})
 
     run_name = mod.segment_subject_masks_from_root(
         root,
@@ -238,6 +242,9 @@ def test_segment_subject_masks_from_root_writes_body_only_run_using_saved_tuning
 
     assert run.attrs["label_schema_id"] == "subject_v1_union"
     assert run.attrs["source_crop_run"] == "crop_001"
+    assert run.attrs["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["source_crop_revision"] == 3
+    assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run.attrs["source_background_run"] == "background_001"
     assert run.attrs["source_background_array"] == "background_full"
     assert run.attrs["run_semantics"] == "traditional_subject_body_inference"
@@ -274,6 +281,12 @@ def test_segment_subject_masks_from_root_writes_body_only_run_using_saved_tuning
     assert body_provenance["source_channels"] == ["subject_body"]
     assert body_provenance["source_label_schema_id"] == "subject_v1_union"
     assert "provenance" in run.attrs
+    assert run.attrs["provenance"]["inputs"]["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["provenance"]["inputs"]["source_crop_revision"] == 3
+    assert (
+        run.attrs["provenance"]["inputs"]["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_001/review_status"
+    )
     assert run.attrs["provenance"]["parameters"]["method"] == "traditional_subject_mask_seed"
     assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_subject_body_inference"
     assert (
@@ -322,6 +335,7 @@ def test_segment_subject_masks_from_root_supports_geometry_only_crop_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _make_root()
+    expected_crop_signature = str({"version": 1, "source": "crop_001"})
     crop_group = root["crop_runs"]["crop_001"]
     crop_group.attrs["crop_storage_mode"] = "geometry_only"
     crop_source = _FakeCropSource(
@@ -345,12 +359,21 @@ def test_segment_subject_masks_from_root_supports_geometry_only_crop_source(
 
     run = root["subject_mask_runs"][run_name]
     assert run.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run.attrs["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["source_crop_revision"] == 3
+    assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run.attrs["source_roi_read_mode"] == "temporary_cache"
     assert run.attrs["source_roi_cache_used"] is True
     assert run.attrs["source_roi_cache_key"] == "cache-key-001"
     assert run.attrs["source_roi_cache_path"] == "/tmp/subject-cache.zarr"
     assert run.attrs["provenance"]["inputs"]["frame_source"] == "source_video_path"
     assert run.attrs["provenance"]["inputs"]["source_video_path"] == "/tmp/source.mp4"
+    assert run.attrs["provenance"]["inputs"]["source_crop_signature"] == expected_crop_signature
+    assert run.attrs["provenance"]["inputs"]["source_crop_revision"] == 3
+    assert (
+        run.attrs["provenance"]["inputs"]["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_001/review_status"
+    )
     np.testing.assert_array_equal(run["frame_indices"][:], np.asarray([0, 1], dtype=np.int32))
 
 

@@ -22,6 +22,7 @@ from ..diagnostics.preview_eye_mask_background_subtraction import (
     _resolve_run_name,
 )
 from ..shared.crop_image_source import CropImageSource
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -482,6 +483,10 @@ def segment_subject_masks_from_root(
             else np.zeros((roi_count,), dtype=np.int8)
         )
         tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
+        crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+            crop_group.attrs,
+            source_crop_storage_mode=crop_source.storage_mode,
+        )
 
         run_group.attrs.update(
             {
@@ -492,9 +497,7 @@ def segment_subject_masks_from_root(
                 ),
                 "config": asdict(cfg),
                 "source_crop_run": str(crop_run),
-                "source_crop_storage_mode": crop_source.storage_mode,
-                "source_crop_signature": crop_group.attrs.get("crop_signature"),
-                "source_crop_revision": crop_group.attrs.get("crop_revision"),
+                **crop_snapshot_attrs,
                 "source_roi_read_mode": crop_source.roi_read_mode,
                 "roi_cache_policy": crop_source.roi_cache_policy,
                 "source_roi_cache_used": bool(crop_source.roi_cache_used),
@@ -631,9 +634,7 @@ def segment_subject_masks_from_root(
         platform_info = env_info.get("platform", {})
         provenance_inputs = {
             "source_crop_run": str(crop_run),
-            "source_crop_storage_mode": crop_source.storage_mode,
-            "source_crop_signature": crop_group.attrs.get("crop_signature"),
-            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            **crop_snapshot_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),
