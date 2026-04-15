@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import io
 
 import numpy as np
@@ -26,6 +27,9 @@ class _FakeArray:
 
     def __getitem__(self, key):
         return self._data[key]
+
+    def __setitem__(self, key, value) -> None:
+        self._data[key] = value
 
     def __array__(self, dtype=None):
         return np.asarray(self._data, dtype=dtype)
@@ -171,6 +175,40 @@ def _make_root() -> _FakeGroup:
     return root
 
 
+def _make_keypoint_source(
+    keypoints: np.ndarray,
+    *,
+    success_flags: np.ndarray,
+    frame_indices: np.ndarray | None = None,
+    detection_indices: np.ndarray | None = None,
+    source_crop_run: str = "crop_001",
+) -> mod.subject_tuning.EyeKeypointSource:
+    if frame_indices is None:
+        frame_indices = np.asarray([0, 1], dtype=np.int32)
+    if detection_indices is None:
+        detection_indices = np.asarray([10, 11], dtype=np.int32)
+    group = _FakeGroup(
+        {
+            "keypoints_roi": _FakeArray(np.asarray(keypoints, dtype=np.float32)),
+            "refined_success": _FakeArray(np.asarray(success_flags, dtype=bool)),
+            "frame_indices": _FakeArray(np.asarray(frame_indices, dtype=np.int32)),
+            "detection_indices": _FakeArray(np.asarray(detection_indices, dtype=np.int32)),
+        },
+        attrs={
+            "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+            "source_crop_run": source_crop_run,
+        },
+    )
+    return mod.subject_tuning.EyeKeypointSource(
+        group_name="refined_keypoints_runs",
+        run_name="refined_keypoints_canary_001",
+        group=group,
+        keypoints_roi=group["keypoints_roi"],
+        success_flags=np.asarray(success_flags, dtype=bool),
+        heading_values=None,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _stub_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -206,21 +244,15 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     root = _make_root()
     console = Console(file=io.StringIO(), force_terminal=False)
     expected_crop_signature = str({"version": 1, "source": "crop_001"})
-    keypoint_source = mod.subject_tuning.EyeKeypointSource(
-        group_name="refined_keypoints_runs",
-        run_name="refined_keypoints_canary_001",
-        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
-        keypoints_roi=_FakeArray(
-            np.asarray(
-                [
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                    [[np.nan, np.nan], [0.0, 0.0], [0.0, 0.0]],
-                ],
-                dtype=np.float32,
-            )
+    keypoint_source = _make_keypoint_source(
+        np.asarray(
+            [
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                [[np.nan, np.nan], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float32,
         ),
         success_flags=np.asarray([True, True], dtype=bool),
-        heading_values=None,
     )
     monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
 
@@ -235,6 +267,8 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     run = root["subject_mask_runs"][run_name]
     assert run.attrs["run_semantics"] == "traditional_swim_bladder_inference"
     assert run.attrs["probability_semantics"] == "normalized_patch_darkness"
+    assert run.attrs["dask_scheduler"] == "single-threaded"
+    assert run.attrs["dask_num_workers"] is None
     assert run.attrs["source_keypoints_run"] == "refined_keypoints_canary_001"
     assert run.attrs["source_keypoint_group"] == "refined_keypoints_runs"
     assert run.attrs["source_crop_signature"] == expected_crop_signature
@@ -273,13 +307,16 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert swim_provenance["source_method"] == "global_threshold_otsu"
     assert swim_provenance["source_channels"] == ["swim_bladder"]
     assert swim_provenance["source_label_schema_id"] == "subject_v1_union"
+    assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_swim_bladder_inference"
     assert run.attrs["provenance"]["inputs"]["source_crop_signature"] == expected_crop_signature
     assert run.attrs["provenance"]["inputs"]["source_crop_revision"] == 6
     assert (
         run.attrs["provenance"]["inputs"]["source_detect_review_status_ref"]
         == "refined_detect_runs/refined_001/review_status"
     )
-    assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_swim_bladder_inference"
+    assert run.attrs["provenance"]["parameters"]["dask_scheduler"] == "single-threaded"
+    assert run.attrs["provenance"]["parameters"]["dask_num_workers"] is None
+    assert run.attrs["provenance"]["scheduler"] == {"type": "single-threaded"}
     assert run.attrs["provenance"]["parameters"]["tuning_timestamp"] == "2026-03-12T10:00:00+00:00"
     assert run.attrs["provenance"]["parameters"]["tuning_override_keys"] == []
     assert run.attrs["provenance"]["parameters"]["tuning_entry_snapshot"]["subject_method_family"] == (
@@ -291,21 +328,15 @@ def test_segment_swim_bladder_masks_skips_unsuccessful_keypoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _make_root()
-    keypoint_source = mod.subject_tuning.EyeKeypointSource(
-        group_name="refined_keypoints_runs",
-        run_name="refined_keypoints_canary_001",
-        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
-        keypoints_roi=_FakeArray(
-            np.asarray(
-                [
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                ],
-                dtype=np.float32,
-            )
+    keypoint_source = _make_keypoint_source(
+        np.asarray(
+            [
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float32,
         ),
         success_flags=np.asarray([True, False], dtype=bool),
-        heading_values=None,
     )
     monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
 
@@ -321,17 +352,46 @@ def test_segment_swim_bladder_masks_skips_unsuccessful_keypoints(
     assert run["metrics"]["mask_present"][:].tolist() == [[False, False, True], [False, False, False]]
 
 
+def test_segment_swim_bladder_masks_rejects_misaligned_keypoint_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    keypoint_parent = root.require_group("refined_keypoints_runs")
+    keypoint_parent.attrs["latest"] = "refined_keypoints_bad_001"
+    keypoint_parent["refined_keypoints_bad_001"] = _FakeGroup(
+        {
+            "keypoints_roi": _FakeArray(
+                np.asarray(
+                    [
+                        [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                        [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                    ],
+                    dtype=np.float32,
+                )
+            ),
+            "refined_success": _FakeArray(np.asarray([True, True], dtype=bool)),
+            "frame_indices": _FakeArray(np.asarray([0, 1], dtype=np.int32)),
+            "detection_indices": _FakeArray(np.asarray([99, 100], dtype=np.int32)),
+        },
+        attrs={
+            "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+            "source_crop_run": "crop_001",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="detection_indices"):
+        mod.segment_swim_bladder_masks_from_root(
+            root,
+            zarr_path="/tmp/fake_training.zarr",
+            output_run="swim_bladder_masks_bad_alignment_001",
+        )
+
+
 def test_segment_swim_bladder_masks_uses_open_zarr_root_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
     root = _make_root()
-    keypoint_source = mod.subject_tuning.EyeKeypointSource(
-        group_name="refined_keypoints_runs",
-        run_name="refined_keypoints_canary_001",
-        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
-        keypoints_roi=_FakeArray(
-            np.asarray([[[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]]], dtype=np.float32).repeat(2, axis=0)
-        ),
+    keypoint_source = _make_keypoint_source(
+        np.asarray([[[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]]], dtype=np.float32).repeat(2, axis=0),
         success_flags=np.asarray([True, True], dtype=bool),
-        heading_values=None,
     )
     monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
     monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
@@ -368,21 +428,15 @@ def test_segment_swim_bladder_masks_dispatches_polar_boundary_family(
         },
         "context": {"storage_component_name": "swim_bladder"},
     }
-    keypoint_source = mod.subject_tuning.EyeKeypointSource(
-        group_name="refined_keypoints_runs",
-        run_name="refined_keypoints_canary_001",
-        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
-        keypoints_roi=_FakeArray(
-            np.asarray(
-                [
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                ],
-                dtype=np.float32,
-            )
+    keypoint_source = _make_keypoint_source(
+        np.asarray(
+            [
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float32,
         ),
         success_flags=np.asarray([True, True], dtype=bool),
-        heading_values=None,
     )
     monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
 
@@ -409,21 +463,15 @@ def test_segment_swim_bladder_masks_override_method_family_updates_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _make_root()
-    keypoint_source = mod.subject_tuning.EyeKeypointSource(
-        group_name="refined_keypoints_runs",
-        run_name="refined_keypoints_canary_001",
-        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
-        keypoints_roi=_FakeArray(
-            np.asarray(
-                [
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                ],
-                dtype=np.float32,
-            )
+    keypoint_source = _make_keypoint_source(
+        np.asarray(
+            [
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float32,
         ),
         success_flags=np.asarray([True, True], dtype=bool),
-        heading_values=None,
     )
     monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
 
@@ -463,21 +511,15 @@ def test_segment_swim_bladder_masks_supports_geometry_only_crop_source(
         frame_source_path="/tmp/source.mp4",
     )
     monkeypatch.setattr(mod.CropImageSource, "open", lambda *args, **kwargs: crop_source)
-    keypoint_source = mod.subject_tuning.EyeKeypointSource(
-        group_name="refined_keypoints_runs",
-        run_name="refined_keypoints_canary_001",
-        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
-        keypoints_roi=_FakeArray(
-            np.asarray(
-                [
-                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
-                    [[np.nan, np.nan], [0.0, 0.0], [0.0, 0.0]],
-                ],
-                dtype=np.float32,
-            )
+    keypoint_source = _make_keypoint_source(
+        np.asarray(
+            [
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                [[np.nan, np.nan], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float32,
         ),
         success_flags=np.asarray([True, True], dtype=bool),
-        heading_values=None,
     )
     monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
 
@@ -504,3 +546,124 @@ def test_segment_swim_bladder_masks_supports_geometry_only_crop_source(
         run.attrs["provenance"]["inputs"]["source_detect_review_status_ref"]
         == "refined_detect_runs/refined_001/review_status"
     )
+
+
+def test_segment_swim_bladder_masks_can_refresh_selected_rows_in_existing_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    initial_keypoint_source = _make_keypoint_source(
+        np.asarray(
+            [
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                [[np.nan, np.nan], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float32,
+        ),
+        success_flags=np.asarray([True, True], dtype=bool),
+    )
+    monkeypatch.setattr(
+        mod.subject_tuning,
+        "_resolve_eye_keypoint_source",
+        lambda *_args, **_kwargs: initial_keypoint_source,
+    )
+
+    run_name = mod.segment_swim_bladder_masks_from_root(
+        root,
+        zarr_path="/tmp/fake_training.zarr",
+        output_run="swim_bladder_masks_partial_001",
+    )
+
+    run = root["subject_mask_runs"][run_name]
+    assert run.attrs["summary_statistics"]["rows_skipped_missing_keypoint"] == 1
+    assert run["metrics"]["mask_present"][:].tolist() == [[False, False, True], [False, False, False]]
+
+    refreshed_keypoint_source = _make_keypoint_source(
+        np.asarray(
+            [
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float32,
+        ),
+        success_flags=np.asarray([True, True], dtype=bool),
+    )
+    monkeypatch.setattr(
+        mod.subject_tuning,
+        "_resolve_eye_keypoint_source",
+        lambda *_args, **_kwargs: refreshed_keypoint_source,
+    )
+
+    refreshed_name = mod.segment_swim_bladder_masks_from_root(
+        root,
+        zarr_path="/tmp/fake_training.zarr",
+        output_run="swim_bladder_masks_partial_001",
+        roi_indices=[1],
+    )
+
+    assert refreshed_name == "swim_bladder_masks_partial_001"
+    refreshed_run = root["subject_mask_runs"][refreshed_name]
+    assert refreshed_run.attrs["summary_statistics"]["rows_skipped_missing_keypoint"] == 0
+    assert refreshed_run.attrs["summary_statistics"]["rows_skipped_unsuccessful_keypoint"] == 0
+    assert refreshed_run.attrs["summary_statistics"]["updated_at_utc"]
+    assert refreshed_run.attrs["provenance"]["parameters"]["refresh_mode"] == "partial"
+    assert refreshed_run.attrs["provenance"]["parameters"]["roi_indices"] == [1]
+    assert refreshed_run["metrics"]["mask_present"][:].tolist() == [[False, False, True], [False, False, True]]
+    np.testing.assert_array_equal(
+        np.asarray(refreshed_run["metrics"]["swim_row_status"][:], dtype=np.int8),
+        np.asarray([0, 0], dtype=np.int8),
+    )
+
+
+def test_parse_scheduler_arg_rejects_invalid_value() -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match="Invalid scheduler"):
+        mod._parse_scheduler_arg("bogus")
+
+
+def test_main_passes_scheduler_and_num_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_segment(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return "swim_bladder_masks_cli_001"
+
+    monkeypatch.setattr(mod, "segment_swim_bladder_masks", _fake_segment)
+
+    rc = mod.main(
+        [
+            "/tmp/fake_training.zarr",
+            "--scheduler",
+            "distributed",
+            "--num-workers",
+            "5",
+            "--run-name",
+            "swim_bladder_masks_cli_001",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["scheduler"] == "distributed"
+    assert captured["num_workers"] == 5
+
+
+def test_main_passes_roi_indices(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_segment(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return "swim_bladder_masks_cli_001"
+
+    monkeypatch.setattr(mod, "segment_swim_bladder_masks", _fake_segment)
+
+    rc = mod.main(
+        [
+            "/tmp/fake_training.zarr",
+            "--run-name",
+            "swim_bladder_masks_cli_001",
+            "--roi-indices",
+            "1,1,3",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["roi_indices"] == [1, 1, 3]

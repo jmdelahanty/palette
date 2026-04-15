@@ -43,6 +43,8 @@ def _default_options(**overrides) -> mod.BatchOptions:
         output_run="traditional_swim_bladder_masks_batch_001",
         overwrite=False,
         require_swim_tuning=True,
+        scheduler="single-threaded",
+        num_workers=None,
         config_dict={},
     )
     values = dict(base.__dict__)
@@ -123,12 +125,23 @@ def test_process_zarr_path_apply_runs_segmentation(monkeypatch, tmp_path: Path) 
     )
     captured: dict[str, object] = {}
 
-    def _fake_segment(zarr_path_arg, *, config_dict, console, output_run, overwrite):  # type: ignore[no-untyped-def]
+    def _fake_segment(  # type: ignore[no-untyped-def]
+        zarr_path_arg,
+        *,
+        config_dict,
+        console,
+        output_run,
+        overwrite,
+        scheduler,
+        num_workers,
+    ):
         captured["zarr_path"] = zarr_path_arg
         captured["config_dict"] = config_dict
         captured["console"] = console
         captured["output_run"] = output_run
         captured["overwrite"] = overwrite
+        captured["scheduler"] = scheduler
+        captured["num_workers"] = num_workers
         return "traditional_swim_bladder_masks_batch_001"
 
     monkeypatch.setattr(mod.swim_mod, "segment_swim_bladder_masks", _fake_segment)
@@ -145,6 +158,8 @@ def test_process_zarr_path_apply_runs_segmentation(monkeypatch, tmp_path: Path) 
     assert captured["console"] is None
     assert captured["output_run"] == "traditional_swim_bladder_masks_batch_001"
     assert captured["overwrite"] is False
+    assert captured["scheduler"] == "single-threaded"
+    assert captured["num_workers"] is None
 
 
 def test_main_parses_roi_cache_args_into_config(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -185,6 +200,40 @@ def test_main_parses_roi_cache_args_into_config(monkeypatch, tmp_path: Path, cap
     assert options.config_dict["roi_cache_dir"] == "/tmp/swim-cache"
     assert options.config_dict["roi_live_acceleration"] == "gpu"
     assert options.config_dict["roi_live_gpu_chunk_frames"] == 21
+    assert options.scheduler == "single-threaded"
+    assert options.num_workers is None
+
+
+def test_main_parses_scheduler_args(monkeypatch, tmp_path: Path, capsys) -> None:
+    training_path = tmp_path / "recording_training.zarr"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(mod, "_iter_zarr", lambda _roots, recursive: [training_path])
+
+    def _fake_process(zarr_path, options):  # type: ignore[no-untyped-def]
+        captured["options"] = options
+        return mod.BatchRow(zarr_path=zarr_path, status="planned", observed_use="training")
+
+    monkeypatch.setattr(mod, "_process_zarr_path", _fake_process)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--run-name",
+            "traditional_swim_bladder_masks_batch_001",
+            "--scheduler",
+            "distributed",
+            "--num-workers",
+            "7",
+        ]
+    )
+    _ = capsys.readouterr()
+
+    assert rc == 0
+    options = captured["options"]
+    assert options.scheduler == "distributed"
+    assert options.num_workers == 7
 
 
 def test_main_scans_roots_and_reports_summary(monkeypatch, tmp_path: Path, capsys) -> None:

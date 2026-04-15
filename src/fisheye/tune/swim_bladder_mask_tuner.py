@@ -22,7 +22,10 @@ from ..diagnostics.preview_eye_mask_background_subtraction import _prepare_panel
 from ..utils.zarr_io import open_zarr_root
 from ..visualization.visualize_swim_bladder_mask_patches import (
     _extract_patch_bounds,
-    _resolve_swim_bladder_center_with_source,
+    _load_keypoint_success_flags,
+    _resolve_keypoint_group,
+    _resolve_swim_bladder_keypoint_center,
+    _validate_keypoint_group_alignment,
 )
 from . import eye_mask_tuner as eye_mask_ops
 from . import subject_mask_tuner as subject_tuner
@@ -583,6 +586,71 @@ def _build_canvas(
     return cv2.vconcat([grid, footer])
 
 
+def _build_missing_keypoint_canvas(
+    *,
+    roi_img: np.ndarray,
+    existing_patch: Optional[np.ndarray],
+    existing_title: str,
+    panel_size: int,
+    footer_lines: Sequence[str],
+    message: str,
+) -> np.ndarray:
+    blank_patch = np.zeros_like(roi_img, dtype=np.uint8)
+    message_panel = np.zeros((int(roi_img.shape[0]), int(roi_img.shape[1]), 3), dtype=np.uint8)
+    for idx, line in enumerate(str(message).splitlines()[:3]):
+        cv2.putText(
+            message_panel,
+            line,
+            (10, 28 + idx * 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
+    roi_panel = _draw_roi_context(
+        roi_img,
+        center_xy=(float(roi_img.shape[1]) / 2.0, float(roi_img.shape[0]) / 2.0),
+        bounds_xyxy=(0, int(roi_img.shape[1]), 0, int(roi_img.shape[0])),
+    )
+
+    panels_top = [
+        _prepare_panel(roi_panel, "Crop ROI", panel_size),
+        _prepare_panel(blank_patch, "Swim Bladder Patch", panel_size),
+        _prepare_panel(
+            np.asarray(existing_patch, dtype=np.uint8) * 255 if existing_patch is not None else np.zeros_like(blank_patch),
+            existing_title,
+            panel_size,
+            nearest=True,
+        ),
+        _prepare_panel(message_panel, "Proposal Overlay", panel_size),
+    ]
+    panels_bottom = [
+        _prepare_panel(blank_patch, "Filtered Patch", panel_size),
+        _prepare_panel(message_panel, "Debug Panel", panel_size),
+        _prepare_panel(blank_patch, "Seed Mask", panel_size, nearest=True),
+        _prepare_panel(blank_patch, "Proposal Mask", panel_size, nearest=True),
+    ]
+
+    top_row = cv2.hconcat(panels_top)
+    bottom_row = cv2.hconcat(panels_bottom)
+    grid = cv2.vconcat([top_row, bottom_row])
+
+    footer = np.zeros((110, grid.shape[1], 3), dtype=np.uint8)
+    for idx, line in enumerate(footer_lines[:4]):
+        cv2.putText(
+            footer,
+            str(line),
+            (10, 24 + idx * 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.53,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
+    return cv2.vconcat([grid, footer])
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune local traditional swim-bladder segmentation parameters.")
     parser.add_argument("zarr_path", type=Path, help="Path to Palette zarr archive.")
@@ -624,23 +692,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         np.asarray(crop_group["detection_indices"][:], dtype=np.int32) if "detection_indices" in crop_group else None
     )
 
-    keypoint_source = subject_tuner._resolve_eye_keypoint_source(root, args.keypoint_run)
-    keypoints_roi = np.asarray(keypoint_source.keypoints_roi[:], dtype=np.float32)
-    keypoint_labels_raw = keypoint_source.group.attrs.get("keypoint_labels")
-    keypoint_labels = (
-        [str(item) for item in keypoint_labels_raw]
-        if isinstance(keypoint_labels_raw, (list, tuple))
-        else None
-    )
-    if int(keypoints_roi.shape[0]) != total_rois:
-        raise RuntimeError(
-            f"Keypoint rows {int(keypoints_roi.shape[0])} do not match crop ROI rows {total_rois}."
-        )
-
     subject_source = _resolve_subject_source(root, args.subject_run)
     subject_component_index = (
         subject_tuner._find_subject_label_index(subject_source, "swim_bladder")
         if subject_source is not None
+        else None
+    )
+    kp_group, kp_group_name, kp_run_name = _resolve_keypoint_group(
+        root,
+        subject_group=subject_source.group if subject_source is not None else None,
+        refined_group=None,
+        explicit_run=args.keypoint_run,
+        explicit_group=None,
+        expected_crop_run=str(crop_run),
+    )
+    if kp_group is None or kp_group_name is None or kp_run_name is None:
+        raise RuntimeError("No keypoint run resolved for swim-bladder tuning.")
+    _validate_keypoint_group_alignment(
+        crop_group,
+        str(crop_run),
+        kp_group,
+        total_rois=total_rois,
+    )
+    keypoints_roi = np.asarray(kp_group["keypoints_roi"][:], dtype=np.float32)
+    keypoint_success = _load_keypoint_success_flags(kp_group, total_rois=total_rois)
+    keypoint_labels_raw = kp_group.attrs.get("keypoint_labels")
+    keypoint_labels = (
+        [str(item) for item in keypoint_labels_raw]
+        if isinstance(keypoint_labels_raw, (list, tuple))
         else None
     )
 
@@ -779,7 +858,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print("\nStarting Swim Bladder Mask Tuner")
     print(f"  crop_run={crop_run}")
-    print(f"  keypoint_run={keypoint_source.group_name}/{keypoint_source.run_name}")
+    print(f"  keypoint_run={kp_group_name}/{kp_run_name}")
     print(f"  method_family={active_method_family}")
     if subject_source is not None:
         if int(subject_source.masks_roi.shape[0]) != total_rois:
@@ -850,37 +929,69 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         roi_img = np.asarray(roi_images[current_roi], dtype=np.uint8)
         keypoints_row = keypoints_roi[current_roi]
-        center_xy, center_source = _resolve_swim_bladder_center_with_source(
+        center_xy, center_source = _resolve_swim_bladder_keypoint_center(
             keypoints_row,
             keypoint_labels,
-            np.zeros(roi_img.shape, dtype=np.uint8),
-            tuple(roi_img.shape),
+            success_flag=bool(keypoint_success[current_roi]),
         )
-        x0, x1, y0, y1 = _extract_patch_bounds(tuple(roi_img.shape), center_xy, int(current_params["roi_padding"]))
-        patch = np.asarray(roi_img[y0:y1, x0:x1], dtype=np.uint8)
-        patch_center_xy = (float(center_xy[0]) - float(x0), float(center_xy[1]) - float(y0))
-        preview = _compute_swim_bladder_patch_preview(
-            patch,
-            center_xy=patch_center_xy,
-            params=current_params,
-            method_family=active_method_family,
-        )
-
-        existing_patch = None
+        existing_mask_full = None
         existing_title = "Stored Mask (none)"
         if subject_source is not None and subject_component_index is not None:
-            existing_mask = np.asarray(subject_source.masks_roi[current_roi, subject_component_index], dtype=np.uint8)
-            existing_patch = existing_mask[y0:y1, x0:x1]
+            existing_mask_full = np.asarray(
+                subject_source.masks_roi[current_roi, subject_component_index],
+                dtype=np.uint8,
+            )
             existing_title = f"Stored Mask ({subject_source.run_name})"
 
-        stats = preview["stats"]
-        if active_method_family == POLAR_BOUNDARY_METHOD_FAMILY:
+        preview = None
+        patch = None
+        patch_center_xy = None
+        patch_bounds = None
+        existing_patch = existing_mask_full
+        stats: Dict[str, Any] = {
+            "selected_area": 0,
+            "circularity": None,
+            "threshold_value": None,
+            "valid_ray_fraction": None,
+            "max_missing_gap_degrees": None,
+        }
+        if center_xy is not None:
+            x0, x1, y0, y1 = _extract_patch_bounds(
+                tuple(roi_img.shape),
+                center_xy,
+                int(current_params["roi_padding"]),
+            )
+            patch_bounds = (x0, x1, y0, y1)
+            patch = np.asarray(roi_img[y0:y1, x0:x1], dtype=np.uint8)
+            patch_center_xy = (float(center_xy[0]) - float(x0), float(center_xy[1]) - float(y0))
+            preview = _compute_swim_bladder_patch_preview(
+                patch,
+                center_xy=patch_center_xy,
+                params=current_params,
+                method_family=active_method_family,
+            )
+            if existing_mask_full is not None:
+                existing_patch = existing_mask_full[y0:y1, x0:x1]
+            stats.update(dict(preview["stats"]))
+
+        line1 = (
+            f"ROI {current_roi + 1}/{total_rois} | frame="
+            f"{int(frame_indices[current_roi]) if frame_indices is not None else '-'} | detection="
+            f"{int(detection_indices[current_roi]) if detection_indices is not None else '-'} | center={center_source}"
+        )
+        if center_xy is None:
             footer_lines = [
+                line1,
+                f"pad={int(current_params['roi_padding'])} | keypoint_run={kp_group_name}/{kp_run_name}",
                 (
-                    f"ROI {current_roi + 1}/{total_rois} | frame="
-                    f"{int(frame_indices[current_roi]) if frame_indices is not None else '-'} | detection="
-                    f"{int(detection_indices[current_roi]) if detection_indices is not None else '-'} | center={center_source}"
+                    "Swim-bladder tuning preview is disabled until this ROI has a valid aligned "
+                    "swim-bladder keypoint."
                 ),
+                "Controls: n/p next-prev, j/k +/-10 ROI, s save tuning, q/ESC quit",
+            ]
+        elif active_method_family == POLAR_BOUNDARY_METHOD_FAMILY:
+            footer_lines = [
+                line1,
                 (
                     f"pad={int(current_params['roi_padding'])} | angle_step={int(current_params['angle_step_degrees'])} | "
                     f"radius=[{int(current_params['min_radius_px'])},{int(current_params['max_radius_px'])}] | "
@@ -911,11 +1022,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else "None"
             )
             footer_lines = [
-                (
-                    f"ROI {current_roi + 1}/{total_rois} | frame="
-                    f"{int(frame_indices[current_roi]) if frame_indices is not None else '-'} | detection="
-                    f"{int(detection_indices[current_roi]) if detection_indices is not None else '-'} | center={center_source}"
-                ),
+                line1,
                 (
                     f"pad={int(current_params['roi_padding'])} | pre_thr={current_params['pre_threshold'] or 'None'} | "
                     f"sobel={float(current_params['sobel_strength']):.2f} | close={int(current_params['closing_radius'])} | "
@@ -933,24 +1040,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ),
             ]
 
-        canvas = _build_canvas(
-            roi_img=roi_img,
-            patch=patch,
-            filtered_patch=preview["filtered_patch"],
-            seed_mask=preview["seed_mask"],
-            proposal_mask=preview["proposal_mask"],
-            center_xy=center_xy,
-            patch_center_xy=patch_center_xy,
-            patch_bounds=(x0, x1, y0, y1),
-            existing_patch=existing_patch,
-            existing_title=existing_title,
-            sobel_panel=preview["sobel_panel"],
-            filtered_patch_title=str(preview.get("filtered_patch_title") or "Filtered Patch"),
-            sobel_panel_title=str(preview.get("sobel_panel_title") or "Debug Panel"),
-            seed_mask_title=str(preview.get("seed_mask_title") or "Seed Mask"),
-            panel_size=DEFAULT_PANEL_SIZE,
-            footer_lines=footer_lines,
-        )
+        if center_xy is None or preview is None or patch is None or patch_center_xy is None or patch_bounds is None:
+            message = (
+                "Swim bladder keypoint row is marked unsuccessful."
+                if center_source == "unsuccessful_keypoint"
+                else "Swim bladder keypoint is missing or non-finite."
+            )
+            canvas = _build_missing_keypoint_canvas(
+                roi_img=roi_img,
+                existing_patch=existing_patch,
+                existing_title=existing_title,
+                panel_size=DEFAULT_PANEL_SIZE,
+                footer_lines=footer_lines,
+                message=message,
+            )
+        else:
+            canvas = _build_canvas(
+                roi_img=roi_img,
+                patch=patch,
+                filtered_patch=preview["filtered_patch"],
+                seed_mask=preview["seed_mask"],
+                proposal_mask=preview["proposal_mask"],
+                center_xy=center_xy,
+                patch_center_xy=patch_center_xy,
+                patch_bounds=patch_bounds,
+                existing_patch=existing_patch,
+                existing_title=existing_title,
+                sobel_panel=preview["sobel_panel"],
+                filtered_patch_title=str(preview.get("filtered_patch_title") or "Filtered Patch"),
+                sobel_panel_title=str(preview.get("sobel_panel_title") or "Debug Panel"),
+                seed_mask_title=str(preview.get("seed_mask_title") or "Seed Mask"),
+                panel_size=DEFAULT_PANEL_SIZE,
+                footer_lines=footer_lines,
+            )
         cv2.imshow(WINDOW_NAME, canvas)
 
         key = cv2.waitKey(30) & 0xFF
@@ -973,6 +1095,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             cv2.setTrackbarPos("ROI Index", WINDOW_NAME, current_roi)
             continue
         if key == ord("s"):
+            if center_xy is None:
+                print(
+                    "Cannot save swim-bladder tuning from this ROI: "
+                    f"{center_source}. Choose an ROI with a valid aligned swim-bladder keypoint."
+                )
+                continue
             method_label = (
                 "polar_boundary_center_seed"
                 if active_method_family == POLAR_BOUNDARY_METHOD_FAMILY
@@ -986,11 +1114,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "roi_index_one_based": int(current_roi) + 1,
                     "total_rois": int(total_rois),
                     "crop_run": str(crop_run),
-                    "keypoint_run": str(keypoint_source.run_name),
-                    "keypoint_source": str(keypoint_source.group_name),
+                    "keypoint_run": str(kp_run_name),
+                    "keypoint_source": str(kp_group_name),
                     "frame_index": int(frame_indices[current_roi]) if frame_indices is not None else None,
                     "detection_index": int(detection_indices[current_roi]) if detection_indices is not None else None,
-                    "roi_success": bool(np.all(np.isfinite(np.asarray(center_xy, dtype=np.float32)))),
+                    "roi_success": True,
                     "patch_center_source": str(center_source),
                     "storage_component_name": "swim_bladder",
                     "subject_preview_run": str(subject_source.run_name) if subject_source is not None else None,

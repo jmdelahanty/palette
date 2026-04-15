@@ -27,6 +27,8 @@ class BatchOptions:
     output_run: Optional[str]
     overwrite: bool
     require_swim_tuning: bool
+    scheduler: str
+    num_workers: Optional[int]
     config_dict: Mapping[str, object]
 
 
@@ -186,6 +188,8 @@ def _process_zarr_path(zarr_path: Path, options: BatchOptions) -> BatchRow:
             console=None,
             output_run=options.output_run,
             overwrite=options.overwrite,
+            scheduler=options.scheduler,
+            num_workers=options.num_workers,
         )
     except Exception as exc:
         return BatchRow(
@@ -225,6 +229,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         type=str,
         required=True,
         help="Explicit subject_mask_runs/<run> output name for every archive.",
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=swim_mod._parse_scheduler_arg,
+        default="single-threaded",
+        help=(
+            "Scheduler to use for ROI processing. Accepted values: threads, processes, distributed, "
+            "single-threaded, single-thread, single_thread. Default: single-threaded."
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        help="Optional number of worker threads/processes for scheduler-backed ROI processing.",
     )
     parser.add_argument("--crop-run", type=str, help="Optional crop_runs/<run> override for every archive.")
     parser.add_argument("--keypoint-run", type=str, help="Optional keypoint run override for every archive.")
@@ -301,6 +319,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_run=str(args.run_name),
         overwrite=bool(args.overwrite),
         require_swim_tuning=not bool(args.allow_missing_tuning),
+        scheduler=str(args.scheduler),
+        num_workers=int(args.num_workers) if args.num_workers is not None else None,
         config_dict=swim_mod._build_cli_overrides(args),
     )
 

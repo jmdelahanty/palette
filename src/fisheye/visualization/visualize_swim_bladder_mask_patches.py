@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -36,6 +38,7 @@ except (TypeError, ValueError):
 cv2.setNumThreads(cv2_threads)
 
 WINDOW_NAME = "Swim Bladder Mask Patch Viewer"
+CONTROL_WINDOW_NAME = "Swim Bladder Mask Patch Controls"
 DEFAULT_PADDING = 18
 MAX_PADDING = 128
 DEFAULT_SCALE_PERCENT = 220
@@ -48,6 +51,58 @@ PANEL_LABEL_HEIGHT = 18
 MASK_COLOR = (255, 220, 0)
 KEYPOINT_COLOR = (255, 0, 255)
 CENTER_COLOR = (0, 255, 0)
+
+
+def _debug_json_value(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, tuple):
+        return [_debug_json_value(item) for item in value]
+    if isinstance(value, list):
+        return [_debug_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _debug_json_value(item) for key, item in value.items()}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+class _UiDebugLog:
+    def __init__(self, path: Path, *, zarr_path: Path) -> None:
+        self.path = path.expanduser()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = self.path.open("a", encoding="utf-8", buffering=1)
+        self._session_id = f"{os.getpid()}-{time.time_ns()}"
+        self._seq = 0
+        self._zarr_path = str(zarr_path)
+
+    def emit(self, event: str, /, **fields: object) -> None:
+        payload = {
+            "session_id": self._session_id,
+            "seq": self._seq,
+            "event": str(event),
+            "pid": int(os.getpid()),
+            "t_monotonic_ns": int(time.monotonic_ns()),
+            "zarr_path": self._zarr_path,
+        }
+        payload.update({str(key): _debug_json_value(value) for key, value in fields.items()})
+        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
+        self._seq += 1
+
+    def close(self) -> None:
+        self._fh.close()
+
+
+def _open_ui_debug_log(path: Optional[Path], *, zarr_path: Path) -> Optional[_UiDebugLog]:
+    if path is None:
+        return None
+    try:
+        return _UiDebugLog(path, zarr_path=zarr_path)
+    except Exception as exc:
+        print(f"Warning: failed to open UI debug log {path}: {exc}")
+        return None
 
 
 def _require_gui_display() -> None:
@@ -420,8 +475,37 @@ def _message_panel(
             (220, 220, 220),
             1,
             cv2.LINE_AA,
-        )
+    )
     return panel
+
+
+def _target_canvas_shape(
+    roi_shape: Tuple[int, int],
+    *,
+    padding: int,
+    edit_zoom: int,
+) -> Tuple[int, int]:
+    roi_h, roi_w = int(roi_shape[0]), int(roi_shape[1])
+    patch_dim = max(1, int(padding) * 2 + 1)
+    zoom = max(1, int(edit_zoom))
+
+    top_height = roi_h + PANEL_LABEL_HEIGHT
+    top_width = (roi_w * 2) + 6
+
+    bottom_height = max(patch_dim + PANEL_LABEL_HEIGHT, patch_dim * zoom + PANEL_LABEL_HEIGHT)
+    bottom_width = (patch_dim * 3) + (patch_dim * zoom) + (6 * 3)
+
+    return top_height + 8 + bottom_height, max(top_width, bottom_width)
+
+
+def _pad_canvas_to_shape(canvas: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+    target_h, target_w = int(target_shape[0]), int(target_shape[1])
+    canvas_h, canvas_w = int(canvas.shape[0]), int(canvas.shape[1])
+    pad_bottom = max(0, target_h - canvas_h)
+    pad_right = max(0, target_w - canvas_w)
+    if pad_bottom == 0 and pad_right == 0:
+        return canvas
+    return np.pad(canvas, ((0, pad_bottom), (0, pad_right), (0, 0)), mode="constant")
 
 
 def _build_missing_keypoint_view(
@@ -577,6 +661,7 @@ def create_viewer(
     review_intended_use: str,
     reviewer: Optional[str],
     review_notes: Optional[str],
+    debug_ui_log: Optional[Path] = None,
 ) -> str:
     root = open_zarr_root(zarr_path, mode="a")
     source, refined = prepare_refined_subject_run(
@@ -629,8 +714,28 @@ def create_viewer(
         raise RuntimeError("Refined masks rows do not match crop ROI rows.")
 
     _require_gui_display()
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-    cv2.resizeWindow(WINDOW_NAME, 1900, 1100)
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(CONTROL_WINDOW_NAME, cv2.WINDOW_NORMAL)
+    ui_framework = str(cv2.currentUIFramework()).strip().upper() if hasattr(cv2, "currentUIFramework") else ""
+    use_callback_roi_sync = not ui_framework.startswith("QT")
+    debug_log = _open_ui_debug_log(debug_ui_log, zarr_path=zarr_path)
+
+    def _debug_emit(event: str, /, **fields: object) -> None:
+        if debug_log is not None:
+            debug_log.emit(event, **fields)
+
+    _debug_emit(
+        "session_start",
+        ui_framework=ui_framework or "unknown",
+        use_callback_roi_sync=use_callback_roi_sync,
+        control_window=CONTROL_WINDOW_NAME,
+        total_rois=total_rois,
+        queue_size=queue_size,
+        subset_active=subset_active,
+        start_roi=start_roi,
+        initial_subject_run=subject_run,
+        initial_refined_run=refined_run,
+    )
 
     def _noop(_value: int) -> None:
         return
@@ -642,28 +747,67 @@ def create_viewer(
         current_pos = 0
     current_pos = _clamp_queue_pos(current_pos, queue_size=queue_size)
     last_loaded_pos = -1
-    # Track mouse-driven trackbar drags via callback instead of polling
-    # getTrackbarPos, which returns stale values on GTK backends.
+    # GTK-backed HighGUI windows can return stale ROI positions via
+    # getTrackbarPos() during active drags, so keep the callback path there.
+    # Qt behaves better with direct polling and avoids visible slider wobble.
     _trackbar_drag_pos: List[int] = [current_pos]
+    _displayed_trackbar_pos: List[int] = [current_pos]
+    _pending_programmatic_roi_pos: List[Optional[int]] = [None]
+    _last_polled_roi_slider: List[Optional[int]] = [None]
+    _last_window_rect: List[Optional[Tuple[int, int, int, int]]] = [None]
     _setting_trackbar = [False]
 
     def _on_roi_trackbar(value: int) -> None:
         if not _setting_trackbar[0]:
-            _trackbar_drag_pos[0] = _clamp_queue_pos(value, queue_size=queue_size)
+            clamped = _clamp_queue_pos(value, queue_size=queue_size)
+            _trackbar_drag_pos[0] = clamped
+            _displayed_trackbar_pos[0] = clamped
+            _debug_emit(
+                "roi_trackbar_callback",
+                value=value,
+                clamped=clamped,
+                current_pos=current_pos,
+            )
 
     def _set_roi_trackbar(pos: int) -> None:
+        clamped = _clamp_queue_pos(pos, queue_size=queue_size)
+        if _displayed_trackbar_pos[0] == clamped:
+            _debug_emit(
+                "roi_trackbar_set_skipped",
+                requested=pos,
+                clamped=clamped,
+                displayed=_displayed_trackbar_pos[0],
+                pending_programmatic=_pending_programmatic_roi_pos[0],
+            )
+            return
+        if not use_callback_roi_sync:
+            _pending_programmatic_roi_pos[0] = clamped
+        _debug_emit(
+            "roi_trackbar_set",
+            requested=pos,
+            clamped=clamped,
+            displayed_before=_displayed_trackbar_pos[0],
+            pending_before=_pending_programmatic_roi_pos[0],
+        )
         _setting_trackbar[0] = True
-        cv2.setTrackbarPos("ROI", WINDOW_NAME, pos)
+        cv2.setTrackbarPos("ROI", CONTROL_WINDOW_NAME, clamped)
         _setting_trackbar[0] = False
+        _displayed_trackbar_pos[0] = clamped
 
     roi_trackbar_max = max(1, queue_size - 1)
-    cv2.createTrackbar("ROI", WINDOW_NAME, current_pos, roi_trackbar_max, _on_roi_trackbar)
-    cv2.createTrackbar("Padding", WINDOW_NAME, max(1, min(int(padding), MAX_PADDING)), MAX_PADDING, _noop)
-    cv2.createTrackbar("Brush", WINDOW_NAME, max(1, min(int(DEFAULT_BRUSH), BRUSH_MAX)), BRUSH_MAX, _noop)
-    cv2.createTrackbar("Edit Zoom", WINDOW_NAME, max(1, min(int(edit_zoom), MAX_EDIT_ZOOM)), MAX_EDIT_ZOOM, _noop)
+    cv2.createTrackbar(
+        "ROI",
+        CONTROL_WINDOW_NAME,
+        current_pos,
+        roi_trackbar_max,
+        _on_roi_trackbar if use_callback_roi_sync else _noop,
+    )
+    cv2.createTrackbar("Padding", CONTROL_WINDOW_NAME, max(1, min(int(padding), MAX_PADDING)), MAX_PADDING, _noop)
+    cv2.createTrackbar("Brush", CONTROL_WINDOW_NAME, max(1, min(int(DEFAULT_BRUSH), BRUSH_MAX)), BRUSH_MAX, _noop)
+    cv2.createTrackbar("Edit Zoom", CONTROL_WINDOW_NAME, max(1, min(int(edit_zoom), MAX_EDIT_ZOOM)), MAX_EDIT_ZOOM, _noop)
     cv2.createTrackbar(
         "Scale %",
-        WINDOW_NAME,
+        CONTROL_WINDOW_NAME,
         max(25, min(int(scale_percent), MAX_SCALE_PERCENT)),
         MAX_SCALE_PERCENT,
         _noop,
@@ -682,7 +826,21 @@ def create_viewer(
         "center_xy": None,
         "drawing": False,
         "erase_mode": False,
+        "needs_redraw": False,
+        "redraw_reason": None,
     }
+
+    def _request_redraw(reason: str) -> None:
+        previous_reason = state.get("redraw_reason")
+        state["needs_redraw"] = True
+        state["redraw_reason"] = str(reason)
+        _debug_emit(
+            "request_redraw",
+            reason=reason,
+            previous_reason=previous_reason,
+            loaded_roi_idx=state.get("loaded_roi_idx"),
+            current_pos=current_pos,
+        )
 
     def _load_roi(queue_pos: int) -> None:
         roi_idx = int(visible_roi_indices[int(queue_pos)])
@@ -702,6 +860,12 @@ def create_viewer(
         state["cursor_patch_xy"] = None
         state["center_xy"] = center_xy
         state["center_source"] = center_source
+        _debug_emit(
+            "load_roi",
+            queue_pos=queue_pos,
+            roi_idx=roi_idx,
+            center_source=center_source,
+        )
 
     def _update_display() -> None:
         roi_img = state.get("roi_img")
@@ -717,10 +881,10 @@ def create_viewer(
             else np.zeros_like(masks_row[component_idx]),
             dtype=np.uint8,
         )
-        padding_val = max(1, int(cv2.getTrackbarPos("Padding", WINDOW_NAME)))
-        brush_val = max(1, int(cv2.getTrackbarPos("Brush", WINDOW_NAME)))
-        edit_zoom_val = max(1, int(cv2.getTrackbarPos("Edit Zoom", WINDOW_NAME)))
-        scale_percent_val = max(25, int(cv2.getTrackbarPos("Scale %", WINDOW_NAME)))
+        padding_val = max(1, int(cv2.getTrackbarPos("Padding", CONTROL_WINDOW_NAME)))
+        brush_val = max(1, int(cv2.getTrackbarPos("Brush", CONTROL_WINDOW_NAME)))
+        edit_zoom_val = max(1, int(cv2.getTrackbarPos("Edit Zoom", CONTROL_WINDOW_NAME)))
+        scale_percent_val = max(25, int(cv2.getTrackbarPos("Scale %", CONTROL_WINDOW_NAME)))
         state["display_scale"] = max(0.25, float(scale_percent_val) / 100.0)
 
         center_xy = state.get("center_xy")
@@ -743,6 +907,14 @@ def create_viewer(
                 brush_radius=brush_val,
                 cursor_patch_xy=state.get("cursor_patch_xy"),
             )
+        canvas = _pad_canvas_to_shape(
+            canvas,
+            _target_canvas_shape(
+                tuple(roi_arr.shape),
+                padding=padding_val,
+                edit_zoom=edit_zoom_val,
+            ),
+        )
         review_payload = dict(refined.group.attrs.get("component_review_statuses") or {}).get("swim_bladder", {})
         review_state_text = str(review_payload.get("state") or "pending")
         brush_mode_text = "erase" if bool(state.get("erase_mode")) else "paint"
@@ -774,6 +946,27 @@ def create_viewer(
                 interpolation=cv2.INTER_NEAREST,
             )
         cv2.imshow(WINDOW_NAME, canvas)
+        window_rect: Optional[Tuple[int, int, int, int]] = None
+        if hasattr(cv2, "getWindowImageRect"):
+            try:
+                rect_raw = cv2.getWindowImageRect(WINDOW_NAME)
+                if rect_raw is not None:
+                    window_rect = tuple(int(v) for v in rect_raw)
+            except Exception:
+                window_rect = None
+        redraw_reason = state.get("redraw_reason")
+        if redraw_reason is not None or window_rect != _last_window_rect[0]:
+            _debug_emit(
+                "update_display",
+                redraw_reason=redraw_reason,
+                canvas_shape=tuple(int(v) for v in canvas.shape),
+                window_rect=window_rect,
+                loaded_roi_idx=state.get("loaded_roi_idx"),
+                current_pos=current_pos,
+            )
+        _last_window_rect[0] = window_rect
+        state["needs_redraw"] = False
+        state["redraw_reason"] = None
 
     def _save_current() -> None:
         if state.get("center_xy") is None:
@@ -791,6 +984,7 @@ def create_viewer(
         )
         state["stored_masks_row"] = np.asarray(state["edit_masks_row"], dtype=np.uint8).copy()
         print(f"Saved swim bladder patch edits for ROI {int(state['loaded_roi_idx'])}.")
+        _debug_emit("save_current", loaded_roi_idx=state.get("loaded_roi_idx"))
 
     def _apply_patch_at(local_x: int, local_y: int, erase: bool) -> None:
         edit_meta = state.get("edit_meta")
@@ -807,9 +1001,16 @@ def create_viewer(
         mask = np.asarray(edit_masks_row, dtype=np.uint8)[component_idx]
         full_x = int(edit_meta["patch_x0"]) + patch_x
         full_y = int(edit_meta["patch_y0"]) + patch_y
-        brush_val = max(1, int(cv2.getTrackbarPos("Brush", WINDOW_NAME)))
+        brush_val = max(1, int(cv2.getTrackbarPos("Brush", CONTROL_WINDOW_NAME)))
         cv2.circle(mask, (full_x, full_y), brush_val, 0 if erase else 1, -1)
-        _update_display()
+        _debug_emit(
+            "apply_patch",
+            patch_xy=(patch_x, patch_y),
+            full_xy=(full_x, full_y),
+            brush=brush_val,
+            erase=erase,
+        )
+        _request_redraw("mouse_apply_patch")
 
     def _on_mouse(event: int, x: int, y: int, _flags: int, _param: object) -> None:
         edit_meta = state.get("edit_meta")
@@ -827,8 +1028,10 @@ def create_viewer(
         if not in_edit:
             if state.get("cursor_patch_xy") is not None:
                 state["cursor_patch_xy"] = None
-                _update_display()
+                _request_redraw("mouse_leave_edit")
             if event == cv2.EVENT_LBUTTONUP or not left_down:
+                if bool(state.get("drawing")):
+                    _debug_emit("drawing_state", active=False, reason="mouse_leave_or_button_up")
                 state["drawing"] = False
             return
 
@@ -837,11 +1040,14 @@ def create_viewer(
         if event == cv2.EVENT_LBUTTONDOWN:
             # Brush edits are gated behind Ctrl to avoid accidental draws while navigating.
             state["drawing"] = bool(ctrl_down)
+            _debug_emit("drawing_state", active=bool(state["drawing"]), reason="lbutton_down", ctrl_down=ctrl_down)
         elif event == cv2.EVENT_MOUSEMOVE and bool(state.get("drawing")):
             if not (ctrl_down and left_down):
                 state["drawing"] = False
+                _debug_emit("drawing_state", active=False, reason="mouse_move_without_ctrl")
         elif event == cv2.EVENT_LBUTTONUP:
             state["drawing"] = False
+            _debug_emit("drawing_state", active=False, reason="lbutton_up")
 
         patch_x = int(local_x / max(1, int(edit_meta["zoom"])))
         patch_y = int((local_y - int(edit_meta["label_h"])) / max(1, int(edit_meta["zoom"])))
@@ -850,11 +1056,14 @@ def create_viewer(
             _apply_patch_at(local_x, local_y, erase_mode)
         elif event == cv2.EVENT_MOUSEMOVE:
             if 0 <= patch_x < int(edit_meta["patch_w"]) and 0 <= patch_y < int(edit_meta["patch_h"]):
-                state["cursor_patch_xy"] = (patch_x, patch_y)
-                _update_display()
+                next_cursor = (patch_x, patch_y)
+                if state.get("cursor_patch_xy") != next_cursor:
+                    state["cursor_patch_xy"] = next_cursor
+                    _request_redraw("mouse_cursor_move")
 
     cv2.setMouseCallback(WINDOW_NAME, _on_mouse)
     _load_roi(current_pos)
+    last_loaded_pos = current_pos
     _update_display()
 
     print("\nSwim Bladder Patch Review")
@@ -876,50 +1085,81 @@ def create_viewer(
     print("  q/ESC: quit")
 
     while True:
-        key = cv2.waitKey(30) & 0xFF
-        if key in (ord("q"), 27):
-            break
-
-        if key == ord("n"):
-            if current_pos < queue_size - 1:
-                current_pos += 1
-                _trackbar_drag_pos[0] = current_pos
-                _set_roi_trackbar(current_pos)
-        elif key == ord("p"):
-            if current_pos > 0:
-                current_pos -= 1
-                _trackbar_drag_pos[0] = current_pos
-                _set_roi_trackbar(current_pos)
-        elif key == ord("["):
-            current = max(1, int(cv2.getTrackbarPos("Brush", WINDOW_NAME)))
-            cv2.setTrackbarPos("Brush", WINDOW_NAME, max(1, current - 1))
-            _update_display()
-        elif key == ord("]"):
-            current = max(1, int(cv2.getTrackbarPos("Brush", WINDOW_NAME)))
-            cv2.setTrackbarPos("Brush", WINDOW_NAME, min(BRUSH_MAX, current + 1))
-            _update_display()
-        elif key == ord("r"):
-            state["edit_masks_row"] = np.asarray(state["stored_masks_row"], dtype=np.uint8).copy()
-            _update_display()
-        elif key == ord("x"):
-            new_mode = not bool(state.get("erase_mode"))
-            state["erase_mode"] = new_mode
-            print(f"Brush mode: {'erase' if new_mode else 'paint'}")
-            _update_display()
-        elif key == ord("s"):
-            _save_current()
-
-        # Accept mouse-driven trackbar drags (callback updates
-        # _trackbar_drag_pos without going through getTrackbarPos).
-        if _trackbar_drag_pos[0] != current_pos:
-            current_pos = _trackbar_drag_pos[0]
+        if use_callback_roi_sync:
+            # Accept mouse-driven trackbar drags via callback updates rather than
+            # getTrackbarPos(), which can be stale on GTK backends.
+            if _trackbar_drag_pos[0] != current_pos:
+                current_pos = _trackbar_drag_pos[0]
+                _debug_emit("current_pos_from_callback", current_pos=current_pos)
+        else:
+            roi_slider = _clamp_queue_pos(int(cv2.getTrackbarPos("ROI", CONTROL_WINDOW_NAME)), queue_size=queue_size)
+            if _last_polled_roi_slider[0] != roi_slider or _pending_programmatic_roi_pos[0] is not None:
+                _debug_emit(
+                    "roi_trackbar_poll",
+                    roi_slider=roi_slider,
+                    current_pos=current_pos,
+                    pending_programmatic=_pending_programmatic_roi_pos[0],
+                )
+                _last_polled_roi_slider[0] = roi_slider
+            pending_programmatic = _pending_programmatic_roi_pos[0]
+            if pending_programmatic is not None:
+                if roi_slider == pending_programmatic:
+                    _displayed_trackbar_pos[0] = roi_slider
+                    _pending_programmatic_roi_pos[0] = None
+                    _debug_emit("roi_trackbar_programmatic_ack", roi_slider=roi_slider)
+            elif roi_slider != current_pos:
+                current_pos = roi_slider
+                _displayed_trackbar_pos[0] = roi_slider
+                _debug_emit("current_pos_from_poll", current_pos=current_pos)
 
         if current_pos != last_loaded_pos:
             _set_roi_trackbar(current_pos)
             last_loaded_pos = current_pos
             _load_roi(current_pos)
+        if not use_callback_roi_sync or bool(state.get("needs_redraw")):
             _update_display()
+
+        key = cv2.waitKey(30) & 0xFF
+        if key in (ord("q"), 27):
+            _debug_emit("key_event", key=key, key_chr=chr(key) if 32 <= key <= 126 else None)
+            break
+
+        if key == ord("n"):
+            _debug_emit("key_event", key=key, key_chr="n", current_pos=current_pos)
+            if current_pos < queue_size - 1:
+                current_pos += 1
+                if use_callback_roi_sync:
+                    _trackbar_drag_pos[0] = current_pos
+                else:
+                    _set_roi_trackbar(current_pos)
+        elif key == ord("p"):
+            _debug_emit("key_event", key=key, key_chr="p", current_pos=current_pos)
+            if current_pos > 0:
+                current_pos -= 1
+                if use_callback_roi_sync:
+                    _trackbar_drag_pos[0] = current_pos
+                else:
+                    _set_roi_trackbar(current_pos)
+        elif key == ord("["):
+            current = max(1, int(cv2.getTrackbarPos("Brush", CONTROL_WINDOW_NAME)))
+            cv2.setTrackbarPos("Brush", CONTROL_WINDOW_NAME, max(1, current - 1))
+            _request_redraw("key_brush_dec")
+        elif key == ord("]"):
+            current = max(1, int(cv2.getTrackbarPos("Brush", CONTROL_WINDOW_NAME)))
+            cv2.setTrackbarPos("Brush", CONTROL_WINDOW_NAME, min(BRUSH_MAX, current + 1))
+            _request_redraw("key_brush_inc")
+        elif key == ord("r"):
+            state["edit_masks_row"] = np.asarray(state["stored_masks_row"], dtype=np.uint8).copy()
+            _request_redraw("key_reset")
+        elif key == ord("x"):
+            new_mode = not bool(state.get("erase_mode"))
+            state["erase_mode"] = new_mode
+            print(f"Brush mode: {'erase' if new_mode else 'paint'}")
+            _request_redraw("key_toggle_erase")
+        elif key == ord("s"):
+            _save_current()
         elif key in (ord("a"), ord("N"), ord("R"), ord("P")):
+            _debug_emit("key_event", key=key, key_chr=chr(key), current_pos=current_pos)
             state_value = {
                 ord("a"): "approved",
                 ord("N"): "needs_review",
@@ -942,9 +1182,12 @@ def create_viewer(
                 f"Set swim_bladder review to {payload.get('state')} "
                 f"(run={run_payload.get('state')})"
             )
-            _update_display()
+            _request_redraw("key_review_state")
 
     cv2.destroyAllWindows()
+    _debug_emit("session_end", loaded_roi_idx=state.get("loaded_roi_idx"))
+    if debug_log is not None:
+        debug_log.close()
     return refined.run_name
 
 
@@ -970,6 +1213,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--review-intended-use", default=DEFAULT_REVIEW_INTENDED_USE)
     parser.add_argument("--reviewer", help="Reviewer name to record in review payloads.")
     parser.add_argument("--review-notes", help="Optional note attached to review payload updates.")
+    parser.add_argument(
+        "--debug-ui-log",
+        type=Path,
+        help="Optional JSONL log path for UI event instrumentation.",
+    )
     return parser.parse_args(argv)
 
 
@@ -992,6 +1240,7 @@ def main(argv: Optional[Sequence[str]] = None) -> str:
         review_intended_use=args.review_intended_use,
         reviewer=args.reviewer,
         review_notes=args.review_notes,
+        debug_ui_log=args.debug_ui_log,
     )
 
 

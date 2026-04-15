@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -11,11 +12,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+import dask
 import numpy as np
 import zarr
+from dask import delayed
+from dask.diagnostics import ProgressBar
 
 from ..shared.crop_image_source import CropImageSource
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -25,7 +30,10 @@ from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 from ..visualization.visualize_swim_bladder_mask_patches import (
     _extract_patch_bounds,
-    _resolve_swim_bladder_center_with_source,
+    _load_keypoint_success_flags,
+    _resolve_keypoint_group,
+    _resolve_swim_bladder_keypoint_center,
+    _validate_keypoint_group_alignment,
 )
 from .subject_segmentation import (
     SUBJECT_MASK_LABELS,
@@ -64,6 +72,11 @@ TUNING_OVERRIDE_KEYS = (
     "gradient_mode",
     "prefilter_sigma",
 )
+VALID_SCHEDULERS = ("threads", "processes", "distributed", "single-threaded")
+SWIM_ROW_STATUS_OK = np.int8(0)
+SWIM_ROW_STATUS_MISSING_KEYPOINT = np.int8(1)
+SWIM_ROW_STATUS_UNSUCCESSFUL_KEYPOINT = np.int8(2)
+_SUBJECT_MASKS_STATUS_SOURCE = "runtime_swim_bladder_segmentation"
 
 
 @dataclass
@@ -192,15 +205,289 @@ def _apply_overrides(
 def _resolve_swim_bladder_point(
     keypoints_row: np.ndarray,
     keypoint_labels: Optional[Sequence[str]],
-    roi_shape: tuple[int, int],
 ) -> Optional[tuple[float, float]]:
-    center_xy, center_source = _resolve_swim_bladder_center_with_source(
+    center_xy, center_source = _resolve_swim_bladder_keypoint_center(
         keypoints_row,
         keypoint_labels,
-        np.zeros(roi_shape, dtype=np.uint8),
-        roi_shape,
+        success_flag=True,
     )
-    return tuple(center_xy) if center_source == "keypoint" else None
+    return tuple(center_xy) if center_source == "keypoint" and center_xy is not None else None
+
+
+def _normalize_scheduler(scheduler: Optional[str]) -> str:
+    scheduler_key = str(scheduler or "single-threaded").strip().lower()
+    if scheduler_key in {"single-thread", "single_thread"}:
+        scheduler_key = "single-threaded"
+    if scheduler_key not in VALID_SCHEDULERS:
+        scheduler_key = "single-threaded"
+    return scheduler_key
+
+
+def _parse_scheduler_arg(text: str) -> str:
+    normalized = str(text or "").strip().lower()
+    if normalized not in {"threads", "processes", "distributed", "single-threaded", "single-thread", "single_thread"}:
+        raise argparse.ArgumentTypeError(
+            "Invalid scheduler. Expected one of: threads, processes, distributed, "
+            "single-threaded, single-thread, single_thread."
+        )
+    return _normalize_scheduler(text)
+
+
+def _parse_roi_indices_arg(text: str) -> list[int]:
+    raw = str(text or "").replace(" ", "")
+    if not raw:
+        raise argparse.ArgumentTypeError("ROI indices must not be empty.")
+    try:
+        return [int(token) for token in raw.split(",") if token]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid ROI indices '{text}'. Expected comma-separated integers."
+        ) from exc
+
+
+def _normalize_roi_indices(roi_indices: Optional[Sequence[int]], total_rois: int) -> list[int]:
+    if roi_indices is None:
+        return list(range(int(total_rois)))
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw_idx in roi_indices:
+        idx = int(raw_idx)
+        if idx < 0 or idx >= int(total_rois):
+            raise ValueError(f"roi index {idx} is out of bounds for run with {int(total_rois)} rows.")
+        if idx in seen:
+            continue
+        seen.add(idx)
+        normalized.append(idx)
+    if not normalized:
+        raise ValueError("At least one ROI index is required.")
+    return normalized
+
+
+def _bootstrap_swim_row_status(
+    *,
+    keypoints_roi: np.ndarray,
+    success_flags: np.ndarray,
+    keypoint_labels: Optional[Sequence[str]],
+) -> np.ndarray:
+    total_rois = int(keypoints_roi.shape[0])
+    status = np.zeros((total_rois,), dtype=np.int8)
+    for row_idx in range(total_rois):
+        if row_idx >= int(success_flags.shape[0]) or not bool(success_flags[row_idx]):
+            status[row_idx] = SWIM_ROW_STATUS_UNSUCCESSFUL_KEYPOINT
+            continue
+        if _resolve_swim_bladder_point(np.asarray(keypoints_roi[row_idx], dtype=np.float32), keypoint_labels) is None:
+            status[row_idx] = SWIM_ROW_STATUS_MISSING_KEYPOINT
+    return status
+
+
+def _compute_swim_summary_statistics(
+    *,
+    roi_count: int,
+    run_name: str,
+    crop_run: str,
+    kp_group_name: str,
+    kp_run_name: str,
+    duration_seconds: float,
+    created_at_utc: str,
+    updated_at_utc: Optional[str],
+    mask_present_swim: np.ndarray,
+    area_px_swim: np.ndarray,
+    prob_max_swim: np.ndarray,
+    swim_row_status: np.ndarray,
+    previous_summary: Optional[Mapping[str, Any]] = None,
+    swim_row_diagnostics_complete: bool,
+    otsu_thresholds: Optional[np.ndarray] = None,
+    valid_ray_fraction_values: Optional[np.ndarray] = None,
+    max_missing_gap_values: Optional[np.ndarray] = None,
+) -> dict[str, Any]:
+    roi_total = int(roi_count)
+    mask_present_arr = np.asarray(mask_present_swim, dtype=bool)
+    area_arr = np.asarray(area_px_swim, dtype=np.float32)
+    prob_arr = np.asarray(prob_max_swim, dtype=np.float32)
+    status_arr = np.asarray(swim_row_status, dtype=np.int8)
+    nonempty_count = int(np.count_nonzero(mask_present_arr))
+    summary_statistics = {
+        "rows_total": roi_total,
+        "rows_with_nonempty_masks": nonempty_count,
+        "rows_empty_masks": int(roi_total - nonempty_count),
+        "rows_skipped_missing_keypoint": int(np.count_nonzero(status_arr == SWIM_ROW_STATUS_MISSING_KEYPOINT)),
+        "rows_skipped_unsuccessful_keypoint": int(np.count_nonzero(status_arr == SWIM_ROW_STATUS_UNSUCCESSFUL_KEYPOINT)),
+        "area_px_min": float(area_arr.min()) if roi_total else None,
+        "area_px_mean": float(area_arr.mean()) if roi_total else None,
+        "area_px_max": float(area_arr.max()) if roi_total else None,
+        "prob_max_min": float(prob_arr.min()) if roi_total else None,
+        "prob_max_mean": float(prob_arr.mean()) if roi_total else None,
+        "prob_max_max": float(prob_arr.max()) if roi_total else None,
+        "output_run": run_name,
+        "crop_run": str(crop_run),
+        "keypoint_group": str(kp_group_name),
+        "keypoint_run": str(kp_run_name),
+        "duration_seconds": duration_seconds,
+        "created_at_utc": created_at_utc,
+    }
+    if updated_at_utc:
+        summary_statistics["updated_at_utc"] = str(updated_at_utc)
+
+    if swim_row_diagnostics_complete and otsu_thresholds is not None and valid_ray_fraction_values is not None and max_missing_gap_values is not None:
+        finite_otsu = np.isfinite(otsu_thresholds)
+        finite_valid_fraction = np.isfinite(valid_ray_fraction_values)
+        finite_max_gap = np.isfinite(max_missing_gap_values)
+        summary_statistics["otsu_threshold_min"] = float(np.nanmin(otsu_thresholds)) if np.any(finite_otsu) else None
+        summary_statistics["otsu_threshold_mean"] = float(np.nanmean(otsu_thresholds)) if np.any(finite_otsu) else None
+        summary_statistics["otsu_threshold_max"] = float(np.nanmax(otsu_thresholds)) if np.any(finite_otsu) else None
+        summary_statistics["valid_ray_fraction_mean"] = (
+            float(np.nanmean(valid_ray_fraction_values)) if np.any(finite_valid_fraction) else None
+        )
+        summary_statistics["max_missing_gap_degrees_mean"] = (
+            float(np.nanmean(max_missing_gap_values)) if np.any(finite_max_gap) else None
+        )
+    else:
+        previous = dict(previous_summary) if isinstance(previous_summary, Mapping) else {}
+        for key in (
+            "otsu_threshold_min",
+            "otsu_threshold_mean",
+            "otsu_threshold_max",
+            "valid_ray_fraction_mean",
+            "max_missing_gap_degrees_mean",
+        ):
+            summary_statistics[key] = previous.get(key)
+    return summary_statistics
+
+
+def _process_swim_bladder_roi(
+    row_idx: int,
+    roi_image: np.ndarray,
+    keypoints_row: np.ndarray,
+    *,
+    success_flag: bool,
+    keypoint_labels: Optional[Sequence[str]],
+    cfg: SwimBladderSegmentationConfig,
+) -> Dict[str, Any]:
+    if not success_flag:
+        return {"index": int(row_idx), "status": "unsuccessful_keypoint"}
+
+    gray_roi = _coerce_roi_to_gray(np.asarray(roi_image))
+    center_xy = _resolve_swim_bladder_point(keypoints_row, keypoint_labels)
+    if center_xy is None:
+        return {"index": int(row_idx), "status": "missing_keypoint"}
+
+    if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY:
+        params = {
+            "roi_padding": int(cfg.roi_padding),
+            "angle_step_degrees": int(cfg.angle_step_degrees),
+            "min_radius_px": int(cfg.min_radius_px),
+            "max_radius_px": int(cfg.max_radius_px),
+            "smoothing_sigma": float(cfg.smoothing_sigma),
+            "response_threshold": float(cfg.response_threshold),
+            "max_missing_gap_degrees": int(cfg.max_missing_gap_degrees),
+            "min_valid_ray_fraction": float(cfg.min_valid_ray_fraction),
+            "gradient_mode": str(cfg.gradient_mode),
+            "prefilter_sigma": float(cfg.prefilter_sigma),
+        }
+    else:
+        params = {
+            "roi_padding": int(cfg.roi_padding),
+            "pre_threshold": cfg.pre_threshold,
+            "sobel_strength": float(cfg.sobel_strength),
+            "min_area": int(cfg.min_area),
+            "max_area": cfg.max_area,
+            "min_circularity": cfg.min_circularity,
+            "closing_radius": int(cfg.closing_radius),
+            "opening_radius": int(cfg.opening_radius),
+        }
+
+    x0, x1, y0, y1 = _extract_patch_bounds(tuple(gray_roi.shape), center_xy, int(cfg.roi_padding))
+    patch = np.asarray(gray_roi[y0:y1, x0:x1], dtype=np.uint8)
+    patch_center_xy = (float(center_xy[0]) - float(x0), float(center_xy[1]) - float(y0))
+    preview = swim_tuning._compute_swim_bladder_patch_preview(
+        patch,
+        center_xy=patch_center_xy,
+        params=params,
+        method_family=cfg.subject_method_family,
+    )
+    probability_patch = np.asarray(preview.get("probability_patch"), dtype=np.float32)
+    if probability_patch.shape != patch.shape:
+        probability_patch = np.zeros_like(patch, dtype=np.float32)
+
+    return {
+        "index": int(row_idx),
+        "status": "ok",
+        "bounds": (int(x0), int(x1), int(y0), int(y1)),
+        "proposal_patch": np.asarray(preview["proposal_mask"], dtype=np.uint8),
+        "probability_patch": np.clip(probability_patch, 0.0, 1.0),
+        "threshold_value": preview["stats"].get("threshold_value"),
+        "valid_ray_fraction": preview["stats"].get("valid_ray_fraction"),
+        "max_missing_gap_degrees": preview["stats"].get("max_missing_gap_degrees"),
+    }
+
+
+def _process_swim_bladder_chunk(
+    chunk_indices: Sequence[int],
+    zarr_path: str,
+    cfg_dict: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    if not chunk_indices:
+        return []
+
+    root = open_zarr_root(zarr_path, mode="r")
+    cfg = SwimBladderSegmentationConfig(**cfg_dict)
+    crop_source = CropImageSource.open(
+        root,
+        crop_run=cfg.crop_run,
+        zarr_path=zarr_path,
+        roi_cache_policy=cfg.roi_cache_policy,
+        roi_live_acceleration=cfg.roi_live_acceleration,
+        roi_live_gpu_chunk_frames=int(cfg.roi_live_gpu_chunk_frames),
+        roi_cache_dir=cfg.roi_cache_dir,
+        console=None,
+    )
+    try:
+        kp_group, kp_group_name, kp_run_name = _resolve_keypoint_group(
+            root,
+            subject_group=None,
+            refined_group=None,
+            explicit_run=cfg.keypoint_run,
+            explicit_group=None,
+            expected_crop_run=cfg.crop_run,
+        )
+        if kp_group is None or kp_group_name is None or kp_run_name is None:
+            fallback = subject_tuning._resolve_eye_keypoint_source(root, cfg.keypoint_run)
+            kp_group = fallback.group
+            kp_group_name = fallback.group_name
+            kp_run_name = fallback.run_name
+        _validate_keypoint_group_alignment(
+            crop_source.crop_group,
+            str(cfg.crop_run),
+            kp_group,
+            total_rois=int(crop_source.shape[0]),
+        )
+        keypoint_labels_raw = kp_group.attrs.get("keypoint_labels")
+        keypoint_labels = (
+            [str(item) for item in keypoint_labels_raw]
+            if isinstance(keypoint_labels_raw, (list, tuple))
+            else None
+        )
+        start = int(chunk_indices[0])
+        stop = int(chunk_indices[-1]) + 1
+        keypoints_chunk = np.asarray(kp_group["keypoints_roi"][start:stop], dtype=np.float32)
+        success_all = _load_keypoint_success_flags(kp_group, total_rois=int(crop_source.shape[0]))
+        success_chunk = np.asarray(success_all[start:stop], dtype=bool)
+        results: list[Dict[str, Any]] = []
+        for row_idx in chunk_indices:
+            local_idx = int(row_idx) - start
+            results.append(
+                _process_swim_bladder_roi(
+                    int(row_idx),
+                    np.asarray(crop_source[int(row_idx)]),
+                    np.asarray(keypoints_chunk[local_idx], dtype=np.float32),
+                    success_flag=bool(success_chunk[local_idx]),
+                    keypoint_labels=keypoint_labels,
+                    cfg=cfg,
+                )
+            )
+        return results
+    finally:
+        crop_source.close()
 
 
 def segment_swim_bladder_masks_from_root(
@@ -211,6 +498,9 @@ def segment_swim_bladder_masks_from_root(
     console: Optional[Console] = None,
     output_run: Optional[str] = None,
     overwrite: bool = False,
+    scheduler: str = "single-threaded",
+    num_workers: Optional[int] = None,
+    roi_indices: Optional[Sequence[int]] = None,
 ) -> str:
     stage_start = time.perf_counter()
     cfg = SwimBladderSegmentationConfig()
@@ -234,111 +524,374 @@ def segment_swim_bladder_masks_from_root(
     roi_images = crop_source
 
     try:
-        keypoint_source = subject_tuning._resolve_eye_keypoint_source(root, cfg.keypoint_run)
-        keypoints_roi = np.asarray(keypoint_source.keypoints_roi[:], dtype=np.float32)
-        success_flags = np.asarray(keypoint_source.success_flags, dtype=bool)
-        if int(keypoints_roi.shape[0]) != int(roi_images.shape[0]):
-            raise ValueError(
-                f"Keypoint rows {int(keypoints_roi.shape[0])} do not match crop ROI rows {int(roi_images.shape[0])}."
-            )
-        keypoint_labels_raw = keypoint_source.group.attrs.get("keypoint_labels")
+        kp_group, kp_group_name, kp_run_name = _resolve_keypoint_group(
+            root,
+            subject_group=None,
+            refined_group=None,
+            explicit_run=cfg.keypoint_run,
+            explicit_group=None,
+            expected_crop_run=str(crop_run),
+        )
+        if kp_group is None or kp_group_name is None or kp_run_name is None:
+            fallback = subject_tuning._resolve_eye_keypoint_source(root, cfg.keypoint_run)
+            kp_group = fallback.group
+            kp_group_name = fallback.group_name
+            kp_run_name = fallback.run_name
+        _validate_keypoint_group_alignment(
+            crop_group,
+            str(crop_run),
+            kp_group,
+            total_rois=int(roi_images.shape[0]),
+        )
+        keypoints_roi = np.asarray(kp_group["keypoints_roi"][:], dtype=np.float32)
+        success_flags = _load_keypoint_success_flags(kp_group, total_rois=int(roi_images.shape[0]))
+        keypoint_labels_raw = kp_group.attrs.get("keypoint_labels")
         keypoint_labels = (
             [str(item) for item in keypoint_labels_raw]
             if isinstance(keypoint_labels_raw, (list, tuple))
             else None
         )
+        cfg.crop_run = str(crop_run)
+        cfg.keypoint_run = str(kp_run_name)
 
         roi_count = int(roi_images.shape[0])
         roi_h = int(roi_images.shape[1])
         roi_w = int(roi_images.shape[2])
         n_channels = len(SUBJECT_MASK_LABELS)
+        selected_rows = _normalize_roi_indices(roi_indices, roi_count)
+        partial_refresh = roi_indices is not None
 
-        swim_masks = np.zeros((roi_count, roi_h, roi_w), dtype=np.uint8)
-        swim_probs = np.zeros((roi_count, roi_h, roi_w), dtype=np.float32)
-        rows_skipped_missing_keypoint = 0
-        rows_skipped_unsuccessful_keypoint = 0
-        otsu_thresholds = np.full((roi_count,), np.nan, dtype=np.float32)
-        valid_ray_fraction_values = np.full((roi_count,), np.nan, dtype=np.float32)
-        max_missing_gap_values = np.full((roi_count,), np.nan, dtype=np.float32)
+        selected_swim_masks = np.zeros((len(selected_rows), roi_h, roi_w), dtype=np.uint8)
+        selected_swim_probs = np.zeros((len(selected_rows), roi_h, roi_w), dtype=np.float32)
+        selected_status = np.full((len(selected_rows),), SWIM_ROW_STATUS_OK, dtype=np.int8)
+        selected_otsu_thresholds = np.full((len(selected_rows),), np.nan, dtype=np.float32)
+        selected_valid_ray_fraction_values = np.full((len(selected_rows),), np.nan, dtype=np.float32)
+        selected_max_missing_gap_values = np.full((len(selected_rows),), np.nan, dtype=np.float32)
+        scheduler_key = _normalize_scheduler(scheduler)
+        requested_scheduler = str(scheduler or "").strip().lower()
+        if requested_scheduler and scheduler_key != requested_scheduler and requested_scheduler not in {"single-thread", "single_thread"}:
+            _print(console, f"[yellow]Unknown scheduler '{scheduler}', defaulting to 'single-threaded'[/yellow]")
 
-        if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY:
-            params = {
-                "roi_padding": int(cfg.roi_padding),
-                "angle_step_degrees": int(cfg.angle_step_degrees),
-                "min_radius_px": int(cfg.min_radius_px),
-                "max_radius_px": int(cfg.max_radius_px),
-                "smoothing_sigma": float(cfg.smoothing_sigma),
-                "response_threshold": float(cfg.response_threshold),
-                "max_missing_gap_degrees": int(cfg.max_missing_gap_degrees),
-                "min_valid_ray_fraction": float(cfg.min_valid_ray_fraction),
-                "gradient_mode": str(cfg.gradient_mode),
-                "prefilter_sigma": float(cfg.prefilter_sigma),
+        roi_results: list[Dict[str, Any]] = []
+        if total_selected := int(len(selected_rows)):
+            can_parallelize = zarr_path is not None
+            if scheduler_key != "single-threaded" and not can_parallelize:
+                _print(console, "[yellow]Parallel scheduler requested without zarr_path; falling back to single-threaded.[/yellow]")
+                scheduler_key = "single-threaded"
+
+            if scheduler_key == "single-threaded" or total_selected == 1:
+                for row_idx in selected_rows:
+                    roi_results.append(
+                        _process_swim_bladder_roi(
+                            row_idx,
+                            np.asarray(roi_images[row_idx]),
+                            np.asarray(keypoints_roi[row_idx], dtype=np.float32),
+                            success_flag=bool(success_flags[row_idx]) if row_idx < success_flags.shape[0] else False,
+                            keypoint_labels=keypoint_labels,
+                            cfg=cfg,
+                        )
+                    )
+            else:
+                default_workers = os.cpu_count() or 4
+                worker_count = int(num_workers) if num_workers is not None else min(default_workers, 16)
+                indices = list(selected_rows)
+                chunk_size = max(64, min(1024, (total_selected + worker_count - 1) // worker_count))
+                chunks = [indices[i:i + chunk_size] for i in range(0, total_selected, chunk_size)]
+                cfg_dict = asdict(cfg)
+                tasks = [
+                    delayed(_process_swim_bladder_chunk)(
+                        chunk,
+                        str(zarr_path),
+                        cfg_dict,
+                    )
+                    for chunk in chunks
+                ]
+
+                client = None
+                cluster = None
+                try:
+                    if scheduler_key == "distributed":
+                        try:
+                            from dask.distributed import Client, LocalCluster
+                        except ImportError:
+                            _print(console, "[yellow]dask[distributed] not installed; falling back to 'threads'.[/yellow]")
+                            scheduler_key = "threads"
+                        else:
+                            dashboard_addr = os.environ.get("PALETTE_DASK_DASHBOARD", ":0")
+                            cluster_kwargs: Dict[str, Any] = {
+                                "threads_per_worker": 1,
+                                "processes": True,
+                                "memory_limit": "auto",
+                                "dashboard_address": dashboard_addr,
+                            }
+                            if num_workers is not None:
+                                cluster_kwargs["n_workers"] = int(num_workers)
+                            cluster = LocalCluster(**cluster_kwargs)
+                            client = Client(cluster)
+                            dash_link = getattr(client, "dashboard_link", None)
+                            if dash_link:
+                                _print(console, f"[cyan]Dask dashboard:[/cyan] [link={dash_link}]{dash_link}[/link]")
+                            futures = client.compute(tasks, sync=False)
+                            gathered = client.gather(futures)
+                            roi_results = [item for chunk_result in gathered for item in chunk_result]
+
+                    if not roi_results:
+                        compute_kwargs: Dict[str, Any] = {"scheduler": scheduler_key}
+                        if num_workers is not None:
+                            compute_kwargs["num_workers"] = int(num_workers)
+                        with ProgressBar():
+                            computed = dask.compute(*tasks, **compute_kwargs)
+                        for chunk_result in computed:
+                            roi_results.extend(chunk_result)
+                finally:
+                    if client is not None:
+                        try:
+                            client.close(timeout=5)
+                        except Exception:
+                            pass
+                    if cluster is not None:
+                        try:
+                            cluster.close(timeout=5)
+                        except Exception:
+                            pass
+
+        roi_results.sort(key=lambda result: int(result["index"]))
+        row_to_offset = {int(row_idx): idx for idx, row_idx in enumerate(selected_rows)}
+        for result in roi_results:
+            row_idx = int(result["index"])
+            row_offset = int(row_to_offset[row_idx])
+            status = str(result["status"])
+            if status == "unsuccessful_keypoint":
+                selected_status[row_offset] = SWIM_ROW_STATUS_UNSUCCESSFUL_KEYPOINT
+                continue
+            if status == "missing_keypoint":
+                selected_status[row_offset] = SWIM_ROW_STATUS_MISSING_KEYPOINT
+                continue
+
+            selected_status[row_offset] = SWIM_ROW_STATUS_OK
+            x0, x1, y0, y1 = result["bounds"]
+            selected_swim_masks[row_offset, y0:y1, x0:x1] = np.asarray(result["proposal_patch"], dtype=np.uint8)
+            selected_swim_probs[row_offset, y0:y1, x0:x1] = np.asarray(result["probability_patch"], dtype=np.float32)
+            threshold_value = result.get("threshold_value")
+            if threshold_value is not None:
+                selected_otsu_thresholds[row_offset] = float(threshold_value)
+            valid_fraction = result.get("valid_ray_fraction")
+            if valid_fraction is not None:
+                selected_valid_ray_fraction_values[row_offset] = float(valid_fraction)
+            max_gap = result.get("max_missing_gap_degrees")
+            if max_gap is not None:
+                selected_max_missing_gap_values[row_offset] = float(max_gap)
+
+        channel_metrics = _compute_channel_metrics(selected_swim_masks, selected_swim_probs)
+        metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
+        op_timestamp = datetime.now(timezone.utc).isoformat()
+        tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
+
+        if partial_refresh:
+            if output_run is None:
+                raise ValueError("Partial swim-bladder refresh requires --run-name / output_run.")
+            subject_parent = root.get("subject_mask_runs")
+            if subject_parent is None or not hasattr(subject_parent, "attrs") or str(output_run) not in subject_parent:
+                raise ValueError(
+                    f"subject_mask_runs/{output_run} not found. Partial swim-bladder refresh requires an existing run."
+                )
+            run_group = subject_parent[str(output_run)]
+            run_name = str(output_run)
+            created_at = str(run_group.attrs.get("created_at_utc") or op_timestamp)
+            updated_at = op_timestamp
+
+            masks_arr = run_group.get("masks_roi")
+            probs_arr = run_group.get("mask_probs_roi")
+            if masks_arr is None or probs_arr is None:
+                raise RuntimeError(f"subject_mask_runs/{run_name} is missing masks_roi or mask_probs_roi.")
+            if tuple(int(dim) for dim in masks_arr.shape) != (roi_count, n_channels, roi_h, roi_w):
+                raise RuntimeError(
+                    f"subject_mask_runs/{run_name} masks_roi shape mismatch: expected {(roi_count, n_channels, roi_h, roi_w)}, "
+                    f"got {tuple(int(dim) for dim in masks_arr.shape)}."
+                )
+            if tuple(int(dim) for dim in probs_arr.shape) != (roi_count, n_channels, roi_h, roi_w):
+                raise RuntimeError(
+                    f"subject_mask_runs/{run_name} mask_probs_roi shape mismatch: expected {(roi_count, n_channels, roi_h, roi_w)}, "
+                    f"got {tuple(int(dim) for dim in probs_arr.shape)}."
+                )
+
+            metrics_group = run_group.require_group("metrics")
+            prob_max_arr = metrics_group["prob_max"]
+            mask_present_arr = metrics_group["mask_present"]
+            area_px_arr = metrics_group["area_px"]
+            centroid_xy_arr = metrics_group["centroid_xy"]
+            centroid_valid_arr = metrics_group["centroid_valid"]
+            bbox_xyxy_arr = metrics_group["bbox_xyxy"]
+            bbox_valid_arr = metrics_group["bbox_valid"]
+
+            swim_row_status_arr = metrics_group.get("swim_row_status")
+            if swim_row_status_arr is None or int(swim_row_status_arr.shape[0]) != roi_count:
+                metrics_group.create_array(
+                    "swim_row_status",
+                    data=_bootstrap_swim_row_status(
+                        keypoints_roi=keypoints_roi,
+                        success_flags=success_flags,
+                        keypoint_labels=keypoint_labels,
+                    ),
+                    chunks=(metric_row_chunk,),
+                    overwrite=True,
+                )
+                swim_row_status_arr = metrics_group["swim_row_status"]
+            run_group.attrs["swim_row_status_labels"] = {
+                "0": "ok",
+                "1": "missing_keypoint",
+                "2": "unsuccessful_keypoint",
             }
+
+            diagnostics_complete = bool(run_group.attrs.get("swim_row_diagnostics_complete", False))
+            for metric_name in (
+                "swim_otsu_threshold",
+                "swim_valid_ray_fraction",
+                "swim_max_missing_gap_degrees",
+            ):
+                metric_arr = metrics_group.get(metric_name)
+                if metric_arr is None or int(metric_arr.shape[0]) != roi_count:
+                    metrics_group.create_array(
+                        metric_name,
+                        data=np.full((roi_count,), np.nan, dtype=np.float32),
+                        chunks=(metric_row_chunk,),
+                        overwrite=True,
+                    )
+                    diagnostics_complete = False
+            otsu_threshold_arr = metrics_group["swim_otsu_threshold"]
+            valid_ray_fraction_arr = metrics_group["swim_valid_ray_fraction"]
+            max_missing_gap_arr = metrics_group["swim_max_missing_gap_degrees"]
+
+            for row_offset, roi_idx in enumerate(selected_rows):
+                masks_arr[int(roi_idx), 2] = np.asarray(selected_swim_masks[row_offset], dtype=np.uint8)
+                probs_arr[int(roi_idx), 2] = np.asarray(selected_swim_probs[row_offset], dtype=np.float16)
+                prob_max_arr[int(roi_idx), 2] = np.float32(channel_metrics["prob_max"][row_offset])
+                mask_present_arr[int(roi_idx), 2] = bool(channel_metrics["mask_present"][row_offset])
+                area_px_arr[int(roi_idx), 2] = np.float32(channel_metrics["area_px"][row_offset])
+                centroid_xy_arr[int(roi_idx), 2] = np.asarray(channel_metrics["centroid_xy"][row_offset], dtype=np.float32)
+                centroid_valid_arr[int(roi_idx), 2] = bool(channel_metrics["centroid_valid"][row_offset])
+                bbox_xyxy_arr[int(roi_idx), 2] = np.asarray(channel_metrics["bbox_xyxy"][row_offset], dtype=np.float32)
+                bbox_valid_arr[int(roi_idx), 2] = bool(channel_metrics["bbox_valid"][row_offset])
+                swim_row_status_arr[int(roi_idx)] = np.int8(selected_status[row_offset])
+                otsu_threshold_arr[int(roi_idx)] = np.float32(selected_otsu_thresholds[row_offset])
+                valid_ray_fraction_arr[int(roi_idx)] = np.float32(selected_valid_ray_fraction_values[row_offset])
+                max_missing_gap_arr[int(roi_idx)] = np.float32(selected_max_missing_gap_values[row_offset])
+
+            run_group.attrs["swim_row_diagnostics_complete"] = bool(diagnostics_complete)
+            prob_max_swim = np.asarray(prob_max_arr[:, 2], dtype=np.float32)
+            mask_present_swim = np.asarray(mask_present_arr[:, 2], dtype=bool)
+            area_px_swim = np.asarray(area_px_arr[:, 2], dtype=np.float32)
+            swim_row_status = np.asarray(swim_row_status_arr[:], dtype=np.int8)
+            previous_summary = run_group.attrs.get("summary_statistics")
+            diagnostic_thresholds = np.asarray(otsu_threshold_arr[:], dtype=np.float32)
+            diagnostic_valid_fraction = np.asarray(valid_ray_fraction_arr[:], dtype=np.float32)
+            diagnostic_max_gap = np.asarray(max_missing_gap_arr[:], dtype=np.float32)
         else:
-            params = {
-                "roi_padding": int(cfg.roi_padding),
-                "pre_threshold": cfg.pre_threshold,
-                "sobel_strength": float(cfg.sobel_strength),
-                "min_area": int(cfg.min_area),
-                "max_area": cfg.max_area,
-                "min_circularity": cfg.min_circularity,
-                "closing_radius": int(cfg.closing_radius),
-                "opening_radius": int(cfg.opening_radius),
-            }
+            run_group, run_name = _prepare_run_group(root, output_run=output_run, overwrite=overwrite)
+            created_at = op_timestamp
+            updated_at = None
 
-        for row_idx in range(roi_count):
-            if row_idx < success_flags.shape[0] and not bool(success_flags[row_idx]):
-                rows_skipped_unsuccessful_keypoint += 1
-                continue
+            masks_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.uint8)
+            probs_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.float16)
+            for row_offset, roi_idx in enumerate(selected_rows):
+                masks_full[int(roi_idx), 2] = np.asarray(selected_swim_masks[row_offset], dtype=np.uint8)
+                probs_full[int(roi_idx), 2] = np.asarray(selected_swim_probs[row_offset], dtype=np.float16)
 
-            roi_image = _coerce_roi_to_gray(np.asarray(roi_images[row_idx]))
-            keypoints_row = np.asarray(keypoints_roi[row_idx], dtype=np.float32)
-            center_xy = _resolve_swim_bladder_point(keypoints_row, keypoint_labels, tuple(roi_image.shape))
-            if center_xy is None:
-                rows_skipped_missing_keypoint += 1
-                continue
-
-            x0, x1, y0, y1 = _extract_patch_bounds(tuple(roi_image.shape), center_xy, int(cfg.roi_padding))
-            patch = np.asarray(roi_image[y0:y1, x0:x1], dtype=np.uint8)
-            patch_center_xy = (float(center_xy[0]) - float(x0), float(center_xy[1]) - float(y0))
-            preview = swim_tuning._compute_swim_bladder_patch_preview(
-                patch,
-                center_xy=patch_center_xy,
-                params=params,
-                method_family=cfg.subject_method_family,
+            detection_source_arr = crop_group.get("detection_source")
+            detection_source = (
+                np.asarray(detection_source_arr[:], dtype=np.int8)
+                if detection_source_arr is not None
+                else np.zeros((roi_count,), dtype=np.int8)
             )
 
-            proposal_patch = np.asarray(preview["proposal_mask"], dtype=np.uint8)
-            swim_masks[row_idx, y0:y1, x0:x1] = proposal_patch
-            probability_patch = np.asarray(preview.get("probability_patch"), dtype=np.float32)
-            if probability_patch.shape != patch.shape:
-                probability_patch = np.zeros_like(patch, dtype=np.float32)
-            swim_probs[row_idx, y0:y1, x0:x1] = np.clip(probability_patch, 0.0, 1.0)
-            threshold_value = preview["stats"].get("threshold_value")
-            if threshold_value is not None:
-                otsu_thresholds[row_idx] = float(threshold_value)
-            valid_fraction = preview["stats"].get("valid_ray_fraction")
-            if valid_fraction is not None:
-                valid_ray_fraction_values[row_idx] = float(valid_fraction)
-            max_gap = preview["stats"].get("max_missing_gap_degrees")
-            if max_gap is not None:
-                max_missing_gap_values[row_idx] = float(max_gap)
+            _copy_lineage_array(run_group, crop_group, "frame_indices")
+            _copy_lineage_array(run_group, crop_group, "frame_counts")
+            _copy_lineage_array(run_group, crop_group, "detection_indices")
+            storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
+            run_group.create_array("detection_source", data=detection_source, overwrite=True)
+            run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)
+            run_group.create_array("mask_probs_roi", data=probs_full, chunks=storage_chunks, overwrite=True)
+            run_group.create_array(
+                "available_channels",
+                data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
+                overwrite=True,
+            )
 
-        run_group, run_name = _prepare_run_group(root, output_run=output_run, overwrite=overwrite)
-        created_at = datetime.now(timezone.utc).isoformat()
+            metrics_group = run_group.require_group("metrics")
+            prob_max = np.zeros((roi_count, n_channels), dtype=np.float32)
+            mask_present = np.zeros((roi_count, n_channels), dtype=bool)
+            area_px = np.zeros((roi_count, n_channels), dtype=np.float32)
+            centroid_xy = np.zeros((roi_count, n_channels, 2), dtype=np.float32)
+            centroid_valid = np.zeros((roi_count, n_channels), dtype=bool)
+            bbox_xyxy = np.zeros((roi_count, n_channels, 4), dtype=np.float32)
+            bbox_valid = np.zeros((roi_count, n_channels), dtype=bool)
+            for row_offset, roi_idx in enumerate(selected_rows):
+                prob_max[int(roi_idx), 2] = np.float32(channel_metrics["prob_max"][row_offset])
+                mask_present[int(roi_idx), 2] = bool(channel_metrics["mask_present"][row_offset])
+                area_px[int(roi_idx), 2] = np.float32(channel_metrics["area_px"][row_offset])
+                centroid_xy[int(roi_idx), 2, :] = np.asarray(channel_metrics["centroid_xy"][row_offset], dtype=np.float32)
+                centroid_valid[int(roi_idx), 2] = bool(channel_metrics["centroid_valid"][row_offset])
+                bbox_xyxy[int(roi_idx), 2, :] = np.asarray(channel_metrics["bbox_xyxy"][row_offset], dtype=np.float32)
+                bbox_valid[int(roi_idx), 2] = bool(channel_metrics["bbox_valid"][row_offset])
 
-        masks_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.uint8)
-        probs_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.float16)
-        masks_full[:, 2] = swim_masks
-        probs_full[:, 2] = swim_probs.astype(np.float16, copy=False)
+            metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
+            metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
+            metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
+            metrics_group.create_array(
+                "centroid_xy",
+                data=centroid_xy,
+                chunks=(metric_row_chunk, 1, 2),
+                overwrite=True,
+            )
+            metrics_group.create_array(
+                "centroid_valid",
+                data=centroid_valid,
+                chunks=(metric_row_chunk, 1),
+                overwrite=True,
+            )
+            metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
+            metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
+            metrics_group.create_array(
+                "swim_row_status",
+                data=np.asarray(selected_status, dtype=np.int8),
+                chunks=(metric_row_chunk,),
+                overwrite=True,
+            )
+            metrics_group.create_array(
+                "swim_otsu_threshold",
+                data=np.asarray(selected_otsu_thresholds, dtype=np.float32),
+                chunks=(metric_row_chunk,),
+                overwrite=True,
+            )
+            metrics_group.create_array(
+                "swim_valid_ray_fraction",
+                data=np.asarray(selected_valid_ray_fraction_values, dtype=np.float32),
+                chunks=(metric_row_chunk,),
+                overwrite=True,
+            )
+            metrics_group.create_array(
+                "swim_max_missing_gap_degrees",
+                data=np.asarray(selected_max_missing_gap_values, dtype=np.float32),
+                chunks=(metric_row_chunk,),
+                overwrite=True,
+            )
+            run_group.attrs["swim_row_status_labels"] = {
+                "0": "ok",
+                "1": "missing_keypoint",
+                "2": "unsuccessful_keypoint",
+            }
+            run_group.attrs["swim_row_diagnostics_complete"] = True
 
-        detection_source_arr = crop_group.get("detection_source")
-        detection_source = (
-            np.asarray(detection_source_arr[:], dtype=np.int8)
-            if detection_source_arr is not None
-            else np.zeros((roi_count,), dtype=np.int8)
-        )
-        tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
+            prob_max_swim = np.asarray(prob_max[:, 2], dtype=np.float32)
+            mask_present_swim = np.asarray(mask_present[:, 2], dtype=bool)
+            area_px_swim = np.asarray(area_px[:, 2], dtype=np.float32)
+            swim_row_status = np.asarray(selected_status, dtype=np.int8)
+            previous_summary = None
+            diagnostic_thresholds = np.asarray(selected_otsu_thresholds, dtype=np.float32)
+            diagnostic_valid_fraction = np.asarray(selected_valid_ray_fraction_values, dtype=np.float32)
+            diagnostic_max_gap = np.asarray(selected_max_missing_gap_values, dtype=np.float32)
+
+        duration_seconds = float(time.perf_counter() - stage_start)
         crop_snapshot_attrs = build_source_crop_snapshot_attrs(
             crop_group.attrs,
             source_crop_storage_mode=crop_source.storage_mode,
@@ -357,9 +910,9 @@ def segment_swim_bladder_masks_from_root(
                 "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
                 "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
                 "source_roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
-                "source_keypoints_run": str(keypoint_source.run_name),
-                "source_keypoint_run": str(keypoint_source.run_name),
-                "source_keypoint_group": str(keypoint_source.group_name),
+                "source_keypoints_run": str(kp_run_name),
+                "source_keypoint_run": str(kp_run_name),
+                "source_keypoint_group": str(kp_group_name),
                 "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
                 "mask_labels": list(SUBJECT_MASK_LABELS),
                 "output_semantics": "multilabel",
@@ -378,9 +931,13 @@ def segment_swim_bladder_masks_from_root(
                     if tuning_entry is not None
                     else "defaults_or_overrides"
                 ),
+                "dask_scheduler": scheduler_key,
+                "dask_num_workers": int(num_workers) if num_workers is not None else None,
                 "tuning_timestamp": tuning_entry.get("tuned_timestamp") if isinstance(tuning_entry, dict) else None,
                 "tuning_override_keys": list(tuning_override_keys),
                 "created_at_utc": created_at,
+                "updated_at_utc": updated_at,
+                "duration_seconds": duration_seconds,
             }
         )
         if crop_source.roi_cache_key is not None:
@@ -390,19 +947,6 @@ def segment_swim_bladder_masks_from_root(
         if tuning_entry_snapshot is not None:
             run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
 
-        _copy_lineage_array(run_group, crop_group, "frame_indices")
-        _copy_lineage_array(run_group, crop_group, "frame_counts")
-        _copy_lineage_array(run_group, crop_group, "detection_indices")
-        storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
-        metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
-        run_group.create_array("detection_source", data=detection_source, overwrite=True)
-        run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)
-        run_group.create_array("mask_probs_roi", data=probs_full, chunks=storage_chunks, overwrite=True)
-        run_group.create_array(
-            "available_channels",
-            data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
-            overwrite=True,
-        )
         write_subject_mask_component_provenance(
             run_group,
             component_name="swim_bladder",
@@ -414,77 +958,25 @@ def segment_swim_bladder_masks_from_root(
             source_created_at_utc=created_at,
         )
 
-        channel_metrics = _compute_channel_metrics(swim_masks, swim_probs)
-        metrics_group = run_group.require_group("metrics")
-        prob_max = np.zeros((roi_count, n_channels), dtype=np.float32)
-        mask_present = np.zeros((roi_count, n_channels), dtype=bool)
-        area_px = np.zeros((roi_count, n_channels), dtype=np.float32)
-        centroid_xy = np.zeros((roi_count, n_channels, 2), dtype=np.float32)
-        centroid_valid = np.zeros((roi_count, n_channels), dtype=bool)
-        bbox_xyxy = np.zeros((roi_count, n_channels, 4), dtype=np.float32)
-        bbox_valid = np.zeros((roi_count, n_channels), dtype=bool)
-
-        prob_max[:, 2] = channel_metrics["prob_max"]
-        mask_present[:, 2] = channel_metrics["mask_present"]
-        area_px[:, 2] = channel_metrics["area_px"]
-        centroid_xy[:, 2, :] = channel_metrics["centroid_xy"]
-        centroid_valid[:, 2] = channel_metrics["centroid_valid"]
-        bbox_xyxy[:, 2, :] = channel_metrics["bbox_xyxy"]
-        bbox_valid[:, 2] = channel_metrics["bbox_valid"]
-
-        metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
-        metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
-        metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
-        metrics_group.create_array(
-            "centroid_xy",
-            data=centroid_xy,
-            chunks=(metric_row_chunk, 1, 2),
-            overwrite=True,
+        summary_statistics = _compute_swim_summary_statistics(
+            roi_count=roi_count,
+            run_name=run_name,
+            crop_run=str(crop_run),
+            kp_group_name=str(kp_group_name),
+            kp_run_name=str(kp_run_name),
+            duration_seconds=duration_seconds,
+            created_at_utc=created_at,
+            updated_at_utc=updated_at,
+            mask_present_swim=mask_present_swim,
+            area_px_swim=area_px_swim,
+            prob_max_swim=prob_max_swim,
+            swim_row_status=swim_row_status,
+            previous_summary=previous_summary if isinstance(previous_summary, Mapping) else None,
+            swim_row_diagnostics_complete=bool(run_group.attrs.get("swim_row_diagnostics_complete", False)),
+            otsu_thresholds=diagnostic_thresholds,
+            valid_ray_fraction_values=diagnostic_valid_fraction,
+            max_missing_gap_values=diagnostic_max_gap,
         )
-        metrics_group.create_array(
-            "centroid_valid",
-            data=centroid_valid,
-            chunks=(metric_row_chunk, 1),
-            overwrite=True,
-        )
-        metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
-        metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
-
-        duration_seconds = float(time.perf_counter() - stage_start)
-        nonempty_rows = np.any(swim_masks > 0, axis=(1, 2))
-        nonempty_count = int(np.sum(nonempty_rows))
-        finite_otsu = np.isfinite(otsu_thresholds)
-        finite_valid_fraction = np.isfinite(valid_ray_fraction_values)
-        finite_max_gap = np.isfinite(max_missing_gap_values)
-        summary_statistics = {
-            "rows_total": int(roi_count),
-            "rows_with_nonempty_masks": nonempty_count,
-            "rows_empty_masks": int(roi_count - nonempty_count),
-            "rows_skipped_missing_keypoint": int(rows_skipped_missing_keypoint),
-            "rows_skipped_unsuccessful_keypoint": int(rows_skipped_unsuccessful_keypoint),
-            "area_px_min": float(area_px[:, 2].min()) if roi_count else None,
-            "area_px_mean": float(area_px[:, 2].mean()) if roi_count else None,
-            "area_px_max": float(area_px[:, 2].max()) if roi_count else None,
-            "prob_max_min": float(prob_max[:, 2].min()) if roi_count else None,
-            "prob_max_mean": float(prob_max[:, 2].mean()) if roi_count else None,
-            "prob_max_max": float(prob_max[:, 2].max()) if roi_count else None,
-            "otsu_threshold_min": float(np.nanmin(otsu_thresholds)) if np.any(finite_otsu) else None,
-            "otsu_threshold_mean": float(np.nanmean(otsu_thresholds)) if np.any(finite_otsu) else None,
-            "otsu_threshold_max": float(np.nanmax(otsu_thresholds)) if np.any(finite_otsu) else None,
-            "valid_ray_fraction_mean": float(np.nanmean(valid_ray_fraction_values))
-            if np.any(finite_valid_fraction)
-            else None,
-            "max_missing_gap_degrees_mean": float(np.nanmean(max_missing_gap_values))
-            if np.any(finite_max_gap)
-            else None,
-            "output_run": run_name,
-            "crop_run": str(crop_run),
-            "keypoint_group": str(keypoint_source.group_name),
-            "keypoint_run": str(keypoint_source.run_name),
-            "duration_seconds": duration_seconds,
-            "created_at_utc": created_at,
-        }
-        run_group.attrs["duration_seconds"] = duration_seconds
         run_group.attrs["summary_statistics"] = summary_statistics
 
         git_info = get_git_info()
@@ -506,17 +998,22 @@ def segment_swim_bladder_masks_from_root(
             "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
-            "source_keypoint_run": str(keypoint_source.run_name),
-            "source_keypoint_group": str(keypoint_source.group_name),
+            "source_keypoint_run": str(kp_run_name),
+            "source_keypoint_group": str(kp_group_name),
             "frame_source": crop_source.frame_source_kind,
             "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
         }
         if crop_source.roi_cache_path is not None:
             provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
+        scheduler_info: Optional[Dict[str, Any]] = None
+        if scheduler_key:
+            scheduler_info = {"type": scheduler_key}
+            if num_workers is not None:
+                scheduler_info["num_workers"] = int(num_workers)
         provenance = build_stage_provenance(
             stage="subject_masks",
             command=" ".join(sys.argv),
-            created_at_utc=created_at,
+            created_at_utc=updated_at or created_at,
             version=git_info.get("short_hash") or git_info.get("commit_hash"),
             git={
                 "commit": git_info.get("commit_hash"),
@@ -533,12 +1030,17 @@ def segment_swim_bladder_masks_from_root(
                 "python_version": platform_info.get("python_version"),
                 "machine": platform_info.get("machine"),
             },
+            scheduler=scheduler_info,
             parameters={
                 **asdict(cfg),
                 "method": run_group.attrs.get("method"),
                 "run_semantics": run_group.attrs.get("run_semantics"),
                 "probability_semantics": run_group.attrs.get("probability_semantics"),
+                "refresh_mode": "partial" if partial_refresh else "full",
+                "roi_indices": list(selected_rows) if partial_refresh else None,
                 "tuning_source": run_group.attrs.get("tuning_source"),
+                "dask_scheduler": run_group.attrs.get("dask_scheduler"),
+                "dask_num_workers": run_group.attrs.get("dask_num_workers"),
                 "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
                 "tuning_override_keys": list(tuning_override_keys),
                 "tuning_entry_snapshot": tuning_entry_snapshot,
@@ -546,11 +1048,25 @@ def segment_swim_bladder_masks_from_root(
             inputs=provenance_inputs,
         )
         write_stage_provenance(run_group, provenance)
+        if zarr_path is not None:
+            emit_subject_mask_stage_completion(
+                root,
+                zarr_path,
+                run_group=run_group,
+                run_name=run_name,
+                source=_SUBJECT_MASKS_STATUS_SOURCE,
+                console=console,
+                invalidate_on_ok=True,
+            )
 
         _print(
             console,
-            f"[green]✓[/green] Swim-bladder masks saved as [cyan]subject_mask_runs/{run_name}[/cyan] "
-            f"({nonempty_count}/{roi_count} nonempty swim-bladder masks) in {duration_seconds:.1f}s",
+            (
+                f"[green]✓[/green] Swim-bladder masks {'updated' if partial_refresh else 'saved'} as "
+                f"[cyan]subject_mask_runs/{run_name}[/cyan] "
+                f"({int(np.count_nonzero(mask_present_swim))}/{roi_count} nonempty swim-bladder masks"
+                f"{'; touched ' + str(len(selected_rows)) + ' rows' if partial_refresh else ''}) in {duration_seconds:.1f}s"
+            ),
         )
         return run_name
     finally:
@@ -564,6 +1080,9 @@ def segment_swim_bladder_masks(
     console: Optional[Console] = None,
     output_run: Optional[str] = None,
     overwrite: bool = False,
+    scheduler: str = "single-threaded",
+    num_workers: Optional[int] = None,
+    roi_indices: Optional[Sequence[int]] = None,
 ) -> str:
     root = open_zarr_root(zarr_path, mode="a")
     return segment_swim_bladder_masks_from_root(
@@ -573,6 +1092,9 @@ def segment_swim_bladder_masks(
         console=console,
         output_run=output_run,
         overwrite=overwrite,
+        scheduler=scheduler,
+        num_workers=num_workers,
+        roi_indices=roi_indices,
     )
 
 
@@ -601,6 +1123,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--crop-run", type=str, help="Optional crop_runs/<run> to segment.")
     parser.add_argument("--keypoint-run", type=str, help="Optional keypoint run providing swim-bladder anchors.")
     parser.add_argument(
+        "--scheduler",
+        type=_parse_scheduler_arg,
+        default="single-threaded",
+        help=(
+            "Scheduler to use for ROI processing. Accepted values: threads, processes, distributed, "
+            "single-threaded, single-thread, single_thread. Default: single-threaded."
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Optional number of worker threads/processes for scheduler-backed ROI processing.",
+    )
+    parser.add_argument(
         "--roi-cache-policy",
         choices=("never", "auto", "always"),
         default="auto",
@@ -625,6 +1162,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Optional swim-bladder method family override (e.g. threshold_blob or polar_boundary).",
     )
     parser.add_argument("--run-name", type=str, help="Optional subject_mask_runs/<run> output name.")
+    parser.add_argument(
+        "--roi-indices",
+        type=_parse_roi_indices_arg,
+        help=(
+            "Optional comma-separated ROI row indices to refresh in-place inside an existing --run-name. "
+            "When omitted, the segmenter writes a full run."
+        ),
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -669,6 +1214,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         console=console,
         output_run=args.run_name,
         overwrite=bool(args.overwrite),
+        scheduler=args.scheduler,
+        num_workers=args.num_workers,
+        roi_indices=list(args.roi_indices) if args.roi_indices is not None else None,
     )
     return 0
 
