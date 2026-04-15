@@ -5,7 +5,7 @@ This note captures the sequencing we used to align refined detections, crops, ke
 ## Stage Overview
 
 ```
-detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs → eye_masks_runs → refined_eye_masks_runs → arena_assignment_runs → tracking_runs → track_kinematics_runs
+detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs → subject_mask_runs → refined_subject_masks_runs → eye_masks_runs → refined_eye_masks_runs → arena_assignment_runs → tracking_runs → track_kinematics_runs
 ```
 
 Relevant provenance attributes:
@@ -19,6 +19,7 @@ Relevant provenance attributes:
 | `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
 | `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `subject_mask_runs/<run>` | `masks_roi`, `mask_probs_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `label_schema_id`, `run_semantics` |
+| `refined_subject_masks_runs/<run>` | `masks_roi` | `source_subject_mask_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `refined_subject_mask_review_status`, `component_review_statuses` |
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
 | `tracking_runs/<run>` | `track_ids`, `track_arena_ids` | `source_detect_run`, `source_refined_run`, `source_arena_assignment_run`, `tracking_qc_state` |
@@ -38,12 +39,13 @@ follow the contract in `docs/eye_mask_row_mapping_contract.md`:
 - keypoint lineage arrays are used for cross-check/fallback compatibility;
 - refinement copies lineage arrays from the source eye-mask run.
 
-`check_provenance_consistency` now validates three crop-side contracts:
+`check_provenance_consistency` now validates four crop-side contracts:
 
 - `crop_runs/<run>` must still match the current upstream detect/refined rowset.
-- latest keypoint, eye-mask, and subject-mask runs must carry a crop snapshot
-  (`source_crop_*` plus `source_detect_review_status_ref`) that still matches
-  the current crop run they reference.
+- latest keypoint, eye-mask, subject-mask, and refined-subject-mask runs must
+  carry a crop snapshot (`source_crop_*` plus
+  `source_detect_review_status_ref`) that still matches the current crop run
+  they reference.
 
 Legacy refined-detect sparse subgroups such as `interpolated` and `manual_*`
 may still exist in older archives, but they are no longer the primary current

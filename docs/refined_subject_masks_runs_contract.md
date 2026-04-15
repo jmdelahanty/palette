@@ -238,6 +238,9 @@ Recommended lineage arrays:
 
 - `source_subject_mask_run`
 - `source_crop_run`
+- `source_crop_storage_mode`
+- `source_crop_signature`
+- `source_crop_revision`
 - `label_schema_id`
 - `mask_labels`
 - `output_semantics = "multilabel"`
@@ -245,6 +248,10 @@ Recommended lineage arrays:
 - `method`
 - `created_at_utc`
 - `duration_seconds`
+
+Required when the source crop run exposes detect-review linkage:
+
+- `source_detect_review_status_ref`
 
 Required review attrs:
 
@@ -259,6 +266,16 @@ Optional attrs:
 - `source_subject_shape_run`
 - `summary_statistics`
 - `component_summary_statistics`
+
+Crop-snapshot semantics:
+
+- `source_crop_run` + `source_crop_storage_mode` + `source_crop_signature` +
+  `source_crop_revision` form the refined run's portable crop snapshot.
+- `source_detect_review_status_ref` remains a separate stable lineage field and
+  must not be folded into `source_crop_signature`.
+- Current `refined_subject_masks_runs/<run>` writers preserve this crop
+  snapshot from the upstream `subject_mask_runs/<run>` source rather than
+  re-deriving it from whichever crop run happens to be latest later.
 
 ## `available_channels` semantics
 
@@ -364,6 +381,14 @@ Required provenance attrs for an available component:
   - upstream run `method` used to seed or replace this component
 - `source_channels`
   - list of source channel names used to seed this component
+- `source_crop_run`
+- `source_crop_storage_mode`
+- `source_crop_signature`
+- `source_crop_revision`
+
+Required when the crop source exposes detect-review linkage:
+
+- `source_detect_review_status_ref`
 
 Recommended provenance attrs:
 

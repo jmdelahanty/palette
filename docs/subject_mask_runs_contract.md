@@ -166,6 +166,9 @@ Method-specific recommended `metrics/` arrays:
 ## Required attrs
 
 - `source_crop_run`
+- `source_crop_storage_mode`
+- `source_crop_signature`
+- `source_crop_revision`
 - `label_schema_id`
 - `mask_labels`
 - `output_semantics = "multilabel"`
@@ -173,6 +176,10 @@ Method-specific recommended `metrics/` arrays:
 - `method`
 - `run_semantics`
 - `duration_seconds`
+
+Required when the source crop run exposes detect-review linkage:
+
+- `source_detect_review_status_ref`
 
 Required probability-storage attrs:
 
@@ -196,6 +203,47 @@ Optional attrs:
 - `model_info`
 - `thresholds_by_label`
 - `summary_statistics`
+
+Crop-snapshot semantics:
+
+- `source_crop_run` + `source_crop_storage_mode` + `source_crop_signature` +
+  `source_crop_revision` form the portable crop snapshot for downstream ROI
+  consumers.
+- `source_detect_review_status_ref` remains a separate stable lineage field and
+  must not be folded into `source_crop_signature`.
+- Downstream writers should preserve this crop snapshot contract rather than
+  re-deriving it ad hoc from the latest crop run.
+- Current `refined_subject_masks_runs/<run>` writers carry the same crop
+  snapshot fields forward from their `subject_mask_runs/<run>` source.
+
+## Component Provenance
+
+`components/<component>/provenance` is the canonical component-local lineage
+record for `subject_mask_runs/<run>`.
+
+Required attrs for populated component provenance:
+
+- `source_stage`
+- `source_run`
+- `source_method`
+- `source_channels`
+- `source_crop_run`
+- `source_crop_storage_mode`
+- `source_crop_signature`
+- `source_crop_revision`
+
+Required when the crop source exposes detect-review linkage:
+
+- `source_detect_review_status_ref`
+
+Semantics:
+
+- `source_*` identifies the upstream artifact that seeded the component-local
+  mask payload.
+- The crop snapshot fields identify the crop surface that component was derived
+  from.
+- Component provenance stays component-local; it does not replace the run-level
+  crop snapshot attrs.
 
 ### Traditional subject-body inference attrs
 

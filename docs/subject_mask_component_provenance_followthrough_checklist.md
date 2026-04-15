@@ -111,14 +111,14 @@ Specific expectations:
 
 ### 1. Standardize active subject-mask writers
 
-- [ ] Update `src/fisheye/segmentation/subject_segmentation.py`
+- [x] Update `src/fisheye/segmentation/subject_segmentation.py`
   to use `build_source_crop_snapshot_attrs(...)` for both run attrs and
   `provenance.inputs`.
-- [ ] Update `src/fisheye/segmentation/infer_unet_subject_masks.py`
+- [x] Update `src/fisheye/segmentation/infer_unet_subject_masks.py`
   the same way.
-- [ ] Update `src/fisheye/utils/run_sam_subject_masks.py`
+- [x] Update `src/fisheye/utils/run_sam_subject_masks.py`
   the same way.
-- [ ] Update `src/fisheye/segmentation/swim_bladder_segmentation.py`
+- [x] Update `src/fisheye/segmentation/swim_bladder_segmentation.py`
   the same way.
 
 Acceptance criteria:
@@ -130,9 +130,9 @@ Acceptance criteria:
 
 ### 2. Extend component-scoped provenance
 
-- [ ] Extend `src/fisheye/shared/subject_mask_component_provenance.py`
+- [x] Extend `src/fisheye/shared/subject_mask_component_provenance.py`
   to accept the crop snapshot field set in a structured way.
-- [ ] Update all subject-mask writers that call
+- [x] Update all subject-mask writers that call
   `write_subject_mask_component_provenance(...)` to pass the crop snapshot
   fields through.
 
@@ -146,14 +146,14 @@ Acceptance criteria:
 
 ### 3. Fix merged subject-mask assembly
 
-- [ ] Update `src/fisheye/utils/merge_subject_mask_runs.py`
+- [x] Update `src/fisheye/utils/merge_subject_mask_runs.py`
   to validate crop snapshot equivalence across source runs, not just
   `source_crop_run` and row alignment.
-- [ ] If the body-source and eye-source crop snapshot fields disagree, fail
+- [x] If the body-source and eye-source crop snapshot fields disagree, fail
   assembly with an explicit error listing the mismatched fields.
-- [ ] When the sources agree, write the shared crop snapshot field set to the
+- [x] When the sources agree, write the shared crop snapshot field set to the
   merged run attrs and provenance.
-- [ ] Pass the crop snapshot field set into each component provenance entry for
+- [x] Pass the crop snapshot field set into each component provenance entry for
   the merged run.
 
 Acceptance criteria:
@@ -165,16 +165,16 @@ Acceptance criteria:
 
 ### 4. Add subject-mask provenance audit
 
-- [ ] Extend `src/fisheye/diagnostics/check_provenance_consistency.py`
+- [x] Extend `src/fisheye/diagnostics/check_provenance_consistency.py`
   to inspect the latest `subject_mask_runs/<run>` entry.
-- [ ] Reuse the same crop snapshot comparison semantics already used for
+- [x] Reuse the same crop snapshot comparison semantics already used for
   keypoints and eye masks:
   - wrong `source_crop_run`
   - stale `source_crop_signature`
   - stale `source_crop_revision`
   - stale or missing `source_detect_review_status_ref`
   - stale `source_crop_storage_mode`
-- [ ] Add a distinct issue bucket for subject-mask crop snapshot drift rather
+- [x] Add a distinct issue bucket for subject-mask crop snapshot drift rather
   than overloading crop-vs-source drift.
 
 Acceptance criteria:
@@ -187,25 +187,27 @@ Acceptance criteria:
 
 ### 5. Keep `refined_subject_masks_runs` decisions explicit
 
-- [ ] Decide whether `refined_subject_masks_runs` should adopt the same crop
+- [x] Decide whether `refined_subject_masks_runs` should adopt the same crop
   snapshot quintet in this pass or in a follow-up.
-- [ ] If deferred, document the deferral explicitly in the code/doc update for
-  the subject-mask pass.
+- [x] Carry the same crop snapshot contract through `refined_subject_masks_runs`
+  in this pass.
 
 Required decision rule:
 
 - Do not partially implement `refined_subject_masks_runs` in an ad hoc way.
-- Either:
-  - carry the same subject-mask crop snapshot contract through cleanly, or
-  - leave it unchanged and document the follow-up.
+- Decision taken on 2026-04-15:
+  current `refined_subject_masks_runs/<run>` writers preserve the same
+  `source_crop_*` + `source_detect_review_status_ref` contract as their
+  upstream `subject_mask_runs/<run>` source, and provenance/audit surfaces
+  should treat refined subject-mask runs as crop-snapshot consumers.
 
 ### 6. Update docs and contracts
 
-- [ ] Update `src/fisheye/docs/provenance_workflow.md`
+- [x] Update `src/fisheye/docs/provenance_workflow.md`
   to list subject-mask crop snapshot fields explicitly.
-- [ ] Update `docs/subject_mask_runs_contract.md`
+- [x] Update `docs/subject_mask_runs_contract.md`
   so the required/optional attrs match the actual crop snapshot target.
-- [ ] Update any subject-mask contract/reference docs that describe component
+- [x] Update active subject-mask contract/reference docs that describe component
   provenance if the helper schema changes.
 
 Acceptance criteria:
@@ -216,20 +218,20 @@ Acceptance criteria:
 
 ### 7. Add focused tests
 
-- [ ] Extend `tests/unit/fisheye/test_subject_segmentation.py`
+- [x] Extend `tests/unit/fisheye/test_subject_segmentation.py`
   to assert crop signature/revision/review linkage on attrs and provenance.
-- [ ] Extend `tests/unit/fisheye/test_infer_unet_subject_masks_source.py`
+- [x] Extend `tests/unit/fisheye/test_infer_unet_subject_masks_source.py`
   the same way.
-- [ ] Extend `tests/unit/fisheye/test_run_sam_subject_masks.py`
+- [x] Extend `tests/unit/fisheye/test_run_sam_subject_masks.py`
   to assert crop snapshot propagation into run attrs, provenance, and component
   provenance.
-- [ ] Extend `tests/unit/fisheye/test_merge_subject_mask_runs.py`
+- [x] Extend `tests/unit/fisheye/test_merge_subject_mask_runs.py`
   to assert:
   - crop snapshot fields on successful merged runs
   - explicit failure on mismatched source crop snapshots
-- [ ] Add or extend tests for
+- [x] Add or extend tests for
   `src/fisheye/shared/subject_mask_component_provenance.py`.
-- [ ] Extend
+- [x] Extend
   `tests/unit/fisheye/test_check_provenance_consistency.py`
   to cover subject-mask crop snapshot drift reporting.
 

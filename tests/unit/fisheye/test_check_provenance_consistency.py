@@ -237,6 +237,16 @@ def test_collect_provenance_reports_stale_downstream_crop_snapshots() -> None:
     subject_masks.create_array("masks_roi", shape=(2, 1, 4, 4))
     subject_mask_runs.attrs["latest"] = "subject_001"
 
+    refined_subject_mask_runs = root.create_group("refined_subject_masks_runs")
+    refined_subject_masks = refined_subject_mask_runs.create_group("refined_subject_001")
+    refined_subject_masks.attrs["source_crop_run"] = "crop_001"
+    refined_subject_masks.attrs["source_crop_storage_mode"] = "geometry_only"
+    refined_subject_masks.attrs["source_crop_signature"] = "{'signature_version': 2, 'crop_revision': 3}"
+    refined_subject_masks.attrs["source_crop_revision"] = 2
+    refined_subject_masks.attrs["source_detect_review_status_ref"] = "refined_detect_runs/refined_detect_000"
+    refined_subject_masks.create_array("masks_roi", shape=(2, 2, 4, 4))
+    refined_subject_mask_runs.attrs["latest"] = "refined_subject_001"
+
     record = mod.collect_provenance(root)  # type: ignore[arg-type]
 
     assert any("Keypoint run 'kp_001' crop snapshot drifted" in issue for issue in record.issues)
@@ -247,7 +257,12 @@ def test_collect_provenance_reports_stale_downstream_crop_snapshots() -> None:
     assert any("missing source_detect_review_status_ref" in issue for issue in record.issues)
     assert any("Subject mask run 'subject_001' crop snapshot drifted" in issue for issue in record.issues)
     assert any("source_crop_signature='stale-subject-sig'" in issue for issue in record.issues)
+    assert any("Refined subject mask run 'refined_subject_001' crop snapshot drifted" in issue for issue in record.issues)
+    assert any("source_crop_revision=2 expected 3" in issue for issue in record.subject_mask_crop_snapshot_issues + record.refined_subject_mask_crop_snapshot_issues)
     assert record.subject_mask_run == "subject_001"
     assert record.subject_mask_rows == 2
+    assert record.refined_subject_mask_run == "refined_subject_001"
+    assert record.refined_subject_mask_rows == 2
     assert len(record.downstream_crop_snapshot_issues) == 2
     assert len(record.subject_mask_crop_snapshot_issues) == 1
+    assert len(record.refined_subject_mask_crop_snapshot_issues) == 1

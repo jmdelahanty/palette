@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 from dataclasses import dataclass
@@ -22,11 +23,17 @@ import zarr
 from scipy.ndimage import gaussian_filter1d
 
 from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels, write_reason_columns
-from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.provenance_attrs import (
+    build_source_crop_snapshot_attrs,
+    build_source_keypoints_attrs,
+    extract_source_crop_snapshot_attrs,
+    resolve_source_keypoints_run,
+)
 from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
 )
+from ..shared.subject_mask_stale import sync_source_subject_mask_stale_payload
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
@@ -75,9 +82,11 @@ DEFAULT_REVIEW_INTENDED_USE = "training"
 DEFAULT_RUN_METHOD = "refined_subject_mask_manual_review_v1"
 REFINED_SUBJECT_STAGE_NAME = "refine_subject_masks"
 REFINED_SUBJECT_SYNC_METHOD = "sync_refined_subject_mask_metadata"
+REFINED_SUBJECT_SOURCE_UPDATE_METHOD = "check_refined_subject_source_updates"
 DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID = "subject_body_v1"
 DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE = "body_core"
 DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY = "excluded_or_unresolved"
+REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID = "refined_subject_source_sync_v1"
 SIGMA_NOISE_SMOOTHING_SIGMA = 3.0
 CURVATURE_VAR_SMOOTHING_SIGMA = 3.0
 CURVATURE_VAR_STEP = 5
@@ -88,6 +97,7 @@ class SourceSubjectMaskRun:
     run_name: str
     group: zarr.Group
     crop_run: str
+    source_crop_snapshot: dict[str, object]
     masks_roi: Any
     detection_source: Any
     mask_labels: tuple[str, ...]
@@ -336,8 +346,10 @@ def _source_component_provenance_payload(
             or source.group.attrs.get("method")
             or "unknown"
         ),
+        "source_crop_run": source.crop_run,
         "source_channels": _normalize_provenance_channels(source_channels, default_component=component_name),
     }
+    payload.update(source.source_crop_snapshot)
     source_label_schema_id = provenance_attrs.get("source_label_schema_id")
     if source_label_schema_id is None:
         source_label_schema_id = legacy_component_payload.get("source_label_schema_id", label_schema_id)
@@ -404,6 +416,85 @@ def _component_masks_from_source(source: SourceSubjectMaskRun, component_name: s
     if source_idx >= int(source.available_channels.shape[0]) or not bool(source.available_channels[source_idx]):
         return masks
     return np.asarray(source.masks_roi[:, source_idx], dtype=np.uint8)
+
+
+def _mask_row_fingerprint(mask: np.ndarray) -> np.uint64:
+    payload = np.ascontiguousarray(np.asarray(mask, dtype=np.uint8))
+    digest = hashlib.blake2b(payload.tobytes(), digest_size=8).digest()
+    return np.uint64(int.from_bytes(digest, byteorder="little", signed=False))
+
+
+def _compute_mask_row_fingerprints(masks: np.ndarray) -> np.ndarray:
+    rows = np.asarray(masks, dtype=np.uint8)
+    if rows.ndim != 3:
+        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(rows.shape)}")
+    out = np.zeros((int(rows.shape[0]),), dtype=np.uint64)
+    for row_idx in range(int(rows.shape[0])):
+        out[row_idx] = _mask_row_fingerprint(rows[row_idx])
+    return out
+
+
+def _compute_manual_override_flags(
+    *,
+    source_masks: np.ndarray,
+    current_masks: np.ndarray,
+) -> np.ndarray:
+    source_arr = np.asarray(source_masks, dtype=np.uint8)
+    current_arr = np.asarray(current_masks, dtype=np.uint8)
+    if source_arr.shape != current_arr.shape:
+        raise ValueError(
+            f"source/current mask shape mismatch for source-sync tracking: {tuple(source_arr.shape)} vs {tuple(current_arr.shape)}"
+        )
+    if source_arr.ndim != 3:
+        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(source_arr.shape)}")
+    changed = np.any(source_arr != current_arr, axis=(1, 2))
+    return np.asarray(changed, dtype=bool)
+
+
+def _ensure_component_source_sync_arrays(
+    component_group: zarr.Group,
+    *,
+    total_rois: int,
+    source_masks: np.ndarray,
+    current_masks: np.ndarray,
+) -> None:
+    component_chunks = _refined_metric_chunks(total_rois)
+    source_hashes = _compute_mask_row_fingerprints(source_masks)
+    stale = np.zeros((int(total_rois),), dtype=bool)
+
+    source_hash_arr = component_group.get("source_row_fingerprint")
+    if source_hash_arr is None or int(source_hash_arr.shape[0]) != int(total_rois):
+        component_group.create_array(
+            "source_row_fingerprint",
+            data=np.asarray(source_hashes, dtype=np.uint64),
+            chunks=component_chunks,
+            overwrite=True,
+        )
+
+    manual_override_arr = component_group.get("manual_override")
+    if manual_override_arr is None or int(manual_override_arr.shape[0]) != int(total_rois):
+        edit_applied_arr = component_group.get("edit_applied")
+        if edit_applied_arr is not None and int(edit_applied_arr.shape[0]) == int(total_rois):
+            manual_override = np.asarray(edit_applied_arr[:], dtype=bool)
+        else:
+            manual_override = _compute_manual_override_flags(source_masks=source_masks, current_masks=current_masks)
+        component_group.create_array(
+            "manual_override",
+            data=np.asarray(manual_override, dtype=bool),
+            chunks=component_chunks,
+            overwrite=True,
+        )
+
+    stale_arr = component_group.get("source_row_stale")
+    if stale_arr is None or int(stale_arr.shape[0]) != int(total_rois):
+        component_group.create_array(
+            "source_row_stale",
+            data=stale,
+            chunks=component_chunks,
+            overwrite=True,
+        )
+
+    component_group.attrs.setdefault("source_sync_schema_id", REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID)
 
 
 def _build_single_source_component_seeds(
@@ -806,6 +897,8 @@ def _ensure_component_group(
     area_px: np.ndarray,
     edit_applied: np.ndarray,
     component_metrics: Optional[Mapping[str, np.ndarray]] = None,
+    source_masks: Optional[np.ndarray] = None,
+    current_masks: Optional[np.ndarray] = None,
 ) -> zarr.Group:
     components_parent = refined.require_group("components")
     component_group = components_parent.require_group(component_name)
@@ -854,6 +947,13 @@ def _ensure_component_group(
             if metric_name not in metrics_group:
                 metrics_group.create_array(metric_name, data=metric_values, chunks=component_chunks, overwrite=True)
     _load_or_init_reason_labels(component_group, total_rois)
+    if source_masks is not None and current_masks is not None:
+        _ensure_component_source_sync_arrays(
+            component_group,
+            total_rois=int(total_rois),
+            source_masks=np.asarray(source_masks, dtype=np.uint8),
+            current_masks=np.asarray(current_masks, dtype=np.uint8),
+        )
     return component_group
 
 
@@ -871,6 +971,19 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     if not crop_run:
         crop_parent = root.get("crop_runs")
         crop_run = _resolve_latest_run(crop_parent, "crop_runs")
+    crop_group = root.get(f"crop_runs/{crop_run}") if crop_run else None
+    stored_crop_snapshot = extract_source_crop_snapshot_attrs(group.attrs)
+    inferred_crop_storage_mode = stored_crop_snapshot.get("source_crop_storage_mode")
+    if inferred_crop_storage_mode is None and crop_group is not None:
+        inferred_crop_storage_mode = (
+            crop_group.attrs.get("crop_storage_mode")
+            or ("materialized" if crop_group.get("roi_images") is not None else "geometry_only")
+        )
+    source_crop_snapshot = build_source_crop_snapshot_attrs(
+        crop_group.attrs if crop_group is not None else None,
+        source_crop_storage_mode=inferred_crop_storage_mode,
+    )
+    source_crop_snapshot.update(stored_crop_snapshot)
     labels_raw = group.attrs.get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"subject_mask_runs/{run_name} missing usable mask_labels attr.")
@@ -881,6 +994,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         run_name=run_name,
         group=group,
         crop_run=crop_run,
+        source_crop_snapshot=source_crop_snapshot,
         masks_roi=group["masks_roi"],
         detection_source=group["detection_source"],
         mask_labels=tuple(str(item) for item in labels_raw),
@@ -1047,6 +1161,8 @@ def _create_refined_subject_run_from_component_seeds(
             area_px[:, comp_idx],
             edit_applied[:, comp_idx],
             component_metrics=component_metrics,
+            source_masks=component_masks,
+            current_masks=np.asarray(masks[:, comp_idx], dtype=np.uint8),
         )
         reason_labels = _load_or_init_reason_labels(component_group, total_rois)
         for row_idx in range(total_rois):
@@ -1075,6 +1191,7 @@ def _create_refined_subject_run_from_component_seeds(
     if source_keypoint_group:
         run_group.attrs["source_keypoint_group"] = source_keypoint_group
     run_group.attrs["source_crop_run"] = reference_source.crop_run
+    run_group.attrs.update(reference_source.source_crop_snapshot)
     run_group.attrs["mask_labels"] = list(component_names)
     run_group.attrs["label_schema_id"] = _infer_refined_label_schema_id(component_names)
     run_group.attrs["output_semantics"] = "multilabel"
@@ -1113,6 +1230,7 @@ def _create_refined_subject_run_from_component_seeds(
         "source_subject_mask_run": coarse_source_subject_mask_run,
         "source_subject_mask_method": coarse_source_subject_mask_method,
         "source_crop_run": reference_source.crop_run,
+        **reference_source.source_crop_snapshot,
         "source_keypoints_run": source_keypoints_run,
         "source_keypoint_group": source_keypoint_group,
     }
@@ -1258,6 +1376,8 @@ def _open_or_create_refined_subject_run(
                 area_px_arr[:, comp_idx],
                 edit_applied_arr[:, comp_idx],
                 component_metrics=component_metrics,
+                source_masks=_component_masks_from_source(source, component_name),
+                current_masks=np.asarray(masks_np[:, comp_idx], dtype=np.uint8),
             )
             _ensure_refined_component_provenance(
                 run_group,
@@ -1477,6 +1597,9 @@ def _compute_refined_subject_component_apply_rows(
     curvature_var = np.zeros((row_count,), dtype=np.float32)
     ipr = np.zeros((row_count,), dtype=np.float32)
     solidity = np.zeros((row_count,), dtype=np.float32)
+    source_row_fingerprint = np.zeros((row_count,), dtype=np.uint64)
+    manual_override = np.zeros((row_count,), dtype=bool)
+    source_row_stale = np.zeros((row_count,), dtype=bool)
     reason_labels = np.empty((row_count,), dtype=object)
 
     for row_offset, roi_idx in enumerate(roi_indices):
@@ -1503,6 +1626,9 @@ def _compute_refined_subject_component_apply_rows(
         curvature_var[row_offset] = np.float32(_compute_single_mask_curvature_var(current_mask))
         ipr[row_offset] = np.float32(_compute_single_mask_ipr(current_mask))
         solidity[row_offset] = np.float32(_compute_single_mask_solidity(current_mask))
+        source_row_fingerprint[row_offset] = _mask_row_fingerprint(source_mask)
+        manual_override[row_offset] = bool(edited)
+        source_row_stale[row_offset] = False
         reason_labels[row_offset] = _default_reason_label(source_mask, current_mask, edited)
 
     return {
@@ -1521,6 +1647,9 @@ def _compute_refined_subject_component_apply_rows(
         "curvature_var": curvature_var,
         "ipr": ipr,
         "solidity": solidity,
+        "source_row_fingerprint": source_row_fingerprint,
+        "manual_override": manual_override,
+        "source_row_stale": source_row_stale,
         "reason_labels": reason_labels,
     }
 
@@ -1546,7 +1675,11 @@ def _write_refined_subject_component_apply_rows(
     metrics_bbox_valid = metrics["bbox_valid"]
     component_group = run_group.require_group("components").require_group(component_name)
     component_metrics = component_group.require_group("metrics")
+    source_row_fingerprint = component_group["source_row_fingerprint"]
+    manual_override = component_group["manual_override"]
+    source_row_stale = component_group["source_row_stale"]
     reason_labels = _load_or_init_reason_labels(component_group, int(run_group["masks_roi"].shape[0]))
+    pending_rows = sorted(set(int(v) for v in (component_group.attrs.get("source_update_pending_rows") or [])))
 
     for row_offset, roi_idx in enumerate(roi_indices):
         masks_arr[int(roi_idx), comp_idx] = np.asarray(edited_masks_batch[row_offset, comp_idx], dtype=np.uint8)
@@ -1579,8 +1712,16 @@ def _write_refined_subject_component_apply_rows(
         component_metrics["curvature_var"][int(roi_idx)] = np.float32(component_updates["curvature_var"][row_offset])
         component_metrics["ipr"][int(roi_idx)] = np.float32(component_updates["ipr"][row_offset])
         component_metrics["solidity"][int(roi_idx)] = np.float32(component_updates["solidity"][row_offset])
+        source_row_fingerprint[int(roi_idx)] = np.uint64(component_updates["source_row_fingerprint"][row_offset])
+        manual_override[int(roi_idx)] = bool(component_updates["manual_override"][row_offset])
+        source_row_stale[int(roi_idx)] = bool(component_updates["source_row_stale"][row_offset])
         reason_labels[int(roi_idx)] = str(component_updates["reason_labels"][row_offset])
         _write_reason_label_row(component_group, reason_labels, int(roi_idx))
+        if int(roi_idx) in pending_rows:
+            pending_rows.remove(int(roi_idx))
+
+    component_group.attrs["source_update_pending_rows"] = pending_rows
+    sync_source_subject_mask_stale_payload(run_group)
 
 
 def _materialize_refined_eye_compat_if_needed(
@@ -1732,6 +1873,9 @@ def _component_sync_state(
 ) -> tuple[bool, float, bool, str]:
     reason_labels = _load_or_init_reason_labels(component_group, int(run_group["masks_roi"].shape[0]))
     component_metrics = component_group.require_group("metrics")
+    manual_override_arr = component_group.get("manual_override")
+    source_row_stale_arr = component_group.get("source_row_stale")
+    source_row_fingerprint_arr = component_group.get("source_row_fingerprint")
     return (
         bool(np.asarray(run_group["metrics/mask_present"][int(roi_idx), comp_idx], dtype=bool)),
         float(np.asarray(run_group["metrics/area_px"][int(roi_idx), comp_idx], dtype=np.float32)),
@@ -1754,6 +1898,11 @@ def _component_sync_state(
         float(np.asarray(component_metrics["curvature_var"][int(roi_idx)], dtype=np.float32)),
         float(np.asarray(component_metrics["ipr"][int(roi_idx)], dtype=np.float32)),
         float(np.asarray(component_metrics["solidity"][int(roi_idx)], dtype=np.float32)),
+        bool(np.asarray(manual_override_arr[int(roi_idx)], dtype=bool)) if manual_override_arr is not None else False,
+        bool(np.asarray(source_row_stale_arr[int(roi_idx)], dtype=bool)) if source_row_stale_arr is not None else False,
+        int(np.asarray(source_row_fingerprint_arr[int(roi_idx)], dtype=np.uint64))
+        if source_row_fingerprint_arr is not None
+        else 0,
         str(reason_labels[int(roi_idx)]),
     )
 
@@ -1921,6 +2070,168 @@ def sync_refined_subject_mask_metadata(
         "changed_roi_count": int(changed_count),
         "noop_roi_count": int(noop_count),
         "updated_at_utc": str(run_group.attrs.get("updated_at_utc") or ""),
+    }
+
+
+def check_refined_subject_source_updates(
+    zarr_path: str | Path,
+    *,
+    refined_run: str,
+    component_name: str,
+    roi_indices: Sequence[int],
+    source_subject_mask_run: Optional[str] = None,
+    assume_source_changed_untracked: bool = False,
+    force_source_changed: bool = False,
+) -> dict[str, object]:
+    root = open_zarr_root(zarr_path, mode="a")
+    refined_parent = root.get("refined_subject_masks_runs")
+    if refined_parent is None or str(refined_run) not in refined_parent:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
+
+    existing_run = refined_parent[str(refined_run)]
+    labels_raw = existing_run.attrs.get("mask_labels")
+    if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
+
+    normalized_component = _normalize_component_name(component_name)
+    if normalized_component is None:
+        raise ValueError("component_name is required.")
+    if normalized_component not in tuple(str(item) for item in labels_raw):
+        raise RuntimeError(
+            f"Component '{normalized_component}' not available in refined_subject_masks_runs/{refined_run}."
+        )
+
+    resolved_source_run = source_subject_mask_run or str(existing_run.attrs.get("source_subject_mask_run") or "")
+    if not resolved_source_run:
+        raise RuntimeError(
+            f"refined_subject_masks_runs/{refined_run} is missing source_subject_mask_run and no override was provided."
+        )
+
+    source, refined = prepare_refined_subject_run(
+        root,
+        subject_run=resolved_source_run,
+        refined_run=str(refined_run),
+        components=tuple(str(item) for item in labels_raw),
+    )
+    _primary_source, component_sources = _load_refined_component_source_runs(root, refined, default_source=source)
+
+    run_group = refined.group
+    total_rois = int(run_group["masks_roi"].shape[0])
+    normalized_rows = _normalize_roi_indices(roi_indices, total_rois)
+    comp_idx = int(refined.component_to_index[normalized_component])
+    component_group = run_group.require_group("components").require_group(normalized_component)
+    had_source_fingerprint_tracking = component_group.get("source_row_fingerprint") is not None
+
+    current_component_masks = np.asarray(run_group["masks_roi"][:, comp_idx], dtype=np.uint8)
+    source_component_masks = _component_masks_from_source(component_sources[normalized_component], normalized_component)
+    _ensure_component_source_sync_arrays(
+        component_group,
+        total_rois=total_rois,
+        source_masks=source_component_masks,
+        current_masks=current_component_masks,
+    )
+
+    source_row_fingerprint_arr = component_group["source_row_fingerprint"]
+    manual_override_arr = component_group["manual_override"]
+    source_row_stale_arr = component_group["source_row_stale"]
+
+    auto_sync_rows: list[int] = []
+    stale_rows: list[int] = []
+    unchanged_rows: list[int] = []
+
+    for roi_idx in normalized_rows:
+        current_source_mask = np.asarray(source_component_masks[int(roi_idx)], dtype=np.uint8)
+        current_source_fingerprint = _mask_row_fingerprint(current_source_mask)
+        previous_source_fingerprint = np.uint64(np.asarray(source_row_fingerprint_arr[int(roi_idx)], dtype=np.uint64))
+        treat_as_source_changed = bool(force_source_changed) or (
+            bool(assume_source_changed_untracked) and not had_source_fingerprint_tracking
+        )
+        if not treat_as_source_changed and int(current_source_fingerprint) == int(previous_source_fingerprint):
+            unchanged_rows.append(int(roi_idx))
+            continue
+
+        source_row_fingerprint_arr[int(roi_idx)] = np.uint64(current_source_fingerprint)
+        if bool(np.asarray(manual_override_arr[int(roi_idx)], dtype=bool)):
+            source_row_stale_arr[int(roi_idx)] = True
+            stale_rows.append(int(roi_idx))
+        else:
+            source_row_stale_arr[int(roi_idx)] = False
+            auto_sync_rows.append(int(roi_idx))
+
+    auto_synced_rows: list[int] = []
+    updated_at_utc = str(run_group.attrs.get("updated_at_utc") or "")
+    if auto_sync_rows:
+        edited_masks_batch = np.stack(
+            [np.asarray(run_group["masks_roi"][int(roi_idx)], dtype=np.uint8) for roi_idx in auto_sync_rows],
+            axis=0,
+        )
+        for row_offset, roi_idx in enumerate(auto_sync_rows):
+            edited_masks_batch[row_offset, comp_idx] = np.asarray(source_component_masks[int(roi_idx)], dtype=np.uint8)
+        _apply_refined_subject_roi_rows(
+            component_sources=component_sources,
+            refined=refined,
+            roi_indices=auto_sync_rows,
+            edited_masks_batch=edited_masks_batch,
+            component_names=(normalized_component,),
+            update_mode="sync",
+            update_method=REFINED_SUBJECT_SOURCE_UPDATE_METHOD,
+        )
+        auto_synced_rows = list(auto_sync_rows)
+        updated_at_utc = str(run_group.attrs.get("updated_at_utc") or "")
+
+    if stale_rows:
+        updated_at_utc = _utc_now()
+        run_group.attrs["updated_at_utc"] = updated_at_utc
+        existing_pending_raw = component_group.attrs.get("source_update_pending_rows")
+        if isinstance(existing_pending_raw, (list, tuple)):
+            existing_pending = [int(v) for v in existing_pending_raw]
+        elif existing_pending_raw is None:
+            existing_pending = []
+        else:
+            existing_pending = [int(existing_pending_raw)]
+        component_group.attrs["source_update_pending_rows"] = sorted(set(existing_pending + stale_rows))
+        _write_refined_component_last_update(
+            run_group,
+            component_name=normalized_component,
+            updated_at_utc=updated_at_utc,
+            update_mode="sync",
+            update_method=REFINED_SUBJECT_SOURCE_UPDATE_METHOD,
+        )
+        existing_review = dict(run_group.attrs.get("component_review_statuses") or {}).get(normalized_component, {})
+        existing_intended_use = str(existing_review.get("intended_use") or DEFAULT_REVIEW_INTENDED_USE)
+        apply_component_review_status(
+            refined.parent,
+            refined.run_name,
+            refined.group,
+            component_name=normalized_component,
+            state="needs_review",
+            method=REFINED_SUBJECT_SOURCE_UPDATE_METHOD,
+            intended_use=existing_intended_use,
+            reviewer=None,
+            notes=f"source_subject_mask_rows_changed:{','.join(str(idx) for idx in stale_rows)}",
+        )
+
+    sync_source_subject_mask_stale_payload(run_group)
+    stale_total = int(np.count_nonzero(np.asarray(source_row_stale_arr[:], dtype=bool)))
+    return {
+        "status": "updated",
+        "zarr_path": str(Path(zarr_path)),
+        "refined_run": refined.run_name,
+        "component_name": normalized_component,
+        "source_subject_mask_run": source.run_name,
+        "assume_source_changed_untracked": bool(assume_source_changed_untracked),
+        "force_source_changed": bool(force_source_changed),
+        "roi_indices": normalized_rows,
+        "roi_count": int(len(normalized_rows)),
+        "unchanged_roi_count": int(len(unchanged_rows)),
+        "source_changed_roi_count": int(len(auto_sync_rows) + len(stale_rows)),
+        "auto_synced_roi_count": int(len(auto_synced_rows)),
+        "stale_marked_roi_count": int(len(stale_rows)),
+        "auto_synced_roi_indices": auto_synced_rows,
+        "stale_roi_indices": stale_rows,
+        "unchanged_roi_indices": unchanged_rows,
+        "stale_total": stale_total,
+        "updated_at_utc": updated_at_utc,
     }
 
 

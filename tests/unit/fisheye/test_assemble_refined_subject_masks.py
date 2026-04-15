@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.refinement import assemble_refined_subject_masks as assemble_mod
@@ -56,6 +59,10 @@ def _create_subject_run(
     available_channels: np.ndarray,
     masks: np.ndarray,
     source_crop_run: str = "crop_001",
+    source_crop_storage_mode: str = "geometry_only",
+    source_crop_signature: str = "{'signature_version': 2, 'crop_revision': 4}",
+    source_crop_revision: int = 4,
+    source_detect_review_status_ref: str = "refined_detect_runs/refined_detect_001/review_status",
     source_keypoints_run: str = "refined_kp_001",
     source_keypoint_group: str = "refined_keypoints_runs",
 ) -> zarr.Group:
@@ -65,6 +72,10 @@ def _create_subject_run(
     run.attrs.update(
         {
             "source_crop_run": source_crop_run,
+            "source_crop_storage_mode": source_crop_storage_mode,
+            "source_crop_signature": source_crop_signature,
+            "source_crop_revision": source_crop_revision,
+            "source_detect_review_status_ref": source_detect_review_status_ref,
             "method": method,
             "mask_labels": list(mask_labels),
             "label_schema_id": "subject_v1_lr" if mask_labels == ["subject_body", "eye_left", "eye_right", "swim_bladder"] else "subject_v1_custom",
@@ -88,6 +99,10 @@ def _build_assembly_root() -> zarr.Group:
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_001"
     crop = crop_parent.create_group("crop_001")
+    crop.attrs["crop_storage_mode"] = "geometry_only"
+    crop.attrs["crop_signature"] = {"signature_version": 2, "crop_revision": 4}
+    crop.attrs["crop_revision"] = 4
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001/review_status"
     crop.create_array("roi_images", data=np.zeros((2, 8, 8), dtype=np.uint8), overwrite=True)
 
     body_masks = np.zeros((2, 1, 8, 8), dtype=np.uint8)
@@ -130,6 +145,40 @@ def _build_assembly_root() -> zarr.Group:
     return root
 
 
+def test_validate_source_alignment_rejects_crop_snapshot_mismatch_without_zarr() -> None:
+    reference = SimpleNamespace(
+        crop_run="crop_001",
+        source_crop_snapshot={
+            "source_crop_storage_mode": "geometry_only",
+            "source_crop_signature": "sig-001",
+            "source_crop_revision": 4,
+            "source_detect_review_status_ref": "refined_detect_runs/refined_detect_001/review_status",
+        },
+        masks_roi=np.zeros((2, 1, 8, 8), dtype=np.uint8),
+        detection_source=np.zeros((2,), dtype=np.int8),
+        frame_indices=np.asarray([10, 11], dtype=np.int32),
+        frame_counts=np.asarray([1, 1], dtype=np.int32),
+        detection_indices=np.asarray([0, 1], dtype=np.int32),
+    )
+    other = SimpleNamespace(
+        crop_run="crop_001",
+        source_crop_snapshot={
+            "source_crop_storage_mode": "geometry_only",
+            "source_crop_signature": "sig-002",
+            "source_crop_revision": 4,
+            "source_detect_review_status_ref": "refined_detect_runs/refined_detect_001/review_status",
+        },
+        masks_roi=np.zeros((2, 1, 8, 8), dtype=np.uint8),
+        detection_source=np.zeros((2,), dtype=np.int8),
+        frame_indices=np.asarray([10, 11], dtype=np.int32),
+        frame_counts=np.asarray([1, 1], dtype=np.int32),
+        detection_indices=np.asarray([0, 1], dtype=np.int32),
+    )
+
+    with pytest.raises(ValueError, match="Alignment mismatch for crop snapshot fields"):
+        assemble_mod._validate_source_alignment(reference, other)  # noqa: SLF001
+
+
 def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()
@@ -159,6 +208,10 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     assert run.attrs["source_body_subject_mask_run"] == "body_run_001"
     assert run.attrs["source_eye_subject_mask_run"] == "eye_run_001"
     assert run.attrs["source_swim_subject_mask_run"] == "swim_run_001"
+    assert run.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run.attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert run.attrs["source_crop_revision"] == 4
+    assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
     np.testing.assert_array_equal(
         np.asarray(run["available_channels"][:], dtype=bool),
         np.asarray([True, True, True, True], dtype=bool),
@@ -192,10 +245,25 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     assert swim_reasons.tolist() == ["copied_from_source", "copied_from_source"]
 
     assert run["components/subject_body/provenance"].attrs["source_run"] == "body_run_001"
+    assert run["components/subject_body/provenance"].attrs["source_crop_run"] == "crop_001"
+    assert run["components/subject_body/provenance"].attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run["components/subject_body/provenance"].attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert run["components/subject_body/provenance"].attrs["source_crop_revision"] == 4
+    assert (
+        run["components/subject_body/provenance"].attrs["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_detect_001/review_status"
+    )
     assert run["components/eye_left/provenance"].attrs["source_run"] == "eye_run_001"
     assert run["components/eye_right/provenance"].attrs["source_run"] == "eye_run_001"
     assert run["components/swim_bladder/provenance"].attrs["source_run"] == "swim_run_001"
     assert run["components/swim_bladder/provenance"].attrs["last_update_mode"] == "create"
+
+    provenance = run.attrs["provenance"]
+    assert provenance["inputs"]["source_crop_run"] == "crop_001"
+    assert provenance["inputs"]["source_crop_storage_mode"] == "geometry_only"
+    assert provenance["inputs"]["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert provenance["inputs"]["source_crop_revision"] == 4
+    assert provenance["inputs"]["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
 
 
 def test_refine_subject_masks_uses_component_provenance_for_assembled_run(monkeypatch) -> None:
@@ -244,3 +312,21 @@ def test_refine_subject_masks_uses_component_provenance_for_assembled_run(monkey
     swim_reasons = read_reason_labels(run["components/swim_bladder"])
     assert swim_reasons is not None
     assert swim_reasons.tolist() == ["manual_correction", "copied_from_source"]
+
+
+def test_assemble_refined_subject_run_rejects_crop_snapshot_mismatch(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    root["subject_mask_runs"]["eye_run_001"].attrs["source_crop_signature"] = "sig-eye-mismatch"
+
+    try:
+        assemble_mod.assemble_refined_subject_run(
+            root,
+            body_run="body_run_001",
+            eye_run="eye_run_001",
+            refined_run="refined_subject_masks_bad_001",
+        )
+    except ValueError as exc:
+        assert "Alignment mismatch for crop snapshot fields" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected crop snapshot mismatch to raise ValueError.")

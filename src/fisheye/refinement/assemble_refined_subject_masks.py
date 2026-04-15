@@ -11,6 +11,8 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import zarr
 
+from ..shared.provenance_attrs import CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS
+from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
 from ..tune.refined_subject_mask_review import (
     RefinedSubjectComponentSeed,
     SourceSubjectMaskRun,
@@ -24,6 +26,7 @@ from ..utils.zarr_io import open_zarr_root
 
 ASSEMBLE_REFINED_SUBJECT_METHOD = "assemble_refined_subject_masks_v1"
 CANONICAL_COMPONENT_ORDER = ("subject_body", "eye_left", "eye_right", "swim_bladder")
+_REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_assemble_refined_subject_masks"
 
 
 def _required_array_equal(name: str, left: Any, right: Any) -> None:
@@ -45,6 +48,20 @@ def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSub
     if reference.crop_run != other.crop_run:
         raise ValueError(
             f"Alignment mismatch for source_crop_run: {reference.crop_run!r} != {other.crop_run!r}."
+        )
+    crop_snapshot_mismatches: list[str] = []
+    for field_name in CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS:
+        reference_value = reference.source_crop_snapshot.get(field_name)
+        other_value = other.source_crop_snapshot.get(field_name)
+        if reference_value != other_value:
+            crop_snapshot_mismatches.append(
+                f"{field_name}: {reference_value!r} != {other_value!r}"
+            )
+    if crop_snapshot_mismatches:
+        raise ValueError(
+            "Alignment mismatch for crop snapshot fields: "
+            + "; ".join(crop_snapshot_mismatches)
+            + "."
         )
     if int(reference.masks_roi.shape[0]) != int(other.masks_roi.shape[0]):
         raise ValueError(
@@ -166,6 +183,7 @@ def assemble_refined_subject_run(
         "source_subject_mask_run": reference_source.run_name,
         "source_subject_mask_runs": source_component_runs,
         "source_crop_run": reference_source.crop_run,
+        **reference_source.source_crop_snapshot,
         "roi_count": int(reference_source.masks_roi.shape[0]),
         "label_schema_id": _infer_refined_label_schema_id(component_names),
     }
@@ -245,6 +263,19 @@ def assemble_refined_subject_masks(
         dry_run=dry_run,
     )
     summary["zarr_path"] = str(Path(zarr_path))
+    if not dry_run:
+        refined_parent = root.get("refined_subject_masks_runs")
+        resolved_run = str(summary.get("refined_run") or "")
+        if refined_parent is not None and resolved_run in refined_parent:
+            emit_refined_subject_mask_stage_completion(
+                root,
+                zarr_path,
+                run_group=refined_parent[resolved_run],
+                run_name=resolved_run,
+                source=_REFINED_SUBJECT_MASKS_STATUS_SOURCE,
+                console=None,
+                invalidate_on_ok=True,
+            )
     return summary
 
 

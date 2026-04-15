@@ -24,6 +24,10 @@ def _build_subject_review_root():
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_001"
     crop = crop_parent.create_group("crop_001")
+    crop.attrs["crop_storage_mode"] = "geometry_only"
+    crop.attrs["crop_signature"] = {"signature_version": 2, "crop_revision": 4}
+    crop.attrs["crop_revision"] = 4
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001/review_status"
     roi_images = np.zeros((2, 8, 8), dtype=np.uint8)
     roi_images[0, 1:7, 1:7] = 70
     roi_images[1, 2:6, 2:6] = 120
@@ -33,6 +37,10 @@ def _build_subject_review_root():
     subject_parent.attrs["latest"] = "subject_masks_001"
     subject = subject_parent.create_group("subject_masks_001")
     subject.attrs["source_crop_run"] = "crop_001"
+    subject.attrs["source_crop_storage_mode"] = "geometry_only"
+    subject.attrs["source_crop_signature"] = "{'signature_version': 2, 'crop_revision': 4}"
+    subject.attrs["source_crop_revision"] = 4
+    subject.attrs["source_detect_review_status_ref"] = "refined_detect_runs/refined_detect_001/review_status"
     subject.attrs["method"] = "subject_mask_threshold_lr_v1"
     subject.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
     subject.attrs["label_schema_id"] = "subject_v1_lr"
@@ -99,6 +107,14 @@ def _patch_review_provenance(monkeypatch) -> None:
     )
 
 
+class _MinimalGroup:
+    def __init__(self, attrs: dict[str, object]) -> None:
+        self.attrs = attrs
+
+    def get(self, _name: str):
+        return None
+
+
 def test_compute_single_mask_topology_metrics_handles_components_and_holes() -> None:
     mask = np.zeros((10, 10), dtype=np.uint8)
     mask[2:8, 2:8] = 1
@@ -111,6 +127,47 @@ def test_compute_single_mask_topology_metrics_handles_components_and_holes() -> 
     np.testing.assert_allclose(largest_component_fraction, np.float32(32.0 / 33.0))
     assert hole_count == 1
     np.testing.assert_allclose(hole_area_fraction, np.float32(4.0 / 33.0))
+
+
+def test_source_component_provenance_payload_includes_crop_snapshot_fields() -> None:
+    source = mod.SourceSubjectMaskRun(
+        run_name="subject_masks_001",
+        group=_MinimalGroup(
+            {
+                "label_schema_id": "subject_v1_lr",
+                "created_at_utc": "2026-04-01T00:00:00+00:00",
+                "method": "subject_mask_threshold_lr_v1",
+            }
+        ),
+        crop_run="crop_001",
+        source_crop_snapshot={
+            "source_crop_storage_mode": "geometry_only",
+            "source_crop_signature": "{'signature_version': 2, 'crop_revision': 4}",
+            "source_crop_revision": 4,
+            "source_detect_review_status_ref": "refined_detect_runs/refined_detect_001/review_status",
+        },
+        masks_roi=np.zeros((1, 1, 1, 1), dtype=np.uint8),
+        detection_source=np.zeros((1,), dtype=np.int8),
+        mask_labels=("subject_body",),
+        available_channels=np.asarray([True], dtype=bool),
+        frame_indices=None,
+        frame_counts=None,
+        detection_indices=None,
+        source_method="subject_mask_threshold_lr_v1",
+        source_keypoints_run=None,
+        source_keypoint_group=None,
+    )
+
+    payload = mod._source_component_provenance_payload(source, "subject_body")  # noqa: SLF001
+
+    assert payload["source_stage"] == "subject_mask_runs"
+    assert payload["source_run"] == "subject_masks_001"
+    assert payload["source_method"] == "subject_mask_threshold_lr_v1"
+    assert payload["source_crop_run"] == "crop_001"
+    assert payload["source_crop_storage_mode"] == "geometry_only"
+    assert payload["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert payload["source_crop_revision"] == 4
+    assert payload["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
 
 
 def test_compute_single_mask_sigma_noise_is_higher_for_jagged_mask() -> None:
@@ -187,6 +244,10 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     run = refined.group
     assert run.attrs["source_subject_mask_run"] == "subject_masks_001"
     assert run.attrs["source_crop_run"] == "crop_001"
+    assert run.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run.attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert run.attrs["source_crop_revision"] == 4
+    assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
     assert run.attrs["source_keypoint_group"] == "refined_keypoints_runs"
     assert run.attrs["source_keypoints_run"] == "refined_kp_001"
     assert run.attrs["source_keypoint_run"] == "refined_kp_001"
@@ -239,12 +300,25 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
 
     body_group = run["components/subject_body"]
     body_provenance = body_group["provenance"]
+    np.testing.assert_array_equal(
+        np.asarray(body_group["manual_override"][:], dtype=bool),
+        np.asarray([False, False], dtype=bool),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(body_group["source_row_stale"][:], dtype=bool),
+        np.asarray([False, False], dtype=bool),
+    )
     assert body_group.attrs["component_schema_id"] == "subject_body_v1"
     assert body_group.attrs["anatomical_scope"] == "body_core"
     assert body_group.attrs["pectoral_fin_policy"] == "excluded_or_unresolved"
     assert body_provenance.attrs["source_stage"] == "subject_mask_runs"
     assert body_provenance.attrs["source_run"] == "subject_masks_001"
     assert body_provenance.attrs["source_method"] == "subject_mask_threshold_lr_v1"
+    assert body_provenance.attrs["source_crop_run"] == "crop_001"
+    assert body_provenance.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert body_provenance.attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert body_provenance.attrs["source_crop_revision"] == 4
+    assert body_provenance.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
     assert body_provenance.attrs["source_channels"] == ["subject_body"]
     assert body_provenance.attrs["source_label_schema_id"] == "subject_v1_lr"
     assert body_provenance.attrs["last_update_stage"] == mod.REFINED_SUBJECT_STAGE_NAME
@@ -256,6 +330,11 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert swim_provenance.attrs["source_stage"] == "subject_mask_runs"
     assert swim_provenance.attrs["source_run"] == "subject_masks_001"
     assert swim_provenance.attrs["source_method"] == "subject_mask_threshold_lr_v1"
+    assert swim_provenance.attrs["source_crop_run"] == "crop_001"
+    assert swim_provenance.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert swim_provenance.attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert swim_provenance.attrs["source_crop_revision"] == 4
+    assert swim_provenance.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
     assert swim_provenance.attrs["source_channels"] == ["swim_bladder"]
     assert swim_provenance.attrs["source_label_schema_id"] == "subject_v1_lr"
     assert swim_provenance.attrs["last_update_mode"] == "create"
@@ -311,6 +390,10 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert provenance["command"] == "scripts/py -m fisheye.tune.refined_subject_mask_review"
     assert provenance["git"]["commit"] == "b" * 40
     assert provenance["inputs"]["source_subject_mask_run"] == "subject_masks_001"
+    assert provenance["inputs"]["source_crop_storage_mode"] == "geometry_only"
+    assert provenance["inputs"]["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert provenance["inputs"]["source_crop_revision"] == 4
+    assert provenance["inputs"]["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
     assert provenance["inputs"]["source_keypoints_run"] == "refined_kp_001"
     assert provenance["inputs"]["source_keypoint_group"] == "refined_keypoints_runs"
 
@@ -419,6 +502,9 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     swim_provenance = swim_group["provenance"]
     assert bool(np.asarray(body_group["edit_applied"][0], dtype=bool)) is True
     assert bool(np.asarray(swim_group["edit_applied"][0], dtype=bool)) is True
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is True
+    assert bool(np.asarray(swim_group["manual_override"][0], dtype=bool)) is True
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is False
     body_reasons = read_reason_labels(body_group)
     swim_reasons = read_reason_labels(swim_group)
     assert body_reasons is not None
@@ -471,6 +557,260 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     assert swim_provenance.attrs["last_update_mode"] == "interactive"
     assert swim_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
     assert swim_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]
+
+
+def test_check_refined_subject_source_updates_auto_syncs_unedited_rows(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 1:7, 1:7] = 0
+    source_masks[0, 0, 2:6, 2:6] = 1
+    subject["masks_roi"][:] = source_masks
+
+    summary = mod.check_refined_subject_source_updates(
+        "/tmp/fake_subject_review.zarr",
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["source_changed_roi_count"] == 1
+    assert summary["auto_synced_roi_count"] == 1
+    assert summary["stale_marked_roi_count"] == 0
+    assert summary["auto_synced_roi_indices"] == [0]
+
+    run = refined.group
+    body_group = run["components/subject_body"]
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 0], dtype=np.uint8),
+        np.asarray(subject["masks_roi"][0, 0], dtype=np.uint8),
+    )
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is False
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is False
+
+
+def test_check_refined_subject_source_updates_marks_manual_rows_stale(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+    mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+    )
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 2:6, 2:6] = 0
+    source_masks[0, 0, 3:5, 3:5] = 1
+    subject["masks_roi"][:] = source_masks
+
+    summary = mod.check_refined_subject_source_updates(
+        "/tmp/fake_subject_review.zarr",
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["source_changed_roi_count"] == 1
+    assert summary["auto_synced_roi_count"] == 0
+    assert summary["stale_marked_roi_count"] == 1
+    assert summary["stale_roi_indices"] == [0]
+    assert summary["stale_total"] == 1
+
+    run = mod._open_existing_refined_subject_run(root, "refined_subject_masks_001").group  # noqa: SLF001
+    body_group = run["components/subject_body"]
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is True
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is True
+    assert body_group.attrs["source_update_pending_rows"] == [0]
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 0], dtype=np.uint8),
+        np.asarray(edited[0], dtype=np.uint8),
+    )
+    review_payload = dict(run.attrs.get("component_review_statuses") or {}).get("subject_body", {})
+    assert review_payload["state"] == "needs_review"
+
+
+def test_check_refined_subject_source_updates_legacy_bootstrap_auto_syncs_unedited_rows(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    body_group = refined.group["components/subject_body"]
+    del body_group["source_row_fingerprint"]
+    del body_group["manual_override"]
+    del body_group["source_row_stale"]
+    body_group.attrs.pop("source_sync_schema_id", None)
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 2:6, 2:6] = 0
+    source_masks[0, 0, 3:5, 3:5] = 1
+    subject["masks_roi"][:] = source_masks
+
+    summary = mod.check_refined_subject_source_updates(
+        "/tmp/fake_subject_review.zarr",
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+        assume_source_changed_untracked=True,
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["assume_source_changed_untracked"] is True
+    assert summary["source_changed_roi_count"] == 1
+    assert summary["auto_synced_roi_count"] == 1
+    assert summary["stale_marked_roi_count"] == 0
+    assert summary["unchanged_roi_count"] == 0
+
+    run = mod._open_existing_refined_subject_run(root, "refined_subject_masks_001").group  # noqa: SLF001
+    body_group = run["components/subject_body"]
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 0], dtype=np.uint8),
+        np.asarray(subject["masks_roi"][0, 0], dtype=np.uint8),
+    )
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is False
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is False
+
+
+def test_check_refined_subject_source_updates_legacy_bootstrap_marks_manual_rows_stale(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+    mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+    )
+
+    body_group = refined.group["components/subject_body"]
+    del body_group["source_row_fingerprint"]
+    del body_group["manual_override"]
+    del body_group["source_row_stale"]
+    body_group.attrs.pop("source_sync_schema_id", None)
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 2:6, 2:6] = 0
+    source_masks[0, 0, 3:5, 3:5] = 1
+    subject["masks_roi"][:] = source_masks
+
+    summary = mod.check_refined_subject_source_updates(
+        "/tmp/fake_subject_review.zarr",
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+        assume_source_changed_untracked=True,
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["assume_source_changed_untracked"] is True
+    assert summary["source_changed_roi_count"] == 1
+    assert summary["auto_synced_roi_count"] == 0
+    assert summary["stale_marked_roi_count"] == 1
+    assert summary["stale_roi_indices"] == [0]
+
+    run = mod._open_existing_refined_subject_run(root, "refined_subject_masks_001").group  # noqa: SLF001
+    body_group = run["components/subject_body"]
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 0], dtype=np.uint8),
+        np.asarray(edited[0], dtype=np.uint8),
+    )
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is True
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is True
+
+
+def test_check_refined_subject_source_updates_force_source_changed_reprocesses_seeded_rows(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+    mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+    )
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 2:6, 2:6] = 0
+    source_masks[0, 0, 3:5, 3:5] = 1
+    subject["masks_roi"][:] = source_masks
+
+    baseline_summary = mod.check_refined_subject_source_updates(
+        "/tmp/fake_subject_review.zarr",
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+        assume_source_changed_untracked=True,
+    )
+    assert baseline_summary["source_changed_roi_count"] == 1
+    assert baseline_summary["stale_marked_roi_count"] == 1
+
+    rerun_summary = mod.check_refined_subject_source_updates(
+        "/tmp/fake_subject_review.zarr",
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+        force_source_changed=True,
+    )
+
+    assert rerun_summary["status"] == "updated"
+    assert rerun_summary["force_source_changed"] is True
+    assert rerun_summary["source_changed_roi_count"] == 1
+    assert rerun_summary["auto_synced_roi_count"] == 0
+    assert rerun_summary["stale_marked_roi_count"] == 1
 
 
 def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> None:
