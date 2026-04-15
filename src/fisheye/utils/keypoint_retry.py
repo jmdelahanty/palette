@@ -16,6 +16,7 @@ from ultralytics import YOLO, __version__ as ultralytics_version
 from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import read_reason_labels
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _as_text
 from ..shared.zarr.schema import get_run_group
@@ -593,7 +594,11 @@ def retry_failed_keypoints_yolo(
         run_attrs["ultralytics_version"] = ultralytics_version
         run_attrs["device"] = model_device
         run_attrs["source_crop_run"] = crop_run_name
-        run_attrs["source_crop_storage_mode"] = crop_source.storage_mode
+        crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+            crop_source.crop_group.attrs,
+            source_crop_storage_mode=crop_source.storage_mode,
+        )
+        run_attrs.update(crop_snapshot_attrs)
         run_attrs["source_roi_read_mode"] = crop_source.roi_read_mode
         run_attrs["roi_cache_policy"] = crop_source.roi_cache_policy
         run_attrs["source_roi_cache_used"] = bool(crop_source.roi_cache_used)
@@ -653,7 +658,7 @@ def retry_failed_keypoints_yolo(
             "reason": "present",
             "run_group": "keypoints_runs",
             "source_crop_run": crop_run_name,
-            "source_crop_storage_mode": crop_source.storage_mode,
+            **crop_snapshot_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),

@@ -23,7 +23,7 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 from skimage import filters, measure, morphology
 from skimage.measure import EllipseModel
-from ..shared.provenance_attrs import build_source_keypoints_attrs
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_keypoints_attrs
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
@@ -525,6 +525,10 @@ def segment_eye_masks(
     if crop_run is None:
         raise ValueError("No crop run available")
     crop_group = root[f"crop_runs/{crop_run}"]
+    crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+        crop_group.attrs,
+        source_crop_storage_mode=crop_group.attrs.get("crop_storage_mode") or "materialized",
+    )
 
     if "keypoints_runs" not in root and "refined_keypoints_runs" not in root:
         raise ValueError("Keypoints runs missing from Zarr; run keypoints stage first")
@@ -850,6 +854,7 @@ def segment_eye_masks(
             "method": "traditional_eye_segmentation",
             "config": cfg.__dict__,
             "source_crop_run": crop_run,
+            **crop_snapshot_attrs,
             **build_source_keypoints_attrs(keypoint_run, include_legacy_alias=True),
             "source_keypoint_group": keypoint_group_name,
             "total_rois": total_rois,
@@ -890,6 +895,7 @@ def segment_eye_masks(
         parameters=dict(cfg.__dict__),
         inputs={
             "source_crop_run": crop_run,
+            **crop_snapshot_attrs,
             "source_keypoints_run": keypoint_run,
             "source_keypoint_group": keypoint_group_name,
             "frame_source": crop_group.attrs.get("video_source_type", "zarr"),

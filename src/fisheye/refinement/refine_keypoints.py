@@ -47,6 +47,7 @@ from ..pose.metric_schema import (
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.derived_metrics_schema import build_refined_keypoint_derived_metrics_schema
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.registry_stage_complete import (
     DatasetMetadata,
     emit_stage_completion,
@@ -390,11 +391,15 @@ def _build_keypoint_signature(
     parameters: Optional[Dict[str, object]],
 ) -> Dict[str, object]:
     return {
-        "signature_version": 1,
+        "signature_version": 2,
         "source_keypoints_run": attrs.get("source_keypoints_run"),
         "source_crop_run": attrs.get("source_crop_run"),
+        "source_crop_storage_mode": attrs.get("source_crop_storage_mode"),
+        "source_crop_signature": attrs.get("source_crop_signature"),
+        "source_crop_revision": attrs.get("source_crop_revision"),
         "source_detect_run": attrs.get("source_detect_run"),
         "source_refined_run": attrs.get("source_refined_run"),
+        "source_detect_review_status_ref": attrs.get("source_detect_review_status_ref"),
         "parameter_source": parameters.get("parameter_source") if parameters else None,
         "parameters_hash": _hash_parameters(parameters),
     }
@@ -996,6 +1001,20 @@ def create_refined_keypoint_run(
     source_crop_run = kp_source.attrs.get("source_crop_run")
     source_detect_run = kp_source.attrs.get("source_detect_run")
     source_refined_run = kp_source.attrs.get("source_refined_run")
+    source_crop_group = (
+        root.get(f"crop_runs/{source_crop_run}") if isinstance(source_crop_run, str) and source_crop_run else None
+    )
+    source_crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+        source_crop_group.attrs if source_crop_group is not None else None,
+        source_crop_storage_mode=(
+            (
+                source_crop_group.attrs.get("crop_storage_mode")
+                or ("materialized" if source_crop_group.get("roi_images") is not None else "geometry_only")
+            )
+            if source_crop_group is not None
+            else None
+        ),
+    )
 
     kp_refined.attrs.update(
         {
@@ -1006,6 +1025,7 @@ def create_refined_keypoint_run(
             "memory_limit": params.memory_limit,
             "refinement_role": "left_right_eye_check",
             "created_utc": created_timestamp,
+            **source_crop_snapshot_attrs,
         }
     )
     if source_crop_run:
@@ -1522,11 +1542,9 @@ def create_refined_keypoint_run(
 
     frame_source = "zarr"
     source_video_path = root.attrs.get("source_video_path")
-    if source_crop_run:
-        crop_group = root.get(f"crop_runs/{source_crop_run}")
-        if crop_group is not None:
-            frame_source = crop_group.attrs.get("video_source_type", frame_source)
-            source_video_path = crop_group.attrs.get("video_source_path") or source_video_path
+    if source_crop_group is not None:
+        frame_source = source_crop_group.attrs.get("video_source_type", frame_source)
+        source_video_path = source_crop_group.attrs.get("video_source_path") or source_video_path
 
     provenance_record = build_stage_provenance(
         stage="refine_keypoints",
@@ -1547,6 +1565,7 @@ def create_refined_keypoint_run(
         inputs={
             "keypoints_run": keypoint_run,
             "source_crop_run": source_crop_run,
+            **source_crop_snapshot_attrs,
             "source_refined_run": source_refined_run,
             "frame_source": frame_source,
             "source_video_path": source_video_path,

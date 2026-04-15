@@ -15,9 +15,9 @@ Relevant provenance attributes:
 | `detect_runs/<run>` | `bbox_norm_coords` | `detect_timestamp_utc`, `total_detections` |
 | `refined_detect_runs/<run>` | `instances/bbox_norm_coords`, `source_detections/bbox_norm_coords` | `source_detect_run`, `detect_review_status`, `refined_storage_semantics`, `source_detection_decision_code_map` |
 | `crop_runs/<run>` | `roi_images` | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_selection_policy`, `crop_signature`, `crop_review_status` |
-| `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run` |
-| `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
-| `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
+| `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref` |
+| `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
+| `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
 | `tracking_runs/<run>` | `track_ids`, `track_arena_ids` | `source_detect_run`, `source_refined_run`, `source_arena_assignment_run`, `tracking_qc_state` |
@@ -36,6 +36,13 @@ follow the contract in `docs/eye_mask_row_mapping_contract.md`:
 - segmentation writes should anchor lineage to source crop runs;
 - keypoint lineage arrays are used for cross-check/fallback compatibility;
 - refinement copies lineage arrays from the source eye-mask run.
+
+`check_provenance_consistency` now validates two crop-side contracts:
+
+- `crop_runs/<run>` must still match the current upstream detect/refined rowset.
+- latest keypoint and eye-mask runs must carry a crop snapshot (`source_crop_*`
+  plus `source_detect_review_status_ref`) that still matches the current crop
+  run they reference.
 
 Legacy refined-detect sparse subgroups such as `interpolated` and `manual_*`
 may still exist in older archives, but they are no longer the primary current

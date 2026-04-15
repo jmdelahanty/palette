@@ -27,6 +27,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRe
 from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
@@ -708,6 +709,10 @@ def detect_keypoints_yolo(
         capture_env_vars=False,
     )
     platform_info = env_info.get("platform", {})
+    crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+        crop_group.attrs,
+        source_crop_storage_mode=crop_source.storage_mode,
+    )
 
     run_group.attrs.update({
         "method": "yolo_pose",
@@ -717,9 +722,7 @@ def detect_keypoints_yolo(
         "ultralytics_version": ultralytics_version,
         "device": model_device,
         "source_crop_run": latest_crop,
-        "source_crop_storage_mode": crop_source.storage_mode,
-        "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
-        "source_crop_revision": crop_group.attrs.get("crop_revision"),
+        **crop_snapshot_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "source_roi_cache_used": bool(crop_source.roi_cache_used),
@@ -797,9 +800,7 @@ def detect_keypoints_yolo(
         parameters=dict(run_group.attrs.get("parameters") or {}),
         inputs={
             "source_crop_run": latest_crop,
-            "source_crop_storage_mode": crop_source.storage_mode,
-            "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
-            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            **crop_snapshot_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),
@@ -833,9 +834,7 @@ def detect_keypoints_yolo(
         "reason": "present",
         "run_group": "keypoints_runs",
         "source_crop_run": latest_crop,
-        "source_crop_storage_mode": crop_source.storage_mode,
-        "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
-        "source_crop_revision": crop_group.attrs.get("crop_revision"),
+        **crop_snapshot_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),

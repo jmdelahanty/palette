@@ -19,7 +19,11 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from ..registry.db import Registry, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
 from ..registry.step_cascade import invalidate_downstream_steps
-from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.provenance_attrs import (
+    build_source_crop_snapshot_attrs,
+    build_source_keypoints_attrs,
+    resolve_source_keypoints_run,
+)
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.registry_stage_complete import emit_stage_completion
@@ -905,6 +909,10 @@ def main(
         )
 
     run_group.attrs.update(src_attrs)
+    crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+        crop_group.attrs,
+        source_crop_storage_mode=crop_source.storage_mode,
+    )
     run_group.attrs.update(
         {
             "method": "unet_eye_mask_segmenter",
@@ -916,9 +924,7 @@ def main(
             "source_keypoint_group": resolved_keypoint_group,
             "source_crop_run": crop_run_name,
             "detection_source_path": crop_group.attrs.get("detection_source_path"),
-            "source_crop_storage_mode": crop_source.storage_mode,
-            "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
-            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            **crop_snapshot_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
@@ -1005,9 +1011,7 @@ def main(
             "source_keypoints_run": resolved_keypoints_run,
             "frame_source": crop_source.frame_source_kind,
             "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
-            "source_crop_storage_mode": crop_source.storage_mode,
-            "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
-            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            **crop_snapshot_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,

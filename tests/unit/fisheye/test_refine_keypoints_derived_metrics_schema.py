@@ -128,6 +128,15 @@ def _make_keypoint_root() -> _FakeGroup:
     root = _FakeGroup()
     root.attrs["recording_id"] = "rec_derived_metrics_schema"
 
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.create_group("crop_001")
+    crop.attrs["crop_storage_mode"] = "geometry_only"
+    crop.attrs["crop_signature"] = {"signature_version": 2, "crop_revision": 4}
+    crop.attrs["crop_revision"] = 4
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001"
+    crop.attrs["video_source_path"] = "/tmp/source-video.mp4"
+
     keypoints_parent = root.create_group("keypoints_runs")
     keypoints_parent.attrs["latest"] = "keypoints_001"
     run = keypoints_parent.create_group("keypoints_001")
@@ -303,8 +312,27 @@ def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -
     schema = dict(refined.attrs["derived_metrics_schema"])
 
     assert refined.attrs["source_refined_run"] == "refined_detect_001"
+    assert refined.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert refined.attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert refined.attrs["source_crop_revision"] == 4
+    assert refined.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001"
     assert refined.attrs["keypoint_signature"]["source_refined_run"] == "refined_detect_001"
+    assert refined.attrs["keypoint_signature"]["signature_version"] == 2
+    assert refined.attrs["keypoint_signature"]["source_crop_storage_mode"] == "geometry_only"
+    assert refined.attrs["keypoint_signature"]["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert refined.attrs["keypoint_signature"]["source_crop_revision"] == 4
+    assert (
+        refined.attrs["keypoint_signature"]["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_detect_001"
+    )
     assert refined.attrs["provenance"]["inputs"]["source_refined_run"] == "refined_detect_001"
+    assert refined.attrs["provenance"]["inputs"]["source_crop_storage_mode"] == "geometry_only"
+    assert refined.attrs["provenance"]["inputs"]["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
+    assert refined.attrs["provenance"]["inputs"]["source_crop_revision"] == 4
+    assert (
+        refined.attrs["provenance"]["inputs"]["source_detect_review_status_ref"]
+        == "refined_detect_runs/refined_detect_001"
+    )
 
     assert schema["schema_version"] == 1
     assert schema["entity_kind"] == "keypoint_roi"

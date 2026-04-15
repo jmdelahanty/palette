@@ -63,11 +63,15 @@ def _build_keypoint_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
         parameter_source = params.get("parameter_source")
 
     return {
-        "signature_version": 1,
+        "signature_version": 2,
         "source_keypoints_run": attrs.get("source_keypoints_run"),
         "source_crop_run": attrs.get("source_crop_run"),
+        "source_crop_storage_mode": attrs.get("source_crop_storage_mode"),
+        "source_crop_signature": attrs.get("source_crop_signature"),
+        "source_crop_revision": attrs.get("source_crop_revision"),
         "source_detect_run": attrs.get("source_detect_run"),
         "source_refined_run": attrs.get("source_refined_run"),
+        "source_detect_review_status_ref": attrs.get("source_detect_review_status_ref"),
         "parameter_source": parameter_source,
         "parameters_hash": _hash_parameters(params),
     }

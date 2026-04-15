@@ -26,7 +26,11 @@ from ..registry.db import Registry, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
 from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.crop_image_source import CropImageSource
-from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.provenance_attrs import (
+    build_source_crop_snapshot_attrs,
+    build_source_keypoints_attrs,
+    resolve_source_keypoints_run,
+)
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -1224,9 +1228,10 @@ def segment_eye_masks_yolo(
                 "proto_upsample_factor": proto_factor,
             },
             "source_crop_run": crop_run_name,
-            "source_crop_storage_mode": crop_source.storage_mode,
-            "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
-            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            **build_source_crop_snapshot_attrs(
+                crop_group.attrs,
+                source_crop_storage_mode=crop_source.storage_mode,
+            ),
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
@@ -1285,9 +1290,10 @@ def segment_eye_masks_yolo(
             parameters=dict(run_group.attrs.get("config") or {}),
             inputs={
                 "source_crop_run": crop_run_name,
-                "source_crop_storage_mode": crop_source.storage_mode,
-                "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
-                "source_crop_revision": crop_group.attrs.get("crop_revision"),
+                **build_source_crop_snapshot_attrs(
+                    crop_group.attrs,
+                    source_crop_storage_mode=crop_source.storage_mode,
+                ),
                 "source_roi_read_mode": crop_source.roi_read_mode,
                 "roi_cache_policy": crop_source.roi_cache_policy,
                 "roi_cache_used": bool(crop_source.roi_cache_used),

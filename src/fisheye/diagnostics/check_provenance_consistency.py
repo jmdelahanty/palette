@@ -13,10 +13,12 @@ import zarr
 from rich.console import Console
 from rich.table import Table
 
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.refined_detect_curation import (
     has_curated_refined_detect_surface,
     has_sparse_curated_refined_detect_instances_arrays,
 )
+from ..shared.type_conversions import as_int, normalize_attr
 
 
 @dataclass
@@ -35,6 +37,7 @@ class ProvenanceRecord:
     arena_assignment_rows: Optional[int]
     issues: list[str]
     crop_source_drift_issues: list[str] = field(default_factory=list)
+    downstream_crop_snapshot_issues: list[str] = field(default_factory=list)
 
 
 def _safe_len(arr: Optional[zarr.Array]) -> Optional[int]:
@@ -296,6 +299,70 @@ def _collect_crop_source_drift_issues(
     return issues
 
 
+def _infer_crop_storage_mode(crop_group: zarr.Group) -> str:
+    stored = normalize_attr(crop_group.attrs.get("crop_storage_mode"))
+    if stored:
+        return stored
+    return "materialized" if _safe_get(crop_group, "roi_images") is not None else "geometry_only"
+
+
+def _compare_snapshot_value(field_name: str, value: object) -> object:
+    if field_name == "source_crop_revision":
+        numeric = as_int(value)
+        return int(numeric) if numeric is not None and numeric >= 0 else None
+    return normalize_attr(value)
+
+
+def _collect_downstream_crop_snapshot_issues(
+    *,
+    stage_label: str,
+    run_name: Optional[str],
+    run_group: Optional[zarr.Group],
+    latest_crop: Optional[str],
+    crop_group: Optional[zarr.Group],
+) -> list[str]:
+    if run_group is None or crop_group is None:
+        return []
+
+    issues: list[str] = []
+    source_crop_run = normalize_attr(run_group.attrs.get("source_crop_run"))
+    run_label = f"{stage_label} run '{run_name}'" if run_name else f"{stage_label} run"
+    crop_label = f"crop run '{latest_crop}'" if latest_crop else "current crop run"
+
+    if not source_crop_run:
+        issues.append(f"{run_label} is missing source_crop_run provenance.")
+        return issues
+
+    if latest_crop and source_crop_run != latest_crop:
+        issues.append(
+            f"{run_label} references crop '{source_crop_run}', but latest crop is '{latest_crop}'."
+        )
+        return issues
+
+    expected_snapshot = build_source_crop_snapshot_attrs(
+        crop_group.attrs,
+        source_crop_storage_mode=_infer_crop_storage_mode(crop_group),
+    )
+    if not expected_snapshot:
+        return issues
+
+    mismatches: list[str] = []
+    for field_name, expected_value in expected_snapshot.items():
+        actual_value = _compare_snapshot_value(field_name, run_group.attrs.get(field_name))
+        expected_comp = _compare_snapshot_value(field_name, expected_value)
+        if expected_comp is None:
+            continue
+        if actual_value is None:
+            mismatches.append(f"missing {field_name}")
+        elif actual_value != expected_comp:
+            mismatches.append(f"{field_name}={actual_value!r} expected {expected_comp!r}")
+
+    if mismatches:
+        issues.append(f"{run_label} crop snapshot drifted from {crop_label}: {'; '.join(mismatches)}.")
+
+    return issues
+
+
 def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     issues: list[str] = []
 
@@ -379,12 +446,30 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     keypoint_latest = _latest(keypoint_parent)
     keypoint_group = _first_matching_run(keypoint_parent, keypoint_latest)
     keypoint_rows = _safe_len(_safe_get(keypoint_group, "heading")) if keypoint_group else None
-    if keypoint_group is not None:
-        kp_source_crop = keypoint_group.attrs.get("source_crop_run")
-        if crop_latest and kp_source_crop and crop_latest != kp_source_crop:
-            issues.append(
-                f"Keypoint run '{keypoint_latest}' references crop '{kp_source_crop}', but latest crop is '{crop_latest}'."
-            )
+    downstream_crop_snapshot_issues: list[str] = []
+    downstream_crop_snapshot_issues.extend(
+        _collect_downstream_crop_snapshot_issues(
+            stage_label="Keypoint",
+            run_name=keypoint_latest,
+            run_group=keypoint_group,
+            latest_crop=crop_latest,
+            crop_group=crop_group,
+        )
+    )
+
+    eye_mask_parent = root.get("eye_masks_runs")
+    eye_mask_latest = _latest(eye_mask_parent)
+    eye_mask_group = _first_matching_run(eye_mask_parent, eye_mask_latest)
+    downstream_crop_snapshot_issues.extend(
+        _collect_downstream_crop_snapshot_issues(
+            stage_label="Eye mask",
+            run_name=eye_mask_latest,
+            run_group=eye_mask_group,
+            latest_crop=crop_latest,
+            crop_group=crop_group,
+        )
+    )
+    issues.extend(downstream_crop_snapshot_issues)
 
     arena_parent = root.get("arena_assignment_runs")
     arena_latest = _latest(arena_parent)
@@ -447,6 +532,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
         arena_assignment_rows=arena_rows,
         issues=issues,
         crop_source_drift_issues=crop_source_drift_issues,
+        downstream_crop_snapshot_issues=downstream_crop_snapshot_issues,
     )
 
 

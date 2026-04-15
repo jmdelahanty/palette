@@ -28,6 +28,7 @@ from dask.diagnostics import ProgressBar
 
 from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import resolve_materialized_crop_run
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
@@ -586,6 +587,10 @@ def detect_keypoints(
     )
     source_detect_run = crop_group.attrs.get('source_detect_run')
     source_refined_run = crop_group.attrs.get('source_refined_run')
+    crop_snapshot_attrs = build_source_crop_snapshot_attrs(
+        crop_group.attrs,
+        source_crop_storage_mode=crop_group.attrs.get("crop_storage_mode") or "materialized",
+    )
 
     metadata_dict = {
         'keypoints_timestamp_utc': datetime.now(timezone.utc).isoformat(),
@@ -597,6 +602,7 @@ def detect_keypoints(
         'source_background_run': latest_background,
         'source_detect_run': source_detect_run or 'unknown',
         'method': 'traditional_pose',
+        **crop_snapshot_attrs,
     }
     if source_refined_run:
         metadata_dict['source_refined_run'] = source_refined_run
@@ -982,6 +988,7 @@ def detect_keypoints(
         },
         inputs={
             'source_crop_run': latest_crop,
+            **crop_snapshot_attrs,
             'source_background_run': latest_background,
             'source_detect_run': source_detect_run or 'unknown',
             'source_refined_run': source_refined_run,
@@ -1036,6 +1043,7 @@ def detect_keypoints(
         "reason": "present",
         "run_group": "keypoints_runs",
         "source_crop_run": latest_crop,
+        **crop_snapshot_attrs,
         "source_detect_run": source_detect_run or "unknown",
         "total_rois": int(total_rois),
         "successful_detections": int(total_successful),

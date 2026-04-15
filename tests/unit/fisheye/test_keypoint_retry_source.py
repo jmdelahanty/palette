@@ -69,6 +69,9 @@ def test_retry_failed_keypoints_yolo_uses_geometry_only_latest_any_crop(tmp_path
     crop_geometry = crop_parent.create_group("crop_geometry")
     crop_geometry.attrs["crop_storage_mode"] = "geometry_only"
     crop_geometry.attrs["roi_size"] = [4, 4]
+    crop_geometry.attrs["crop_signature"] = "sig-geometry-001"
+    crop_geometry.attrs["crop_revision"] = 5
+    crop_geometry.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001"
     crop_geometry.create_array(
         "roi_coordinates_full",
         data=np.array([[1, 1]], dtype=np.int32),
@@ -134,6 +137,9 @@ def test_retry_failed_keypoints_yolo_uses_geometry_only_latest_any_crop(tmp_path
     assert result["updated"] is True
     assert retry_group.attrs["source_crop_run"] == "crop_geometry"
     assert retry_group.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert retry_group.attrs["source_crop_signature"] == "sig-geometry-001"
+    assert retry_group.attrs["source_crop_revision"] == 5
+    assert retry_group.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001"
     assert retry_group.attrs["source_roi_read_mode"] == "temporary_cache"
     assert retry_group.attrs["roi_cache_policy"] == "always"
     assert bool(retry_group.attrs["source_roi_cache_used"]) is True

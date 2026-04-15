@@ -363,6 +363,26 @@ def _build_manual_reason(existing: str, *, geom_ok: bool) -> str:
     return "|".join(unique) if unique else "manual_correction"
 
 
+def _build_cleared_failure_reason(existing: str) -> str:
+    existing_tags = [tag for tag in existing.split("|") if tag]
+    drop_tags = {
+        "detection_failed",
+        "fish_present_no_keypoints",
+        "detection_issue",
+    }
+    kept_tags = [tag for tag in existing_tags if tag not in drop_tags]
+    if "manual_correction" not in kept_tags:
+        kept_tags.append("manual_correction")
+    unique: list[str] = []
+    seen = set()
+    for tag in kept_tags:
+        if not tag or tag in seen:
+            continue
+        unique.append(tag)
+        seen.add(tag)
+    return "|".join(unique) if unique else "manual_correction"
+
+
 def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
     try:
         raw = reason_arr[:]
@@ -598,11 +618,15 @@ def _build_keypoint_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
         parameter_source = params.get("parameter_source")
 
     return {
-        "signature_version": 1,
+        "signature_version": 2,
         "source_keypoints_run": attrs.get("source_keypoints_run"),
         "source_crop_run": attrs.get("source_crop_run"),
+        "source_crop_storage_mode": attrs.get("source_crop_storage_mode"),
+        "source_crop_signature": attrs.get("source_crop_signature"),
+        "source_crop_revision": attrs.get("source_crop_revision"),
         "source_detect_run": attrs.get("source_detect_run"),
         "source_refined_run": attrs.get("source_refined_run"),
+        "source_detect_review_status_ref": attrs.get("source_detect_review_status_ref"),
         "parameter_source": parameter_source,
         "parameters_hash": _hash_parameters(params),
     }
@@ -1436,6 +1460,47 @@ def launch_review(
         load_current_points()
         update_display()
 
+    def clear_failure_label() -> None:
+        roi_idx = int(failures[idx_pos])
+        frame_idx = int(frame_indices[roi_idx])
+        if reason_arr is None:
+            print("Cannot clear failure label: reason labels are unavailable.")
+            return
+
+        existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
+        tags = {token.strip() for token in existing.split("|") if token.strip()}
+        target_tags = {"fish_present_no_keypoints", "detection_issue"}
+        present = sorted(tags & target_tags)
+        if not present:
+            print(f"ROI {roi_idx} has no clearable failure label.")
+            return
+
+        reason_value = _build_cleared_failure_reason(existing)
+        changed = False
+        if existing != reason_value:
+            reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+            changed = True
+
+        if changed:
+            _mark_edit_applied(edit_applied_arr, roi_idx)
+            stale_touched = mark_downstream_eye_mask_runs_stale(
+                root,
+                source_keypoint_group="refined_keypoints_runs",
+                source_keypoints_run=str(refined_run),
+                roi_indices=[roi_idx],
+                frame_indices=[frame_idx],
+                reason="keypoint_clear_failure_label",
+            )
+            print(
+                f"Cleared failure label for ROI {roi_idx} (frame {frame_idx}): "
+                f"{', '.join(present)}."
+            )
+            if stale_touched:
+                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+        else:
+            print(f"No changes for ROI {roi_idx} (frame {frame_idx}); skipped stale marker update.")
+        update_display()
+
     def next_failure() -> None:
         nonlocal idx_pos
         if idx_pos < len(failures) - 1:
@@ -1513,6 +1578,8 @@ def launch_review(
             mark_detection_issue()
         elif event.key == "x":
             mark_no_keypoints()
+        elif event.key == "c":
+            clear_failure_label()
         elif event.key == "a":
             apply_state(review_state)
         elif event.key == "R":
@@ -1548,6 +1615,7 @@ def launch_review(
     print("  b: flag frame for follow-up (writes --frame-flag-file)")
     print("  d: flag detection issue (writes retune flags)")
     print("  x: mark fish present but no keypoints")
+    print("  c: clear fish_present_no_keypoints/detection_issue label")
     print("  r: reset points from current data")
     print("  n/p: next/previous failure")
     print("  a: approve keypoints")

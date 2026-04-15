@@ -226,9 +226,11 @@ Produced by the keypoint detection stage (traditional or YOLO-based).
 | `triangle_angles_raw` | `(n_rois, 3)` | `float64` | Triangle angles in candidate order (largest -> smallest blob) |
 | `triangle_area` | `(n_rois,)` | `float64` | Triangle area (pixels^2) |
 
-Attributes: `source_crop_run`, `source_background_run`, `source_detect_run`,
-`source_refined_run` (if available), `method`, `parameter_source`, `parameters`,
-`skeleton_id`, `kpt_shape`, `pose_schema`, `keypoint_labels`,
+Attributes: `source_crop_run`, `source_crop_storage_mode`,
+`source_crop_signature`, `source_crop_revision`,
+`source_detect_review_status_ref`, `source_background_run`,
+`source_detect_run`, `source_refined_run` (if available), `method`,
+`parameter_source`, `parameters`, `skeleton_id`, `kpt_shape`, `pose_schema`, `keypoint_labels`,
 `keypoint_confidence_labels`, `triangle_angle_order`,
 `triangle_angle_raw_order`, `heading_computation_override`,
 scheduler configuration, timing, QA summaries.
@@ -291,9 +293,12 @@ Row lineage (`frame_indices`, `detection_indices`, `frame_counts`) follows:
 | `contours_right` | `(n_points, 2)` | `float32` | Concatenated right eye contours (x, y) |
 | `reason` | `(n_rois,)` | `string` | Per-ROI labels (`clean`, `keypoint_fail`, `no_region`, `overlap`, `too_close`, `too_far`, `incomplete`) |
 
-Attributes: `source_crop_run`, canonical `source_keypoints_run` *(legacy alias:
-`source_keypoint_run` may be present for migration compatibility)*,
-`source_keypoint_group` (defaults to `refined_keypoints_runs` when present), `method`,
+Attributes: `source_crop_run`, `source_crop_storage_mode`,
+`source_crop_signature`, `source_crop_revision`,
+`source_detect_review_status_ref`, canonical `source_keypoints_run`
+*(legacy alias: `source_keypoint_run` may be present for migration
+compatibility)*, `source_keypoint_group` (defaults to
+`refined_keypoints_runs` when present), `method`,
 model info, thresholds, separation limits, `successful_eyes`,
 `successful_roi_pairs`, `reason_counts`, `ellipse_angle_units`,
 `ellipse_fit_backend` (currently `opencv` for refined runs),
@@ -501,9 +506,12 @@ Outputs from `fisheye.refinement.refine_keypoints`.
 | `reason` | `(n_rois,)` | `string` | Pipe-delimited tags (e.g., `flip_corrected|geometry_issue`) |
 | `failure_indices` | `(n_failures,)` | `int32` | ROI indices where source keypoints failed |
 
-Attributes: `source_keypoints_run`, `source_crop_run`, `source_detect_run`,
-`skeleton_id`, `kpt_shape`, `pose_schema`, `heading_computation_override`,
-`derived_metrics_schema`, refinement parameters (thresholds),
+Attributes: `source_keypoints_run`, `source_crop_run`,
+`source_crop_storage_mode`, `source_crop_signature`,
+`source_crop_revision`, `source_detect_review_status_ref`,
+`source_detect_run`, `skeleton_id`, `kpt_shape`, `pose_schema`,
+`heading_computation_override`, `derived_metrics_schema`,
+refinement parameters (thresholds),
 `summary_statistics`, `retune_params`, `keypoint_signature`,
 `keypoint_review_status`, `keypoint_review_signature`, scheduler config,
 environment/provenance metadata.

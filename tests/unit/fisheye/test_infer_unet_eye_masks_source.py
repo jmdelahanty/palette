@@ -52,8 +52,10 @@ def _make_geometry_only_archive(tmp_path: Path) -> Path:
     crop.attrs["crop_storage_mode"] = "geometry_only"
     crop.attrs["roi_size"] = [4, 4]
     crop.attrs["crop_signature"] = "sig-001"
+    crop.attrs["crop_revision"] = 7
     crop.attrs["source_detect_run"] = "detect_001"
     crop.attrs["detection_source_path"] = "detect_runs/detect_001"
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001"
     crop.attrs["video_source_path"] = "/tmp/source-video.mp4"
     crop.create_array(
         "roi_coordinates_full",
@@ -179,6 +181,9 @@ def test_infer_unet_eye_masks_supports_geometry_only_crop_runs_with_temporary_ca
     assert run_group.attrs["source_keypoint_run"] == "kp_valid"
     assert run_group.attrs["source_keypoint_group"] == "keypoints_runs"
     assert run_group.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run_group.attrs["source_crop_signature"] == "sig-001"
+    assert run_group.attrs["source_crop_revision"] == 7
+    assert run_group.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001"
     assert run_group.attrs["source_roi_read_mode"] == "temporary_cache"
     assert run_group.attrs["roi_cache_policy"] == "always"
     assert run_group.attrs["source_roi_cache_used"] is True
@@ -191,6 +196,10 @@ def test_infer_unet_eye_masks_supports_geometry_only_crop_runs_with_temporary_ca
     timing_profile = run_group.attrs["timing_profile"]
     assert timing_profile["enabled"] is True
     assert "roi_read" in timing_profile["stages"]
+    provenance_inputs = run_group.attrs["provenance"]["inputs"]
+    assert provenance_inputs["source_crop_signature"] == "sig-001"
+    assert provenance_inputs["source_crop_revision"] == 7
+    assert provenance_inputs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001"
     assert run_group["mask_probs_roi"].shape == (2, 1, 4, 4)
 
 

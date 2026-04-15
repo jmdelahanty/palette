@@ -14,6 +14,7 @@ import zarr
 
 from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
 from ..refinement.refine_keypoints import _process_refinement_chunk
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
@@ -466,8 +467,15 @@ def _patch_keypoints_run(
     attrs["patched_keypoint_total"] = int(patched_idx.size)
     attrs["patched_keypoint_frame_total"] = int(patched_frames.size)
     attrs["keypoint_patch_last_utc"] = patch_entry["timestamp_utc"]
-    attrs["source_crop_signature"] = crop_group.attrs.get("crop_signature")
-    attrs["source_crop_revision"] = crop_group.attrs.get("crop_revision")
+    attrs.update(
+        build_source_crop_snapshot_attrs(
+            crop_group.attrs,
+            source_crop_storage_mode=(
+                crop_group.attrs.get("crop_storage_mode")
+                or ("materialized" if crop_group.get("roi_images") is not None else "geometry_only")
+            ),
+        )
+    )
     keypoints_group.attrs.put(attrs)
 
     return {

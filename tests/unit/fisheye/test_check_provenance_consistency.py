@@ -194,3 +194,46 @@ def test_collect_provenance_reports_crop_snapshot_drift_from_upstream_refined_so
 
     assert any("snapshot drifted from upstream source" in issue for issue in record.issues)
     assert any("bbox_norm_coords differ for 1 row(s) across 1 frame(s)." in issue for issue in record.issues)
+
+
+def test_collect_provenance_reports_stale_downstream_crop_snapshots() -> None:
+    root = _build_root_with_detect()
+
+    crop_runs = root.create_group("crop_runs")
+    crop = crop_runs.create_group("crop_001")
+    crop.attrs["crop_storage_mode"] = "geometry_only"
+    crop.attrs["crop_signature"] = {"signature_version": 2, "crop_revision": 3}
+    crop.attrs["crop_revision"] = 3
+    crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001"
+    crop.create_array("frame_indices", data=np.asarray([0, 1], dtype=np.int32))
+    crop.create_array("bbox_norm_coords", data=np.zeros((2, 4), dtype=np.float32))
+    crop.create_array("roi_coordinates_full", data=np.asarray([[0, 0], [1, 1]], dtype=np.int32))
+    crop_runs.attrs["latest"] = "crop_001"
+
+    keypoints_runs = root.create_group("keypoints_runs")
+    keypoints = keypoints_runs.create_group("kp_001")
+    keypoints.attrs["source_crop_run"] = "crop_001"
+    keypoints.attrs["source_crop_storage_mode"] = "geometry_only"
+    keypoints.attrs["source_crop_signature"] = "stale-sig"
+    keypoints.attrs["source_crop_revision"] = 2
+    keypoints.attrs["source_detect_review_status_ref"] = "refined_detect_runs/refined_detect_000"
+    keypoints.create_array("heading", data=np.asarray([0.0, 1.0], dtype=np.float64))
+    keypoints_runs.attrs["latest"] = "kp_001"
+
+    eye_masks_runs = root.create_group("eye_masks_runs")
+    eye_masks = eye_masks_runs.create_group("eye_001")
+    eye_masks.attrs["source_crop_run"] = "crop_001"
+    eye_masks.attrs["source_crop_storage_mode"] = "geometry_only"
+    eye_masks.attrs["source_crop_signature"] = "{'signature_version': 2, 'crop_revision': 3}"
+    eye_masks.attrs["source_crop_revision"] = 3
+    eye_masks_runs.attrs["latest"] = "eye_001"
+
+    record = mod.collect_provenance(root)  # type: ignore[arg-type]
+
+    assert any("Keypoint run 'kp_001' crop snapshot drifted" in issue for issue in record.issues)
+    assert any("source_crop_signature='stale-sig'" in issue for issue in record.issues)
+    assert any("source_crop_revision=2 expected 3" in issue for issue in record.issues)
+    assert any("source_detect_review_status_ref='refined_detect_runs/refined_detect_000'" in issue for issue in record.issues)
+    assert any("Eye mask run 'eye_001' crop snapshot drifted" in issue for issue in record.issues)
+    assert any("missing source_detect_review_status_ref" in issue for issue in record.issues)
+    assert len(record.downstream_crop_snapshot_issues) == 2
