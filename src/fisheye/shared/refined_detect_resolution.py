@@ -14,6 +14,9 @@ from .refined_detect_review import DEFAULT_DETECT_GROUP_PREFERENCE, resolve_refi
 from .type_conversions import normalize_attr
 
 
+REVIEW_STATUS_DETECT_GROUP_PREFERENCE = ("refined", "manual", "interpolated", "filtered", "raw")
+
+
 @dataclass(frozen=True)
 class RefinedDetectionReadResolution:
     detection_path: Optional[str]
@@ -22,6 +25,12 @@ class RefinedDetectionReadResolution:
     refined_sparse_group: Optional[str]
     source_detect_run: Optional[str]
     curated_root: bool
+
+
+@dataclass(frozen=True)
+class RefinedDetectReviewTargetResolution:
+    resolved_group: Optional[str]
+    preference_chain: Sequence[str]
 
 
 def _sorted_group_names(group: Optional[zarr.Group]) -> List[str]:
@@ -161,8 +170,55 @@ def resolve_detection_read_source(
     raise ValueError("No detection source available.")
 
 
+def resolve_detect_review_target(
+    root: zarr.Group,
+    *,
+    refined_run_name: str,
+    refined_run: zarr.Group,
+    override_group: Optional[str] = None,
+) -> RefinedDetectReviewTargetResolution:
+    preference_chain = REVIEW_STATUS_DETECT_GROUP_PREFERENCE
+    requested = normalize_attr(override_group)
+    requested = requested.lower() if requested else None
+
+    if requested:
+        if requested == "refined":
+            resolved_group = "refined" if has_curated_refined_detect_surface(refined_run) else None
+            return RefinedDetectReviewTargetResolution(
+                resolved_group=resolved_group,
+                preference_chain=preference_chain,
+            )
+        resolution = resolve_refined_detect_group(
+            refined_run,
+            preference=DEFAULT_DETECT_GROUP_PREFERENCE,
+            override_group=requested,
+        )
+        return RefinedDetectReviewTargetResolution(
+            resolved_group=resolution.label or resolution.group,
+            preference_chain=preference_chain,
+        )
+
+    resolution = resolve_detection_read_source(
+        root,
+        prefer_curated=True,
+        refined_run=refined_run_name,
+        allow_sparse_fallback=True,
+    )
+    if resolution.curated_root:
+        resolved_group = "refined"
+    else:
+        resolved_group = resolution.detection_kind or resolution.refined_sparse_group
+    return RefinedDetectReviewTargetResolution(
+        resolved_group=resolved_group,
+        preference_chain=preference_chain,
+    )
+
+
 __all__ = [
+    "REVIEW_STATUS_DETECT_GROUP_PREFERENCE",
+    "RefinedDetectReviewTargetResolution",
     "RefinedDetectionReadResolution",
+    "resolve_detect_review_target",
     "resolve_active_curated_refined_run_name",
     "resolve_detection_read_source",
 ]

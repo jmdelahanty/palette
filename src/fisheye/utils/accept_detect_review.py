@@ -10,10 +10,7 @@ from typing import Optional
 
 import zarr
 
-from fisheye.shared.refined_detect_review import (
-    DEFAULT_DETECT_GROUP_PREFERENCE,
-    resolve_refined_detect_group,
-)
+from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
 
 
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
@@ -56,6 +53,22 @@ def _emit(result: dict[str, object], *, as_json: bool) -> None:
     print(f"dry_run: {result['dry_run']}")
 
 
+def _resolve_review_target(
+    root: zarr.Group,
+    refined_run_name: str,
+    refined_run: zarr.Group,
+    *,
+    override_group: Optional[str],
+) -> tuple[Optional[str], list[str]]:
+    resolution = resolve_detect_review_target(
+        root,
+        refined_run_name=refined_run_name,
+        refined_run=refined_run,
+        override_group=override_group,
+    )
+    return resolution.resolved_group, list(resolution.preference_chain)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -67,7 +80,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--refined-run", help="Refined run name (default: latest).")
     parser.add_argument(
         "--target-group",
-        help="Explicit refined group to approve (manual/interpolated/filtered/raw or custom).",
+        help="Explicit detect source to approve (refined/manual/interpolated/filtered/raw or custom sparse group).",
     )
     parser.add_argument(
         "--state",
@@ -116,12 +129,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         refined_run_name = _select_refined_run(refined_parent, args.refined_run)
         refined_run = refined_parent[refined_run_name]
 
-        resolution = resolve_refined_detect_group(
+        resolved_group, preference_chain = _resolve_review_target(
+            root,
+            refined_run_name,
             refined_run,
-            preference=DEFAULT_DETECT_GROUP_PREFERENCE,
             override_group=args.target_group,
         )
-        resolved_group = resolution.label or resolution.group
 
         if args.target_group and resolved_group is None:
             raise RuntimeError(f"Target group '{args.target_group}' could not be resolved.")
@@ -146,7 +159,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "timestamp": timestamp_utc,
             "resolved_group": resolved_group,
             "target_group": args.target_group or None,
-            "preference_chain": list(DEFAULT_DETECT_GROUP_PREFERENCE),
+            "preference_chain": preference_chain,
         }
         if args.reviewer:
             payload["reviewer"] = args.reviewer

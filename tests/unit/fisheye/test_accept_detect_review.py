@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import zarr
 
 from fisheye.utils import accept_detect_review as mod
@@ -15,6 +16,33 @@ def _make_zarr(path: Path, *, with_group: str = "interpolated") -> Path:
     run = parent.create_group("refined_1")
     if with_group:
         run.create_group(with_group)
+    return path
+
+
+def _make_curated_zarr(path: Path) -> Path:
+    root = zarr.open_group(store=path, mode="w")
+    parent = root.create_group("refined_detect_runs")
+    parent.attrs["latest"] = "refined_1"
+    run = parent.create_group("refined_1")
+    run.attrs["source_detect_run"] = "detect_1"
+    run.create_array("refined_row_ids", data=np.asarray([0], dtype=np.int64))
+    run.create_array("frame_indices", data=np.asarray([0], dtype=np.int32))
+    run.create_array("entity_ids", data=np.asarray([0], dtype=np.int32))
+    run.create_array(
+        "bbox_img_xyxy",
+        data=np.asarray([[1.0, 1.0, 4.0, 4.0]], dtype=np.float64),
+    )
+    run.create_array(
+        "bbox_norm_coords",
+        data=np.asarray([[0.5, 0.5, 0.2, 0.2]], dtype=np.float64),
+    )
+    run.create_array("status_codes", data=np.asarray([0], dtype=np.int8))
+    run.create_array("source_kind_codes", data=np.asarray([1], dtype=np.int8))
+    run.create_array("review_state_codes", data=np.asarray([1], dtype=np.int8))
+    run.create_array("keypoints_state_codes", data=np.asarray([0], dtype=np.int8))
+    run.create_array("subject_mask_state_codes", data=np.asarray([0], dtype=np.int8))
+    run.create_array("eye_mask_state_codes", data=np.asarray([0], dtype=np.int8))
+    run.create_array("swim_bladder_state_codes", data=np.asarray([0], dtype=np.int8))
     return path
 
 
@@ -101,3 +129,23 @@ def test_accept_detect_review_json_output_contains_expected_fields(tmp_path: Pat
     assert payload["resolved_group"] == "interpolated"
     assert payload["state"] == "approved"
     assert payload["intended_use"] == "full_recording"
+
+
+def test_accept_detect_review_prefers_curated_root_when_present(tmp_path: Path) -> None:
+    zarr_path = _make_curated_zarr(tmp_path / "curated.zarr")
+    rc = mod.main(
+        [
+            str(zarr_path),
+            "--state",
+            "approved",
+            "--intended-use",
+            "training",
+            "--reviewer",
+            "operator3",
+        ]
+    )
+    assert rc == 0
+
+    root = zarr.open_group(store=zarr_path, mode="r")
+    status = dict(root["refined_detect_runs"]["refined_1"].attrs["detect_review_status"])
+    assert status["resolved_group"] == "refined"

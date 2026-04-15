@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from fisheye.shared.refined_detect_resolution import (
+    REVIEW_STATUS_DETECT_GROUP_PREFERENCE,
+    resolve_detect_review_target,
     resolve_active_curated_refined_run_name,
     resolve_detection_read_source,
 )
@@ -165,3 +167,75 @@ def test_resolve_detection_read_source_accepts_instances_only_curated_surface() 
     assert resolved.refined_detect_run == "refined_detect_001"
     assert resolved.source_detect_run == "detect_001"
     assert resolved.curated_root is True
+
+
+def test_resolve_detect_review_target_prefers_curated_refined_surface() -> None:
+    root = _FakeGroup()
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    _seed_curated_run(refined)
+
+    resolved = resolve_detect_review_target(  # type: ignore[arg-type]
+        root,
+        refined_run_name="refined_detect_001",
+        refined_run=refined,
+    )
+
+    assert resolved.resolved_group == "refined"
+    assert tuple(resolved.preference_chain) == REVIEW_STATUS_DETECT_GROUP_PREFERENCE
+
+
+def test_resolve_detect_review_target_falls_back_to_sparse_manual_when_curated_absent() -> None:
+    root = _FakeGroup()
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["manual_review_latest"] = "manual_a"
+    refined.create_group("manual_a")
+
+    resolved = resolve_detect_review_target(  # type: ignore[arg-type]
+        root,
+        refined_run_name="refined_detect_001",
+        refined_run=refined,
+    )
+
+    assert resolved.resolved_group == "manual"
+    assert tuple(resolved.preference_chain) == REVIEW_STATUS_DETECT_GROUP_PREFERENCE
+
+
+def test_resolve_detect_review_target_normalizes_override_group_case() -> None:
+    root = _FakeGroup()
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["manual_review_latest"] = "manual_a"
+    refined.create_group("manual_a")
+    refined.create_group("interpolated")
+    _seed_curated_run(refined)
+
+    resolved_refined = resolve_detect_review_target(  # type: ignore[arg-type]
+        root,
+        refined_run_name="refined_detect_001",
+        refined_run=refined,
+        override_group="REFINED",
+    )
+    resolved_interpolated = resolve_detect_review_target(  # type: ignore[arg-type]
+        root,
+        refined_run_name="refined_detect_001",
+        refined_run=refined,
+        override_group="INTERPOLATED",
+    )
+    resolved_raw = resolve_detect_review_target(  # type: ignore[arg-type]
+        root,
+        refined_run_name="refined_detect_001",
+        refined_run=refined,
+        override_group="RAW",
+    )
+
+    assert resolved_refined.resolved_group == "refined"
+    assert resolved_interpolated.resolved_group == "interpolated"
+    assert resolved_raw.resolved_group == "raw"

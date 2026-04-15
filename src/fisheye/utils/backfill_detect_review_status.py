@@ -9,10 +9,7 @@ from typing import Iterable, Optional
 
 import zarr
 
-from fisheye.shared.refined_detect_review import (
-    DEFAULT_DETECT_GROUP_PREFERENCE,
-    resolve_refined_detect_group,
-)
+from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
 
 
 def _iter_zarr(roots: Iterable[Path], recursive: bool) -> Iterable[Path]:
@@ -61,6 +58,16 @@ def _should_update(status: object, fill_missing: bool) -> bool:
         return False
     required = ("state", "method", "intended_use", "resolved_group")
     return any(not status.get(key) for key in required)
+
+
+def _resolve_review_target(root: zarr.Group, refined_run_name: str, refined_run: zarr.Group) -> tuple[Optional[str], list[str]]:
+    resolution = resolve_detect_review_target(
+        root,
+        refined_run_name=refined_run_name,
+        refined_run=refined_run,
+        override_group=None,
+    )
+    return resolution.resolved_group, list(resolution.preference_chain)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -134,15 +141,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             skipped += 1
             continue
 
-        resolution = resolve_refined_detect_group(refined_run, DEFAULT_DETECT_GROUP_PREFERENCE)
+        resolved_group, preference_chain = _resolve_review_target(root, refined_run_name, refined_run)
         payload: dict[str, object] = {}
         if isinstance(existing, dict) and not args.force:
             payload.update(existing)
         payload.setdefault("state", args.state)
         payload.setdefault("method", args.method)
         payload.setdefault("intended_use", args.intended_use)
-        payload.setdefault("resolved_group", resolution.label or resolution.group)
-        payload.setdefault("preference_chain", list(DEFAULT_DETECT_GROUP_PREFERENCE))
+        payload.setdefault("resolved_group", resolved_group)
+        payload.setdefault("preference_chain", preference_chain)
         payload.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
         if args.reviewer:
             payload.setdefault("reviewer", args.reviewer)
