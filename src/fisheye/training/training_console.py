@@ -142,6 +142,9 @@ def print_dataset_details(
                     table.add_row("Jumps Removed", str(quality.get("jumps_removed")))
                 if "gaps_filled" in quality:
                     table.add_row("Gaps Filled", str(quality.get("gaps_filled")))
+                manual_present = quality.get("manual_edited_detections")
+                if manual_present is not None:
+                    table.add_row("Manual-Edited Detections", f"{int(manual_present or 0):,}")
         elif task_norm == "pose":
             tracking = meta.get("tracking_info") if isinstance(meta.get("tracking_info"), Mapping) else {}
             if "warning" in tracking:

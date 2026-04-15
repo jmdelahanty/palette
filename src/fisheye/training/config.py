@@ -13,6 +13,7 @@ class SamplingStrategy(str, Enum):
 class SourceType(str, Enum):
     """Detection source types"""
     DETECT = "detect"
+    REFINED = "refined"
     FILTERED = "filtered"
     INTERPOLATED = "interpolated"
     MANUAL = "manual"
@@ -33,7 +34,7 @@ class DatasetSplit(BaseModel):
 class DatasetConfig(BaseModel):
     """Configuration for a single dataset"""
     zarr_path: Path
-    source_type: SourceType = SourceType.FILTERED
+    source_type: SourceType = SourceType.REFINED
     input_format: Literal["gray", "rgb"] = "gray"
     keypoint_run: Optional[str] = None
     split: Optional[DatasetSplit] = None
