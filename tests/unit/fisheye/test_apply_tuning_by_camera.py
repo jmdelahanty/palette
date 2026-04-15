@@ -229,6 +229,45 @@ def test_filter_subject_mask_tuning_payload_selects_requested_components() -> No
     assert missing == ["eye_left"]
 
 
+def test_filter_subject_mask_tuning_payload_scrubs_source_specific_swim_context() -> None:
+    payload, missing = mod._filter_subject_mask_tuning_payload(  # noqa: SLF001
+        {
+            "version": "2.0",
+            "components": {
+                "swim_bladder": {
+                    "method": "polar_boundary_center_seed",
+                    "tuned_parameters": {"ray_count": 96},
+                    "context": {
+                        "storage_component_name": "swim_bladder",
+                        "crop_run": "crop_001",
+                        "keypoint_run": "refined_keypoints_001",
+                        "keypoint_source": "refined_keypoints_runs",
+                        "frame_index": 42,
+                        "detection_index": 7,
+                        "roi_index": 12,
+                        "patch_center_source": "keypoint",
+                    },
+                }
+            },
+        },
+        ["swim_bladder"],
+    )
+
+    assert missing == []
+    assert payload == {
+        "version": "2.0",
+        "components": {
+            "swim_bladder": {
+                "method": "polar_boundary_center_seed",
+                "tuned_parameters": {"ray_count": 96},
+                "context": {"storage_component_name": "swim_bladder"},
+                "propagated_by_camera": True,
+                "propagated_component": "swim_bladder",
+            }
+        },
+    }
+
+
 def test_apply_subject_mask_component_updates_preserves_unrelated_components() -> None:
     attrs = {
         "subject_mask_tuning": {

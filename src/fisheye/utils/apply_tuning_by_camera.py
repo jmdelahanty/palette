@@ -33,6 +33,19 @@ SUPPORTED_SUBJECT_MASK_COMPONENTS = {
     "eye_right",
     "swim_bladder",
 }
+SOURCE_SPECIFIC_SUBJECT_TUNING_CONTEXT_KEYS = {
+    "crop_run",
+    "keypoint_run",
+    "keypoint_source",
+    "subject_preview_run",
+    "frame_index",
+    "detection_index",
+    "roi_index",
+    "roi_index_one_based",
+    "total_rois",
+    "roi_success",
+    "patch_center_source",
+}
 
 
 @dataclass
@@ -218,11 +231,43 @@ def _filter_subject_mask_tuning_payload(
         if component_name not in source_components:
             missing.append(component_name)
             continue
-        filtered_components[component_name] = deepcopy(source_components[component_name])
+        filtered_components[component_name] = _scrub_subject_tuning_component_for_camera_propagation(
+            component_name,
+            deepcopy(source_components[component_name]),
+        )
     return {
         "version": str(payload.get("version") or SUBJECT_TUNING_VERSION),
         "components": filtered_components,
     }, missing
+
+
+def _scrub_subject_tuning_component_for_camera_propagation(
+    component_name: str,
+    component_value: object,
+) -> object:
+    if not isinstance(component_value, Mapping):
+        return component_value
+
+    normalized = {str(key): deepcopy(value) for key, value in component_value.items()}
+    context_raw = normalized.get("context")
+    if not isinstance(context_raw, Mapping):
+        return normalized
+
+    context = {str(key): deepcopy(value) for key, value in context_raw.items()}
+    removed_any = False
+    for key in SOURCE_SPECIFIC_SUBJECT_TUNING_CONTEXT_KEYS:
+        if key in context:
+            context.pop(key, None)
+            removed_any = True
+
+    if removed_any:
+        if context:
+            normalized["context"] = context
+        else:
+            normalized.pop("context", None)
+        normalized["propagated_by_camera"] = True
+        normalized["propagated_component"] = str(component_name)
+    return normalized
 
 
 def _format_tuning_targets(
