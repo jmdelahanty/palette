@@ -9,6 +9,15 @@ from .type_conversions import as_int, normalize_attr
 CANONICAL_SOURCE_KEYPOINTS_RUN_ATTR = "source_keypoints_run"
 LEGACY_SOURCE_KEYPOINT_RUN_ATTR = "source_keypoint_run"
 CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR = "source_detect_review_status_ref"
+SOURCE_CROP_STORAGE_MODE_ATTR = "source_crop_storage_mode"
+SOURCE_CROP_SIGNATURE_ATTR = "source_crop_signature"
+SOURCE_CROP_REVISION_ATTR = "source_crop_revision"
+CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS = (
+    SOURCE_CROP_STORAGE_MODE_ATTR,
+    SOURCE_CROP_SIGNATURE_ATTR,
+    SOURCE_CROP_REVISION_ATTR,
+    CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR,
+)
 
 
 def resolve_source_keypoints_run(attrs: Optional[Mapping[str, Any]]) -> Any:
@@ -61,5 +70,29 @@ def build_source_crop_snapshot_attrs(
         review_status_ref = normalize_attr(attrs.get("detect_review_status_ref"))
         if review_status_ref is not None:
             payload[CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR] = review_status_ref
+
+    return payload
+
+
+def extract_source_crop_snapshot_attrs(attrs: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Return normalized canonical crop snapshot attrs from an attr mapping."""
+    attr_map = attrs or {}
+    payload: Dict[str, Any] = {}
+
+    storage_mode = normalize_attr(attr_map.get(SOURCE_CROP_STORAGE_MODE_ATTR))
+    if storage_mode is not None:
+        payload[SOURCE_CROP_STORAGE_MODE_ATTR] = storage_mode
+
+    crop_signature = normalize_attr(attr_map.get(SOURCE_CROP_SIGNATURE_ATTR))
+    if crop_signature is not None:
+        payload[SOURCE_CROP_SIGNATURE_ATTR] = crop_signature
+
+    crop_revision = as_int(attr_map.get(SOURCE_CROP_REVISION_ATTR))
+    if crop_revision is not None and crop_revision >= 0:
+        payload[SOURCE_CROP_REVISION_ATTR] = int(crop_revision)
+
+    review_status_ref = normalize_attr(attr_map.get(CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR))
+    if review_status_ref is not None:
+        payload[CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR] = review_status_ref
 
     return payload

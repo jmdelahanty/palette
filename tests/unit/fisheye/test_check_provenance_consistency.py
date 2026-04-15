@@ -228,6 +228,15 @@ def test_collect_provenance_reports_stale_downstream_crop_snapshots() -> None:
     eye_masks.attrs["source_crop_revision"] = 3
     eye_masks_runs.attrs["latest"] = "eye_001"
 
+    subject_mask_runs = root.create_group("subject_mask_runs")
+    subject_masks = subject_mask_runs.create_group("subject_001")
+    subject_masks.attrs["source_crop_run"] = "crop_001"
+    subject_masks.attrs["source_crop_storage_mode"] = "geometry_only"
+    subject_masks.attrs["source_crop_signature"] = "stale-subject-sig"
+    subject_masks.attrs["source_crop_revision"] = 3
+    subject_masks.create_array("masks_roi", shape=(2, 1, 4, 4))
+    subject_mask_runs.attrs["latest"] = "subject_001"
+
     record = mod.collect_provenance(root)  # type: ignore[arg-type]
 
     assert any("Keypoint run 'kp_001' crop snapshot drifted" in issue for issue in record.issues)
@@ -236,4 +245,9 @@ def test_collect_provenance_reports_stale_downstream_crop_snapshots() -> None:
     assert any("source_detect_review_status_ref='refined_detect_runs/refined_detect_000'" in issue for issue in record.issues)
     assert any("Eye mask run 'eye_001' crop snapshot drifted" in issue for issue in record.issues)
     assert any("missing source_detect_review_status_ref" in issue for issue in record.issues)
+    assert any("Subject mask run 'subject_001' crop snapshot drifted" in issue for issue in record.issues)
+    assert any("source_crop_signature='stale-subject-sig'" in issue for issue in record.issues)
+    assert record.subject_mask_run == "subject_001"
+    assert record.subject_mask_rows == 2
     assert len(record.downstream_crop_snapshot_issues) == 2
+    assert len(record.subject_mask_crop_snapshot_issues) == 1

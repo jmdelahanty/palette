@@ -29,15 +29,18 @@ class ProvenanceRecord:
     crop_source_path: Optional[str]
     crop_source_rows: Optional[int]
     keypoint_run: Optional[str]
+    subject_mask_run: Optional[str]
     arena_assignment_run: Optional[str]
     detect_rows: Optional[int]
     refined_rows: Optional[int]
     crop_rois: Optional[int]
     keypoint_rows: Optional[int]
+    subject_mask_rows: Optional[int]
     arena_assignment_rows: Optional[int]
     issues: list[str]
     crop_source_drift_issues: list[str] = field(default_factory=list)
     downstream_crop_snapshot_issues: list[str] = field(default_factory=list)
+    subject_mask_crop_snapshot_issues: list[str] = field(default_factory=list)
 
 
 def _safe_len(arr: Optional[zarr.Array]) -> Optional[int]:
@@ -471,6 +474,21 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     )
     issues.extend(downstream_crop_snapshot_issues)
 
+    subject_mask_parent = root.get("subject_mask_runs")
+    subject_mask_latest = _latest(subject_mask_parent)
+    subject_mask_group = _first_matching_run(subject_mask_parent, subject_mask_latest)
+    subject_mask_rows = _safe_len(_safe_get(subject_mask_group, "masks_roi")) if subject_mask_group else None
+    if subject_mask_rows is None and subject_mask_group is not None:
+        subject_mask_rows = _safe_len(_safe_get(subject_mask_group, "mask_probs_roi"))
+    subject_mask_crop_snapshot_issues = _collect_downstream_crop_snapshot_issues(
+        stage_label="Subject mask",
+        run_name=subject_mask_latest,
+        run_group=subject_mask_group,
+        latest_crop=crop_latest,
+        crop_group=crop_group,
+    )
+    issues.extend(subject_mask_crop_snapshot_issues)
+
     arena_parent = root.get("arena_assignment_runs")
     arena_latest = _latest(arena_parent)
     arena_group = _first_matching_run(arena_parent, arena_latest)
@@ -524,15 +542,18 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
         crop_source_path=crop_source_path,
         crop_source_rows=crop_source_rows,
         keypoint_run=keypoint_latest,
+        subject_mask_run=subject_mask_latest,
         arena_assignment_run=arena_latest,
         detect_rows=detect_rows,
         refined_rows=refined_rows,
         crop_rois=crop_rois,
         keypoint_rows=keypoint_rows,
+        subject_mask_rows=subject_mask_rows,
         arena_assignment_rows=arena_rows,
         issues=issues,
         crop_source_drift_issues=crop_source_drift_issues,
         downstream_crop_snapshot_issues=downstream_crop_snapshot_issues,
+        subject_mask_crop_snapshot_issues=subject_mask_crop_snapshot_issues,
     )
 
 
@@ -556,6 +577,7 @@ def show_provenance(zarr_path: Path) -> None:
     table.add_row("Refined Detect", record.refined_run or "—", str(record.refined_rows or "—"))
     table.add_row("Crop", record.crop_run or "—", str(record.crop_rois or "—"))
     table.add_row("Keypoints", record.keypoint_run or "—", str(record.keypoint_rows or "—"))
+    table.add_row("Subject Masks", record.subject_mask_run or "—", str(record.subject_mask_rows or "—"))
     table.add_row("Arena Assignment", record.arena_assignment_run or "—", str(record.arena_assignment_rows or "—"))
 
     console.print(table)
@@ -563,7 +585,11 @@ def show_provenance(zarr_path: Path) -> None:
     det_count = record.crop_source_rows if record.crop_source_rows is not None else "—"
     crop_count = record.crop_rois if record.crop_rois is not None else "—"
     kp_count = record.keypoint_rows if record.keypoint_rows is not None else "—"
-    console.print(f"[dim]Lineage counts:[/dim] source={source_label} det={det_count} crop={crop_count} kpt={kp_count}")
+    subject_mask_count = record.subject_mask_rows if record.subject_mask_rows is not None else "—"
+    console.print(
+        f"[dim]Lineage counts:[/dim] source={source_label} det={det_count} "
+        f"crop={crop_count} kpt={kp_count} subject={subject_mask_count}"
+    )
 
     if record.issues:
         console.print("[bold red]Inconsistencies detected:[/bold red]")

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,15 +14,33 @@ from typing import Any, Optional
 import numpy as np
 import zarr
 
-from fisheye.shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from fisheye.shared.provenance_attrs import (
+    CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR,
+    SOURCE_CROP_REVISION_ATTR,
+    SOURCE_CROP_SIGNATURE_ATTR,
+    SOURCE_CROP_STORAGE_MODE_ATTR,
+    build_source_keypoints_attrs,
+    extract_source_crop_snapshot_attrs,
+    resolve_source_keypoints_run,
+)
+from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
+from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 TARGET_LABEL_SCHEMA = "subject_v1_lr"
 TARGET_LABELS: tuple[str, ...] = ("subject_body", "eye_left", "eye_right", "swim_bladder")
 TARGET_AVAILABLE_CHANNELS = np.asarray([True, True, True, False], dtype=bool)
+_REQUIRED_CROP_SNAPSHOT_FIELDS = (
+    SOURCE_CROP_STORAGE_MODE_ATTR,
+    SOURCE_CROP_SIGNATURE_ATTR,
+    SOURCE_CROP_REVISION_ATTR,
+)
+_OPTIONAL_CROP_SNAPSHOT_FIELDS = (
+    CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +58,7 @@ class ResolvedSubjectRun:
     detection_indices: Optional[zarr.Array]
     source_keypoints_run: Optional[str]
     source_keypoint_group: Optional[str]
+    source_crop_snapshot: dict[str, Any]
     probabilities_encoding: str
     probability_source_path: str
 
@@ -138,6 +158,7 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
         detection_indices=group.get("detection_indices"),
         source_keypoints_run=normalize_attr(resolve_source_keypoints_run(group.attrs)),
         source_keypoint_group=normalize_attr(group.attrs.get("source_keypoint_group")),
+        source_crop_snapshot=extract_source_crop_snapshot_attrs(group.attrs),
         probabilities_encoding=str(probabilities_encoding),
         probability_source_path=probability_source_path,
     )
@@ -170,6 +191,57 @@ def _semantic_probabilities(
         return np.asarray(source.masks_roi[row_slice, component_idx : component_idx + 1], dtype=np.float32)
     batch = np.asarray(source.mask_probs_roi[row_slice, component_idx : component_idx + 1])
     return _decode_probabilities(batch, encoding=source.probabilities_encoding)
+
+
+def _resolve_shared_crop_snapshot(
+    body_source: ResolvedSubjectRun,
+    eye_source: ResolvedSubjectRun,
+) -> dict[str, Any]:
+    missing_fields = [
+        field
+        for field in _REQUIRED_CROP_SNAPSHOT_FIELDS
+        if field not in body_source.source_crop_snapshot or field not in eye_source.source_crop_snapshot
+    ]
+    if missing_fields:
+        raise ValueError(
+            "Missing required crop snapshot fields for merge: " + ", ".join(sorted(missing_fields))
+        )
+
+    mismatches: list[str] = []
+    shared: dict[str, Any] = {}
+    for field in (*_REQUIRED_CROP_SNAPSHOT_FIELDS, *_OPTIONAL_CROP_SNAPSHOT_FIELDS):
+        body_value = body_source.source_crop_snapshot.get(field)
+        eye_value = eye_source.source_crop_snapshot.get(field)
+        if body_value != eye_value:
+            mismatches.append(f"{field}: {body_value!r} != {eye_value!r}")
+            continue
+        if body_value is not None:
+            shared[field] = body_value
+
+    if mismatches:
+        raise ValueError("Alignment mismatch for crop snapshot fields: " + "; ".join(mismatches))
+
+    return shared
+
+
+def _build_component_provenance_entry(
+    *,
+    source_stage: Optional[str],
+    source_run: Optional[str],
+    source_channel: str,
+    source_probability_path: Optional[str],
+    source_crop_run: str,
+    source_crop_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source_stage": source_stage,
+        "source_run": source_run,
+        "source_channel": source_channel,
+        "source_probability_path": source_probability_path,
+        "source_crop_run": source_crop_run,
+    }
+    payload.update(source_crop_snapshot)
+    return payload
 
 
 def _compute_metrics(masks_roi: np.ndarray, probs_roi: np.ndarray) -> dict[str, np.ndarray]:
@@ -234,6 +306,7 @@ def merge_subject_mask_runs(
         raise ValueError(
             f"Alignment mismatch for source_crop_run: {body_source.crop_run!r} != {eye_source.crop_run!r}."
         )
+    shared_crop_snapshot = _resolve_shared_crop_snapshot(body_source, eye_source)
     if int(body_source.masks_roi.shape[0]) != int(eye_source.masks_roi.shape[0]):
         raise ValueError(
             f"Row-count mismatch: {body_source.masks_roi.shape[0]} != {eye_source.masks_roi.shape[0]}."
@@ -251,32 +324,41 @@ def merge_subject_mask_runs(
     height = int(body_source.masks_roi.shape[2])
     width = int(body_source.masks_roi.shape[3])
     created_at = _utc_now()
+    shared_crop_inputs = {"source_crop_run": body_source.crop_run, **shared_crop_snapshot}
     component_provenance = {
         "components": {
-            "subject_body": {
-                "source_stage": "subject_mask_runs",
-                "source_run": body_source.run_name,
-                "source_channel": "subject_body",
-                "source_probability_path": body_source.probability_source_path,
-            },
-            "eye_left": {
-                "source_stage": "subject_mask_runs",
-                "source_run": eye_source.run_name,
-                "source_channel": "eye_left",
-                "source_probability_path": eye_source.probability_source_path,
-            },
-            "eye_right": {
-                "source_stage": "subject_mask_runs",
-                "source_run": eye_source.run_name,
-                "source_channel": "eye_right",
-                "source_probability_path": eye_source.probability_source_path,
-            },
-            "swim_bladder": {
-                "source_stage": None,
-                "source_run": None,
-                "source_channel": "swim_bladder",
-                "source_probability_path": None,
-            },
+            "subject_body": _build_component_provenance_entry(
+                source_stage="subject_mask_runs",
+                source_run=body_source.run_name,
+                source_channel="subject_body",
+                source_probability_path=body_source.probability_source_path,
+                source_crop_run=body_source.crop_run,
+                source_crop_snapshot=shared_crop_snapshot,
+            ),
+            "eye_left": _build_component_provenance_entry(
+                source_stage="subject_mask_runs",
+                source_run=eye_source.run_name,
+                source_channel="eye_left",
+                source_probability_path=eye_source.probability_source_path,
+                source_crop_run=body_source.crop_run,
+                source_crop_snapshot=shared_crop_snapshot,
+            ),
+            "eye_right": _build_component_provenance_entry(
+                source_stage="subject_mask_runs",
+                source_run=eye_source.run_name,
+                source_channel="eye_right",
+                source_probability_path=eye_source.probability_source_path,
+                source_crop_run=body_source.crop_run,
+                source_crop_snapshot=shared_crop_snapshot,
+            ),
+            "swim_bladder": _build_component_provenance_entry(
+                source_stage=None,
+                source_run=None,
+                source_channel="swim_bladder",
+                source_probability_path=None,
+                source_crop_run=body_source.crop_run,
+                source_crop_snapshot=shared_crop_snapshot,
+            ),
         }
     }
     summary = {
@@ -287,6 +369,8 @@ def merge_subject_mask_runs(
         "eye_run": eye_source.run_name,
         "label_schema_id": TARGET_LABEL_SCHEMA,
         "available_channels": [bool(v) for v in TARGET_AVAILABLE_CHANNELS.tolist()],
+        "source_crop_run": body_source.crop_run,
+        "source_crop_snapshot": dict(shared_crop_snapshot),
         "component_provenance": component_provenance,
     }
     if not apply:
@@ -304,6 +388,7 @@ def merge_subject_mask_runs(
     run_group.attrs.update(
         {
             "source_crop_run": body_source.crop_run,
+            **shared_crop_snapshot,
             "label_schema_id": TARGET_LABEL_SCHEMA,
             "mask_labels": list(TARGET_LABELS),
             "output_semantics": "multilabel",
@@ -325,6 +410,8 @@ def merge_subject_mask_runs(
         source_run=body_source.run_name,
         source_method=str(body_source.run_group.attrs.get("method") or "unknown"),
         source_channels=["subject_body"],
+        source_crop_run=body_source.crop_run,
+        source_crop_snapshot=shared_crop_snapshot,
         source_label_schema_id=normalize_attr(body_source.run_group.attrs.get("label_schema_id")),
         source_created_at_utc=normalize_attr(body_source.run_group.attrs.get("created_at_utc")),
     )
@@ -335,6 +422,8 @@ def merge_subject_mask_runs(
         source_run=eye_source.run_name,
         source_method=str(eye_source.run_group.attrs.get("method") or "unknown"),
         source_channels=["eye_left"],
+        source_crop_run=body_source.crop_run,
+        source_crop_snapshot=shared_crop_snapshot,
         source_label_schema_id=normalize_attr(eye_source.run_group.attrs.get("label_schema_id")),
         source_created_at_utc=normalize_attr(eye_source.run_group.attrs.get("created_at_utc")),
     )
@@ -345,6 +434,8 @@ def merge_subject_mask_runs(
         source_run=eye_source.run_name,
         source_method=str(eye_source.run_group.attrs.get("method") or "unknown"),
         source_channels=["eye_right"],
+        source_crop_run=body_source.crop_run,
+        source_crop_snapshot=shared_crop_snapshot,
         source_label_schema_id=normalize_attr(eye_source.run_group.attrs.get("label_schema_id")),
         source_created_at_utc=normalize_attr(eye_source.run_group.attrs.get("created_at_utc")),
     )
@@ -353,6 +444,15 @@ def merge_subject_mask_runs(
         run_group.attrs.update(build_source_keypoints_attrs(body_source.source_keypoints_run, include_legacy_alias=True))
     if body_source.source_keypoint_group and body_source.source_keypoint_group == eye_source.source_keypoint_group:
         run_group.attrs["source_keypoint_group"] = body_source.source_keypoint_group
+
+    git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    platform_info = env_info.get("platform", {})
 
     for name, source_array in (
         ("frame_indices", body_source.frame_indices),
@@ -486,6 +586,50 @@ def merge_subject_mask_runs(
         "created_at_utc": created_at,
         "output_run": run_name,
     }
+    provenance_inputs = {
+        **shared_crop_inputs,
+        "source_body_subject_mask_run": body_source.run_name,
+        "source_eye_subject_mask_run": eye_source.run_name,
+    }
+    if body_source.source_keypoints_run and body_source.source_keypoints_run == eye_source.source_keypoints_run:
+        provenance_inputs["source_keypoints_run"] = body_source.source_keypoints_run
+    if body_source.source_keypoint_group and body_source.source_keypoint_group == eye_source.source_keypoint_group:
+        provenance_inputs["source_keypoint_group"] = body_source.source_keypoint_group
+    provenance = build_stage_provenance(
+        stage="subject_masks",
+        command=" ".join(sys.argv) if sys.argv else "unknown",
+        created_at_utc=created_at,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
+            "hostname": platform_info.get("hostname"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "python_version": platform_info.get("python_version"),
+            "machine": platform_info.get("machine"),
+        },
+        parameters={
+            "method": "fisheye.utils.merge_subject_mask_runs",
+            "run_semantics": "merged_subject_components",
+            "body_run": body_source.run_name,
+            "eye_run": eye_source.run_name,
+            "batch_size": int(batch_size),
+            "overwrite": bool(overwrite),
+        },
+        inputs=provenance_inputs,
+        artifacts={
+            "body_probability_source_path": body_source.probability_source_path,
+            "eye_probability_source_path": eye_source.probability_source_path,
+        },
+    )
+    write_stage_provenance(run_group, provenance)
     summary["duration_seconds"] = duration
     return summary
 

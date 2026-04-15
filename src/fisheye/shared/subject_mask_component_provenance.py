@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
+
+from .provenance_attrs import extract_source_crop_snapshot_attrs
 
 
 def _normalize_source_channels(value: object) -> list[str]:
@@ -29,6 +31,8 @@ def write_subject_mask_component_provenance(
     source_label_schema_id: str | None = None,
     projection_mode: str | None = None,
     source_created_at_utc: str | None = None,
+    source_crop_run: str | None = None,
+    source_crop_snapshot: Mapping[str, Any] | None = None,
 ) -> Any:
     """Write canonical component provenance attrs under components/<name>/provenance."""
 
@@ -38,6 +42,10 @@ def write_subject_mask_component_provenance(
     provenance_group.attrs["source_run"] = str(source_run)
     provenance_group.attrs["source_method"] = str(source_method)
     provenance_group.attrs["source_channels"] = _normalize_source_channels(source_channels)
+    if source_crop_run is not None:
+        provenance_group.attrs["source_crop_run"] = str(source_crop_run)
+    for key, value in extract_source_crop_snapshot_attrs(source_crop_snapshot).items():
+        provenance_group.attrs[key] = value
     if source_label_schema_id is not None:
         provenance_group.attrs["source_label_schema_id"] = str(source_label_schema_id)
     if projection_mode is not None:
