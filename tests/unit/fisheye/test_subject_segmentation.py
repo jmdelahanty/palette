@@ -377,6 +377,33 @@ def test_segment_subject_masks_from_root_supports_geometry_only_crop_source(
     np.testing.assert_array_equal(run["frame_indices"][:], np.asarray([0, 1], dtype=np.int32))
 
 
+def test_segment_subject_masks_emits_stage_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _make_root()
+    captured: dict[str, object] = {}
+
+    def _fake_emit(root_arg, zarr_path_arg, **kwargs):  # type: ignore[no-untyped-def]
+        captured["root"] = root_arg
+        captured["zarr_path"] = zarr_path_arg
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(mod, "emit_subject_mask_stage_completion", _fake_emit)
+
+    run_name = mod.segment_subject_masks_from_root(
+        root,
+        zarr_path="/tmp/fake_training.zarr",
+        output_run="subject_masks_status_001",
+    )
+
+    assert run_name == "subject_masks_status_001"
+    assert captured["root"] is root
+    assert captured["zarr_path"] == "/tmp/fake_training.zarr"
+    assert captured["run_name"] == "subject_masks_status_001"
+    assert captured["run_group"] is root["subject_mask_runs"]["subject_masks_status_001"]
+    assert captured["source"] == "runtime_subject_segmentation"
+    assert captured["invalidate_on_ok"] is True
+
+
 def test_segment_subject_masks_uses_open_zarr_root_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
     root = _make_root()
     monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)

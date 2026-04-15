@@ -23,6 +23,7 @@ from ..diagnostics.preview_eye_mask_background_subtraction import (
 )
 from ..shared.crop_image_source import CropImageSource
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -39,6 +40,7 @@ except Exception:  # pragma: no cover - rich is optional at runtime
 SUBJECT_MASK_LABEL_SCHEMA = "subject_v1_union"
 SUBJECT_MASK_LABELS: tuple[str, ...] = ("subject_body", "eyes_union", "swim_bladder")
 SUBJECT_MASK_AVAILABLE_CHANNELS = (True, False, False)
+_SUBJECT_MASKS_STATUS_SOURCE = "runtime_subject_segmentation"
 
 
 @dataclass
@@ -683,6 +685,16 @@ def segment_subject_masks_from_root(
             inputs=provenance_inputs,
         )
         write_stage_provenance(run_group, provenance)
+        if zarr_path is not None:
+            emit_subject_mask_stage_completion(
+                root,
+                zarr_path,
+                run_group=run_group,
+                run_name=run_name,
+                source=_SUBJECT_MASKS_STATUS_SOURCE,
+                console=console,
+                invalidate_on_ok=True,
+            )
 
         _print(
             console,
