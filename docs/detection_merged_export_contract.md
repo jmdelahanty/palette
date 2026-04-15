@@ -1,8 +1,8 @@
 # Detection Merged Export Contract (Proposed)
 <!-- contract-meta
-version: 1
+version: 2
 status: draft
-last_verified: 2026-02-27
+last_verified: 2026-04-15
 -->
 
 Purpose: define an implementation-ready contract for exporting a single merged detection-training Zarr per training set, while preserving provenance and compatibility with current training loaders.
@@ -32,8 +32,15 @@ Compatibility requirements:
 - `raw_video/images_ds` exists.
 - `crop_runs/<run_id>/bbox_norm_coords` exists.
 - `crop_runs.attrs["latest"]` points to `<run_id>`.
-- `crop_runs/<run_id>/detection_source` exists when `includes_interpolated=true`.
+- `crop_runs/<run_id>/detection_source` exists when synthetic/interpolated rows are present or the exporter emits the compatibility field unconditionally.
 - `crop_runs/<run_id>/frame_indices` exists.
+
+Current default expectation:
+
+- merged exports should normally be built from `source_type=refined`
+- `detection_source_type` should normally be `refined`
+- `manual|filtered|interpolated` remain compatibility source types for legacy
+  archives or explicit historical exports
 
 ## Output Layout (Zarr v3)
 
@@ -53,13 +60,14 @@ Compatibility requirements:
     <run_id>/
       bbox_norm_coords         (N, 4) float32      # normalized [cx, cy, w, h]
       frame_indices            (N,) int64
-      detection_source         (N,) int8             # 0 real, 1 interpolated
+      detection_source         (N,) int8             # 0 accepted curated row, 1 compatibility interpolated row
       attrs:
-        detection_source_type  "manual|filtered|detect|interpolated"
-        includes_interpolated  bool
+        detection_source_type  "refined|detect|manual|filtered|interpolated"
+        includes_interpolated  bool                  # compatibility field; normally false for current refined exports
         detection_source_path  "merged://source_index"
         n_real_detections      int
         n_interpolated_detections int
+        n_manual_edited_detections int              # optional, current refined exports should populate when known
 
   splits/
     train_indices              (Nt,) int64
@@ -98,6 +106,7 @@ Required keys:
 - `set_name`: string
 - `set_version`: int
 - `source_type_requested`: string
+- `source_type_resolved`: string
 - `input_format`: `"gray"` or `"rgb"` or `"both"`
 - `include_rgb`: bool
 - `created_at_utc`: ISO-8601 UTC
@@ -122,8 +131,10 @@ Required keys:
 - `source_dataset_idx[i]` is within `[0, M-1]`.
 - `source_frame_idx[i]` is the original frame index in the source Zarr context.
 - `detection_source` encoding is stable:
-  - `0` real/manual-reviewed sample
+  - `0` accepted curated sample (`refined` and manual-edited current rows both map here)
   - `1` interpolated/synthetic sample
+- Current refined exports should normally have `includes_interpolated=false`
+  and all-zero `detection_source`.
 
 ## Determinism Rules
 
@@ -143,7 +154,7 @@ Proposed CLI surface:
 - `--seed 42`
 - `--input-format gray|rgb|both`
 - `--include-rgb` (alias for `--input-format both`)
-- `--source-type manual|filtered|detect|interpolated`
+- `--source-type refined|detect|manual|filtered|interpolated`
 - `--set-name <name>`
 - `--set-version <int>`
 - `--set-id <id>` (optional override)
@@ -152,6 +163,7 @@ Proposed CLI surface:
 Behavior:
 
 - Default mode writes gray only.
+- Default `--source-type` should be `refined`.
 - If `--input-format both` is requested and any source lacks RGB downsample arrays, fail fast.
 - `--split` writes fixed index arrays in `splits/`.
 
@@ -166,6 +178,7 @@ Behavior:
   - total samples
   - per-source dataset counts
   - real vs interpolated counts
+  - manual-edited counts when available from refined summary metadata
   - split counts
 
 ## Registry Integration (Recommended)

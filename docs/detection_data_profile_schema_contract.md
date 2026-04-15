@@ -1,8 +1,8 @@
 # Detection Data Profile Schema Contract
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-04-15
 -->
 
 ## Purpose
@@ -65,8 +65,8 @@ not mutate, production stage outputs.
 - Canonical linkage to stage output is `source_detection_path`.
 - Canonical linkage examples:
   - `detect_runs/<run>`
-  - `refined_detect_runs/<run>/filtered`
-  - `refined_detect_runs/<run>/interpolated`
+  - `refined_detect_runs/<run>/instances`
+- Historical compatibility example:
   - `refined_detect_runs/<run>/manual`
 - Selection policy for "best available" source can evolve, but links remain
   explicit per profile run.
@@ -98,10 +98,13 @@ This follows existing `analysis/<analysis_type>_runs/<run_name>/` conventions.
 - `source_zarr_use`: e.g. `analysis`, `training` (nullable)
 - `source_detection_path`: canonical detection source path used for profile
   - examples:
-    - `refined_detect_runs/<run>/manual`
-    - `refined_detect_runs/<run>/interpolated`
+    - `refined_detect_runs/<run>/instances`
     - `detect_runs/<run>`
-- `source_detection_type`: `manual|interpolated|filtered|detect`
+- `source_detection_type`: `refined|manual|interpolated|filtered|detect`
+  - Current curated refined profiles should use `refined` with
+    `source_detection_path = refined_detect_runs/<run>/instances`.
+  - `manual|interpolated|filtered` are historical compatibility values for
+    legacy sparse archives.
 - `source_resolution`: `full|sampled`
 - `source_frame_count`: frame universe used for coverage denominator
 - `source_frame_count_full`: full frame count when sampled universe is used (nullable)
@@ -128,11 +131,11 @@ Canonical JSON shape:
     "zarr_path": "/nvme1/recordings/..._training.zarr"
   },
   "source": {
-    "detection_path": "refined_detect_runs/refined_detect_.../manual",
-    "detection_type": "manual",
+    "detection_path": "refined_detect_runs/refined_detect_.../instances",
+    "detection_type": "refined",
     "detect_run": "detect_...",
     "refined_run": "refined_detect_...",
-    "manual_group": "manual",
+    "manual_group": null,
     "review_state": "approved",
     "review_method": "manual",
     "review_intended_use": "training",
@@ -202,6 +205,10 @@ Canonical JSON shape:
   }
 }
 ```
+
+`source.manual_group` is a legacy compatibility field:
+- use `null` for current `instances/`-based profiles
+- populate it only when the profiled source was a historical sparse subgroup
 
 ### Metric Object Contract (`geometry_norm.*`)
 
@@ -361,9 +368,11 @@ Registry projection extension target (planned):
 ## Implementation Notes
 
 - Compute profile from the *resolved* detection source used for training parity:
-  - `manual_review_latest` subgroup if present and selected
-  - else `interpolated`
-  - else `filtered`
+  - current refined-first path:
+    `refined_detect_runs/<run>/instances`
+  - historical sparse compatibility path when current canonical `instances/`
+    is absent:
+    a selected legacy subgroup such as `manual`, `interpolated`, or `filtered`
   - else raw detect run
 - Prefer writing numeric profile payload first; plots are derived artifacts.
 - Keep profile writer deterministic (stable bin edges + quantile method).

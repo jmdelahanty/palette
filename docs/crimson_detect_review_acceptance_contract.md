@@ -1,20 +1,20 @@
 # Crimson Detect Review Acceptance Contract
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-04-15
 -->
 
 Purpose: define a migration-safe, operator-first contract for approving detect
 review status from Crimson after inspection/manual edits.
 
-Date anchored: 2026-02-09.
+Date anchored: 2026-04-11.
 
 ## Scope
 
 - In scope:
   - Writing review acceptance metadata on refined detect runs
-  - Deterministic target-run/group resolution
+  - Deterministic target-run/current-surface resolution
   - Wrapper behavior for Crimson integration
 - Out of scope:
   - Editing detection arrays (handled by manual write contract)
@@ -38,9 +38,14 @@ shape and attr write locations.
 
 Acceptance is metadata-only and append-safe:
 1. Select refined run (`latest` unless explicitly specified).
-2. Resolve target detect group using preference chain:
-   - `manual -> interpolated -> filtered -> raw`
-   - or explicit `--target-group`.
+2. Resolve the target detect surface:
+   - current runs should resolve to `refined`, meaning the canonical curated
+     sparse surface on `refined_detect_runs/<run>/instances`
+   - legacy subgroup fallback (`manual -> interpolated -> filtered -> raw`)
+     should only be used for historical archives or explicit compatibility
+     reads
+   - explicit `--target-group` may override this when the operator is working
+     with a historical sparse subgroup
 3. Write `detect_review_status` onto selected refined run.
 4. Update parent pointer:
    - `refined_detect_runs.attrs["detect_review_status_latest"] = <run_name>`
@@ -54,8 +59,12 @@ Required fields:
 - `method`: one of `manual | algorithmic | hybrid | spotcheck`
 - `intended_use`: one of `training | full_recording`
 - `timestamp`: ISO UTC timestamp
-- `resolved_group`: resolved group label
+- `resolved_group`: resolved logical detect surface label
+  - should normally be `refined` for current runs
 - `preference_chain`: current detect-group preference chain
+  - current default should begin with `refined`
+  - subgroup-era entries are compatibility fallbacks, not the primary current
+    mode
 
 Recommended fields:
 - `reviewer`: operator identity
@@ -84,7 +93,9 @@ Implement a thin wrapper for Crimson/operator use:
 Proposed arguments:
 - `zarr_path`
 - `--refined-run <name>` (optional)
-- `--target-group <manual|interpolated|filtered|raw|custom>` (optional)
+- `--target-group <refined|manual|interpolated|filtered|raw|custom>` (optional)
+  - `refined` is the normal current value
+  - subgroup values are for historical sparse compatibility only
 - `--state <approved|pending|rejected|needs_review>` (default: approved)
 - `--method <manual|algorithmic|hybrid|spotcheck>` (default: manual)
 - `--intended-use <training|full_recording>` (required in strict mode)
@@ -117,7 +128,7 @@ Recommended flow from Crimson:
 
 After acceptance write:
 1. `refined_detect_runs/<run>.attrs["detect_review_status"]` exists.
-2. `resolved_group` equals expected group.
+2. `resolved_group` equals the expected surface, normally `refined`.
 3. Parent latest pointer updated unless `--no-latest`.
 4. `check_recording_steps` shows updated detect review state.
 

@@ -1,14 +1,28 @@
 # Crimson Refined-Detect Manual Write Contract
 <!-- contract-meta
-version: 1
-status: active
-last_verified: 2026-02-27
+version: 2
+status: historical
+last_verified: 2026-04-15
 stage_arrays_spec: REFINED_DETECT_SPEC
 -->
 
-Purpose: define exactly what Crimson must write so Palette recognizes manual refined detections as the active source.
+Purpose: preserve the older subgroup-era manual detect write contract that
+predated Palette's current sparse-first refined-detect layout.
 
-Date anchored: 2026-02-09.
+Current status note:
+- This document describes the older subgroup-era manual detect write contract.
+- Current Palette refined detect runs are sparse-first, with canonical curated
+  data in `refined_detect_runs/<run>/instances` and candidate audit rows in
+  `refined_detect_runs/<run>/source_detections`.
+- `detect_review_status.resolved_group` should normally be `refined` for
+  current runs.
+- Do not use this note as the contract for new sparse refined-detect writer
+  work. Use it only as historical background for legacy archives until a
+  replacement sparse write contract is published.
+- The `manual_group` terminology below is historical and refers to the legacy
+  sparse subgroup naming pattern, not the current canonical refined surface.
+
+Date anchored: 2026-04-11.
 
 String/encoding policy references:
 - `src/fisheye/docs/zarr_structure.md` (authoritative schema + encoding conventions)
@@ -16,16 +30,17 @@ String/encoding policy references:
 
 ## Scope
 
-This contract is for updating:
+This historical note is for the older behavior that updated:
 - `refined_detect_runs/<latest>/<manual_group>`
 - review pointers/status on the refined run
 
-It is intentionally aligned with current Palette behavior in `fisheye.tune.detect_review`.
+It is intentionally aligned with the legacy subgroup-era behavior in
+`fisheye.tune.detect_review`.
 
 For acceptance/status policy after inspection, see:
 - `docs/crimson_detect_review_acceptance_contract.md`
 
-## Minimum Required Writes
+## Historical Minimum Required Writes
 
 Given `run_name = refined_detect_runs.attrs["latest"]` and `manual_group` (default `"manual"`):
 
@@ -75,10 +90,11 @@ Given `run_name = refined_detect_runs.attrs["latest"]` and `manual_group` (defau
 - `source_variant = "interpolated"` or `"filtered"` (the base used)
 - `manual_review_timestamp` (ISO UTC)
 
-5. Refined run pointer update:
+5. Historical refined run pointer update:
 - `refined_detect_runs/<run_name>.attrs["manual_review_latest"] = <manual_group>`
 
-6. Review status update (strongly recommended so crop/registry resolve correctly):
+6. Review status update (strongly recommended so historical crop/registry
+   compatibility resolves correctly):
 - `refined_detect_runs/<run_name>.attrs["detect_review_status"] = { ... }`
 - `refined_detect_runs.attrs["detect_review_status_latest"] = <run_name>`
 
@@ -89,19 +105,23 @@ Recommended payload fields:
 - `method` (`manual`, `retune`, `algorithmic`, etc.)
 - `intended_use` (`training`, `analysis`, etc.)
 - `timestamp` (ISO UTC)
-- `resolved_group` (typically `<manual_group>`, often `"manual"`)
-- `preference_chain` (default: `["manual", "interpolated", "filtered", "raw"]`)
+- `resolved_group`
+  - current runs should normally use `"refined"`
+  - legacy subgroup-era writes may still record a sparse subgroup such as
+    `"manual"`
+- `preference_chain` (default: `["refined", "manual", "interpolated", "filtered", "raw"]`)
 - optional: `reviewer`, `notes`
 
 ## Behavioral Expectations in Palette
 
 1. Resolution preference:
-- Palette prefers manual when `manual_review_latest` exists and subgroup exists.
-- Fallback chain is `manual -> interpolated -> filtered -> raw`.
+- Palette prefers `refined_detect_runs/<run>/instances` for current runs.
+- Legacy sparse fallback is `manual -> interpolated -> filtered -> raw`.
 
 2. Crop stage:
-- `crop --source-type preferred|auto` depends on `detect_review_status` and manual pointers.
-- Missing pointers may cause crop to use non-manual groups unintentionally.
+- `crop --source-type auto` resolves to the canonical refined surface when available.
+- When the canonical sparse refined surface is missing, crop falls back through the
+  review-guided sparse detect chain.
 
 3. Registry extraction:
 - Registry maintenance reads review status and resolved group from refined attrs.
@@ -110,7 +130,8 @@ Recommended payload fields:
 ## Write Safety Rules
 
 1. Never mutate `detect_runs/<run>` in-place.
-2. Keep manual edits in refined manual subgroup only.
+2. For this historical subgroup-era flow, keep manual edits in the refined
+   manual subgroup only.
 3. If overwriting an existing manual subgroup, rewrite full subgroup atomically.
 4. Keep array lengths consistent:
 - `len(frame_indices) == len(bbox_norm_coords) == len(scores) == len(class_ids)`
@@ -126,7 +147,9 @@ Run after Crimson writes:
 - `manual_review_latest` points to an existing subgroup.
 
 2. Review payload exists:
-- `detect_review_status.resolved_group` equals selected manual group.
+- for this historical subgroup-era flow,
+  `detect_review_status.resolved_group` equals the selected manual group
+- current sparse-first runs should normally resolve to `refined`
 
 3. Shape consistency:
 - all detection-level arrays share `n_detections`.
@@ -139,8 +162,9 @@ Run after Crimson writes:
 
 ## Implementation Note For Crimson Agent
 
-When possible, mirror Palette's existing semantics from:
+When recovering historical subgroup-era behavior, mirror Palette's semantics from:
 - `src/fisheye/tune/detect_review.py`
 - `src/fisheye/shared/refined_detect_review.py`
 
-Do not invent alternate field names for status/pointers; Palette tooling already consumes the names listed above.
+Do not invent alternate field names for status/pointers; Palette tooling already
+consumes the names listed above.
