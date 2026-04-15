@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync refined-subject mask metadata for touched ROIs after external pixel edits."""
+"""Sync refined-subject rows after external edits or source subject-mask updates."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from fisheye.tune.refined_subject_mask_review import sync_refined_subject_mask_metadata
+from fisheye.tune.refined_subject_mask_review import (
+    check_refined_subject_source_updates,
+    sync_refined_subject_mask_metadata,
+)
 
 
 def _parse_roi_indices(text: str) -> list[int]:
@@ -42,14 +45,45 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Optional raw subject_mask_runs/<run> override. Defaults to the refined run lineage attr.",
     )
+    parser.add_argument(
+        "--check-source-updates",
+        action="store_true",
+        help=(
+            "Inspect the selected refined rows against the current source subject-mask run, "
+            "auto-sync untouched rows, and mark manually overridden rows stale."
+        ),
+    )
+    parser.add_argument(
+        "--assume-source-changed-untracked",
+        action="store_true",
+        help=(
+            "Legacy bootstrap for refined runs created before source-sync tracking existed. "
+            "Treat the selected rows as source-changed when no historical source fingerprints are present."
+        ),
+    )
+    parser.add_argument(
+        "--force-source-changed",
+        action="store_true",
+        help=(
+            "Force the selected refined rows to be treated as source-changed even if source-sync "
+            "fingerprints already exist. Use this to recover after an earlier bootstrap seeded the baseline."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    summary = sync_refined_subject_mask_metadata(
+    helper = check_refined_subject_source_updates if args.check_source_updates else sync_refined_subject_mask_metadata
+    kwargs = {
+        "refined_run": str(args.refined_run),
+        "component_name": str(args.component_name),
+        "roi_indices": list(args.roi_indices),
+        "source_subject_mask_run": str(args.source_subject_mask_run) if args.source_subject_mask_run else None,
+    }
+    if args.check_source_updates:
+        kwargs["assume_source_changed_untracked"] = bool(args.assume_source_changed_untracked)
+        kwargs["force_source_changed"] = bool(args.force_source_changed)
+    summary = helper(
         args.zarr_path,
-        refined_run=str(args.refined_run),
-        component_name=str(args.component_name),
-        roi_indices=list(args.roi_indices),
-        source_subject_mask_run=str(args.source_subject_mask_run) if args.source_subject_mask_run else None,
+        **kwargs,
     )
     if args.dataset:
         summary["dataset"] = str(args.dataset)

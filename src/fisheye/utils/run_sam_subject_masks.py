@@ -22,6 +22,7 @@ from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.inference_timing import InferenceTimingProfiler
 from fisheye.shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_keypoints_attrs
+from fisheye.shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -56,6 +57,7 @@ NEGATIVE_POINT_POLICY_CHOICES = ("none", "corners", "border8")
 DEFAULT_NEGATIVE_POINT_POLICY = "none"
 DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION = 0.05
 DEFAULT_KEYPOINT_LABELS: tuple[str, ...] = ("swim_bladder", "eye_left", "eye_right")
+_SUBJECT_MASKS_STATUS_SOURCE = "runtime_run_sam_subject_masks"
 KEYPOINT_LABEL_ALIASES: dict[str, str] = {
     "bladder": "swim_bladder",
     "swimbladder": "swim_bladder",
@@ -2080,6 +2082,17 @@ def run_sam_subject_mask_inference(
                 parent[resolved_output_run].attrs["summary_statistics"] = summary_statistics
                 parent[resolved_output_run].attrs["timing_profile"] = timing_profile_summary
                 parent[resolved_output_run].attrs["profile_timings_enabled"] = True
+        parent = root.get("subject_mask_runs")
+        if parent is not None and resolved_output_run in parent:
+            emit_subject_mask_stage_completion(
+                root,
+                zarr_path,
+                run_group=parent[resolved_output_run],
+                run_name=resolved_output_run,
+                source=_SUBJECT_MASKS_STATUS_SOURCE,
+                console=None,
+                invalidate_on_ok=True,
+            )
         duration = total_duration
     finally:
         del processor

@@ -76,6 +76,8 @@ def test_get_transitive_dependents_detect() -> None:
         "refined_keypoints",
         "eye_masks",
         "refined_eye_masks",
+        "subject_masks",
+        "refined_subject_masks",
         "arena_assignment",
         "tracks",
     })
@@ -108,6 +110,7 @@ def test_get_transitive_dependents_keypoints() -> None:
 def test_get_transitive_dependents_leaf_step() -> None:
     assert get_transitive_dependents("tracks") == frozenset()
     assert get_transitive_dependents("refined_eye_masks") == frozenset()
+    assert get_transitive_dependents("refined_subject_masks") == frozenset()
     assert get_transitive_dependents("detect_quality") == frozenset()
 
 
@@ -124,6 +127,7 @@ def test_invalidate_downstream_marks_missing(tmp_path: Path) -> None:
     registry = _create_registry(tmp_path)
     for step in ["detect", "refined_detect", "crop", "keypoints",
                   "refined_keypoints", "eye_masks", "refined_eye_masks",
+                  "subject_masks", "refined_subject_masks",
                   "arena_assignment", "tracks", "detect_quality"]:
         _seed_step(registry, step, "ok")
 
@@ -138,7 +142,8 @@ def test_invalidate_downstream_marks_missing(tmp_path: Path) -> None:
 
     assert "detect" not in result["steps_invalidated"]
     for step in ["refined_detect", "crop", "keypoints", "refined_keypoints",
-                  "eye_masks", "refined_eye_masks", "arena_assignment", "tracks",
+                  "eye_masks", "refined_eye_masks", "subject_masks", "refined_subject_masks",
+                  "arena_assignment", "tracks",
                   "detect_quality"]:
         assert step in result["steps_invalidated"], f"{step} should be invalidated"
         assert _get_step_status(registry, step) == "missing"
@@ -163,6 +168,42 @@ def test_invalidate_downstream_skips_already_missing(tmp_path: Path) -> None:
 
     assert "crop" in result["steps_skipped"]
     assert "refined_detect" in result["steps_invalidated"]
+    registry.close()
+
+
+def test_get_transitive_dependents_crop_includes_subject_masks() -> None:
+    result = get_transitive_dependents("crop")
+    expected = frozenset({
+        "keypoints",
+        "refined_keypoints",
+        "eye_masks",
+        "refined_eye_masks",
+        "subject_masks",
+        "refined_subject_masks",
+        "arena_assignment",
+        "tracks",
+    })
+    assert result == expected
+
+
+def test_invalidate_downstream_from_crop_marks_subject_masks_missing(tmp_path: Path) -> None:
+    registry = _create_registry(tmp_path)
+    _seed_step(registry, "crop", "ok")
+    _seed_step(registry, "subject_masks", "ok")
+    _seed_step(registry, "refined_subject_masks", "ok")
+
+    result = invalidate_downstream_steps(
+        registry,
+        dataset_id="dataset_a",
+        step_name="crop",
+        source="test_source",
+        recording_id="recording_a",
+    )
+
+    assert "subject_masks" in result["steps_invalidated"]
+    assert "refined_subject_masks" in result["steps_invalidated"]
+    assert _get_step_status(registry, "subject_masks") == "missing"
+    assert _get_step_status(registry, "refined_subject_masks") == "missing"
     registry.close()
 
 
@@ -233,7 +274,7 @@ def test_invalidate_downstream_handles_no_existing_rows(tmp_path: Path) -> None:
     )
 
     # All downstream steps should be created as "missing"
-    assert len(result["steps_invalidated"]) == 9
+    assert len(result["steps_invalidated"]) == len(get_transitive_dependents("detect"))
     for step in get_transitive_dependents("detect"):
         assert _get_step_status(registry, step) == "missing"
     assert len(result["errors"]) == 0

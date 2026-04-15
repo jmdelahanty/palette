@@ -40,7 +40,10 @@ from ..tune.refined_subject_mask_review import (
     _write_refined_subject_component_apply_rows,
     prepare_refined_subject_run,
 )
+from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
 from ..utils.zarr_io import open_zarr_root
+
+_REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_refine_subject_masks"
 
 
 def _parse_roi_index_spec(text: str) -> list[int]:
@@ -512,6 +515,15 @@ def refine_subject_masks(
         "updated_at_utc": str(updated_at_utc),
         "duration_seconds": float(time.perf_counter() - stage_start),
     }
+    emit_refined_subject_mask_stage_completion(
+        root,
+        zarr_path,
+        run_group=refined.group,
+        run_name=refined.run_name,
+        source=_REFINED_SUBJECT_MASKS_STATUS_SOURCE,
+        console=console,
+        invalidate_on_ok=True,
+    )
     return summary
 
 

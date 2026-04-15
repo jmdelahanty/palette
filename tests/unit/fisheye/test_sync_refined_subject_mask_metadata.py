@@ -129,6 +129,9 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
     swim_provenance = swim_group["provenance"]
     assert bool(np.asarray(body_group["edit_applied"][0], dtype=bool)) is True
     assert bool(np.asarray(swim_group["edit_applied"][0], dtype=bool)) is False
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is True
+    assert bool(np.asarray(swim_group["manual_override"][0], dtype=bool)) is False
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is False
     body_reasons = read_reason_labels(body_group)
     swim_reasons = read_reason_labels(swim_group)
     assert body_reasons is not None
@@ -187,6 +190,162 @@ def test_sync_refined_subject_mask_metadata_batches_rows_and_tracks_noops(tmp_pa
     body_reasons = read_reason_labels(body_group)
     assert body_reasons is not None
     assert body_reasons.tolist() == ["manual_correction", "copied_from_source"]
+    np.testing.assert_array_equal(
+        np.asarray(body_group["manual_override"][:], dtype=bool),
+        np.asarray([True, False], dtype=bool),
+    )
+
+
+def test_check_refined_subject_source_updates_auto_syncs_unedited_rows(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    _source, refined = review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 1:7, 1:7] = 0
+    source_masks[0, 0, 2:6, 2:6] = 1
+    subject["masks_roi"][:] = source_masks
+
+    summary = review_mod.check_refined_subject_source_updates(
+        zarr_path,
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["source_changed_roi_count"] == 1
+    assert summary["auto_synced_roi_count"] == 1
+    assert summary["stale_marked_roi_count"] == 0
+    assert summary["auto_synced_roi_indices"] == [0]
+    assert summary["stale_roi_indices"] == []
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 0], dtype=np.uint8),
+        np.asarray(subject["masks_roi"][0, 0], dtype=np.uint8),
+    )
+    body_group = run["components"]["subject_body"]
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is False
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is False
+
+
+def test_check_refined_subject_source_updates_marks_manual_rows_stale(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    source, refined = review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+    review_mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+    )
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 2:6, 2:6] = 0
+    source_masks[0, 0, 3:5, 3:5] = 1
+    subject["masks_roi"][:] = source_masks
+
+    summary = review_mod.check_refined_subject_source_updates(
+        zarr_path,
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["source_changed_roi_count"] == 1
+    assert summary["auto_synced_roi_count"] == 0
+    assert summary["stale_marked_roi_count"] == 1
+    assert summary["stale_roi_indices"] == [0]
+    assert summary["stale_total"] == 1
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
+    body_group = run["components"]["subject_body"]
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is True
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is True
+    assert body_group.attrs["source_update_pending_rows"] == [0]
+    stale_payload = dict(run.attrs.get("source_subject_mask_stale") or {})
+    assert stale_payload["state"] == "stale"
+    assert stale_payload["reason"] == "source_subject_mask_rows_changed"
+    assert stale_payload["roi_indices"] == [0]
+    assert stale_payload["component_names"] == ["subject_body"]
+    assert stale_payload["components"]["subject_body"]["roi_indices"] == [0]
+    assert stale_payload["components"]["subject_body"]["source_subject_mask_run"] == "subject_masks_001"
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 0], dtype=np.uint8),
+        np.asarray(edited[0], dtype=np.uint8),
+    )
+    payload = dict(run.attrs.get("component_review_statuses") or {}).get("subject_body", {})
+    assert payload["state"] == "needs_review"
+
+
+def test_save_refined_subject_roi_clears_active_run_level_stale_payload(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    source, refined = review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+    review_mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+    )
+
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 2:6, 2:6] = 0
+    source_masks[0, 0, 3:5, 3:5] = 1
+    subject["masks_roi"][:] = source_masks
+
+    summary = review_mod.check_refined_subject_source_updates(
+        zarr_path,
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0],
+    )
+    assert summary["stale_marked_roi_count"] == 1
+
+    review_mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=np.asarray(subject["masks_roi"][0], dtype=np.uint8)[[0, 3]],
+    )
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
+    body_group = run["components"]["subject_body"]
+    assert bool(np.asarray(body_group["source_row_stale"][0], dtype=bool)) is False
+    assert body_group.attrs["source_update_pending_rows"] == []
+    assert "source_subject_mask_stale" not in run.attrs
 
 
 def test_sync_refined_subject_mask_metadata_cli_emits_json_summary(tmp_path: Path, capsys) -> None:
@@ -226,3 +385,41 @@ def test_sync_refined_subject_mask_metadata_cli_emits_json_summary(tmp_path: Pat
     assert payload["roi_indices"] == [0]
     assert payload["changed_roi_count"] == 1
     assert payload["noop_roi_count"] == 0
+
+
+def test_sync_refined_subject_mask_metadata_cli_can_check_source_updates(tmp_path: Path, capsys) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    _source, _refined = review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    source_masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    source_masks[0, 0, 1:7, 1:7] = 0
+    source_masks[0, 0, 2:6, 2:6] = 1
+    subject["masks_roi"][:] = source_masks
+
+    rc = cli_mod.main(
+        [
+            "--zarr-path",
+            str(zarr_path),
+            "--refined-run",
+            "refined_subject_masks_001",
+            "--component-name",
+            "subject_body",
+            "--roi-indices",
+            "0",
+            "--check-source-updates",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "updated"
+    assert payload["auto_synced_roi_count"] == 1
+    assert payload["stale_marked_roi_count"] == 0

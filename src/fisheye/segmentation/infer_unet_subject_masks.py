@@ -19,6 +19,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -27,6 +28,7 @@ from .unet import UNetSmall
 
 SUBJECT_MASK_LABEL_SCHEMA = "subject_v1_union"
 SUBJECT_MASK_LABELS: tuple[str, ...] = ("subject_body", "eyes_union", "swim_bladder")
+_SUBJECT_MASKS_STATUS_SOURCE = "runtime_infer_unet_subject_masks"
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -622,6 +624,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         },
     )
     write_stage_provenance(run_group, provenance)
+    emit_subject_mask_stage_completion(
+        root,
+        zarr_path,
+        run_group=run_group,
+        run_name=resolved_run_name,
+        source=_SUBJECT_MASKS_STATUS_SOURCE,
+        console=console,
+        invalidate_on_ok=True,
+    )
 
     console.print(
         f"\n[green]✓[/green] U-Net subject masks written to "
