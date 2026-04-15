@@ -154,6 +154,33 @@ scripts/py -m fisheye.utils.apply_tuning_by_camera \
   --merge-dicts
 ```
 
+Swim-bladder cleanup note:
+
+- if you are cleaning up older propagated swim-bladder metadata that still
+  carries source-specific `context.crop_run` / `context.keypoint_run` fields,
+  rerun propagation with `--overwrite` and without `--merge-dicts`
+- this replaces only
+  `subject_mask_tuning.components["swim_bladder"]`
+- unrelated subject-mask components such as `subject_body` are preserved
+- existing materialized mask runs are not touched
+
+Audit the cleaned state with:
+
+```bash
+scripts/py -m fisheye.utils.audit_swim_bladder_tuning_metadata \
+  /nvme1/recordings \
+  --recursive \
+  --camera-id 2010093 \
+  --camera-id 2010094 \
+  --camera-id 2010095 \
+  --camera-id 2010096 \
+  --strict
+```
+
+See
+[swim_bladder_tuning_metadata_audit.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_tuning_metadata_audit.md)
+for status meanings and the recommended cleanup workflow.
+
 ### 3. Materialize a raw subject-mask run
 
 ```bash
@@ -215,10 +242,9 @@ Operator note:
   `subject_mask_tuning.subject_body` and
   `subject_mask_tuning.swim_bladder` so operators can see which unified
   subject-mask tuning components are actually present.
-- future operator cleanup should promote those nested subject-mask tuning
-  components into the summary/counting layer too, so the top summary reflects
-  all required tuning inputs directly instead of mixing a coarse
-  `subject_mask_tuning: OK` line with component-specific detail lines below it.
+- subject-mask and refined-subject-mask crop snapshot drift now appear as
+  separate status lines in the same command, so stale downstream mask runs are
+  surfaced as provenance drift rather than being mistaken for missing tuning.
 - if registry status views eventually become the default operator surface, the
   same component-aware tuning summary should be mirrored there rather than
   staying filesystem-only.

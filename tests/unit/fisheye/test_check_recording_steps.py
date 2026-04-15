@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -296,6 +297,58 @@ def test_check_zarr_reports_crop_drift_against_current_refined_instances(tmp_pat
     assert any("bbox_norm_coords differ for 1 row(s) across 1 frame(s)." in issue for issue in details)
 
 
+def test_check_zarr_reports_subject_mask_snapshot_drift_against_current_crop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "subject_mask_drift_analysis.zarr"
+    zarr_path.mkdir()
+    root = _FakeTuningGroup()
+    root["crop_runs"] = _FakeTuningGroup(
+        attrs={"latest": "crop_001"},
+        crop_001=_FakeTuningGroup(attrs={"status": "completed"}),
+    )
+
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *args, **kwargs: root)
+    monkeypatch.setattr(
+        mod,
+        "collect_provenance",
+        lambda _root: SimpleNamespace(
+            crop_source_drift_issues=[],
+            subject_mask_crop_snapshot_issues=[
+                "Subject mask run 'subject_masks_001' crop snapshot drifted from crop run 'crop_001': "
+                "source_crop_signature='crop_sig_v1' expected 'crop_sig_v2'; "
+                "source_crop_revision=1 expected 2."
+            ],
+            refined_subject_mask_crop_snapshot_issues=[
+                "Refined subject mask run 'refined_subject_masks_001' crop snapshot drifted from crop run 'crop_001': "
+                "source_crop_signature='crop_sig_v1' expected 'crop_sig_v2'; "
+                "source_crop_revision=1 expected 2."
+            ],
+        ),
+    )
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["crop_drift_present"] is False
+    assert info["subject_mask_drift_present"] is True
+    assert info["subject_mask_drift_summary"] == "DRIFT (1 issue)"
+    subject_details = info["subject_mask_drift_details"]
+    assert isinstance(subject_details, list)
+    assert any("source_crop_signature='crop_sig_v1' expected 'crop_sig_v2'" in issue for issue in subject_details)
+    assert any("source_crop_revision=1 expected 2" in issue for issue in subject_details)
+
+    assert info["refined_subject_mask_drift_present"] is True
+    assert info["refined_subject_mask_drift_summary"] == "DRIFT (1 issue)"
+    refined_subject_details = info["refined_subject_mask_drift_details"]
+    assert isinstance(refined_subject_details, list)
+    assert any(
+        "Refined subject mask run 'refined_subject_masks_001' crop snapshot drifted" in issue
+        for issue in refined_subject_details
+    )
+    assert any("source_crop_signature='crop_sig_v1' expected 'crop_sig_v2'" in issue for issue in refined_subject_details)
+
+
 def test_crop_status_format_helpers() -> None:
     assert mod._crop_status_text(False, None) == "MISS"  # noqa: SLF001
     assert mod._crop_status_text(True, None) == "OK"  # noqa: SLF001
@@ -307,6 +360,8 @@ def test_crop_status_format_helpers() -> None:
     assert mod._crop_drift_text(True, "DRIFT (1 issue)") == "DRIFT (1 issue)"  # noqa: SLF001
     assert mod._crop_drift_rich(False, None) == "[chartreuse1]OK[/chartreuse1]"  # noqa: SLF001
     assert mod._crop_drift_rich(True, "DRIFT (1 issue)") == "[yellow]DRIFT (1 issue)[/yellow]"  # noqa: SLF001
+    assert mod._drift_text(False, None) == "OK"  # noqa: SLF001
+    assert mod._drift_rich(True, "DRIFT (2 issues)") == "[yellow]DRIFT (2 issues)[/yellow]"  # noqa: SLF001
 
 
 def test_track_status_format_helpers() -> None:

@@ -27,9 +27,11 @@ treated as the runtime-validation counterpart to this document.
 - `crop_runs/`
 - `keypoints_runs/`
 - `eye_masks_runs/`
+- `subject_mask_runs/`
 - `refined_detect_runs/`
 - `refined_keypoints_runs/`
 - `refined_eye_masks_runs/`
+- `refined_subject_masks_runs/`
 - `refined_online_runs/`
 - `tracking_runs/`
 - `arena_assignment_runs/`
@@ -659,6 +661,99 @@ by `refine_eye_masks`, and `postprocess` is updated by the review tooling
 (`eye_mask_review --retune/--manual/--audit`). The postprocess stats include
 manual correction counts, retune totals, and reason tag counts. `retune_params`
 maps `retune_id` values to the parameter sets applied during batch retuning.
+
+---
+
+## `subject_mask_runs/`
+
+Unified subject-mask runs produced by the traditional body segmenter, U-Net,
+SAM/SAM2/SAM3 write-back, and swim-bladder refresh flows.
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `frame_indices` *(recommended)* | `(n_rois,)` | `int32` | Copied from the source crop run when available |
+| `frame_counts` *(recommended)* | `(n_frames,)` | `int32` | Copied from the source crop run when available |
+| `detection_indices` *(recommended)* | `(n_rois,)` | `int32` | Copied from the source crop run when available |
+| `detection_source` | `(n_rois,)` | `int8` | Expected to align with the source crop run |
+| `masks_roi` | `(n_rois, C, H, W)` | `uint8` | Canonical binary multilabel masks |
+| `mask_probs_roi` | `(n_rois, C, H, W)` | `float16/float32/uint8` | Decoded or quantized semantic probabilities in `[0,1]` |
+| `available_channels` | `(C,)` | `bool` | Run-level declaration of which channels are semantically valid |
+
+`metrics/` subgroup:
+
+- required: `prob_max`, `mask_present`
+- recommended: `area_px`, `centroid_xy`, `centroid_valid`, `bbox_xyxy`,
+  `bbox_valid`
+
+Important attrs:
+
+- `source_crop_run`
+- `source_crop_storage_mode`
+- `source_crop_signature`
+- `source_crop_revision`
+- `source_detect_review_status_ref` *(when the crop source exposes detect-review linkage)*
+- `label_schema_id`
+- `mask_labels`
+- `output_semantics="multilabel"`
+- `overlap_policy="independent_sigmoid"`
+- `method`
+- `run_semantics`
+- `probabilities_dtype`
+- `probabilities_encoding`
+- `summary_statistics`
+
+Component-local lineage lives under `components/<component>/provenance`.
+Those provenance payloads mirror the canonical crop snapshot fields so merged
+and refined subject-mask stages can preserve the exact crop surface they
+consumed.
+
+---
+
+## `refined_subject_masks_runs/`
+
+Canonical refined/editable subject-mask runs produced by
+`fisheye.tune.refined_subject_mask_review` and
+`fisheye.refinement.assemble_refined_subject_masks`.
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `frame_indices` *(recommended)* | `(n_rois,)` | `int32` | Copied from the upstream subject-mask/crop lineage when available |
+| `frame_counts` *(recommended)* | `(n_frames,)` | `int32` | Copied from the upstream subject-mask/crop lineage when available |
+| `detection_indices` *(recommended)* | `(n_rois,)` | `int32` | Copied from the upstream subject-mask/crop lineage when available |
+| `detection_source` | `(n_rois,)` | `int8` | Expected to align with the source crop run |
+| `masks_roi` | `(n_rois, C, H, W)` | `uint8` | Canonical refined binary masks |
+| `available_channels` | `(C,)` | `bool` | Declares which refined components are intentionally present |
+| `edit_applied` | `(n_rois, C)` | `bool` | True when the refined channel differs from the source subject-mask run |
+| `reason_bytes` *(optional)* | `(n_rois, width)` | `uint8` | Null-terminated UTF-8 reason labels |
+| `reason` *(optional)* | `(n_rois,)` | `string` | Human-readable reason tags |
+
+`metrics/` subgroup:
+
+- required: `mask_present`, `area_px`
+- recommended: `centroid_xy`, `centroid_valid`, `bbox_xyxy`, `bbox_valid`
+
+Important attrs:
+
+- `source_subject_mask_run`
+- `source_crop_run`
+- `source_crop_storage_mode`
+- `source_crop_signature`
+- `source_crop_revision`
+- `source_detect_review_status_ref` *(when the crop source exposes detect-review linkage)*
+- `label_schema_id`
+- `mask_labels`
+- `output_semantics="multilabel"`
+- `refinement_semantics="canonical_component_masks"`
+- `method`
+- `refined_subject_mask_review_status`
+- `component_review_statuses`
+- `summary_statistics`
+- `component_summary_statistics`
+
+Refined subject-mask runs preserve the same portable crop snapshot contract as
+their upstream `subject_mask_runs/<run>` source rather than re-deriving lineage
+from the latest crop run later. Component-local lineage continues to live under
+`components/<component>/provenance`.
 
 ---
 

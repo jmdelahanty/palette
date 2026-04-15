@@ -161,12 +161,18 @@ class RecordingStatus:
     subject_mask_available_components: List[str]
     subject_mask_unavailable_components: List[str]
     subject_mask_component_review_states: Dict[str, str]
+    subject_mask_drift_present: bool
+    subject_mask_drift_summary: Optional[str]
+    subject_mask_drift_details: List[str]
     refined_subject_masks_present: bool
     refined_subject_masks_coverage: Optional[float]
     refined_subject_mask_review_status: Optional[Dict[str, object]]
     refined_subject_mask_available_components: List[str]
     refined_subject_mask_unavailable_components: List[str]
     refined_subject_mask_component_review_states: Dict[str, str]
+    refined_subject_mask_drift_present: bool
+    refined_subject_mask_drift_summary: Optional[str]
+    refined_subject_mask_drift_details: List[str]
     arena_assignment_present: bool
     track_present: bool
     track_qc_state: Optional[str]
@@ -545,12 +551,18 @@ def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[s
         "subject_mask_available_components": [],
         "subject_mask_unavailable_components": [],
         "subject_mask_component_review_states": {},
+        "subject_mask_drift_present": False,
+        "subject_mask_drift_summary": None,
+        "subject_mask_drift_details": [],
         "refined_subject_masks_present": False,
         "refined_subject_masks_coverage": None,
         "refined_subject_mask_review_status": None,
         "refined_subject_mask_available_components": [],
         "refined_subject_mask_unavailable_components": [],
         "refined_subject_mask_component_review_states": {},
+        "refined_subject_mask_drift_present": False,
+        "refined_subject_mask_drift_summary": None,
+        "refined_subject_mask_drift_details": [],
         "arena_assignment_present": False,
         "track_present": False,
         "track_qc_state": None,
@@ -891,6 +903,12 @@ def _registry_status_payload(
     payload["crop_drift_present"] = False
     payload["crop_drift_summary"] = None
     payload["crop_drift_details"] = []
+    payload["subject_mask_drift_present"] = False
+    payload["subject_mask_drift_summary"] = None
+    payload["subject_mask_drift_details"] = []
+    payload["refined_subject_mask_drift_present"] = False
+    payload["refined_subject_mask_drift_summary"] = None
+    payload["refined_subject_mask_drift_details"] = []
 
     keypoints_row = selected_rows.get("keypoints")
     payload["keypoints_present"] = _step_row_status_ok(keypoints_row)
@@ -1076,12 +1094,18 @@ def _build_recording_status(
         subject_mask_available_components=list(zarr_info["subject_mask_available_components"]),  # type: ignore[arg-type]
         subject_mask_unavailable_components=list(zarr_info["subject_mask_unavailable_components"]),  # type: ignore[arg-type]
         subject_mask_component_review_states=dict(zarr_info["subject_mask_component_review_states"]),  # type: ignore[arg-type]
+        subject_mask_drift_present=bool(zarr_info["subject_mask_drift_present"]),
+        subject_mask_drift_summary=zarr_info["subject_mask_drift_summary"],  # type: ignore[arg-type]
+        subject_mask_drift_details=list(zarr_info["subject_mask_drift_details"]),  # type: ignore[arg-type]
         refined_subject_masks_present=bool(zarr_info["refined_subject_masks_present"]),
         refined_subject_masks_coverage=zarr_info["refined_subject_masks_coverage"],  # type: ignore[arg-type]
         refined_subject_mask_review_status=zarr_info["refined_subject_mask_review_status"],  # type: ignore[arg-type]
         refined_subject_mask_available_components=list(zarr_info["refined_subject_mask_available_components"]),  # type: ignore[arg-type]
         refined_subject_mask_unavailable_components=list(zarr_info["refined_subject_mask_unavailable_components"]),  # type: ignore[arg-type]
         refined_subject_mask_component_review_states=dict(zarr_info["refined_subject_mask_component_review_states"]),  # type: ignore[arg-type]
+        refined_subject_mask_drift_present=bool(zarr_info["refined_subject_mask_drift_present"]),
+        refined_subject_mask_drift_summary=zarr_info["refined_subject_mask_drift_summary"],  # type: ignore[arg-type]
+        refined_subject_mask_drift_details=list(zarr_info["refined_subject_mask_drift_details"]),  # type: ignore[arg-type]
         arena_assignment_present=bool(zarr_info["arena_assignment_present"]),
         track_present=bool(zarr_info["track_present"]),
         track_qc_state=zarr_info["track_qc_state"],  # type: ignore[arg-type]
@@ -1150,12 +1174,16 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
     return snapshot
 
 
-def _summarize_crop_drift(issues: List[str]) -> Optional[str]:
+def _summarize_drift(issues: List[str]) -> Optional[str]:
     if not issues:
         return None
     count = len(issues)
     label = "issue" if count == 1 else "issues"
     return f"DRIFT ({count} {label})"
+
+
+def _summarize_crop_drift(issues: List[str]) -> Optional[str]:
+    return _summarize_drift(issues)
 
 
 def _extract_coverage_from_group(group: zarr.Group) -> Optional[float]:
@@ -1848,6 +1876,12 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
     crop_drift_present = False
     crop_drift_summary: Optional[str] = None
     crop_drift_details: List[str] = []
+    subject_mask_drift_present = False
+    subject_mask_drift_summary: Optional[str] = None
+    subject_mask_drift_details: List[str] = []
+    refined_subject_mask_drift_present = False
+    refined_subject_mask_drift_summary: Optional[str] = None
+    refined_subject_mask_drift_details: List[str] = []
     crop_review_status: Optional[Dict[str, object]] = None
     crop_parent = root.get("crop_runs")
     if crop_parent is not None:
@@ -1879,7 +1913,17 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         if provenance_record is not None:
             crop_drift_details = list(provenance_record.crop_source_drift_issues)
             crop_drift_present = bool(crop_drift_details)
-            crop_drift_summary = _summarize_crop_drift(crop_drift_details)
+            crop_drift_summary = _summarize_drift(crop_drift_details)
+            subject_mask_drift_details = list(provenance_record.subject_mask_crop_snapshot_issues)
+            subject_mask_drift_present = bool(subject_mask_drift_details)
+            subject_mask_drift_summary = _summarize_drift(subject_mask_drift_details)
+            refined_subject_mask_drift_details = list(
+                provenance_record.refined_subject_mask_crop_snapshot_issues
+            )
+            refined_subject_mask_drift_present = bool(refined_subject_mask_drift_details)
+            refined_subject_mask_drift_summary = _summarize_drift(
+                refined_subject_mask_drift_details
+            )
 
     keypoints_present = False
     keypoints_parent = root.get("keypoints_runs")
@@ -2190,12 +2234,18 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "subject_mask_available_components": subject_mask_available_components,
         "subject_mask_unavailable_components": subject_mask_unavailable_components,
         "subject_mask_component_review_states": subject_mask_component_review_states,
+        "subject_mask_drift_present": subject_mask_drift_present,
+        "subject_mask_drift_summary": subject_mask_drift_summary,
+        "subject_mask_drift_details": subject_mask_drift_details,
         "refined_subject_masks_present": refined_subject_masks_present,
         "refined_subject_masks_coverage": refined_subject_masks_coverage,
         "refined_subject_mask_review_status": refined_subject_mask_review_status,
         "refined_subject_mask_available_components": refined_subject_mask_available_components,
         "refined_subject_mask_unavailable_components": refined_subject_mask_unavailable_components,
         "refined_subject_mask_component_review_states": refined_subject_mask_component_review_states,
+        "refined_subject_mask_drift_present": refined_subject_mask_drift_present,
+        "refined_subject_mask_drift_summary": refined_subject_mask_drift_summary,
+        "refined_subject_mask_drift_details": refined_subject_mask_drift_details,
         "arena_assignment_present": arena_assignment_present,
         "track_present": track_present,
         "track_qc_state": track_qc_state,
@@ -2232,10 +2282,14 @@ def _crop_status_text(present: bool, status: Optional[str]) -> str:
     return normalized or "OK"
 
 
-def _crop_drift_text(present: bool, summary: Optional[str]) -> str:
+def _drift_text(present: bool, summary: Optional[str]) -> str:
     if not present:
         return "OK"
     return summary or "DRIFT"
+
+
+def _crop_drift_text(present: bool, summary: Optional[str]) -> str:
+    return _drift_text(present, summary)
 
 
 def _format_one_decimal(value: float) -> str:
@@ -2307,10 +2361,14 @@ def _crop_status_rich(present: bool, status: Optional[str]) -> str:
     return "[chartreuse1]OK[/chartreuse1]"
 
 
-def _crop_drift_rich(present: bool, summary: Optional[str]) -> str:
+def _drift_rich(present: bool, summary: Optional[str]) -> str:
     if not present:
         return "[chartreuse1]OK[/chartreuse1]"
     return f"[yellow]{summary or 'DRIFT'}[/yellow]"
+
+
+def _crop_drift_rich(present: bool, summary: Optional[str]) -> str:
+    return _drift_rich(present, summary)
 
 
 def _tuning_status_rich(value: str) -> str:
@@ -2611,7 +2669,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--tuning-keys",
         type=str,
-        help="Comma-separated tuning keys to check (default: dish_mask,detection_tuning,keypoint_tuning,eye_mask_tuning,subdish_mask_tuning).",
+        help=(
+            "Comma-separated tuning keys to check "
+            f"(default: {','.join(DEFAULT_TUNING_KEYS)})."
+        ),
     )
     parser.add_argument(
         "--no-rich",
@@ -2829,8 +2890,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         table.add_column("Refined Eye Masks (legacy)")
         table.add_column("Eye Review (legacy)")
         table.add_column("Subject Masks")
+        table.add_column("Subject Drift")
         table.add_column("Subject Components (unified)")
         table.add_column("Refined Subject Masks")
+        table.add_column("Refined Subject Drift")
         table.add_column("Refined Subject Components (unified)")
         table.add_column("Arena Assignment")
         table.add_column("Track")
@@ -2886,6 +2949,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _status_rich(plan.refined_eye_masks_present),
                 _review_status_rich(plan.eye_mask_review_status),
                 _subject_mask_stage_rich(plan.subject_masks_present, plan.subject_masks_coverage),
+                _drift_rich(plan.subject_mask_drift_present, plan.subject_mask_drift_summary),
                 _subject_mask_component_summary_rich(
                     plan.subject_mask_available_components,
                     plan.subject_mask_unavailable_components,
@@ -2894,6 +2958,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _subject_mask_stage_rich(
                     plan.refined_subject_masks_present,
                     plan.refined_subject_masks_coverage,
+                ),
+                _drift_rich(
+                    plan.refined_subject_mask_drift_present,
+                    plan.refined_subject_mask_drift_summary,
                 ),
                 _subject_mask_component_summary_rich(
                     plan.refined_subject_mask_available_components,
@@ -2971,6 +3039,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             print(f"  subject_masks: {_subject_mask_stage_text(plan.subject_masks_present, plan.subject_masks_coverage)}")
             print(
+                f"  subject_mask_drift: {_drift_text(plan.subject_mask_drift_present, plan.subject_mask_drift_summary)}"
+            )
+            for issue in plan.subject_mask_drift_details:
+                print(f"    - {issue}")
+            print(
                 "  subject_mask_components (unified): "
                 f"{_subject_mask_component_summary_text(plan.subject_mask_available_components, plan.subject_mask_unavailable_components, plan.subject_mask_component_review_states)}"
             )
@@ -2979,6 +3052,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "  refined_subject_masks: "
                 f"{_subject_mask_stage_text(plan.refined_subject_masks_present, plan.refined_subject_masks_coverage)}"
             )
+            print(
+                "  refined_subject_mask_drift: "
+                f"{_drift_text(plan.refined_subject_mask_drift_present, plan.refined_subject_mask_drift_summary)}"
+            )
+            for issue in plan.refined_subject_mask_drift_details:
+                print(f"    - {issue}")
             print(
                 "  refined_subject_mask_components (unified): "
                 f"{_subject_mask_component_summary_text(plan.refined_subject_mask_available_components, plan.refined_subject_mask_unavailable_components, plan.refined_subject_mask_component_review_states)}"
