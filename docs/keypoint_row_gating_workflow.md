@@ -110,7 +110,7 @@ Through wrapper:
 ```bash
 scripts/py -m fisheye.utils.run_pose_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
-  --source-type filtered \
+  --source-type refined \
   --input-format gray \
   --keypoint-run latest_traditional \
   --require-review-state approved \

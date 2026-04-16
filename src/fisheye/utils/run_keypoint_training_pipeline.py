@@ -257,7 +257,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 
-    parser.add_argument("--source-type", choices=["detect", "filtered", "interpolated", "manual"], default="filtered")
+    parser.add_argument(
+        "--source-type",
+        choices=list(prepare_from_registry.KEYPOINT_SOURCE_TYPE_CHOICES),
+        default=prepare_from_registry.DEFAULT_KEYPOINT_SOURCE_TYPE,
+        help=(
+            "Requested crop/detect source label for the training set "
+            f"(default: {prepare_from_registry.DEFAULT_KEYPOINT_SOURCE_TYPE})."
+        ),
+    )
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
         "--model-input",

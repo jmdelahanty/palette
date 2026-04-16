@@ -71,7 +71,7 @@ Run note (February 22, 2026): operator validation executed via
 scripts/py -m fisheye.utils.prepare_pose_training_from_registry \
   --registry /nvme1/palette_registry.sqlite \
   --base-config configs/fisheye/pose_config.yaml \
-  --source-type filtered \
+  --source-type refined \
   --input-format gray \
   --keypoint-run latest_traditional \
   --require-review-state approved \

@@ -103,6 +103,7 @@ def _create_minimal_pose_zarr(
     refined_skeleton_id: str | None = None,
     refined_runtime_kpt_shape: tuple[int, int] | None = None,
     refined_pose_schema_name: str | None = None,
+    detection_source_type: str = "refined",
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["session_uuid"] = session_uuid
@@ -117,7 +118,7 @@ def _create_minimal_pose_zarr(
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_pose_001"
     crop_group = crop_parent.create_group("crop_pose_001")
-    crop_group.attrs["detection_source_type"] = "filtered"
+    crop_group.attrs["detection_source_type"] = detection_source_type
     crop_group.create_array(
         "roi_images",
         data=np.zeros((roi_rows, 64, 64), dtype=np.uint8),
@@ -238,7 +239,7 @@ def _seed_registry(registry_path: Path, zarr_path: Path) -> None:
 
 def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
-    _create_minimal_pose_zarr(zarr_path)
+    _create_minimal_pose_zarr(zarr_path, detection_source_type="filtered")
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     base_config_path = tmp_path / "pose_base.yaml"
@@ -299,7 +300,7 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
 
 def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsys, monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
-    _create_minimal_pose_zarr(zarr_path)
+    _create_minimal_pose_zarr(zarr_path, detection_source_type="filtered")
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     base_config_path = tmp_path / "pose_base.yaml"
@@ -330,7 +331,7 @@ def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsy
 
 def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
-    _create_minimal_pose_zarr(zarr_path)
+    _create_minimal_pose_zarr(zarr_path, detection_source_type="filtered")
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     base_config_path = tmp_path / "pose_base.yaml"
@@ -370,6 +371,45 @@ def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(monkeypatch, 
     ).fetchone()
     db.close()
     assert row is not None
+
+
+def test_prepare_keypoint_from_registry_defaults_manifest_source_type_to_refined(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(zarr_path, detection_source_type="refined")
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    out_config = tmp_path / "pose_config.yaml"
+    out_manifest = tmp_path / "pose_manifest.json"
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--input-format",
+            "gray",
+            "--out-config",
+            str(out_config),
+            "--out-manifest",
+            str(out_manifest),
+        ]
+    )
+    assert rc == 0
+
+    cfg = yaml.safe_load(out_config.read_text(encoding="utf-8"))
+    assert cfg["datasets"]["pose_sample"]["source_type"] == "refined"
+
+    manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
+    assert manifest["source_type_requested"] == "refined"
+    assert manifest["source_type"] == "refined"
+    assert manifest["datasets"][0]["source_type_resolved"] == "refined"
 
 
 def test_prepare_keypoint_from_registry_requires_source_crop_run(monkeypatch, tmp_path: Path) -> None:

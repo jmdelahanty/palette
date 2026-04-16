@@ -58,7 +58,7 @@ def test_pose_config_accepts_keypoint_run(tmp_path: Path) -> None:
                 "datasets:",
                 "  arena1:",
                 f"    zarr_path: {zarr_dir}",
-                "    source_type: filtered",
+                "    source_type: refined",
                 "    input_format: gray",
                 "    keypoint_run: latest_traditional",
                 "training_params:",

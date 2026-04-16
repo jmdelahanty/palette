@@ -36,6 +36,7 @@ def _write_source_pose_zarr(
     path: Path,
     *,
     skeleton_id: str,
+    detection_source_type: str = "refined",
     kpt_shape: tuple[int, int] = (3, 3),
     keypoint_count: int = 3,
     refined_reasons: list[str] | None = None,
@@ -50,7 +51,7 @@ def _write_source_pose_zarr(
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_pose_001"
     crop = crop_parent.create_group("crop_pose_001")
-    crop.attrs["detection_source_type"] = "filtered"
+    crop.attrs["detection_source_type"] = detection_source_type
     crop.create_array(
         "roi_images",
         data=np.zeros((4, 16, 16), dtype=np.uint8),
@@ -142,7 +143,7 @@ def _write_source_pose_zarr(
 def _manifest_for_single_source(path: Path) -> dict:
     return {
         "input_format": "gray",
-        "source_type": "filtered",
+        "source_type": "refined",
         "pose_schema": {
             "kpt_shape": [3, 3],
         },
@@ -162,7 +163,7 @@ def _manifest_for_single_source(path: Path) -> dict:
 def _manifest_for_sources(path_a: Path, path_b: Path) -> dict:
     return {
         "input_format": "gray",
-        "source_type": "filtered",
+        "source_type": "refined",
         "pose_schema": {
             "kpt_shape": [3, 3],
         },
@@ -203,6 +204,21 @@ def test_discover_merge_sources_accepts_single_skeleton_identity(tmp_path: Path)
     assert len(specs) == 2
     assert layout["skeleton_id"] == "pose_skel_shared"
     assert tuple(layout["kpt_shape"]) == (3, 3)
+
+
+def test_discover_merge_sources_prefers_crop_resolved_source_type(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared", detection_source_type="refined")
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["source_type"] = "filtered"
+
+    specs, _ = _discover_merge_sources(
+        manifest,
+        expected_input_format="gray",
+        row_gate_policy="raw_success",
+    )
+
+    assert specs[0].source_type_resolved == "refined"
 
 
 def test_discover_merge_sources_rejects_mixed_skeleton_identities(tmp_path: Path) -> None:
@@ -345,7 +361,7 @@ def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:
         "set_id": set_id,
         "set_name": "pose_set",
         "input_format": "gray",
-        "source_type": "filtered",
+        "source_type": "refined",
         "datasets": [
             {
                 "name": "dataset_a",
@@ -369,7 +385,7 @@ def test_main_auto_aggregates_keypoint_data_card_by_default(tmp_path: Path, monk
         input_format="gray",
         total_samples=4,
         source_specs=[],
-        source_type="filtered",
+        source_type="refined",
         run_name="merged_export_smoke",
     )
 
@@ -443,7 +459,7 @@ def test_main_no_aggregate_training_data_card_disables_aggregation(tmp_path: Pat
         input_format="gray",
         total_samples=2,
         source_specs=[],
-        source_type="filtered",
+        source_type="refined",
         run_name="merged_export_smoke",
     )
 

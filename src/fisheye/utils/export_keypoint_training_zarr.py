@@ -145,6 +145,21 @@ _as_text = _shared_as_text
 BOX_ONLY_REASON_TAG = "fish_present_no_keypoints"
 
 
+def _collapse_source_type_values(values: Sequence[Any], *, fallback: str) -> str:
+    normalized = sorted(
+        {
+            str(value).strip().lower()
+            for value in values
+            if value is not None and str(value).strip()
+        }
+    )
+    if not normalized:
+        return str(fallback).strip().lower()
+    if len(normalized) == 1:
+        return normalized[0]
+    return "mixed"
+
+
 def _reason_has_tag(reason_value: object, tag: str) -> bool:
     reason_text = _as_text(reason_value)
     if reason_text is None:
@@ -752,7 +767,7 @@ def _discover_merge_sources(
             _as_text(dataset.get("source_type_resolved"))
             or _as_text(crop_group.attrs.get("detection_source_type"))
             or _as_text(manifest_payload.get("source_type"))
-            or "filtered"
+            or prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE
         )
 
         dish_design, canvas_name, rig_id = _extract_identity(dataset)
@@ -961,12 +976,20 @@ def _export_merged(
     input_format = str(manifest_payload.get("input_format") or "gray").strip().lower()
     if input_format not in {"gray", "rgb"}:
         raise ValueError(f"Unsupported manifest.input_format '{input_format}'. Expected gray or rgb.")
-    source_type = str(manifest_payload.get("source_type") or "filtered").strip().lower()
+    requested_source_type = str(
+        manifest_payload.get("source_type_requested")
+        or manifest_payload.get("source_type")
+        or prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE
+    ).strip().lower()
 
     source_specs, layout = _discover_merge_sources(
         manifest_payload,
         expected_input_format=input_format,
         row_gate_policy=row_gate_policy,
+    )
+    source_type = _collapse_source_type_values(
+        [spec.source_type_resolved for spec in source_specs],
+        fallback=requested_source_type,
     )
     merged_skeleton_id = _as_text(layout.get("skeleton_id"))
     merged_kpt_shape = _normalize_kpt_shape(layout.get("kpt_shape"))
@@ -1823,6 +1846,12 @@ def _build_merged_manifest_payload(
     merged_canvas = _collapse(canvas_values, mixed_label="mixed_canvas")
     merged_rig = _collapse(rig_values, mixed_label="mixed_rigs")
 
+    requested_source_type = (
+        _as_text(manifest_payload.get("source_type_requested"))
+        or _as_text(manifest_payload.get("source_type"))
+        or merge_result.source_type
+    )
+
     merged_dataset = {
         "name": merged_dataset_name,
         "zarr_path": str(merged_zarr),
@@ -1831,7 +1860,7 @@ def _build_merged_manifest_payload(
         "dish_design": merged_dish,
         "canvas_name": merged_canvas,
         "rig_id": merged_rig,
-        "source_type_requested": merge_result.source_type,
+        "source_type_requested": requested_source_type,
         "source_type_resolved": merge_result.source_type,
         "source_crop_run": run_name,
         "input_format": merge_result.input_format,
@@ -1858,6 +1887,8 @@ def _build_merged_manifest_payload(
     payload["datasets"] = [merged_dataset]
     payload["output_manifest_path"] = str(out_manifest)
     payload["output_config_path"] = str(out_config)
+    payload["source_type_requested"] = requested_source_type
+    payload["source_type"] = merge_result.source_type
     payload["dish_design"] = merged_dish
     payload["canvas_name"] = merged_canvas
     payload["rig_name"] = merged_rig

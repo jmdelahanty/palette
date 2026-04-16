@@ -22,6 +22,9 @@ from fisheye.training.config import PoseConfig
 from fisheye.utils.system import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
 
+KEYPOINT_SOURCE_TYPE_CHOICES = ("refined", "detect", "filtered", "interpolated", "manual")
+DEFAULT_KEYPOINT_SOURCE_TYPE = "refined"
+
 
 def _add_arg(argv: List[str], flag: str, value: Optional[object]) -> None:
     if value is None:
@@ -111,6 +114,21 @@ def _infer_row_value(
     if len(values) == 1:
         return values[0]
     return mixed
+
+
+def _collapse_source_type_values(values: Sequence[Any], *, fallback: str) -> str:
+    normalized = sorted(
+        {
+            str(value).strip().lower()
+            for value in values
+            if value is not None and str(value).strip()
+        }
+    )
+    if not normalized:
+        return str(fallback).strip().lower()
+    if len(normalized) == 1:
+        return normalized[0]
+    return "mixed"
 
 
 def _build_set_name_query_signature(args: argparse.Namespace, *, model_input: str) -> Dict[str, Any]:
@@ -853,7 +871,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 
-    parser.add_argument("--source-type", choices=["detect", "filtered", "interpolated", "manual"], default="filtered")
+    parser.add_argument(
+        "--source-type",
+        choices=list(KEYPOINT_SOURCE_TYPE_CHOICES),
+        default=DEFAULT_KEYPOINT_SOURCE_TYPE,
+        help=(
+            "Requested crop/detect source label for this training set "
+            f"(default: {DEFAULT_KEYPOINT_SOURCE_TYPE}; current canonical surface is refined)."
+        ),
+    )
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
         "--model-input",
@@ -1630,10 +1656,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.out_config is not None:
         planned_out_manifest = args.out_manifest if args.out_manifest is not None else args.out_config.with_suffix(".manifest.json")
 
+    resolved_manifest_source_type = _collapse_source_type_values(
+        [dataset.get("source_type_resolved") for dataset in manifest_datasets],
+        fallback=args.source_type,
+    )
+
     manifest_payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "task": "pose",
-        "source_type": args.source_type,
+        "source_type": resolved_manifest_source_type,
+        "source_type_requested": args.source_type,
         "input_format": args.input_format,
         "imgsz": manifest_imgsz,
         "datasets": manifest_datasets,
