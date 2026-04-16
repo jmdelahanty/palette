@@ -769,6 +769,13 @@ def _discover_merge_sources(
             or _as_text(manifest_payload.get("source_type"))
             or prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE
         )
+        source_type_resolved = str(source_type_resolved).strip().lower()
+        if source_type_resolved != prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE:
+            raise ValueError(
+                f"{source_zarr}: keypoint merged export requires crop lineage "
+                f"detection_source_type={prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE!r}, observed "
+                f"{source_type_resolved!r} on crop run '{source_crop_run}'."
+            )
 
         dish_design, canvas_name, rig_id = _extract_identity(dataset)
 
@@ -981,6 +988,11 @@ def _export_merged(
         or manifest_payload.get("source_type")
         or prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE
     ).strip().lower()
+    if requested_source_type != prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE:
+        raise ValueError(
+            "Keypoint merged export only supports refined-source manifests; "
+            f"observed source_type_requested={requested_source_type!r}."
+        )
 
     source_specs, layout = _discover_merge_sources(
         manifest_payload,
@@ -991,6 +1003,11 @@ def _export_merged(
         [spec.source_type_resolved for spec in source_specs],
         fallback=requested_source_type,
     )
+    if source_type != prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE:
+        raise ValueError(
+            "Keypoint merged export only supports refined-source datasets; "
+            f"resolved source_type={source_type!r}."
+        )
     merged_skeleton_id = _as_text(layout.get("skeleton_id"))
     merged_kpt_shape = _normalize_kpt_shape(layout.get("kpt_shape"))
     merged_skeleton_signature = (

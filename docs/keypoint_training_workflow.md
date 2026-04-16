@@ -42,7 +42,6 @@ Generate pose config + manifest without training:
 scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
-  --source-type refined \
   --input-format gray \
   --model-input gray \
   --keypoint-run latest_traditional \
@@ -61,7 +60,6 @@ Dry-run preflight:
 scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
-  --source-type refined \
   --input-format gray \
   --keypoint-run latest_traditional \
   --dry-run
@@ -76,7 +74,6 @@ reviewed runs:
 scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
-  --source-type refined \
   --input-format gray \
   --model-input gray \
   --keypoint-run latest_traditional \
@@ -122,7 +119,6 @@ Preflight + merged export + train:
 scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
-  --source-type refined \
   --input-format gray \
   --model-input gray \
   --keypoint-run latest_traditional \
@@ -141,7 +137,6 @@ Preflight + merged export + keypoint data-card aggregation (plots + view):
 scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
-  --source-type refined \
   --input-format gray \
   --model-input gray \
   --keypoint-run latest_traditional \
@@ -178,7 +173,6 @@ Optional ONNX/TRT after train:
 scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
-  --source-type refined \
   --input-format gray \
   --keypoint-run latest_traditional \
   --set-name cedar_shadow_pose \
@@ -193,7 +187,6 @@ Dry-run preflight (no files written):
 scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
-  --source-type refined \
   --input-format gray \
   --keypoint-run latest_traditional \
   --dry-run

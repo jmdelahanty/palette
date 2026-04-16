@@ -22,7 +22,6 @@ from fisheye.training.config import PoseConfig
 from fisheye.utils.system import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
 
-KEYPOINT_SOURCE_TYPE_CHOICES = ("refined", "detect", "filtered", "interpolated", "manual")
 DEFAULT_KEYPOINT_SOURCE_TYPE = "refined"
 
 
@@ -161,7 +160,7 @@ def _build_set_name_query_signature(args: argparse.Namespace, *, model_input: st
         "arena_id": args.arena_id,
         "path_contains": args.path_contains,
         "limit": args.limit,
-        "source_type": args.source_type,
+        "source_type": DEFAULT_KEYPOINT_SOURCE_TYPE,
         "input_format": args.input_format,
         "model_input": model_input,
         "keypoint_run": args.keypoint_run,
@@ -192,7 +191,7 @@ def _default_set_name(
         [
             _slug_component(dish_raw, fallback="all_dishes"),
             _slug_component(canvas_raw, fallback="unknown_canvas"),
-            _slug_component(args.source_type, fallback="source"),
+            _slug_component(DEFAULT_KEYPOINT_SOURCE_TYPE, fallback="source"),
             _slug_component(args.input_format, fallback="input"),
             _slug_component(args.keypoint_run, fallback="keypoints"),
             query_hash,
@@ -754,7 +753,7 @@ def _build_query_filter_payload(
     return {
         "tool": "fisheye.utils.prepare_keypoint_training_from_registry",
         "task": "pose",
-        "source_type": args.source_type,
+        "source_type": DEFAULT_KEYPOINT_SOURCE_TYPE,
         "input_format": args.input_format,
         "model_input": model_input,
         "keypoint_run": args.keypoint_run,
@@ -871,15 +870,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 
-    parser.add_argument(
-        "--source-type",
-        choices=list(KEYPOINT_SOURCE_TYPE_CHOICES),
-        default=DEFAULT_KEYPOINT_SOURCE_TYPE,
-        help=(
-            "Requested crop/detect source label for this training set "
-            f"(default: {DEFAULT_KEYPOINT_SOURCE_TYPE}; current canonical surface is refined)."
-        ),
-    )
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
         "--model-input",
@@ -1364,8 +1354,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 f"(roi_images={roi_total}, keypoints_roi={keypoints_total})."
             )
 
-        source_type_resolved = _decode_attr(crop_group.attrs.get("detection_source_type")) or "detect"
-        source_type_resolved = source_type_resolved.lower()
+        source_type_resolved = _decode_attr(crop_group.attrs.get("detection_source_type"))
+        source_type_resolved = str(source_type_resolved).strip().lower() if source_type_resolved is not None else None
+        if source_type_resolved != DEFAULT_KEYPOINT_SOURCE_TYPE:
+            raise ValueError(
+                f"{zarr_path.name}: keypoint training requires crop lineage "
+                f"detection_source_type={DEFAULT_KEYPOINT_SOURCE_TYPE!r}, observed "
+                f"{source_type_resolved or 'missing'!r} on crop run '{source_crop_run}'."
+            )
 
         keypoints_successful: Optional[int] = None
         keypoints_success_rate = _as_float(kp_group.attrs.get("success_rate"))
@@ -1555,7 +1551,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "rig_id": row["rig_id"],
                 "dish_design": row["dish_design"],
                 "canvas_name": row["canvas_name"],
-                "source_type_requested": args.source_type,
+                "source_type_requested": DEFAULT_KEYPOINT_SOURCE_TYPE,
                 "source_type_resolved": source_type_resolved,
                 "source_crop_run": source_crop_run,
                 "input_format": args.input_format,
@@ -1658,14 +1654,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     resolved_manifest_source_type = _collapse_source_type_values(
         [dataset.get("source_type_resolved") for dataset in manifest_datasets],
-        fallback=args.source_type,
+        fallback=DEFAULT_KEYPOINT_SOURCE_TYPE,
     )
 
     manifest_payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "task": "pose",
         "source_type": resolved_manifest_source_type,
-        "source_type_requested": args.source_type,
+        "source_type_requested": DEFAULT_KEYPOINT_SOURCE_TYPE,
         "input_format": args.input_format,
         "imgsz": manifest_imgsz,
         "datasets": manifest_datasets,
@@ -1692,7 +1688,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     }
 
     _print_summary(
-        source_type=args.source_type,
+        source_type=DEFAULT_KEYPOINT_SOURCE_TYPE,
         input_format=args.input_format,
         imgsz=manifest_imgsz,
         set_id=set_id,

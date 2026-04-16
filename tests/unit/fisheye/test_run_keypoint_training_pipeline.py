@@ -165,8 +165,6 @@ def test_auto_sets_out_manifest_when_missing(tmp_path: Path, monkeypatch) -> Non
     manifest_path = Path(prepare_cli[prepare_cli.index("--out-manifest") + 1])
     expected_manifest = dataset_root / "pose_pose_smoke_v001" / "pose_pose_smoke_v001.manifest.json"
     assert manifest_path.resolve() == expected_manifest.resolve()
-    assert "--source-type" in prepare_cli
-    assert prepare_cli[prepare_cli.index("--source-type") + 1] == "refined"
 
 
 def test_export_merged_invokes_exporter(tmp_path: Path, monkeypatch) -> None:

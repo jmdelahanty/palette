@@ -257,15 +257,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 
-    parser.add_argument(
-        "--source-type",
-        choices=list(prepare_from_registry.KEYPOINT_SOURCE_TYPE_CHOICES),
-        default=prepare_from_registry.DEFAULT_KEYPOINT_SOURCE_TYPE,
-        help=(
-            "Requested crop/detect source label for the training set "
-            f"(default: {prepare_from_registry.DEFAULT_KEYPOINT_SOURCE_TYPE})."
-        ),
-    )
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")
     parser.add_argument(
         "--model-input",
@@ -586,7 +577,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_arg(prepare_cli, "--arena-id", args.arena_id)
     _add_arg(prepare_cli, "--path-contains", args.path_contains)
     _add_arg(prepare_cli, "--limit", args.limit)
-    _add_arg(prepare_cli, "--source-type", args.source_type)
     _add_arg(prepare_cli, "--input-format", args.input_format)
     _add_arg(prepare_cli, "--model-input", args.model_input)
     _add_arg(prepare_cli, "--keypoint-run", args.keypoint_run)

@@ -221,6 +221,19 @@ def test_discover_merge_sources_prefers_crop_resolved_source_type(tmp_path: Path
     assert specs[0].source_type_resolved == "refined"
 
 
+def test_discover_merge_sources_rejects_non_refined_crop_lineage(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared", detection_source_type="filtered")
+    manifest = _manifest_for_single_source(zarr_path)
+
+    with pytest.raises(ValueError, match="keypoint merged export requires crop lineage detection_source_type='refined'"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+        )
+
+
 def test_discover_merge_sources_rejects_mixed_skeleton_identities(tmp_path: Path) -> None:
     zarr_a = tmp_path / "source_a.zarr"
     zarr_b = tmp_path / "source_b.zarr"

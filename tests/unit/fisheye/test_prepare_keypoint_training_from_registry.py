@@ -239,7 +239,7 @@ def _seed_registry(registry_path: Path, zarr_path: Path) -> None:
 
 def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
-    _create_minimal_pose_zarr(zarr_path, detection_source_type="filtered")
+    _create_minimal_pose_zarr(zarr_path)
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     base_config_path = tmp_path / "pose_base.yaml"
@@ -255,8 +255,6 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "filtered",
             "--input-format",
             "gray",
             "--set-name",
@@ -276,7 +274,7 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
     cfg = yaml.safe_load(out_config.read_text(encoding="utf-8"))
     assert cfg["task"] == "pose"
     dataset_cfg = cfg["datasets"]["pose_sample"]
-    assert dataset_cfg["source_type"] == "filtered"
+    assert dataset_cfg["source_type"] == "refined"
     assert dataset_cfg["keypoint_run"] == "kp_pose_001"
 
     manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
@@ -300,7 +298,7 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
 
 def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsys, monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
-    _create_minimal_pose_zarr(zarr_path, detection_source_type="filtered")
+    _create_minimal_pose_zarr(zarr_path)
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     base_config_path = tmp_path / "pose_base.yaml"
@@ -314,8 +312,6 @@ def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsy
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "filtered",
             "--input-format",
             "gray",
             "--dry-run",
@@ -331,7 +327,7 @@ def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsy
 
 def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
-    _create_minimal_pose_zarr(zarr_path, detection_source_type="filtered")
+    _create_minimal_pose_zarr(zarr_path)
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     base_config_path = tmp_path / "pose_base.yaml"
@@ -346,8 +342,6 @@ def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(monkeypatch, 
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "filtered",
             "--input-format",
             "gray",
             "--register",
@@ -360,7 +354,7 @@ def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(monkeypatch, 
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
     set_name = manifest["set_name"]
     set_id = manifest["set_id"]
-    assert set_name.startswith("cedar_defaultscreen_filtered_gray_latest_traditional_")
+    assert set_name.startswith("cedar_defaultscreen_refined_gray_latest_traditional_")
     assert len(set_name.rsplit("_", 1)[-1]) == 8
     assert set_id == f"pose_{set_name}_v001"
 
@@ -412,6 +406,32 @@ def test_prepare_keypoint_from_registry_defaults_manifest_source_type_to_refined
     assert manifest["datasets"][0]["source_type_resolved"] == "refined"
 
 
+def test_prepare_keypoint_from_registry_rejects_non_refined_crop_lineage(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(zarr_path, detection_source_type="filtered")
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="keypoint training requires crop lineage detection_source_type='refined'"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--input-format",
+                "gray",
+                "--dry-run",
+            ]
+        )
+
+
 def test_prepare_keypoint_from_registry_requires_source_crop_run(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "pose_sample.zarr"
     _create_minimal_pose_zarr(zarr_path, include_source_crop_run=False)
@@ -429,8 +449,6 @@ def test_prepare_keypoint_from_registry_requires_source_crop_run(monkeypatch, tm
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "filtered",
                 "--input-format",
                 "gray",
                 "--dry-run",
@@ -455,8 +473,6 @@ def test_prepare_keypoint_from_registry_fails_on_roi_keypoint_row_mismatch(monke
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "filtered",
                 "--input-format",
                 "gray",
                 "--dry-run",
@@ -487,8 +503,6 @@ def test_prepare_keypoint_from_registry_fails_on_detection_success_row_mismatch(
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "filtered",
                 "--input-format",
                 "gray",
                 "--dry-run",
@@ -522,8 +536,6 @@ def test_prepare_keypoint_from_registry_enforces_review_status_and_quality(monke
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "manual",
             "--input-format",
             "gray",
             "--min-usable-keypoints-rate",
@@ -565,8 +577,6 @@ def test_prepare_keypoint_from_registry_fails_when_review_status_missing(monkeyp
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "manual",
                 "--input-format",
                 "gray",
                 "--require-review-state",
@@ -603,8 +613,6 @@ def test_prepare_keypoint_from_registry_exclusion_is_nonfatal(monkeypatch, tmp_p
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "manual",
                 "--input-format",
                 "gray",
                 "--require-review-state",
@@ -667,8 +675,6 @@ def test_prepare_keypoint_from_registry_review_gate_falls_back_to_reviewed_sourc
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "manual",
             "--input-format",
             "gray",
             "--keypoint-run",
@@ -745,8 +751,6 @@ def test_prepare_keypoint_from_registry_review_gate_is_strict_without_fallback_f
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "manual",
                 "--input-format",
                 "gray",
                 "--keypoint-run",
@@ -801,8 +805,6 @@ def test_prepare_keypoint_from_registry_accepts_legacy_refined_group_name(monkey
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "manual",
             "--input-format",
             "gray",
             "--require-review-state",
@@ -851,8 +853,6 @@ def test_prepare_keypoint_from_registry_fails_closed_on_stale_quality_row(
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "manual",
                 "--input-format",
                 "gray",
                 "--require-review-state",
@@ -900,8 +900,6 @@ def test_prepare_keypoint_from_registry_fails_closed_on_quality_divergence(
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "manual",
                 "--input-format",
                 "gray",
                 "--require-review-state",
@@ -949,8 +947,6 @@ def test_prepare_keypoint_from_registry_fails_on_mixed_skeleton_signatures(
                 str(registry_path),
                 "--base-config",
                 str(base_config_path),
-                "--source-type",
-                "filtered",
                 "--input-format",
                 "gray",
                 "--dry-run",
@@ -1002,8 +998,6 @@ def test_prepare_keypoint_from_registry_prefers_refined_annotation_source_skelet
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "manual",
             "--input-format",
             "gray",
             "--require-review-state",
@@ -1095,8 +1089,6 @@ def test_prepare_keypoint_from_registry_filters_to_requested_skeleton(
             str(registry_path),
             "--base-config",
             str(base_config_path),
-            "--source-type",
-            "filtered",
             "--input-format",
             "gray",
             "--require-review-state",
