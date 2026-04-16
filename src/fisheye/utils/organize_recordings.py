@@ -372,6 +372,17 @@ def _build_plan(
     if update_timing.exists():
         raw_files.append(PlannedFile(update_timing, update_timing.name))
 
+    # Move the full recording_snapshot.json into raw/ as
+    # recording_snapshot_runtime.json — the unfiltered original from Citrus,
+    # preserved alongside the H5 as a recovery backup. The per-camera
+    # filtered version is written separately by --snapshot / _write_snapshot
+    # into derived/recording_snapshot.json.
+    for snapshot_name in ("recording_snapshot.json", "recording_snapshot"):
+        snapshot_candidate = h5_path.parent / snapshot_name
+        if snapshot_candidate.exists():
+            raw_files.append(PlannedFile(snapshot_candidate, "recording_snapshot_runtime.json"))
+            break
+
     if camera_id:
         search_roots = [h5_path.parent]
         if cam_root is not None:
@@ -1123,6 +1134,8 @@ def main() -> int:
                     for warning in cleanup_warnings:
                         logger.log("warning", batch_source=str(source_path), message=warning)
             if args.cleanup_staging:
+                # Snapshot names kept as safety net — normally moved to raw/
+                # by _build_plan, but may remain if no H5 was found.
                 ignore_names = {"TRANSFER_DONE", "recording_snapshot.json", "recording_snapshot"}
                 ignore_names.update(args.cleanup_ignore)
                 cleanup_warnings = _cleanup_staging_dirs(

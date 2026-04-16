@@ -5,10 +5,22 @@ recordings have been [organized](organize_recordings.md). Each step reads from
 the analysis Zarr and appends its outputs there, so the Zarr is the single
 source of truth for a recording's analysis state.
 
+Recommended pre-import order:
+
+1. organize recordings into the standard recording directory layout
+2. run the [video diagnostics preflight](video_diagnostics.md) against the
+   organized recording to check `raw/`, `cams/`, and paired `Cam..._meta.csv`
+   camera metadata files
+3. if `Media` passes, import the recording into its analysis Zarr
+4. continue with detection and downstream analysis stages
+
 ## Overview
 
 ```
 organize recordings
+       |
+       v
+recommended video diagnostics preflight
        |
        v
   1. import (create analysis zarr, import metadata + stimulus)
