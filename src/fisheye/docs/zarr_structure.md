@@ -1229,6 +1229,9 @@ Examples:
   (`roi_thresh`, `se1_radius`, `se2_radius`, `min_area`, `min_valid_angle`,
   `max_valid_angle`, `min_triangle_area`, plus `tuned_on_frame` and
   `tuned_on_detection`).
+  These are stage-local tuned overrides; packaged traditional defaults now
+  live under `configs/fisheye/pose_heuristics/traditional_pose/` and should be
+  treated as the shared baseline when no tuning block is present.
 - `attrs["eye_mask_tuning"]` – parameters saved from the eye mask tuner:
   - `method`: `"global_threshold_otsu"`
   - `version`: Schema version (e.g., `"1.0"`)

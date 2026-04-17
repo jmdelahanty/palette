@@ -20,6 +20,17 @@ This contract covers:
 - how readers resolve precedence between run metadata and skeleton metadata
 - how UI/editing tools determine whether an edited keypoint affects heading
 
+This contract does not cover:
+
+- unlabeled blob-assignment policy
+- geometry acceptance thresholds
+- heading temporal outlier policy
+- flip-detection family selection
+
+Those are heuristic-policy concerns, not heading semantics. See:
+
+- `docs/pose_heuristic_profile_contract.md`
+
 This contract does not require every keypoint run to define heading semantics.
 Runs may explicitly disable heading computation or omit it entirely.
 
@@ -218,6 +229,11 @@ If heading metadata is absent or disabled:
 - rendering stored `heading` is still allowed when present
 - candidate-heading preview should be disabled unless the consumer explicitly
   enters a temporary legacy-compatibility mode
+
+## Related Docs
+
+- `docs/pose_heuristic_profile_contract.md`
+- `docs/pose_schema_heuristics_split_proposal.md`
 
 ### Editing / dashed candidate preview
 

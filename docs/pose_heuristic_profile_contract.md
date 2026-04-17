@@ -1,7 +1,7 @@
 # Pose Heuristic Profile Contract
 <!-- contract-meta
 version: 1
-status: draft
+status: active
 last_verified: 2026-04-17
 -->
 
@@ -52,6 +52,30 @@ Out of scope:
 - mandatory runtime adoption by every existing tool
 - Crimson consumer behavior
 
+## Current Runtime Adoption
+
+As of 2026-04-17:
+
+- `src/fisheye/detection/detect_keypoints_traditional.py` loads the packaged
+  `traditional_pose/traditional_v1.json` profile for blob-assignment and
+  geometry-QC defaults
+- `src/fisheye/tune/keypoint_tuner.py` uses the same packaged
+  `traditional_pose/traditional_v1.json` profile for its default sliders,
+  unlabeled blob assignment, and saved tuning defaults
+
+Important limitation:
+
+- the raw traditional detector/tuner still operate on the starter 3-point
+  skeleton, so they currently resolve `traditional_v1`
+- the packaged `traditional_v2` profile exists so other skeleton-aware tools
+  can share the same policy shape, but the raw 3-blob detector/tuner do not
+  automatically select it
+
+Still pending:
+
+- refined/manual/retry paths that should share packaged heuristic defaults
+- any run-level override contract beyond existing stage-local tuning attrs
+
 ## Packaged Config Location
 
 Packaged defaults should live at:
@@ -84,6 +108,10 @@ Recommended packaged-default lookup:
 5. if absent, no heuristic profile is available
 
 This contract does not yet define a run-level override mechanism.
+
+Current packaged runtime adoption uses these profiles as shared defaults only.
+Stage-local tuned params such as `analysis_metadata.attrs["keypoint_tuning"]`
+may still override those defaults for one recording or run.
 
 ## Design Principles
 
@@ -224,6 +252,14 @@ Supported `v1` fields:
 
 These are defaults, not canonical pose meaning.
 
+Current traditional packaged defaults in this repo intentionally match the
+existing runtime baseline:
+
+- `min_triangle_angle_deg = 10.0`
+- `max_triangle_angle_deg = 90.0`
+- `min_triangle_area_px = 100.0`
+- `max_triangle_area_px = null`
+
 ## `heading_qc`
 
 Packaged default thresholds for heading-based review heuristics.
@@ -337,6 +373,8 @@ Selects the heuristic family used for left/right eye flip correction.
 - consumers should load heuristic profiles only when they need method policy
 - consumers should continue to use `pose_schema.metadata.heading_computation`
   for semantic heading interpretation
+- current traditional detector/tuner readers fail closed if the required
+  packaged `blob_assignment` or `geometry_qc` sections are missing
 - if a required heuristic profile is missing, the consumer should either:
   - fall back to existing hardcoded legacy behavior during migration, or
   - fail with a clear unsupported-profile error

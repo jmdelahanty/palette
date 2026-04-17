@@ -181,13 +181,24 @@ separation of concerns.
 Short term:
 
 - keep heading semantics in `pose_schema.metadata.heading_computation`
-- leave remaining traditional detector heuristics in code until a heuristic
-  profile surface exists
+- use packaged heuristic profiles for shared traditional detector/tuner
+  defaults where the policy is genuinely method-level rather than run-local
+- keep stage-local tuning attrs when operators need one-off overrides
+
+Current state:
+
+- packaged profiles now exist under
+  `configs/fisheye/pose_heuristics/traditional_pose/`
+- `detect_keypoints_traditional` and `keypoint_tuner` load the packaged
+  `traditional_v1` profile for blob assignment and geometry-QC defaults
+- the raw traditional detector/tuner still target the starter 3-point layout,
+  so packaged `traditional_v2` is available for future skeleton-aware readers
+  rather than selected automatically by those tools
 
 Medium term:
 
-- move traditional unlabeled-blob assignment policy into packaged heuristic
-  configs
+- move remaining reusable traditional review/refine policy into packaged
+  heuristic configs where it should be shared
 - move reusable QC threshold defaults into heuristic profiles
 - keep run-level tuning attrs only for explicit local deviation
 

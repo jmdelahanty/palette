@@ -40,6 +40,8 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
 - [ ] Add explicit policy section to keypoint contracts:
   - recording-level: multiple skeleton runs allowed
   - training-set-level: single skeleton required
+- [x] Define packaged heuristic profiles as a separate config surface from
+      `pose_schema.metadata`.
 - [ ] Define canonical skeleton identity source precedence:
   1) explicit `skeleton_id` attr
   2) `pose_schema.skeleton_id`
@@ -48,13 +50,23 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   - `skeleton_id`
   - `kpt_shape`
   - `pose_schema` (nodes/edges/metadata)
+  - optional `heading_computation_override`
+- [x] Define heading metadata precedence:
+  1) run attr `heading_computation_override`
+  2) `pose_schema.metadata.heading_computation`
+  3) deprecated run attr `heading_computation`
+  4) disabled / unavailable
 
 ## Phase 1: Data Model Hardening
 
 - [ ] Ensure writers set `skeleton_id` and `kpt_shape` explicitly on new
       `keypoints_runs/*` and `refined_keypoints_runs/*` (not only `pose_schema`).
-- [ ] Add maintenance/backfill utility to populate missing run attrs from
-      existing `pose_schema`.
+- [x] Ensure new runs that persist meaningful `heading` set canonical heading
+      semantics in `pose_schema.metadata.heading_computation`.
+- [ ] Only use `heading_computation_override` for explicit run-level divergence
+      or disable behavior.
+- [x] Add maintenance/backfill utility to populate missing
+      `pose_schema.metadata.heading_computation` on existing keypoint runs.
 - [ ] Verify registry ingestion continues to map skeleton specs into
       `pose_skeleton_specs` and `keypoint_data_profile`.
 
@@ -77,6 +89,9 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
       `(N,K,2)` where valid.
 - [ ] Update keypoint detect/refine code paths that allocate fixed 3-point
       tensors.
+- [x] Switch the traditional raw detector and interactive tuner from hardcoded
+      geometry/blob-assignment defaults to packaged `pose_heuristics`
+      profiles.
 - [ ] Update downstream consumers that index fixed eye landmarks by position:
   - use label-based resolution (`swim_bladder`, `eye_left`, `eye_right`) where required
   - fail with clear errors when required labels are missing
@@ -141,6 +156,8 @@ surface needs a careful skeleton-aware policy before we denormalize them.
 ## Related Docs
 
 - `docs/keypoint_training_data_card_contract.md`
+- `docs/pose_heuristic_profile_contract.md`
+- `docs/pose_schema_heuristics_split_proposal.md`
 - `docs/traditional_v2_keypoint_migration_design.md`
 - `docs/keypoint_derived_metric_schema_contract.md`
 - `docs/keypoint_data_profile_schema_contract.md`
