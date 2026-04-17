@@ -34,6 +34,11 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..pose.heading import compute_heading_from_spec
+from ..pose.heuristics import (
+    heuristic_profile_from_package,
+    require_blob_assignment,
+    require_geometry_qc,
+)
 from ..pose.schema import schema_from_package
 
 # Optional distributed
@@ -47,8 +52,44 @@ from ..utils.system import get_environment_info
 
 
 TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
+TRADITIONAL_HEURISTIC_PROFILE = heuristic_profile_from_package(
+    "traditional_pose", TRADITIONAL_POSE_SCHEMA.name
+)
+TRADITIONAL_BLOB_ASSIGNMENT = require_blob_assignment(
+    TRADITIONAL_HEURISTIC_PROFILE,
+    family="triangle_3blob",
+)
+TRADITIONAL_GEOMETRY_QC = require_geometry_qc(TRADITIONAL_HEURISTIC_PROFILE)
 _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
+
+
+def _required_geometry_default(value: Optional[float], field_name: str) -> float:
+    if value is None:
+        raise RuntimeError(
+            "Traditional pose heuristic profile is missing "
+            f"'geometry_qc.{field_name}'."
+        )
+    return float(value)
+
+
+DEFAULT_MIN_VALID_ANGLE = _required_geometry_default(
+    TRADITIONAL_GEOMETRY_QC.min_triangle_angle_deg,
+    "min_triangle_angle_deg",
+)
+DEFAULT_MAX_VALID_ANGLE = _required_geometry_default(
+    TRADITIONAL_GEOMETRY_QC.max_triangle_angle_deg,
+    "max_triangle_angle_deg",
+)
+DEFAULT_MIN_TRIANGLE_AREA = _required_geometry_default(
+    TRADITIONAL_GEOMETRY_QC.min_triangle_area_px,
+    "min_triangle_area_px",
+)
+DEFAULT_MAX_TRIANGLE_AREA = (
+    float(TRADITIONAL_GEOMETRY_QC.max_triangle_area_px)
+    if TRADITIONAL_GEOMETRY_QC.max_triangle_area_px is not None
+    else None
+)
 
 
 def _resolve_traditional_crop_background_inputs(
@@ -141,10 +182,10 @@ def detect_keypoints_traditional(
     se1_radius: int = 1,
     se2_radius: int = 2,
     min_area: int = 5,
-    min_valid_angle: float = 10.0,
-    max_valid_angle: float = 90.0,
-    min_triangle_area: float = 100.0,
-    max_triangle_area: Optional[float] = None
+    min_valid_angle: float = DEFAULT_MIN_VALID_ANGLE,
+    max_valid_angle: float = DEFAULT_MAX_VALID_ANGLE,
+    min_triangle_area: float = DEFAULT_MIN_TRIANGLE_AREA,
+    max_triangle_area: Optional[float] = DEFAULT_MAX_TRIANGLE_AREA,
 ) -> Optional[Dict[str, Any]]:
     """
     Detect keypoints (swim bladder and eyes) in a fish ROI using traditional CV methods.
@@ -258,12 +299,15 @@ def identify_keypoints_by_geometry(
     
     pts = np.array([s.centroid[::-1] for s in keypoint_stats])
     
+    if TRADITIONAL_BLOB_ASSIGNMENT.bladder_vertex_rule != "smallest_angle":
+        raise ValueError(
+            "Unsupported traditional blob assignment rule "
+            f"'{TRADITIONAL_BLOB_ASSIGNMENT.bladder_vertex_rule}'."
+        )
+
     angles, _ = calculate_triangle_metrics(pts[0], pts[1], pts[2])
-    kp_idx = np.argsort(angles)
-    
-    # Bladder at smallest angle (furthest from eye pair)
-    bladder_idx = kp_idx[0]
-    eye_indices = kp_idx[1:3]
+    bladder_idx = int(np.argmin(angles))
+    eye_indices = [idx for idx in range(3) if idx != bladder_idx]
     
     heading = compute_heading_from_spec(
         TRADITIONAL_POSE_SCHEMA.metadata.get("heading_computation"),
@@ -279,13 +323,31 @@ def identify_keypoints_by_geometry(
     )
     eye_mean = np.mean(pts[eye_indices], axis=0)
 
-    R = rotation_matrix_2d(heading)
-    rotated_pts = (pts - eye_mean) @ R.T
-    
-    if rotated_pts[eye_indices[0], 1] > rotated_pts[eye_indices[1], 1]:
-        eye_r_idx, eye_l_idx = eye_indices[0], eye_indices[1]
+    eye_l_idx: Optional[int] = None
+    eye_r_idx: Optional[int] = None
+    if TRADITIONAL_BLOB_ASSIGNMENT.left_right_rule == "heading_relative":
+        R = rotation_matrix_2d(heading)
+        rotated_pts = (pts - eye_mean) @ R.T
+        if rotated_pts[eye_indices[0], 1] > rotated_pts[eye_indices[1], 1]:
+            eye_r_idx, eye_l_idx = eye_indices[0], eye_indices[1]
+        else:
+            eye_r_idx, eye_l_idx = eye_indices[1], eye_indices[0]
     else:
-        eye_r_idx, eye_l_idx = eye_indices[1], eye_indices[0]
+        raise ValueError(
+            "Unsupported traditional blob assignment rule "
+            f"'{TRADITIONAL_BLOB_ASSIGNMENT.left_right_rule}'."
+        )
+
+    if eye_l_idx is None or eye_r_idx is None:
+        if TRADITIONAL_BLOB_ASSIGNMENT.fallback_rule != "image_x_order":
+            raise ValueError(
+                "Unsupported traditional blob assignment fallback "
+                f"'{TRADITIONAL_BLOB_ASSIGNMENT.fallback_rule}'."
+            )
+        if pts[eye_indices[0], 0] <= pts[eye_indices[1], 0]:
+            eye_l_idx, eye_r_idx = eye_indices[0], eye_indices[1]
+        else:
+            eye_l_idx, eye_r_idx = eye_indices[1], eye_indices[0]
     
     return {
         'bladder': pts[bladder_idx],
@@ -430,10 +492,14 @@ def process_keypoint_chunk_delayed(
             se1_radius=detection_params.get('se1_radius', 1),
             se2_radius=detection_params.get('se2_radius', 2),
             min_area=detection_params.get('min_area', 5),
-            min_valid_angle=detection_params.get('min_valid_angle', 10.0),
-            max_valid_angle=detection_params.get('max_valid_angle', 90.0),
-            min_triangle_area=detection_params.get('min_triangle_area', 100.0),
-            max_triangle_area=detection_params.get('max_triangle_area')
+            min_valid_angle=detection_params.get('min_valid_angle', DEFAULT_MIN_VALID_ANGLE),
+            max_valid_angle=detection_params.get('max_valid_angle', DEFAULT_MAX_VALID_ANGLE),
+            min_triangle_area=detection_params.get(
+                'min_triangle_area', DEFAULT_MIN_TRIANGLE_AREA
+            ),
+            max_triangle_area=detection_params.get(
+                'max_triangle_area', DEFAULT_MAX_TRIANGLE_AREA
+            ),
         )
         
         if keypoints is None:
@@ -507,10 +573,10 @@ def get_keypoint_parameters(root: zarr.Group, config: Dict[str, Any], console: O
     keypoint_params.setdefault('se1_radius', 1)
     keypoint_params.setdefault('se2_radius', 2)
     keypoint_params.setdefault('min_area', 5)
-    keypoint_params.setdefault('min_valid_angle', 10.0)
-    keypoint_params.setdefault('max_valid_angle', 90.0)
-    keypoint_params.setdefault('min_triangle_area', 100.0)
-    keypoint_params.setdefault('max_triangle_area', None)
+    keypoint_params.setdefault('min_valid_angle', DEFAULT_MIN_VALID_ANGLE)
+    keypoint_params.setdefault('max_valid_angle', DEFAULT_MAX_VALID_ANGLE)
+    keypoint_params.setdefault('min_triangle_area', DEFAULT_MIN_TRIANGLE_AREA)
+    keypoint_params.setdefault('max_triangle_area', DEFAULT_MAX_TRIANGLE_AREA)
     
     param_source = 'config_default'
     

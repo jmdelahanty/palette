@@ -40,6 +40,11 @@ from skimage.measure import label, regionprops
 try:
     from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
     from ..pose.heading import compute_heading_from_attrs, compute_heading_from_spec
+    from ..pose.heuristics import (
+        heuristic_profile_from_package,
+        require_blob_assignment,
+        require_geometry_qc,
+    )
     from ..pose.schema import schema_from_package
     from ..refinement.keypoint_quality import compute_geometry_metrics
     from ..refinement.refine_keypoints import _detect_eye_flip
@@ -47,24 +52,15 @@ try:
 except ImportError:  # pragma: no cover - fallback for script execution
     from fisheye.detection.detect_keypoints_traditional import detect_keypoints_traditional
     from fisheye.pose.heading import compute_heading_from_attrs, compute_heading_from_spec
+    from fisheye.pose.heuristics import (
+        heuristic_profile_from_package,
+        require_blob_assignment,
+        require_geometry_qc,
+    )
     from fisheye.pose.schema import schema_from_package
     from fisheye.refinement.keypoint_quality import compute_geometry_metrics
     from fisheye.refinement.refine_keypoints import _detect_eye_flip
     from fisheye.shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
-
-# Global variables for trackbar values
-current_frame = 1
-min_valid_angle = 10
-max_valid_angle = 90
-min_triangle_area = 100
-max_triangle_area = 0
-current_detection = 0
-roi_thresh = 50
-se1_radius = 1
-se2_radius = 2
-min_area = 5
-use_difference = 1  # Default to using difference (matches actual pipeline)
-show_geometry = 1   # Show triangle geometry analysis
 
 MIN_AREA_SLIDER_MAX = 1000
 MIN_TRI_AREA_SLIDER_MAX = 2000
@@ -75,6 +71,61 @@ EVAL_SAMPLE_DEFAULT = 300
 APPLY_BATCH_DEFAULT = 128
 APPLY_WORKERS_DEFAULT = max(1, min(4, os.cpu_count() or 1))
 TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
+TRADITIONAL_HEURISTIC_PROFILE = heuristic_profile_from_package(
+    "traditional_pose", TRADITIONAL_POSE_SCHEMA.name
+)
+TRADITIONAL_BLOB_ASSIGNMENT = require_blob_assignment(
+    TRADITIONAL_HEURISTIC_PROFILE,
+    family="triangle_3blob",
+)
+TRADITIONAL_GEOMETRY_QC = require_geometry_qc(TRADITIONAL_HEURISTIC_PROFILE)
+
+
+def _required_geometry_default(value: Optional[float], field_name: str) -> float:
+    if value is None:
+        raise RuntimeError(
+            "Traditional pose heuristic profile is missing "
+            f"'geometry_qc.{field_name}'."
+        )
+    return float(value)
+
+
+DEFAULT_MIN_VALID_ANGLE = _required_geometry_default(
+    TRADITIONAL_GEOMETRY_QC.min_triangle_angle_deg,
+    "min_triangle_angle_deg",
+)
+DEFAULT_MAX_VALID_ANGLE = _required_geometry_default(
+    TRADITIONAL_GEOMETRY_QC.max_triangle_angle_deg,
+    "max_triangle_angle_deg",
+)
+DEFAULT_MIN_TRIANGLE_AREA = _required_geometry_default(
+    TRADITIONAL_GEOMETRY_QC.min_triangle_area_px,
+    "min_triangle_area_px",
+)
+DEFAULT_MAX_TRIANGLE_AREA = (
+    float(TRADITIONAL_GEOMETRY_QC.max_triangle_area_px)
+    if TRADITIONAL_GEOMETRY_QC.max_triangle_area_px is not None
+    else None
+)
+DEFAULT_MAX_TRIANGLE_AREA_SLIDER = (
+    int(round(DEFAULT_MAX_TRIANGLE_AREA))
+    if DEFAULT_MAX_TRIANGLE_AREA is not None and DEFAULT_MAX_TRIANGLE_AREA > 0
+    else 0
+)
+
+# Global variables for trackbar values
+current_frame = 1
+min_valid_angle = int(round(DEFAULT_MIN_VALID_ANGLE))
+max_valid_angle = int(round(DEFAULT_MAX_VALID_ANGLE))
+min_triangle_area = int(round(DEFAULT_MIN_TRIANGLE_AREA))
+max_triangle_area = DEFAULT_MAX_TRIANGLE_AREA_SLIDER
+current_detection = 0
+roi_thresh = 50
+se1_radius = 1
+se2_radius = 2
+min_area = 5
+use_difference = 1  # Default to using difference (matches actual pipeline)
+show_geometry = 1   # Show triangle geometry analysis
 
 def update_frame(val):
     global current_frame
@@ -211,10 +262,10 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
     keypoint_stats = []
     last_roi_stats = []
     effective_se2_radius = current_se2_radius
-    min_angle_threshold = params.get('min_valid_angle', 10.0)
-    max_angle_threshold = params.get('max_valid_angle', 90.0)
-    min_triangle_area = params.get('min_triangle_area', 100.0)  # NEW
-    max_triangle_area = params.get('max_triangle_area')
+    min_angle_threshold = params.get('min_valid_angle', DEFAULT_MIN_VALID_ANGLE)
+    max_angle_threshold = params.get('max_valid_angle', DEFAULT_MAX_VALID_ANGLE)
+    min_triangle_area = params.get('min_triangle_area', DEFAULT_MIN_TRIANGLE_AREA)
+    max_triangle_area = params.get('max_triangle_area', DEFAULT_MAX_TRIANGLE_AREA)
     angle_min = min(min_angle_threshold, max_angle_threshold)
     angle_max = max(min_angle_threshold, max_angle_threshold)
     
@@ -305,10 +356,14 @@ def save_keypoint_params(zarr_path, params):
                 'se1_radius': params['se1_radius'],
                 'se2_radius': params['se2_radius'],
                 'min_area': params['min_area'],
-                'min_valid_angle': params.get('min_valid_angle', 10),
-                'max_valid_angle': params.get('max_valid_angle', 90),
-            'min_triangle_area': params.get('min_triangle_area', 100),
-            'max_triangle_area': params.get('max_triangle_area'),
+                'min_valid_angle': params.get('min_valid_angle', DEFAULT_MIN_VALID_ANGLE),
+                'max_valid_angle': params.get('max_valid_angle', DEFAULT_MAX_VALID_ANGLE),
+                'min_triangle_area': params.get(
+                    'min_triangle_area', DEFAULT_MIN_TRIANGLE_AREA
+                ),
+                'max_triangle_area': params.get(
+                    'max_triangle_area', DEFAULT_MAX_TRIANGLE_AREA
+                ),
             },
             'tuned_on_frame': params.get('frame_index', None),
             'tuned_on_detection': params.get('detection_index', None)
@@ -602,9 +657,8 @@ def identify_keypoints_by_geometry(keypoint_stats):
     """
     Identify which blob is the bladder and which are eyes.
     
-    Uses geometric criteria:
-    - Bladder should be at vertex with largest angle (obtuse)
-    - Eyes should form acute angles with bladder
+    Uses the packaged traditional pose heuristic profile to map the three
+    candidate blobs onto swim bladder / eye labels.
     """
     if len(keypoint_stats) != 3:
         return None
@@ -615,8 +669,13 @@ def identify_keypoints_by_geometry(keypoint_stats):
     # Calculate angles at each vertex
     angles = calculate_triangle_angles(centroids[0], centroids[1], centroids[2])
     
-    # Bladder should be at the vertex with the largest angle (typically obtuse)
-    bladder_idx = np.argmin(angles)
+    if TRADITIONAL_BLOB_ASSIGNMENT.bladder_vertex_rule != "smallest_angle":
+        raise ValueError(
+            "Unsupported traditional blob assignment rule "
+            f"'{TRADITIONAL_BLOB_ASSIGNMENT.bladder_vertex_rule}'."
+        )
+
+    bladder_idx = int(np.argmin(angles))
     eye_indices = [i for i in range(3) if i != bladder_idx]
     
     bladder = centroids[bladder_idx]
@@ -640,7 +699,7 @@ def identify_keypoints_by_geometry(keypoint_stats):
 
     left_eye_idx = None
     right_eye_idx = None
-    if dx or dy:
+    if TRADITIONAL_BLOB_ASSIGNMENT.left_right_rule == "heading_relative" and (dx or dy):
         # Determine left/right relative to heading so rotated view is stable.
         left_vec = np.array([-dx, dy], dtype=np.float64)  # (y, x) vector for "left" side
         eye_vecs = eyes - bladder
@@ -648,9 +707,18 @@ def identify_keypoints_by_geometry(keypoint_stats):
         if dots[0] != dots[1]:
             left_eye_idx = eye_indices[int(np.argmax(dots))]
             right_eye_idx = eye_indices[int(np.argmin(dots))]
+    elif TRADITIONAL_BLOB_ASSIGNMENT.left_right_rule != "heading_relative":
+        raise ValueError(
+            "Unsupported traditional blob assignment rule "
+            f"'{TRADITIONAL_BLOB_ASSIGNMENT.left_right_rule}'."
+        )
 
     if left_eye_idx is None or right_eye_idx is None:
-        # Fallback to image-space x ordering
+        if TRADITIONAL_BLOB_ASSIGNMENT.fallback_rule != "image_x_order":
+            raise ValueError(
+                "Unsupported traditional blob assignment fallback "
+                f"'{TRADITIONAL_BLOB_ASSIGNMENT.fallback_rule}'."
+            )
         eye_x = [centroids[i][1] for i in eye_indices]
         if eye_x[0] < eye_x[1]:
             left_eye_idx, right_eye_idx = eye_indices[0], eye_indices[1]
@@ -819,7 +887,7 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
     slider_info = (
         f"Thresh:{params['roi_thresh']} | SE1:{params['se1_radius']} "
         f"| SE2 slider:{params['se2_radius']} | SE2 eff:{effective_se2} "
-        f"| MinArea:{params['min_area']} | Ang:{params['min_valid_angle']}-{params.get('max_valid_angle', 90)} "
+        f"| MinArea:{params['min_area']} | Ang:{params['min_valid_angle']}-{params.get('max_valid_angle', DEFAULT_MAX_VALID_ANGLE)} "
         f"| MinTri:{params['min_triangle_area']} | MaxTri:{max_tri_label}"
     )
     cv2.putText(panel4, slider_info, (10, 38),
@@ -1010,13 +1078,17 @@ def run_failure_tuner(
     summary_raw = refined.attrs.get("summary_statistics", {})
     summary = summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
     confidence_threshold = float(summary.get("confidence_threshold", 0.3))
-    min_triangle_angle = float(summary.get("min_triangle_angle", 10.0))
-    min_triangle_area = float(summary.get("min_triangle_area", 100.0))
+    min_triangle_angle = float(summary.get("min_triangle_angle", DEFAULT_MIN_VALID_ANGLE))
+    min_triangle_area = float(summary.get("min_triangle_area", DEFAULT_MIN_TRIANGLE_AREA))
     max_summary = summary.get("max_triangle_area")
     try:
-        max_triangle_area = float(max_summary) if max_summary is not None else 0
+        max_triangle_area = (
+            float(max_summary)
+            if max_summary is not None
+            else DEFAULT_MAX_TRIANGLE_AREA_SLIDER
+        )
     except (TypeError, ValueError):
-        max_triangle_area = 0
+        max_triangle_area = DEFAULT_MAX_TRIANGLE_AREA_SLIDER
 
     apply_batch_size = max(1, int(apply_batch_size))
     apply_workers = max(1, int(apply_workers))

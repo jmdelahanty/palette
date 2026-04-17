@@ -1,0 +1,36 @@
+{
+  "profile_name": "traditional_pose_traditional_v2",
+  "profile_version": "v1",
+  "method": "traditional_pose",
+  "source_pose_schema": "traditional_v2",
+  "skeleton_id": "pose_skel_traditional_v2",
+  "label_requirements": {
+    "required_labels": [
+      "swim_bladder",
+      "eye_left",
+      "eye_right",
+      "snout_tip",
+      "tail_tip"
+    ],
+    "core_assignment_labels": ["swim_bladder", "eye_left", "eye_right"]
+  },
+  "blob_assignment": {
+    "family": "triangle_3blob",
+    "bladder_vertex_rule": "smallest_angle",
+    "left_right_rule": "heading_relative",
+    "fallback_rule": "image_x_order"
+  },
+  "geometry_qc": {
+    "min_triangle_angle_deg": 10.0,
+    "max_triangle_angle_deg": 90.0,
+    "min_triangle_area_px": 100.0,
+    "max_triangle_area_px": null
+  },
+  "heading_qc": {
+    "temporal_outlier_threshold_deg": 120.0,
+    "max_frame_gap": 3
+  },
+  "flip_detection": {
+    "family": "traditional_eye_flip_v1"
+  }
+}
