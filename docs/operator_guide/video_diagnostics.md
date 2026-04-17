@@ -28,9 +28,14 @@ The recommended operator workflow is:
 3. if `Media` passes, create or import the analysis Zarr
 4. continue with detection and downstream analysis
 
-Diagnostics are a manual pre-import checkpoint. They are not run automatically
-by `fisheye.utils.organize_recordings`, `fisheye.analysis.create_analysis_zarr`,
-or `fisheye.utils.import_recording_analysis`.
+Diagnostics are a pre-import checkpoint. You can run them manually, or opt
+into them during `fisheye.utils.organize_recordings --apply` with
+`--run-video-diagnostics`. They are still not run automatically by
+`fisheye.analysis.create_analysis_zarr` or
+`fisheye.utils.import_recording_analysis`.
+
+For repeatable real-data smoke checks, prefer the shared fixture and run
+layout documented in [test_data.md](test_data.md).
 
 ## Main entry points
 

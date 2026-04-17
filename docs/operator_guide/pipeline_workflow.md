@@ -16,6 +16,10 @@ Recommended pre-import order:
 4. if both preflights pass, import the recording into its analysis Zarr
 5. continue with detection and downstream analysis stages
 
+For repeatable operator smoke checks on real data, use the shared fixture
+convention documented in [test_data.md](test_data.md) rather than writing test
+artifacts back into `/nvme1/recordings`.
+
 ## Overview
 
 ```

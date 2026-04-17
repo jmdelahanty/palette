@@ -211,8 +211,10 @@ scripts/py -m fisheye.utils.organize_recordings \
 
 Use the video report when you want media and camera-metadata confidence. Use
 the H5 report when you want to know whether stimulus import should succeed.
-See [video_diagnostics.md](video_diagnostics.md) and
-[h5_diagnostics.md](h5_diagnostics.md) for the full CLI and output reference.
+See [video_diagnostics.md](video_diagnostics.md),
+[h5_diagnostics.md](h5_diagnostics.md), and
+[test_data.md](test_data.md) for the full CLI, output reference, and the shared
+real-data fixture convention under `/nvme1/palette_test_data`.
 
 ## Logs
 

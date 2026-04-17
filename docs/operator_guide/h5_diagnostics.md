@@ -29,9 +29,14 @@ The recommended operator workflow is:
 4. if both preflights pass, create or import the analysis Zarr
 5. continue with detection and downstream analysis
 
-Diagnostics are manual pre-import checkpoints. They are not run automatically
-by `fisheye.utils.organize_recordings`, `fisheye.analysis.create_analysis_zarr`,
-or `fisheye.utils.import_recording_analysis`.
+Diagnostics are pre-import checkpoints. You can run them manually, or opt
+into them during `fisheye.utils.organize_recordings --apply` with
+`--run-h5-diagnostics`. They are still not run automatically by
+`fisheye.analysis.create_analysis_zarr` or
+`fisheye.utils.import_recording_analysis`.
+
+For repeatable real-data smoke checks, prefer the shared fixture and run
+layout documented in [test_data.md](test_data.md).
 
 ## Main entry points
 
