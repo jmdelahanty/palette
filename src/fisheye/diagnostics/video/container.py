@@ -1,15 +1,17 @@
-"""Container-level keyframe-flag checks for MP4 video files."""
-
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
+from .models import ContainerInfo, Finding
 
 _HEVC_CODEC_ALIASES = {"hevc", "hvc1", "hev1"}
 _H264_CODEC_ALIASES = {"h264", "avc1", "avc"}
+
+CodecProbe = Callable[[Path], str]
+StssScan = Callable[[Path], Tuple[bool, Optional[str]]]
 
 
 def _normalize_codec_name(codec_name: Optional[str]) -> str:
@@ -169,26 +171,34 @@ def _scan_stss_presence(video_path: Path) -> Tuple[bool, Optional[str]]:
         return False, f"failed to read moov atom ({exc})"
 
 
-def check_hevc_keyframe_flags(video_path: Path) -> Dict[str, Any]:
-    """Check whether an MP4 has container sync-sample entries for HEVC streams."""
+def evaluate_keyframe_flags(
+    video_path: Path,
+    *,
+    codec_name: Optional[str] = None,
+    codec_probe: Optional[CodecProbe] = None,
+    stss_scan: Optional[StssScan] = None,
+) -> tuple[dict[str, Any], Optional[str]]:
     video_path = Path(video_path)
     if not video_path.exists() or not video_path.is_file():
-        return {
-            "codec": "unknown",
-            "has_stss": False,
-            "needs_fix": False,
-            "message": f"Video file not found: {video_path}",
-        }
+        return (
+            {
+                "codec": "unknown",
+                "has_stss": False,
+                "needs_fix": False,
+                "message": f"Video file not found: {video_path}",
+            },
+            None,
+        )
 
-    codec = _normalize_codec_name(_probe_codec_name(video_path))
-    has_stss, scan_error = _scan_stss_presence(video_path)
-    needs_fix = codec == "hevc" and not has_stss
+    normalized_codec = _normalize_codec_name(codec_name) if codec_name is not None else _normalize_codec_name((codec_probe or _probe_codec_name)(video_path))
+    has_stss, scan_error = (stss_scan or _scan_stss_presence)(video_path)
+    needs_fix = normalized_codec == "hevc" and not has_stss
 
-    if codec != "hevc":
-        if codec == "unknown":
+    if normalized_codec != "hevc":
+        if normalized_codec == "unknown":
             message = "Codec unknown; HEVC keyframe flag check not applicable."
         else:
-            message = f"Codec '{codec}' is not HEVC; keyframe-flag fix not required."
+            message = f"Codec '{normalized_codec}' is not HEVC; keyframe-flag fix not required."
     elif has_stss:
         message = "HEVC stream has sync sample table (stss) in moov."
     else:
@@ -196,9 +206,58 @@ def check_hevc_keyframe_flags(video_path: Path) -> Dict[str, Any]:
         if scan_error:
             message = f"{message} Container scan issue: {scan_error}."
 
-    return {
-        "codec": codec,
-        "has_stss": bool(has_stss),
-        "needs_fix": bool(needs_fix),
-        "message": message,
-    }
+    return (
+        {
+            "codec": normalized_codec,
+            "has_stss": bool(has_stss),
+            "needs_fix": bool(needs_fix),
+            "message": message,
+        },
+        scan_error,
+    )
+
+
+def check_hevc_keyframe_flags(video_path: Path, *, codec_name: Optional[str] = None) -> dict[str, Any]:
+    payload, _ = evaluate_keyframe_flags(Path(video_path), codec_name=codec_name)
+    return payload
+
+
+def inspect_container(video_path: Path | str, *, codec_hint: Optional[str] = None) -> tuple[ContainerInfo, list[Finding]]:
+    path = Path(video_path).expanduser()
+    payload, scan_error = evaluate_keyframe_flags(path, codec_name=codec_hint)
+    info = ContainerInfo(
+        status="pass",
+        codec=str(payload.get("codec") or "") or None,
+        has_stss=bool(payload.get("has_stss")) if payload.get("has_stss") is not None else None,
+        needs_fix=bool(payload.get("needs_fix")) if payload.get("needs_fix") is not None else None,
+        message=str(payload.get("message") or "") or None,
+        scan_error=scan_error,
+    )
+    findings: list[Finding] = []
+
+    if not path.exists() or not path.is_file():
+        info.status = "fail"
+        findings.append(
+            Finding(
+                severity="fail",
+                code="video.file_missing",
+                summary="Video file not found for container inspection.",
+                details=info.message,
+                component="container",
+            )
+        )
+        return info, findings
+
+    if info.codec == "hevc" and info.needs_fix:
+        info.status = "warn"
+        findings.append(
+            Finding(
+                severity="warn",
+                code="video.hevc_missing_stss",
+                summary="HEVC stream is missing sync sample table (stss) entries.",
+                details=info.message,
+                component="container",
+            )
+        )
+
+    return info, findings

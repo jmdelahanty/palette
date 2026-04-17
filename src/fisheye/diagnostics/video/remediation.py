@@ -12,7 +12,19 @@ def build_remediation(report: VideoDiagnosticsReport) -> list[Remediation]:
 
     video_path = Path(report.file_info.path)
     stem = video_path.stem
-    codec = (report.stream_info.codec or "").lower()
+    codec = (report.stream_info.codec or report.container.codec or "").lower()
+
+    if codec == "hevc" and bool(report.container.needs_fix):
+        actions.append(
+            Remediation(
+                issue="Missing HEVC sync samples",
+                description="Re-encode the HEVC file with an explicit GOP so MP4 sync-sample entries are rebuilt.",
+                command=(
+                    f"ffmpeg -i {video_path} -c:v hevc_nvenc -preset p4 -rc vbr -cq 23 "
+                    f"-g 60 -bf 0 {stem}_hevc_fixed.mp4"
+                ),
+            )
+        )
 
     if codec == "hevc" and (
         (report.gop.max_keyframe_interval_s is not None and report.gop.max_keyframe_interval_s > 10.0)
@@ -63,4 +75,3 @@ def build_remediation(report: VideoDiagnosticsReport) -> list[Remediation]:
         )
 
     return actions
-

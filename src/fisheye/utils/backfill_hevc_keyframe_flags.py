@@ -15,14 +15,15 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from fisheye.shared.batch_logging import utc_now
 
 try:
-    from fisheye.utils.hevc_keyframe_flags import check_hevc_keyframe_flags
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
 except ModuleNotFoundError:
     import sys
 
     _THIS_DIR = Path(__file__).resolve().parent
-    if str(_THIS_DIR) not in sys.path:
-        sys.path.insert(0, str(_THIS_DIR))
-    from hevc_keyframe_flags import check_hevc_keyframe_flags
+    _SRC_DIR = _THIS_DIR.parent.parent
+    if str(_SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(_SRC_DIR))
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
 
 
 _utc_now = utc_now

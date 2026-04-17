@@ -163,15 +163,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "seek_samples": DEFAULT_SEEK_SAMPLES,
     }
     if command == "probe":
-        kwargs.update(include_timing=False, include_gop=False, include_decode=False)
+        kwargs.update(include_container=True, include_timing=False, include_gop=False, include_decode=False)
     elif command == "timing":
-        kwargs.update(include_probe=True, include_gop=False, include_decode=False)
+        kwargs.update(include_container=False, include_probe=True, include_gop=False, include_decode=False)
     elif command == "gop":
-        kwargs.update(include_probe=True, include_timing=False, include_decode=False)
+        kwargs.update(include_container=False, include_probe=True, include_timing=False, include_decode=False)
     elif command == "decode":
-        kwargs.update(include_probe=True, include_timing=False, include_gop=False)
+        kwargs.update(include_container=False, include_probe=True, include_timing=False, include_gop=False)
     else:
-        kwargs.update(include_probe=True, include_timing=True, include_gop=True, include_decode=True)
+        kwargs.update(include_container=True, include_probe=True, include_timing=True, include_gop=True, include_decode=True)
 
     report = build_video_report(video_path, **kwargs)
     print(render_report(report, as_json=bool(getattr(args, "json", False))))

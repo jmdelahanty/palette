@@ -27,6 +27,16 @@ class FileInfo:
 
 
 @dataclass
+class ContainerInfo:
+    status: CheckStatus = "skip"
+    codec: Optional[str] = None
+    has_stss: Optional[bool] = None
+    needs_fix: Optional[bool] = None
+    message: Optional[str] = None
+    scan_error: Optional[str] = None
+
+
+@dataclass
 class StreamInfo:
     status: CheckStatus = "skip"
     container_format: Optional[str] = None
@@ -156,6 +166,7 @@ class VideoDiagnosticsReport:
     file_info: FileInfo
     media_status: CheckStatus = "skip"
     tooling_status: CheckStatus = "skip"
+    container: ContainerInfo = field(default_factory=ContainerInfo)
     stream_info: StreamInfo = field(default_factory=StreamInfo)
     timing: TimingInfo = field(default_factory=TimingInfo)
     gop: GOPInfo = field(default_factory=GOPInfo)
@@ -206,7 +217,7 @@ def report_to_dict(report: VideoDiagnosticsReport) -> dict[str, Any]:
 def _has_media_checks(report: VideoDiagnosticsReport) -> bool:
     if any(finding.kind == "media" for finding in report.findings):
         return True
-    statuses = [report.stream_info.status, report.timing.status, report.gop.status, report.camera_csv.status]
+    statuses = [report.container.status, report.stream_info.status, report.timing.status, report.gop.status, report.camera_csv.status]
     if any(status in {"pass", "warn", "fail"} for status in statuses):
         return True
     return any(item.status in {"pass", "warn", "fail"} for item in report.decode)

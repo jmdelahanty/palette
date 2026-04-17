@@ -197,6 +197,18 @@ The H5 preflight resolves the organized `raw/*.h5` file automatically and
 checks whether the raw Citrus H5 meets Palette import requirements while also
 reporting optional section health for tracking, snapshots, and enums.
 
+If you want `organize_recordings` to run these preflights immediately after
+`--apply`, use `--run-video-diagnostics`, `--run-h5-diagnostics`, or both:
+
+```bash
+scripts/py -m fisheye.utils.organize_recordings \
+  "$PALETTE_STAGING_ROOT/<batch>" \
+  --apply \
+  --write-manifest \
+  --run-video-diagnostics \
+  --run-h5-diagnostics
+```
+
 Use the video report when you want media and camera-metadata confidence. Use
 the H5 report when you want to know whether stimulus import should succeed.
 See [video_diagnostics.md](video_diagnostics.md) and

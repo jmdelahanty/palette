@@ -46,6 +46,7 @@ This runs the combined report and prints:
 - `Overall`: the default verdict, based on media health
 - `Media`: media-only status
 - `Tooling`: tooling/backend status
+- container checks
 - stream metadata
 - timing checks
 - GOP/keyframe checks
@@ -99,6 +100,12 @@ Typical examples:
 Tooling errors do not downgrade the default media verdict.
 
 ## What gets checked
+
+### Container
+
+- codec normalization for HEVC/H.264 variants
+- MP4 `moov` scan for `stss` sync-sample entries
+- HEVC seek-risk warning when `stss` is missing
 
 ### Stream
 
@@ -155,6 +162,8 @@ By default the tool attempts both:
 - Decord
 
 This is useful because one backend can fail even when the media is fine.
+
+The organizer and `backfill_hevc_keyframe_flags.py` now reuse the same shared container-check logic as the unified video diagnostics.
 
 ## Quick vs full scan
 

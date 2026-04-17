@@ -20,15 +20,15 @@ from typing import Any, Dict, Iterable, List, Optional
 import cv2
 
 try:
-    from fisheye.utils.hevc_keyframe_flags import check_hevc_keyframe_flags
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
 except ModuleNotFoundError:
     import sys
 
     _THIS_DIR = Path(__file__).resolve().parent
-    _UTILS_DIR = _THIS_DIR.parent / "utils"
-    if str(_UTILS_DIR) not in sys.path:
-        sys.path.insert(0, str(_UTILS_DIR))
-    from hevc_keyframe_flags import check_hevc_keyframe_flags
+    _SRC_DIR = _THIS_DIR.parent.parent
+    if str(_SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(_SRC_DIR))
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
 
 
 def _utc_now_iso() -> str:

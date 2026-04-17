@@ -44,6 +44,21 @@ def render_report(report: VideoDiagnosticsReport, *, as_json: bool = False) -> s
     if report.file_info.recording_root:
         lines.append(f"Recording: {report.file_info.recording_root}")
 
+    container = report.container
+    if container.status != "skip":
+        lines.extend(
+            [
+                "",
+                f"Container [{container.status}]",
+                f"  codec: {container.codec or '—'}",
+                f"  has_stss: {container.has_stss if container.has_stss is not None else '—'}",
+                f"  needs_fix: {container.needs_fix if container.needs_fix is not None else '—'}",
+                f"  message: {container.message or '—'}",
+            ]
+        )
+        if container.scan_error:
+            lines.append(f"  scan_error: {container.scan_error}")
+
     stream = report.stream_info
     if stream.status != "skip":
         lines.extend(

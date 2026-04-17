@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.utils import hevc_keyframe_flags
+from fisheye.diagnostics.video import container as hevc_keyframe_flags
 
 
 def _atom(atom_type: bytes, payload: bytes = b"") -> bytes:

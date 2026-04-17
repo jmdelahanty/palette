@@ -26,12 +26,13 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 
 try:
-    from fisheye.utils.hevc_keyframe_flags import check_hevc_keyframe_flags
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
 except ModuleNotFoundError:
     _THIS_DIR = Path(__file__).resolve().parent
-    if str(_THIS_DIR) not in sys.path:
-        sys.path.insert(0, str(_THIS_DIR))
-    from hevc_keyframe_flags import check_hevc_keyframe_flags
+    _SRC_DIR = _THIS_DIR.parent.parent
+    if str(_SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(_SRC_DIR))
+    from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
 
 
 _utc_now = utc_now
@@ -830,6 +831,165 @@ def _cleanup_staging_dirs(
     return warnings
 
 
+_VIDEO_DIAGNOSTICS_SAMPLE_FRAMES = 120
+_VIDEO_DIAGNOSTICS_DECODE_FRAMES = 30
+_VIDEO_DIAGNOSTICS_SEEK_SAMPLES = 10
+
+
+def _diagnostic_finding_codes(findings: List[object], limit: int = 3) -> List[str]:
+    codes: List[str] = []
+    for finding in findings:
+        code = getattr(finding, "code", None)
+        if code is None:
+            continue
+        code_text = str(code)
+        if not code_text or code_text in codes:
+            continue
+        codes.append(code_text)
+        if len(codes) >= limit:
+            break
+    return codes
+
+
+def _run_video_diagnostics_for_plan(
+    plan: RecordingPlan,
+    logger: Optional[JsonLogger],
+) -> List[str]:
+    try:
+        from fisheye.diagnostics.video.batch import build_batch_report
+    except Exception as exc:
+        message = f"Video diagnostics unavailable for {plan.name}: {exc}"
+        if logger:
+            logger.log(
+                "video_diagnostics_error",
+                recording_name=plan.name,
+                session_uuid=plan.meta.get("session_uuid"),
+                recording_dir=str(plan.dest_dir),
+                message=message,
+            )
+        return [message]
+
+    try:
+        report = build_batch_report(
+            [plan.dest_dir],
+            recursive=True,
+            source="all",
+            full_scan=False,
+            sample_frames=_VIDEO_DIAGNOSTICS_SAMPLE_FRAMES,
+            decode_backend="all",
+            decode_frames=_VIDEO_DIAGNOSTICS_DECODE_FRAMES,
+            seek_samples=_VIDEO_DIAGNOSTICS_SEEK_SAMPLES,
+            include_probe=True,
+            include_timing=True,
+            include_gop=True,
+            include_decode=True,
+        )
+    except Exception as exc:
+        message = f"Video diagnostics failed for {plan.name}: {exc}"
+        if logger:
+            logger.log(
+                "video_diagnostics_error",
+                recording_name=plan.name,
+                session_uuid=plan.meta.get("session_uuid"),
+                recording_dir=str(plan.dest_dir),
+                message=message,
+            )
+        return [message]
+
+    recording = next(
+        (item for item in report.recordings if item.recording_root == str(plan.dest_dir)),
+        None,
+    )
+    media_status = recording.media_status if recording is not None else report.overall_status
+    tooling_status = recording.tooling_status if recording is not None else "skip"
+    scanned = recording.item_count if recording is not None else report.summary.scanned
+    finding_codes = _diagnostic_finding_codes(
+        [finding for item in report.items for finding in item.findings]
+    )
+    finding_suffix = f" ({', '.join(finding_codes)})" if finding_codes else ""
+    print(
+        f"Video diagnostics [{plan.name}]: media={media_status} tooling={tooling_status} videos={scanned}{finding_suffix}"
+    )
+    if logger:
+        logger.log(
+            "video_diagnostics",
+            recording_name=plan.name,
+            session_uuid=plan.meta.get("session_uuid"),
+            recording_dir=str(plan.dest_dir),
+            media_status=media_status,
+            tooling_status=tooling_status,
+            videos_scanned=scanned,
+            finding_codes=finding_codes,
+        )
+
+    warnings: List[str] = []
+    if scanned == 0:
+        warnings.append(f"Video diagnostics for {plan.name}: no videos found under {plan.dest_dir}")
+    elif media_status in {"warn", "fail", "error"} or tooling_status in {"warn", "fail", "error"}:
+        warnings.append(
+            f"Video diagnostics for {plan.name}: media={media_status} tooling={tooling_status}{finding_suffix}"
+        )
+    return warnings
+
+
+def _run_h5_diagnostics_for_plan(
+    plan: RecordingPlan,
+    logger: Optional[JsonLogger],
+) -> List[str]:
+    try:
+        from fisheye.diagnostics.h5 import build_h5_report
+    except Exception as exc:
+        message = f"H5 diagnostics unavailable for {plan.name}: {exc}"
+        if logger:
+            logger.log(
+                "h5_diagnostics_error",
+                recording_name=plan.name,
+                session_uuid=plan.meta.get("session_uuid"),
+                recording_dir=str(plan.dest_dir),
+                message=message,
+            )
+        return [message]
+
+    try:
+        report = build_h5_report(plan.dest_dir, profile="palette-import")
+    except Exception as exc:
+        message = f"H5 diagnostics failed for {plan.name}: {exc}"
+        if logger:
+            logger.log(
+                "h5_diagnostics_error",
+                recording_name=plan.name,
+                session_uuid=plan.meta.get("session_uuid"),
+                recording_dir=str(plan.dest_dir),
+                message=message,
+            )
+        return [message]
+
+    finding_codes = _diagnostic_finding_codes(report.findings)
+    finding_suffix = f" ({', '.join(finding_codes)})" if finding_codes else ""
+    print(
+        f"H5 diagnostics [{plan.name}]: core={report.core_status} optional={report.optional_status} tooling={report.tooling_status}{finding_suffix}"
+    )
+    if logger:
+        logger.log(
+            "h5_diagnostics",
+            recording_name=plan.name,
+            session_uuid=plan.meta.get("session_uuid"),
+            recording_dir=str(plan.dest_dir),
+            h5_path=report.file_info.path,
+            core_status=report.core_status,
+            optional_status=report.optional_status,
+            tooling_status=report.tooling_status,
+            finding_codes=finding_codes,
+        )
+
+    warnings: List[str] = []
+    if report.core_status in {"warn", "fail", "error"} or report.optional_status in {"warn", "fail", "error"} or report.tooling_status in {"warn", "fail", "error"}:
+        warnings.append(
+            f"H5 diagnostics for {plan.name}: core={report.core_status} optional={report.optional_status} tooling={report.tooling_status}{finding_suffix}"
+        )
+    return warnings
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Plan recording re-organization by mapping H5 files to camera artifacts.",
@@ -957,6 +1117,16 @@ def main() -> int:
         default=None,
         help="CSV describing video-only recordings. Required with --video-only.",
     )
+    parser.add_argument(
+        "--run-video-diagnostics",
+        action="store_true",
+        help="Run unified video diagnostics against each organized recording after --apply.",
+    )
+    parser.add_argument(
+        "--run-h5-diagnostics",
+        action="store_true",
+        help="Run unified H5 diagnostics against each organized recording after --apply.",
+    )
 
     args = parser.parse_args()
 
@@ -978,6 +1148,13 @@ def main() -> int:
         if args.require_done:
             print("--require-done is not supported with --video-only.", file=sys.stderr)
             return 1
+        if args.run_h5_diagnostics:
+            print("--run-h5-diagnostics is not supported with --video-only.", file=sys.stderr)
+            return 1
+
+    if (args.run_video_diagnostics or args.run_h5_diagnostics) and not args.apply:
+        print("--run-video-diagnostics and --run-h5-diagnostics require --apply.", file=sys.stderr)
+        return 1
 
     if args.process_all:
         sources = sorted([path for path in source.iterdir() if path.is_dir()])
@@ -1016,6 +1193,8 @@ def main() -> int:
             snapshot_mode=args.snapshot_mode,
             video_only=args.video_only,
             metadata_csv=str(args.metadata_csv) if args.metadata_csv else None,
+            run_video_diagnostics=args.run_video_diagnostics,
+            run_h5_diagnostics=args.run_h5_diagnostics,
         )
     except Exception as exc:
         print(f"Warning: could not create log file: {exc}", file=sys.stderr)
@@ -1148,6 +1327,13 @@ def main() -> int:
                 if logger:
                     for warning in cleanup_warnings:
                         logger.log("warning", batch_source=str(source_path), message=warning)
+            if args.run_video_diagnostics or args.run_h5_diagnostics:
+                print("\nRunning post-organize diagnostics:")
+                for plan in plans:
+                    if args.run_video_diagnostics:
+                        warnings.extend(_run_video_diagnostics_for_plan(plan, logger))
+                    if args.run_h5_diagnostics:
+                        warnings.extend(_run_h5_diagnostics_for_plan(plan, logger))
             if warnings:
                 print("\nWarnings:")
                 for warning in warnings:
