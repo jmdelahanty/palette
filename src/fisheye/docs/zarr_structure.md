@@ -237,6 +237,17 @@ Attributes: `source_crop_run`, `source_crop_storage_mode`,
 `triangle_angle_raw_order`, `heading_computation_override`,
 scheduler configuration, timing, QA summaries.
 
+Skeleton-identity metadata note:
+
+- new keypoint runs are expected to persist explicit `skeleton_id` and
+  `kpt_shape` attrs, not only `pose_schema`
+- readers should resolve skeleton identity in this order:
+  1. explicit run attr `skeleton_id`
+  2. `pose_schema.skeleton_id`
+  3. fallback `pose_schema:<name>`
+- historical archives can be normalized with
+  `fisheye.utils.backfill_keypoint_skeleton_attrs`
+
 Heading metadata note:
 
 - `pose_schema.metadata.heading_computation` is the canonical heading
@@ -517,6 +528,17 @@ refinement parameters (thresholds),
 `summary_statistics`, `retune_params`, `keypoint_signature`,
 `keypoint_review_status`, `keypoint_review_signature`, scheduler config,
 environment/provenance metadata.
+
+Skeleton-identity metadata note:
+
+- new refined keypoint runs are expected to persist explicit `skeleton_id` and
+  `kpt_shape` attrs, not only `pose_schema`
+- readers should resolve skeleton identity in this order:
+  1. explicit run attr `skeleton_id`
+  2. `pose_schema.skeleton_id`
+  3. fallback `pose_schema:<name>`
+- historical archives can be normalized with
+  `fisheye.utils.backfill_keypoint_skeleton_attrs`
 
 Heading metadata note:
 

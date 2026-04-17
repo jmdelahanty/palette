@@ -62,6 +62,13 @@ As of 2026-04-17:
 - `src/fisheye/tune/keypoint_tuner.py` uses the same packaged
   `traditional_pose/traditional_v1.json` profile for its default sliders,
   unlabeled blob assignment, and saved tuning defaults
+- `src/fisheye/refinement/refine_keypoints.py` uses packaged traditional
+  geometry-QC defaults as the baseline before applying stage-local refinement
+  params
+- `src/fisheye/tune/keypoint_failure_review.py` resolves packaged traditional
+  geometry defaults instead of local literals
+- `src/fisheye/utils/patch_keypoints_from_crops.py` uses packaged traditional
+  geometry defaults for raw re-detect and refined re-run baselines
 
 Important limitation:
 
@@ -73,7 +80,9 @@ Important limitation:
 
 Still pending:
 
-- refined/manual/retry paths that should share packaged heuristic defaults
+- any remaining retry/manual helpers that still carry their own heuristic
+  defaults
+- temporal-heading/QC consumers that still use local `heading_qc` thresholds
 - any run-level override contract beyond existing stage-local tuning attrs
 
 ## Packaged Config Location
@@ -390,6 +399,7 @@ Selects the heuristic family used for left/right eye flip correction.
 
 ## Related Docs
 
+- [keypoint_pose_rollout_status.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_pose_rollout_status.md)
 - [pose_schema_heuristics_split_proposal.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_schema_heuristics_split_proposal.md)
 - [keypoint_heading_computation_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_heading_computation_contract.md)
 - [keypoint_multi_skeleton_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_multi_skeleton_todo.md)

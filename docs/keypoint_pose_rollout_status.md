@@ -26,8 +26,8 @@ What is now materially true:
   overrides instead of competing baseline defaults
 - active raw and refined keypoint writers now persist explicit skeleton
   identity attrs (`skeleton_id`, `kpt_shape`, `pose_schema`) on new outputs
-- skeleton identity resolution now has a shared runtime helper and a dedicated
-  audit utility for missing explicit attrs
+- historical keypoint/refined-keypoint runs can now be normalized to the same
+  explicit skeleton-identity contract with dedicated audit and backfill tools
 
 The main remaining work is not "decide the architecture." The architecture is
 clear enough now. The remaining work is:
@@ -127,6 +127,8 @@ Current behavior:
 - the audit utility can report runs still missing explicit attrs
 - historical runs can be normalized in place with a dedicated skeleton-attr
   backfill utility
+- current operator validation on the maintained recording corpus converged to
+  zero missing explicit skeleton attrs after backfill
 
 ### 4. Packaged pose-heuristic profiles now exist
 
@@ -232,8 +234,8 @@ Current state:
 - the active raw and refined writers now set explicit attrs on new outputs
 - the main reader precedence is centralized, but some downstream reader code
   still carries local skeleton-resolution logic
-- legacy tolerance still exists because historical runs are not uniformly
-  normalized
+- historical runs can now be normalized in place, but reader tolerance for
+  unnormalized external archives still exists for compatibility
 
 ### 4. Heuristic-profile overrides are not yet defined beyond stage-local tuning
 
@@ -302,6 +304,8 @@ Checklist:
       outputs
 - [x] Provide a maintenance backfill for historical runs missing explicit
       skeleton attrs
+- [x] Validate the historical-maintenance path against large real archives and
+      confirm convergence with the audit utility
 - [ ] Continue migrating downstream readers to the shared helper where they
       still carry local precedence code
 
@@ -362,6 +366,8 @@ are true:
   detector, refine, review, and patch paths
 - all new keypoint/refined-keypoint runs write explicit `skeleton_id` and
   `kpt_shape`
+- historical keypoint/refined-keypoint runs have a supported audit/backfill
+  path to reach the same explicit identity contract
 - the main runtime stack no longer assumes `(N,3,2)` except in intentionally
   starter-skeleton-specific producers
 - label-based consumers fail clearly when required labels are missing

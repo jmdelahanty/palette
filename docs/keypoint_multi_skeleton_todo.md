@@ -27,6 +27,9 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   runs and completed manually.
 - schema-driven derived metrics can now be stored on refined runs and surfaced
   in keypoint profile payloads.
+- historical keypoint/refined-keypoint runs can now be normalized in place to
+  explicit `skeleton_id` / `kpt_shape` attrs with dedicated audit/backfill
+  tooling.
 - registry/query projection of those derived metrics is intentionally deferred
   pending a cross-skeleton query policy.
 
@@ -69,6 +72,8 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
       `pose_schema.metadata.heading_computation` on existing keypoint runs.
 - [x] Add audit utility to report runs missing explicit `skeleton_id` /
       `kpt_shape` attrs.
+- [x] Add maintenance/backfill utility to populate missing explicit
+      `skeleton_id` / `kpt_shape` attrs on historical keypoint runs.
 - [ ] Verify registry ingestion continues to map skeleton specs into
       `pose_skeleton_specs` and `keypoint_data_profile`.
 
