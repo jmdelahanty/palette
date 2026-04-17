@@ -46,6 +46,7 @@ from ..pose.heuristics import (
     require_flip_detection,
     require_geometry_qc,
 )
+from ..pose.schema import RUNTIME_COORD_DIMS, resolve_skeleton_identity_from_attrs
 from ..pose.metric_schema import (
     DerivedMetricStorage,
     ensure_derived_metric_storage,
@@ -1154,9 +1155,25 @@ def create_refined_keypoint_run(
     else:
         kp_refined.attrs["keypoint_labels"] = keypoint_labels
 
-    # Copy pose schema if present in source run
-    if "pose_schema" in kp_source.attrs:
-        kp_refined.attrs["pose_schema"] = kp_source.attrs["pose_schema"]
+    source_identity = resolve_skeleton_identity_from_attrs(
+        dict(kp_source.attrs),
+        keypoint_count=int(len(keypoint_labels)),
+        coord_dims=RUNTIME_COORD_DIMS,
+    )
+
+    pose_schema_payload = _as_mapping(kp_source.attrs.get("pose_schema"))
+    if pose_schema_payload is not None:
+        if source_identity.skeleton_id is not None:
+            pose_schema_payload["skeleton_id"] = source_identity.skeleton_id
+        if source_identity.kpt_shape is not None:
+            pose_schema_payload["kpt_shape"] = list(source_identity.kpt_shape)
+        if "keypoint_labels" not in pose_schema_payload:
+            pose_schema_payload["keypoint_labels"] = list(keypoint_labels)
+        kp_refined.attrs["pose_schema"] = pose_schema_payload
+    if source_identity.skeleton_id is not None:
+        kp_refined.attrs["skeleton_id"] = source_identity.skeleton_id
+    if source_identity.kpt_shape is not None:
+        kp_refined.attrs["kpt_shape"] = list(source_identity.kpt_shape)
 
     if edge_count > 0:
         edge_chunks = (max(1, min(128, edge_count)), 2)

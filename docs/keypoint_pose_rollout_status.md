@@ -24,6 +24,10 @@ What is now materially true:
 - traditional refinement, failure-review, and crop-patch paths now use the
   same packaged geometry defaults, with stage-local params treated as explicit
   overrides instead of competing baseline defaults
+- active raw and refined keypoint writers now persist explicit skeleton
+  identity attrs (`skeleton_id`, `kpt_shape`, `pose_schema`) on new outputs
+- skeleton identity resolution now has a shared runtime helper and a dedicated
+  audit utility for missing explicit attrs
 
 The main remaining work is not "decide the architecture." The architecture is
 clear enough now. The remaining work is:
@@ -31,7 +35,8 @@ clear enough now. The remaining work is:
 1. finish the packaged-heuristics rollout beyond geometry defaults
 2. remove the remaining fixed-`K=3` and fixed-label assumptions from runtime
    consumers
-3. harden explicit skeleton identity on new runs and remaining readers
+3. decide override policy and remaining reader hardening around explicit
+   skeleton identity
 
 ## What Is Implemented
 
@@ -97,6 +102,31 @@ Current status:
   metadata cases
 - legacy label alias reconciliation (`bladder` -> `swim_bladder`) is handled in
   the maintenance path
+
+### 3a. Explicit skeleton identity on new runs is now hardened
+
+Implemented in:
+
+- `src/fisheye/pose/schema.py`
+- `src/fisheye/detection/detect_keypoints_traditional.py`
+- `src/fisheye/detection/detect_keypoints_yolo.py`
+- `src/fisheye/refinement/refine_keypoints.py`
+- `src/fisheye/utils/audit_keypoint_skeleton_attrs.py`
+- `src/fisheye/utils/backfill_keypoint_skeleton_attrs.py`
+
+Current behavior:
+
+- shared runtime precedence is now:
+  1. explicit run attr `skeleton_id`
+  2. `pose_schema.skeleton_id`
+  3. fallback `pose_schema:<name>`
+- `kpt_shape` resolves from explicit run attr first, then `pose_schema.kpt_shape`,
+  then runtime keypoint count where needed
+- new raw and refined keypoint runs now persist explicit `skeleton_id` and
+  `kpt_shape`, not only `pose_schema`
+- the audit utility can report runs still missing explicit attrs
+- historical runs can be normalized in place with a dedicated skeleton-attr
+  backfill utility
 
 ### 4. Packaged pose-heuristic profiles now exist
 
@@ -188,20 +218,20 @@ Primary tracker:
 
 - `docs/keypoint_multi_skeleton_todo.md`
 
-### 3. Explicit skeleton identity is not yet fully hardened
+### 3. Explicit skeleton identity is improved but not yet universal
 
 Still pending:
 
-- all new keypoint/refined-keypoint writers should always set:
-  - `skeleton_id`
-  - `kpt_shape`
-  - `pose_schema`
 - readers should prefer explicit skeleton identity over schema-name fallback
   wherever possible
+- secondary writers and maintenance tools should converge on the same helper
+  surface where they still carry bespoke fallback code
 
 Current state:
 
-- some code paths already honor explicit skeleton identity
+- the active raw and refined writers now set explicit attrs on new outputs
+- the main reader precedence is centralized, but some downstream reader code
+  still carries local skeleton-resolution logic
 - legacy tolerance still exists because historical runs are not uniformly
   normalized
 
@@ -262,14 +292,18 @@ Goal:
 
 Checklist:
 
-- [ ] Audit all keypoint and refined-keypoint writers for:
+- [x] Audit all keypoint and refined-keypoint writers for:
   - `skeleton_id`
   - `kpt_shape`
   - `pose_schema`
-- [ ] Ensure all new runs write those attrs explicitly
-- [ ] Document the exact reader precedence for skeleton identity
-- [ ] Add maintenance checks that report missing explicit skeleton attrs on new
+- [x] Ensure all new runs write those attrs explicitly
+- [x] Document the exact reader precedence for skeleton identity
+- [x] Add maintenance checks that report missing explicit skeleton attrs on new
       outputs
+- [x] Provide a maintenance backfill for historical runs missing explicit
+      skeleton attrs
+- [ ] Continue migrating downstream readers to the shared helper where they
+      still carry local precedence code
 
 ### Phase C: Remove remaining fixed-`K=3` runtime assumptions
 

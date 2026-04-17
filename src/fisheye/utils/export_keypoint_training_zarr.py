@@ -26,6 +26,7 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.pose.schema import resolve_skeleton_identity_from_attrs
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
@@ -413,31 +414,25 @@ def _resolve_dataset_skeleton_identity(
     manifest_skeleton_id: Optional[str],
     manifest_kpt_shape: Optional[Tuple[int, int]],
 ) -> Tuple[Optional[str], Tuple[int, int], str]:
-    dataset_pose_schema = _as_mapping(dataset_payload.get("pose_schema"))
-    kp_pose_schema = _as_mapping(kp_group.attrs.get("pose_schema"))
+    runtime_identity = resolve_skeleton_identity_from_attrs(
+        dict(kp_group.attrs),
+        keypoint_count=int(keypoint_count),
+    )
+    dataset_identity = resolve_skeleton_identity_from_attrs(dataset_payload)
+    manifest_identity = resolve_skeleton_identity_from_attrs(
+        {
+            "skeleton_id": manifest_skeleton_id,
+            "kpt_shape": list(manifest_kpt_shape) if manifest_kpt_shape is not None else None,
+        }
+    )
 
     skeleton_id = (
-        _as_text(kp_group.attrs.get("skeleton_id"))
-        or (_as_text(kp_pose_schema.get("skeleton_id")) if kp_pose_schema is not None else None)
-        or _as_text(dataset_payload.get("skeleton_id"))
-        or (_as_text(dataset_pose_schema.get("skeleton_id")) if dataset_pose_schema is not None else None)
-        or manifest_skeleton_id
+        runtime_identity.skeleton_id
+        or dataset_identity.skeleton_id
+        or manifest_identity.skeleton_id
     )
-    if skeleton_id is None:
-        kp_schema_name = _as_text(kp_pose_schema.get("name")) if kp_pose_schema is not None else None
-        dataset_schema_name = _as_text(dataset_pose_schema.get("name")) if dataset_pose_schema is not None else None
-        resolved_name = kp_schema_name or dataset_schema_name
-        if resolved_name:
-            skeleton_id = f"pose_schema:{resolved_name}"
-
-    runtime_kpt_shape = _normalize_kpt_shape(kp_group.attrs.get("kpt_shape")) or (
-        _normalize_kpt_shape(kp_pose_schema.get("kpt_shape")) if kp_pose_schema is not None else None
-    )
-    preferred_kpt_shape = (
-        _normalize_kpt_shape(dataset_payload.get("kpt_shape"))
-        or (_normalize_kpt_shape(dataset_pose_schema.get("kpt_shape")) if dataset_pose_schema is not None else None)
-        or manifest_kpt_shape
-    )
+    runtime_kpt_shape = runtime_identity.kpt_shape
+    preferred_kpt_shape = dataset_identity.kpt_shape or manifest_identity.kpt_shape
 
     if runtime_kpt_shape is not None and runtime_kpt_shape[0] != int(keypoint_count):
         raise ValueError(

@@ -8,6 +8,8 @@ from typing import Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from .schema import resolve_skeleton_identity_from_attrs
+
 
 @dataclass(frozen=True)
 class DerivedMetricDefinition:
@@ -94,12 +96,9 @@ def metric_schema_from_package(name: str, base_dir: Optional[Path] = None) -> Ke
 
 
 def resolve_metric_schema_for_group(group: zarr.Group, *, required: bool = False) -> KeypointMetricSchema | None:
-    pose_schema_meta = group.attrs.get("pose_schema")
-    pose_schema_name = None
-    skeleton_id = None
-    if isinstance(pose_schema_meta, Mapping):
-        pose_schema_name = pose_schema_meta.get("name")
-        skeleton_id = pose_schema_meta.get("skeleton_id")
+    resolved = resolve_skeleton_identity_from_attrs(group.attrs)
+    pose_schema_name = resolved.pose_schema_name
+    skeleton_id = resolved.skeleton_id
     if pose_schema_name is None:
         return None
     try:

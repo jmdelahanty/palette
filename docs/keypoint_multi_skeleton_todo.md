@@ -42,11 +42,11 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   - training-set-level: single skeleton required
 - [x] Define packaged heuristic profiles as a separate config surface from
       `pose_schema.metadata`.
-- [ ] Define canonical skeleton identity source precedence:
+- [x] Define canonical skeleton identity source precedence:
   1) explicit `skeleton_id` attr
   2) `pose_schema.skeleton_id`
   3) fallback `pose_schema:<name>`
-- [ ] Define required attrs on keypoint/refined runs:
+- [x] Define required attrs on keypoint/refined runs:
   - `skeleton_id`
   - `kpt_shape`
   - `pose_schema` (nodes/edges/metadata)
@@ -59,7 +59,7 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
 
 ## Phase 1: Data Model Hardening
 
-- [ ] Ensure writers set `skeleton_id` and `kpt_shape` explicitly on new
+- [x] Ensure writers set `skeleton_id` and `kpt_shape` explicitly on new
       `keypoints_runs/*` and `refined_keypoints_runs/*` (not only `pose_schema`).
 - [x] Ensure new runs that persist meaningful `heading` set canonical heading
       semantics in `pose_schema.metadata.heading_computation`.
@@ -67,6 +67,8 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
       or disable behavior.
 - [x] Add maintenance/backfill utility to populate missing
       `pose_schema.metadata.heading_computation` on existing keypoint runs.
+- [x] Add audit utility to report runs missing explicit `skeleton_id` /
+      `kpt_shape` attrs.
 - [ ] Verify registry ingestion continues to map skeleton specs into
       `pose_skeleton_specs` and `keypoint_data_profile`.
 
@@ -155,6 +157,7 @@ surface needs a careful skeleton-aware policy before we denormalize them.
 
 ## Related Docs
 
+- `docs/keypoint_pose_rollout_status.md`
 - `docs/keypoint_training_data_card_contract.md`
 - `docs/pose_heuristic_profile_contract.md`
 - `docs/pose_schema_heuristics_split_proposal.md`

@@ -39,7 +39,7 @@ from ..pose.heuristics import (
     require_blob_assignment,
     require_geometry_qc,
 )
-from ..pose.schema import schema_from_package
+from ..pose.schema import schema_payload_from_package
 
 # Optional distributed
 try:
@@ -51,7 +51,9 @@ except Exception:  # pragma: no cover - optional dependency
 from ..utils.system import get_environment_info
 
 
-TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
+TRADITIONAL_POSE_SCHEMA, TRADITIONAL_POSE_ATTR_PAYLOAD = schema_payload_from_package(
+    "traditional_v1"
+)
 TRADITIONAL_HEURISTIC_PROFILE = heuristic_profile_from_package(
     "traditional_pose", TRADITIONAL_POSE_SCHEMA.name
 )
@@ -1080,13 +1082,9 @@ def detect_keypoints(
         },
     )
     write_stage_provenance(keypoint_group, provenance_record)
-    keypoint_group.attrs['pose_schema'] = {
-        'name': TRADITIONAL_POSE_SCHEMA.name,
-        'nodes': TRADITIONAL_POSE_SCHEMA.node_names,
-        'edges': TRADITIONAL_POSE_SCHEMA.edges,
-        'metadata': TRADITIONAL_POSE_SCHEMA.metadata,
-        'source': 'configs/fisheye/pose_schemas/traditional_v1.json'
-    }
+    keypoint_group.attrs['skeleton_id'] = str(TRADITIONAL_POSE_ATTR_PAYLOAD['skeleton_id'])
+    keypoint_group.attrs['kpt_shape'] = list(TRADITIONAL_POSE_ATTR_PAYLOAD['kpt_shape'])
+    keypoint_group.attrs['pose_schema'] = dict(TRADITIONAL_POSE_ATTR_PAYLOAD)
     
     # Completion panel
     completion_text = f"""[green]✓[/green] Keypoint detection completed

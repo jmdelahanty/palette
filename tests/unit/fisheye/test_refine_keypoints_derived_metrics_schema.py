@@ -312,6 +312,10 @@ def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -
     schema = dict(refined.attrs["derived_metrics_schema"])
 
     assert refined.attrs["source_refined_run"] == "refined_detect_001"
+    assert refined.attrs["skeleton_id"] == "fish_v1"
+    assert refined.attrs["kpt_shape"] == [3, 2]
+    assert refined.attrs["pose_schema"]["skeleton_id"] == "fish_v1"
+    assert refined.attrs["pose_schema"]["kpt_shape"] == [3, 2]
     assert refined.attrs["source_crop_storage_mode"] == "geometry_only"
     assert refined.attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
     assert refined.attrs["source_crop_revision"] == 4
