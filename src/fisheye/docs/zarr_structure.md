@@ -237,6 +237,16 @@ Attributes: `source_crop_run`, `source_crop_storage_mode`,
 `triangle_angle_raw_order`, `heading_computation_override`,
 scheduler configuration, timing, QA summaries.
 
+Keypoint storage note:
+
+- the canonical datastore contract remains dense numeric arrays such as
+  `keypoints_roi (N, K, 2)` and `keypoint_confidences (N, K)`
+- semantic meaning comes from `keypoint_labels` and `pose_schema`, not from
+  hard-coded positional assumptions
+- consumers that need specific landmarks should build a label-to-index helper
+  view at runtime and then read from the dense arrays
+- per-row key/value keypoint storage is not the Palette datastore contract
+
 Skeleton-identity metadata note:
 
 - new keypoint runs are expected to persist explicit `skeleton_id` and
@@ -528,6 +538,16 @@ refinement parameters (thresholds),
 `summary_statistics`, `retune_params`, `keypoint_signature`,
 `keypoint_review_status`, `keypoint_review_signature`, scheduler config,
 environment/provenance metadata.
+
+Keypoint storage note:
+
+- the canonical datastore contract remains dense numeric arrays such as
+  `keypoints_roi (N, K, 2)` and `keypoint_confidences (N, K)`
+- semantic meaning comes from `keypoint_labels` and `pose_schema`, not from
+  hard-coded positional assumptions
+- consumers that need specific landmarks should build a label-to-index helper
+  view at runtime and then read from the dense arrays
+- per-row key/value keypoint storage is not the Palette datastore contract
 
 Skeleton-identity metadata note:
 

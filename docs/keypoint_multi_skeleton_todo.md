@@ -92,6 +92,11 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
 
 ## Phase 3: Runtime Generalization (Remove K=3 Assumptions)
 
+- Storage-contract note:
+  - keep keypoints as dense arrays (`(N,K,2)` and related `(N,K)` arrays)
+  - Phase 3 is about replacing fixed positional access with label-to-index
+    resolution, not about switching the datastore to per-row key/value storage
+
 - [ ] Generalize keypoint stage array contracts from fixed `(N,3,2)` to dynamic
       `(N,K,2)` where valid.
 - [ ] Update keypoint detect/refine code paths that allocate fixed 3-point

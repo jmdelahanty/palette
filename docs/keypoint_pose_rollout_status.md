@@ -318,6 +318,11 @@ Goal:
 
 Checklist:
 
+- storage-contract note:
+  - keep keypoint storage dense-array based
+  - convert consumers from fixed positional indexing to label-to-index helper
+    resolution
+  - do not redesign the datastore around per-row key/value keypoint objects
 - [ ] Audit array allocation sites for hardcoded `(N,3,2)`
 - [ ] Replace positional eye/bladder indexing with label resolution where the
       operation is semantically label-based
