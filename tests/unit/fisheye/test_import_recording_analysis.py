@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-
-import zarr
 
 from fisheye.utils import import_recording_analysis as mod
 
@@ -16,6 +15,7 @@ def _opts() -> mod.RecordingImportOptions:
         stimulus_run_name=None,
         stimulus_overwrite=False,
         stimulus_quiet=True,
+        allow_preflight_failures=False,
     )
 
 
@@ -33,6 +33,8 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
     def _fake_stim(_plan: mod.RecordingAnalysisPlan, _opts: mod.RecordingImportOptions):
         return False, 5, ["stimulus"]
 
+    monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+    monkeypatch.setattr(mod, "stimulus_runs_present", lambda _path: False)
     monkeypatch.setattr(mod, "run_stimulus_import", _fake_stim)
     result = mod.process_recording_import(plan, opts, logger=None)
 
@@ -41,16 +43,45 @@ def test_process_recording_import_returns_stimulus_failure(monkeypatch, tmp_path
     assert result.returncode == 5
 
 
-def test_stimulus_runs_present_detects_existing_run(tmp_path: Path) -> None:
-    zarr_path = tmp_path / "sample_analysis.zarr"
-    root = zarr.open_group(str(zarr_path), mode="w")
-    stim_parent = root.require_group("analysis").require_group("stimulus_runs")
-    stim_parent.require_group("stimulus_20260209_000000")
+def test_stimulus_runs_present_detects_existing_run(monkeypatch, tmp_path: Path) -> None:
+    class _FakeGroup:
+        def __init__(self, groups: dict[str, object] | None = None, keys: list[str] | None = None) -> None:
+            self._groups = groups or {}
+            self._keys = keys or []
 
-    assert mod.stimulus_runs_present(zarr_path)
+        def get(self, name: str):
+            return self._groups.get(name)
+
+        def group_keys(self):
+            return list(self._keys)
+
+    fake_root = _FakeGroup(
+        groups={
+            "analysis": _FakeGroup(
+                groups={
+                    "stimulus_runs": _FakeGroup(keys=["stimulus_20260209_000000"]),
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
+
+    assert mod.stimulus_runs_present(tmp_path / "sample_analysis.zarr")
 
 
-def test_ensure_analysis_archive_sets_purpose(tmp_path: Path) -> None:
+def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    class _FakeGroup:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs()
+
+    fake_root = _FakeGroup()
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+
     plan = mod.RecordingAnalysisPlan(
         recording_dir=tmp_path / "rec",
         h5_path=tmp_path / "rec" / "raw" / "session.h5",
@@ -60,8 +91,7 @@ def test_ensure_analysis_archive_sets_purpose(tmp_path: Path) -> None:
 
     mod.ensure_analysis_archive(plan)
 
-    root = zarr.open_group(str(plan.zarr_path), mode="r")
-    assert root.attrs.get("zarr_purpose") == "analysis"
+    assert fake_root.attrs.get("zarr_purpose") == "analysis"
 
 
 def test_resolve_single_recording_plan_uses_default_paths(tmp_path: Path) -> None:
@@ -109,3 +139,52 @@ def test_main_defaults_to_dry_run_and_does_not_create_archive(tmp_path: Path) ->
 
     assert rc == 0
     assert not out.exists()
+
+
+def test_process_recording_import_blocks_failed_preflight(tmp_path: Path) -> None:
+    recording_dir = tmp_path / "rec"
+    recording_dir.mkdir()
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps({"preflight": {"status": "fail", "video": {"media_status": "fail"}}}),
+        encoding="utf-8",
+    )
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=recording_dir / "raw" / "session.h5",
+        cam_video=recording_dir / "cams" / "cam.mp4",
+        zarr_path=recording_dir / "zarr" / "rec_analysis.zarr",
+    )
+
+    result = mod.process_recording_import(plan, _opts(), logger=None)
+
+    assert not result.ok
+    assert result.failed_step == "preflight_gate"
+    assert "preflight failed" in (result.error or "")
+
+
+def test_process_recording_import_allows_failed_preflight_when_overridden(monkeypatch, tmp_path: Path) -> None:
+    recording_dir = tmp_path / "rec"
+    recording_dir.mkdir()
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps({"preflight": {"status": "fail", "video": {"media_status": "fail"}}}),
+        encoding="utf-8",
+    )
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=recording_dir / "raw" / "session.h5",
+        cam_video=recording_dir / "cams" / "cam.mp4",
+        zarr_path=recording_dir / "zarr" / "rec_analysis.zarr",
+    )
+    opts = _opts()
+    opts.allow_preflight_failures = True
+    seen: dict[str, bool] = {"ensure": False}
+
+    def _fake_ensure(_plan: mod.RecordingAnalysisPlan) -> None:
+        seen["ensure"] = True
+
+    monkeypatch.setattr(mod, "ensure_analysis_archive", _fake_ensure)
+
+    result = mod.process_recording_import(plan, opts, logger=None)
+
+    assert result.ok
+    assert seen["ensure"] is True

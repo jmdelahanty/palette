@@ -32,6 +32,7 @@ def _opts(tmp_path: Path) -> mod.RecordingPipelineOptions:
             stimulus_run_name=None,
             stimulus_overwrite=False,
             stimulus_quiet=True,
+            allow_preflight_failures=False,
         ),
     )
 

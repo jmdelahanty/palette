@@ -16,6 +16,7 @@ from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
 from fisheye.utils.import_video_metadata import probe_video_metadata, write_video_metadata
+from fisheye.utils.recording_preflight import preflight_gate_reason
 
 from .import_stimulus_to_zarr import import_stimulus_to_zarr
 
@@ -158,6 +159,14 @@ def _build_plan(args: argparse.Namespace) -> CreationPlan:
     if output_reason:
         reasons.append(output_reason)
 
+    if recording_dir is not None:
+        gate_reason = preflight_gate_reason(
+            recording_dir,
+            allow_failures=bool(args.allow_preflight_failures),
+        )
+        if gate_reason is not None:
+            reasons.append(gate_reason)
+
     if reasons:
         return CreationPlan(
             recording_dir=recording_dir,
@@ -280,6 +289,11 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip chaser interpolation repair during stimulus import.",
     )
+    parser.add_argument(
+        "--allow-preflight-failures",
+        action="store_true",
+        help="Proceed even if recording_manifest.json marks preflight.status=fail.",
+    )
 
     parser.add_argument("--register", action="store_true", help="Scan resulting archive into registry.")
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
@@ -299,6 +313,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     plan = _build_plan(args)
     _print_plan(plan)
     print(f"  import_video_metadata: {bool(args.import_video_metadata)}")
+    print(f"  allow_preflight_failures: {bool(args.allow_preflight_failures)}")
 
     logger: Optional[JsonLogger] = None
     if not args.no_log:
@@ -316,6 +331,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             output_path=str(plan.output_path) if plan.output_path else None,
             import_stimulus=plan.import_stimulus,
             import_video_metadata=bool(args.import_video_metadata),
+            allow_preflight_failures=bool(args.allow_preflight_failures),
             video_metadata_overwrite=bool(args.video_metadata_overwrite),
             register=bool(args.register),
         )

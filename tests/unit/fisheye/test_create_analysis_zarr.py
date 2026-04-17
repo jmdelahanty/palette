@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import zarr
@@ -27,6 +28,7 @@ def _base_args(tmp_path: Path) -> argparse.Namespace:
         dry_run=True,
         log_dir=None,
         no_log=True,
+        allow_preflight_failures=False,
     )
 
 
@@ -79,7 +81,19 @@ def test_build_plan_no_import_stimulus_allows_missing_h5(tmp_path: Path) -> None
     assert plan.import_stimulus is False
 
 
-def test_ensure_archive_sets_analysis_attrs(tmp_path: Path) -> None:
+def test_ensure_archive_sets_analysis_attrs(monkeypatch, tmp_path: Path) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    class _FakeGroup:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs()
+
+    fake_root = _FakeGroup()
+    monkeypatch.setattr(create_mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+
     output = tmp_path / "rec" / "zarr" / "rec_analysis.zarr"
     video = tmp_path / "rec" / "cams" / "Cam2010093_a.mp4"
     video.parent.mkdir(parents=True)
@@ -95,10 +109,9 @@ def test_ensure_archive_sets_analysis_attrs(tmp_path: Path) -> None:
     )
     create_mod._ensure_archive(plan)  # noqa: SLF001
 
-    root = zarr.open_group(str(output), mode="r")
-    assert root.attrs.get("zarr_purpose") == "analysis"
-    assert root.attrs.get("source_video_path") == str(video)
-    assert root.attrs.get("source_video") == video.name
+    assert fake_root.attrs.get("zarr_purpose") == "analysis"
+    assert fake_root.attrs.get("source_video_path") == str(video)
+    assert fake_root.attrs.get("source_video") == video.name
 
 
 def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monkeypatch) -> None:
@@ -106,7 +119,6 @@ def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monke
     video = tmp_path / "rec" / "cams" / "Cam2010093_a.mp4"
     output.parent.mkdir(parents=True, exist_ok=True)
     video.parent.mkdir(parents=True, exist_ok=True)
-    zarr.open_group(str(output), mode="w")
     video.touch()
 
     plan = create_mod.CreationPlan(
@@ -139,6 +151,7 @@ def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monke
 
     monkeypatch.setattr(create_mod, "probe_video_metadata", _fake_probe)
     monkeypatch.setattr(create_mod, "write_video_metadata", _fake_write)
+    monkeypatch.setattr(create_mod.zarr, "open_group", lambda *_args, **_kwargs: object())
 
     updates = create_mod._apply_video_metadata(plan, overwrite=True)  # noqa: SLF001
 
@@ -146,3 +159,22 @@ def test_apply_video_metadata_uses_analysis_import_purpose(tmp_path: Path, monke
     assert calls["overwrite"] is True
     assert calls["import_purpose"] == "analysis"
     assert updates == {"root_attrs_updated": 1, "raw_video_attrs_updated": 1}
+
+
+def test_build_plan_blocks_failed_preflight(tmp_path: Path) -> None:
+    rec = tmp_path / "2026-02-09T04-00-00Z_arena_1_DefaultScreen"
+    (rec / "cams").mkdir(parents=True)
+    (rec / "raw").mkdir(parents=True)
+    (rec / "cams" / "Cam2010093_a.mp4").touch()
+    (rec / "raw" / "session.h5").touch()
+    (rec / "recording_manifest.json").write_text(
+        json.dumps({"preflight": {"status": "fail", "h5": {"core_status": "fail"}}}),
+        encoding="utf-8",
+    )
+
+    args = _base_args(tmp_path)
+    args.recording_dir = rec
+    plan = create_mod._build_plan(args)  # noqa: SLF001
+
+    assert plan.status == "missing"
+    assert "preflight failed" in (plan.reason or "")

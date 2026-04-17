@@ -1,5 +1,6 @@
 from pathlib import Path
 import csv
+import json
 import sys
 
 import h5py
@@ -159,3 +160,59 @@ def test_main_apply_runs_h5_diagnostics_hook(tmp_path: Path, monkeypatch) -> Non
 
     assert rc == 0
     assert seen == [tmp_path / "recordings" / "recording_001"]
+
+
+def test_main_apply_persists_h5_preflight_manifest(tmp_path: Path, monkeypatch) -> None:
+    source_root = tmp_path / "staging"
+    source_root.mkdir()
+    h5_path = source_root / "recording_002.h5"
+    with h5py.File(h5_path, "w") as handle:
+        handle.attrs["camera_id"] = "2010093"
+        handle.attrs["session_uuid"] = "session_2"
+    cam_mp4 = source_root / "Cam2010093.mp4"
+    cam_meta = source_root / "Cam2010093_meta.csv"
+    cam_mp4.write_bytes(b"video")
+    cam_meta.write_text("frame_id,timestamp,timestamp_sys\n1,1,1\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        organize_recordings,
+        "check_hevc_keyframe_flags",
+        lambda _: {"codec": "hevc", "has_stss": True, "needs_fix": False, "message": "ok"},
+    )
+    monkeypatch.setattr(
+        organize_recordings,
+        "_run_h5_diagnostics_for_plan",
+        lambda plan, logger: organize_recordings.H5DiagnosticsHookResult(
+            manifest_payload=organize_recordings.build_h5_preflight_payload(
+                status="pass",
+                core_status="pass",
+                optional_status="pass",
+                tooling_status="pass",
+                finding_codes=[],
+            ),
+            warnings=[],
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "organize_recordings.py",
+            str(source_root),
+            "--dest-root",
+            str(tmp_path / "recordings"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--apply",
+            "--run-h5-diagnostics",
+        ],
+    )
+
+    rc = organize_recordings.main()
+
+    assert rc == 0
+    manifest_path = tmp_path / "recordings" / "recording_002" / "recording_manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["preflight"]["status"] == "pass"
+    assert payload["preflight"]["h5"]["core_status"] == "pass"
+    assert payload["preflight"]["checked_at_utc"]

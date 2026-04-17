@@ -16,6 +16,14 @@ Recommended pre-import order:
 4. if both preflights pass, import the recording into its analysis Zarr
 5. continue with detection and downstream analysis stages
 
+If you run diagnostics through `organize_recordings --run-video-diagnostics`
+and/or `--run-h5-diagnostics`, the organizer writes a `preflight` summary into
+`recording_manifest.json`. The import entry points below now block only when
+that stored manifest preflight is `fail`. They do not block on `warn`.
+
+Use `--allow-preflight-failures` only when you explicitly want to override a
+recorded failed preflight.
+
 For repeatable operator smoke checks on real data, use the shared fixture
 convention documented in [test_data.md](test_data.md) rather than writing test
 artifacts back into `/nvme1/recordings`.
@@ -91,7 +99,8 @@ scripts/py -m fisheye.utils.import_recordings_analysis \
 ```
 
 With no `--apply` flag, this prints a plan showing each recording it found,
-what camera video it matched, and whether the analysis zarr already exists.
+what camera video it matched, whether the analysis zarr already exists, and
+whether a recorded manifest preflight would block the run.
 
 ### Apply
 

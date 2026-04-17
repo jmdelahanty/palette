@@ -52,6 +52,7 @@ scripts/py -m fisheye.analysis.create_analysis_zarr \
   [--h5 /path/to/raw/session.h5] \
   [--output /path/to/<recording>_analysis.zarr] \
   [--import-stimulus] [--stimulus-run-name <name>] [--stimulus-overwrite] \
+  [--allow-preflight-failures] \
   [--register --registry /nvme1/palette_registry.sqlite] \
   [--apply]
 ```
@@ -89,6 +90,8 @@ Defaults:
 
 - Fail-closed on ambiguous camera/H5 resolution.
 - Fail-closed if `--import-stimulus` requested but H5 unavailable.
+- Fail-closed when `recording_manifest.json` records `preflight.status=fail`,
+  unless `--allow-preflight-failures` is passed.
 - Return non-zero if any requested step fails.
 - Dry-run must never mutate filesystem or registry.
 

@@ -17,6 +17,7 @@ from typing import Callable, List, Optional
 import zarr
 
 from fisheye.utils.import_video_metadata import probe_video_metadata, write_video_metadata
+from fisheye.utils.recording_preflight import preflight_gate_reason
 
 
 @dataclass
@@ -36,6 +37,7 @@ class RecordingImportOptions:
     stimulus_run_name: Optional[str]
     stimulus_overwrite: bool
     stimulus_quiet: bool
+    allow_preflight_failures: bool = False
 
 
 @dataclass
@@ -123,6 +125,19 @@ def process_recording_import(
     *,
     logger: Optional[Callable[..., None]] = None,
 ) -> RecordingImportResult:
+    gate_reason = preflight_gate_reason(
+        plan.recording_dir,
+        allow_failures=bool(opts.allow_preflight_failures),
+    )
+    if gate_reason is not None:
+        _log(
+            logger,
+            "preflight_gate_blocked",
+            recording_dir=str(plan.recording_dir),
+            reason=gate_reason,
+        )
+        return RecordingImportResult(ok=False, failed_step="preflight_gate", error=gate_reason)
+
     try:
         ensure_analysis_archive(plan)
     except Exception as exc:
@@ -241,6 +256,7 @@ def _build_options(args: argparse.Namespace) -> RecordingImportOptions:
         stimulus_run_name=args.stimulus_run_name,
         stimulus_overwrite=bool(args.stimulus_overwrite),
         stimulus_quiet=bool(args.stimulus_quiet),
+        allow_preflight_failures=bool(args.allow_preflight_failures),
     )
 
 
@@ -291,6 +307,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
+    parser.add_argument(
+        "--allow-preflight-failures",
+        action="store_true",
+        help="Proceed even if recording_manifest.json marks preflight.status=fail.",
+    )
 
     args = parser.parse_args(argv)
     if not args.apply:
@@ -314,6 +335,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  output: {plan.zarr_path}")
     print(f"  import_video_metadata: {bool(args.import_video_metadata)}")
     print(f"  import_stimulus: {bool(args.import_stimulus)}")
+    print(f"  allow_preflight_failures: {bool(args.allow_preflight_failures)}")
     if args.dry_run:
         print("Dry run: no changes were made.")
         return 0

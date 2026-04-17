@@ -147,6 +147,7 @@ For each recording discovered via its H5 file, the organizer:
 5. Creates an empty `zarr/` directory (used by later pipeline stages).
 6. Writes `recording_manifest.json` with all metadata extracted from the H5.
 7. Validates HEVC keyframe flags on the camera video.
+8. If diagnostics hooks are enabled, records a `preflight` summary in the manifest.
 
 ## After organization: what you should have
 
@@ -208,6 +209,20 @@ scripts/py -m fisheye.utils.organize_recordings \
   --run-video-diagnostics \
   --run-h5-diagnostics
 ```
+
+When these hooks run, the organizer persists a `preflight` block into
+`recording_manifest.json`. That block stores the combined preflight verdict plus
+separate video and H5 summaries. Downstream import entry points now refuse
+`preflight.status=fail` by default:
+
+- `scripts/py -m fisheye.analysis.create_analysis_zarr ...`
+- `scripts/py -m fisheye.utils.import_recording_analysis ...`
+- `scripts/py -m fisheye.utils.run_recording_analysis_pipeline ...`
+- `scripts/py -m fisheye.utils.import_recordings_analysis ...`
+
+Use `--allow-preflight-failures` on those commands only when you intentionally
+want to bypass a failed recorded preflight. A stored `warn` does not block
+import.
 
 Use the video report when you want media and camera-metadata confidence. Use
 the H5 report when you want to know whether stimulus import should succeed.

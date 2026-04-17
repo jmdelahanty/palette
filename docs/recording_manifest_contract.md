@@ -49,6 +49,51 @@ Recommended additional keys (already used by backfill when present):
 - `canvas_name`
 - `protocol_name_from_definition`
 
+## Optional Preflight Section
+
+`recording_manifest.json` may include a machine-written `preflight` object. This
+is written by `fisheye.utils.organize_recordings` when post-organize
+diagnostics hooks run.
+
+Example shape:
+
+```json
+{
+  "preflight": {
+    "status": "warn",
+    "checked_at_utc": "2026-04-17T22:49:40.614931+00:00",
+    "video": {
+      "status": "warn",
+      "media_status": "pass",
+      "tooling_status": "error",
+      "videos_scanned": 2,
+      "finding_codes": ["video.decord_unavailable"]
+    },
+    "h5": {
+      "status": "pass",
+      "core_status": "pass",
+      "optional_status": "pass",
+      "tooling_status": "pass",
+      "finding_codes": []
+    }
+  }
+}
+```
+
+Semantics:
+
+- `preflight.status` is the combined stored verdict.
+- `video.status` summarizes the unified raw-video preflight.
+- `h5.status` summarizes the unified H5 preflight.
+- `video.media_status` and `h5.core_status` are the strongest import-relevant
+  fields.
+- tooling-only problems may produce `warn` without indicating bad media or an
+  unimportable H5.
+
+Downstream import commands currently block only when `preflight.status=fail`,
+and allow `warn` by default. Commands that enforce this gate expose an explicit
+`--allow-preflight-failures` override.
+
 ## Controlled Vocabulary
 
 ### `recording_type`

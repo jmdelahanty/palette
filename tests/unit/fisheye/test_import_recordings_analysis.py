@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
-import zarr
 
 from fisheye.utils import import_recordings_analysis as analysis_import
 
@@ -66,7 +65,7 @@ def test_build_plans_marks_multi_camera_recording_as_unsupported(tmp_path: Path)
     assert "multi-camera analysis import is not yet supported" in (plan.reason or "")
 
 
-def test_build_plans_skips_existing_analysis_zarr(tmp_path: Path) -> None:
+def test_build_plans_skips_existing_analysis_zarr(monkeypatch, tmp_path: Path) -> None:
     recording_dir = tmp_path / "2026-01-28T22-22-57Z_arena_2_Feeding"
     h5_path = recording_dir / "raw" / "session.h5"
     _write_h5(h5_path, camera_id="2010094")
@@ -76,7 +75,8 @@ def test_build_plans_skips_existing_analysis_zarr(tmp_path: Path) -> None:
     (cams / "Cam2010094_foo.mp4").touch()
 
     zarr_path = recording_dir / "zarr" / f"{recording_dir.name}_analysis.zarr"
-    zarr.open_group(str(zarr_path), mode="w")
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(analysis_import, "stimulus_runs_present", lambda _path: False)
 
     plans = analysis_import._build_plans(  # noqa: SLF001
         root=tmp_path,
@@ -229,3 +229,53 @@ def test_main_rejects_deprecated_refine_max_gap(tmp_path: Path) -> None:
         assert "--refine-max-gap" in str(exc)
     else:  # pragma: no cover - defensive branch
         raise AssertionError("Expected SystemExit when --refine-max-gap is passed.")
+
+
+def test_build_plans_blocks_failed_preflight_by_default(tmp_path: Path) -> None:
+    recording_dir = tmp_path / "2026-01-28T23-00-00Z_arena_3_DefaultScreen"
+    h5_path = recording_dir / "raw" / "session.h5"
+    _write_h5(h5_path, camera_id="2010093")
+    cams = recording_dir / "cams"
+    cams.mkdir(parents=True, exist_ok=True)
+    (cams / "Cam2010093_foo.mp4").touch()
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps({"preflight": {"status": "fail", "video": {"media_status": "fail"}}}),
+        encoding="utf-8",
+    )
+
+    plans = analysis_import._build_plans(  # noqa: SLF001
+        root=tmp_path,
+        recursive=True,
+        skip_existing=True,
+        check_stimulus=False,
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "missing"
+    assert "preflight failed" in (plans[0].reason or "")
+
+
+def test_build_plans_allows_failed_preflight_with_override(tmp_path: Path) -> None:
+    recording_dir = tmp_path / "2026-01-28T23-10-00Z_arena_3_DefaultScreen"
+    h5_path = recording_dir / "raw" / "session.h5"
+    _write_h5(h5_path, camera_id="2010093")
+    cams = recording_dir / "cams"
+    cams.mkdir(parents=True, exist_ok=True)
+    wanted = cams / "Cam2010093_foo.mp4"
+    wanted.touch()
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps({"preflight": {"status": "fail", "video": {"media_status": "fail"}}}),
+        encoding="utf-8",
+    )
+
+    plans = analysis_import._build_plans(  # noqa: SLF001
+        root=tmp_path,
+        recursive=True,
+        skip_existing=True,
+        check_stimulus=False,
+        allow_preflight_failures=True,
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "ok"
+    assert plans[0].cam_video == wanted

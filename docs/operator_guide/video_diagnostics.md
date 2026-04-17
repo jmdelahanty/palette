@@ -30,9 +30,13 @@ The recommended operator workflow is:
 
 Diagnostics are a pre-import checkpoint. You can run them manually, or opt
 into them during `fisheye.utils.organize_recordings --apply` with
-`--run-video-diagnostics`. They are still not run automatically by
-`fisheye.analysis.create_analysis_zarr` or
-`fisheye.utils.import_recording_analysis`.
+`--run-video-diagnostics`. When the organizer runs them, it records the result
+in `recording_manifest.json` under `preflight.video`.
+
+Import commands still do not execute video diagnostics automatically, but they
+now honor the recorded manifest gate: `preflight.status=fail` blocks import by
+default, while `warn` does not. Use `--allow-preflight-failures` on the import
+command only when you intentionally want to bypass a failed recorded preflight.
 
 For repeatable real-data smoke checks, prefer the shared fixture and run
 layout documented in [test_data.md](test_data.md).

@@ -24,6 +24,16 @@ from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+from fisheye.utils.recording_preflight import (
+    PRECHECK_FAIL,
+    PRECHECK_NOT_RUN,
+    PRECHECK_PASS,
+    PRECHECK_WARN,
+    build_h5_preflight_payload,
+    build_manifest_preflight_payload,
+    build_video_preflight_payload,
+    default_preflight_payload,
+)
 
 try:
     from fisheye.diagnostics.video.container import check_hevc_keyframe_flags
@@ -57,6 +67,18 @@ class RecordingPlan:
     meta: Dict[str, str] = field(default_factory=dict)
     missing: List[str] = field(default_factory=list)
     keyframe_checks: Dict[str, Dict[str, object]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VideoDiagnosticsHookResult:
+    manifest_payload: Dict[str, object]
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class H5DiagnosticsHookResult:
+    manifest_payload: Dict[str, object]
+    warnings: List[str] = field(default_factory=list)
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -545,6 +567,7 @@ def _write_manifest(
         "files": files,
         "hevc_keyframe_flags": plan.keyframe_checks if plan.keyframe_checks else None,
         "recording_snapshot": f"derived/{snapshot_path.name}" if snapshot_path.exists() else None,
+        "preflight": default_preflight_payload(),
     }
     try:
         plan.dest_dir.mkdir(parents=True, exist_ok=True)
@@ -851,10 +874,81 @@ def _diagnostic_finding_codes(findings: List[object], limit: int = 3) -> List[st
     return codes
 
 
+def _coerce_video_diagnostics_hook_result(result: object) -> VideoDiagnosticsHookResult:
+    if isinstance(result, VideoDiagnosticsHookResult):
+        return result
+    if isinstance(result, list):
+        return VideoDiagnosticsHookResult(
+            manifest_payload=build_video_preflight_payload(
+                status=PRECHECK_NOT_RUN,
+                media_status=PRECHECK_NOT_RUN,
+                tooling_status="skip",
+                videos_scanned=0,
+                finding_codes=[],
+            ),
+            warnings=[str(item) for item in result],
+        )
+    raise TypeError(f"unexpected video diagnostics hook result: {type(result)!r}")
+
+
+def _coerce_h5_diagnostics_hook_result(result: object) -> H5DiagnosticsHookResult:
+    if isinstance(result, H5DiagnosticsHookResult):
+        return result
+    if isinstance(result, list):
+        return H5DiagnosticsHookResult(
+            manifest_payload=build_h5_preflight_payload(
+                status=PRECHECK_NOT_RUN,
+                core_status=PRECHECK_NOT_RUN,
+                optional_status=PRECHECK_NOT_RUN,
+                tooling_status="skip",
+                finding_codes=[],
+            ),
+            warnings=[str(item) for item in result],
+        )
+    raise TypeError(f"unexpected h5 diagnostics hook result: {type(result)!r}")
+
+
+def _persist_preflight_to_manifest(
+    plan: RecordingPlan,
+    *,
+    video_result: Optional[VideoDiagnosticsHookResult],
+    h5_result: Optional[H5DiagnosticsHookResult],
+) -> Optional[str]:
+    manifest_path = plan.dest_dir / "recording_manifest.json"
+    if not manifest_path.exists():
+        return f"Missing manifest, cannot persist preflight for {plan.name}: {manifest_path}"
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"Failed to read manifest for {plan.name}: {exc}"
+    if not isinstance(payload, dict):
+        return f"Manifest root is not a JSON object: {manifest_path}"
+
+    existing_preflight = payload.get("preflight")
+    if not isinstance(existing_preflight, dict):
+        existing_preflight = {}
+
+    existing_video = existing_preflight.get("video") if isinstance(existing_preflight.get("video"), dict) else None
+    existing_h5 = existing_preflight.get("h5") if isinstance(existing_preflight.get("h5"), dict) else None
+    payload["preflight"] = build_manifest_preflight_payload(
+        checked_at_utc=_utc_now(),
+        video=video_result.manifest_payload if video_result is not None else existing_video,
+        h5=h5_result.manifest_payload if h5_result is not None else existing_h5,
+    )
+
+    try:
+        manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as exc:
+        return f"Failed to update preflight manifest for {plan.name}: {exc}"
+    return None
+
+
 def _run_video_diagnostics_for_plan(
     plan: RecordingPlan,
     logger: Optional[JsonLogger],
-) -> List[str]:
+) -> VideoDiagnosticsHookResult:
+    session_uuid = plan.meta.get("session_uuid")
     try:
         from fisheye.diagnostics.video.batch import build_batch_report
     except Exception as exc:
@@ -863,11 +957,21 @@ def _run_video_diagnostics_for_plan(
             logger.log(
                 "video_diagnostics_error",
                 recording_name=plan.name,
-                session_uuid=plan.meta.get("session_uuid"),
+                session_uuid=session_uuid,
                 recording_dir=str(plan.dest_dir),
                 message=message,
             )
-        return [message]
+        return VideoDiagnosticsHookResult(
+            manifest_payload=build_video_preflight_payload(
+                status=PRECHECK_WARN,
+                media_status=PRECHECK_NOT_RUN,
+                tooling_status="error",
+                videos_scanned=0,
+                finding_codes=[],
+                error=str(exc),
+            ),
+            warnings=[message],
+        )
 
     try:
         report = build_batch_report(
@@ -890,19 +994,29 @@ def _run_video_diagnostics_for_plan(
             logger.log(
                 "video_diagnostics_error",
                 recording_name=plan.name,
-                session_uuid=plan.meta.get("session_uuid"),
+                session_uuid=session_uuid,
                 recording_dir=str(plan.dest_dir),
                 message=message,
             )
-        return [message]
+        return VideoDiagnosticsHookResult(
+            manifest_payload=build_video_preflight_payload(
+                status=PRECHECK_WARN,
+                media_status=PRECHECK_NOT_RUN,
+                tooling_status="error",
+                videos_scanned=0,
+                finding_codes=[],
+                error=str(exc),
+            ),
+            warnings=[message],
+        )
 
     recording = next(
         (item for item in report.recordings if item.recording_root == str(plan.dest_dir)),
         None,
     )
-    media_status = recording.media_status if recording is not None else report.overall_status
-    tooling_status = recording.tooling_status if recording is not None else "skip"
-    scanned = recording.item_count if recording is not None else report.summary.scanned
+    media_status = str(recording.media_status if recording is not None else report.overall_status)
+    tooling_status = str(recording.tooling_status if recording is not None else "skip")
+    scanned = int(recording.item_count if recording is not None else report.summary.scanned)
     finding_codes = _diagnostic_finding_codes(
         [finding for item in report.items for finding in item.findings]
     )
@@ -914,7 +1028,7 @@ def _run_video_diagnostics_for_plan(
         logger.log(
             "video_diagnostics",
             recording_name=plan.name,
-            session_uuid=plan.meta.get("session_uuid"),
+            session_uuid=session_uuid,
             recording_dir=str(plan.dest_dir),
             media_status=media_status,
             tooling_status=tooling_status,
@@ -922,20 +1036,40 @@ def _run_video_diagnostics_for_plan(
             finding_codes=finding_codes,
         )
 
+    status = PRECHECK_PASS
     warnings: List[str] = []
     if scanned == 0:
+        status = PRECHECK_WARN
         warnings.append(f"Video diagnostics for {plan.name}: no videos found under {plan.dest_dir}")
-    elif media_status in {"warn", "fail", "error"} or tooling_status in {"warn", "fail", "error"}:
-        warnings.append(
-            f"Video diagnostics for {plan.name}: media={media_status} tooling={tooling_status}{finding_suffix}"
-        )
-    return warnings
+        media_payload_status = PRECHECK_NOT_RUN
+    else:
+        media_payload_status = media_status
+        if media_status == PRECHECK_FAIL:
+            status = PRECHECK_FAIL
+        elif media_status in {PRECHECK_WARN, "error"} or tooling_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"}:
+            status = PRECHECK_WARN
+        if status in {PRECHECK_WARN, PRECHECK_FAIL}:
+            warnings.append(
+                f"Video diagnostics for {plan.name}: media={media_status} tooling={tooling_status}{finding_suffix}"
+            )
+
+    return VideoDiagnosticsHookResult(
+        manifest_payload=build_video_preflight_payload(
+            status=status,
+            media_status=media_payload_status,
+            tooling_status=tooling_status,
+            videos_scanned=scanned,
+            finding_codes=finding_codes,
+        ),
+        warnings=warnings,
+    )
 
 
 def _run_h5_diagnostics_for_plan(
     plan: RecordingPlan,
     logger: Optional[JsonLogger],
-) -> List[str]:
+) -> H5DiagnosticsHookResult:
+    session_uuid = plan.meta.get("session_uuid")
     try:
         from fisheye.diagnostics.h5 import build_h5_report
     except Exception as exc:
@@ -944,11 +1078,21 @@ def _run_h5_diagnostics_for_plan(
             logger.log(
                 "h5_diagnostics_error",
                 recording_name=plan.name,
-                session_uuid=plan.meta.get("session_uuid"),
+                session_uuid=session_uuid,
                 recording_dir=str(plan.dest_dir),
                 message=message,
             )
-        return [message]
+        return H5DiagnosticsHookResult(
+            manifest_payload=build_h5_preflight_payload(
+                status=PRECHECK_WARN,
+                core_status=PRECHECK_NOT_RUN,
+                optional_status=PRECHECK_NOT_RUN,
+                tooling_status="error",
+                finding_codes=[],
+                error=str(exc),
+            ),
+            warnings=[message],
+        )
 
     try:
         report = build_h5_report(plan.dest_dir, profile="palette-import")
@@ -958,11 +1102,21 @@ def _run_h5_diagnostics_for_plan(
             logger.log(
                 "h5_diagnostics_error",
                 recording_name=plan.name,
-                session_uuid=plan.meta.get("session_uuid"),
+                session_uuid=session_uuid,
                 recording_dir=str(plan.dest_dir),
                 message=message,
             )
-        return [message]
+        return H5DiagnosticsHookResult(
+            manifest_payload=build_h5_preflight_payload(
+                status=PRECHECK_WARN,
+                core_status=PRECHECK_NOT_RUN,
+                optional_status=PRECHECK_NOT_RUN,
+                tooling_status="error",
+                finding_codes=[],
+                error=str(exc),
+            ),
+            warnings=[message],
+        )
 
     finding_codes = _diagnostic_finding_codes(report.findings)
     finding_suffix = f" ({', '.join(finding_codes)})" if finding_codes else ""
@@ -973,7 +1127,7 @@ def _run_h5_diagnostics_for_plan(
         logger.log(
             "h5_diagnostics",
             recording_name=plan.name,
-            session_uuid=plan.meta.get("session_uuid"),
+            session_uuid=session_uuid,
             recording_dir=str(plan.dest_dir),
             h5_path=report.file_info.path,
             core_status=report.core_status,
@@ -982,12 +1136,28 @@ def _run_h5_diagnostics_for_plan(
             finding_codes=finding_codes,
         )
 
+    status = PRECHECK_PASS
     warnings: List[str] = []
-    if report.core_status in {"warn", "fail", "error"} or report.optional_status in {"warn", "fail", "error"} or report.tooling_status in {"warn", "fail", "error"}:
+    if report.core_status == PRECHECK_FAIL:
+        status = PRECHECK_FAIL
+    elif report.core_status in {PRECHECK_WARN, "error"} or report.optional_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"} or report.tooling_status in {PRECHECK_WARN, PRECHECK_FAIL, "error"}:
+        status = PRECHECK_WARN
+
+    if status in {PRECHECK_WARN, PRECHECK_FAIL}:
         warnings.append(
             f"H5 diagnostics for {plan.name}: core={report.core_status} optional={report.optional_status} tooling={report.tooling_status}{finding_suffix}"
         )
-    return warnings
+
+    return H5DiagnosticsHookResult(
+        manifest_payload=build_h5_preflight_payload(
+            status=status,
+            core_status=str(report.core_status),
+            optional_status=str(report.optional_status),
+            tooling_status=str(report.tooling_status),
+            finding_codes=finding_codes,
+        ),
+        warnings=warnings,
+    )
 
 
 def main() -> int:
@@ -1156,6 +1326,10 @@ def main() -> int:
         print("--run-video-diagnostics and --run-h5-diagnostics require --apply.", file=sys.stderr)
         return 1
 
+    effective_write_manifest = bool(
+        args.write_manifest or args.run_video_diagnostics or args.run_h5_diagnostics
+    )
+
     if args.process_all:
         sources = sorted([path for path in source.iterdir() if path.is_dir()])
         if not sources:
@@ -1189,7 +1363,8 @@ def main() -> int:
             recursive=args.recursive,
             dest_root=str(args.dest_root),
             rename_cams=args.rename_cams,
-            write_manifest=args.write_manifest,
+            write_manifest=effective_write_manifest,
+            requested_write_manifest=bool(args.write_manifest),
             snapshot_mode=args.snapshot_mode,
             video_only=args.video_only,
             metadata_csv=str(args.metadata_csv) if args.metadata_csv else None,
@@ -1299,7 +1474,7 @@ def main() -> int:
             warnings = _apply_plan(
                 plans,
                 create_empty=False,
-                write_manifest=args.write_manifest,
+                write_manifest=effective_write_manifest,
                 snapshot=snapshot_payload,
                 snapshot_mode=args.snapshot_mode,
                 logger=logger,
@@ -1330,10 +1505,41 @@ def main() -> int:
             if args.run_video_diagnostics or args.run_h5_diagnostics:
                 print("\nRunning post-organize diagnostics:")
                 for plan in plans:
+                    video_result: Optional[VideoDiagnosticsHookResult] = None
+                    h5_result: Optional[H5DiagnosticsHookResult] = None
                     if args.run_video_diagnostics:
-                        warnings.extend(_run_video_diagnostics_for_plan(plan, logger))
+                        video_result = _coerce_video_diagnostics_hook_result(
+                            _run_video_diagnostics_for_plan(plan, logger)
+                        )
+                        warnings.extend(video_result.warnings)
                     if args.run_h5_diagnostics:
-                        warnings.extend(_run_h5_diagnostics_for_plan(plan, logger))
+                        h5_result = _coerce_h5_diagnostics_hook_result(
+                            _run_h5_diagnostics_for_plan(plan, logger)
+                        )
+                        warnings.extend(h5_result.warnings)
+                    manifest_warning = _persist_preflight_to_manifest(
+                        plan,
+                        video_result=video_result,
+                        h5_result=h5_result,
+                    )
+                    if manifest_warning:
+                        warnings.append(manifest_warning)
+                        if logger:
+                            logger.log(
+                                "warning",
+                                recording_name=plan.name,
+                                session_uuid=plan.meta.get("session_uuid"),
+                                message=manifest_warning,
+                            )
+                    elif logger:
+                        logger.log(
+                            "preflight_written",
+                            recording_name=plan.name,
+                            session_uuid=plan.meta.get("session_uuid"),
+                            manifest_path=str(plan.dest_dir / "recording_manifest.json"),
+                            video_status=(video_result.manifest_payload.get("status") if video_result else None),
+                            h5_status=(h5_result.manifest_payload.get("status") if h5_result else None),
+                        )
             if warnings:
                 print("\nWarnings:")
                 for warning in warnings:

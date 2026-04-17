@@ -325,6 +325,7 @@ def _build_import_options(args: argparse.Namespace) -> RecordingImportOptions:
         stimulus_run_name=args.stimulus_run_name,
         stimulus_overwrite=bool(args.stimulus_overwrite),
         stimulus_quiet=bool(args.stimulus_quiet),
+        allow_preflight_failures=bool(args.allow_preflight_failures),
     )
 
 
@@ -422,6 +423,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
+    parser.add_argument(
+        "--allow-preflight-failures",
+        action="store_true",
+        help="Proceed even if recording_manifest.json marks preflight.status=fail.",
+    )
 
     parser.add_argument(
         "--refine-detect",
@@ -491,6 +497,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  output: {plan.zarr_path}")
     print(f"  model_source: {args.model_source}")
     print(f"  import_stimulus: {bool(args.import_stimulus)}")
+    print(f"  allow_preflight_failures: {bool(args.allow_preflight_failures)}")
     print(f"  refine_detect: {bool(args.refine_detect)}")
     print(f"  keypoints: {bool(args.keypoints)}")
     print(f"  refine_keypoints: {bool(args.refine_keypoints)}")

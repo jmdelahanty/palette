@@ -103,9 +103,13 @@ analysis purpose and imported metadata context.
   - stop immediately on first failed stage
   - return non-zero
   - report `failed_step` and `returncode` where available
+  - treat `recording_manifest.json` `preflight.status=fail` as a blocking
+    `failed_step=preflight_gate` unless `--allow-preflight-failures` is passed
 - Batch orchestrator:
   - continue to next recording when one recording fails
   - summarize `ok/failed/skipped/missing`
+  - recordings with blocking manifest preflight failures are planned as
+    `missing` unless `--allow-preflight-failures` is passed
   - return non-zero if any recording failed
 
 ## Idempotency and Data Safety

@@ -33,6 +33,7 @@ from fisheye.utils.import_recording_analysis import (
     RecordingAnalysisPlan as SingleRecordingPlan,
     stimulus_runs_present,
 )
+from fisheye.utils.recording_preflight import preflight_gate_reason
 from fisheye.utils.run_recording_analysis_pipeline import (
     RecordingPipelineOptions,
     process_recording_analysis_pipeline,
@@ -118,6 +119,7 @@ def _build_plans(
     recursive: bool,
     skip_existing: bool,
     check_stimulus: bool,
+    allow_preflight_failures: bool = False,
 ) -> List[AnalysisPlan]:
     # Group by recording so we can detect multi-H5 (future multi-camera) layouts.
     # Current workflow supports one H5/camera stream per recording directory.
@@ -170,10 +172,18 @@ def _build_plans(
             )
             continue
 
+        gate_reason = preflight_gate_reason(
+            recording_dir,
+            allow_failures=bool(allow_preflight_failures),
+        )
+
         camera_id = meta.get("camera_id")
         cam_video, reason = _select_cam_video(recording_dir, camera_id)
         status = "ok"
-        if cam_video is None:
+        if gate_reason is not None:
+            status = "missing"
+            reason = gate_reason
+        elif cam_video is None:
             status = "missing"
         elif skip_existing and zarr_path.exists():
             status = "skipped"
@@ -310,6 +320,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
     parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
     parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
+    parser.add_argument(
+        "--allow-preflight-failures",
+        action="store_true",
+        help="Proceed even if recording_manifest.json marks preflight.status=fail.",
+    )
 
     parser.add_argument(
         "--refine-detect",
@@ -396,6 +411,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             detect_config=str(args.detect_config) if args.detect_config else None,
             model_source=str(args.model_source),
             import_stimulus=bool(args.import_stimulus),
+            allow_preflight_failures=bool(args.allow_preflight_failures),
             refine_detect=bool(args.refine_detect),
             keypoints=bool(args.keypoints),
             refine_keypoints=bool(args.refine_keypoints),
@@ -413,6 +429,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         recursive=bool(args.recursive),
         skip_existing=skip_existing,
         check_stimulus=bool(args.import_stimulus),
+        allow_preflight_failures=bool(args.allow_preflight_failures),
     )
 
     if args.dry_run:
@@ -468,6 +485,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             stimulus_run_name=args.stimulus_run_name,
             stimulus_overwrite=bool(args.stimulus_overwrite),
             stimulus_quiet=bool(args.stimulus_quiet),
+            allow_preflight_failures=bool(args.allow_preflight_failures),
         ),
     )
 
