@@ -8,6 +8,10 @@ from typing import Iterable, Optional, Sequence
 
 import zarr
 
+from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
+from .backfill_keypoint_label_names import _canonicalize_label_seq
+from .zarr_io import open_zarr_root
+
 
 SWIM_LABEL_ALIASES = ("swim_bladder", "bladder")
 LEFT_EYE_LABEL_ALIASES = ("eye_left", "left_eye")
@@ -48,34 +52,66 @@ def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
     return None
 
 
-def _select_runs(root: zarr.Group, all_runs: bool) -> list[zarr.Group]:
+def _select_runs(
+    root: zarr.Group,
+    all_runs: bool,
+    *,
+    zarr_path: Optional[Path] = None,
+    open_mode: Optional[str] = None,
+) -> list[zarr.Group]:
     groups: list[zarr.Group] = []
+    root_fs_path = zarr_path.expanduser().resolve() if zarr_path is not None else _root_fs_path(root)
+    resolved_open_mode = open_mode or _open_mode(root)
     for parent_name in ("keypoints_runs", "refined_keypoints_runs", "keypoints_refined_runs"):
+        parent_fs_path = root_fs_path
+        if parent_fs_path is not None:
+            parent_fs_path = parent_fs_path / parent_name
+
         parent = root.get(parent_name)
+        if parent is None and parent_fs_path is not None and parent_fs_path.is_dir():
+            try:
+                parent = _open_group_direct(parent_fs_path, mode=resolved_open_mode)
+            except Exception:
+                parent = None
         if parent is None:
             continue
+
+        names = sorted(set(_group_names(parent)) | set(_direct_group_names(parent_fs_path)))
         if all_runs:
-            try:
-                names = sorted(list(parent.group_keys()))
-            except Exception:
-                names = sorted(list(parent.keys()))
+            selected_names = names
         else:
             latest = parent.attrs.get("latest")
-            if latest and latest in parent:
-                names = [str(latest)]
+            latest_name = str(latest) if latest else ""
+            if latest_name and latest_name in names:
+                selected_names = [latest_name]
             else:
+                selected_names = [names[-1]] if names else []
+        for name in selected_names:
+            direct_path = (parent_fs_path / name) if parent_fs_path is not None else None
+            if direct_path is not None and name in names:
                 try:
-                    all_names = sorted(list(parent.group_keys()))
+                    groups.append(_open_group_direct(direct_path, mode=resolved_open_mode))
                 except Exception:
-                    all_names = sorted(list(parent.keys()))
-                names = [all_names[-1]] if all_names else []
-        for name in names:
-            if name in parent:
+                    if name in parent:
+                        groups.append(parent[name])
+                    continue
+            elif name in parent:
                 groups.append(parent[name])
     return groups
 
 
-def _extract_pose_schema_labels(pose_schema: dict[str, object], run_group: zarr.Group) -> list[str]:
+def _normalize_label_sequence(values: object) -> list[str]:
+    if not isinstance(values, (list, tuple)):
+        return []
+    labels, _ = _canonicalize_label_seq(values)
+    return [label for label in labels if label]
+
+
+def _extract_pose_schema_labels(pose_schema: dict[str, object]) -> list[str]:
+    keypoint_labels = _normalize_label_sequence(pose_schema.get("keypoint_labels"))
+    if keypoint_labels:
+        return keypoint_labels
+
     nodes = pose_schema.get("nodes")
     labels: list[str] = []
     if isinstance(nodes, list) and nodes:
@@ -86,19 +122,14 @@ def _extract_pose_schema_labels(pose_schema: dict[str, object], run_group: zarr.
                     labels.append(str(raw_name).strip())
             elif node is not None:
                 labels.append(str(node).strip())
-    if labels:
-        return [label for label in labels if label]
+    return _normalize_label_sequence(labels)
 
-    keypoint_labels = pose_schema.get("keypoint_labels")
-    if isinstance(keypoint_labels, (list, tuple)):
-        labels = [str(value).strip() for value in keypoint_labels if str(value).strip()]
-    if labels:
-        return labels
 
-    run_labels = run_group.attrs.get("keypoint_labels")
-    if isinstance(run_labels, (list, tuple)):
-        labels = [str(value).strip() for value in run_labels if str(value).strip()]
-    return labels
+def _resolve_effective_labels(pose_schema: dict[str, object], run_group: zarr.Group) -> list[str]:
+    run_labels = _normalize_label_sequence(run_group.attrs.get("keypoint_labels"))
+    if run_labels:
+        return run_labels
+    return _extract_pose_schema_labels(pose_schema)
 
 
 def _find_first_label(labels: Sequence[str], aliases: Sequence[str]) -> Optional[str]:
@@ -133,7 +164,7 @@ def _backfill_run_group(run_group: zarr.Group, *, apply: bool) -> BackfillResult
         return BackfillResult(status="no_pose_schema", reason="pose_schema attr missing or invalid")
 
     pose_schema = deepcopy(raw_pose_schema)
-    labels = _extract_pose_schema_labels(pose_schema, run_group)
+    labels = _resolve_effective_labels(pose_schema, run_group)
     heading_spec = _build_heading_computation_spec(labels)
     if heading_spec is None:
         return BackfillResult(status="unsupported_labels", reason="heading keypoint labels not found")
@@ -194,13 +225,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         any_zarr = True
         counts["zarr_scanned"] += 1
         try:
-            root = zarr.open_group(str(zarr_path), mode="a" if args.apply else "r")
+            root = open_zarr_root(zarr_path, mode="a" if args.apply else "r")
             if args.zarr_use != "any":
                 observed_use = _infer_zarr_use(root, zarr_path)
                 if observed_use != args.zarr_use:
                     counts["filtered_zarr_use"] += 1
                     continue
-            run_groups = _select_runs(root, all_runs=bool(args.all_runs))
+            run_groups = _select_runs(
+                root,
+                all_runs=bool(args.all_runs),
+                zarr_path=zarr_path,
+                open_mode="a" if args.apply else "r",
+            )
             if not run_groups:
                 counts["missing_runs"] += 1
                 continue

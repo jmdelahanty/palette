@@ -39,13 +39,17 @@ from skimage.measure import label, regionprops
 
 try:
     from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
+    from ..pose.heading import compute_heading_from_attrs, compute_heading_from_spec
+    from ..pose.schema import schema_from_package
     from ..refinement.keypoint_quality import compute_geometry_metrics
-    from ..refinement.refine_keypoints import _compute_heading_from_points, _detect_eye_flip
+    from ..refinement.refine_keypoints import _detect_eye_flip
     from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 except ImportError:  # pragma: no cover - fallback for script execution
     from fisheye.detection.detect_keypoints_traditional import detect_keypoints_traditional
+    from fisheye.pose.heading import compute_heading_from_attrs, compute_heading_from_spec
+    from fisheye.pose.schema import schema_from_package
     from fisheye.refinement.keypoint_quality import compute_geometry_metrics
-    from fisheye.refinement.refine_keypoints import _compute_heading_from_points, _detect_eye_flip
+    from fisheye.refinement.refine_keypoints import _detect_eye_flip
     from fisheye.shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 
 # Global variables for trackbar values
@@ -70,6 +74,7 @@ MAX_ANGLE_SLIDER_MAX = 180
 EVAL_SAMPLE_DEFAULT = 300
 APPLY_BATCH_DEFAULT = 128
 APPLY_WORKERS_DEFAULT = max(1, min(4, os.cpu_count() or 1))
+TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
 
 def update_frame(val):
     global current_frame
@@ -620,7 +625,18 @@ def identify_keypoints_by_geometry(keypoint_stats):
     dy = float(eye_mid[0] - bladder[0])
     dx = float(eye_mid[1] - bladder[1])
 
-    heading_deg = float(np.degrees(np.arctan2(dy, dx))) if (dx or dy) else float("nan")
+    heading_deg = compute_heading_from_spec(
+        TRADITIONAL_POSE_SCHEMA.metadata.get("heading_computation"),
+        labels=TRADITIONAL_POSE_SCHEMA.node_names,
+        points=np.asarray(
+            [
+                [bladder[1], bladder[0]],
+                [centroids[eye_indices[0]][1], centroids[eye_indices[0]][0]],
+                [centroids[eye_indices[1]][1], centroids[eye_indices[1]][0]],
+            ],
+            dtype=np.float64,
+        ),
+    )
 
     left_eye_idx = None
     right_eye_idx = None
@@ -1160,10 +1176,19 @@ def run_failure_tuner(
                         [keypoints["bladder"], keypoints["eye_left"], keypoints["eye_right"]],
                         dtype=np.float64,
                     )
-                    heading_val = _compute_heading_from_points(points[0], points[1], points[2])
-                    flip_detected = _detect_eye_flip(points[0], points[1], points[2], heading_val)
+                    heading_for_flip = compute_heading_from_attrs(
+                        refined.attrs,
+                        labels=labels,
+                        points=points,
+                    )
+                    flip_detected = _detect_eye_flip(points[0], points[1], points[2], heading_for_flip)
                     if flip_detected:
                         points[[1, 2]] = points[[2, 1]]
+                    heading_val = compute_heading_from_attrs(
+                        refined.attrs,
+                        labels=labels,
+                        points=points,
+                    )
 
                     conf_missing = True
                     conf_ok = False

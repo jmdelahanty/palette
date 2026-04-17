@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from fisheye.utils import backfill_keypoint_heading_computation as mod
 from fisheye.utils.backfill_keypoint_heading_computation import _backfill_run_group
 
 
@@ -35,7 +38,31 @@ def test_backfill_run_group_populates_pose_schema_heading_computation() -> None:
     assert heading["dependent_keypoints"] == ["swim_bladder", "eye_left", "eye_right"]
 
 
-def test_backfill_run_group_uses_run_consistent_legacy_bladder_label() -> None:
+def test_backfill_run_group_prefers_run_level_labels_over_stale_schema_nodes() -> None:
+    run = _FakeGroup(
+        attrs={
+            "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+            "pose_schema": {
+                "name": "traditional_v1",
+                "nodes": [
+                    {"id": 0, "name": "bladder"},
+                    {"id": 1, "name": "eye_left"},
+                    {"id": 2, "name": "eye_right"},
+                ],
+                "metadata": {},
+            },
+        }
+    )
+
+    result = _backfill_run_group(run, apply=True)
+
+    assert result.status == "ok"
+    heading = run.attrs["pose_schema"]["metadata"]["heading_computation"]
+    assert heading["direction_from"] == {"op": "keypoint", "label": "swim_bladder"}
+    assert heading["dependent_keypoints"] == ["swim_bladder", "eye_left", "eye_right"]
+
+
+def test_backfill_run_group_canonicalizes_legacy_bladder_label() -> None:
     run = _FakeGroup(
         attrs={
             "keypoint_labels": ["bladder", "eye_left", "eye_right"],
@@ -55,8 +82,8 @@ def test_backfill_run_group_uses_run_consistent_legacy_bladder_label() -> None:
 
     assert result.status == "ok"
     heading = run.attrs["pose_schema"]["metadata"]["heading_computation"]
-    assert heading["direction_from"] == {"op": "keypoint", "label": "bladder"}
-    assert heading["dependent_keypoints"] == ["bladder", "eye_left", "eye_right"]
+    assert heading["direction_from"] == {"op": "keypoint", "label": "swim_bladder"}
+    assert heading["dependent_keypoints"] == ["swim_bladder", "eye_left", "eye_right"]
 
 
 def test_backfill_run_group_skips_when_heading_computation_already_present() -> None:
@@ -107,3 +134,33 @@ def test_backfill_run_group_reports_unsupported_when_heading_labels_missing() ->
     result = _backfill_run_group(run, apply=True)
 
     assert result.status == "unsupported_labels"
+
+
+def test_select_runs_includes_direct_fs_run_names(monkeypatch) -> None:
+    root = _FakeGroup(
+        attrs={},
+        keypoints_runs=_FakeGroup(
+            attrs={"latest": "keypoints_001"},
+            keypoints_001=_FakeGroup(attrs={"name": "embedded"}),
+        ),
+    )
+    direct_groups = {
+        "keypoints_001": _FakeGroup(attrs={"name": "direct-001"}),
+        "keypoints_002": _FakeGroup(attrs={"name": "direct-002"}),
+    }
+    zarr_path = Path("/tmp/fake_training.zarr")
+    seen_modes: list[str] = []
+
+    monkeypatch.setattr(mod, "_direct_group_names", lambda path: ["keypoints_001", "keypoints_002"])
+    monkeypatch.setattr(
+        mod,
+        "_open_group_direct",
+        lambda path, mode: seen_modes.append(mode) or direct_groups[Path(path).name],
+    )
+
+    groups = mod._select_runs(root, all_runs=True, zarr_path=zarr_path, open_mode="a")
+
+    assert len(groups) == 2
+    assert groups[0] is direct_groups["keypoints_001"]
+    assert groups[1] is direct_groups["keypoints_002"]
+    assert seen_modes == ["a", "a"]

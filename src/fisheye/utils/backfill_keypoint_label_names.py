@@ -7,6 +7,9 @@ from typing import Iterable, Optional, Sequence
 
 import zarr
 
+from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
+from .zarr_io import open_zarr_root
+
 
 CANONICAL_LABELS = ("swim_bladder", "eye_left", "eye_right")
 CANONICAL_TRADITIONAL_EDGES = ((0, 1), (0, 2), (1, 2))
@@ -46,29 +49,50 @@ def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
     return None
 
 
-def _select_runs(root: zarr.Group, all_runs: bool) -> list[zarr.Group]:
+def _select_runs(
+    root: zarr.Group,
+    all_runs: bool,
+    *,
+    zarr_path: Optional[Path] = None,
+    open_mode: Optional[str] = None,
+) -> list[zarr.Group]:
     groups: list[zarr.Group] = []
+    root_fs_path = zarr_path.expanduser().resolve() if zarr_path is not None else _root_fs_path(root)
+    resolved_open_mode = open_mode or _open_mode(root)
     for parent_name in ("keypoints_runs", "refined_keypoints_runs", "keypoints_refined_runs"):
+        parent_fs_path = root_fs_path
+        if parent_fs_path is not None:
+            parent_fs_path = parent_fs_path / parent_name
+
         parent = root.get(parent_name)
+        if parent is None and parent_fs_path is not None and parent_fs_path.is_dir():
+            try:
+                parent = _open_group_direct(parent_fs_path, mode=resolved_open_mode)
+            except Exception:
+                parent = None
         if parent is None:
             continue
+
+        names = sorted(set(_group_names(parent)) | set(_direct_group_names(parent_fs_path)))
         if all_runs:
-            try:
-                names = sorted(list(parent.group_keys()))
-            except Exception:
-                names = sorted(list(parent.keys()))
+            selected_names = names
         else:
             latest = parent.attrs.get("latest")
-            if latest and latest in parent:
-                names = [str(latest)]
+            latest_name = str(latest) if latest else ""
+            if latest_name and latest_name in names:
+                selected_names = [latest_name]
             else:
+                selected_names = [names[-1]] if names else []
+        for name in selected_names:
+            direct_path = (parent_fs_path / name) if parent_fs_path is not None else None
+            if direct_path is not None and name in names:
                 try:
-                    all_names = sorted(list(parent.group_keys()))
+                    groups.append(_open_group_direct(direct_path, mode=resolved_open_mode))
                 except Exception:
-                    all_names = sorted(list(parent.keys()))
-                names = [all_names[-1]] if all_names else []
-        for name in names:
-            if name in parent:
+                    if name in parent:
+                        groups.append(parent[name])
+                    continue
+            elif name in parent:
                 groups.append(parent[name])
     return groups
 
@@ -292,13 +316,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         any_zarr = True
         counts["zarr_scanned"] += 1
         try:
-            root = zarr.open_group(str(zarr_path), mode="a" if args.apply else "r")
+            root = open_zarr_root(zarr_path, mode="a" if args.apply else "r")
             if args.zarr_use != "any":
                 observed_use = _infer_zarr_use(root, zarr_path)
                 if observed_use != args.zarr_use:
                     counts["filtered_zarr_use"] += 1
                     continue
-            run_groups = _select_runs(root, all_runs=bool(args.all_runs))
+            run_groups = _select_runs(
+                root,
+                all_runs=bool(args.all_runs),
+                zarr_path=zarr_path,
+                open_mode="a" if args.apply else "r",
+            )
             if not run_groups:
                 counts["missing_runs"] += 1
                 continue

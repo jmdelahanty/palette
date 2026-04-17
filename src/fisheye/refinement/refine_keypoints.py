@@ -38,6 +38,7 @@ except ImportError:
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
 from ..registry.db import Registry, RegistryPaths
+from ..pose.heading import compute_heading_from_attrs
 from ..pose.metric_schema import (
     DerivedMetricStorage,
     ensure_derived_metric_storage,
@@ -730,6 +731,7 @@ def _process_refinement_chunk(
         else None
     )
     success_chunk = kp_source["detection_success"][idx]
+    keypoint_labels = _normalize_keypoint_labels(kp_source, n_keypoints=kp_roi_src.shape[1])
 
     length = end - start
 
@@ -796,11 +798,9 @@ def _process_refinement_chunk(
         if kp_conf_out is not None and kp_conf_src is not None:
             kp_conf_out[i] = kp_conf_src[i]
 
-        heading_val = heading_src[i]
-        heading_val = _compute_heading_from_points(
+        heading_for_flip = _compute_heading_from_points(
             roi_out[i][0], roi_out[i][1], roi_out[i][2]
-        ) if not np.isfinite(heading_val) else heading_val
-        heading_out[i] = heading_val
+        )
 
         if thresh_out is not None and thresh_src is not None:
             thresh_out[i] = thresh_src[i]
@@ -808,7 +808,7 @@ def _process_refinement_chunk(
             se2_out[i] = se2_src[i]
 
         flip_detected = _detect_eye_flip(
-            roi_out[i][0], roi_out[i][1], roi_out[i][2], heading_val
+            roi_out[i][0], roi_out[i][1], roi_out[i][2], heading_for_flip
         )
         if flip_detected:
             # Swap left/right eyes in all coordinate spaces
@@ -822,6 +822,12 @@ def _process_refinement_chunk(
             stats["flips_corrected"] += 1
         else:
             quality_out[i] = 0
+
+        heading_out[i] = compute_heading_from_attrs(
+            kp_source.attrs,
+            labels=keypoint_labels,
+            points=roi_out[i],
+        )
 
         conf_missing = False
         conf_ok = False

@@ -9,7 +9,6 @@ keypoints.
 
 from __future__ import annotations
 
-import math
 import sys
 import argparse
 from pathlib import Path
@@ -32,6 +31,7 @@ from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..pose.heading import compute_heading_from_spec
 from ..utils.system import get_environment_info, get_git_info
 from ..pose.schema import schema_from_package
 from ultralytics import YOLO, __version__ as ultralytics_version
@@ -273,12 +273,11 @@ def _prepare_refined_roi_overrides(
 
 
 def _compute_heading(bladder: np.ndarray, eye_left: np.ndarray, eye_right: np.ndarray) -> float:
-    eye_mean = (eye_left + eye_right) / 2.0
-    head_vec = eye_mean - bladder
-    if np.allclose(head_vec, 0.0):
-        return float("nan")
-    angle = math.degrees(math.atan2(-head_vec[1], head_vec[0]))
-    return float(angle)
+    return compute_heading_from_spec(
+        TRADITIONAL_POSE_SCHEMA.metadata.get("heading_computation"),
+        labels=TRADITIONAL_POSE_SCHEMA.node_names,
+        points=np.asarray([bladder, eye_left, eye_right], dtype=np.float64),
+    )
 
 
 def _repeat_to_rgb(batch: np.ndarray) -> List[np.ndarray]:

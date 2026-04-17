@@ -24,6 +24,7 @@ from ..pose.metric_schema import (
     ensure_derived_metric_storage,
     resolve_metric_schema_for_group,
 )
+from ..pose.heading import compute_heading_from_attrs
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
@@ -31,7 +32,6 @@ from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_complet
 from ..shared.type_conversions import normalize_attr as _normalize_attr
 from ..utils.zarr_io import open_zarr_root
 from ..refinement.keypoint_quality import compute_geometry_metrics
-from ..refinement.refine_keypoints import _compute_heading_from_points
 from ..registry.db import Registry, RegistryPaths
 
 
@@ -1230,7 +1230,11 @@ def launch_review(
         changed |= _set_roi_value_if_changed(kp_img_arr, roi_idx, full_points)
         changed |= _set_roi_value_if_changed(kp_norm_arr, roi_idx, full_points / norm_factor)
 
-        heading_val = _compute_heading_from_points(points[0], points[1], points[2])
+        heading_val = compute_heading_from_attrs(
+            refined.attrs,
+            labels=labels,
+            points=points,
+        )
         changed |= _set_roi_value_if_changed(heading_arr, roi_idx, heading_val)
 
         metrics = compute_geometry_metrics(points[:3])

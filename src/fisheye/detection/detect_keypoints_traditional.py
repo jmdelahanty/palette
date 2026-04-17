@@ -33,6 +33,7 @@ from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..pose.heading import compute_heading_from_spec
 from ..pose.schema import schema_from_package
 
 # Optional distributed
@@ -264,10 +265,20 @@ def identify_keypoints_by_geometry(
     bladder_idx = kp_idx[0]
     eye_indices = kp_idx[1:3]
     
+    heading = compute_heading_from_spec(
+        TRADITIONAL_POSE_SCHEMA.metadata.get("heading_computation"),
+        labels=TRADITIONAL_POSE_SCHEMA.node_names,
+        points=np.asarray(
+            [
+                pts[bladder_idx],
+                pts[eye_indices[0]],
+                pts[eye_indices[1]],
+            ],
+            dtype=np.float64,
+        ),
+    )
     eye_mean = np.mean(pts[eye_indices], axis=0)
-    head_vec = eye_mean - pts[bladder_idx]
-    heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
-    
+
     R = rotation_matrix_2d(heading)
     rotated_pts = (pts - eye_mean) @ R.T
     

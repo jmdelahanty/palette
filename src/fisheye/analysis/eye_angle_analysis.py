@@ -136,20 +136,6 @@ def _compute_delta(values: np.ndarray) -> np.ndarray:
     return delta
 
 
-def _compute_heading_fallback(bladder: np.ndarray, eye_left: np.ndarray, eye_right: np.ndarray) -> np.ndarray:
-    """Fallback heading calculation using keypoint geometry."""
-    eye_mean = (eye_left + eye_right) / 2.0
-    head_vec = eye_mean - bladder
-    headings = np.full(head_vec.shape[0], np.nan, dtype=np.float64)
-    norms = np.linalg.norm(head_vec, axis=1)
-    valid = norms > 0
-    if np.any(valid):
-        sub = head_vec[valid]
-        # Screen coordinates: x grows right, y grows down. Negating dy yields fish-centric "up".
-        headings[valid] = np.degrees(np.arctan2(-sub[:, 1], sub[:, 0]))
-    return headings
-
-
 def _process_chunk(
     ellipse_params: np.ndarray,
     ellipse_success: np.ndarray,
@@ -185,20 +171,6 @@ def _process_chunk(
     bladder = keypoints_roi[:, 0, :]
     eye_left_kp = keypoints_roi[:, 1, :]
     eye_right_kp = keypoints_roi[:, 2, :]
-
-    fallback_mask = ~heading_valid
-    if np.any(fallback_mask):
-        fallback_headings = _compute_heading_fallback(
-            bladder[fallback_mask],
-            eye_left_kp[fallback_mask],
-            eye_right_kp[fallback_mask],
-        )
-        heading_out[fallback_mask] = np.where(
-            np.isfinite(fallback_headings),
-            fallback_headings,
-            heading_out[fallback_mask],
-        )
-        heading_valid = np.isfinite(heading_out)
 
     reason_codes[~detection_success] |= REASON_DETECTION_FAILURE
     reason_codes[~heading_valid] |= REASON_HEADING_INVALID
