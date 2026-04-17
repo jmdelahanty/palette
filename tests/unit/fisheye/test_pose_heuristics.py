@@ -6,8 +6,18 @@ from dataclasses import dataclass
 import numpy as np
 
 from fisheye.detection import detect_keypoints_traditional as detect_mod
-from fisheye.pose.heuristics import heuristic_profile_from_package
+from fisheye.pose.heuristics import (
+    FlipDetectionHeuristic,
+    GeometryQcHeuristic,
+    heuristic_profile_from_package,
+    maybe_flip_detection_from_attrs,
+    maybe_geometry_qc_from_attrs,
+    maybe_heuristic_profile_from_attrs,
+)
+from fisheye.refinement import refine_keypoints as refine_mod
 from fisheye.tune import keypoint_tuner as tuner_mod
+from fisheye.tune import keypoint_failure_review as review_mod
+from fisheye.utils import patch_keypoints_from_crops as patch_mod
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,22 @@ def test_traditional_pose_heuristic_profiles_load_packaged_defaults() -> None:
     )
 
 
+def test_pose_heuristic_profile_helpers_resolve_from_attrs() -> None:
+    attrs = {"pose_schema": {"name": "traditional_v1"}}
+
+    profile = maybe_heuristic_profile_from_attrs("traditional_pose", attrs)
+    geometry = maybe_geometry_qc_from_attrs("traditional_pose", attrs)
+    flip = maybe_flip_detection_from_attrs("traditional_pose", attrs)
+
+    assert profile is not None
+    assert profile.profile_name == "traditional_pose_traditional_v1"
+    assert geometry is not None
+    assert geometry.min_triangle_angle_deg == 10.0
+    assert geometry.max_triangle_angle_deg == 90.0
+    assert flip is not None
+    assert flip.family == "traditional_eye_flip_v1"
+
+
 def test_traditional_detector_and_tuner_defaults_follow_packaged_profile() -> None:
     profile = heuristic_profile_from_package("traditional_pose", "traditional_v1")
     assert profile.geometry_qc is not None
@@ -56,6 +82,44 @@ def test_traditional_detector_and_tuner_defaults_follow_packaged_profile() -> No
     assert tuner_mod.max_valid_angle == int(profile.geometry_qc.max_triangle_angle_deg)
     assert tuner_mod.min_triangle_area == int(profile.geometry_qc.min_triangle_area_px)
     assert tuner_mod.max_triangle_area == 0
+    assert refine_mod.DEFAULT_MIN_TRIANGLE_ANGLE == profile.geometry_qc.min_triangle_angle_deg
+    assert refine_mod.DEFAULT_MIN_TRIANGLE_AREA == profile.geometry_qc.min_triangle_area_px
+    assert refine_mod.DEFAULT_MAX_TRIANGLE_AREA == profile.geometry_qc.max_triangle_area_px
+    assert review_mod.DEFAULT_MIN_TRIANGLE_ANGLE == profile.geometry_qc.min_triangle_angle_deg
+    assert review_mod.DEFAULT_MIN_TRIANGLE_AREA == profile.geometry_qc.min_triangle_area_px
+    assert review_mod.DEFAULT_MAX_TRIANGLE_AREA == profile.geometry_qc.max_triangle_area_px
+
+
+def test_phase1_geometry_resolution_uses_packaged_profile_helpers(monkeypatch) -> None:
+    geometry = GeometryQcHeuristic(
+        min_triangle_angle_deg=12.5,
+        max_triangle_angle_deg=82.0,
+        min_triangle_area_px=222.0,
+        max_triangle_area_px=444.0,
+    )
+    flip = FlipDetectionHeuristic(family="traditional_eye_flip_v1")
+
+    monkeypatch.setattr(refine_mod, "maybe_geometry_qc_from_attrs", lambda *args, **kwargs: geometry)
+    monkeypatch.setattr(refine_mod, "maybe_flip_detection_from_attrs", lambda *args, **kwargs: flip)
+    monkeypatch.setattr(review_mod, "maybe_geometry_qc_from_attrs", lambda *args, **kwargs: geometry)
+    monkeypatch.setattr(patch_mod, "maybe_geometry_qc_from_attrs", lambda *args, **kwargs: geometry)
+
+    assert refine_mod._resolve_refinement_geometry_defaults({"pose_schema": {"name": "custom"}}) == (
+        12.5,
+        222.0,
+        444.0,
+    )
+    assert review_mod._resolve_review_geometry_defaults({"pose_schema": {"name": "custom"}}) == (
+        12.5,
+        222.0,
+        444.0,
+    )
+    assert patch_mod._resolve_detect_geometry_defaults({"pose_schema": {"name": "custom"}}) == (
+        12.5,
+        82.0,
+        222.0,
+        444.0,
+    )
 
 
 def test_traditional_detector_assignment_uses_packaged_profile_rules() -> None:

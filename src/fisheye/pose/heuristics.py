@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,12 @@ class PoseHeuristicProfile:
     heading_qc: Optional[HeadingQcHeuristic]
     flip_detection: Optional[FlipDetectionHeuristic]
     notes: Any = None
+
+
+def _coerce_mapping(value: object) -> Optional[dict[str, object]]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    return None
 
 
 def _require_text(raw: dict[str, object], key: str) -> str:
@@ -197,6 +204,33 @@ def heuristic_profile_from_package(
     )
 
 
+def pose_schema_name_from_value(pose_schema: object) -> Optional[str]:
+    pose_schema_map = _coerce_mapping(pose_schema)
+    if pose_schema_map is None:
+        return None
+    name = str(pose_schema_map.get("name", "")).strip()
+    return name or None
+
+
+def pose_schema_name_from_attrs(attrs: Mapping[str, object]) -> Optional[str]:
+    return pose_schema_name_from_value(attrs.get("pose_schema"))
+
+
+def maybe_heuristic_profile_from_attrs(
+    method: str,
+    attrs: Mapping[str, object],
+    *,
+    base_dir: Optional[Path] = None,
+) -> Optional[PoseHeuristicProfile]:
+    pose_schema_name = pose_schema_name_from_attrs(attrs)
+    if not pose_schema_name:
+        return None
+    try:
+        return heuristic_profile_from_package(method, pose_schema_name, base_dir=base_dir)
+    except FileNotFoundError:
+        return None
+
+
 def require_blob_assignment(
     profile: PoseHeuristicProfile,
     *,
@@ -222,3 +256,55 @@ def require_geometry_qc(profile: PoseHeuristicProfile) -> GeometryQcHeuristic:
             f"Heuristic profile '{profile.profile_name}' is missing 'geometry_qc'."
         )
     return geometry
+
+
+def require_heading_qc(profile: PoseHeuristicProfile) -> HeadingQcHeuristic:
+    heading = profile.heading_qc
+    if heading is None:
+        raise RuntimeError(
+            f"Heuristic profile '{profile.profile_name}' is missing 'heading_qc'."
+        )
+    return heading
+
+
+def require_flip_detection(
+    profile: PoseHeuristicProfile,
+    *,
+    family: Optional[str] = None,
+) -> FlipDetectionHeuristic:
+    flip = profile.flip_detection
+    if flip is None:
+        raise RuntimeError(
+            f"Heuristic profile '{profile.profile_name}' is missing 'flip_detection'."
+        )
+    if family is not None and flip.family != family:
+        raise RuntimeError(
+            f"Heuristic profile '{profile.profile_name}' has unsupported "
+            f"flip_detection.family='{flip.family}' (expected '{family}')."
+        )
+    return flip
+
+
+def maybe_geometry_qc_from_attrs(
+    method: str,
+    attrs: Mapping[str, object],
+    *,
+    base_dir: Optional[Path] = None,
+) -> Optional[GeometryQcHeuristic]:
+    profile = maybe_heuristic_profile_from_attrs(method, attrs, base_dir=base_dir)
+    if profile is None:
+        return None
+    return require_geometry_qc(profile)
+
+
+def maybe_flip_detection_from_attrs(
+    method: str,
+    attrs: Mapping[str, object],
+    *,
+    family: Optional[str] = None,
+    base_dir: Optional[Path] = None,
+) -> Optional[FlipDetectionHeuristic]:
+    profile = maybe_heuristic_profile_from_attrs(method, attrs, base_dir=base_dir)
+    if profile is None:
+        return None
+    return require_flip_detection(profile, family=family)

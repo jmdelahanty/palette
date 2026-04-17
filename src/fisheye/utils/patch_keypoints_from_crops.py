@@ -12,12 +12,27 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
-from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
-from ..refinement.refine_keypoints import _process_refinement_chunk
+from ..detection.detect_keypoints_traditional import (
+    DEFAULT_MAX_TRIANGLE_AREA as DEFAULT_DETECT_MAX_TRIANGLE_AREA,
+    DEFAULT_MAX_VALID_ANGLE,
+    DEFAULT_MIN_TRIANGLE_AREA as DEFAULT_DETECT_MIN_TRIANGLE_AREA,
+    DEFAULT_MIN_VALID_ANGLE,
+    detect_keypoints_traditional,
+)
+from ..pose.heuristics import maybe_geometry_qc_from_attrs
+from ..refinement.refine_keypoints import (
+    DEFAULT_MAX_TRIANGLE_AREA as DEFAULT_REFINE_MAX_TRIANGLE_AREA,
+    DEFAULT_MIN_TRIANGLE_ANGLE,
+    DEFAULT_MIN_TRIANGLE_AREA as DEFAULT_REFINE_MIN_TRIANGLE_AREA,
+    _process_refinement_chunk,
+)
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
+
+_TRADITIONAL_HEURISTIC_METHOD = "traditional_pose"
+_DEFAULT_CONFIDENCE_THRESHOLD = 0.3
 
 
 @dataclass(frozen=True)
@@ -172,6 +187,40 @@ def _load_keypoint_parameters(group: zarr.Group) -> Dict[str, object]:
     return params if isinstance(params, dict) else {}
 
 
+def _resolve_detect_geometry_defaults(
+    attrs: Dict[str, object],
+) -> tuple[float, float, float, Optional[float]]:
+    geometry_qc = maybe_geometry_qc_from_attrs(_TRADITIONAL_HEURISTIC_METHOD, attrs)
+    if geometry_qc is None:
+        return (
+            DEFAULT_MIN_VALID_ANGLE,
+            DEFAULT_MAX_VALID_ANGLE,
+            DEFAULT_DETECT_MIN_TRIANGLE_AREA,
+            DEFAULT_DETECT_MAX_TRIANGLE_AREA,
+        )
+    min_angle = (
+        float(geometry_qc.min_triangle_angle_deg)
+        if geometry_qc.min_triangle_angle_deg is not None
+        else DEFAULT_MIN_VALID_ANGLE
+    )
+    max_angle = (
+        float(geometry_qc.max_triangle_angle_deg)
+        if geometry_qc.max_triangle_angle_deg is not None
+        else DEFAULT_MAX_VALID_ANGLE
+    )
+    min_area = (
+        float(geometry_qc.min_triangle_area_px)
+        if geometry_qc.min_triangle_area_px is not None
+        else DEFAULT_DETECT_MIN_TRIANGLE_AREA
+    )
+    max_area = (
+        float(geometry_qc.max_triangle_area_px)
+        if geometry_qc.max_triangle_area_px is not None
+        else DEFAULT_DETECT_MAX_TRIANGLE_AREA
+    )
+    return (min_angle, max_angle, min_area, max_area)
+
+
 def _update_index_array(group: zarr.Group, name: str, values: np.ndarray) -> np.ndarray:
     values = np.unique(values.astype(np.int64, copy=False))
     if name in group:
@@ -187,6 +236,8 @@ def _compute_keypoints_for_indices(
     background_full: np.ndarray,
     indices: np.ndarray,
     params: Dict[str, object],
+    *,
+    source_attrs: Dict[str, object],
 ) -> Dict[str, np.ndarray]:
     n = int(indices.size)
     roi_shape = roi_images.shape[1:]
@@ -204,6 +255,12 @@ def _compute_keypoints_for_indices(
     tri_angles_out = np.full((n, 3), np.nan, dtype=np.float64)
     tri_angles_raw_out = np.full((n, 3), np.nan, dtype=np.float64)
     tri_area_out = np.full(n, np.nan, dtype=np.float64)
+    (
+        default_min_valid_angle,
+        default_max_valid_angle,
+        default_min_triangle_area,
+        default_max_triangle_area,
+    ) = _resolve_detect_geometry_defaults(source_attrs)
 
     for i, roi_idx in enumerate(indices):
         roi_img = roi_images[roi_idx]
@@ -221,10 +278,12 @@ def _compute_keypoints_for_indices(
             se1_radius=int(params.get("se1_radius", 1)),
             se2_radius=int(params.get("se2_radius", 2)),
             min_area=int(params.get("min_area", 5)),
-            min_valid_angle=float(params.get("min_valid_angle", 10.0)),
-            max_valid_angle=float(params.get("max_valid_angle", 90.0)),
-            min_triangle_area=float(params.get("min_triangle_area", 100.0)),
-            max_triangle_area=params.get("max_triangle_area"),
+            min_valid_angle=float(params.get("min_valid_angle", default_min_valid_angle)),
+            max_valid_angle=float(params.get("max_valid_angle", default_max_valid_angle)),
+            min_triangle_area=float(
+                params.get("min_triangle_area", default_min_triangle_area)
+            ),
+            max_triangle_area=params.get("max_triangle_area", default_max_triangle_area),
         )
         if keypoints is None:
             continue
@@ -375,6 +434,7 @@ def _patch_keypoints_run(
         background_full,
         target_indices,
         params,
+        source_attrs=dict(keypoints_group.attrs),
     )
 
     success_mask = outputs["detection_success"]
@@ -531,11 +591,38 @@ def _patch_refined_keypoints(
     params = refined.attrs.get("parameters")
     if not isinstance(params, dict):
         params = {}
+    geometry_qc = maybe_geometry_qc_from_attrs(
+        _TRADITIONAL_HEURISTIC_METHOD,
+        dict(refined.attrs),
+    )
+    default_min_triangle_angle = (
+        float(geometry_qc.min_triangle_angle_deg)
+        if geometry_qc is not None and geometry_qc.min_triangle_angle_deg is not None
+        else DEFAULT_MIN_TRIANGLE_ANGLE
+    )
+    default_min_triangle_area = (
+        float(geometry_qc.min_triangle_area_px)
+        if geometry_qc is not None and geometry_qc.min_triangle_area_px is not None
+        else DEFAULT_REFINE_MIN_TRIANGLE_AREA
+    )
+    default_max_triangle_area = (
+        float(geometry_qc.max_triangle_area_px)
+        if geometry_qc is not None and geometry_qc.max_triangle_area_px is not None
+        else DEFAULT_REFINE_MAX_TRIANGLE_AREA
+    )
     params_dict = {
-        "confidence_threshold": params.get("confidence_threshold", 0.3),
-        "min_triangle_angle": params.get("min_triangle_angle", 10.0),
-        "min_triangle_area": params.get("min_triangle_area", 100.0),
-        "max_triangle_area": params.get("max_triangle_area"),
+        "confidence_threshold": params.get(
+            "confidence_threshold", _DEFAULT_CONFIDENCE_THRESHOLD
+        ),
+        "min_triangle_angle": params.get(
+            "min_triangle_angle", default_min_triangle_angle
+        ),
+        "min_triangle_area": params.get(
+            "min_triangle_area", default_min_triangle_area
+        ),
+        "max_triangle_area": params.get(
+            "max_triangle_area", default_max_triangle_area
+        ),
     }
 
     for roi_idx in target_indices:

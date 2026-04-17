@@ -18,6 +18,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
+from ..pose.heuristics import (
+    heuristic_profile_from_package,
+    maybe_geometry_qc_from_attrs,
+    require_geometry_qc,
+)
 from ..pose.metric_schema import (
     DerivedMetricStorage,
     compute_derived_metric_results,
@@ -41,6 +46,66 @@ _NO_REVIEWABLE_FAILURES_POLICY_ID = "keypoint_no_reviewable_failures_v1"
 _NO_REVIEWABLE_FAILURES_POLICY_VERSION = 1
 _NO_REVIEWABLE_FAILURES_ALLOWED_TAGS = ("fish_present_no_keypoints",)
 _NO_REVIEWABLE_FAILURES_BLOCKED_TAGS = ("detection_issue",)
+_TRADITIONAL_HEURISTIC_METHOD = "traditional_pose"
+_DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+
+TRADITIONAL_REVIEW_HEURISTIC_PROFILE = heuristic_profile_from_package(
+    _TRADITIONAL_HEURISTIC_METHOD,
+    "traditional_v1",
+)
+TRADITIONAL_REVIEW_GEOMETRY_QC = require_geometry_qc(TRADITIONAL_REVIEW_HEURISTIC_PROFILE)
+
+
+def _required_geometry_default(value: object, field_name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "Traditional pose heuristic profile is missing "
+            f"'geometry_qc.{field_name}'."
+        ) from None
+    return result
+
+
+DEFAULT_MIN_TRIANGLE_ANGLE = _required_geometry_default(
+    TRADITIONAL_REVIEW_GEOMETRY_QC.min_triangle_angle_deg,
+    "min_triangle_angle_deg",
+)
+DEFAULT_MIN_TRIANGLE_AREA = _required_geometry_default(
+    TRADITIONAL_REVIEW_GEOMETRY_QC.min_triangle_area_px,
+    "min_triangle_area_px",
+)
+DEFAULT_MAX_TRIANGLE_AREA = (
+    float(TRADITIONAL_REVIEW_GEOMETRY_QC.max_triangle_area_px)
+    if TRADITIONAL_REVIEW_GEOMETRY_QC.max_triangle_area_px is not None
+    else None
+)
+
+
+def _resolve_review_geometry_defaults(
+    attrs: Dict[str, object],
+) -> tuple[float, float, Optional[float]]:
+    geometry_qc = maybe_geometry_qc_from_attrs(_TRADITIONAL_HEURISTIC_METHOD, attrs)
+    if geometry_qc is None:
+        return (
+            DEFAULT_MIN_TRIANGLE_ANGLE,
+            DEFAULT_MIN_TRIANGLE_AREA,
+            DEFAULT_MAX_TRIANGLE_AREA,
+        )
+    min_angle = _required_geometry_default(
+        geometry_qc.min_triangle_angle_deg,
+        "min_triangle_angle_deg",
+    )
+    min_area = _required_geometry_default(
+        geometry_qc.min_triangle_area_px,
+        "min_triangle_area_px",
+    )
+    max_area = (
+        float(geometry_qc.max_triangle_area_px)
+        if geometry_qc.max_triangle_area_px is not None
+        else None
+    )
+    return (min_angle, min_area, max_area)
 
 
 def _display_colors(label_count: int) -> list[str]:
@@ -1087,14 +1152,27 @@ def launch_review(
 
     summary_raw = refined.attrs.get("summary_statistics", {})
     summary = summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
-    confidence_threshold = float(summary.get("confidence_threshold", 0.3))
-    min_triangle_angle = float(summary.get("min_triangle_angle", 10.0))
-    min_triangle_area = float(summary.get("min_triangle_area", 100.0))
+    default_min_triangle_angle, default_min_triangle_area, default_max_triangle_area = (
+        _resolve_review_geometry_defaults(refined.attrs)
+    )
+    confidence_threshold = float(
+        summary.get("confidence_threshold", _DEFAULT_CONFIDENCE_THRESHOLD)
+    )
+    min_triangle_angle = float(
+        summary.get("min_triangle_angle", default_min_triangle_angle)
+    )
+    min_triangle_area = float(
+        summary.get("min_triangle_area", default_min_triangle_area)
+    )
     max_tri_val = summary.get("max_triangle_area")
     try:
-        max_triangle_area = float(max_tri_val) if max_tri_val is not None else None
+        max_triangle_area = (
+            float(max_tri_val)
+            if max_tri_val is not None
+            else default_max_triangle_area
+        )
     except (TypeError, ValueError):
-        max_triangle_area = None
+        max_triangle_area = default_max_triangle_area
 
     if "keypoints_roi" not in refined:
         raise RuntimeError("Refined run is missing keypoints_roi.")

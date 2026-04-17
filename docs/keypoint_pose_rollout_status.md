@@ -1,0 +1,347 @@
+# Keypoint Pose Rollout Status
+
+Date anchored: 2026-04-17
+
+Purpose: document the current implementation status of Palette's modern
+keypoint pose stack after the heading-semantics cutover and the first packaged
+pose-heuristic rollout, and define the next concrete implementation sequence.
+
+## Executive Summary
+
+The repo is past the "design only" phase for modern keypoint pose semantics.
+
+What is now materially true:
+
+- heading semantics are metadata-driven through
+  `pose_schema.metadata.heading_computation`
+- runtime heading evaluation is centralized in
+  `src/fisheye/pose/heading.py`
+- historical keypoint/refined-keypoint runs can be backfilled to current
+  heading fields and metadata
+- traditional raw detector/tuner geometry and blob-assignment defaults now load
+  packaged heuristic profiles from
+  `configs/fisheye/pose_heuristics/traditional_pose/`
+- traditional refinement, failure-review, and crop-patch paths now use the
+  same packaged geometry defaults, with stage-local params treated as explicit
+  overrides instead of competing baseline defaults
+
+The main remaining work is not "decide the architecture." The architecture is
+clear enough now. The remaining work is:
+
+1. finish the packaged-heuristics rollout beyond geometry defaults
+2. remove the remaining fixed-`K=3` and fixed-label assumptions from runtime
+   consumers
+3. harden explicit skeleton identity on new runs and remaining readers
+
+## What Is Implemented
+
+### 1. Heading semantics are now metadata-driven
+
+Canonical contract:
+
+- `docs/keypoint_heading_computation_contract.md`
+
+Current runtime helper:
+
+- `src/fisheye/pose/heading.py`
+
+Current behavior:
+
+- readers resolve heading semantics in this order:
+  1. `heading_computation_override`
+  2. `pose_schema.metadata.heading_computation`
+  3. deprecated run attr `heading_computation`
+- heading computation is no longer defined by ad hoc fixed-label assumptions in
+  each consumer
+
+This is the right long-term boundary:
+
+- pose meaning lives with the skeleton
+- heuristics do not define heading semantics
+
+### 2. Shared runtime heading evaluation exists
+
+Implemented in:
+
+- `src/fisheye/pose/heading.py`
+
+Current scope:
+
+- resolves heading precedence from attrs/schema
+- evaluates `keypoint` and `midpoint` expressions
+- computes:
+  - heading scalar
+  - heading origin
+  - explicit dependent labels
+
+Current write-path adoption:
+
+- raw YOLO keypoint detection
+- raw traditional keypoint detection
+- refined keypoint writes
+- manual correction / failure review paths
+
+### 3. Heading-field migration and backfill utilities exist
+
+Implemented utilities:
+
+- `src/fisheye/utils/backfill_keypoint_heading_computation.py`
+- `src/fisheye/utils/backfill_keypoint_heading_fields.py`
+- `src/fisheye/utils/backfill_keypoint_label_names.py`
+
+Current status:
+
+- these tools now support dry-run/apply
+- `backfill_keypoint_heading_fields` supports `--log-dir` JSONL reporting
+- run discovery and live-child reads were hardened for mixed or stale zarr
+  metadata cases
+- legacy label alias reconciliation (`bladder` -> `swim_bladder`) is handled in
+  the maintenance path
+
+### 4. Packaged pose-heuristic profiles now exist
+
+Contract:
+
+- `docs/pose_heuristic_profile_contract.md`
+
+Design note:
+
+- `docs/pose_schema_heuristics_split_proposal.md`
+
+Packaged defaults:
+
+- `configs/fisheye/pose_heuristics/traditional_pose/traditional_v1.json`
+- `configs/fisheye/pose_heuristics/traditional_pose/traditional_v2.json`
+
+Runtime loader:
+
+- `src/fisheye/pose/heuristics.py`
+
+Current supported policy families:
+
+- `blob_assignment`
+- `geometry_qc`
+- `heading_qc`
+- `flip_detection`
+
+### 5. First packaged-heuristics rollout is complete
+
+Current runtime adoption:
+
+- `src/fisheye/detection/detect_keypoints_traditional.py`
+- `src/fisheye/tune/keypoint_tuner.py`
+- `src/fisheye/refinement/refine_keypoints.py`
+- `src/fisheye/tune/keypoint_failure_review.py`
+- `src/fisheye/utils/patch_keypoints_from_crops.py`
+
+Current behavior:
+
+- traditional blob assignment is no longer hardcoded as magic rules in those
+  modules
+- geometry-QC defaults are read from the packaged profile instead of local
+  literals
+- tuner slider defaults and saved tuning defaults now start from the packaged
+  baseline
+- refinement, failure-review, and crop-patch flows now also resolve
+  traditional geometry defaults from the packaged profile before applying any
+  stage-local overrides
+
+Important current limitation:
+
+- these raw traditional tools still target the starter 3-point skeleton, so
+  they currently resolve the `traditional_v1` packaged profile
+- the presence of `traditional_v2` packaged defaults does not mean the raw
+  detector is already multi-skeleton
+
+## What Is Not Yet Finished
+
+### 1. Packaged heuristics are not yet the repo-wide default policy surface
+
+Still pending:
+
+- any other repair/retry/manual paths that still carry their own geometry or
+  flip defaults
+- heading-temporal/QC consumers still use their own local threshold defaults
+  instead of packaged `heading_qc`
+
+Current gap:
+
+- the repo now has a packaged policy surface across the main traditional raw,
+  refine, review, and patch paths
+- it is not yet the default policy surface for every repair/retry/manual path
+  or for heading-temporal QC thresholds
+
+### 2. Multi-skeleton runtime support is only partial
+
+Policy and migration direction are real, but runtime generalization is still
+incomplete.
+
+Still incomplete:
+
+- many write/read paths still allocate or assume `(N,3,2)`
+- some consumers still assume positional eye/bladder indexing instead of label
+  resolution
+- dynamic `K` support is not yet the default invariant across keypoint runtime
+  modules
+
+Primary tracker:
+
+- `docs/keypoint_multi_skeleton_todo.md`
+
+### 3. Explicit skeleton identity is not yet fully hardened
+
+Still pending:
+
+- all new keypoint/refined-keypoint writers should always set:
+  - `skeleton_id`
+  - `kpt_shape`
+  - `pose_schema`
+- readers should prefer explicit skeleton identity over schema-name fallback
+  wherever possible
+
+Current state:
+
+- some code paths already honor explicit skeleton identity
+- legacy tolerance still exists because historical runs are not uniformly
+  normalized
+
+### 4. Heuristic-profile overrides are not yet defined beyond stage-local tuning
+
+Current state:
+
+- packaged profiles act as shared defaults
+- stage-local tuning metadata still exists, for example
+  `analysis_metadata.attrs["keypoint_tuning"]`
+
+Still open:
+
+- whether there should be a formal run-level heuristic override surface
+- or whether stage-local tuned attrs remain the only override mechanism
+
+### 5. Some secondary docs and consumers may still lag
+
+The main contracts are now aligned, but secondary surfaces can still lag:
+
+- secondary docs that describe geometry thresholds or traditional behavior
+- downstream readers that should remain semantic-only and not absorb heuristic
+  policy
+- helper/review utilities that still carry hardcoded starter-skeleton logic
+
+## Recommended Next Implementation Sequence
+
+### Phase A: Finish packaged-heuristics rollout
+
+Goal:
+
+- make the packaged heuristic profile the shared default policy source for the
+  traditional pose family, not just for the raw detector/tuner
+
+Checklist:
+
+- [x] Audit remaining traditional geometry/flip defaults in:
+  - `src/fisheye/refinement/refine_keypoints.py`
+  - `src/fisheye/tune/keypoint_failure_review.py`
+  - `src/fisheye/utils/patch_keypoints_from_crops.py`
+- [x] Decide which defaults belong in packaged heuristic profiles versus which
+      are truly stage-local
+- [x] Load packaged profiles in the remaining shared traditional paths
+- [x] Keep stage-local tuned params as explicit overrides, not silent competing
+      default systems
+- [x] Add focused tests proving packaged defaults are actually used in those
+      paths
+- [ ] Extend packaged-heuristic adoption into remaining retry/manual helpers
+- [ ] Decide whether `heading_qc` should migrate into the runtime temporal
+      heading/QC helpers in a follow-up phase
+
+### Phase B: Harden skeleton identity on new runs
+
+Goal:
+
+- stop relying on schema-name inference where a writer can persist the explicit
+  skeleton signature directly
+
+Checklist:
+
+- [ ] Audit all keypoint and refined-keypoint writers for:
+  - `skeleton_id`
+  - `kpt_shape`
+  - `pose_schema`
+- [ ] Ensure all new runs write those attrs explicitly
+- [ ] Document the exact reader precedence for skeleton identity
+- [ ] Add maintenance checks that report missing explicit skeleton attrs on new
+      outputs
+
+### Phase C: Remove remaining fixed-`K=3` runtime assumptions
+
+Goal:
+
+- make richer skeletons a first-class runtime case rather than a migration
+  exception
+
+Checklist:
+
+- [ ] Audit array allocation sites for hardcoded `(N,3,2)`
+- [ ] Replace positional eye/bladder indexing with label resolution where the
+      operation is semantically label-based
+- [ ] Fail clearly when a required label is absent, rather than silently
+      assuming the starter skeleton
+- [ ] Re-check manual/review UIs for dynamic keypoint count behavior
+- [ ] Re-check patch/retry paths for dynamic `K`
+
+### Phase D: Decide override policy
+
+Goal:
+
+- define one coherent policy for packaged defaults versus local deviation
+
+Checklist:
+
+- [ ] Decide whether there will be a formal run-level heuristic override
+      contract
+- [ ] If no, document that packaged profiles plus stage-local tuning attrs are
+      the only supported model
+- [ ] If yes, define precedence and writer guidance explicitly
+- [ ] Ensure downstream readers do not confuse heuristic overrides with
+      skeleton semantics
+
+### Phase E: Validation and operator closure
+
+Goal:
+
+- treat the modern pose stack as a maintained contract rather than a one-off
+  migration
+
+Checklist:
+
+- [ ] Keep in-memory/fake-group unit coverage for zarr-heavy maintenance tools
+- [ ] Add mixed-skeleton fixtures that exercise coexisting 3-point and 5-point
+      runs in one lineage
+- [ ] Add a documented local validation recipe for real archives
+- [ ] Periodically audit secondary docs for stale starter-skeleton assumptions
+
+## Suggested Acceptance Criteria For The Next Milestone
+
+This rollout should be considered materially complete when all of the following
+are true:
+
+- packaged heuristic profiles are the shared default source for traditional
+  detector, refine, review, and patch paths
+- all new keypoint/refined-keypoint runs write explicit `skeleton_id` and
+  `kpt_shape`
+- the main runtime stack no longer assumes `(N,3,2)` except in intentionally
+  starter-skeleton-specific producers
+- label-based consumers fail clearly when required labels are missing
+- the main docs agree on:
+  - heading semantics in `pose_schema.metadata`
+  - heuristics in packaged profiles
+  - run-local tuning as local override rather than pose meaning
+
+## Related Docs
+
+- `docs/keypoint_heading_computation_contract.md`
+- `docs/pose_heuristic_profile_contract.md`
+- `docs/pose_schema_heuristics_split_proposal.md`
+- `docs/keypoint_multi_skeleton_todo.md`
+- `docs/keypoint_heading_validity_todo.md`
+- `docs/keypoint_temporal_heading_heuristic_todo.md`
+- `src/fisheye/docs/zarr_structure.md`

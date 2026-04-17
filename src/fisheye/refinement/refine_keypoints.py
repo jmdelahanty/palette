@@ -39,6 +39,13 @@ except ImportError:
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
 from ..registry.db import Registry, RegistryPaths
 from ..pose.heading import compute_heading_from_attrs
+from ..pose.heuristics import (
+    heuristic_profile_from_package,
+    maybe_flip_detection_from_attrs,
+    maybe_geometry_qc_from_attrs,
+    require_flip_detection,
+    require_geometry_qc,
+)
 from ..pose.metric_schema import (
     DerivedMetricStorage,
     ensure_derived_metric_storage,
@@ -62,6 +69,21 @@ REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
 LEGACY_KEYPOINT_GROUP = "keypoints_refined_runs"
 _STEP_NAME_REFINED_KEYPOINTS = "refined_keypoints"
 _STATUS_SOURCE = "runtime_refine_keypoints"
+_TRADITIONAL_HEURISTIC_METHOD = "traditional_pose"
+_TRADITIONAL_FLIP_FAMILY = "traditional_eye_flip_v1"
+_DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+
+TRADITIONAL_REFINEMENT_HEURISTIC_PROFILE = heuristic_profile_from_package(
+    _TRADITIONAL_HEURISTIC_METHOD,
+    "traditional_v1",
+)
+TRADITIONAL_REFINEMENT_GEOMETRY_QC = require_geometry_qc(
+    TRADITIONAL_REFINEMENT_HEURISTIC_PROFILE
+)
+require_flip_detection(
+    TRADITIONAL_REFINEMENT_HEURISTIC_PROFILE,
+    family=_TRADITIONAL_FLIP_FAMILY,
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +115,67 @@ def _as_mapping(value: object) -> Optional[Dict[str, object]]:
     if isinstance(decoded, Mapping):
         return dict(decoded)
     return None
+
+
+def _required_geometry_default(value: Optional[float], field_name: str) -> float:
+    if value is None:
+        raise RuntimeError(
+            "Traditional pose heuristic profile is missing "
+            f"'geometry_qc.{field_name}'."
+        )
+    return float(value)
+
+
+DEFAULT_MIN_TRIANGLE_ANGLE = _required_geometry_default(
+    TRADITIONAL_REFINEMENT_GEOMETRY_QC.min_triangle_angle_deg,
+    "min_triangle_angle_deg",
+)
+DEFAULT_MIN_TRIANGLE_AREA = _required_geometry_default(
+    TRADITIONAL_REFINEMENT_GEOMETRY_QC.min_triangle_area_px,
+    "min_triangle_area_px",
+)
+DEFAULT_MAX_TRIANGLE_AREA = (
+    float(TRADITIONAL_REFINEMENT_GEOMETRY_QC.max_triangle_area_px)
+    if TRADITIONAL_REFINEMENT_GEOMETRY_QC.max_triangle_area_px is not None
+    else None
+)
+
+
+def _resolve_refinement_geometry_defaults(
+    attrs: Mapping[str, object] | None,
+) -> tuple[float, float, Optional[float]]:
+    if attrs is None:
+        return (
+            DEFAULT_MIN_TRIANGLE_ANGLE,
+            DEFAULT_MIN_TRIANGLE_AREA,
+            DEFAULT_MAX_TRIANGLE_AREA,
+        )
+    geometry_qc = maybe_geometry_qc_from_attrs(_TRADITIONAL_HEURISTIC_METHOD, attrs)
+    if geometry_qc is None:
+        return (
+            DEFAULT_MIN_TRIANGLE_ANGLE,
+            DEFAULT_MIN_TRIANGLE_AREA,
+            DEFAULT_MAX_TRIANGLE_AREA,
+        )
+    maybe_flip_detection_from_attrs(
+        _TRADITIONAL_HEURISTIC_METHOD,
+        attrs,
+        family=_TRADITIONAL_FLIP_FAMILY,
+    )
+    min_angle = _required_geometry_default(
+        geometry_qc.min_triangle_angle_deg,
+        "min_triangle_angle_deg",
+    )
+    min_area = _required_geometry_default(
+        geometry_qc.min_triangle_area_px,
+        "min_triangle_area_px",
+    )
+    max_area = (
+        float(geometry_qc.max_triangle_area_px)
+        if geometry_qc.max_triangle_area_px is not None
+        else None
+    )
+    return (min_angle, min_area, max_area)
 
 
 def _resolve_status_dataset_id(
@@ -324,22 +407,31 @@ class KeypointRefinementParams:
     scheduler: str = "processes"
     num_workers: Optional[int] = None
     memory_limit: Optional[str] = None
-    confidence_threshold: float = 0.3
-    min_triangle_angle: float = 10.0
-    min_triangle_area: float = 100.0
-    max_triangle_area: Optional[float] = None
+    confidence_threshold: float = _DEFAULT_CONFIDENCE_THRESHOLD
+    min_triangle_angle: float = DEFAULT_MIN_TRIANGLE_ANGLE
+    min_triangle_area: float = DEFAULT_MIN_TRIANGLE_AREA
+    max_triangle_area: Optional[float] = DEFAULT_MAX_TRIANGLE_AREA
 
     @classmethod
     def from_config(
         cls,
         config: Optional[Dict[str, Any]],
+        *,
+        source_attrs: Optional[Mapping[str, object]] = None,
     ) -> Tuple["KeypointRefinementParams", str]:
         """
         Instantiate parameters from pipeline config subtree.
         Returns (params, source_label).
         """
         source = "defaults"
-        params = cls()
+        min_triangle_angle, min_triangle_area, max_triangle_area = (
+            _resolve_refinement_geometry_defaults(source_attrs)
+        )
+        params = cls(
+            min_triangle_angle=min_triangle_angle,
+            min_triangle_area=min_triangle_area,
+            max_triangle_area=max_triangle_area,
+        )
         if config:
             if config.get("chunk_size") is not None:
                 params.chunk_size = int(config["chunk_size"])
@@ -707,6 +799,9 @@ def _process_refinement_chunk(
     """Process a slice of keypoints and return refinement outputs."""
     root = zarr.open(zarr_path, mode="r")
     kp_source = root[f"keypoints_runs/{keypoint_run}"]
+    min_triangle_angle_default, min_triangle_area_default, max_triangle_area_default = (
+        _resolve_refinement_geometry_defaults(kp_source.attrs)
+    )
 
     idx = slice(start, end)
 
@@ -759,14 +854,24 @@ def _process_refinement_chunk(
     usable_out = np.zeros(length, dtype=bool)
     reason_out = np.full(length, "", dtype=object)
 
-    confidence_threshold = float(params_dict.get("confidence_threshold", 0.3))
-    min_triangle_angle = float(params_dict.get("min_triangle_angle", 10.0))
-    min_triangle_area = float(params_dict.get("min_triangle_area", 100.0))
+    confidence_threshold = float(
+        params_dict.get("confidence_threshold", _DEFAULT_CONFIDENCE_THRESHOLD)
+    )
+    min_triangle_angle = float(
+        params_dict.get("min_triangle_angle", min_triangle_angle_default)
+    )
+    min_triangle_area = float(
+        params_dict.get("min_triangle_area", min_triangle_area_default)
+    )
     max_tri_val = params_dict.get("max_triangle_area")
     try:
-        max_triangle_area = float(max_tri_val) if max_tri_val is not None else None
+        max_triangle_area = (
+            float(max_tri_val)
+            if max_tri_val is not None
+            else max_triangle_area_default
+        )
     except (TypeError, ValueError):
-        max_triangle_area = None
+        max_triangle_area = max_triangle_area_default
 
     stats = {
         "refined_success": 0,
@@ -950,7 +1055,10 @@ def create_refined_keypoint_run(
     console.print(f"Source keypoint run: [cyan]{keypoint_run}[/cyan]")
 
     params_config = (config or {}).get("refine_keypoints", {}) if config else {}
-    params, param_source = KeypointRefinementParams.from_config(params_config)
+    params, param_source = KeypointRefinementParams.from_config(
+        params_config,
+        source_attrs=kp_source.attrs,
+    )
 
     console.print(f"Parameter source: [cyan]{param_source}[/cyan]")
     console.print(f"  Chunk size: {params.chunk_size}")
