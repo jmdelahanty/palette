@@ -44,15 +44,16 @@ Conventions:
 
 ## Current shared fixture
 
-Current curated recording fixture:
+Current curated fixtures:
 
-- `/nvme1/palette_test_data/fixtures/recordings/2026-01-28T19-36-18Z_arena_1_Feeding`
+- organized recording: `/nvme1/palette_test_data/fixtures/recordings/2026-01-28T19-36-18Z_arena_1_Feeding`
+- staging batch: `/nvme1/palette_test_data/fixtures/staging/2026_01_28_19_36_18_batch`
 
-This fixture is a curated copy of an organized recording. It keeps the canonical
-files needed for organize/import/diagnostics work while excluding backup and
-repair variants such as `.bak*` and `*_fixed.mp4`.
+The organized recording fixture is a curated copy of an organized recording. It
+keeps the canonical files needed for import/diagnostics work while excluding
+backup and repair variants such as `.bak*` and `*_fixed.mp4`.
 
-Included artifacts:
+Included organized artifacts:
 
 - `cams/*.mp4`
 - `cams/*_meta.csv`
@@ -61,6 +62,16 @@ Included artifacts:
 - `raw/*_update_timing.csv`
 - `derived/recording_snapshot.json`
 - `recording_manifest.json`
+
+The staging batch fixture reconstructs the pre-organize Citrus-style layout:
+
+- `TRANSFER_DONE` at batch root
+- `citrus/<recording>.h5`
+- `citrus/<recording>.mp4`
+- `citrus/<recording>_update_timing.csv`
+- `citrus/Cam2010093.mp4`
+- `citrus/Cam2010093_meta.csv`
+- `citrus/recording_snapshot.json`
 
 ## Typical usage
 
@@ -84,6 +95,19 @@ scripts/run_shared_diagnostics_smoke.sh --label feeding_fixture
 
 This writes text and JSON/JSONL diagnostics artifacts under
 `$PALETTE_TEST_RUNS_ROOT/diagnostics/...`.
+
+### Run the organize preflight smoke runner
+
+```bash
+scripts/run_organize_preflight_smoke.sh
+
+scripts/run_organize_preflight_smoke.sh --label feeding_fixture
+```
+
+This clones the shared staging fixture into a fresh run directory, runs
+`organize_recordings --apply --run-video-diagnostics --run-h5-diagnostics`,
+and keeps the resulting recordings tree, logs, and console output under
+`$PALETTE_TEST_RUNS_ROOT/organize_preflight/...`.
 
 ### Write smoke outputs into a run directory
 
