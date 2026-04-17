@@ -29,6 +29,7 @@ import numpy as np
 import zarr
 from matplotlib.widgets import Button, Slider
 
+from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 
 
@@ -38,6 +39,7 @@ ADDITIONAL_COLORS = [
     np.array([0.47, 0.72, 0.31], dtype=np.float32),
     np.array([0.56, 0.35, 0.74], dtype=np.float32),
 ]
+_HEAD_KEYPOINT_LABELS = ("swim_bladder", "eye_left", "eye_right")
 
 
 def _open_zarr(zarr_path: Path) -> zarr.Group:
@@ -132,6 +134,7 @@ class EyeAngleOverlayViewer:
         masks: zarr.Array,
         angles: Sequence[AngleRecord],
         keypoints_roi: Optional[zarr.Array],
+        keypoint_indices: Optional[Dict[str, int]],
         ellipse_params: Optional[zarr.Array],
         vergence_threshold: float,
     ) -> None:
@@ -139,6 +142,7 @@ class EyeAngleOverlayViewer:
         self._masks = masks
         self._angles = list(angles)
         self._keypoints = keypoints_roi
+        self._keypoint_indices = dict(keypoint_indices) if keypoint_indices is not None else None
         self._ellipse_params = ellipse_params
         self._vergence_threshold = float(vergence_threshold)
         self.total = int(roi_images.shape[0])
@@ -325,17 +329,20 @@ class EyeAngleOverlayViewer:
         print(f"No vergence ≥ {threshold:.1f}° found after ROI {start + 1}.")
 
     def _draw_heading(self, idx: int) -> None:
-        if self._keypoints is None:
+        if self._keypoints is None or self._keypoint_indices is None:
             return
         try:
             kp = np.asarray(self._keypoints[idx])
         except Exception:
             return
-        if kp.ndim < 2 or kp.shape[0] < 3 or kp.shape[1] < 2:
+        if kp.ndim < 2 or kp.shape[1] < 2:
             return
-        bladder = kp[0, :2].astype(np.float32)
-        eye_left = kp[1, :2].astype(np.float32)
-        eye_right = kp[2, :2].astype(np.float32)
+        try:
+            bladder = kp[int(self._keypoint_indices["swim_bladder"]), :2].astype(np.float32)
+            eye_left = kp[int(self._keypoint_indices["eye_left"]), :2].astype(np.float32)
+            eye_right = kp[int(self._keypoint_indices["eye_right"]), :2].astype(np.float32)
+        except Exception:
+            return
         if not (np.all(np.isfinite(bladder)) and np.all(np.isfinite(eye_left)) and np.all(np.isfinite(eye_right))):
             return
         center = 0.5 * (eye_left + eye_right)
@@ -444,14 +451,25 @@ def _load_roi_images(root: zarr.Group, keypoint_run: str) -> zarr.Array:
     )
 
 
-def _load_keypoints(root: zarr.Group, keypoint_run: str) -> Optional[zarr.Array]:
+def _load_keypoints(root: zarr.Group, keypoint_run: str) -> tuple[Optional[zarr.Array], Optional[Dict[str, int]]]:
     # Check both keypoints_runs and refined_keypoints_runs paths
     for prefix in ("keypoints_runs", "refined_keypoints_runs"):
         kp_path = f"{prefix}/{keypoint_run}"
         if kp_path in root:
             kp_group = root[kp_path]
-            return kp_group["keypoints_roi"] if "keypoints_roi" in kp_group else None
-    return None
+            if "keypoints_roi" not in kp_group:
+                return None, None
+            keypoints_roi = kp_group["keypoints_roi"]
+            try:
+                keypoint_indices = resolve_required_keypoint_indices_from_attrs(
+                    kp_group.attrs,
+                    _HEAD_KEYPOINT_LABELS,
+                    keypoint_count=int(keypoints_roi.shape[1]),
+                )
+            except ValueError:
+                keypoint_indices = None
+            return keypoints_roi, keypoint_indices
+    return None, None
 
 
 def _load_masks(root: zarr.Group, refined_run: str) -> tuple[zarr.Array, Optional[zarr.Array], Optional[zarr.Array], Optional[zarr.Array]]:
@@ -663,7 +681,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     keypoint_run = _get_latest(root, "keypoints", keypoint_run) if keypoint_run == "latest" else keypoint_run
 
     roi_images = _load_roi_images(root, keypoint_run)
-    keypoints_roi = _load_keypoints(root, keypoint_run)
+    keypoints_roi, keypoint_indices = _load_keypoints(root, keypoint_run)
     masks, ellipse_params = _load_masks(root, refined_run)
 
     if roi_images.shape[0] != masks.shape[0]:
@@ -688,6 +706,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         masks,
         angle_records,
         keypoints_roi,
+        keypoint_indices,
         ellipse_params,
         args.vergence_threshold,
     )

@@ -51,6 +51,7 @@ from skimage import measure, morphology
 from collections import Counter
 
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
@@ -83,6 +84,7 @@ _SUCCESS_MIN_EYE_AREA_PX_DEFAULT = 50.0
 _REFINED_EYE_MASKS_STATUS_SOURCE = "runtime_refine_eye_masks"
 _LOCAL_REASON_STAGING_DATASET = "reason_local"
 _GLOBAL_REASON_TAGS = ("filtered_left", "filtered_right", "filtered_pair")
+_EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
 
 _ZARR_GROUP_CACHE: Dict[str, zarr.Group] = {}
 _ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
@@ -361,6 +363,22 @@ def _validate_input_row_alignment(
         ),
         stage="refine_eye_masks input",
     )
+
+
+def _resolve_eye_keypoint_indices(kp_group: zarr.Group) -> tuple[int, int]:
+    keypoint_count = int(kp_group["keypoints_roi"].shape[1])
+    try:
+        resolved = resolve_required_keypoint_indices_from_attrs(
+            kp_group.attrs,
+            _EYE_KEYPOINT_LABELS,
+            keypoint_count=keypoint_count,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Keypoint run is missing canonical eye labels required for refined_eye_masks "
+            f"({_EYE_KEYPOINT_LABELS}): {exc}"
+        ) from exc
+    return int(resolved["eye_left"]), int(resolved["eye_right"])
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -974,6 +992,7 @@ def _build_passthrough_output(
     source_ellipse_success: np.ndarray,
     source_eye_separation: Optional[float],
     keypoints_roi: np.ndarray,
+    eye_keypoint_indices: tuple[int, int],
     reason: Optional[str],
 ) -> ROIOutput:
     """Build a ROIOutput that preserves the source masks/ellipses unchanged."""
@@ -1014,8 +1033,8 @@ def _build_passthrough_output(
     else:
         separation = float("nan")
 
-    eye_left = keypoints_roi[1]
-    eye_right = keypoints_roi[2]
+    eye_left = np.asarray(keypoints_roi[int(eye_keypoint_indices[0])], dtype=np.float32)
+    eye_right = np.asarray(keypoints_roi[int(eye_keypoint_indices[1])], dtype=np.float32)
     keypoints_valid = (
         eye_left.size >= 2
         and eye_right.size >= 2
@@ -1105,6 +1124,7 @@ def _load_source_mask_slices(
 def _refine_roi(
     source_masks: np.ndarray,
     keypoints_roi: np.ndarray,
+    eye_keypoint_indices: tuple[int, int],
     heading_deg: float,
     success_flag: bool,
     mask_probs: Optional[np.ndarray] = None,
@@ -1179,8 +1199,8 @@ def _refine_roi(
         else:
             separation = float("nan")
 
-        eye_left_local = keypoints_roi[1]
-        eye_right_local = keypoints_roi[2]
+        eye_left_local = np.asarray(keypoints_roi[int(eye_keypoint_indices[0])], dtype=np.float32)
+        eye_right_local = np.asarray(keypoints_roi[int(eye_keypoint_indices[1])], dtype=np.float32)
         keypoints_valid_local = (
             eye_left_local.size >= 2
             and eye_right_local.size >= 2
@@ -1236,8 +1256,8 @@ def _refine_roi(
     reason: Optional[str] = None
     if union_source:
         reason = _append_reason(reason, "union_source")
-    eye_left = keypoints_roi[1]
-    eye_right = keypoints_roi[2]
+    eye_left = np.asarray(keypoints_roi[int(eye_keypoint_indices[0])], dtype=np.float32)
+    eye_right = np.asarray(keypoints_roi[int(eye_keypoint_indices[1])], dtype=np.float32)
 
     def _valid_keypoint(point: np.ndarray) -> bool:
         arr = np.asarray(point)
@@ -1448,6 +1468,7 @@ def _process_refine_chunk(
     success_path: str,
     start: int,
     stop: int,
+    eye_keypoint_indices: tuple[int, int],
     *,
     fast_path: bool = False,
     probability_threshold: float = _DEFAULT_PROBABILITY_THRESHOLD,
@@ -1505,6 +1526,7 @@ def _process_refine_chunk(
                         ellipse_success_np[local_idx],
                         eye_sep_val,
                         keypoints_roi,
+                        eye_keypoint_indices,
                         reason_val,
                     ),
                 )
@@ -1519,6 +1541,7 @@ def _process_refine_chunk(
                     _refine_roi(
                         source_masks,
                         keypoints_roi,
+                        eye_keypoint_indices,
                         heading,
                         success_flag,
                         mask_probs=mask_probs_roi,
@@ -1757,6 +1780,7 @@ def _process_and_write_chunk(
     success_path: str,
     start: int,
     stop: int,
+    eye_keypoint_indices: tuple[int, int],
     *,
     write_probabilities: bool,
     fast_path: bool = False,
@@ -1777,6 +1801,7 @@ def _process_and_write_chunk(
         success_path,
         start,
         stop,
+        eye_keypoint_indices,
         fast_path=fast_path,
         probability_threshold=probability_threshold,
         source_ellipse_params_path=source_ellipse_params_path,
@@ -1909,6 +1934,7 @@ def refine_eye_masks(
             raise ValueError(f"Keypoint run '{keypoint_run_name}' missing '{arr}'.")
     kp_paths = ", ".join(f"{keypoint_group_name}/{keypoint_run_name}/{name}" for name in required_kp)
     console.print(f"Using keypoint datasets: [cyan]{kp_paths}[/cyan]")
+    eye_keypoint_indices = _resolve_eye_keypoint_indices(kp_group)
 
     console.print(
         "Loading mask bundle (prefer_probs=True, threshold="
@@ -2380,6 +2406,7 @@ def refine_eye_masks(
                     success_path,
                     start,
                     stop,
+                    eye_keypoint_indices,
                     write_probabilities=write_refined_probabilities,
                     fast_path=use_fast_path,
                     probability_threshold=probability_threshold,

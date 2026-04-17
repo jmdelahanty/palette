@@ -104,9 +104,16 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
 - [x] Switch the traditional raw detector and interactive tuner from hardcoded
       geometry/blob-assignment defaults to packaged `pose_heuristics`
       profiles.
-- [ ] Update downstream consumers that index fixed eye landmarks by position:
-  - use label-based resolution (`swim_bladder`, `eye_left`, `eye_right`) where required
-  - fail with clear errors when required labels are missing
+- [x] Update the first downstream consumer slice that indexed fixed eye
+      landmarks by position:
+  - `src/fisheye/refinement/refine_eye_masks.py`
+  - `src/fisheye/tune/eye_mask_tuner.py`
+  - `src/fisheye/utils/materialize_refined_eye_masks_compat.py`
+  - `src/fisheye/analysis/eye_angle_analysis.py`
+  - `src/fisheye/visualization/visualize_eye_angle_overlays.py`
+- [ ] Continue migrating the remaining downstream consumers from fixed eye
+      positions to label-based resolution (`swim_bladder`, `eye_left`,
+      `eye_right`) and clear missing-label failures.
 - [ ] Confirm eye-mask-dependent logic works when skeleton has extra points.
 
 ## Phase 4: CLI and Operator Ergonomics

@@ -212,7 +212,8 @@ Still incomplete:
 
 - many write/read paths still allocate or assume `(N,3,2)`
 - some consumers still assume positional eye/bladder indexing instead of label
-  resolution
+  resolution, but the first eye-mask and eye-angle consumer cluster now uses
+  shared label-to-index resolution from run attrs
 - dynamic `K` support is not yet the default invariant across keypoint runtime
   modules
 
@@ -324,8 +325,15 @@ Checklist:
     resolution
   - do not redesign the datastore around per-row key/value keypoint objects
 - [ ] Audit array allocation sites for hardcoded `(N,3,2)`
-- [ ] Replace positional eye/bladder indexing with label resolution where the
-      operation is semantically label-based
+- [x] Convert the first eye-mask / eye-angle consumer slice from positional
+      indexing to label resolution:
+  - `src/fisheye/refinement/refine_eye_masks.py`
+  - `src/fisheye/tune/eye_mask_tuner.py`
+  - `src/fisheye/utils/materialize_refined_eye_masks_compat.py`
+  - `src/fisheye/analysis/eye_angle_analysis.py`
+  - `src/fisheye/visualization/visualize_eye_angle_overlays.py`
+- [ ] Continue replacing positional eye/bladder indexing across the rest of the
+      runtime consumer surface
 - [ ] Fail clearly when a required label is absent, rather than silently
       assuming the starter skeleton
 - [ ] Re-check manual/review UIs for dynamic keypoint count behavior

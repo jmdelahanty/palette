@@ -105,6 +105,7 @@ def test_process_and_write_chunk_open_uses_live_metadata(
         success_path="unused/success",
         start=0,
         stop=1,
+        eye_keypoint_indices=(1, 2),
         write_probabilities=False,
     )
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +10,17 @@ from typing import Dict, List, Optional
 
 
 RUNTIME_COORD_DIMS = 2
+_KEYPOINT_LABEL_ALIASES = {
+    "bladder": "swim_bladder",
+    "swim_bladder": "swim_bladder",
+    "swim-bladder": "swim_bladder",
+    "eye_left": "eye_left",
+    "left_eye": "eye_left",
+    "left-eye": "eye_left",
+    "eye_right": "eye_right",
+    "right_eye": "eye_right",
+    "right-eye": "eye_right",
+}
 
 
 @dataclass(frozen=True)
@@ -73,6 +84,124 @@ def normalize_kpt_shape(value: object) -> Optional[tuple[int, int]]:
         if first > 0 and second > 0:
             return (first, second)
     return None
+
+
+def canonicalize_keypoint_label(value: object) -> Optional[str]:
+    text = _normalize_text(value)
+    if text is None:
+        return None
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    return _KEYPOINT_LABEL_ALIASES.get(normalized, normalized)
+
+
+def _normalize_label_sequence(values: object) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return ()
+    labels: list[str] = []
+    for value in values:
+        label = canonicalize_keypoint_label(value)
+        if label is not None:
+            labels.append(label)
+    return tuple(labels)
+
+
+def _extract_pose_schema_labels(pose_schema: object) -> tuple[str, ...]:
+    if isinstance(pose_schema, PoseSchema):
+        return tuple(
+            label
+            for label in (canonicalize_keypoint_label(node.name) for node in pose_schema.nodes)
+            if label is not None
+        )
+
+    pose_schema_map = _coerce_mapping(pose_schema)
+    if pose_schema_map is None:
+        return ()
+
+    labels = _normalize_label_sequence(pose_schema_map.get("keypoint_labels"))
+    if labels:
+        return labels
+
+    nodes_meta = pose_schema_map.get("nodes")
+    if isinstance(nodes_meta, Sequence) and not isinstance(nodes_meta, (str, bytes, bytearray)):
+        labels_from_nodes: list[str] = []
+        for node in nodes_meta:
+            if isinstance(node, Mapping):
+                label = canonicalize_keypoint_label(node.get("name"))
+            else:
+                label = canonicalize_keypoint_label(node)
+            if label is not None:
+                labels_from_nodes.append(label)
+        if labels_from_nodes:
+            return tuple(labels_from_nodes)
+
+    node_names = _normalize_label_sequence(pose_schema_map.get("node_names"))
+    if node_names:
+        return node_names
+
+    return ()
+
+
+def resolve_keypoint_labels_from_attrs(
+    attrs: Mapping[str, object],
+    *,
+    keypoint_count: Optional[int] = None,
+) -> tuple[str, ...]:
+    labels = _normalize_label_sequence(attrs.get("keypoint_labels"))
+    if not labels:
+        labels = _extract_pose_schema_labels(attrs.get("pose_schema"))
+    if keypoint_count is not None and labels and len(labels) != int(keypoint_count):
+        raise ValueError(
+            f"Keypoint labels count {len(labels)} does not match runtime keypoint count {int(keypoint_count)}."
+        )
+    return labels
+
+
+def resolve_required_keypoint_indices(
+    labels: Sequence[object],
+    required_labels: Sequence[object],
+    *,
+    keypoint_count: Optional[int] = None,
+) -> dict[str, int]:
+    normalized_labels = _normalize_label_sequence(labels)
+    if keypoint_count is not None and len(normalized_labels) != int(keypoint_count):
+        raise ValueError(
+            f"Keypoint labels count {len(normalized_labels)} does not match runtime keypoint count {int(keypoint_count)}."
+        )
+
+    label_to_idx: dict[str, int] = {}
+    for idx, label in enumerate(normalized_labels):
+        label_to_idx.setdefault(label, idx)
+
+    resolved: dict[str, int] = {}
+    missing: list[str] = []
+    for required in required_labels:
+        canonical = canonicalize_keypoint_label(required)
+        if canonical is None:
+            continue
+        if canonical not in label_to_idx:
+            missing.append(canonical)
+            continue
+        resolved[canonical] = int(label_to_idx[canonical])
+
+    if missing:
+        raise ValueError(f"Required keypoint labels missing: {', '.join(missing)}")
+    return resolved
+
+
+def resolve_required_keypoint_indices_from_attrs(
+    attrs: Mapping[str, object],
+    required_labels: Sequence[object],
+    *,
+    keypoint_count: Optional[int] = None,
+) -> dict[str, int]:
+    labels = resolve_keypoint_labels_from_attrs(attrs, keypoint_count=keypoint_count)
+    if not labels:
+        raise ValueError("Keypoint labels are missing from run attrs and pose_schema metadata.")
+    return resolve_required_keypoint_indices(
+        labels,
+        required_labels,
+        keypoint_count=keypoint_count,
+    )
 
 
 def schema_to_attr_payload(

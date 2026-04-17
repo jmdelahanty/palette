@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .schema import PoseSchema
+from .schema import PoseSchema, canonicalize_keypoint_label
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ def dependent_keypoints(spec: Mapping[str, object] | None) -> tuple[str, ...]:
 def _label_index_map(labels: Sequence[str]) -> dict[str, int]:
     mapping: dict[str, int] = {}
     for idx, label in enumerate(labels):
-        text = str(label).strip()
+        text = canonicalize_keypoint_label(label)
         if text:
             mapping[text] = idx
     return mapping
@@ -125,7 +125,7 @@ def evaluate_point_expression(
 
     try:
         if op == "keypoint":
-            label = str(expr_map.get("label", "")).strip()
+            label = canonicalize_keypoint_label(expr_map.get("label"))
             if not label:
                 raise ValueError("Heading keypoint expression is missing 'label'.")
             if label not in label_to_idx:
@@ -136,7 +136,11 @@ def evaluate_point_expression(
             raw_labels = expr_map.get("labels")
             if not isinstance(raw_labels, Sequence) or isinstance(raw_labels, (str, bytes)):
                 raise ValueError("Heading midpoint expression must define 'labels'.")
-            midpoint_labels = [str(value).strip() for value in raw_labels if str(value).strip()]
+            midpoint_labels = [
+                label
+                for label in (canonicalize_keypoint_label(value) for value in raw_labels)
+                if label is not None
+            ]
             if len(midpoint_labels) != 2:
                 raise ValueError(
                     "Heading midpoint expression currently requires exactly 2 labels."

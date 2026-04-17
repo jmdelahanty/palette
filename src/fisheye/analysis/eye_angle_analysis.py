@@ -25,6 +25,7 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.utils.metadata import get_fps
 from fisheye.utils.system import get_git_info
 
@@ -49,6 +50,7 @@ REASON_CODE_MAP = {
 ELLIPSE_CIRCULARITY_THRESHOLD = 0.95  # reject nearly circular fits that lack a stable major axis
 DERIVATIVE_MAX_DT = 0.25  # seconds; ignore large gaps when computing discrete derivatives
 ANGLE_SMOOTHING_WINDOW = 7  # frames; moving-average window for smoothed angle outputs
+_HEAD_KEYPOINT_LABELS = ("swim_bladder", "eye_left", "eye_right")
 
 
 @dataclass
@@ -142,6 +144,8 @@ def _process_chunk(
     keypoints_roi: np.ndarray,
     heading_deg: np.ndarray,
     detection_success: np.ndarray,
+    *,
+    keypoint_indices: Dict[str, int],
 ) -> EyeAngleResults:
     """Process a chunk of detections into eye angles and QA flags."""
     chunk_len = ellipse_params.shape[0]
@@ -168,9 +172,9 @@ def _process_chunk(
     heading_out = heading_deg.astype(np.float64, copy=True)
     heading_valid = np.isfinite(heading_out)
 
-    bladder = keypoints_roi[:, 0, :]
-    eye_left_kp = keypoints_roi[:, 1, :]
-    eye_right_kp = keypoints_roi[:, 2, :]
+    bladder = keypoints_roi[:, int(keypoint_indices["swim_bladder"]), :]
+    eye_left_kp = keypoints_roi[:, int(keypoint_indices["eye_left"]), :]
+    eye_right_kp = keypoints_roi[:, int(keypoint_indices["eye_right"]), :]
 
     reason_codes[~detection_success] |= REASON_DETECTION_FAILURE
     reason_codes[~heading_valid] |= REASON_HEADING_INVALID
@@ -496,6 +500,21 @@ def _resolve_keypoint_run_name(
     )
 
 
+def _resolve_head_keypoint_indices(kp_group: zarr.Group) -> Dict[str, int]:
+    keypoint_count = int(kp_group["keypoints_roi"].shape[1])
+    try:
+        return resolve_required_keypoint_indices_from_attrs(
+            kp_group.attrs,
+            _HEAD_KEYPOINT_LABELS,
+            keypoint_count=keypoint_count,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Keypoint run is missing canonical head labels required for eye-angle analysis "
+            f"({_HEAD_KEYPOINT_LABELS}): {exc}"
+        ) from exc
+
+
 def run(args: argparse.Namespace) -> None:
     console = Console()
     mode = "a"
@@ -570,6 +589,7 @@ def run(args: argparse.Namespace) -> None:
     total_detections = refined_group["ellipse_params"].shape[0]
     if kp_group["keypoints_roi"].shape[0] != total_detections:
         raise ValueError("Mismatch between refined eye masks and keypoint detections.")
+    keypoint_indices = _resolve_head_keypoint_indices(kp_group)
 
     chunk_size = max(1, int(args.chunk_size))
     if chunk_size > total_detections:
@@ -613,6 +633,7 @@ def run(args: argparse.Namespace) -> None:
             keypoints_roi=keypoints_roi,
             heading_deg=heading_deg,
             detection_success=detection_success,
+            keypoint_indices=keypoint_indices,
         )
 
         left_angles[start:stop] = chunk_result.left_deg

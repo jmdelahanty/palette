@@ -5,6 +5,7 @@ from pathlib import Path
 from fisheye.detection import detect_keypoints_traditional as trad_mod
 from fisheye.detection import detect_keypoints_yolo as yolo_mod
 from fisheye.pose.schema import (
+    resolve_required_keypoint_indices_from_attrs,
     resolve_skeleton_identity_from_attrs,
     schema_payload_from_package,
 )
@@ -53,6 +54,30 @@ def test_resolve_skeleton_identity_falls_back_to_pose_schema_name_and_runtime_sh
     assert resolved.pose_schema_name == "traditional_v2"
     assert resolved.skeleton_id == "pose_schema:traditional_v2"
     assert resolved.kpt_shape == (5, 2)
+
+
+def test_resolve_required_keypoint_indices_uses_canonical_labels_from_run_attrs() -> None:
+    resolved = resolve_required_keypoint_indices_from_attrs(
+        {
+            "keypoint_labels": ["eye_right", "tail_tip", "bladder", "left_eye"],
+            "pose_schema": {
+                "name": "traditional_v2",
+                "nodes": [
+                    {"id": 0, "name": "swim_bladder"},
+                    {"id": 1, "name": "eye_left"},
+                    {"id": 2, "name": "eye_right"},
+                ],
+            },
+        },
+        ("swim_bladder", "eye_left", "eye_right"),
+        keypoint_count=4,
+    )
+
+    assert resolved == {
+        "swim_bladder": 2,
+        "eye_left": 3,
+        "eye_right": 0,
+    }
 
 
 def test_raw_keypoint_writers_use_shared_pose_payload() -> None:

@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..refinement.refine_eye_masks import _compute_roi_metrics, _measure_mask, _write_contours_from_masks
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
@@ -29,6 +30,7 @@ MATERIALIZE_REFINED_EYE_MASKS_COMPAT_METHOD = "materialize_refined_eye_masks_com
 MATERIALIZE_REFINED_EYE_MASKS_STAGE = "materialize_refined_eye_masks_compat"
 DERIVED_REFINED_EYE_MASKS_COMPAT_ROLE = DERIVED_COMPAT_ROLE
 EYE_COMPONENTS = ("eye_left", "eye_right")
+_EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
 _TRIVIAL_REASON_TAGS = {"clean", "copied_from_source"}
 _CARRYOVER_ATTR_KEYS = (
     "source_eye_masks_run",
@@ -260,7 +262,7 @@ def _load_keypoints_roi(
     refined_group: zarr.Group,
     *,
     total_rois: int,
-) -> Optional[np.ndarray]:
+) -> tuple[Optional[np.ndarray], Optional[dict[str, int]]]:
     keypoint_run = _normalize_text(resolve_source_keypoints_run(refined_group.attrs))
     keypoint_group = _normalize_text(refined_group.attrs.get("source_keypoint_group"))
     candidates = [keypoint_group] if keypoint_group else []
@@ -269,7 +271,7 @@ def _load_keypoints_roi(
             candidates.append(fallback)
 
     if keypoint_run is None:
-        return None
+        return None, None
     for parent_name in candidates:
         parent = root.get(parent_name)
         if parent is None or keypoint_run not in parent:
@@ -279,10 +281,18 @@ def _load_keypoints_roi(
         if keypoints_roi is None:
             continue
         keypoints = np.asarray(keypoints_roi[:], dtype=np.float32)
-        if keypoints.ndim < 3 or int(keypoints.shape[0]) != total_rois or int(keypoints.shape[1]) < 3:
+        if keypoints.ndim < 3 or int(keypoints.shape[0]) != total_rois:
             continue
-        return keypoints
-    return None
+        try:
+            indices = resolve_required_keypoint_indices_from_attrs(
+                keypoints_group.attrs,
+                _EYE_KEYPOINT_LABELS,
+                keypoint_count=int(keypoints.shape[1]),
+            )
+        except ValueError:
+            continue
+        return keypoints, {name: int(value) for name, value in indices.items()}
+    return None, None
 
 
 def _read_component_reason_labels(
@@ -601,7 +611,7 @@ def materialize_refined_eye_masks_compat(
     )
     source_union = np.logical_or(source_left > 0, source_right > 0).astype(np.uint8)
 
-    keypoints_roi = _load_keypoints_roi(root, refined_group, total_rois=total_rois)
+    keypoints_roi, keypoint_indices = _load_keypoints_roi(root, refined_group, total_rois=total_rois)
     keypoint_run = _normalize_text(resolve_source_keypoints_run(refined_group.attrs))
     keypoint_group = _normalize_text(refined_group.attrs.get("source_keypoint_group"))
     left_reason_labels = _read_component_reason_labels(refined_group, "eye_left", total_rois=total_rois)
@@ -664,9 +674,15 @@ def materialize_refined_eye_masks_compat(
         if np.all(ellipse_success[roi_idx]) and np.all(np.isfinite(centroids)):
             eye_separation[roi_idx] = np.float32(np.linalg.norm(centroids[0] - centroids[1]))
 
-        if keypoints_roi is not None:
-            eye_left_kp = np.asarray(keypoints_roi[roi_idx, 1, :2], dtype=np.float32)
-            eye_right_kp = np.asarray(keypoints_roi[roi_idx, 2, :2], dtype=np.float32)
+        if keypoints_roi is not None and keypoint_indices is not None:
+            eye_left_kp = np.asarray(
+                keypoints_roi[roi_idx, int(keypoint_indices["eye_left"]), :2],
+                dtype=np.float32,
+            )
+            eye_right_kp = np.asarray(
+                keypoints_roi[roi_idx, int(keypoint_indices["eye_right"]), :2],
+                dtype=np.float32,
+            )
             keypoints_valid = (
                 eye_left_kp.size >= 2
                 and eye_right_kp.size >= 2

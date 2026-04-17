@@ -24,6 +24,7 @@ from skimage import filters, measure, morphology
 from skimage.measure import EllipseModel
 from datetime import datetime, timezone
 
+from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..segmentation.eye_segmentation import EyeSegmentationConfig, _process_roi_data
 
 
@@ -38,6 +39,8 @@ DEBUG_PANEL_SCALE = 5
 DEBUG_PANEL_MARGIN = 10
 DEBUG_PANEL_SPACING = 20
 _DEFAULT_SUCCESS_MIN_EYE_AREA_PX = 50.0
+_HEAD_KEYPOINT_LABELS = ("swim_bladder", "eye_left", "eye_right")
+_EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
 
 
 def save_eye_mask_params(zarr_path: Path, params: Dict[str, Any]) -> Tuple[bool, str]:
@@ -99,12 +102,15 @@ def apply_sobel_filter(patch: np.ndarray, strength: float) -> Tuple[np.ndarray, 
     return filtered_uint8, sobel_visual
 
 
-def compute_heading_deg(kp: np.ndarray) -> Optional[float]:
-    if kp.shape[0] < 3:
+def compute_heading_deg(kp: np.ndarray, keypoint_indices: Dict[str, int]) -> Optional[float]:
+    if kp.ndim < 2 or kp.shape[1] < 2:
         return None
-    bladder = kp[0]
-    eye_left = kp[1]
-    eye_right = kp[2]
+    try:
+        bladder = kp[int(keypoint_indices["swim_bladder"])]
+        eye_left = kp[int(keypoint_indices["eye_left"])]
+        eye_right = kp[int(keypoint_indices["eye_right"])]
+    except Exception:
+        return None
     if not (np.all(np.isfinite(bladder)) and np.all(np.isfinite(eye_left)) and np.all(np.isfinite(eye_right))):
         return None
     eye_mean = (eye_left + eye_right) / 2.0
@@ -116,6 +122,23 @@ def compute_heading_deg(kp: np.ndarray) -> Optional[float]:
     if dx == 0.0 and dy == 0.0:
         return None
     return float(np.degrees(np.arctan2(-dy, dx)))
+
+
+def _resolve_required_keypoints(
+    kp_group: zarr.Group,
+    required_labels: Sequence[str],
+) -> Dict[str, int]:
+    keypoint_count = int(kp_group["keypoints_roi"].shape[1])
+    try:
+        return resolve_required_keypoint_indices_from_attrs(
+            kp_group.attrs,
+            required_labels,
+            keypoint_count=keypoint_count,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Keypoint run is missing required labels {tuple(required_labels)}: {exc}"
+        ) from exc
 
 
 def rotate_image_and_points(
@@ -773,6 +796,8 @@ def run_tuner(args: argparse.Namespace) -> None:
 
     roi_images = crop_group["roi_images"]
     keypoints = kp_group["keypoints_roi"][:]
+    head_keypoint_indices = _resolve_required_keypoints(kp_group, _HEAD_KEYPOINT_LABELS)
+    eye_keypoint_indices = _resolve_required_keypoints(kp_group, _EYE_KEYPOINT_LABELS)
     if "refined_success" in kp_group:
         success = kp_group["refined_success"][:]
     elif "detection_success" in kp_group:
@@ -860,7 +885,7 @@ def run_tuner(args: argparse.Namespace) -> None:
             if np.isfinite(heading_val):
                 heading_deg = heading_val
         if heading_deg is None:
-            heading_deg = compute_heading_deg(kp)
+            heading_deg = compute_heading_deg(kp, head_keypoint_indices)
         if rotate_roi and heading_deg is not None:
             roi_img, kp = rotate_image_and_points(roi_img, kp, -heading_deg)
 
@@ -893,8 +918,8 @@ def run_tuner(args: argparse.Namespace) -> None:
             eye_labels = ["Left", "Right"]
             eye_centers_roi = [None, None]
 
-            for eye_idx in (0, 1):
-                center = kp[1 + eye_idx]
+            for eye_idx, label in enumerate(_EYE_KEYPOINT_LABELS):
+                center = kp[int(eye_keypoint_indices[label])]
                 cx, cy = float(center[0]), float(center[1])
                 if not np.isfinite(cx) or not np.isfinite(cy):
                     info_lines.append(f"{eye_labels[eye_idx]}: keypoint missing")
@@ -1109,6 +1134,7 @@ def run_failure_tuner(
 
     roi_images = crop_group["roi_images"]
     keypoints = kp_group["keypoints_roi"][:]
+    eye_keypoint_indices = _resolve_required_keypoints(kp_group, _EYE_KEYPOINT_LABELS)
     if "refined_success" in kp_group:
         success_flags = kp_group["refined_success"][:]
     elif "detection_success" in kp_group:
@@ -1366,8 +1392,8 @@ def run_failure_tuner(
         )
 
         if success_flag:
-            for eye_idx in (0, 1):
-                center = kp[1 + eye_idx]
+            for eye_idx, label in enumerate(_EYE_KEYPOINT_LABELS):
+                center = kp[int(eye_keypoint_indices[label])]
                 cx, cy = float(center[0]), float(center[1])
                 if not np.isfinite(cx) or not np.isfinite(cy):
                     continue
