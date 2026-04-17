@@ -256,9 +256,12 @@ After organization and before import:
 ```bash
 scripts/py -m fisheye.diagnostics.video batch \
   "$PALETTE_RECORDINGS_ROOT/<recording>"
+
+scripts/py -m fisheye.diagnostics.h5 report \
+  "$PALETTE_RECORDINGS_ROOT/<recording>"
 ```
 
-If you want the results archived:
+If you want the video results archived:
 
 ```bash
 scripts/py -m fisheye.diagnostics.video batch \
@@ -267,4 +270,6 @@ scripts/py -m fisheye.diagnostics.video batch \
 ```
 
 If `Media` passes but `Tooling` errors, the recording is probably okay and the
-problem is with the inspection environment, not the video itself.
+problem is with the inspection environment, not the video itself. Use
+[h5_diagnostics.md](h5_diagnostics.md) alongside the video preflight when you
+also want to confirm that the raw Citrus H5 is importable.

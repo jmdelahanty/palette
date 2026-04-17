@@ -11,8 +11,10 @@ Recommended pre-import order:
 2. run the [video diagnostics preflight](video_diagnostics.md) against the
    organized recording to check `raw/`, `cams/`, and paired `Cam..._meta.csv`
    camera metadata files
-3. if `Media` passes, import the recording into its analysis Zarr
-4. continue with detection and downstream analysis stages
+3. run the [H5 diagnostics preflight](h5_diagnostics.md) against the organized
+   recording to verify raw Citrus H5 importability and optional section health
+4. if both preflights pass, import the recording into its analysis Zarr
+5. continue with detection and downstream analysis stages
 
 ## Overview
 
@@ -21,6 +23,9 @@ organize recordings
        |
        v
 recommended video diagnostics preflight
+       |
+       v
+recommended H5 diagnostics preflight
        |
        v
   1. import (create analysis zarr, import metadata + stimulus)

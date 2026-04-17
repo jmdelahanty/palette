@@ -176,24 +176,31 @@ the per-camera filtered version used by downstream tools.
 This is the starting point for all downstream pipeline steps (detection,
 keypoints, segmentation, analysis, etc.).
 
-## Optional: run video diagnostics before import
+## Optional: run diagnostics before import
 
-Once a recording has been organized, you can run the unified video diagnostics
-tool against the whole recording directory before creating the analysis Zarr:
+Once a recording has been organized, you can run both unified diagnostics
+preflights before creating the analysis Zarr:
 
 ```bash
 scripts/py -m fisheye.diagnostics.video batch \
   "$PALETTE_RECORDINGS_ROOT/2026-01-28T19-36-18Z_arena_1_Feeding"
+
+scripts/py -m fisheye.diagnostics.h5 report \
+  "$PALETTE_RECORDINGS_ROOT/2026-01-28T19-36-18Z_arena_1_Feeding"
 ```
 
-This checks both `cams/` and `raw/` videos by default, groups them by
-recording, and validates the paired `Cam..._meta.csv` camera metadata file for
-each `cams/*.mp4`.
+The video preflight checks both `cams/` and `raw/` videos by default, groups
+entries by recording, and validates the paired `Cam..._meta.csv` camera
+metadata file for each `cams/*.mp4`.
 
-The default `Overall` status tracks media health, while `Tooling` tells you
-whether the inspection environment itself had problems (for example a broken
-decode backend). See [video_diagnostics.md](video_diagnostics.md) for the full
-CLI and output reference.
+The H5 preflight resolves the organized `raw/*.h5` file automatically and
+checks whether the raw Citrus H5 meets Palette import requirements while also
+reporting optional section health for tracking, snapshots, and enums.
+
+Use the video report when you want media and camera-metadata confidence. Use
+the H5 report when you want to know whether stimulus import should succeed.
+See [video_diagnostics.md](video_diagnostics.md) and
+[h5_diagnostics.md](h5_diagnostics.md) for the full CLI and output reference.
 
 ## Logs
 
