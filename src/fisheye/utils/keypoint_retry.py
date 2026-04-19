@@ -14,6 +14,8 @@ from rich.console import Console
 from ultralytics import YOLO, __version__ as ultralytics_version
 
 from ..registry.db import RegistryPaths
+from ..pose.heading import compute_heading_from_attrs
+from ..pose.schema import resolve_keypoint_labels_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import read_reason_labels
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
@@ -21,7 +23,6 @@ from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _as_text
 from ..shared.zarr.schema import get_run_group
 from ..detection.detect_keypoints_yolo import (
-    _compute_heading,
     _extract_keypoint_confidences,
     _prepare_refined_roi_overrides,
     _repeat_to_rgb,
@@ -204,6 +205,47 @@ def _copy_run_arrays(source: zarr.Group, dest: zarr.Group) -> None:
         if chunks is not None:
             kwargs["chunks"] = chunks
         dest.create_array(name, data=src_arr[:], **kwargs)
+
+
+def _resolve_retry_keypoint_contract(
+    source_run: zarr.Group,
+    retry_group: zarr.Group,
+) -> tuple[tuple[str, ...], int]:
+    keypoints_roi = retry_group.get("keypoints_roi")
+    if keypoints_roi is None or len(keypoints_roi.shape) < 3:
+        raise ValueError("Retry keypoint run is missing a valid 'keypoints_roi' array.")
+    expected_keypoint_count = int(keypoints_roi.shape[1])
+    labels = resolve_keypoint_labels_from_attrs(
+        source_run.attrs,
+        keypoint_count=expected_keypoint_count,
+    )
+    if not labels:
+        if expected_keypoint_count == 3:
+            labels = ("swim_bladder", "eye_left", "eye_right")
+        else:
+            raise ValueError(
+                "Source keypoint run is missing keypoint label metadata needed for retry "
+                "(expected keypoint_labels or pose_schema nodes)."
+            )
+
+    for name in ("keypoints_img", "keypoints_norm"):
+        arr = retry_group.get(name)
+        if arr is not None and len(arr.shape) >= 3 and int(arr.shape[1]) != expected_keypoint_count:
+            raise ValueError(
+                f"Retry keypoint run array '{name}' has keypoint count {int(arr.shape[1])}, "
+                f"expected {expected_keypoint_count}."
+            )
+    keypoint_confidences = retry_group.get("keypoint_confidences")
+    if (
+        keypoint_confidences is not None
+        and len(keypoint_confidences.shape) >= 2
+        and int(keypoint_confidences.shape[1]) != expected_keypoint_count
+    ):
+        raise ValueError(
+            "Retry keypoint run 'keypoint_confidences' shape does not match 'keypoints_roi'."
+        )
+
+    return tuple(labels), expected_keypoint_count
 
 
 def _ensure_retry_mask(dest: zarr.Group, name: str, total_rois: int, chunk_len: int) -> zarr.Array:
@@ -455,6 +497,10 @@ def retry_failed_keypoints_yolo(
         heading_arr = retry_group["heading"]
         confidence_arr = retry_group["confidence"]
         keypoint_conf_arr = retry_group["keypoint_confidences"]
+        keypoint_labels, expected_keypoint_count = _resolve_retry_keypoint_contract(
+            source_run,
+            retry_group,
+        )
         detection_success_arr = retry_group["detection_success"]
         heading_finite_arr = retry_group["heading_finite"]
         heading_usable_arr = retry_group["heading_usable"]
@@ -514,16 +560,28 @@ def retry_failed_keypoints_yolo(
                     continue
 
                 kp = kp_xy[det_idx].detach().cpu().numpy()
-                if kp.shape[0] < 3:
-                    continue
+                if int(kp.shape[0]) != expected_keypoint_count:
+                    raise ValueError(
+                        "YOLO retry prediction keypoint count does not match source run contract: "
+                        f"predicted {int(kp.shape[0])}, expected {expected_keypoint_count} "
+                        f"for keypoints_runs/{source_run_name}."
+                    )
 
                 kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
                 kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
                 top_left_arr = np.asarray(top_left, dtype=np.float64)
                 kp_img = kp + np.array([top_left_arr[0], top_left_arr[1]], dtype=np.float64)
                 kp_norm = kp_img / norm_factor
-                heading = _compute_heading(kp[0], kp[1], kp[2])
-                kp_conf = _extract_keypoint_confidences(keypoints, det_idx, n_keypoints=3)
+                heading = compute_heading_from_attrs(
+                    source_run.attrs,
+                    labels=keypoint_labels,
+                    points=np.asarray(kp, dtype=np.float64),
+                )
+                kp_conf = _extract_keypoint_confidences(
+                    keypoints,
+                    det_idx,
+                    n_keypoints=expected_keypoint_count,
+                )
 
                 boxes = getattr(res, "boxes", None)
                 if boxes is not None and boxes.conf is not None and boxes.conf.numel() > 0:

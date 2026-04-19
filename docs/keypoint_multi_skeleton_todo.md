@@ -111,6 +111,14 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   - `src/fisheye/utils/materialize_refined_eye_masks_compat.py`
   - `src/fisheye/analysis/eye_angle_analysis.py`
   - `src/fisheye/visualization/visualize_eye_angle_overlays.py`
+- [x] Update `src/fisheye/utils/keypoint_retry.py` to resolve dynamic `K`,
+      source-run label metadata, and metadata-driven heading from the source
+      run instead of assuming the starter 3-point contract.
+- [x] Remove starter-label fallback defaults from the current training/export
+      surfaces:
+  - `src/fisheye/utils/export_keypoint_training_zarr.py`
+  - `src/fisheye/training/zarr_yolo_dataset_loader.py`
+  - `src/fisheye/training/train_pose.py`
 - [ ] Continue migrating the remaining downstream consumers from fixed eye
       positions to label-based resolution (`swim_bladder`, `eye_left`,
       `eye_right`) and clear missing-label failures.

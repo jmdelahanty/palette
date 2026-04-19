@@ -26,7 +26,10 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry, RegistryPaths
-from fisheye.pose.schema import resolve_skeleton_identity_from_attrs
+from fisheye.pose.schema import (
+    resolve_keypoint_labels_from_attrs,
+    resolve_skeleton_identity_from_attrs,
+)
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
@@ -459,6 +462,56 @@ def _resolve_dataset_skeleton_identity(
     return skeleton_id, resolved_kpt_shape, signature
 
 
+def _resolve_dataset_keypoint_labels(
+    *,
+    manifest_payload: Dict[str, Any],
+    dataset_payload: Dict[str, Any],
+    annotation_group: zarr.Group,
+    source_zarr: Path,
+    keypoint_run: str,
+    keypoint_count: int,
+) -> List[str]:
+    runtime_labels = list(
+        resolve_keypoint_labels_from_attrs(
+            dict(annotation_group.attrs),
+            keypoint_count=int(keypoint_count),
+        )
+    )
+    dataset_labels = list(
+        resolve_keypoint_labels_from_attrs(
+            dataset_payload,
+            keypoint_count=int(keypoint_count),
+        )
+    )
+    manifest_labels = list(
+        resolve_keypoint_labels_from_attrs(
+            {
+                "keypoint_labels": manifest_payload.get("keypoint_labels"),
+                "pose_schema": manifest_payload.get("pose_schema"),
+            },
+            keypoint_count=int(keypoint_count),
+        )
+    )
+
+    selected = runtime_labels or dataset_labels or manifest_labels
+    if not selected:
+        raise ValueError(
+            f"{source_zarr}: keypoint run '{keypoint_run}' is missing keypoint label metadata "
+            "(expected keypoint_labels or pose_schema nodes on the run, dataset manifest row, or manifest pose_schema)."
+        )
+
+    for source_name, labels in (
+        ("dataset", dataset_labels),
+        ("manifest", manifest_labels),
+    ):
+        if labels and labels != selected:
+            raise ValueError(
+                f"{source_zarr}: {source_name} keypoint_labels {labels} do not match "
+                f"resolved run labels {selected} for '{keypoint_run}'."
+            )
+    return [str(label) for label in selected]
+
+
 def _extract_identity(dataset_payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     def _clean_text(value: Any) -> Optional[str]:
         text = _as_text(value)
@@ -614,6 +667,7 @@ def _discover_merge_sources(
     keypoint_shape: Optional[Tuple[int, ...]] = None
     keypoint_dtype: Optional[np.dtype] = None
     keypoint_labels: Optional[List[str]] = None
+    keypoint_label_members: Dict[Tuple[str, ...], List[str]] = {}
     manifest_pose_schema = _as_mapping(manifest_payload.get("pose_schema"))
     manifest_skeleton_id = (
         _as_text(manifest_payload.get("skeleton_id"))
@@ -747,10 +801,6 @@ def _discover_merge_sources(
         annotation_group = kp_group
         annotation_run = keypoint_run
         annotation_parent_name = "keypoints_runs"
-        labels = annotation_group.attrs.get("keypoint_labels")
-        normalized_labels = [str(item) for item in labels] if isinstance(labels, list) else []
-        if keypoint_labels is None:
-            keypoint_labels = normalized_labels or ["swim_bladder", "eye_left", "eye_right"]
 
         frame_indices_path = (
             f"crop_runs/{source_crop_run}/frame_indices" if "frame_indices" in crop_group else None
@@ -796,10 +846,6 @@ def _discover_merge_sources(
                 annotation_group = refined_group
                 annotation_run = refined_run_name
                 annotation_parent_name = refined_parent_name
-                labels = annotation_group.attrs.get("keypoint_labels")
-                normalized_labels = [str(item) for item in labels] if isinstance(labels, list) else []
-                if keypoint_labels is None:
-                    keypoint_labels = normalized_labels or ["swim_bladder", "eye_left", "eye_right"]
             if "usable_keypoints" in refined_group:
                 refined_success_arr = refined_group["usable_keypoints"]
                 if int(refined_success_arr.shape[0]) != source_sample_count:
@@ -839,7 +885,28 @@ def _discover_merge_sources(
             manifest_skeleton_id=manifest_skeleton_id,
             manifest_kpt_shape=manifest_kpt_shape,
         )
+        dataset_labels = _resolve_dataset_keypoint_labels(
+            manifest_payload=manifest_payload,
+            dataset_payload=dataset,
+            annotation_group=annotation_group,
+            source_zarr=source_zarr,
+            keypoint_run=f"{annotation_parent_name}/{annotation_run}",
+            keypoint_count=int(dataset_keypoint_shape[0]),
+        )
         dataset_member = f"{dataset_id} (zarr={source_zarr}, keypoint_run={keypoint_run})"
+        label_signature = tuple(str(label) for label in dataset_labels)
+        keypoint_label_members.setdefault(label_signature, []).append(dataset_member)
+        if keypoint_labels is None:
+            keypoint_labels = list(dataset_labels)
+        elif list(dataset_labels) != keypoint_labels:
+            detail_lines = []
+            for signature, members in sorted(keypoint_label_members.items()):
+                detail_lines.append(f"- {list(signature)}: {', '.join(members)}")
+            raise ValueError(
+                "Mixed keypoint label sets detected while exporting keypoint training data. "
+                "Expected one keypoint_labels ordering/signature but found:\n"
+                + "\n".join(detail_lines)
+            )
         skeleton_signature_members.setdefault(dataset_signature, []).append(dataset_member)
         candidate_identity = (dataset_skeleton_id, dataset_kpt_shape)
         if selected_skeleton_identity is None:
@@ -890,7 +957,7 @@ def _discover_merge_sources(
                 roi_chunks=dataset_roi_chunks,
                 keypoint_shape=dataset_keypoint_shape,
                 keypoint_dtype=dataset_keypoint_dtype,
-                keypoint_labels=normalized_labels or (keypoint_labels or ["swim_bladder", "eye_left", "eye_right"]),
+                keypoint_labels=list(dataset_labels),
                 skeleton_id=dataset_skeleton_id,
                 kpt_shape=dataset_kpt_shape,
                 skeleton_signature=dataset_signature,
@@ -905,6 +972,8 @@ def _discover_merge_sources(
         raise ValueError("Failed to resolve merged keypoint layout from manifest datasets.")
     if selected_skeleton_identity is None:
         raise ValueError("Failed to resolve skeleton identity from manifest datasets.")
+    if keypoint_labels is None:
+        raise ValueError("Failed to resolve keypoint label metadata from manifest datasets.")
 
     return specs, {
         "roi_shape": roi_shape,
@@ -912,7 +981,7 @@ def _discover_merge_sources(
         "roi_chunks": roi_chunks,
         "keypoint_shape": keypoint_shape,
         "keypoint_dtype": keypoint_dtype,
-        "keypoint_labels": keypoint_labels or ["swim_bladder", "eye_left", "eye_right"],
+        "keypoint_labels": keypoint_labels,
         "skeleton_id": selected_skeleton_identity[0],
         "kpt_shape": selected_skeleton_identity[1],
         "skeleton_signature": selected_skeleton_signature

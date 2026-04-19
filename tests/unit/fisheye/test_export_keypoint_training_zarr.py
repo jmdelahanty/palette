@@ -39,6 +39,7 @@ def _write_source_pose_zarr(
     detection_source_type: str = "refined",
     kpt_shape: tuple[int, int] = (3, 3),
     keypoint_count: int = 3,
+    keypoint_labels: list[str] | None = None,
     refined_reasons: list[str] | None = None,
     refined_run_name: str = "refined_kp_pose_001",
     refined_skeleton_id: str | None = None,
@@ -75,7 +76,7 @@ def _write_source_pose_zarr(
         "skeleton_id": skeleton_id,
         "kpt_shape": [int(kpt_shape[0]), int(kpt_shape[1])],
     }
-    kp.attrs["keypoint_labels"] = [f"kpt_{idx}" for idx in range(int(keypoint_count))]
+    kp.attrs["keypoint_labels"] = keypoint_labels or [f"kpt_{idx}" for idx in range(int(keypoint_count))]
     kp.create_array(
         "keypoints_roi",
         data=np.zeros((4, int(keypoint_count), 2), dtype=np.float32),
@@ -253,6 +254,42 @@ def test_discover_merge_sources_rejects_mixed_skeleton_identities(tmp_path: Path
     assert "dataset_b" in message
     assert "skeleton_id=pose_skel_a" in message
     assert "skeleton_id=pose_skel_b" in message
+
+
+def test_discover_merge_sources_rejects_manifest_keypoint_label_mismatch(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(
+        zarr_path,
+        skeleton_id="pose_skel_shared",
+        keypoint_labels=["eye_left", "tail_tip", "bladder"],
+    )
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["keypoint_labels"] = ["eye_left", "tail_tip", "swim_bladder"]
+    manifest["datasets"][0]["keypoint_labels"] = ["tail_tip", "eye_left", "swim_bladder"]
+
+    with pytest.raises(ValueError, match="dataset keypoint_labels"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+        )
+
+
+def test_discover_merge_sources_rejects_mixed_keypoint_label_sets(tmp_path: Path) -> None:
+    zarr_a = tmp_path / "source_a.zarr"
+    zarr_b = tmp_path / "source_b.zarr"
+    labels_a = ["eye_left", "tail_tip", "bladder"]
+    labels_b = ["eye_right", "tail_tip", "bladder"]
+    _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_shared", keypoint_labels=labels_a)
+    _write_source_pose_zarr(zarr_b, skeleton_id="pose_skel_shared", keypoint_labels=labels_b)
+    manifest = _manifest_for_sources(zarr_a, zarr_b)
+
+    with pytest.raises(ValueError, match="Mixed keypoint label sets detected"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+        )
 
 
 def test_discover_merge_sources_raw_success_plus_box_only_includes_tagged_rows(tmp_path: Path) -> None:

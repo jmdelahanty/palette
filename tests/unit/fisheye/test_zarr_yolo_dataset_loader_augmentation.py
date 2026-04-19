@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
@@ -96,7 +97,11 @@ def _write_curated_refined_detect_zarr(path: Path) -> None:
     refined.create_array("detection_source", data=np.array([0, 0], dtype=np.int8), chunks=(2,))
 
 
-def _write_pose_merged_zarr_with_box_only(path: Path) -> None:
+def _write_pose_merged_zarr_with_box_only(
+    path: Path,
+    *,
+    keypoint_labels: tuple[str, ...] = ("swim_bladder", "eye_left", "eye_right"),
+) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["zarr_purpose"] = "training"
 
@@ -139,6 +144,13 @@ def _write_pose_merged_zarr_with_box_only(path: Path) -> None:
     kp.attrs["method"] = "merged_export"
     kp.attrs["row_gate_applied"] = True
     kp.attrs["source_crop_run"] = "merged_export_test"
+    kp.attrs["keypoint_labels"] = list(keypoint_labels)
+    kp.attrs["pose_schema"] = {
+        "name": "test_pose_schema",
+        "keypoint_labels": list(keypoint_labels),
+        "nodes": [{"id": idx, "name": label} for idx, label in enumerate(keypoint_labels)],
+        "edges": [[0, 1], [0, 2], [1, 2]],
+    }
     kp.create_array(
         "keypoints_roi",
         data=np.array(
@@ -292,6 +304,67 @@ def test_pose_loader_supports_box_only_rows_with_visibility_zero(tmp_path: Path)
     full_sample = ds[full_pos]
     full_vis = full_sample["keypoints"].reshape(1, 3, 3)[0, :, 2]
     assert np.allclose(full_vis, np.full((3,), 2.0, dtype=np.float32))
+
+
+def test_pose_loader_uses_metadata_keypoint_labels(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_labels.zarr"
+    _write_pose_merged_zarr_with_box_only(
+        zarr_path,
+        keypoint_labels=("left_eye", "tail_tip", "bladder"),
+    )
+
+    cfg = ZarrDatasetConfig(
+        datasets={
+            "pose": {
+                "zarr_path": str(zarr_path),
+                "source_type": "filtered",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            }
+        },
+        task="pose",
+        random_seed=11,
+        sampling_strategy="proportional",
+    )
+    ds = create_zarr_dataset(cfg, mode="train")
+
+    assert ds.keypoint_labels == ["eye_left", "tail_tip", "swim_bladder"]
+
+
+def test_pose_loader_rejects_mixed_keypoint_labels(tmp_path: Path) -> None:
+    zarr_a = tmp_path / "pose_a.zarr"
+    zarr_b = tmp_path / "pose_b.zarr"
+    _write_pose_merged_zarr_with_box_only(
+        zarr_a,
+        keypoint_labels=("swim_bladder", "eye_left", "eye_right"),
+    )
+    _write_pose_merged_zarr_with_box_only(
+        zarr_b,
+        keypoint_labels=("tail_tip", "eye_left", "eye_right"),
+    )
+
+    cfg = ZarrDatasetConfig(
+        datasets={
+            "pose_a": {
+                "zarr_path": str(zarr_a),
+                "source_type": "filtered",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            },
+            "pose_b": {
+                "zarr_path": str(zarr_b),
+                "source_type": "filtered",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            },
+        },
+        task="pose",
+        random_seed=11,
+        sampling_strategy="proportional",
+    )
+
+    with pytest.raises(ValueError, match="Mixed keypoint_labels across configured pose datasets"):
+        create_zarr_dataset(cfg, mode="train")
 
 
 def test_detect_loader_supports_curated_refined_root_source(tmp_path: Path) -> None:

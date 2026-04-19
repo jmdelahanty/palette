@@ -214,6 +214,14 @@ Still incomplete:
 - some consumers still assume positional eye/bladder indexing instead of label
   resolution, but the first eye-mask and eye-angle consumer cluster now uses
   shared label-to-index resolution from run attrs
+- `src/fisheye/utils/keypoint_retry.py` now resolves source-run labels,
+  dynamic `K`, and metadata-driven heading, but other repair/manual paths have
+  not all been brought onto that same helper surface yet
+- training/export surfaces no longer silently inject starter labels:
+  `src/fisheye/utils/export_keypoint_training_zarr.py`,
+  `src/fisheye/training/zarr_yolo_dataset_loader.py`, and
+  `src/fisheye/training/train_pose.py` now resolve labels from run attrs /
+  `pose_schema` and reject mixed or missing signatures
 - dynamic `K` support is not yet the default invariant across keypoint runtime
   modules
 
@@ -332,12 +340,20 @@ Checklist:
   - `src/fisheye/utils/materialize_refined_eye_masks_compat.py`
   - `src/fisheye/analysis/eye_angle_analysis.py`
   - `src/fisheye/visualization/visualize_eye_angle_overlays.py`
+- [x] Update `src/fisheye/utils/keypoint_retry.py` to resolve dynamic `K`,
+      source-run label metadata, and metadata-driven heading instead of
+      hardcoded starter-skeleton assumptions
+- [x] Remove starter-label fallback defaults from the current training/export
+      surfaces:
+  - `src/fisheye/utils/export_keypoint_training_zarr.py`
+  - `src/fisheye/training/zarr_yolo_dataset_loader.py`
+  - `src/fisheye/training/train_pose.py`
 - [ ] Continue replacing positional eye/bladder indexing across the rest of the
       runtime consumer surface
 - [ ] Fail clearly when a required label is absent, rather than silently
       assuming the starter skeleton
 - [ ] Re-check manual/review UIs for dynamic keypoint count behavior
-- [ ] Re-check patch/retry paths for dynamic `K`
+- [ ] Re-check remaining patch/manual/review helper paths for dynamic `K`
 
 ### Phase D: Decide override policy
 

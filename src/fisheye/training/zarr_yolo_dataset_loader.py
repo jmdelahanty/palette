@@ -16,6 +16,7 @@ import yaml
 import zarr
 from torch.utils.data import Dataset
 
+from ..pose.schema import resolve_keypoint_labels_from_attrs
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -610,7 +611,17 @@ class GlobalIndexManager:
                         raise KeyError(f"Keypoint run '{keypoint_run_name}' missing 'keypoints_roi' array.")
 
                     total_frames = kp_group['keypoints_roi'].shape[0]
-                    column_names = list(kp_group.attrs.get('keypoint_labels', ['swim_bladder', 'eye_left', 'eye_right']))
+                    column_names = list(
+                        resolve_keypoint_labels_from_attrs(
+                            dict(kp_group.attrs),
+                            keypoint_count=int(kp_group['keypoints_roi'].shape[1]),
+                        )
+                    )
+                    if not column_names:
+                        raise KeyError(
+                            f"Keypoint run '{keypoint_run_name}' in {Path(path_str).name} is missing "
+                            "keypoint label metadata (expected keypoint_labels or pose_schema nodes)."
+                        )
                     success_arr = kp_group['detection_success'][:]
                     if total_frames > 0:
                         tracking_success_rate = float(np.mean(success_arr) * 100.0)
@@ -951,9 +962,21 @@ class ZarrYOLODataset(Dataset):
         
         self.metadata_map = {m.path: m for m in index_manager.metadata_list}
         if self.config.task == 'pose':
-            first_metadata = index_manager.metadata_list[0] if index_manager.metadata_list else None
-            labels = first_metadata.column_names if first_metadata and first_metadata.column_names else ['swim_bladder', 'eye_left', 'eye_right']
-            self.keypoint_labels = labels
+            label_sets = {
+                tuple(metadata.column_names)
+                for metadata in index_manager.metadata_list
+                if metadata.column_names
+            }
+            if not label_sets:
+                raise ValueError(
+                    "Pose dataset metadata is missing keypoint_labels; expected live run attrs or pose_schema nodes."
+                )
+            if len(label_sets) != 1:
+                raise ValueError(
+                    "Mixed keypoint_labels across configured pose datasets are not supported; "
+                    f"observed signatures: {[list(labels) for labels in sorted(label_sets)]}"
+                )
+            self.keypoint_labels = list(next(iter(label_sets)))
         else:
             self.keypoint_labels = []
         self.zarr_roots = {path: zarr.open(path, mode='r') for path in config.get_zarr_paths()}

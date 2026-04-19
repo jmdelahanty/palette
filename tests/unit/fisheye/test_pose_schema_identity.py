@@ -113,3 +113,44 @@ def test_export_runtime_identity_resolution_uses_shared_schema_precedence() -> N
     assert skeleton_id == "pose_schema:traditional_v2"
     assert kpt_shape == (5, 3)
     assert signature == "skeleton_id=pose_schema:traditional_v2, kpt_shape=[5,3]"
+
+
+def test_export_keypoint_label_resolution_prefers_runtime_labels() -> None:
+    kp_group = _FakeExportGroup(
+        {
+            "keypoint_labels": ["left_eye", "tail_tip", "bladder"],
+        }
+    )
+
+    labels = export_mod._resolve_dataset_keypoint_labels(
+        manifest_payload={"keypoint_labels": ["eye_left", "tail_tip", "swim_bladder"]},
+        dataset_payload={},
+        annotation_group=kp_group,
+        source_zarr=Path("/tmp/source_pose.zarr"),
+        keypoint_run="kp_pose_001",
+        keypoint_count=3,
+    )
+
+    assert labels == ["eye_left", "tail_tip", "swim_bladder"]
+
+
+def test_export_keypoint_label_resolution_rejects_dataset_mismatch() -> None:
+    kp_group = _FakeExportGroup(
+        {
+            "keypoint_labels": ["eye_left", "tail_tip", "swim_bladder"],
+        }
+    )
+
+    try:
+        export_mod._resolve_dataset_keypoint_labels(
+            manifest_payload={},
+            dataset_payload={"keypoint_labels": ["tail_tip", "eye_left", "swim_bladder"]},
+            annotation_group=kp_group,
+            source_zarr=Path("/tmp/source_pose.zarr"),
+            keypoint_run="kp_pose_001",
+            keypoint_count=3,
+        )
+    except ValueError as exc:
+        assert "dataset keypoint_labels" in str(exc)
+    else:
+        raise AssertionError("Expected dataset keypoint_labels mismatch to raise ValueError")

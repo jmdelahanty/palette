@@ -36,6 +36,7 @@ import json
 import zarr
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from ..pose.schema import resolve_keypoint_labels_from_attrs
 from .config import PoseConfig
 from .export_shared import (
     collect_export_env as _shared_collect_export_env,
@@ -326,6 +327,35 @@ def get_zarr_metadata(zarr_paths, console=None):
     """
     metadata = {}
 
+    def _resolve_tracking_labels(kp_group: zarr.Group) -> Optional[list[str]]:
+        if "keypoints_roi" not in kp_group:
+            return None
+        labels = resolve_keypoint_labels_from_attrs(
+            dict(kp_group.attrs),
+            keypoint_count=int(kp_group["keypoints_roi"].shape[1]),
+        )
+        return list(labels) if labels else None
+
+    def _resolve_tracking_skeleton(kp_group: zarr.Group) -> Optional[list[list[int]]]:
+        raw_skeleton = kp_group.attrs.get("keypoint_skeleton")
+        if not isinstance(raw_skeleton, (list, tuple)):
+            pose_schema = kp_group.attrs.get("pose_schema")
+            if isinstance(pose_schema, Mapping):
+                raw_skeleton = pose_schema.get("edges")
+                if raw_skeleton is None:
+                    raw_skeleton = pose_schema.get("skeleton")
+        if not isinstance(raw_skeleton, (list, tuple)):
+            return None
+        edges: list[list[int]] = []
+        for edge in raw_skeleton:
+            if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+                continue
+            try:
+                edges.append([int(edge[0]), int(edge[1])])
+            except Exception:
+                continue
+        return edges or None
+
     def _summarize_source_video_metadata(source_paths: list[str]) -> tuple[int, Any]:
         total_frames = 0
         fps_values: list[float] = []
@@ -463,8 +493,8 @@ def get_zarr_metadata(zarr_paths, console=None):
                         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
                         _ts, refined_run_name, usable_keypoints, total_keypoints, usable_keypoints_rate = candidates[0]
 
-                keypoint_labels = kp_group.attrs.get('keypoint_labels')
-                keypoint_skeleton = kp_group.attrs.get('keypoint_skeleton')
+                keypoint_labels = _resolve_tracking_labels(kp_group)
+                keypoint_skeleton = _resolve_tracking_skeleton(kp_group)
                 zarr_meta['tracking_info'] = {
                     'run_name': latest_kp,
                     'refined_run': refined_run_name,
@@ -473,8 +503,8 @@ def get_zarr_metadata(zarr_paths, console=None):
                     'usable_keypoints': usable_keypoints,
                     'total_keypoints': total_keypoints,
                     'usable_keypoints_rate': usable_keypoints_rate,
-                    'keypoint_labels': list(keypoint_labels) if isinstance(keypoint_labels, (list, tuple)) else None,
-                    'keypoint_skeleton': list(keypoint_skeleton) if isinstance(keypoint_skeleton, (list, tuple)) else None,
+                    'keypoint_labels': keypoint_labels,
+                    'keypoint_skeleton': keypoint_skeleton,
                 }
             else:
                 zarr_meta['tracking_info'] = {'warning': 'keypoints_runs not found; proceeding without precomputed keypoints metadata'}
@@ -505,11 +535,6 @@ def _infer_pose_schema(kpt_shape: Optional[tuple], zarr_metadata: dict) -> dict:
 
     kpt_dims = list(kpt_shape) if isinstance(kpt_shape, tuple) else None
     n_keypoints = int(kpt_dims[0]) if kpt_dims and len(kpt_dims) >= 1 else None
-
-    if labels is None and n_keypoints == 3:
-        labels = ["swim_bladder", "eye_left", "eye_right"]
-    if skeleton is None and labels and len(labels) == 3:
-        skeleton = [[0, 1], [0, 2], [1, 2]]
 
     return {
         "kpt_shape": kpt_dims,
