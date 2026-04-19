@@ -19,7 +19,9 @@ from ..detection.detect_keypoints_traditional import (
     DEFAULT_MIN_VALID_ANGLE,
     detect_keypoints_traditional,
 )
+from ..pose.heading import compute_heading_from_attrs
 from ..pose.heuristics import maybe_geometry_qc_from_attrs
+from ..pose.schema import resolve_keypoint_labels_from_attrs
 from ..refinement.refine_keypoints import (
     DEFAULT_MAX_TRIANGLE_AREA as DEFAULT_REFINE_MAX_TRIANGLE_AREA,
     DEFAULT_MIN_TRIANGLE_ANGLE,
@@ -33,6 +35,11 @@ from ..tune.keypoint_review import _update_postprocess_summary
 
 _TRADITIONAL_HEURISTIC_METHOD = "traditional_pose"
 _DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+_TRADITIONAL_OUTPUT_LABEL_TO_KEY = {
+    "swim_bladder": "bladder",
+    "eye_left": "eye_left",
+    "eye_right": "eye_right",
+}
 
 
 @dataclass(frozen=True)
@@ -238,20 +245,23 @@ def _compute_keypoints_for_indices(
     params: Dict[str, object],
     *,
     source_attrs: Dict[str, object],
+    keypoint_count: int,
+    keypoint_labels: Sequence[str],
 ) -> Dict[str, np.ndarray]:
     n = int(indices.size)
     roi_shape = roi_images.shape[1:]
     full_shape = background_full.shape
 
-    roi_out = np.full((n, 3, 2), np.nan, dtype=np.float64)
-    img_out = np.full((n, 3, 2), np.nan, dtype=np.float64)
-    norm_out = np.full((n, 3, 2), np.nan, dtype=np.float64)
+    resolved_keypoint_count = int(keypoint_count)
+    roi_out = np.full((n, resolved_keypoint_count, 2), np.nan, dtype=np.float64)
+    img_out = np.full((n, resolved_keypoint_count, 2), np.nan, dtype=np.float64)
+    norm_out = np.full((n, resolved_keypoint_count, 2), np.nan, dtype=np.float64)
     heading_out = np.full(n, np.nan, dtype=np.float64)
     conf_out = np.full(n, np.nan, dtype=np.float64)
     thresh_out = np.full(n, np.nan, dtype=np.float64)
     se2_out = np.full(n, np.nan, dtype=np.float64)
     success_out = np.zeros(n, dtype=bool)
-    kp_conf_out = np.full((n, 3), np.nan, dtype=np.float64)
+    kp_conf_out = np.full((n, resolved_keypoint_count), np.nan, dtype=np.float64)
     tri_angles_out = np.full((n, 3), np.nan, dtype=np.float64)
     tri_angles_raw_out = np.full((n, 3), np.nan, dtype=np.float64)
     tri_area_out = np.full(n, np.nan, dtype=np.float64)
@@ -289,20 +299,34 @@ def _compute_keypoints_for_indices(
             continue
 
         success_out[i] = True
-        roi_pts = np.array(
-            [keypoints["bladder"], keypoints["eye_left"], keypoints["eye_right"]],
+        roi_pts = np.full((resolved_keypoint_count, 2), np.nan, dtype=np.float64)
+        detector_conf = np.asarray(
+            keypoints.get("keypoint_confidences", [np.nan, np.nan, np.nan]),
             dtype=np.float64,
         )
+        for label_idx, label in enumerate(keypoint_labels):
+            detector_key = _TRADITIONAL_OUTPUT_LABEL_TO_KEY.get(str(label))
+            if detector_key is None or detector_key not in keypoints:
+                continue
+            roi_pts[label_idx] = np.asarray(keypoints[detector_key], dtype=np.float64)
+            detector_conf_idx = ("bladder", "eye_left", "eye_right").index(detector_key)
+            if detector_conf_idx < detector_conf.shape[0]:
+                kp_conf_out[i, label_idx] = float(detector_conf[detector_conf_idx])
         roi_out[i] = roi_pts
         img_pts = roi_pts + np.array([x1, y1], dtype=np.float64)
         img_out[i] = img_pts
         norm_factor = np.array(full_shape[::-1], dtype=np.float64)
         norm_out[i] = img_pts / norm_factor
-        heading_out[i] = float(keypoints.get("heading", np.nan))
+        heading_out[i] = compute_heading_from_attrs(
+            source_attrs,
+            labels=keypoint_labels,
+            points=roi_pts,
+        )
+        if not np.isfinite(heading_out[i]):
+            heading_out[i] = float(keypoints.get("heading", np.nan))
         conf_out[i] = float(keypoints.get("confidence", np.nan))
         thresh_out[i] = float(keypoints.get("effective_threshold", np.nan))
         se2_out[i] = float(keypoints.get("effective_se2_radius", np.nan))
-        kp_conf_out[i] = np.asarray(keypoints.get("keypoint_confidences", [np.nan, np.nan, np.nan]), dtype=np.float64)
         tri_angles_out[i] = np.asarray(keypoints.get("triangle_angles", [np.nan, np.nan, np.nan]), dtype=np.float64)
         tri_angles_raw_out[i] = np.asarray(
             keypoints.get("triangle_angles_raw", [np.nan, np.nan, np.nan]), dtype=np.float64
@@ -427,6 +451,20 @@ def _patch_keypoints_run(
     roi_images = crop_group["roi_images"]
     roi_coords_full = crop_group["roi_coordinates_full"]
     params = _load_keypoint_parameters(keypoints_group)
+    keypoint_count = int(keypoints_group["keypoints_roi"].shape[1])
+    keypoint_labels = tuple(
+        resolve_keypoint_labels_from_attrs(
+            dict(keypoints_group.attrs),
+            keypoint_count=keypoint_count,
+        )
+    )
+    if not keypoint_labels and keypoint_count == 3:
+        keypoint_labels = ("swim_bladder", "eye_left", "eye_right")
+    if not keypoint_labels:
+        raise ValueError(
+            "Keypoint patching requires keypoint label metadata for non-legacy runs "
+            "(expected keypoint_labels or pose_schema nodes)."
+        )
 
     outputs = _compute_keypoints_for_indices(
         roi_images,
@@ -435,6 +473,8 @@ def _patch_keypoints_run(
         target_indices,
         params,
         source_attrs=dict(keypoints_group.attrs),
+        keypoint_count=keypoint_count,
+        keypoint_labels=keypoint_labels,
     )
 
     success_mask = outputs["detection_success"]
@@ -449,15 +489,25 @@ def _patch_keypoints_run(
             "failed": failed,
         }
 
-    nan_roi = np.full((3, 2), np.nan, dtype=np.float64)
+    nan_roi = np.full((keypoint_count, 2), np.nan, dtype=np.float64)
     nan_tri = np.full(3, np.nan, dtype=np.float64)
     for i, roi_idx in enumerate(target_indices):
         if success_mask[i]:
-            keypoints_group["keypoints_roi"][roi_idx] = outputs["keypoints_roi"][i]
+            roi_patch = outputs["keypoints_roi"][i]
+            roi_existing = np.asarray(keypoints_group["keypoints_roi"][roi_idx], dtype=np.float64)
+            roi_valid = np.isfinite(roi_patch).all(axis=1)
+            roi_existing[roi_valid] = roi_patch[roi_valid]
+            keypoints_group["keypoints_roi"][roi_idx] = roi_existing
             if "keypoints_img" in keypoints_group:
-                keypoints_group["keypoints_img"][roi_idx] = outputs["keypoints_img"][i]
+                img_patch = outputs["keypoints_img"][i]
+                img_existing = np.asarray(keypoints_group["keypoints_img"][roi_idx], dtype=np.float64)
+                img_existing[roi_valid] = img_patch[roi_valid]
+                keypoints_group["keypoints_img"][roi_idx] = img_existing
             if "keypoints_norm" in keypoints_group:
-                keypoints_group["keypoints_norm"][roi_idx] = outputs["keypoints_norm"][i]
+                norm_patch = outputs["keypoints_norm"][i]
+                norm_existing = np.asarray(keypoints_group["keypoints_norm"][roi_idx], dtype=np.float64)
+                norm_existing[roi_valid] = norm_patch[roi_valid]
+                keypoints_group["keypoints_norm"][roi_idx] = norm_existing
             if "heading" in keypoints_group:
                 keypoints_group["heading"][roi_idx] = outputs["heading"][i]
             if "confidence" in keypoints_group:
@@ -467,7 +517,11 @@ def _patch_keypoints_run(
             if "effective_se2_radius" in keypoints_group:
                 keypoints_group["effective_se2_radius"][roi_idx] = outputs["effective_se2_radius"][i]
             if "keypoint_confidences" in keypoints_group:
-                keypoints_group["keypoint_confidences"][roi_idx] = outputs["keypoint_confidences"][i]
+                conf_patch = outputs["keypoint_confidences"][i]
+                conf_existing = np.asarray(keypoints_group["keypoint_confidences"][roi_idx], dtype=np.float64)
+                conf_valid = np.isfinite(conf_patch)
+                conf_existing[conf_valid] = conf_patch[conf_valid]
+                keypoints_group["keypoint_confidences"][roi_idx] = conf_existing
             if "triangle_angles" in keypoints_group:
                 keypoints_group["triangle_angles"][roi_idx] = outputs["triangle_angles"][i]
             if "triangle_angles_raw" in keypoints_group:
@@ -489,7 +543,11 @@ def _patch_keypoints_run(
             if "effective_se2_radius" in keypoints_group:
                 keypoints_group["effective_se2_radius"][roi_idx] = np.nan
             if "keypoint_confidences" in keypoints_group:
-                keypoints_group["keypoint_confidences"][roi_idx] = np.full(3, np.nan, dtype=np.float64)
+                keypoints_group["keypoint_confidences"][roi_idx] = np.full(
+                    keypoint_count,
+                    np.nan,
+                    dtype=np.float64,
+                )
             if "triangle_angles" in keypoints_group:
                 keypoints_group["triangle_angles"][roi_idx] = nan_tri
             if "triangle_angles_raw" in keypoints_group:

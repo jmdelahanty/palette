@@ -216,7 +216,7 @@ Produced by the keypoint detection stage (traditional or YOLO-based).
 | `keypoints_norm` | `(n_rois, n_keypoints, 2)` | `float64` | Normalized [0,1] |
 | `heading` | `(n_rois,)` | `float64` | Degrees, NaN when unavailable |
 | `confidence` | `(n_rois,)` | `float64` | Overall score |
-| `keypoint_confidences` | `(n_rois, n_keypoints)` | `float64` | Per-keypoint confidences (swim_bladder, left, right) |
+| `keypoint_confidences` | `(n_rois, n_keypoints)` | `float64` | Per-keypoint confidences in `keypoint_labels` order |
 | `effective_threshold` | `(n_rois,)` | `float64` | Per-ROI threshold used |
 | `effective_se2_radius` | `(n_rois,)` | `float64` | Search radius actually applied |
 | `detection_success` | `(n_rois,)` | `bool` | True if keypoints converged |
@@ -502,12 +502,12 @@ Outputs from `fisheye.refinement.refine_keypoints`.
 | `detection_indices` *(optional)* | `(n_rois,)` | `int32` | Copied from source when present |
 | `detection_source` | `(n_rois,)` | `int8` | 0=real, 1=interpolated |
 | `retune_id` | `(n_rois,)` | `int32` | Batch retune parameter set label (`-1` = none) |
-| `keypoints_roi` | `(n_rois, 3, 2)` | `float64` | Refined keypoints (ROI pixels) |
-| `keypoints_img` | `(n_rois, 3, 2)` | `float64` | Refined keypoints (full image) |
-| `keypoints_norm` | `(n_rois, 3, 2)` | `float64` | Refined keypoints (normalized) |
+| `keypoints_roi` | `(n_rois, n_keypoints, 2)` | `float64` | Refined keypoints (ROI pixels) |
+| `keypoints_img` | `(n_rois, n_keypoints, 2)` | `float64` | Refined keypoints (full image) |
+| `keypoints_norm` | `(n_rois, n_keypoints, 2)` | `float64` | Refined keypoints (normalized) |
 | `heading` | `(n_rois,)` | `float64` | Heading after refinement |
 | `confidence` | `(n_rois,)` | `float64` | Overall score (copied from source) |
-| `keypoint_confidences` *(optional)* | `(n_rois, 3)` | `float64` | Per-keypoint confidences (copied, eyes swapped if flipped) |
+| `keypoint_confidences` *(optional)* | `(n_rois, n_keypoints)` | `float64` | Per-keypoint confidences in `keypoint_labels` order |
 | `effective_threshold` *(optional)* | `(n_rois,)` | `float64` | Copied from source if present |
 | `effective_se2_radius` *(optional)* | `(n_rois,)` | `float64` | Copied from source if present |
 | `triangle_area` | `(n_rois,)` | `float64` | Triangle area |

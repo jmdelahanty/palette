@@ -210,7 +210,9 @@ incomplete.
 
 Still incomplete:
 
-- many write/read paths still allocate or assume `(N,3,2)`
+- the shared stage-array specs now model keypoint coordinate/confidence arrays
+  with symbolic `n_keypoints`, but some producer-specific paths still allocate
+  traditional-v1 arrays directly
 - some consumers still assume positional eye/bladder indexing instead of label
   resolution, but the first eye-mask and eye-angle consumer cluster now uses
   shared label-to-index resolution from run attrs
@@ -332,7 +334,15 @@ Checklist:
   - convert consumers from fixed positional indexing to label-to-index helper
     resolution
   - do not redesign the datastore around per-row key/value keypoint objects
-- [ ] Audit array allocation sites for hardcoded `(N,3,2)`
+- [x] Convert shared keypoint/refined-keypoint stage-array specs from fixed
+      `3` to symbolic `n_keypoints` for keypoint coordinate/confidence arrays
+- [x] Centralize skeleton-edge resolution, including the legacy 3-point triangle
+      fallback, in `src/fisheye/pose/schema.py`
+- [x] Make pose-training collation preserve runtime `K` for empty/no-label
+      batches instead of constructing implicit 3-keypoint tensors
+- [x] Update `src/fisheye/utils/patch_keypoints_from_crops.py` so traditional
+      patch output maps into the run's label order and preserves labels the
+      traditional detector does not emit
 - [x] Convert the first eye-mask / eye-angle consumer slice from positional
       indexing to label resolution:
   - `src/fisheye/refinement/refine_eye_masks.py`
@@ -352,6 +362,9 @@ Checklist:
       runtime consumer surface
 - [ ] Fail clearly when a required label is absent, rather than silently
       assuming the starter skeleton
+- [ ] Decide when raw `traditional_pose` / current YOLO writer outputs should
+      grow beyond traditional-v1. Their remaining fixed `3` allocations are
+      currently producer-contract constraints, not reader/storage constraints.
 - [ ] Re-check manual/review UIs for dynamic keypoint count behavior
 - [ ] Re-check remaining patch/manual/review helper paths for dynamic `K`
 

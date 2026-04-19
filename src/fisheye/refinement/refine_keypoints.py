@@ -46,7 +46,11 @@ from ..pose.heuristics import (
     require_flip_detection,
     require_geometry_qc,
 )
-from ..pose.schema import RUNTIME_COORD_DIMS, resolve_skeleton_identity_from_attrs
+from ..pose.schema import (
+    RUNTIME_COORD_DIMS,
+    resolve_skeleton_edges_from_attrs,
+    resolve_skeleton_identity_from_attrs,
+)
 from ..pose.metric_schema import (
     DerivedMetricStorage,
     ensure_derived_metric_storage,
@@ -671,64 +675,16 @@ def _extract_skeleton_edges(
     *,
     n_keypoints: int,
 ) -> Tuple[np.ndarray, str]:
-    raw_edges: Optional[object] = None
-    source = "none"
-    pose_schema = _as_mapping(kp_source.attrs.get("pose_schema"))
-    if pose_schema:
-        raw_edges = pose_schema.get("edges")
-        if raw_edges is None:
-            raw_edges = pose_schema.get("skeleton")
-        if raw_edges is not None:
-            source = "pose_schema"
+    resolved = resolve_skeleton_edges_from_attrs(
+        dict(kp_source.attrs),
+        n_keypoints=int(n_keypoints),
+    )
+    if not resolved.edge_pairs:
+        return np.zeros((0, 2), dtype=np.int16), resolved.source
 
-    if raw_edges is None:
-        raw_edges = kp_source.attrs.get("keypoint_skeleton")
-        if raw_edges is not None:
-            source = "keypoint_skeleton"
-
-    if raw_edges is None and n_keypoints == 3:
-        raw_edges = ((0, 1), (0, 2), (1, 2))
-        source = "default_triangle"
-
-    pairs: List[Tuple[int, int]] = []
-    if isinstance(raw_edges, (list, tuple)):
-        for edge in raw_edges:
-            a_raw: Optional[object] = None
-            b_raw: Optional[object] = None
-            if isinstance(edge, Mapping):
-                a_raw = edge.get("from")
-                if a_raw is None:
-                    a_raw = edge.get("source")
-                if a_raw is None:
-                    a_raw = edge.get("a")
-                b_raw = edge.get("to")
-                if b_raw is None:
-                    b_raw = edge.get("target")
-                if b_raw is None:
-                    b_raw = edge.get("b")
-            elif isinstance(edge, (list, tuple)) and len(edge) >= 2:
-                a_raw = edge[0]
-                b_raw = edge[1]
-            if a_raw is None or b_raw is None:
-                continue
-            try:
-                a = int(a_raw)
-                b = int(b_raw)
-            except (TypeError, ValueError):
-                continue
-            if a < 0 or b < 0 or a >= n_keypoints or b >= n_keypoints or a == b:
-                continue
-            left, right = (a, b) if a < b else (b, a)
-            pair = (left, right)
-            if pair not in pairs:
-                pairs.append(pair)
-
-    if not pairs:
-        return np.zeros((0, 2), dtype=np.int16), source
-
-    max_index = max(max(pair) for pair in pairs)
+    max_index = max(max(pair) for pair in resolved.edge_pairs)
     dtype = np.int16 if max_index <= np.iinfo(np.int16).max else np.int32
-    return np.asarray(pairs, dtype=dtype), source
+    return np.asarray(resolved.edge_pairs, dtype=dtype), resolved.source
 
 
 def _resolve_roi_diagonal(

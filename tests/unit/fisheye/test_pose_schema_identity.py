@@ -6,6 +6,7 @@ from fisheye.detection import detect_keypoints_traditional as trad_mod
 from fisheye.detection import detect_keypoints_yolo as yolo_mod
 from fisheye.pose.schema import (
     resolve_required_keypoint_indices_from_attrs,
+    resolve_skeleton_edges_from_attrs,
     resolve_skeleton_identity_from_attrs,
     schema_payload_from_package,
 )
@@ -54,6 +55,31 @@ def test_resolve_skeleton_identity_falls_back_to_pose_schema_name_and_runtime_sh
     assert resolved.pose_schema_name == "traditional_v2"
     assert resolved.skeleton_id == "pose_schema:traditional_v2"
     assert resolved.kpt_shape == (5, 2)
+
+
+def test_resolve_skeleton_edges_prefers_pose_schema_and_canonicalizes_pairs() -> None:
+    resolved = resolve_skeleton_edges_from_attrs(
+        {
+            "keypoint_skeleton": [[0, 1]],
+            "pose_schema": {
+                "edges": [[2, 1], {"from": 4, "to": 3}, [99, 1], [1, 2]],
+            },
+        },
+        n_keypoints=5,
+    )
+
+    assert resolved.source == "pose_schema"
+    assert resolved.edge_pairs == ((1, 2), (3, 4))
+
+
+def test_resolve_skeleton_edges_legacy_triangle_is_compatibility_only() -> None:
+    legacy = resolve_skeleton_edges_from_attrs({}, n_keypoints=3)
+    extended = resolve_skeleton_edges_from_attrs({}, n_keypoints=5)
+
+    assert legacy.source == "legacy_default_triangle"
+    assert legacy.edge_pairs == ((0, 1), (0, 2), (1, 2))
+    assert extended.source == "none"
+    assert extended.edge_pairs == ()
 
 
 def test_resolve_required_keypoint_indices_uses_canonical_labels_from_run_attrs() -> None:

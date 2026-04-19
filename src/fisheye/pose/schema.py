@@ -58,6 +58,12 @@ class ResolvedSkeletonIdentity:
     kpt_shape: Optional[tuple[int, int]]
 
 
+@dataclass(frozen=True)
+class ResolvedSkeletonEdges:
+    edge_pairs: tuple[tuple[int, int], ...]
+    source: str
+
+
 def _normalize_text(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -266,6 +272,77 @@ def resolve_skeleton_identity_from_attrs(
         pose_schema_name=pose_schema_name,
         skeleton_id=skeleton_id,
         kpt_shape=kpt_shape,
+    )
+
+
+def _coerce_edge_pairs(raw_edges: object, *, n_keypoints: int) -> tuple[tuple[int, int], ...]:
+    if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes, bytearray)):
+        return ()
+
+    pairs: list[tuple[int, int]] = []
+    for edge in raw_edges:
+        a_raw: object | None = None
+        b_raw: object | None = None
+        if isinstance(edge, Mapping):
+            a_raw = edge.get("from")
+            if a_raw is None:
+                a_raw = edge.get("source")
+            if a_raw is None:
+                a_raw = edge.get("a")
+            b_raw = edge.get("to")
+            if b_raw is None:
+                b_raw = edge.get("target")
+            if b_raw is None:
+                b_raw = edge.get("b")
+        elif isinstance(edge, Sequence) and not isinstance(edge, (str, bytes, bytearray)) and len(edge) >= 2:
+            a_raw = edge[0]
+            b_raw = edge[1]
+        if a_raw is None or b_raw is None:
+            continue
+        try:
+            a = int(a_raw)
+            b = int(b_raw)
+        except Exception:
+            continue
+        if 0 <= a < int(n_keypoints) and 0 <= b < int(n_keypoints) and a != b:
+            left, right = (a, b) if a < b else (b, a)
+            pair = (left, right)
+            if pair not in pairs:
+                pairs.append(pair)
+    return tuple(pairs)
+
+
+def resolve_skeleton_edges_from_attrs(
+    attrs: Mapping[str, object],
+    *,
+    n_keypoints: int,
+    allow_legacy_triangle: bool = True,
+) -> ResolvedSkeletonEdges:
+    """Resolve skeleton edge pairs from current metadata with a narrow legacy fallback."""
+
+    pose_schema = _coerce_mapping(attrs.get("pose_schema"))
+    raw_edges: object | None = None
+    source = "none"
+
+    if pose_schema is not None:
+        raw_edges = pose_schema.get("edges")
+        if raw_edges is None:
+            raw_edges = pose_schema.get("skeleton")
+        if raw_edges is not None:
+            source = "pose_schema"
+
+    if raw_edges is None:
+        raw_edges = attrs.get("keypoint_skeleton")
+        if raw_edges is not None:
+            source = "keypoint_skeleton"
+
+    if raw_edges is None and allow_legacy_triangle and int(n_keypoints) == 3:
+        raw_edges = ((0, 1), (0, 2), (1, 2))
+        source = "legacy_default_triangle"
+
+    return ResolvedSkeletonEdges(
+        edge_pairs=_coerce_edge_pairs(raw_edges, n_keypoints=int(n_keypoints)),
+        source=source,
     )
 
 

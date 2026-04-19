@@ -1498,7 +1498,11 @@ class ZarrYOLODataset(Dataset):
             "img": image_3ch.transpose(2, 0, 1),
             "cls": cls_arr,
             "bboxes": bboxes_arr,
-            "keypoints": label_info.get('keypoints', np.zeros((0, 9), dtype=np.float32)).astype(np.float32),
+            "keypoints": label_info.get(
+                'keypoints',
+                np.zeros((0, len(self.keypoint_labels) * 3), dtype=np.float32),
+            ).astype(np.float32),
+            "num_keypoints": len(self.keypoint_labels) if self.config.task == "pose" else 0,
             "im_file": im_identifier,
             "ori_shape": ori_shape,
             "ratio_pad": ((1.0, 1.0), (0.0, 0.0)),

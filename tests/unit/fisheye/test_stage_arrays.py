@@ -34,6 +34,7 @@ DEFAULT_DIMS: Dict[str, int] = {
     "n_instances": 3,
     "n_frame_offsets": 4,
     "n_rois": 4,
+    "n_keypoints": 5,
     "n_import_frames": 2,
     "n_samples": 3,
     "n_failures": 2,

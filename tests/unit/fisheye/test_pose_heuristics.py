@@ -122,6 +122,54 @@ def test_phase1_geometry_resolution_uses_packaged_profile_helpers(monkeypatch) -
     )
 
 
+def test_patch_keypoints_maps_traditional_output_into_runtime_labels(monkeypatch) -> None:
+    roi_images = np.zeros((1, 4, 4), dtype=np.uint8)
+    roi_coords = np.array([[10, 20]], dtype=np.int32)
+    background = np.zeros((64, 64), dtype=np.uint8)
+
+    def _fake_detect(*args, **kwargs):
+        return {
+            "bladder": np.array([1.0, 1.0], dtype=np.float64),
+            "eye_left": np.array([2.0, 1.0], dtype=np.float64),
+            "eye_right": np.array([2.0, 3.0], dtype=np.float64),
+            "heading": 0.0,
+            "confidence": 0.9,
+            "keypoint_confidences": [0.7, 0.8, 0.9],
+            "triangle_angles": [30.0, 60.0, 90.0],
+            "triangle_angles_raw": [90.0, 60.0, 30.0],
+            "triangle_area": 2.0,
+        }
+
+    monkeypatch.setattr(patch_mod, "detect_keypoints_traditional", _fake_detect)
+
+    outputs = patch_mod._compute_keypoints_for_indices(
+        roi_images,
+        roi_coords,
+        background,
+        np.array([0], dtype=np.int64),
+        {},
+        source_attrs={
+            "keypoint_labels": ["tail_tip", "eye_left", "swim_bladder", "eye_right", "pelvis"],
+            "heading_computation_override": {
+                "enabled": True,
+                "direction_from": {"op": "keypoint", "label": "swim_bladder"},
+                "direction_to": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+            },
+        },
+        keypoint_count=5,
+        keypoint_labels=("tail_tip", "eye_left", "swim_bladder", "eye_right", "pelvis"),
+    )
+
+    assert outputs["keypoints_roi"].shape == (1, 5, 2)
+    assert np.isnan(outputs["keypoints_roi"][0, 0]).all()
+    np.testing.assert_allclose(outputs["keypoints_roi"][0, 1], [2.0, 1.0])
+    np.testing.assert_allclose(outputs["keypoints_roi"][0, 2], [1.0, 1.0])
+    np.testing.assert_allclose(outputs["keypoints_roi"][0, 3], [2.0, 3.0])
+    assert np.isnan(outputs["keypoints_roi"][0, 4]).all()
+    np.testing.assert_allclose(outputs["keypoint_confidences"][0, 1:4], [0.8, 0.7, 0.9])
+    assert np.isfinite(outputs["heading"][0])
+
+
 def test_traditional_detector_assignment_uses_packaged_profile_rules() -> None:
     stats = [
         _FakeRegion((10.0, 10.0)),

@@ -89,6 +89,21 @@ def pose_collate_fn(batch):
     ori_shapes = [s.get('ori_shape', (images.shape[2], images.shape[3])) for s in batch]
     # Provide safe default ratio_pad if missing: ((h_ratio, w_ratio), (pad_w, pad_h))
     ratio_pads = [s.get('ratio_pad', ((1.0, 1.0), (0.0, 0.0))) for s in batch]
+    fallback_num_keypoints = 0
+    for sample in batch:
+        try:
+            sample_count = int(sample.get("num_keypoints") or 0)
+        except Exception:
+            sample_count = 0
+        if sample_count > 0:
+            fallback_num_keypoints = sample_count
+            break
+        sample_keypoints = sample.get("keypoints")
+        if hasattr(sample_keypoints, "size") and sample_keypoints.size > 0:
+            flat_width = int(np.asarray(sample_keypoints).reshape(-1).shape[0])
+            if flat_width > 0 and flat_width % 3 == 0:
+                fallback_num_keypoints = flat_width // 3
+                break
     
     cls_list, bboxes_list, keypoints_list, batch_idx_list = [], [], [], []
     
@@ -107,8 +122,8 @@ def pose_collate_fn(batch):
                 kpts = kpts.view(num_instances, -1, 3)  # Reshape to (N, K, 3)
                 keypoints_list.append(kpts)
             else:
-                # Create empty keypoints if none provided (shouldn't happen with pose task)
-                num_kpts = 3  # Default: bladder, eye_l, eye_r
+                # Create empty keypoints if none provided (shouldn't happen with pose task).
+                num_kpts = int(fallback_num_keypoints)
                 keypoints_list.append(torch.zeros((num_instances, num_kpts, 3)))
 
             # Use long dtype for batch indices (required for indexing)
@@ -121,7 +136,7 @@ def pose_collate_fn(batch):
             'batch_idx': torch.empty(0, dtype=torch.long), 
             'cls': torch.empty(0, 1, dtype=torch.float32), 
             'bboxes': torch.empty(0, 4, dtype=torch.float32),
-            'keypoints': torch.empty(0, 3, 3, dtype=torch.float32),  # (0, 3 keypoints, 3 coords)
+            'keypoints': torch.empty(0, int(fallback_num_keypoints), 3, dtype=torch.float32),
             'im_file': im_files, 
             'ori_shape': ori_shapes,
             'ratio_pad': ratio_pads

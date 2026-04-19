@@ -97,8 +97,17 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   - Phase 3 is about replacing fixed positional access with label-to-index
     resolution, not about switching the datastore to per-row key/value storage
 
-- [ ] Generalize keypoint stage array contracts from fixed `(N,3,2)` to dynamic
+- [x] Generalize keypoint stage array contracts from fixed `(N,3,2)` to dynamic
       `(N,K,2)` where valid.
+- [x] Generalize the shared keypoint/refined-keypoint stage-array specs for
+      coordinate/confidence arrays to symbolic `n_keypoints`.
+- [x] Centralize skeleton-edge resolution in `src/fisheye/pose/schema.py` so
+      legacy 3-point triangle fallback is compatibility-only and shared.
+- [x] Update pose-training collation to preserve runtime `K` for empty/no-label
+      batches instead of constructing implicit 3-keypoint tensors.
+- [x] Update `src/fisheye/utils/patch_keypoints_from_crops.py` to map
+      traditional detector output into the run's label order and preserve
+      non-traditional labels.
 - [ ] Update keypoint detect/refine code paths that allocate fixed 3-point
       tensors.
 - [x] Switch the traditional raw detector and interactive tuner from hardcoded
