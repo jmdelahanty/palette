@@ -28,13 +28,18 @@ What is now materially true:
   identity attrs (`skeleton_id`, `kpt_shape`, `pose_schema`) on new outputs
 - historical keypoint/refined-keypoint runs can now be normalized to the same
   explicit skeleton-identity contract with dedicated audit and backfill tools
+- keypoint storage/read contracts now use dense dynamic `K` arrays
+  (`(N, K, 2)` and `(N, K)`) rather than treating `K=3` as the shared stage
+  invariant
+- the first major consumer/training surfaces now resolve labels from run
+  metadata and reject missing or mixed signatures rather than silently assuming
+  the starter skeleton
 
 The main remaining work is not "decide the architecture." The architecture is
 clear enough now. The remaining work is:
 
 1. finish the packaged-heuristics rollout beyond geometry defaults
-2. remove the remaining fixed-`K=3` and fixed-label assumptions from runtime
-   consumers
+2. remove the remaining producer-specific and secondary fixed-`K=3` assumptions
 3. decide override policy and remaining reader hardening around explicit
    skeleton identity
 
@@ -230,6 +235,27 @@ Still incomplete:
 Primary tracker:
 
 - `docs/keypoint_multi_skeleton_todo.md`
+
+### 2a. Remaining fixed-3 surfaces are now mostly producer-specific
+
+The current fixed-shape audit no longer shows shared storage contracts or the
+main training/export readers as the primary blocker. Remaining fixed-3 hits
+fall into these categories:
+
+- raw `traditional_pose` detector output is intentionally a 3-point
+  `traditional_v1` producer for now
+- the current YOLO writer wrapper still materializes traditional-v1-shaped
+  output and should only be generalized when the model/skeleton contract grows
+- `triangle_angles`, `triangle_angles_raw`, and `triangle_area` remain
+  triangle-QC compatibility arrays, not the general skeleton geometry contract
+- visualization snippets that index `kp[0]` / `kp[1]` are reading x/y
+  coordinates from one already-resolved point, not selecting semantic keypoints
+- homography and image-channel reshapes using `3` are unrelated to keypoint
+  skeleton cardinality
+
+Next producer work should therefore be explicit: decide when raw YOLO and/or
+traditional output contracts should grow beyond traditional-v1, rather than
+treating their fixed `3` allocations as accidental reader bugs.
 
 ### 3. Explicit skeleton identity is improved but not yet universal
 

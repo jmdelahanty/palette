@@ -246,6 +246,8 @@ Keypoint storage note:
 - consumers that need specific landmarks should build a label-to-index helper
   view at runtime and then read from the dense arrays
 - per-row key/value keypoint storage is not the Palette datastore contract
+- fixed-width triangle diagnostic arrays are compatibility/QC outputs for the
+  traditional triangle and are not the general skeleton geometry contract
 
 Skeleton-identity metadata note:
 
@@ -548,6 +550,8 @@ Keypoint storage note:
 - consumers that need specific landmarks should build a label-to-index helper
   view at runtime and then read from the dense arrays
 - per-row key/value keypoint storage is not the Palette datastore contract
+- fixed-width triangle diagnostic arrays are compatibility/QC outputs for the
+  traditional triangle and are not the general skeleton geometry contract
 
 Skeleton-identity metadata note:
 

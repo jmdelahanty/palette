@@ -21,8 +21,10 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   selectors exist (`latest`, `latest_traditional`, `latest_yolo`, explicit run).
 - Training/export paths fail fast on mixed skeleton identities across selected
   datasets (intended behavior).
-- Several runtime surfaces are still hard-coded to 3 keypoints (`(N,3,2)`),
-  which blocks first-class support for richer skeletons.
+- Shared keypoint/refined-keypoint stage specs and primary training/export
+  readers now use dynamic `K` contracts for coordinate/confidence arrays.
+- Remaining fixed-3 surfaces are mostly producer-specific traditional-v1
+  outputs or compatibility/QC arrays, not the shared storage contract.
 - `traditional_v2` seed runs can now be created from `traditional_v1` refined
   runs and completed manually.
 - schema-driven derived metrics can now be stored on refined runs and surfaced
@@ -132,6 +134,18 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
       positions to label-based resolution (`swim_bladder`, `eye_left`,
       `eye_right`) and clear missing-label failures.
 - [ ] Confirm eye-mask-dependent logic works when skeleton has extra points.
+
+### Remaining Fixed-3 Categories
+
+- raw `traditional_pose` detector: intentionally emits traditional-v1
+  3-point runs until the producer contract changes
+- current YOLO keypoint writer wrapper: still traditional-v1-shaped and should
+  be generalized together with model/skeleton selection
+- triangle QC arrays: `triangle_angles`, `triangle_angles_raw`, and
+  `triangle_area` remain compatibility diagnostics for the traditional
+  triangle, not the general skeleton geometry surface
+- non-keypoint `3`s: homography matrices, image channels, and x/y coordinate
+  indexing are not keypoint cardinality assumptions
 
 ## Phase 4: CLI and Operator Ergonomics
 
