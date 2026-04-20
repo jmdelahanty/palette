@@ -21,6 +21,7 @@ _KEYPOINT_LABEL_ALIASES = {
     "right_eye": "eye_right",
     "right-eye": "eye_right",
 }
+HEAD_TRIANGLE_KEYPOINT_LABELS = ("swim_bladder", "eye_left", "eye_right")
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,18 @@ class ResolvedSkeletonIdentity:
 class ResolvedSkeletonEdges:
     edge_pairs: tuple[tuple[int, int], ...]
     source: str
+
+
+@dataclass(frozen=True)
+class ResolvedHeadTriangleIndices:
+    swim_bladder: int
+    eye_left: int
+    eye_right: int
+    source: str
+
+    @property
+    def as_tuple(self) -> tuple[int, int, int]:
+        return (self.swim_bladder, self.eye_left, self.eye_right)
 
 
 def _normalize_text(value: object) -> Optional[str]:
@@ -208,6 +221,61 @@ def resolve_required_keypoint_indices_from_attrs(
         required_labels,
         keypoint_count=keypoint_count,
     )
+
+
+def resolve_head_triangle_indices(
+    labels: Sequence[object],
+    *,
+    keypoint_count: Optional[int] = None,
+    allow_legacy_3point_fallback: bool = False,
+) -> ResolvedHeadTriangleIndices:
+    """Resolve the canonical swim-bladder/left-eye/right-eye triangle indices."""
+    try:
+        resolved = resolve_required_keypoint_indices(
+            labels,
+            HEAD_TRIANGLE_KEYPOINT_LABELS,
+            keypoint_count=keypoint_count,
+        )
+    except ValueError:
+        if allow_legacy_3point_fallback and keypoint_count == 3:
+            return ResolvedHeadTriangleIndices(
+                swim_bladder=0,
+                eye_left=1,
+                eye_right=2,
+                source="legacy_3point_fallback",
+            )
+        raise
+    return ResolvedHeadTriangleIndices(
+        swim_bladder=int(resolved["swim_bladder"]),
+        eye_left=int(resolved["eye_left"]),
+        eye_right=int(resolved["eye_right"]),
+        source="labels",
+    )
+
+
+def resolve_head_triangle_indices_from_attrs(
+    attrs: Mapping[str, object],
+    *,
+    keypoint_count: Optional[int] = None,
+    allow_legacy_3point_fallback: bool = False,
+) -> ResolvedHeadTriangleIndices:
+    """Resolve canonical head-triangle indices from run attrs or pose schema."""
+    labels = resolve_keypoint_labels_from_attrs(attrs, keypoint_count=keypoint_count)
+    try:
+        return resolve_head_triangle_indices(
+            labels,
+            keypoint_count=keypoint_count,
+            allow_legacy_3point_fallback=allow_legacy_3point_fallback,
+        )
+    except ValueError:
+        if allow_legacy_3point_fallback and keypoint_count == 3 and not labels:
+            return ResolvedHeadTriangleIndices(
+                swim_bladder=0,
+                eye_left=1,
+                eye_right=2,
+                source="legacy_3point_fallback",
+            )
+        raise
 
 
 def schema_to_attr_payload(

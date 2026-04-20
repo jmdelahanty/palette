@@ -36,7 +36,11 @@ from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
 from ..utils.zarr_io import open_zarr_root
-from ..refinement.keypoint_quality import compute_geometry_metrics
+from ..refinement.keypoint_quality import (
+    compute_geometry_metrics,
+    resolve_head_triangle_for_labels,
+    select_head_triangle_points,
+)
 from ..registry.db import Registry, RegistryPaths
 
 
@@ -1204,7 +1208,22 @@ def launch_review(
     if reason_arr is not None:
         _sanitize_reason_array(reason_arr)
 
+    keypoint_count = (
+        int(kp_roi_arr.shape[1])
+        if len(kp_roi_arr.shape) >= 2
+        else len(_DEFAULT_LABELS)
+    )
     labels = list(refined.attrs.get("keypoint_labels", _DEFAULT_LABELS))
+    if len(labels) != keypoint_count:
+        raise ValueError(
+            "Refined keypoint run keypoint_labels count does not match keypoints_roi "
+            f"K ({len(labels)} vs {keypoint_count})."
+        )
+    head_triangle_indices = resolve_head_triangle_for_labels(
+        labels,
+        keypoint_count=keypoint_count,
+        allow_legacy_3point_fallback=True,
+    )
     colors = _display_colors(len(labels))
     roi_diagonal = _roi_diagonal_from_roi_images(roi_images)
     derived_metric_storage: Optional[DerivedMetricStorage] = None
@@ -1315,7 +1334,9 @@ def launch_review(
         )
         changed |= _set_roi_value_if_changed(heading_arr, roi_idx, heading_val)
 
-        metrics = compute_geometry_metrics(points[:3])
+        metrics = compute_geometry_metrics(
+            select_head_triangle_points(points, head_triangle_indices)
+        )
         max_ok = max_triangle_area is None or metrics.area <= max_triangle_area
         geom_ok = bool(
             np.isfinite(metrics.min_angle)

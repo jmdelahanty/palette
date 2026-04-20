@@ -5,6 +5,7 @@ from pathlib import Path
 from fisheye.detection import detect_keypoints_traditional as trad_mod
 from fisheye.detection import detect_keypoints_yolo as yolo_mod
 from fisheye.pose.schema import (
+    resolve_head_triangle_indices,
     resolve_required_keypoint_indices_from_attrs,
     resolve_skeleton_edges_from_attrs,
     resolve_skeleton_identity_from_attrs,
@@ -104,6 +105,27 @@ def test_resolve_required_keypoint_indices_uses_canonical_labels_from_run_attrs(
         "eye_left": 3,
         "eye_right": 0,
     }
+
+
+def test_resolve_head_triangle_indices_uses_runtime_label_order() -> None:
+    resolved = resolve_head_triangle_indices(
+        ["eye_right", "tail_tip", "bladder", "left_eye"],
+        keypoint_count=4,
+    )
+
+    assert resolved.as_tuple == (2, 3, 0)
+    assert resolved.source == "labels"
+
+
+def test_resolve_head_triangle_indices_legacy_fallback_is_explicit() -> None:
+    resolved = resolve_head_triangle_indices(
+        ["k0", "k1", "k2"],
+        keypoint_count=3,
+        allow_legacy_3point_fallback=True,
+    )
+
+    assert resolved.as_tuple == (0, 1, 2)
+    assert resolved.source == "legacy_3point_fallback"
 
 
 def test_raw_keypoint_writers_use_shared_pose_payload() -> None:

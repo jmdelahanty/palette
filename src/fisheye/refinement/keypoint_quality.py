@@ -6,10 +6,13 @@ Shared utilities for computing triangle metrics formed by bladder/eye keypoints.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Tuple
 
 import numpy as np
+
+from ..pose.schema import ResolvedHeadTriangleIndices, resolve_head_triangle_indices
 
 
 @dataclass(frozen=True)
@@ -104,4 +107,34 @@ def compute_geometry_metrics(vertices: np.ndarray) -> KeypointGeometryMetrics:
         min_angle=float(min_angle),
         max_angle=float(max_angle),
         edge_lengths=edges,
+    )
+
+
+def resolve_head_triangle_for_labels(
+    keypoint_labels: Sequence[object],
+    *,
+    keypoint_count: int,
+    allow_legacy_3point_fallback: bool = False,
+) -> ResolvedHeadTriangleIndices:
+    """Resolve the canonical head-triangle labels in a run's keypoint order."""
+    return resolve_head_triangle_indices(
+        keypoint_labels,
+        keypoint_count=int(keypoint_count),
+        allow_legacy_3point_fallback=allow_legacy_3point_fallback,
+    )
+
+
+def select_head_triangle_points(
+    points: np.ndarray,
+    indices: ResolvedHeadTriangleIndices,
+) -> np.ndarray:
+    """Return `(swim_bladder, eye_left, eye_right)` points from an arbitrary keypoint row."""
+    arr = np.asarray(points, dtype=np.float64)
+    return np.asarray(
+        [
+            arr[int(indices.swim_bladder), :2],
+            arr[int(indices.eye_left), :2],
+            arr[int(indices.eye_right), :2],
+        ],
+        dtype=np.float64,
     )

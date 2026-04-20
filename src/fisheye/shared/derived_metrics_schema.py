@@ -2,25 +2,30 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+from ..pose.schema import resolve_head_triangle_indices
 
 DERIVED_METRICS_SCHEMA_VERSION = 1
 
 
-def _normalized_metric_labels(keypoint_labels: Sequence[str]) -> list[str]:
-    labels: list[str] = []
-    for index, raw_label in enumerate(list(keypoint_labels)[:3]):
-        label = str(raw_label).strip()
-        labels.append(label or f"k{index}")
-    while len(labels) < 3:
-        labels.append(f"k{len(labels)}")
-    return labels
+def _head_triangle_selector(keypoint_labels: Sequence[str]) -> tuple[list[int], list[str]]:
+    labels = [
+        str(raw_label).strip() or f"k{index}"
+        for index, raw_label in enumerate(keypoint_labels)
+    ]
+    resolved = resolve_head_triangle_indices(
+        labels,
+        keypoint_count=len(labels),
+        allow_legacy_3point_fallback=True,
+    )
+    indices = [int(idx) for idx in resolved.as_tuple]
+    return indices, [labels[idx] for idx in indices]
 
 
 def build_refined_keypoint_derived_metrics_schema(
     *,
     keypoint_labels: Sequence[str],
 ) -> dict[str, Any]:
-    triangle_labels = _normalized_metric_labels(keypoint_labels)
+    triangle_indices, triangle_labels = _head_triangle_selector(keypoint_labels)
     triangle_metric_name = "eye_triangle_geometry"
 
     return {
@@ -36,7 +41,7 @@ def build_refined_keypoint_derived_metrics_schema(
                     "coordinate_space": "roi_pixels",
                 },
                 "selectors": {
-                    "indices": [0, 1, 2],
+                    "indices": triangle_indices,
                     "labels": triangle_labels,
                 },
                 "outputs": [

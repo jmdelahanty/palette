@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 
 from fisheye.refinement import refine_keypoints as mod
+from fisheye.shared.derived_metrics_schema import build_refined_keypoint_derived_metrics_schema
 
 
 class _FakeArray:
@@ -359,3 +360,78 @@ def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -
     assert gate["conditions"][2]["threshold_attr"] == "summary_statistics.min_triangle_angle"
     assert gate["conditions"][3]["threshold_attr"] == "summary_statistics.min_triangle_area"
     assert gate["conditions"][4]["threshold_attr"] == "summary_statistics.max_triangle_area"
+
+
+def test_derived_metrics_schema_uses_head_triangle_label_order() -> None:
+    schema = build_refined_keypoint_derived_metrics_schema(
+        keypoint_labels=["tail_tip", "eye_right", "swim_bladder", "eye_left", "mouth"]
+    )
+
+    metric = schema["metrics"][0]
+    assert metric["selectors"]["indices"] == [2, 3, 1]
+    assert metric["selectors"]["labels"] == ["swim_bladder", "eye_left", "eye_right"]
+
+
+def test_process_refinement_chunk_accepts_extended_keypoint_order(monkeypatch) -> None:
+    root = _FakeGroup()
+    parent = root.create_group("keypoints_runs")
+    run = parent.create_group("keypoints_001")
+    labels = ["tail_tip", "eye_right", "swim_bladder", "eye_left", "mouth"]
+    run.attrs["keypoint_labels"] = labels
+    run.attrs["pose_schema"] = {
+        "name": "traditional_v2",
+        "skeleton_id": "fish_v2",
+        "kpt_shape": [5, 2],
+        "nodes": [{"id": idx, "name": label} for idx, label in enumerate(labels)],
+        "metadata": {
+            "heading_computation": {
+                "version": 1,
+                "enabled": True,
+                "origin": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+                "direction_from": {"op": "keypoint", "label": "swim_bladder"},
+                "direction_to": {"op": "midpoint", "labels": ["eye_left", "eye_right"]},
+                "dependent_keypoints": ["swim_bladder", "eye_left", "eye_right"],
+            }
+        },
+    }
+    points = np.asarray(
+        [
+            [
+                [100.0, 100.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [1.0, -1.0],
+                [2.0, 0.0],
+            ]
+        ],
+        dtype=np.float64,
+    )
+    run.create_array("keypoints_roi", data=points, chunks=(1, 5, 2))
+    run.create_array("keypoints_img", data=points + 10.0, chunks=(1, 5, 2))
+    run.create_array("keypoints_norm", data=points / 100.0, chunks=(1, 5, 2))
+    run.create_array("heading", data=np.asarray([0.0], dtype=np.float64), chunks=(1,))
+    run.create_array("confidence", data=np.asarray([0.95], dtype=np.float64), chunks=(1,))
+    run.create_array("keypoint_confidences", data=np.full((1, 5), 0.95, dtype=np.float64), chunks=(1, 5))
+    run.create_array("effective_threshold", data=np.asarray([0.5], dtype=np.float64), chunks=(1,))
+    run.create_array("effective_se2_radius", data=np.asarray([2.0], dtype=np.float64), chunks=(1,))
+    run.create_array("detection_success", data=np.asarray([True], dtype=np.bool_), chunks=(1,))
+
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+
+    result = mod._process_refinement_chunk(
+        "/tmp/unused.zarr",
+        "keypoints_001",
+        0,
+        1,
+        {
+            "confidence_threshold": 0.1,
+            "min_triangle_angle": 1.0,
+            "min_triangle_area": 0.1,
+        },
+    )
+
+    assert result["roi"].shape == (1, 5, 2)
+    assert result["usable"].tolist() == [True]
+    assert result["flip_flags"].tolist() == [False]
+    assert result["area"][0] == 1.0
+    np.testing.assert_allclose(result["roi"][0, 0], [100.0, 100.0])

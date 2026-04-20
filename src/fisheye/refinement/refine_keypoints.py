@@ -36,7 +36,12 @@ except ImportError:
     Client = None  # type: ignore
     HAVE_DISTRIBUTED = False
 
-from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
+from .keypoint_quality import (
+    KeypointGeometryMetrics,
+    compute_geometry_metrics,
+    resolve_head_triangle_for_labels,
+    select_head_triangle_points,
+)
 from ..registry.db import Registry, RegistryPaths
 from ..pose.heading import compute_heading_from_attrs
 from ..pose.heuristics import (
@@ -784,6 +789,11 @@ def _process_refinement_chunk(
     )
     success_chunk = kp_source["detection_success"][idx]
     keypoint_labels = _normalize_keypoint_labels(kp_source, n_keypoints=kp_roi_src.shape[1])
+    head_triangle_indices = resolve_head_triangle_for_labels(
+        keypoint_labels,
+        keypoint_count=int(kp_roi_src.shape[1]),
+        allow_legacy_3point_fallback=True,
+    )
 
     length = end - start
 
@@ -848,7 +858,11 @@ def _process_refinement_chunk(
             reason_out[i] = "detection_failed"
             continue
 
-        metrics: KeypointGeometryMetrics = compute_geometry_metrics(kp_roi_src[i])
+        source_head_points = select_head_triangle_points(
+            kp_roi_src[i],
+            head_triangle_indices,
+        )
+        metrics: KeypointGeometryMetrics = compute_geometry_metrics(source_head_points)
         area_out[i] = metrics.area
         min_angle_out[i] = metrics.min_angle
         triangle_angles_out[i] = metrics.angles
@@ -860,8 +874,9 @@ def _process_refinement_chunk(
         if kp_conf_out is not None and kp_conf_src is not None:
             kp_conf_out[i] = kp_conf_src[i]
 
+        head_points = select_head_triangle_points(roi_out[i], head_triangle_indices)
         heading_for_flip = _compute_heading_from_points(
-            roi_out[i][0], roi_out[i][1], roi_out[i][2]
+            head_points[0], head_points[1], head_points[2]
         )
 
         if thresh_out is not None and thresh_src is not None:
@@ -870,15 +885,23 @@ def _process_refinement_chunk(
             se2_out[i] = se2_src[i]
 
         flip_detected = _detect_eye_flip(
-            roi_out[i][0], roi_out[i][1], roi_out[i][2], heading_for_flip
+            head_points[0], head_points[1], head_points[2], heading_for_flip
         )
         if flip_detected:
             # Swap left/right eyes in all coordinate spaces
-            roi_out[i][[1, 2]] = roi_out[i][[2, 1]]
-            img_out[i][[1, 2]] = img_out[i][[2, 1]]
-            norm_out[i][[1, 2]] = norm_out[i][[2, 1]]
+            eye_pair = [
+                int(head_triangle_indices.eye_left),
+                int(head_triangle_indices.eye_right),
+            ]
+            eye_pair_reversed = [
+                int(head_triangle_indices.eye_right),
+                int(head_triangle_indices.eye_left),
+            ]
+            roi_out[i][eye_pair] = roi_out[i][eye_pair_reversed].copy()
+            img_out[i][eye_pair] = img_out[i][eye_pair_reversed].copy()
+            norm_out[i][eye_pair] = norm_out[i][eye_pair_reversed].copy()
             if kp_conf_out is not None:
-                kp_conf_out[i][[1, 2]] = kp_conf_out[i][[2, 1]]
+                kp_conf_out[i][eye_pair] = kp_conf_out[i][eye_pair_reversed].copy()
             flip_flags_out[i] = True
             quality_out[i] = 6  # Flag flip correction
             stats["flips_corrected"] += 1
