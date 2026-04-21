@@ -327,6 +327,34 @@ def _resolve_manual_review_start_roi(
     crop_run: Optional[str],
     frame_flag_file: Optional[str],
 ) -> int:
+    crop_parent = root.get("crop_runs")
+    resolved_crop_run = crop_run or refined.attrs.get("source_crop_run") or (
+        crop_parent.attrs.get("latest") if crop_parent is not None else None
+    )
+
+    if frame_flag_file and crop_parent is not None and resolved_crop_run and resolved_crop_run in crop_parent:
+        from .eye_mask_failure_review import _collect_flagged_roi_indices
+
+        crop_group = crop_parent[resolved_crop_run]
+        roi_images = crop_group.get("roi_images")
+        if roi_images is not None:
+            frame_indices = (
+                np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
+                if "frame_indices" in crop_group
+                else None
+            )
+            try:
+                flagged_indices = _collect_flagged_roi_indices(
+                    flag_path=Path(frame_flag_file).expanduser(),
+                    zarr_path=str(zarr_path),
+                    total_rois=int(roi_images.shape[0]),
+                    frame_indices=frame_indices,
+                )
+            except RuntimeError:
+                flagged_indices = np.zeros((0,), dtype=np.int32)
+            if flagged_indices.size > 0:
+                return int(flagged_indices[0])
+
     min_sep, max_sep = _get_sep_limits(root, refined)
     ellipse_success = np.asarray(refined["ellipse_success"][:], dtype=bool)
     eye_separation = _load_eye_separation(refined)
@@ -343,38 +371,6 @@ def _resolve_manual_review_start_roi(
     failure_indices = np.where(~success_mask)[0].astype(np.int32, copy=False)
     if failure_indices.size > 0:
         return int(failure_indices[0])
-
-    if not frame_flag_file:
-        return 0
-
-    from .eye_mask_failure_review import _collect_flagged_roi_indices
-
-    crop_parent = root.get("crop_runs")
-    resolved_crop_run = crop_run or refined.attrs.get("source_crop_run") or (
-        crop_parent.attrs.get("latest") if crop_parent is not None else None
-    )
-    if crop_parent is None or not resolved_crop_run or resolved_crop_run not in crop_parent:
-        return 0
-    crop_group = crop_parent[resolved_crop_run]
-    roi_images = crop_group.get("roi_images")
-    if roi_images is None:
-        return 0
-    frame_indices = (
-        np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
-        if "frame_indices" in crop_group
-        else None
-    )
-    try:
-        flagged_indices = _collect_flagged_roi_indices(
-            flag_path=Path(frame_flag_file).expanduser(),
-            zarr_path=str(zarr_path),
-            total_rois=int(roi_images.shape[0]),
-            frame_indices=frame_indices,
-        )
-    except RuntimeError:
-        return 0
-    if flagged_indices.size > 0:
-        return int(flagged_indices[0])
     return 0
 
 
