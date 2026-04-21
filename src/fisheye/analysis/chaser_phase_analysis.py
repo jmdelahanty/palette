@@ -1229,7 +1229,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--detect-run",
         type=str,
-        help="Detection run to analyze (e.g., 'detect_runs/<run>' or 'refined_detect_runs/<run>/interpolated').",
+        help=(
+            "Detection run to analyze (e.g., 'detect_runs/<run>' or the "
+            "preferred current refined override "
+            "'refined_detect_runs/<run>/instances')."
+        ),
     )
     parser.add_argument(
         "--stimulus-run",

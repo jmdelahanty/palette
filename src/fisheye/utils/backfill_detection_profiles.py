@@ -233,7 +233,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--source-detection-path",
         type=str,
-        help="Optional explicit source path (e.g. detect_runs/<run> or refined_detect_runs/<run>/manual).",
+        help=(
+            "Optional explicit source path (e.g. detect_runs/<run> or the "
+            "preferred current refined override "
+            "refined_detect_runs/<run>/instances)."
+        ),
     )
     parser.add_argument("--detect-run", type=str, help="Optional detect run override.")
     parser.add_argument("--refined-run", type=str, help="Optional refined run override.")

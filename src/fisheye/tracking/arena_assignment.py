@@ -467,7 +467,7 @@ def assign_arenas_spatial(
     # Create run group
     assign_group, run_group_name = get_run_group(root, 'arena_assignment', console)
     
-    # Select detection data, preferring refined detections when available
+    # Select detection data, preferring the canonical sparse refined surface when available.
     refined_parent = root.get('refined_detect_runs')
     refined_run_name = None
     detection_group = None
@@ -478,16 +478,16 @@ def assign_arenas_spatial(
         candidate_run = refined_parent.attrs.get('latest')
         if candidate_run and candidate_run in refined_parent:
             candidate_group = refined_parent[candidate_run]
-            if 'interpolated' in candidate_group:
+            if 'instances' in candidate_group:
                 refined_run_name = candidate_run
-                detection_group = candidate_group['interpolated']
+                detection_group = candidate_group['instances']
                 source_detect_run = candidate_group.attrs.get('source_detect_run')
-                assignment_source = 'refined_interpolated'
-                console.print(f"[cyan]Using refined detections:[/cyan] refined_detect_runs/{refined_run_name} (interpolated)")
+                assignment_source = 'refined_instances'
+                console.print(f"[cyan]Using refined detections:[/cyan] refined_detect_runs/{refined_run_name} (instances)")
                 if source_detect_run:
                     console.print(f"  Source detect run: {source_detect_run}")
             else:
-                console.print(f"[yellow]Refined run '{candidate_run}' missing 'interpolated' subgroup; falling back to raw detections.[/yellow]")
+                console.print(f"[yellow]Refined run '{candidate_run}' missing 'instances' subgroup; falling back to raw detections.[/yellow]")
     
     if detection_group is None:
         if 'detect_runs' not in root:
@@ -693,7 +693,7 @@ def assign_arenas_spatial(
     parent_group.attrs['latest'] = run_group_name
 
     source_rowset_path = (
-        f"refined_detect_runs/{refined_run_name}/interpolated"
+        f"refined_detect_runs/{refined_run_name}/instances"
         if refined_run_name
         else f"detect_runs/{source_detect_run}"
     )
@@ -763,7 +763,7 @@ def assign_arenas_spatial(
         expected_fish = experiment_setup.get('total_expected_fish', 0)
         validation_text = f"\n[bold]Validation:[/bold]\n  Expected: {expected_fish} fish\n  Found: {n_masks} ROI(s)"
     
-    assignment_label = "refined/interpolated" if assignment_source == 'refined_interpolated' else 'raw detections'
+    assignment_label = "refined/instances" if assignment_source == 'refined_instances' else 'raw detections'
     source_lines = [
         f"  Arena assignment source: {assignment_label}",
         f"  Detect run: detect_runs/{source_detect_run}"

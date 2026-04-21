@@ -67,7 +67,7 @@ Prepare/export parity flags:
 
 Task-specific extension flags remain allowed, for example:
 
-- detect: `--source-type` (`manual|filtered|detect|interpolated`)
+- detect: `--source-type` (`refined|manual|filtered|detect|interpolated`)
 - pose: `--keypoint-run` selector semantics
 
 ## Artifact Contract

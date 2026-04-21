@@ -1,5 +1,12 @@
 # Crimson <> Palette Zarr Alignment TODO (Agent Handoff)
 
+Superseded for refined-detect downstream adoption by
+`docs/refined_detect_downstream_adoption_checklist.md`.
+
+This older note remains useful for broader archive-discovery/history context,
+but its detect-specific manual/interpolated subgroup assumptions are no longer
+the active implementation target.
+
 As of 2026-02-09, this note captures the concrete differences between:
 
 - Palette's current archive/registry design (training + analysis split)
@@ -194,7 +201,8 @@ Use one real recording directory containing both training + analysis archives:
 
 6. Manual edit activation
 - After Crimson manual edit write, Palette resolution picks manual subgroup as active.
-- Crop with preferred/auto resolves to manual source (not interpolated/filtered).
+- Crop with `auto` resolves to the curated refined root when present, otherwise
+  to the active sparse manual source before interpolated/filtered fallback.
 
 ## Notes For Safe Rollout
 

@@ -4,10 +4,29 @@ Focus areas remaining after schema correctness tests.
 
 ## Refinement selection logic
 
-- Preferred resolution order: detect → filtered → interpolated → manual.
-- Manual override: `manual_review_latest` should select manual when present.
-- Review status override: `detect_review_status.resolved_group` should win if set.
-- Mixed availability: ensure resolution is stable when some groups are missing.
+- Current curated detect read order: `refined_detect_runs/<latest>/instances`
+  → legacy sparse refined fallback
+  (`manual_review_latest`, `manual`, `interpolated`, `filtered`) → raw detect.
+- Manual override: `manual_review_latest` should still select manual when the
+  resolver is operating on legacy sparse runs.
+- Review status override: `detect_review_status.resolved_group` should win if
+  set for legacy subgroup fallback.
+- Mixed availability: ensure resolution is stable when `instances/` or legacy
+  sparse groups are missing.
+
+## Detect Review
+
+- Add more arena-aware `detect_review` coverage around the interactive refined
+  path:
+  - multi-arena targeting with `--frames` should review all slots for the
+    selected frames
+  - manual box rejection should be covered when the drawn box center falls
+    outside the active arena ROI
+  - status-only approval should be exercised for arena-aware refined runs
+- Add a focused non-interactive regression for `review_axis="frame_arena"` save
+  metadata so `manual_review_slots` stays consistent.
+- Retune still follows the older single-instance refined path; add explicit
+  tests or defer until arena-aware retune is implemented.
 
 ## Coverage accounting
 

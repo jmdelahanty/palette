@@ -199,7 +199,7 @@ scripts/py -m fisheye.utils.crop_batch /nvme1/recordings \
 ```
 
 Notes:
-- Defaults to `source_type=preferred` (uses review status or preferred chain).
+- Defaults to `source_type=auto` (uses review status or the refined fallback chain).
 - Skips when the latest crop run already matches the resolved detection source
   and ROI size (use `--force-new` to always create a new run).
 - No ML model resolution — crop is a deterministic operation using existing

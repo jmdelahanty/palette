@@ -46,7 +46,7 @@ Contract reference: `docs/recording_analysis_pipeline_contract.md`.
 Use a config with `import.resolutions: both` (e.g. `configs/fisheye/import_local.yaml` or `configs/fisheye/default.yaml`).
 
 ```bash
-python -m fisheye.capture.import_video /path/to/video.mp4 \
+scripts/py -m fisheye.capture.import_video /path/to/video.mp4 \
   --config configs/fisheye/import_local.yaml \
   --training-data \
   --frame-step 100 \
@@ -71,7 +71,7 @@ recordings/<session_uuid_protocol>/
 you can batch import sampled training Zarrs using:
 
 ```bash
-python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --dry-run
@@ -80,7 +80,7 @@ python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
 Apply the imports:
 
 ```bash
-python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --apply
@@ -89,7 +89,7 @@ python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
 Optional: rich-formatted dry-run output:
 
 ```bash
-python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --dry-run \
@@ -103,7 +103,7 @@ Defaults:
 Optional registry registration:
 
 ```bash
-python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --apply \
@@ -113,7 +113,7 @@ python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
 Optional: mirror stimulus H5 into the Zarr (when available):
 
 ```bash
-python src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --apply \
@@ -126,7 +126,7 @@ By default, stimulus import is skipped if `analysis/stimulus_runs` already exist
 This creates a **detection-only** Zarr with `source_video_path` metadata.
 
 ```bash
-python -m fisheye.detection.detect_yolo /path/to/video.mp4 \
+scripts/py -m fisheye.detection.detect_yolo /path/to/video.mp4 \
   --model /path/to/model.pt \
   --resize-dims 768 1280 \
   --output /path/to/output/detect_runs.zarr
@@ -138,16 +138,17 @@ Notes:
 
 ### 3) Refine + QC detections
 ```bash
-python -m fisheye.refinement.refine_detect /path/to/output/detect_runs.zarr
-python -m fisheye.tracking.arena_assignment /path/to/output/detect_runs.zarr
-python -m fisheye.visualization.detection_visualizer /path/to/output/detect_runs.zarr
+scripts/py -m fisheye.refinement.refine_detect /path/to/output/detect_runs.zarr
+scripts/py -m fisheye.tune.detect_review /path/to/output/detect_runs.zarr
+scripts/py -m fisheye.tracking.arena_assignment /path/to/output/detect_runs.zarr
+scripts/py -m fisheye.visualization.detection_visualizer /path/to/output/detect_runs.zarr
 ```
 
 ### 4) Crop full-resolution ROIs for pose/segmentation
 Cropping uses `raw_video` if present, otherwise `source_video_path` stored in metadata.
 
 ```bash
-python -m fisheye.tracking.crop /path/to/output/detect_runs.zarr \
+scripts/py -m fisheye.tracking.crop /path/to/output/detect_runs.zarr \
   --config configs/fisheye/default.yaml
 ```
 
@@ -155,10 +156,10 @@ python -m fisheye.tracking.crop /path/to/output/detect_runs.zarr \
 Use downsampled frames for detection training and register the dataset in the registry if desired.
 
 ```bash
-python -m fisheye.diagnostics.prepare_detect_training \
+scripts/py -m fisheye.diagnostics.prepare_detect_training \
   /path/to/training_sample.zarr \
   --input-format gray \
-  --source-type filtered \
+  --source-type refined \
   --out-config /path/to/out/train_detect.yaml \
   --out-manifest /path/to/out/train_manifest.json \
   --register
@@ -167,10 +168,10 @@ python -m fisheye.diagnostics.prepare_detect_training \
 Versioned convention (auto paths):
 
 ```bash
-python -m fisheye.diagnostics.prepare_detect_training \
+scripts/py -m fisheye.diagnostics.prepare_detect_training \
   /path/to/training_sample.zarr \
   --input-format gray \
-  --source-type filtered \
+  --source-type refined \
   --set-name detect_base \
   --register
 ```
@@ -182,8 +183,8 @@ This writes:
 List versions:
 
 ```bash
-python src/fisheye/utils/list_training_versions.py
-python src/fisheye/utils/list_training_versions.py --name detect_base
+scripts/py src/fisheye/utils/list_training_versions.py
+scripts/py src/fisheye/utils/list_training_versions.py --name detect_base
 ```
 
 ### 6) Train + iterate
@@ -197,7 +198,7 @@ python src/fisheye/utils/list_training_versions.py --name detect_base
 - **Metadata matters**: sampled imports are deterministic (every Nth frame), which makes QC reproducible.
 - **Provenance**: use `--register` in `prepare_detect_training` to log datasets into the registry.
 - **Registry wiring (current)**: import writes metadata into the Zarr, but does not register it.
-  - Register explicitly with `--register` (batch import) or `python -m fisheye.registry.scan`.
+  - Register explicitly with `--register` (batch import) or `scripts/py -m fisheye.registry.scan`.
   - Rich provenance requires stimulus metadata (see `import_stimulus_to_zarr`).
 
 ## Registry Hygiene (Before Training)
@@ -235,7 +236,7 @@ Use the pipeline wrapper to run selection + preflight + merged export in one inv
 ```bash
 scripts/py -m fisheye.utils.run_detect_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
-  --source-type manual \
+  --source-type refined \
   --input-format gray \
   --model-input gray \
   --out-config /tmp/detect_build.yaml \
