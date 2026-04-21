@@ -23,42 +23,7 @@ from rich.console import Console
 from scipy.ndimage import gaussian_filter
 
 from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
-
-# Event type mappings from the stimulus program
-EXPERIMENT_EVENT_TYPE = {
-    0: "PROTOCOL_START",
-    1: "PROTOCOL_STOP",
-    2: "PROTOCOL_PAUSE",
-    3: "PROTOCOL_RESUME",
-    4: "PROTOCOL_FINISH",
-    5: "PROTOCOL_CLEAR",
-    6: "PROTOCOL_LOAD",
-    7: "STEP_ADD",
-    8: "STEP_REMOVE",
-    9: "STEP_MOVE_UP",
-    10: "STEP_MOVE_DOWN",
-    11: "STEP_START",
-    12: "STEP_END",
-    13: "ITI_START",
-    14: "ITI_END",
-    15: "PARAMS_APPLIED",
-    16: "MANAGER_REINIT",
-    17: "MANAGER_REINIT_FAIL",
-    18: "LOOM_AUTO_REPEAT_TRIGGER",
-    19: "LOOM_MANUAL_START",
-    20: "USER_INTERVENTION",
-    21: "ERROR_RUNTIME",
-    22: "LOG_MESSAGE",
-    23: "IPC_BOUNDING_BOX_RECEIVED",
-    24: "CHASER_PRE_PERIOD_START",
-    25: "CHASER_TRAINING_START",
-    26: "CHASER_POST_PERIOD_START",
-    27: "CHASER_CHASE_SEQUENCE_START",
-    28: "CHASER_CHASE_SEQUENCE_END",
-    29: "CHASER_RANDOM_TARGET_SET",
-}
-
-EVENT_NAME_TO_ID = {name: idx for idx, name in EXPERIMENT_EVENT_TYPE.items()}
+from fisheye.shared.citrus_enums import EXPERIMENT_EVENT_TYPE, EVENT_NAME_TO_ID
 
 
 @dataclass

@@ -31,6 +31,10 @@ from .compute_speed import (  # re-exported for compatibility
     resolve_dimensions,
 )
 from .chaser_metrics_loader import load_chaser_metrics
+from fisheye.shared.stage_provenance import (
+    build_stage_provenance,
+    write_stage_provenance,
+)
 from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.utils.system import get_git_info, get_environment_info
 from .chaser_state_interpolator import load_structured_dataset
@@ -1724,37 +1728,28 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         saved_coordinate_space = "camera" if texture_to_camera_scale != 1.0 else "texture"
                         saved_pixel_to_mm = pixel_to_mm
 
-                    # Build comprehensive provenance record
-                    provenance = {
-                        "stage": "track_kinematics",
-                        "method": method,
-                        "command": " ".join(sys.argv),
-                        "created_at_utc": created_at,
-                        "git": {
-                            "commit": git_info.get("commit_hash"),
-                            "short": git_info.get("short_hash"),
-                            "branch": git_info.get("branch"),
-                            "is_dirty": git_info.get("is_dirty"),
-                            "remote": git_info.get("remote_url"),
-                        },
-                        "environment": {
-                            "hostname": env_info["platform"].get("hostname"),
-                            "python_version": env_info["platform"].get("python_version"),
-                            "system": env_info["platform"].get("system"),
-                            "release": env_info["platform"].get("release"),
-                        },
-                        "parameters": {
-                            "fps": fps,
-                            "smoothing_seconds": args.smooth_seconds,
-                            "smoothing_method": args.smoothing_method,
-                            "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
-                            "coordinate_space": saved_coordinate_space,
-                            "calibration_used": saved_pixel_to_mm,
-                            "texture_to_camera_scale": texture_to_camera_scale,
-                        },
-                        "inputs": inputs,
+                    # Canonical stage provenance.
+                    online_params = {
+                        "fps": fps,
+                        "smoothing_seconds": args.smooth_seconds,
+                        "smoothing_method": args.smoothing_method,
+                        "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
+                        "coordinate_space": saved_coordinate_space,
+                        "calibration_used": saved_pixel_to_mm,
+                        "texture_to_camera_scale": texture_to_camera_scale,
                     }
+                    provenance = build_stage_provenance(
+                        stage="track_kinematics",
+                        created_at_utc=created_at,
+                        parameters=online_params,
+                        inputs=inputs,
+                        command=" ".join(sys.argv),
+                        git=git_info,
+                        environment=env_info.get("platform"),
+                    )
+                    write_stage_provenance(run_group, provenance)
 
+                    # Backward-compatible top-level attrs.
                     run_group.attrs.update(
                         {
                             "method": method,
@@ -1772,7 +1767,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "num_tracks": len(ordered_track_ids),
                             "total_distance_px": total_px_online,
                             "total_distance_mm": total_mm_online if pixel_to_mm_online is not None else float("nan"),
-                            "provenance": provenance,
                         }
                     )
 
@@ -2000,43 +1994,32 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         if swim_bout_mirror:
                             offline_inputs["swim_bout_run"] = swim_bout_mirror
 
-                        # Build comprehensive provenance record
-                        offline_provenance = {
-                            "stage": "track_kinematics",
-                            "method": "track_kinematics_offline",
-                            "command": " ".join(sys.argv),
-                            "created_at_utc": created_at,
-                            "git": {
-                                "commit": git_info.get("commit_hash"),
-                                "short": git_info.get("short_hash"),
-                                "branch": git_info.get("branch"),
-                                "is_dirty": git_info.get("is_dirty"),
-                                "remote": git_info.get("remote_url"),
-                            },
-                            "environment": {
-                                "hostname": env_info["platform"].get("hostname"),
-                                "python_version": env_info["platform"].get("python_version"),
-                                "system": env_info["platform"].get("system"),
-                                "release": env_info["platform"].get("release"),
-                            },
-                            "parameters": {
-                                "fps": fps,
-                                "smoothing_seconds": args.smooth_seconds,
-                                "smoothing_method": args.smoothing_method,
-                                "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
-                                "distance_interpolation_seconds": args.distance_interpolation_seconds,
-                                "coordinate_space": "camera",
-                                "calibration_used": pixel_to_mm,
-                                "hysteresis_enabled": not args.no_hysteresis,
-                                "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
-                                "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
-                                "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
-                                "source_tracking_run": tracking_metadata.get("track_run"),
-                                "source_arena_assignment_run": tracking_metadata.get("source_arena_assignment_run"),
-                            },
-                            "inputs": offline_inputs,
+                        # Canonical stage provenance.
+                        offline_params = {
+                            "fps": fps,
+                            "smoothing_seconds": args.smooth_seconds,
+                            "smoothing_method": args.smoothing_method,
+                            "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
+                            "distance_interpolation_seconds": args.distance_interpolation_seconds,
+                            "coordinate_space": "camera",
+                            "calibration_used": pixel_to_mm,
+                            "hysteresis_enabled": not args.no_hysteresis,
+                            "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
+                            "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
+                            "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
                         }
+                        offline_provenance = build_stage_provenance(
+                            stage="track_kinematics",
+                            created_at_utc=created_at,
+                            parameters=offline_params,
+                            inputs=offline_inputs,
+                            command=" ".join(sys.argv),
+                            git=git_info,
+                            environment=env_info.get("platform"),
+                        )
+                        write_stage_provenance(offline_group, offline_provenance)
 
+                        # Backward-compatible top-level attrs.
                         offline_group.attrs.update(
                             {
                                 "method": "track_kinematics_offline",
@@ -2059,7 +2042,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "num_tracks": len(ordered_ids_offline),
                                 "total_distance_px": total_px_offline,
                                 "total_distance_mm": total_mm_offline if pixel_to_mm is not None else float("nan"),
-                                "provenance": offline_provenance,
                             }
                         )
 

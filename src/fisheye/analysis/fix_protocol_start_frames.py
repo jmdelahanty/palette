@@ -29,7 +29,10 @@ from rich.console import Console
 from rich.table import Table
 
 
-# Event type enum
+# Legacy H5 event type enum — differs from the modern Citrus encoding.
+# See ``fisheye.shared.citrus_enums`` for the canonical modern enum.
+# This repair tool operates on H5-origin event_type IDs so the legacy
+# mapping is intentionally preserved here.
 EXPERIMENT_EVENT_TYPE = {
     0: "PROTOCOL_START",
     1: "PROTOCOL_END",

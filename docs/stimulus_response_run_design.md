@@ -813,3 +813,16 @@ regardless of whether the direction was constant or varying.
 6. **Multi-dish grating orientation**: In multi-dish setups, does each
    sub-arena receive the same grating orientation per step? Blocking for
    multi-dish recordings only.
+
+---
+
+## Implementation
+
+The base framework, bout integration, and grating metrics are implemented in:
+
+- `src/fisheye/analysis/stimulus_response.py`
+- `src/fisheye/shared/zarr/analysis_stage_arrays.py`
+
+See `docs/stimulus_response_implementation_plan.md` for design decisions,
+sequencing, and deferred work. See `src/fisheye/docs/zarr_structure.md`
+for the authoritative zarr layout reference.

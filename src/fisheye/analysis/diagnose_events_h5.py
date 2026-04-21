@@ -25,8 +25,11 @@ from rich.console import Console
 from rich.table import Table
 
 
-# Event type enum (from read_h5_data.py)
-EXPERIMENT_EVENT_TYPE = {
+# Legacy H5 event type enum — differs from the modern Citrus encoding used in
+# zarr-imported events.  See ``fisheye.shared.citrus_enums`` for the canonical
+# modern enum.  This legacy mapping should only be used when reading raw H5
+# files directly (not zarr stimulus_runs).
+_LEGACY_H5_EVENT_TYPE = {
     0: "PROTOCOL_START",
     1: "PROTOCOL_END",
     2: "PROTOCOL_PAUSE",
@@ -36,8 +39,11 @@ EXPERIMENT_EVENT_TYPE = {
     20: "ACQUISITION_START",
     21: "ACQUISITION_END",
 }
+# Keep module-level name for backward compatibility with any callers.
+EXPERIMENT_EVENT_TYPE = _LEGACY_H5_EVENT_TYPE
 
-# Stimulus mode enum
+# Legacy H5 stimulus mode subset.
+# See ``fisheye.shared.citrus_enums.STIMULUS_MODE`` for the full canonical enum.
 STIMULUS_MODE_TYPE = {
     0: "BLANK",
     2: "COHERENT_DOTS",
