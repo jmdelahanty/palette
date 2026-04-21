@@ -396,3 +396,82 @@ def test_write_frame_flag_file_emits_eye_review_compatible_json(tmp_path: Path) 
             {"roi_idx": 3},
         ]
     }
+
+
+def test_write_repair_plan_file_emits_lineage_and_candidate_commands(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "first_training.zarr"
+    frame_flag_path = tmp_path / "flags.json"
+    report = mod.CoverageReport(
+        zarr_path=zarr_path,
+        status="fail",
+        reason="keypoint-valid rows missing required subject-mask eye component(s).",
+        subject_stage="subject_mask_runs",
+        subject_run="subject_masks_eye_bridge",
+        label_schema_id="subject_v1_lr",
+        eye_component_mode="lr",
+        eye_component_indices={"eye_left": 1, "eye_right": 2},
+        source_refined_eye_masks_run="refined_eye_masks_source",
+        source_eye_masks_run="eye_masks_source",
+        latest_refined_eye_masks_run="refined_eye_masks_latest",
+        keypoint_group="refined_keypoints_runs",
+        keypoint_run="refined_keypoints_checked",
+        success_dataset="refined_success",
+        keypoint_eye_indices={"eye_left": 1, "eye_right": 2},
+        failure_targets=[
+            {"roi_idx": 2, "frame_idx": 10},
+            {"roi_idx": 3},
+        ],
+    )
+
+    out_path = tmp_path / "nested" / "repair-plan.jsonl"
+    row_count = mod._write_repair_plan_file(
+        out_path,
+        [report],
+        frame_flag_file=frame_flag_path,
+    )
+
+    assert row_count == 2
+    rows = [
+        json.loads(line)
+        for line in out_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["target"] for row in rows] == [
+        {"frame_idx": 10, "roi_idx": 2},
+        {"roi_idx": 3},
+    ]
+    first = rows[0]
+    assert first["zarr"] == str(zarr_path)
+    assert first["subject_stage"] == "subject_mask_runs"
+    assert first["subject_run"] == "subject_masks_eye_bridge"
+    assert first["source_refined_eye_masks_run"] == "refined_eye_masks_source"
+    assert first["latest_refined_eye_masks_run"] == "refined_eye_masks_latest"
+    assert first["keypoint_group"] == "refined_keypoints_runs"
+    assert first["keypoint_run"] == "refined_keypoints_checked"
+    assert first["frame_flag_file"] == str(frame_flag_path)
+    assert first["classification_required"] is True
+    assert "fish_present_no_keypoints" in first["classification_options"]
+
+    eye_repair = first["repair_options"]["eye_mask_review"]
+    assert eye_repair["argv"][:4] == [
+        "scripts/py",
+        "-m",
+        "fisheye.tune.eye_mask_review",
+        str(zarr_path),
+    ]
+    assert "--refined-run" in eye_repair["argv"]
+    assert "refined_eye_masks_source" in eye_repair["argv"]
+    assert "--frame-flag-file" in eye_repair["argv"]
+    assert str(frame_flag_path) in eye_repair["argv"]
+
+    keypoint_repair = first["repair_options"]["keypoint_review"]
+    assert keypoint_repair["argv"][:4] == [
+        "scripts/py",
+        "-m",
+        "fisheye.tune.keypoint_review",
+        str(zarr_path),
+    ]
+    assert "--refined-run" in keypoint_repair["argv"]
+    assert "refined_keypoints_checked" in keypoint_repair["argv"]
+    assert "--frames" in keypoint_repair["argv"]
+    assert str(frame_flag_path) in keypoint_repair["argv"]
+    assert isinstance(keypoint_repair["shell"], str)

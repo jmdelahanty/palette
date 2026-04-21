@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +75,9 @@ class CoverageReport:
     eye_component_mode: Optional[str] = None
     eye_component_indices: dict[str, int] = field(default_factory=dict)
     component_review_states: dict[str, str] = field(default_factory=dict)
+    source_refined_eye_masks_run: Optional[str] = None
+    source_eye_masks_run: Optional[str] = None
+    latest_refined_eye_masks_run: Optional[str] = None
     keypoint_group: Optional[str] = None
     keypoint_run: Optional[str] = None
     success_dataset: Optional[str] = None
@@ -375,6 +379,47 @@ def _resolve_success_dataset_name(kp_group: zarr.Group) -> Optional[str]:
         if name in kp_group:
             return name
     return None
+
+
+def _run_from_stage_path(value: object, stage_name: str) -> Optional[str]:
+    text = _normalize_attr(value)
+    if not text:
+        return None
+    marker = f"{stage_name}/"
+    if marker not in text:
+        return None
+    suffix = text.split(marker, 1)[1]
+    run_name = suffix.split("/", 1)[0].strip()
+    return run_name or None
+
+
+def _resolve_source_refined_eye_masks_run(subject_group: zarr.Group) -> Optional[str]:
+    provenance = _coerce_mapping(subject_group.attrs.get("provenance")) or {}
+    provenance_inputs = _coerce_mapping(provenance.get("inputs")) or {}
+    return (
+        _normalize_attr(subject_group.attrs.get("source_refined_eye_masks_run"))
+        or _normalize_attr(provenance_inputs.get("source_refined_eye_masks_run"))
+        or _run_from_stage_path(subject_group.attrs.get("source_probability_path"), "refined_eye_masks_runs")
+        or _run_from_stage_path(provenance_inputs.get("source_probability_path"), "refined_eye_masks_runs")
+    )
+
+
+def _resolve_source_eye_masks_run(subject_group: zarr.Group) -> Optional[str]:
+    provenance = _coerce_mapping(subject_group.attrs.get("provenance")) or {}
+    provenance_inputs = _coerce_mapping(provenance.get("inputs")) or {}
+    return (
+        _normalize_attr(subject_group.attrs.get("source_eye_masks_run"))
+        or _normalize_attr(provenance_inputs.get("source_eye_masks_run"))
+        or _run_from_stage_path(subject_group.attrs.get("source_probability_path"), "eye_masks_runs")
+        or _run_from_stage_path(provenance_inputs.get("source_probability_path"), "eye_masks_runs")
+    )
+
+
+def _resolve_latest_refined_eye_masks_run(root: zarr.Group) -> Optional[str]:
+    parent = root.get("refined_eye_masks_runs")
+    if not _is_group(parent):
+        return None
+    return _latest_run_name(parent)
 
 
 def _coerce_mapping(value: object) -> Optional[Mapping[str, object]]:
@@ -743,6 +788,9 @@ def _analyze_root(
     report.eye_component_mode = selection.mode
     report.eye_component_indices = dict(selection.component_indices)
     report.component_review_states = _component_review_states(subject_group, selection.required_components)
+    report.source_refined_eye_masks_run = _resolve_source_refined_eye_masks_run(subject_group)
+    report.source_eye_masks_run = _resolve_source_eye_masks_run(subject_group)
+    report.latest_refined_eye_masks_run = _resolve_latest_refined_eye_masks_run(root)
 
     try:
         kp_group_name, kp_run_name, kp_group, kp_notes = _resolve_keypoint_run(
@@ -856,6 +904,9 @@ def _report_to_log_payload(report: CoverageReport) -> dict[str, object]:
         "eye_component_mode": report.eye_component_mode,
         "eye_component_indices": report.eye_component_indices,
         "component_review_states": report.component_review_states,
+        "source_refined_eye_masks_run": report.source_refined_eye_masks_run,
+        "source_eye_masks_run": report.source_eye_masks_run,
+        "latest_refined_eye_masks_run": report.latest_refined_eye_masks_run,
         "keypoint_group": report.keypoint_group,
         "keypoint_run": report.keypoint_run,
         "success_dataset": report.success_dataset,
@@ -889,6 +940,10 @@ def _print_report(report: CoverageReport, *, show_pass: bool) -> None:
         print(f"eye_component_indices: {report.eye_component_indices}")
     if report.component_review_states:
         print(f"component_review_states: {report.component_review_states}")
+    if report.source_refined_eye_masks_run:
+        print(f"source_refined_eye_masks_run: {report.source_refined_eye_masks_run}")
+    if report.latest_refined_eye_masks_run:
+        print(f"latest_refined_eye_masks_run: {report.latest_refined_eye_masks_run}")
     if report.keypoint_group and report.keypoint_run:
         print(f"keypoint_run: {report.keypoint_group}/{report.keypoint_run}")
     if report.keypoint_eye_indices:
@@ -952,6 +1007,151 @@ def _write_frame_flag_file(path: Path, reports: Sequence[CoverageReport]) -> tup
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return len(payload), target_count
+
+
+def _shell_command(argv: Sequence[str]) -> str:
+    return " ".join(shlex.quote(str(item)) for item in argv)
+
+
+def _command_payload(argv: Sequence[str]) -> dict[str, object]:
+    normalized = [str(item) for item in argv]
+    return {
+        "argv": normalized,
+        "shell": _shell_command(normalized),
+    }
+
+
+def _preferred_refined_eye_masks_run(report: CoverageReport) -> Optional[str]:
+    return report.source_refined_eye_masks_run or report.latest_refined_eye_masks_run
+
+
+def _repair_plan_command_payloads(
+    report: CoverageReport,
+    *,
+    frame_flag_file: Optional[Path],
+) -> dict[str, object]:
+    frame_flag_arg = str(frame_flag_file) if frame_flag_file is not None else "<frame_flag_file>"
+
+    eye_args = [
+        "scripts/py",
+        "-m",
+        "fisheye.tune.eye_mask_review",
+        str(report.zarr_path),
+        "--manual",
+    ]
+    refined_eye_run = _preferred_refined_eye_masks_run(report)
+    if refined_eye_run:
+        eye_args.extend(["--refined-run", refined_eye_run])
+    eye_args.extend(
+        [
+            "--frame-flag-file",
+            frame_flag_arg,
+            "--review-state",
+            "approved",
+            "--review-method",
+            "manual",
+            "--review-intended-use",
+            "training",
+        ]
+    )
+
+    keypoint_args = [
+        "scripts/py",
+        "-m",
+        "fisheye.tune.keypoint_review",
+        str(report.zarr_path),
+        "--manual",
+        "--refined-run",
+        report.keypoint_run or "<refined_keypoints_run>",
+        "--frames",
+        frame_flag_arg,
+        "--review-state",
+        "approved",
+        "--review-method",
+        "manual",
+        "--review-intended-use",
+        "training",
+    ]
+
+    keypoint_note = None
+    if report.keypoint_group != "refined_keypoints_runs":
+        keypoint_note = (
+            "keypoint_review edits refined_keypoints_runs; resolve the refined "
+            "run corresponding to this keypoint source before applying."
+        )
+
+    return {
+        "eye_mask_review": {
+            "purpose": "Repair missing subject/eye component masks when keypoints are valid.",
+            "source_refined_eye_masks_run": report.source_refined_eye_masks_run,
+            "latest_refined_eye_masks_run": report.latest_refined_eye_masks_run,
+            **_command_payload(eye_args),
+        },
+        "keypoint_review": {
+            "purpose": "Mark fish_present_no_keypoints or other keypoint-row failures.",
+            "keypoint_group": report.keypoint_group,
+            "keypoint_run": report.keypoint_run,
+            "note": keypoint_note,
+            **_command_payload(keypoint_args),
+        },
+    }
+
+
+def _repair_plan_rows(
+    reports: Sequence[CoverageReport],
+    *,
+    frame_flag_file: Optional[Path],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for report in reports:
+        if report.status != "fail" or not report.failure_targets:
+            continue
+        for target in report.failure_targets:
+            row: dict[str, object] = {
+                "zarr": str(report.zarr_path),
+                "status": report.status,
+                "reason": report.reason,
+                "target": dict(target),
+                "subject_stage": report.subject_stage,
+                "subject_run": report.subject_run,
+                "label_schema_id": report.label_schema_id,
+                "eye_component_mode": report.eye_component_mode,
+                "eye_component_indices": dict(report.eye_component_indices),
+                "source_refined_eye_masks_run": report.source_refined_eye_masks_run,
+                "source_eye_masks_run": report.source_eye_masks_run,
+                "latest_refined_eye_masks_run": report.latest_refined_eye_masks_run,
+                "keypoint_group": report.keypoint_group,
+                "keypoint_run": report.keypoint_run,
+                "success_dataset": report.success_dataset,
+                "keypoint_eye_indices": dict(report.keypoint_eye_indices),
+                "frame_flag_file": str(frame_flag_file) if frame_flag_file is not None else None,
+                "classification_required": True,
+                "classification_options": [
+                    "missing_eye_component_mask",
+                    "fish_present_no_keypoints",
+                    "detection_or_crop_issue",
+                ],
+                "repair_options": _repair_plan_command_payloads(
+                    report,
+                    frame_flag_file=frame_flag_file,
+                ),
+            }
+            rows.append(row)
+    return rows
+
+
+def _write_repair_plan_file(
+    path: Path,
+    reports: Sequence[CoverageReport],
+    *,
+    frame_flag_file: Optional[Path],
+) -> int:
+    rows = _repair_plan_rows(reports, frame_flag_file=frame_flag_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    return len(rows)
 
 
 def _resolve_default_roots(paths: Optional[list[Path]]) -> list[Path]:
@@ -1038,6 +1238,14 @@ def build_parser() -> argparse.ArgumentParser:
             "--frame-flag-file. The file is overwritten with this run's failures."
         ),
     )
+    parser.add_argument(
+        "--write-repair-plan",
+        type=Path,
+        help=(
+            "Write one JSONL row per failing ROI/frame with lineage metadata and "
+            "candidate eye/keypoint repair commands."
+        ),
+    )
     parser.add_argument("--show-pass", action="store_true", help="Print PASS records too.")
     parser.add_argument("--strict", action="store_true", help="Exit with status 1 on any fail/missing/error.")
     parser.add_argument(
@@ -1093,6 +1301,7 @@ def run(args: argparse.Namespace) -> int:
             sample_limit=int(max(0, args.sample_limit)),
             append_review_list=str(args.append_review_list) if args.append_review_list else None,
             write_frame_flag_file=str(args.write_frame_flag_file) if args.write_frame_flag_file else None,
+            write_repair_plan=str(args.write_repair_plan) if args.write_repair_plan else None,
         )
 
     zarr_scanned = 0
@@ -1191,6 +1400,35 @@ def run(args: argparse.Namespace) -> int:
                 targets=frame_flag_targets_written,
             )
 
+    repair_plan_rows_written = 0
+    if args.write_repair_plan:
+        repair_plan_path = args.write_repair_plan.expanduser().resolve()
+        repair_plan_frame_flag_path = (
+            args.write_frame_flag_file.expanduser().resolve()
+            if args.write_frame_flag_file
+            else None
+        )
+        repair_plan_rows_written = _write_repair_plan_file(
+            repair_plan_path,
+            failing_reports,
+            frame_flag_file=repair_plan_frame_flag_path,
+        )
+        print(
+            f"\nRepair plan written: {repair_plan_path} "
+            f"(rows={repair_plan_rows_written})"
+        )
+        if logger is not None:
+            logger.log(
+                "repair_plan_written",
+                path=str(repair_plan_path),
+                rows=repair_plan_rows_written,
+                frame_flag_file=(
+                    str(repair_plan_frame_flag_path)
+                    if repair_plan_frame_flag_path is not None
+                    else None
+                ),
+            )
+
     issues = (zarr_fail > 0) or (zarr_missing > 0) or (zarr_error > 0)
     print(
         "\nSubject-mask keypoint coverage summary: "
@@ -1203,6 +1441,7 @@ def run(args: argparse.Namespace) -> int:
         f"errors={zarr_error} "
         f"review_list_added={review_list_added} "
         f"frame_flag_targets_written={frame_flag_targets_written} "
+        f"repair_plan_rows_written={repair_plan_rows_written} "
         f"issues={'yes' if issues else 'no'}"
     )
 
@@ -1219,6 +1458,7 @@ def run(args: argparse.Namespace) -> int:
             review_list_added=review_list_added,
             frame_flag_zarrs_written=frame_flag_zarrs_written,
             frame_flag_targets_written=frame_flag_targets_written,
+            repair_plan_rows_written=repair_plan_rows_written,
             issues=issues,
         )
         logger.close()

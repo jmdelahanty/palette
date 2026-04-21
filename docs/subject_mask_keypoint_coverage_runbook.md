@@ -18,16 +18,20 @@ scripts/py -m fisheye.diagnostics.check_subject_mask_keypoint_coverage \
   --recursive \
   --zarr-use training \
   --log-dir /tmp/subject-mask-coverage \
-  --write-frame-flag-file /tmp/subject-mask-coverage/eye-review-flags.json
+  --write-frame-flag-file /tmp/subject-mask-coverage/eye-review-flags.json \
+  --write-repair-plan /tmp/subject-mask-coverage/repair-plan.jsonl
 ```
 
 The JSONL report goes in `--log-dir`. The frame flag file is overwritten on
-each run and contains only current failures.
+each run and contains only current failures. The repair plan is JSONL with one
+row per failing ROI/frame.
 
 A clean run looks like:
 
 ```text
-Subject-mask keypoint coverage summary: ... zarr_fail=0 zarr_missing=0 errors=0 frame_flag_targets_written=0 issues=no
+Subject-mask keypoint coverage summary: ...
+zarr_fail=0 zarr_missing=0 errors=0
+frame_flag_targets_written=0 repair_plan_rows_written=0 issues=no
 ```
 
 ## Inspect Failures
@@ -39,19 +43,29 @@ jq -r 'to_entries[] | .key as $z | .value[] | [$z, .roi_idx, .frame_idx] | @tsv'
   /tmp/subject-mask-coverage/eye-review-flags.json
 ```
 
-List failing zarrs with the keypoint run that the diagnostic checked:
+List failing zarrs with the keypoint run that the diagnostic checked from the
+repair plan:
 
 ```bash
 jq -r '
-  select(.event == "zarr_checked" and .status == "fail")
-  | [.zarr, .keypoint_group, .keypoint_run, (.failure_targets | tostring)]
+  [.zarr, .target.roi_idx, .target.frame_idx, .keypoint_group, .keypoint_run]
   | @tsv
-' /tmp/subject-mask-coverage/check_subject_mask_keypoint_coverage_*.jsonl
+' /tmp/subject-mask-coverage/repair-plan.jsonl
 ```
 
-Use the `keypoint_run` from the JSONL when repairing keypoints. Do not assume
-`refined_keypoints_runs/latest` is the same run; sampled/promoted runs can make
-`latest` differ from the lineage run checked by the diagnostic.
+Each repair-plan row also includes candidate commands:
+
+```bash
+jq -r '.repair_options.eye_mask_review.shell' \
+  /tmp/subject-mask-coverage/repair-plan.jsonl
+
+jq -r '.repair_options.keypoint_review.shell' \
+  /tmp/subject-mask-coverage/repair-plan.jsonl
+```
+
+Use the `keypoint_run` from the repair plan when repairing keypoints. Do not
+assume `refined_keypoints_runs/latest` is the same run; sampled/promoted runs
+can make `latest` differ from the lineage run checked by the diagnostic.
 
 ## Classify Each Failure
 
@@ -73,36 +87,24 @@ be invalid. That hides the real training-label intent.
 Use `eye_mask_review` with the frame flag file:
 
 ```bash
-scripts/py -m fisheye.tune.eye_mask_review <zarr> \
-  --manual \
-  --frame-flag-file /tmp/subject-mask-coverage/eye-review-flags.json \
-  --review-state approved \
-  --review-method manual \
-  --review-intended-use training
+jq -r '.repair_options.eye_mask_review.shell' \
+  /tmp/subject-mask-coverage/repair-plan.jsonl
 ```
 
-If the correct refined eye-mask source is not the zarr's
-`refined_eye_masks_runs/latest`, pass it explicitly:
-
-```bash
-  --refined-run <refined_eye_masks_run>
-```
+Run the row command after confirming the failure is an eye-component mask
+problem. The generated command includes `--refined-run` when the diagnostic can
+resolve a source or latest refined eye-mask run.
 
 The review UI uses the frame flag file to start at the flagged ROI.
 
 ## Repair Fish Present But No Keypoints
 
-Use `keypoint_review` against the refined keypoint run reported by the
-diagnostic JSONL:
+Use `keypoint_review` against the refined keypoint run reported by the repair
+plan:
 
 ```bash
-scripts/py -m fisheye.tune.keypoint_review <zarr> \
-  --manual \
-  --refined-run <refined_keypoints_run_from_jsonl> \
-  --frames /tmp/subject-mask-coverage/eye-review-flags.json \
-  --review-state approved \
-  --review-method manual \
-  --review-intended-use training
+jq -r '.repair_options.keypoint_review.shell' \
+  /tmp/subject-mask-coverage/repair-plan.jsonl
 ```
 
 In the UI, press `x` on the flagged ROI to mark
@@ -128,7 +130,8 @@ scripts/py -m fisheye.diagnostics.check_subject_mask_keypoint_coverage \
   --recursive \
   --zarr-use training \
   --log-dir /tmp/subject-mask-coverage \
-  --write-frame-flag-file /tmp/subject-mask-coverage/eye-review-flags.json
+  --write-frame-flag-file /tmp/subject-mask-coverage/eye-review-flags.json \
+  --write-repair-plan /tmp/subject-mask-coverage/repair-plan.jsonl
 ```
 
 Expected result:
@@ -137,10 +140,11 @@ Expected result:
 - `zarr_missing=0`
 - `errors=0`
 - `frame_flag_targets_written=0`
+- `repair_plan_rows_written=0`
 - `issues=no`
 
 If failures remain, the refreshed
-`/tmp/subject-mask-coverage/eye-review-flags.json` is the next repair queue.
+`/tmp/subject-mask-coverage/repair-plan.jsonl` is the next repair queue.
 
 ## Example From The Coverage Repair Pass
 
