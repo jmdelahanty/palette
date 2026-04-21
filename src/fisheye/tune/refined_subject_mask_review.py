@@ -45,6 +45,7 @@ except (TypeError, ValueError):
 cv2.setNumThreads(cv2_threads)
 
 WINDOW_NAME = "Refined Subject Mask Review"
+EDIT_WINDOW_NAME = "Refined Subject Mask Edit Patch"
 DEFAULT_COMPONENTS = ("subject_body", "swim_bladder")
 REVIEW_STATE_CHOICES = ("approved", "pending", "rejected", "needs_review")
 COMPONENT_ALIASES = {
@@ -75,8 +76,26 @@ COMPONENT_COLORS: dict[str, tuple[int, int, int]] = {
     "eye_left": (0, 255, 255),
     "eye_right": (255, 128, 255),
 }
-DISPLAY_SCALE = 2.5
+DISPLAY_SCALE = 1.0
+DEFAULT_EDIT_ZOOM = 4
+MAX_EDIT_ZOOM = 12
+DEFAULT_EDIT_PADDING = 32
+MAX_EDIT_PADDING = 192
+MIN_WINDOW_SCALE_PERCENT = 50
+MAX_WINDOW_SCALE_PERCENT = 300
+PANEL_GAP = 8
+PANEL_LABEL_HEIGHT = 18
+PATCH_PAN_STEP = 8
+PATCH_PAN_STEP_LARGE = 24
 DEFAULT_BRUSH_RADIUS = 6
+MAX_BRUSH_RADIUS = 64
+LASSO_OUTLINE_COLOR = (0, 0, 255)
+LASSO_PREVIEW_COLOR = (64, 64, 255)
+LASSO_START_COLOR = (255, 255, 255)
+LASSO_LINE_THICKNESS = 2
+LASSO_PREVIEW_THICKNESS = 2
+LASSO_POINT_RADIUS = 2
+LASSO_MIN_POINT_STEP_PX = 2
 DEFAULT_REVIEW_METHOD = "manual"
 DEFAULT_REVIEW_INTENDED_USE = "training"
 DEFAULT_RUN_METHOD = "refined_subject_mask_manual_review_v1"
@@ -124,6 +143,21 @@ class RefinedSubjectComponentSeed:
     component_name: str
     masks: np.ndarray
     source_payload: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class ReviewPanelRegion:
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    zoom: int = 1
+    label_h: int = 0
+    patch_x0: int = 0
+    patch_y0: int = 0
+    patch_w: int | None = None
+    patch_h: int | None = None
 
 
 def _utc_now() -> str:
@@ -495,6 +529,17 @@ def _ensure_component_source_sync_arrays(
         )
 
     component_group.attrs.setdefault("source_sync_schema_id", REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID)
+
+
+def _has_component_source_sync_tracking(component_group: zarr.Group, *, total_rois: int) -> bool:
+    if str(component_group.attrs.get("source_sync_schema_id") or "") != REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID:
+        return False
+    required_names = ("source_row_fingerprint", "manual_override", "source_row_stale")
+    for name in required_names:
+        arr = component_group.get(name)
+        if arr is None or int(arr.shape[0]) != int(total_rois):
+            return False
+    return True
 
 
 def _build_single_source_component_seeds(
@@ -1831,6 +1876,7 @@ def save_refined_subject_roi(
     roi_idx: int,
     edited_masks: np.ndarray,
     component_sources: Optional[Mapping[str, SourceSubjectMaskRun]] = None,
+    component_names: Optional[Sequence[str]] = None,
 ) -> None:
     _apply_refined_subject_roi_rows(
         component_sources=(
@@ -1841,6 +1887,7 @@ def save_refined_subject_roi(
         refined=refined,
         roi_indices=[int(roi_idx)],
         edited_masks_batch=edited_masks,
+        component_names=component_names,
         update_mode="interactive",
         update_method=DEFAULT_RUN_METHOD,
     )
@@ -2101,6 +2148,13 @@ def check_refined_subject_source_updates(
             f"Component '{normalized_component}' not available in refined_subject_masks_runs/{refined_run}."
         )
 
+    existing_component_group = existing_run.require_group("components").require_group(normalized_component)
+    total_rois_existing = int(existing_run["masks_roi"].shape[0])
+    had_source_fingerprint_tracking = _has_component_source_sync_tracking(
+        existing_component_group,
+        total_rois=total_rois_existing,
+    )
+
     resolved_source_run = source_subject_mask_run or str(existing_run.attrs.get("source_subject_mask_run") or "")
     if not resolved_source_run:
         raise RuntimeError(
@@ -2120,7 +2174,6 @@ def check_refined_subject_source_updates(
     normalized_rows = _normalize_roi_indices(roi_indices, total_rois)
     comp_idx = int(refined.component_to_index[normalized_component])
     component_group = run_group.require_group("components").require_group(normalized_component)
-    had_source_fingerprint_tracking = component_group.get("source_row_fingerprint") is not None
 
     current_component_masks = np.asarray(run_group["masks_roi"][:, comp_idx], dtype=np.uint8)
     source_component_masks = _component_masks_from_source(component_sources[normalized_component], normalized_component)
@@ -2249,16 +2302,345 @@ def _overlay_components(
 
 
 def _panel(title: str, image: np.ndarray) -> np.ndarray:
-    panel = np.asarray(image, dtype=np.uint8).copy()
-    cv2.putText(panel, title, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+    image_bgr = np.asarray(image, dtype=np.uint8)
+    h, w = image_bgr.shape[:2]
+    panel = np.zeros((h + PANEL_LABEL_HEIGHT, w, 3), dtype=np.uint8)
+    panel[PANEL_LABEL_HEIGHT:, :] = image_bgr
+    cv2.putText(panel, title, (4, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 255, 220), 1, cv2.LINE_AA)
     return panel
 
 
 def _blank_panel_like(roi_image: np.ndarray, title: str, note: str) -> np.ndarray:
-    panel = np.zeros((int(roi_image.shape[0]), int(roi_image.shape[1]), 3), dtype=np.uint8)
-    cv2.putText(panel, title, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
-    cv2.putText(panel, note, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+    image = np.zeros((int(roi_image.shape[0]), int(roi_image.shape[1]), 3), dtype=np.uint8)
+    panel = _panel(title, image)
+    cv2.putText(panel, note, (10, PANEL_LABEL_HEIGHT + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
     return panel
+
+
+def _noop_trackbar(_value: int) -> None:
+    return
+
+
+def _scale_panel_image(image: np.ndarray, *, zoom: int) -> np.ndarray:
+    zoom_value = max(1, int(zoom))
+    if zoom_value <= 1:
+        return np.asarray(image, dtype=np.uint8).copy()
+    return cv2.resize(
+        np.asarray(image, dtype=np.uint8),
+        None,
+        fx=float(zoom_value),
+        fy=float(zoom_value),
+        interpolation=cv2.INTER_NEAREST,
+    )
+
+
+def _mask_patch_bounds(mask: np.ndarray, *, padding: int) -> tuple[int, int, int, int] | None:
+    ys, xs = np.nonzero(np.asarray(mask, dtype=np.uint8) > 0)
+    if ys.size == 0 or xs.size == 0:
+        return None
+    pad = max(0, int(padding))
+    return (
+        max(0, int(xs.min()) - pad),
+        int(xs.max()) + pad + 1,
+        max(0, int(ys.min()) - pad),
+        int(ys.max()) + pad + 1,
+    )
+
+
+def _resolve_active_patch_bounds(
+    roi_shape: tuple[int, int],
+    anchor_mask: np.ndarray,
+    source_mask: np.ndarray,
+    *,
+    padding: int,
+) -> tuple[int, int, int, int]:
+    roi_h = int(roi_shape[0])
+    roi_w = int(roi_shape[1])
+    combined_mask = np.logical_or(
+        np.asarray(anchor_mask, dtype=np.uint8) > 0,
+        np.asarray(source_mask, dtype=np.uint8) > 0,
+    ).astype(np.uint8)
+    bounds = _mask_patch_bounds(combined_mask, padding=padding)
+    if bounds is not None:
+        x0, x1, y0, y1 = bounds
+        return max(0, x0), min(roi_w, x1), max(0, y0), min(roi_h, y1)
+
+    pad = max(1, int(padding))
+    cx = roi_w // 2
+    cy = roi_h // 2
+    x0 = max(0, cx - pad)
+    x1 = min(roi_w, cx + pad + 1)
+    y0 = max(0, cy - pad)
+    y1 = min(roi_h, cy + pad + 1)
+    return x0, x1, y0, y1
+
+
+def _shift_patch_bounds(
+    bounds: tuple[int, int, int, int],
+    roi_shape: tuple[int, int],
+    *,
+    dx: int = 0,
+    dy: int = 0,
+) -> tuple[int, int, int, int]:
+    roi_h = int(roi_shape[0])
+    roi_w = int(roi_shape[1])
+    x0, x1, y0, y1 = (int(value) for value in bounds)
+    width = max(1, x1 - x0)
+    height = max(1, y1 - y0)
+
+    if width >= roi_w:
+        new_x0 = 0
+        new_x1 = roi_w
+    else:
+        new_x0 = min(max(0, x0 + int(dx)), roi_w - width)
+        new_x1 = new_x0 + width
+
+    if height >= roi_h:
+        new_y0 = 0
+        new_y1 = roi_h
+    else:
+        new_y0 = min(max(0, y0 + int(dy)), roi_h - height)
+        new_y1 = new_y0 + height
+
+    return int(new_x0), int(new_x1), int(new_y0), int(new_y1)
+
+
+def _fill_polygon_mask(
+    mask: np.ndarray,
+    roi_points: Sequence[tuple[int, int]],
+    *,
+    fill_value: int,
+    invert: bool = False,
+) -> bool:
+    if len(roi_points) < 3:
+        return False
+    mask_arr = np.asarray(mask, dtype=np.uint8)
+    roi_h, roi_w = (int(dim) for dim in mask_arr.shape[:2])
+    polygon = np.asarray(roi_points, dtype=np.int32)
+    polygon[:, 0] = np.clip(polygon[:, 0], 0, max(0, roi_w - 1))
+    polygon[:, 1] = np.clip(polygon[:, 1], 0, max(0, roi_h - 1))
+    if invert:
+        fill_mask = np.zeros(mask_arr.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(fill_mask, [polygon.reshape(-1, 1, 2)], 1)
+        mask_arr[fill_mask == 0] = np.uint8(fill_value)
+    else:
+        cv2.fillPoly(mask_arr, [polygon.reshape(-1, 1, 2)], int(fill_value))
+    return True
+
+
+def _append_lasso_point(
+    roi_points: list[tuple[int, int]],
+    point: tuple[int, int],
+    *,
+    min_step_px: int = LASSO_MIN_POINT_STEP_PX,
+) -> bool:
+    candidate = (int(point[0]), int(point[1]))
+    if not roi_points:
+        roi_points.append(candidate)
+        return True
+    last_x, last_y = roi_points[-1]
+    dx = int(candidate[0]) - int(last_x)
+    dy = int(candidate[1]) - int(last_y)
+    min_step = max(0, int(min_step_px))
+    if (dx * dx) + (dy * dy) < (min_step * min_step):
+        return False
+    roi_points.append(candidate)
+    return True
+
+
+def _panel_xy_for_roi_point(
+    panel_region: ReviewPanelRegion,
+    roi_point: tuple[int, int],
+) -> tuple[int, int]:
+    zoom = max(1, int(panel_region.zoom))
+    local_x = int(roi_point[0]) - int(panel_region.patch_x0)
+    local_y = int(roi_point[1]) - int(panel_region.patch_y0)
+    panel_x = int(panel_region.x + round(float(local_x) * zoom))
+    panel_y = int(panel_region.y + int(panel_region.label_h) + round(float(local_y) * zoom))
+    return panel_x, panel_y
+
+
+def _draw_panel_cursor(
+    image: np.ndarray,
+    *,
+    panel_region: ReviewPanelRegion | None,
+    roi_xy: tuple[int, int] | None,
+    brush_radius: int,
+    color: tuple[int, int, int],
+    style: str = "circle",
+) -> None:
+    if panel_region is None or roi_xy is None:
+        return
+    local_roi_x = int(roi_xy[0]) - int(panel_region.patch_x0)
+    local_roi_y = int(roi_xy[1]) - int(panel_region.patch_y0)
+    patch_w = int(panel_region.patch_w) if panel_region.patch_w is not None else 0
+    patch_h = int(panel_region.patch_h) if panel_region.patch_h is not None else 0
+    if patch_w > 0 and patch_h > 0 and not (0 <= local_roi_x < patch_w and 0 <= local_roi_y < patch_h):
+        return
+    zoom = max(1, int(panel_region.zoom))
+    center_x = int(panel_region.x + round(float(local_roi_x) * zoom))
+    center_y = int(panel_region.y + int(panel_region.label_h) + round(float(local_roi_y) * zoom))
+    if str(style).strip().lower() == "crosshair":
+        marker_size = max(11, int(round(float(max(1, brush_radius)) * zoom * 3.0)))
+        cv2.drawMarker(
+            image,
+            (center_x, center_y),
+            color,
+            cv2.MARKER_CROSS,
+            markerSize=marker_size,
+            thickness=1,
+            line_type=cv2.LINE_AA,
+        )
+        return
+    cv2.circle(
+        image,
+        (center_x, center_y),
+        max(1, int(round(float(brush_radius) * zoom))),
+        color,
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def _draw_lasso_overlay(
+    image: np.ndarray,
+    *,
+    panel_region: ReviewPanelRegion | None,
+    roi_points: Sequence[tuple[int, int]],
+    cursor_roi_xy: tuple[int, int] | None,
+) -> None:
+    if panel_region is None or not roi_points:
+        return
+    panel_points = np.asarray(
+        [_panel_xy_for_roi_point(panel_region, point) for point in roi_points],
+        dtype=np.int32,
+    )
+    if panel_points.shape[0] >= 2:
+        cv2.polylines(
+            image,
+            [panel_points.reshape(-1, 1, 2)],
+            False,
+            LASSO_OUTLINE_COLOR,
+            LASSO_LINE_THICKNESS,
+            cv2.LINE_AA,
+        )
+    marker_indices = {0, int(panel_points.shape[0] - 1)}
+    for idx in sorted(marker_indices):
+        point = panel_points[idx]
+        color = LASSO_START_COLOR if idx == 0 else LASSO_OUTLINE_COLOR
+        cv2.circle(
+            image,
+            (int(point[0]), int(point[1])),
+            LASSO_POINT_RADIUS,
+            color,
+            -1,
+            cv2.LINE_AA,
+        )
+    if cursor_roi_xy is not None:
+        cursor_point = _panel_xy_for_roi_point(panel_region, cursor_roi_xy)
+        last_point = tuple(int(v) for v in panel_points[-1])
+        cv2.line(
+            image,
+            last_point,
+            cursor_point,
+            LASSO_PREVIEW_COLOR,
+            LASSO_PREVIEW_THICKNESS,
+            cv2.LINE_AA,
+        )
+
+
+def _stack_h(
+    panels: Sequence[np.ndarray],
+    *,
+    gap: int = PANEL_GAP,
+) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
+    if not panels:
+        return np.zeros((1, 1, 3), dtype=np.uint8), []
+    normalized = [np.asarray(panel, dtype=np.uint8) for panel in panels]
+    height = max(int(panel.shape[0]) for panel in normalized)
+    width = sum(int(panel.shape[1]) for panel in normalized) + max(0, len(normalized) - 1) * int(gap)
+    stacked = np.zeros((height, width, 3), dtype=np.uint8)
+    regions: list[tuple[int, int, int, int]] = []
+    offset_x = 0
+    for panel in normalized:
+        panel_h = int(panel.shape[0])
+        panel_w = int(panel.shape[1])
+        stacked[0:panel_h, offset_x : offset_x + panel_w] = panel
+        regions.append((int(offset_x), 0, panel_w, panel_h))
+        offset_x += panel_w + int(gap)
+    return stacked, regions
+
+
+def _stack_v(
+    panels: Sequence[np.ndarray],
+    *,
+    gap: int = PANEL_GAP,
+) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
+    if not panels:
+        return np.zeros((1, 1, 3), dtype=np.uint8), []
+    normalized = [np.asarray(panel, dtype=np.uint8) for panel in panels]
+    width = max(int(panel.shape[1]) for panel in normalized)
+    height = sum(int(panel.shape[0]) for panel in normalized) + max(0, len(normalized) - 1) * int(gap)
+    stacked = np.zeros((height, width, 3), dtype=np.uint8)
+    regions: list[tuple[int, int, int, int]] = []
+    offset_y = 0
+    for panel in normalized:
+        panel_h = int(panel.shape[0])
+        panel_w = int(panel.shape[1])
+        stacked[offset_y : offset_y + panel_h, 0:panel_w] = panel
+        regions.append((0, int(offset_y), panel_w, panel_h))
+        offset_y += panel_h + int(gap)
+    return stacked, regions
+
+
+def _map_review_pointer_to_roi(
+    *,
+    x: int,
+    y: int,
+    display_scale: float,
+    panel_regions: Mapping[str, ReviewPanelRegion],
+    roi_shape: tuple[int, int],
+) -> tuple[str, int, int] | None:
+    raw_x = int(x / display_scale) if display_scale > 0 else int(x)
+    raw_y = int(y / display_scale) if display_scale > 0 else int(y)
+    roi_h = int(roi_shape[0])
+    roi_w = int(roi_shape[1])
+    for panel_name in ("edit", "all", "roi"):
+        region = panel_regions.get(panel_name)
+        if region is None:
+            continue
+        if not (region.x <= raw_x < region.x + region.width and region.y <= raw_y < region.y + region.height):
+            continue
+        local_x = raw_x - region.x
+        local_y = raw_y - region.y
+        label_h = max(0, int(region.label_h))
+        if local_y < label_h:
+            return None
+        zoom = max(1, int(region.zoom))
+        patch_x = int(local_x / zoom)
+        patch_y = int((local_y - label_h) / zoom)
+        patch_w = int(region.patch_w) if region.patch_w is not None else roi_w
+        patch_h = int(region.patch_h) if region.patch_h is not None else roi_h
+        if not (0 <= patch_x < patch_w and 0 <= patch_y < patch_h):
+            return None
+        roi_x = int(region.patch_x0) + patch_x
+        roi_y = int(region.patch_y0) + patch_y
+        if 0 <= roi_x < roi_w and 0 <= roi_y < roi_h:
+            return region.name, roi_x, roi_y
+        return None
+    return None
+
+
+def _mouse_modifier_state(flags: int) -> tuple[bool, bool, bool]:
+    ctrl_down = bool(flags & cv2.EVENT_FLAG_CTRLKEY)
+    shift_down = bool(flags & cv2.EVENT_FLAG_SHIFTKEY)
+    left_down = bool(flags & cv2.EVENT_FLAG_LBUTTON)
+    return ctrl_down, shift_down, left_down
+
+
+def _resolve_erase_mode(base_erase_mode: bool, shift_down: bool) -> bool:
+    # Shift acts as a temporary inverse while drawing.
+    return (not base_erase_mode) if shift_down else base_erase_mode
 
 
 def launch_review(
@@ -2275,6 +2657,9 @@ def launch_review(
     review_intended_use: str = DEFAULT_REVIEW_INTENDED_USE,
     reviewer: Optional[str] = None,
     review_notes: Optional[str] = None,
+    edit_zoom: int = DEFAULT_EDIT_ZOOM,
+    edit_padding: int = DEFAULT_EDIT_PADDING,
+    display_scale: float = DISPLAY_SCALE,
 ) -> str:
     root = open_zarr_root(zarr_path, mode="a")
     source, refined = prepare_refined_subject_run(
@@ -2311,88 +2696,365 @@ def launch_review(
     brush_radius = DEFAULT_BRUSH_RADIUS
     drawing = False
     erase_mode = False
-    display_scale = max(1.0, float(DISPLAY_SCALE))
-    cursor_pos: Optional[tuple[str, int, int]] = None
+    lasso_mode = False
+    lasso_drawing = False
+    lasso_points: list[tuple[int, int]] = []
+    edit_zoom = max(1, min(int(edit_zoom), MAX_EDIT_ZOOM))
+    edit_padding = max(1, min(int(edit_padding), MAX_EDIT_PADDING))
+    display_scale = max(MIN_WINDOW_SCALE_PERCENT / 100.0, float(display_scale))
 
     _require_gui_display()
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
     cv2.resizeWindow(WINDOW_NAME, 1900, 1100)
+    cv2.createTrackbar("Padding", WINDOW_NAME, int(edit_padding), MAX_EDIT_PADDING, _noop_trackbar)
+    cv2.createTrackbar("Edit Zoom", WINDOW_NAME, int(edit_zoom), MAX_EDIT_ZOOM, _noop_trackbar)
+    cv2.createTrackbar(
+        "Scale %",
+        WINDOW_NAME,
+        max(
+            MIN_WINDOW_SCALE_PERCENT,
+            min(int(round(float(display_scale) * 100.0)), MAX_WINDOW_SCALE_PERCENT),
+        ),
+        MAX_WINDOW_SCALE_PERCENT,
+        _noop_trackbar,
+    )
 
     refined_masks_arr = refined.group["masks_roi"]
     _primary_source, component_sources = _load_refined_component_source_runs(root, refined, default_source=source)
-    display_layout = {"all": (0, 0, 0, 0), "edit": (0, 0, 0, 0)}
+    cv2.namedWindow(EDIT_WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.resizeWindow(EDIT_WINDOW_NAME, 1200, 900)
+
+    main_display_layout: dict[str, ReviewPanelRegion] = {}
+    edit_display_layout: dict[str, ReviewPanelRegion] = {}
     roi_img: np.ndarray | None = None
     original_masks: list[np.ndarray] = []
     edit_masks: list[np.ndarray] = []
+    patch_anchor_masks: list[np.ndarray] = []
+    patch_pan_offsets: list[tuple[int, int]] = []
+    cached_roi_panel: np.ndarray | None = None
+    cached_source_panel: np.ndarray | None = None
+    cached_refined_panel: np.ndarray | None = None
+    cached_active_panel: np.ndarray | None = None
+    cached_main_combined: np.ndarray | None = None
+    cached_edit_combined: np.ndarray | None = None
+    cached_header_signature: tuple[object, ...] | None = None
+    last_draw_signature: tuple[int, int, bool, int, int] | None = None
+    cursor_roi_xy: tuple[int, int] | None = None
+    needs_main_redraw = False
+    needs_edit_redraw = False
+
+    def request_redraw(*, main: bool = True, edit: bool = True) -> None:
+        nonlocal needs_main_redraw, needs_edit_redraw
+        if main:
+            needs_main_redraw = True
+        if edit:
+            needs_edit_redraw = True
+
+    def invalidate_main_combined_cache(*, reset_layout: bool = False) -> None:
+        nonlocal cached_main_combined, cached_header_signature, main_display_layout
+        cached_main_combined = None
+        cached_header_signature = None
+        if reset_layout:
+            main_display_layout = {}
+
+    def invalidate_edit_combined_cache(*, reset_layout: bool = False) -> None:
+        nonlocal cached_edit_combined, edit_display_layout
+        cached_edit_combined = None
+        if reset_layout:
+            edit_display_layout = {}
+
+    def invalidate_active_panel_cache() -> None:
+        nonlocal cached_active_panel
+        cached_active_panel = None
+        invalidate_edit_combined_cache(reset_layout=True)
+
+    def invalidate_source_panel_cache() -> None:
+        nonlocal cached_source_panel
+        cached_source_panel = None
+        invalidate_edit_combined_cache(reset_layout=True)
+
+    def invalidate_refined_panel_cache() -> None:
+        nonlocal cached_refined_panel
+        cached_refined_panel = None
+        invalidate_main_combined_cache(reset_layout=True)
+
+    def invalidate_active_component_caches() -> None:
+        invalidate_source_panel_cache()
+        invalidate_active_panel_cache()
+        invalidate_main_combined_cache(reset_layout=True)
+
+    def invalidate_mask_panel_caches(*, refresh_main: bool = True) -> None:
+        if refresh_main:
+            invalidate_refined_panel_cache()
+        invalidate_active_panel_cache()
+
+    def invalidate_all_panel_caches() -> None:
+        nonlocal cached_roi_panel, cached_source_panel, cached_refined_panel, cached_active_panel, main_display_layout, edit_display_layout
+        cached_roi_panel = None
+        cached_source_panel = None
+        cached_refined_panel = None
+        cached_active_panel = None
+        main_display_layout = {}
+        edit_display_layout = {}
+        invalidate_main_combined_cache(reset_layout=True)
+        invalidate_edit_combined_cache(reset_layout=True)
+
+    def _clear_lasso() -> None:
+        nonlocal lasso_points, lasso_drawing
+        lasso_points = []
+        lasso_drawing = False
 
     def load_current_roi() -> None:
-        nonlocal roi_img, original_masks, edit_masks
+        nonlocal roi_img, original_masks, edit_masks, patch_anchor_masks, patch_pan_offsets, cursor_roi_xy, last_draw_signature
         roi_img = np.asarray(roi_images[current_pos], dtype=np.uint8)
         current_masks = np.asarray(refined_masks_arr[current_pos], dtype=np.uint8)
         original_masks = [current_masks[idx].copy() for idx in range(len(component_names))]
         edit_masks = [current_masks[idx].copy() for idx in range(len(component_names))]
+        patch_anchor_masks = []
+        patch_pan_offsets = [(0, 0) for _ in component_names]
+        for comp_idx, component_name in enumerate(component_names):
+            source_mask = _source_mask_for_resolved_component(component_sources, component_name, current_pos)
+            patch_anchor_masks.append(
+                np.logical_or(
+                    np.asarray(original_masks[comp_idx], dtype=np.uint8) > 0,
+                    np.asarray(source_mask, dtype=np.uint8) > 0,
+                ).astype(np.uint8)
+            )
+        cursor_roi_xy = None
+        last_draw_signature = None
+        _clear_lasso()
+        invalidate_all_panel_caches()
 
-    def update_display() -> None:
+    def update_display(*, refresh_main: bool = True, refresh_edit: bool = True) -> None:
+        nonlocal main_display_layout, edit_display_layout, cached_roi_panel, cached_source_panel, cached_refined_panel, cached_active_panel, cached_main_combined, cached_edit_combined, cached_header_signature, needs_main_redraw, needs_edit_redraw
         if roi_img is None:
             return
-        source_active_mask = _source_mask_for_resolved_component(component_sources, component_names[active_idx], current_pos)
-        source_panel = (
-            _panel(
-                f"Source {component_names[active_idx]}",
-                _overlay_components(roi_img, (component_names[active_idx],), (source_active_mask,)),
+        focus_color = COMPONENT_COLORS.get(component_names[active_idx], (255, 255, 255))
+        if refresh_edit and not refresh_main and cached_edit_combined is not None and edit_display_layout:
+            edit_combined = cached_edit_combined.copy()
+            _draw_lasso_overlay(
+                edit_combined,
+                panel_region=edit_display_layout.get("edit"),
+                roi_points=lasso_points,
+                cursor_roi_xy=cursor_roi_xy if lasso_mode else None,
             )
-            if np.count_nonzero(source_active_mask) > 0
-            else _blank_panel_like(roi_img, f"Source {component_names[active_idx]}", "Unavailable / empty")
+            _draw_panel_cursor(
+                edit_combined,
+                panel_region=edit_display_layout.get("edit"),
+                roi_xy=cursor_roi_xy,
+                brush_radius=brush_radius,
+                color=LASSO_OUTLINE_COLOR if lasso_mode else focus_color,
+                style="crosshair" if lasso_mode else "circle",
+            )
+            if display_scale != 1.0:
+                edit_combined = cv2.resize(
+                    edit_combined,
+                    None,
+                    fx=display_scale,
+                    fy=display_scale,
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            cv2.imshow(EDIT_WINDOW_NAME, edit_combined)
+            needs_edit_redraw = False
+            return
+        source_active_mask = _source_mask_for_resolved_component(component_sources, component_names[active_idx], current_pos)
+        active_mask = np.asarray(edit_masks[active_idx], dtype=np.uint8)
+        anchor_mask = (
+            np.asarray(patch_anchor_masks[active_idx], dtype=np.uint8)
+            if active_idx < len(patch_anchor_masks)
+            else active_mask
         )
-        roi_panel = _panel("Crop ROI", cv2.cvtColor(roi_img, cv2.COLOR_GRAY2BGR))
-        refined_panel = _panel("Refined Overlay", _overlay_components(roi_img, component_names, edit_masks))
-        active_mask = edit_masks[active_idx]
-        active_panel = _panel(
-            f"Editor {component_names[active_idx]}",
-            _overlay_components(roi_img, (component_names[active_idx],), (active_mask,)),
+        base_patch_bounds = _resolve_active_patch_bounds(
+            tuple(int(dim) for dim in roi_img.shape[:2]),
+            anchor_mask,
+            source_active_mask,
+            padding=edit_padding,
         )
-        active_component_group = refined.group.require_group("components").require_group(component_names[active_idx])
-        summary_lines = _format_component_summary_lines(
-            refined.group,
-            active_component_group,
-            comp_idx=active_idx,
-            roi_idx=current_pos,
+        patch_pan_x, patch_pan_y = patch_pan_offsets[active_idx] if active_idx < len(patch_pan_offsets) else (0, 0)
+        patch_x0, patch_x1, patch_y0, patch_y1 = _shift_patch_bounds(
+            base_patch_bounds,
+            tuple(int(dim) for dim in roi_img.shape[:2]),
+            dx=int(patch_pan_x),
+            dy=int(patch_pan_y),
         )
-        active_panel = _draw_summary_lines(active_panel, summary_lines)
+        crop_patch = np.asarray(roi_img[patch_y0:patch_y1, patch_x0:patch_x1], dtype=np.uint8)
+        source_patch_mask = np.asarray(source_active_mask[patch_y0:patch_y1, patch_x0:patch_x1], dtype=np.uint8)
+        active_patch_mask = np.asarray(active_mask[patch_y0:patch_y1, patch_x0:patch_x1], dtype=np.uint8)
+        if refresh_main and cached_roi_panel is None:
+            cached_roi_panel = _panel("Crop ROI", cv2.cvtColor(roi_img, cv2.COLOR_GRAY2BGR))
+        if refresh_edit and cached_source_panel is None:
+            cached_source_panel = (
+                _panel(
+                    f"Source Patch {component_names[active_idx]}",
+                    _overlay_components(crop_patch, (component_names[active_idx],), (source_patch_mask,)),
+                )
+                if np.count_nonzero(source_patch_mask) > 0
+                else _blank_panel_like(crop_patch, f"Source Patch {component_names[active_idx]}", "Unavailable / empty")
+            )
+        if refresh_main and cached_refined_panel is None:
+            cached_refined_panel = _panel("Refined Overlay", _overlay_components(roi_img, component_names, edit_masks))
+        if refresh_edit and cached_active_panel is None:
+            active_panel = _panel(
+                f"Edit Patch {component_names[active_idx]} x{int(edit_zoom)}",
+                _scale_panel_image(
+                    _overlay_components(crop_patch, (component_names[active_idx],), (active_patch_mask,)),
+                    zoom=int(edit_zoom),
+                ),
+            )
+            cached_active_panel = active_panel
 
-        header = refined_panel.copy()
         state_payload = dict(refined.group.attrs.get("component_review_statuses") or {}).get(component_names[active_idx], {})
         state_text = str(state_payload.get("state") or "pending")
-        cv2.putText(
-            header,
-            f"ROI {current_pos + 1}/{total_rois}  Active: {component_names[active_idx]}  Brush: {brush_radius}  Review: {state_text}",
-            (10, int(header.shape[0]) - 18),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
+        brush_mode_text = "erase" if erase_mode else "paint"
+        tool_mode_text = "lasso" if lasso_mode else "brush"
+        header_signature = (
+            int(current_pos),
+            int(active_idx),
+            int(brush_radius),
+            str(state_text),
+            bool(erase_mode),
+            bool(lasso_mode),
+            int(edit_padding),
+            int(patch_pan_x),
+            int(patch_pan_y),
         )
-        top = np.hstack([roi_panel, source_panel])
-        bottom = np.hstack([header, active_panel])
-        combined = np.vstack([top, bottom])
+        if refresh_main and (cached_main_combined is None or cached_header_signature != header_signature):
+            header = cached_refined_panel.copy()
+            cv2.putText(
+                header,
+                (
+                    f"ROI {current_pos + 1}/{total_rois}  Active: {component_names[active_idx]}  "
+                    f"Tool: {tool_mode_text} ({brush_mode_text})  Brush: {brush_radius}  Padding: {edit_padding}  "
+                    f"Pan: {patch_pan_x:+d},{patch_pan_y:+d}  Review: {state_text}"
+                ),
+                (10, int(header.shape[0]) - 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+            )
+            cached_main_combined, main_regions = _stack_h((cached_roi_panel, header), gap=PANEL_GAP)
+            roi_region = main_regions[0]
+            header_region = main_regions[1]
+            main_display_layout = {
+                "roi": ReviewPanelRegion(
+                    name="roi",
+                    x=int(roi_region[0]),
+                    y=int(roi_region[1]),
+                    width=int(roi_region[2]),
+                    height=int(roi_region[3]),
+                    zoom=1,
+                    label_h=int(PANEL_LABEL_HEIGHT),
+                    patch_x0=0,
+                    patch_y0=0,
+                    patch_w=int(roi_img.shape[1]),
+                    patch_h=int(roi_img.shape[0]),
+                ),
+                "all": ReviewPanelRegion(
+                    name="all",
+                    x=int(header_region[0]),
+                    y=int(header_region[1]),
+                    width=int(header_region[2]),
+                    height=int(header_region[3]),
+                    zoom=1,
+                    label_h=int(PANEL_LABEL_HEIGHT),
+                    patch_x0=0,
+                    patch_y0=0,
+                    patch_w=int(roi_img.shape[1]),
+                    patch_h=int(roi_img.shape[0]),
+                ),
+            }
+            cached_header_signature = header_signature
+        if refresh_edit and cached_edit_combined is None:
+            cached_edit_combined, edit_regions = _stack_h((cached_source_panel, cached_active_panel), gap=PANEL_GAP)
+            active_region = edit_regions[1]
+            edit_display_layout = {
+                "edit": ReviewPanelRegion(
+                    name="edit",
+                    x=int(active_region[0]),
+                    y=int(active_region[1]),
+                    width=int(active_region[2]),
+                    height=int(active_region[3]),
+                    zoom=int(edit_zoom),
+                    label_h=int(PANEL_LABEL_HEIGHT),
+                    patch_x0=int(patch_x0),
+                    patch_y0=int(patch_y0),
+                    patch_w=int(crop_patch.shape[1]),
+                    patch_h=int(crop_patch.shape[0]),
+                ),
+            }
 
-        h = int(roi_img.shape[0])
-        w = int(roi_img.shape[1])
-        display_layout["all"] = (0, h, w, h)
-        display_layout["edit"] = (w, h, w, h)
+        if refresh_main:
+            main_combined = cached_main_combined.copy()
+            for panel_name in ("roi", "all"):
+                panel_region = main_display_layout.get(panel_name)
+                if panel_region is None:
+                    continue
+                cv2.rectangle(
+                    main_combined,
+                    (
+                        int(panel_region.x + patch_x0),
+                        int(panel_region.y + panel_region.label_h + patch_y0),
+                    ),
+                    (
+                        int(panel_region.x + patch_x1 - 1),
+                        int(panel_region.y + panel_region.label_h + patch_y1 - 1),
+                    ),
+                    focus_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+        if refresh_edit:
+            edit_combined = cached_edit_combined.copy()
+            _draw_lasso_overlay(
+                edit_combined,
+                panel_region=edit_display_layout.get("edit"),
+                roi_points=lasso_points,
+                cursor_roi_xy=cursor_roi_xy if lasso_mode else None,
+            )
 
-        if cursor_pos is not None:
-            panel_name, local_x, local_y = cursor_pos
-            base_x, base_y, panel_w, panel_h = display_layout[panel_name]
-            x1 = max(base_x, base_x + local_x - brush_radius)
-            y1 = max(base_y, base_y + local_y - brush_radius)
-            x2 = min(base_x + panel_w - 1, base_x + local_x + brush_radius)
-            y2 = min(base_y + panel_h - 1, base_y + local_y + brush_radius)
-            cv2.rectangle(combined, (x1, y1), (x2, y2), COMPONENT_COLORS.get(component_names[active_idx], (255, 255, 255)), 1)
+        if cursor_roi_xy is not None and refresh_main:
+            for panel_name in ("roi", "all"):
+                _draw_panel_cursor(
+                    main_combined,
+                    panel_region=main_display_layout.get(panel_name),
+                    roi_xy=cursor_roi_xy,
+                    brush_radius=brush_radius,
+                    color=LASSO_OUTLINE_COLOR if lasso_mode else focus_color,
+                    style="crosshair" if lasso_mode else "circle",
+                )
+        if cursor_roi_xy is not None and refresh_edit:
+            _draw_panel_cursor(
+                edit_combined,
+                panel_region=edit_display_layout.get("edit"),
+                roi_xy=cursor_roi_xy,
+                brush_radius=brush_radius,
+                color=LASSO_OUTLINE_COLOR if lasso_mode else focus_color,
+                style="crosshair" if lasso_mode else "circle",
+            )
 
-        if display_scale != 1.0:
-            combined = cv2.resize(combined, None, fx=display_scale, fy=display_scale, interpolation=cv2.INTER_NEAREST)
-        cv2.imshow(WINDOW_NAME, combined)
+        if refresh_main and display_scale != 1.0:
+            main_combined = cv2.resize(
+                main_combined,
+                None,
+                fx=display_scale,
+                fy=display_scale,
+                interpolation=cv2.INTER_NEAREST,
+            )
+        if refresh_edit and display_scale != 1.0:
+            edit_combined = cv2.resize(
+                edit_combined,
+                None,
+                fx=display_scale,
+                fy=display_scale,
+                interpolation=cv2.INTER_NEAREST,
+            )
+        if refresh_main:
+            cv2.imshow(WINDOW_NAME, main_combined)
+            needs_main_redraw = False
+        if refresh_edit:
+            cv2.imshow(EDIT_WINDOW_NAME, edit_combined)
+            needs_edit_redraw = False
 
     def save_current() -> None:
         stacked = np.stack(edit_masks, axis=0)
@@ -2402,60 +3064,114 @@ def launch_review(
             roi_idx=current_pos,
             edited_masks=stacked,
             component_sources=component_sources,
+            component_names=(component_names[active_idx],),
         )
+        invalidate_mask_panel_caches(refresh_main=True)
+        request_redraw(main=True, edit=True)
         print(f"Saved refined subject masks for ROI {current_pos}.")
 
-    def on_mouse(event: int, x: int, y: int, _flags: int, _param: object) -> None:
-        nonlocal drawing, erase_mode, cursor_pos
-        if display_scale != 1.0:
-            x = int(x / display_scale)
-            y = int(y / display_scale)
-
-        edit_x, edit_y, edit_w, edit_h = display_layout["edit"]
-        all_x, all_y, all_w, all_h = display_layout["all"]
-        in_edit = edit_x <= x < edit_x + edit_w and edit_y <= y < edit_y + edit_h
-        in_all = all_x <= x < all_x + all_w and all_y <= y < all_y + all_h
-        if not (in_edit or in_all):
-            if cursor_pos is not None:
-                cursor_pos = None
-                update_display()
-            if event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
-                drawing = False
+    def _pan_active_patch(dx: int, dy: int) -> None:
+        if active_idx >= len(patch_pan_offsets):
             return
-        if in_edit:
-            local_x = x - edit_x
-            local_y = y - edit_y
-            panel_name = "edit"
-        else:
-            local_x = x - all_x
-            local_y = y - all_y
-            panel_name = "all"
+        current_dx, current_dy = patch_pan_offsets[active_idx]
+        updated = (int(current_dx) + int(dx), int(current_dy) + int(dy))
+        if updated == (int(current_dx), int(current_dy)):
+            return
+        patch_pan_offsets[active_idx] = updated
+        invalidate_active_component_caches()
+        request_redraw(main=True, edit=True)
+
+    def _recenter_active_patch() -> None:
+        if active_idx >= len(patch_pan_offsets):
+            return
+        if patch_pan_offsets[active_idx] == (0, 0):
+            return
+        patch_pan_offsets[active_idx] = (0, 0)
+        invalidate_active_component_caches()
+        request_redraw(main=True, edit=True)
+
+    def on_edit_mouse(event: int, x: int, y: int, flags: int, _param: object) -> None:
+        nonlocal drawing, erase_mode, cursor_roi_xy, last_draw_signature, lasso_points, lasso_drawing
+        if roi_img is None:
+            return
+        ctrl_down, shift_down, left_down = _mouse_modifier_state(int(flags))
+        mapped = _map_review_pointer_to_roi(
+            x=int(x),
+            y=int(y),
+            display_scale=float(display_scale),
+            panel_regions=edit_display_layout,
+            roi_shape=tuple(int(dim) for dim in roi_img.shape[:2]),
+        )
+        if mapped is None:
+            if cursor_roi_xy is not None:
+                cursor_roi_xy = None
+                request_redraw(main=False, edit=True)
+            if lasso_mode and (event == cv2.EVENT_LBUTTONUP or not left_down):
+                lasso_drawing = False
+            if not lasso_mode and (event == cv2.EVENT_LBUTTONUP or not left_down):
+                drawing = False
+                last_draw_signature = None
+            return
+        _panel_name, roi_x, roi_y = mapped
+
+        if lasso_mode:
+            point = (int(roi_x), int(roi_y))
+            cursor_roi_xy = point
+            if event == cv2.EVENT_LBUTTONDOWN:
+                lasso_drawing = True
+                _append_lasso_point(lasso_points, point)
+                request_redraw(main=False, edit=True)
+            elif event == cv2.EVENT_MOUSEMOVE:
+                if lasso_drawing and left_down:
+                    if _append_lasso_point(lasso_points, point):
+                        request_redraw(main=False, edit=True)
+                else:
+                    request_redraw(main=False, edit=True)
+            elif event == cv2.EVENT_LBUTTONUP:
+                if lasso_drawing:
+                    _append_lasso_point(lasso_points, point)
+                lasso_drawing = False
+                request_redraw(main=False, edit=True)
+            return
 
         if event == cv2.EVENT_LBUTTONDOWN:
-            drawing = True
-            erase_mode = False
-            cursor_pos = (panel_name, int(local_x), int(local_y))
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            drawing = True
-            erase_mode = True
-            cursor_pos = (panel_name, int(local_x), int(local_y))
-        elif event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
+            drawing = bool(ctrl_down)
+            last_draw_signature = None
+            cursor_roi_xy = (int(roi_x), int(roi_y))
+        elif event == cv2.EVENT_MOUSEMOVE and drawing:
+            if not (ctrl_down and left_down):
+                if drawing:
+                    invalidate_refined_panel_cache()
+                    request_redraw(main=True, edit=True)
+                drawing = False
+                last_draw_signature = None
+        elif event == cv2.EVENT_LBUTTONUP:
+            if drawing:
+                invalidate_refined_panel_cache()
+                request_redraw(main=True, edit=True)
             drawing = False
-            cursor_pos = None
-            update_display()
+            last_draw_signature = None
+            cursor_roi_xy = None
+            if not needs_main_redraw:
+                request_redraw(main=False, edit=True)
 
         if event == cv2.EVENT_MOUSEMOVE and not drawing:
-            cursor_pos = (panel_name, int(local_x), int(local_y))
-            update_display()
+            cursor_roi_xy = (int(roi_x), int(roi_y))
+            request_redraw(main=False, edit=True)
         elif drawing:
-            cursor_pos = (panel_name, int(local_x), int(local_y))
-            color = 0 if erase_mode else 1
-            cv2.circle(edit_masks[active_idx], (local_x, local_y), brush_radius, color, -1)
-            update_display()
+            cursor_roi_xy = (int(roi_x), int(roi_y))
+            current_erase_mode = _resolve_erase_mode(bool(erase_mode), shift_down)
+            draw_signature = (int(roi_x), int(roi_y), bool(current_erase_mode), int(active_idx), int(brush_radius))
+            if last_draw_signature != draw_signature:
+                color = 0 if current_erase_mode else 1
+                cv2.circle(edit_masks[active_idx], (roi_x, roi_y), brush_radius, color, -1)
+                last_draw_signature = draw_signature
+                invalidate_mask_panel_caches(refresh_main=False)
+                request_redraw(main=False, edit=True)
 
-    cv2.setMouseCallback(WINDOW_NAME, on_mouse)
+    cv2.setMouseCallback(EDIT_WINDOW_NAME, on_edit_mouse)
     load_current_roi()
-    update_display()
+    request_redraw(main=True, edit=True)
 
     print("\nRefined Subject Mask Review")
     print(f"  Source run: subject_mask_runs/{source.run_name}")
@@ -2463,9 +3179,25 @@ def launch_review(
     print(f"  Crop run: {crop_run_name}")
     print(f"  Components: {', '.join(component_names)}")
     print("Controls:")
-    print("  Mouse: paint (LMB) / erase (RMB) on refined overlay or editor")
+    print(f"  Main window: {WINDOW_NAME}")
+    print(f"  Edit window: {EDIT_WINDOW_NAME}")
+    print("  Mouse on Edit window: hold Ctrl+LMB to draw")
+    print("  Mouse while drawing: hold Shift to temporarily invert brush mode")
     print("  1..9: select active component by order shown")
     print("  [ / ]: brush size")
+    print("  x: toggle brush mode (paint/erase)")
+    print("  v: toggle lasso fill mode")
+    print(
+        "  In lasso mode: click or drag LMB to add contour points, "
+        "f fills inside, g fills outside, e erases outside, u removes last point, d clears contour"
+    )
+    print("  Padding trackbar: expand/shrink the focused crop around the active mask")
+    print("  i/j/k/l: pan edit crop up/left/down/right")
+    print("  I/J/K/L: coarse pan edit crop up/left/down/right")
+    print("  c: recenter edit crop on the anchored mask bounds")
+    print("  - / =: decrease/increase editor zoom")
+    print("  , / .: decrease/increase window scale")
+    print("  Padding / Edit Zoom / Scale % trackbars: focused crop, editor zoom, and shared window scale")
     print("  s: save current ROI edits")
     print("  r: reset current ROI to stored refined masks")
     print("  n/p: next/previous ROI")
@@ -2475,37 +3207,152 @@ def launch_review(
     print("  P: mark active component pending")
     print("  q/ESC: quit")
 
+    def _adjust_trackbar(name: str, delta: int, minimum: int, maximum: int) -> int:
+        current = int(cv2.getTrackbarPos(name, WINDOW_NAME))
+        updated = max(int(minimum), min(int(maximum), current + int(delta)))
+        if updated != current:
+            cv2.setTrackbarPos(name, WINDOW_NAME, updated)
+        return updated
+
     while True:
-        key = cv2.waitKey(30) & 0xFF
+        current_padding = max(1, int(cv2.getTrackbarPos("Padding", WINDOW_NAME)))
+        current_edit_zoom = max(1, int(cv2.getTrackbarPos("Edit Zoom", WINDOW_NAME)))
+        current_scale_percent = max(MIN_WINDOW_SCALE_PERCENT, int(cv2.getTrackbarPos("Scale %", WINDOW_NAME)))
+        current_display_scale = float(current_scale_percent) / 100.0
+        if (
+            current_padding != int(edit_padding)
+            or current_edit_zoom != int(edit_zoom)
+            or abs(current_display_scale - float(display_scale)) > 1e-6
+        ):
+            if current_padding != int(edit_padding):
+                edit_padding = int(current_padding)
+                invalidate_active_component_caches()
+            if current_edit_zoom != int(edit_zoom):
+                invalidate_active_panel_cache()
+            edit_zoom = int(current_edit_zoom)
+            display_scale = float(current_display_scale)
+            request_redraw(main=True, edit=True)
+        if needs_main_redraw or needs_edit_redraw:
+            update_display(refresh_main=needs_main_redraw, refresh_edit=needs_edit_redraw)
+        wait_ms = 1 if drawing or needs_main_redraw or needs_edit_redraw else 30
+        key = cv2.waitKey(wait_ms) & 0xFF
         if key in (ord("q"), 27):
             break
         if ord("1") <= key <= ord("9"):
             choice = key - ord("1")
             if choice < len(component_names):
                 active_idx = choice
-                update_display()
+                _clear_lasso()
+                invalidate_active_component_caches()
+                request_redraw(main=True, edit=True)
         elif key == ord("["):
             brush_radius = max(1, brush_radius - 1)
-            update_display()
+            invalidate_main_combined_cache()
+            request_redraw(main=True, edit=True)
         elif key == ord("]"):
-            brush_radius = min(64, brush_radius + 1)
-            update_display()
+            brush_radius = min(MAX_BRUSH_RADIUS, brush_radius + 1)
+            invalidate_main_combined_cache()
+            request_redraw(main=True, edit=True)
+        elif key in (ord("v"), ord("V")):
+            lasso_mode = not bool(lasso_mode)
+            if not lasso_mode:
+                _clear_lasso()
+            invalidate_main_combined_cache()
+            request_redraw(main=True, edit=True)
+        elif key in (ord("u"), ord("U"), 8):
+            if lasso_points:
+                lasso_points.pop()
+                request_redraw(main=False, edit=True)
+        elif key in (ord("d"), ord("D")):
+            if lasso_points:
+                _clear_lasso()
+                request_redraw(main=False, edit=True)
+        elif key in (ord("f"), ord("F")):
+            fill_value = 0 if erase_mode else 1
+            if _fill_polygon_mask(edit_masks[active_idx], lasso_points, fill_value=fill_value):
+                _clear_lasso()
+                invalidate_mask_panel_caches(refresh_main=True)
+                request_redraw(main=True, edit=True)
+            else:
+                print("Lasso fill requires at least 3 contour points.")
+        elif key in (ord("g"), ord("G")):
+            fill_value = 0 if erase_mode else 1
+            if _fill_polygon_mask(edit_masks[active_idx], lasso_points, fill_value=fill_value, invert=True):
+                _clear_lasso()
+                invalidate_mask_panel_caches(refresh_main=True)
+                request_redraw(main=True, edit=True)
+            else:
+                print("Lasso inverse fill requires at least 3 contour points.")
+        elif key in (ord("e"), ord("E")):
+            if _fill_polygon_mask(edit_masks[active_idx], lasso_points, fill_value=0, invert=True):
+                _clear_lasso()
+                invalidate_mask_panel_caches(refresh_main=True)
+                request_redraw(main=True, edit=True)
+            else:
+                print("Lasso erase-outside requires at least 3 contour points.")
+        elif key == ord("i"):
+            _pan_active_patch(0, -PATCH_PAN_STEP)
+        elif key == ord("k"):
+            _pan_active_patch(0, PATCH_PAN_STEP)
+        elif key == ord("j"):
+            _pan_active_patch(-PATCH_PAN_STEP, 0)
+        elif key == ord("l"):
+            _pan_active_patch(PATCH_PAN_STEP, 0)
+        elif key == ord("I"):
+            _pan_active_patch(0, -PATCH_PAN_STEP_LARGE)
+        elif key == ord("K"):
+            _pan_active_patch(0, PATCH_PAN_STEP_LARGE)
+        elif key == ord("J"):
+            _pan_active_patch(-PATCH_PAN_STEP_LARGE, 0)
+        elif key == ord("L"):
+            _pan_active_patch(PATCH_PAN_STEP_LARGE, 0)
+        elif key in (ord("c"), ord("C")):
+            _recenter_active_patch()
+        elif key in (ord("-"), ord("_")):
+            edit_zoom = _adjust_trackbar("Edit Zoom", -1, 1, MAX_EDIT_ZOOM)
+            invalidate_active_panel_cache()
+            request_redraw(main=False, edit=True)
+        elif key in (ord("="), ord("+")):
+            edit_zoom = _adjust_trackbar("Edit Zoom", 1, 1, MAX_EDIT_ZOOM)
+            invalidate_active_panel_cache()
+            request_redraw(main=False, edit=True)
+        elif key == ord(","):
+            display_scale = float(_adjust_trackbar("Scale %", -10, MIN_WINDOW_SCALE_PERCENT, MAX_WINDOW_SCALE_PERCENT)) / 100.0
+            request_redraw(main=True, edit=True)
+        elif key == ord("."):
+            display_scale = float(_adjust_trackbar("Scale %", 10, MIN_WINDOW_SCALE_PERCENT, MAX_WINDOW_SCALE_PERCENT)) / 100.0
+            request_redraw(main=True, edit=True)
         elif key == ord("r"):
             edit_masks = [mask.copy() for mask in original_masks]
-            update_display()
+            _clear_lasso()
+            invalidate_mask_panel_caches(refresh_main=True)
+            request_redraw(main=True, edit=True)
+        elif key == ord("x"):
+            erase_mode = not bool(erase_mode)
+            invalidate_main_combined_cache()
+            request_redraw(main=True, edit=True)
         elif key == ord("s"):
             save_current()
             original_masks = [mask.copy() for mask in edit_masks]
+            source_mask = _source_mask_for_resolved_component(component_sources, component_names[active_idx], current_pos)
+            if active_idx < len(patch_anchor_masks):
+                patch_anchor_masks[active_idx] = np.logical_or(
+                    np.asarray(original_masks[active_idx], dtype=np.uint8) > 0,
+                    np.asarray(source_mask, dtype=np.uint8) > 0,
+                ).astype(np.uint8)
+            _clear_lasso()
+            invalidate_active_component_caches()
+            request_redraw(main=True, edit=True)
         elif key == ord("n"):
             if current_pos < total_rois - 1:
                 current_pos += 1
                 load_current_roi()
-                update_display()
+                request_redraw(main=True, edit=True)
         elif key == ord("p"):
             if current_pos > 0:
                 current_pos -= 1
                 load_current_roi()
-                update_display()
+                request_redraw(main=True, edit=True)
         elif key in (ord("a"), ord("N"), ord("R"), ord("P")):
             state = {
                 ord("a"): approve_state,
@@ -2529,7 +3376,8 @@ def launch_review(
                 f"Set {component_names[active_idx]} review to {component_payload.get('state')} "
                 f"(run={run_payload.get('state')})"
             )
-            update_display()
+            invalidate_main_combined_cache()
+            request_redraw(main=True, edit=False)
 
     cv2.destroyAllWindows()
     return refined.run_name
@@ -2558,6 +3406,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--review-intended-use", default=DEFAULT_REVIEW_INTENDED_USE)
     parser.add_argument("--reviewer", help="Reviewer name to record in review payloads.")
     parser.add_argument("--review-notes", help="Optional note attached to review payload updates.")
+    parser.add_argument(
+        "--edit-zoom",
+        type=int,
+        default=DEFAULT_EDIT_ZOOM,
+        help="Initial zoom factor for the editor panel (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--edit-padding",
+        type=int,
+        default=DEFAULT_EDIT_PADDING,
+        help="Initial padding around the active-mask crop used for the edit panel (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--display-scale",
+        type=float,
+        default=DISPLAY_SCALE,
+        help="Initial whole-window display scale (default: %(default)s).",
+    )
     return parser
 
 
@@ -2577,6 +3443,9 @@ def main(argv: Optional[Sequence[str]] = None) -> str:
         review_intended_use=args.review_intended_use,
         reviewer=args.reviewer,
         review_notes=args.review_notes,
+        edit_zoom=args.edit_zoom,
+        edit_padding=args.edit_padding,
+        display_scale=args.display_scale,
     )
 
 

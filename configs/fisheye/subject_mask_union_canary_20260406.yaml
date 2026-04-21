@@ -1,0 +1,39 @@
+# ================================================================================
+# Unified Subject-Mask U-Net Canary Training Configuration
+# ================================================================================
+# Intended first canary:
+# - train the new unified subject-mask U-Net path end-to-end
+# - target schema: subject_v1_union
+# - source artifact: merged subject-mask training export written to
+#   /nvme1/training/subject_masks_union_canary_20260406.zarr
+#
+# Important current limitation:
+# - this canary export is expected to come from a source run with body + eye
+#   supervision but no swim-bladder channel yet
+# - the trainer handles this correctly through target_valid_channels, but the
+#   resulting model will not learn swim-bladder behavior from this first export
+# ================================================================================
+
+datasets:
+  canary_union_20260406:
+    zarr_path: /nvme1/training/subject_masks_union_canary_20260406.zarr
+
+names: ["subject_body", "eyes_union", "swim_bladder"]
+nc: 3
+random_seed: 42
+num_workers: 8
+
+training_params:
+  model: unet-small
+  epochs: 20
+  batch_size: 64
+  imgsz: 512
+  lr0: 0.0005
+  momentum: 0.9
+  weight_decay: 0.0005
+  patience: 10
+  device: "0"
+  project: runs/subject_masks
+  seg_loss: bce_dice
+  bce_weight: 0.5
+  label_schema_id: subject_v1_union

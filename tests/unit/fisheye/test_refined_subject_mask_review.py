@@ -115,6 +115,240 @@ class _MinimalGroup:
         return None
 
 
+def test_map_review_pointer_to_roi_maps_zoomed_edit_panel_coordinates() -> None:
+    panel_regions = {
+        "all": mod.ReviewPanelRegion(name="all", x=0, y=72, width=8, height=8, zoom=1),
+        "edit": mod.ReviewPanelRegion(name="edit", x=16, y=72, width=32, height=32, zoom=4),
+    }
+
+    mapped = mod._map_review_pointer_to_roi(  # noqa: SLF001
+        x=80,
+        y=160,
+        display_scale=2.0,
+        panel_regions=panel_regions,
+        roi_shape=(8, 8),
+    )
+
+    assert mapped == ("edit", 6, 2)
+
+
+def test_map_review_pointer_to_roi_ignores_gap_and_out_of_bounds_points() -> None:
+    panel_regions = {
+        "all": mod.ReviewPanelRegion(name="all", x=0, y=72, width=8, height=8, zoom=1),
+        "edit": mod.ReviewPanelRegion(name="edit", x=16, y=72, width=32, height=32, zoom=4),
+    }
+
+    gap_hit = mod._map_review_pointer_to_roi(  # noqa: SLF001
+        x=12,
+        y=74,
+        display_scale=1.0,
+        panel_regions=panel_regions,
+        roi_shape=(8, 8),
+    )
+    outside_zoomed_bounds = mod._map_review_pointer_to_roi(  # noqa: SLF001
+        x=16 + 33,
+        y=72 + 5,
+        display_scale=1.0,
+        panel_regions=panel_regions,
+        roi_shape=(8, 8),
+    )
+
+    assert gap_hit is None
+    assert outside_zoomed_bounds is None
+
+
+def test_map_review_pointer_to_roi_maps_cropped_edit_panel_with_label_and_patch_offset() -> None:
+    panel_regions = {
+        "edit": mod.ReviewPanelRegion(
+            name="edit",
+            x=40,
+            y=100,
+            width=24,
+            height=34,
+            zoom=2,
+            label_h=10,
+            patch_x0=7,
+            patch_y0=11,
+            patch_w=12,
+            patch_h=12,
+        ),
+    }
+
+    mapped = mod._map_review_pointer_to_roi(  # noqa: SLF001
+        x=52,
+        y=118,
+        display_scale=1.0,
+        panel_regions=panel_regions,
+        roi_shape=(40, 40),
+    )
+
+    assert mapped == ("edit", 13, 15)
+
+
+def test_resolve_active_patch_bounds_uses_union_of_active_and_source_masks() -> None:
+    active_mask = np.zeros((20, 20), dtype=np.uint8)
+    source_mask = np.zeros((20, 20), dtype=np.uint8)
+    active_mask[8:10, 8:10] = 1
+    source_mask[4:6, 12:14] = 1
+
+    bounds = mod._resolve_active_patch_bounds(  # noqa: SLF001
+        (20, 20),
+        active_mask,
+        source_mask,
+        padding=2,
+    )
+
+    assert bounds == (6, 16, 2, 12)
+
+
+def test_shift_patch_bounds_preserves_size_and_applies_pan() -> None:
+    shifted = mod._shift_patch_bounds(  # noqa: SLF001
+        (6, 16, 2, 12),
+        (20, 20),
+        dx=3,
+        dy=-1,
+    )
+
+    assert shifted == (9, 19, 1, 11)
+
+
+def test_shift_patch_bounds_clamps_to_roi_edges() -> None:
+    shifted = mod._shift_patch_bounds(  # noqa: SLF001
+        (6, 16, 2, 12),
+        (20, 20),
+        dx=10,
+        dy=20,
+    )
+
+    assert shifted == (10, 20, 10, 20)
+
+
+def test_fill_polygon_mask_paints_polygon_interior() -> None:
+    mask = np.zeros((10, 10), dtype=np.uint8)
+
+    ok = mod._fill_polygon_mask(  # noqa: SLF001
+        mask,
+        [(2, 2), (7, 2), (7, 7), (2, 7)],
+        fill_value=1,
+    )
+
+    assert ok is True
+    assert int(mask[4, 4]) == 1
+    assert int(mask[0, 0]) == 0
+
+
+def test_fill_polygon_mask_can_erase_polygon_interior() -> None:
+    mask = np.ones((10, 10), dtype=np.uint8)
+
+    ok = mod._fill_polygon_mask(  # noqa: SLF001
+        mask,
+        [(2, 2), (7, 2), (7, 7), (2, 7)],
+        fill_value=0,
+    )
+
+    assert ok is True
+    assert int(mask[4, 4]) == 0
+    assert int(mask[0, 0]) == 1
+
+
+def test_fill_polygon_mask_can_paint_polygon_exterior() -> None:
+    mask = np.zeros((10, 10), dtype=np.uint8)
+
+    ok = mod._fill_polygon_mask(  # noqa: SLF001
+        mask,
+        [(2, 2), (7, 2), (7, 7), (2, 7)],
+        fill_value=1,
+        invert=True,
+    )
+
+    assert ok is True
+    assert int(mask[4, 4]) == 0
+    assert int(mask[0, 0]) == 1
+
+
+def test_fill_polygon_mask_can_erase_polygon_exterior() -> None:
+    mask = np.ones((10, 10), dtype=np.uint8)
+
+    ok = mod._fill_polygon_mask(  # noqa: SLF001
+        mask,
+        [(2, 2), (7, 2), (7, 7), (2, 7)],
+        fill_value=0,
+        invert=True,
+    )
+
+    assert ok is True
+    assert int(mask[4, 4]) == 1
+    assert int(mask[0, 0]) == 0
+
+
+def test_append_lasso_point_skips_nearby_duplicates() -> None:
+    points: list[tuple[int, int]] = []
+
+    assert mod._append_lasso_point(points, (5, 5), min_step_px=2) is True  # noqa: SLF001
+    assert mod._append_lasso_point(points, (6, 5), min_step_px=2) is False  # noqa: SLF001
+    assert mod._append_lasso_point(points, (8, 5), min_step_px=2) is True  # noqa: SLF001
+    assert points == [(5, 5), (8, 5)]
+
+
+def test_draw_panel_cursor_crosshair_marks_center_axes() -> None:
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    region = mod.ReviewPanelRegion(
+        name="edit",
+        x=10,
+        y=8,
+        width=20,
+        height=22,
+        zoom=2,
+        label_h=4,
+        patch_x0=3,
+        patch_y0=5,
+        patch_w=10,
+        patch_h=10,
+    )
+
+    mod._draw_panel_cursor(  # noqa: SLF001
+        image,
+        panel_region=region,
+        roi_xy=(6, 8),
+        brush_radius=3,
+        color=(0, 0, 255),
+        style="crosshair",
+    )
+
+    center_x = 10 + round((6 - 3) * 2)
+    center_y = 8 + 4 + round((8 - 5) * 2)
+    assert int(image[center_y, center_x, 2]) > 0
+    assert int(image[center_y, center_x - 2, 2]) > 0
+    assert int(image[center_y - 2, center_x, 2]) > 0
+
+
+def test_has_component_source_sync_tracking_requires_full_schema(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body",),
+    )
+
+    body_group = refined.group["components/subject_body"]
+    assert mod._has_component_source_sync_tracking(body_group, total_rois=2) is True  # noqa: SLF001
+
+    del body_group["manual_override"]
+    body_group.attrs.pop("source_sync_schema_id", None)
+
+    assert mod._has_component_source_sync_tracking(body_group, total_rois=2) is False  # noqa: SLF001
+
+
+def test_resolve_erase_mode_uses_shift_as_temporary_inverse() -> None:
+    assert mod._resolve_erase_mode(False, False) is False  # noqa: SLF001
+    assert mod._resolve_erase_mode(False, True) is True  # noqa: SLF001
+    assert mod._resolve_erase_mode(True, False) is True  # noqa: SLF001
+    assert mod._resolve_erase_mode(True, True) is False  # noqa: SLF001
+
+
 def test_compute_single_mask_topology_metrics_handles_components_and_holes() -> None:
     mask = np.zeros((10, 10), dtype=np.uint8)
     mask[2:8, 2:8] = 1
@@ -557,6 +791,82 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     assert swim_provenance.attrs["last_update_mode"] == "interactive"
     assert swim_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
     assert swim_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]
+
+
+def test_save_refined_subject_roi_can_scope_updates_to_requested_component() -> None:
+    root = _build_subject_review_root()
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+    edited[1, 4:6, 4:6] = 1
+
+    mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+        component_names=("subject_body",),
+    )
+
+    run = refined.group
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 0], dtype=np.uint8),
+        np.asarray(edited[0], dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][0, 1], dtype=np.uint8),
+        np.zeros((8, 8), dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["edit_applied"][0], dtype=bool),
+        np.asarray([True, False], dtype=bool),
+    )
+
+    body_group = run["components/subject_body"]
+    swim_group = run["components/swim_bladder"]
+    assert bool(np.asarray(body_group["manual_override"][0], dtype=bool)) is True
+    assert bool(np.asarray(swim_group["manual_override"][0], dtype=bool)) is False
+    assert body_group["provenance"].attrs["last_update_mode"] == "interactive"
+    assert swim_group["provenance"].attrs["last_update_mode"] == "create"
+
+
+def test_save_refined_subject_roi_scoped_save_passes_only_active_component_to_finalize(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "eye_left", "eye_right"),
+    )
+
+    calls: list[tuple[str, ...] | None] = []
+
+    def _capture_materialize(_refined, *, updated_components=None):  # noqa: ANN001
+        if updated_components is None:
+            calls.append(None)
+        else:
+            calls.append(tuple(str(name) for name in updated_components))
+
+    monkeypatch.setattr(mod, "_materialize_refined_eye_compat_if_needed", _capture_materialize)
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+
+    mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+        component_names=("subject_body",),
+    )
+
+    assert calls == [("subject_body",)]
 
 
 def test_check_refined_subject_source_updates_auto_syncs_unedited_rows(monkeypatch) -> None:
