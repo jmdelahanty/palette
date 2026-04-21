@@ -15,6 +15,7 @@ from fisheye.pose.metric_schema import DerivedMetricStorage, metric_schema_from_
 from fisheye.shared.detect_reason_codec import write_reason_columns
 from fisheye.tune import keypoint_failure_review as mod
 from fisheye.tune.keypoint_failure_review import (
+    _build_cleared_failure_reason,
     _build_manual_reason,
     _build_no_reviewable_failures_auto_review,
     _active_index_from_key,
@@ -88,6 +89,14 @@ def test_build_manual_reason_is_canonical_and_idempotent() -> None:
     second = _build_manual_reason(first, geom_ok=False)
     assert first == "manual_correction|geometry_issue"
     assert second == first
+
+
+def test_build_cleared_failure_reason_removes_negative_failure_tags_and_preserves_context() -> None:
+    reason = _build_cleared_failure_reason("clean|detection_issue|manual_correction|needs_skeleton_extension")
+    assert reason == "clean|manual_correction|needs_skeleton_extension"
+
+    emptyish = _build_cleared_failure_reason("fish_present_no_keypoints")
+    assert emptyish == "manual_correction"
 
 
 def test_display_colors_extends_beyond_default_triplet() -> None:
@@ -268,6 +277,25 @@ def test_empty_review_auto_state_blocks_detection_issue(tmp_path: Path) -> None:
     allowed, reason = _empty_review_auto_state(refined, raw_failures)
     assert allowed is False
     assert reason == "detection_issue_present"
+
+
+def test_load_failure_indices_reincludes_rows_after_negative_failure_label_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refined = object()
+    monkeypatch.setattr(mod, "_load_raw_failure_indices", lambda _refined: np.array([0], dtype="i4"))
+    monkeypatch.setattr(mod, "read_reason_labels", lambda _refined: np.array(["detection_issue"], dtype=object))
+
+    assert mod._load_failure_indices(refined).size == 0
+
+    monkeypatch.setattr(
+        mod,
+        "read_reason_labels",
+        lambda _refined: np.array([_build_cleared_failure_reason("detection_issue")], dtype=object),
+    )
+
+    failures = mod._load_failure_indices(refined)
+    np.testing.assert_array_equal(failures, np.array([0], dtype="i4"))
 
 
 def test_build_no_reviewable_failures_auto_review_contains_policy_metadata(tmp_path: Path) -> None:

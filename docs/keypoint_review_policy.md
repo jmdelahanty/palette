@@ -29,6 +29,7 @@ frames where a fish is present but no keypoints can be resolved.
   - `--all` iterates all ROIs (otherwise only failures).
   - Reason columns are synchronized on write (`reason_bytes` + `reason`).
   - Hotkeys:
+    - `c`: clear mistaken `fish_present_no_keypoints` / `detection_issue` tags and return the ROI to the normal failure-review pool
     - `x`: mark `fish_present_no_keypoints`
     - `d`: mark `detection_issue` (and flag for detection review)
 
