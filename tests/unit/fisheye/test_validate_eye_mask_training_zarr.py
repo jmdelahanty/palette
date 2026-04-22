@@ -130,6 +130,7 @@ def _write_source_eye_zarr(
     ellipse_success: np.ndarray | None = None,
     reason_labels: list[str] | None = None,
     derived_compat: bool = False,
+    include_refined_subject: bool = False,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     if dataset_id is not None:
@@ -216,6 +217,41 @@ def _write_source_eye_zarr(
         include_reason_text=True,
         overwrite=True,
     )
+
+    if include_refined_subject:
+        subject_parent = root.create_group("refined_subject_masks_runs")
+        subject_parent.attrs["latest"] = "refined_subject_masks_001"
+        subject = subject_parent.create_group("refined_subject_masks_001")
+        subject.attrs.update(
+            {
+                "source_crop_run": "crop_001",
+                "source_subject_mask_run": "subject_masks_001",
+                "source_refined_eye_masks_run": "refined_eye_masks_001",
+                "compat_refined_eye_masks_run": "refined_eye_masks_001",
+                "source_keypoints_run": "refined_keypoints_001",
+                "source_keypoint_group": "refined_keypoints_runs",
+                "mask_labels": ["subject_body", "eye_left", "eye_right"],
+            }
+        )
+        subject_masks = np.zeros((4, 3, 16, 16), dtype=np.uint8)
+        subject_masks[0, 1, 1:3, 1:3] = 1
+        subject_masks[0, 2, 1:3, 4:6] = 1
+        subject_masks[1, 1, 2:4, 1:3] = 1
+        subject_masks[1, 2, 2:4, 4:6] = 1
+        subject.create_array("masks_roi", data=subject_masks, chunks=(2, 1, 16, 16))
+
+        left_geometry = subject.create_group("components/eye_left/geometry")
+        right_geometry = subject.create_group("components/eye_right/geometry")
+        left_geometry.create_array("ellipse_params", data=ellipse_params[:, 0, :], chunks=(4, 5))
+        right_geometry.create_array("ellipse_params", data=ellipse_params[:, 1, :], chunks=(4, 5))
+        left_geometry.create_array("ellipse_success", data=ellipse_success_data[:, 0], chunks=(4,))
+        right_geometry.create_array("ellipse_success", data=ellipse_success_data[:, 1], chunks=(4,))
+        relations = subject.create_group("relations/eye_pair/metrics")
+        relations.create_array(
+            "separation_px",
+            data=np.array([5.0, 5.0, np.nan, np.nan], dtype=np.float32),
+            chunks=(4,),
+        )
 
 
 def test_validate_merged_eye_mask_training_zarr_passes(tmp_path: Path) -> None:
@@ -319,6 +355,38 @@ def test_export_records_derived_compat_source_metadata(tmp_path: Path) -> None:
     assert eye.attrs["source_eye_stage_label"] == "refined_eye_masks_runs (derived compat)"
     assert eye.attrs["source_eye_authority_stage"] == "refined_subject_masks_runs"
     assert eye.attrs["source_refined_subject_masks_run"] == "refined_subject_masks_001"
+
+
+def test_export_auto_prefers_refined_subject_eye_geometry(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_training.zarr"
+    out_path = tmp_path / "merged_eye_export_subject.zarr"
+    _write_source_eye_zarr(source_path, include_refined_subject=True)
+
+    summary = export_merged_eye_mask_training_zarr(
+        source_path,
+        out_path,
+        eye_stage="auto",
+        overwrite=True,
+    )
+
+    assert summary["source_eye_stage"] == "refined_subject_masks_runs"
+    assert summary["source_eye_stage_role"] == "canonical"
+    assert summary["source_eye_authority_stage"] == "refined_subject_masks_runs"
+    assert summary["source_eye_run"] == "refined_subject_masks_001"
+    assert summary["source_refined_subject_masks_run"] == "refined_subject_masks_001"
+    assert summary["source_subject_mask_run"] == "subject_masks_001"
+
+    out_root = zarr.open_group(str(out_path), mode="r")
+    eye_latest = str(out_root["eye_masks_runs"].attrs["latest"])
+    eye = out_root[f"eye_masks_runs/{eye_latest}"]
+    assert eye.attrs["source_eye_stage"] == "refined_subject_masks_runs"
+    assert eye.attrs["source_eye_stage_role"] == "canonical"
+    assert eye.attrs["source_eye_authority_stage"] == "refined_subject_masks_runs"
+    assert eye.attrs["eye_labels"] == ["eye_left", "eye_right"]
+    masks = np.asarray(eye["masks_roi"][:], dtype=np.uint8)
+    assert masks.shape == (4, 2, 16, 16)
+    assert int(masks[0, 0, 1, 1]) == 1
+    assert int(masks[0, 1, 1, 4]) == 1
 
 
 def test_export_merged_eye_mask_training_zarr_from_multiple_sources_tracks_source_index(tmp_path: Path) -> None:

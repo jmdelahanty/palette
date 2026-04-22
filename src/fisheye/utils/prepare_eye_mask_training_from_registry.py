@@ -635,7 +635,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched source zarr paths to file.")
 
-    parser.add_argument("--eye-stage", choices=["auto", "eye_masks_runs", "refined_eye_masks_runs"], default="auto")
+    parser.add_argument("--eye-stage", choices=list(export_eye.EYE_EXPORT_STAGE_CHOICES), default="auto")
     parser.add_argument("--eye-run", type=str, help="Explicit eye-mask run name.")
     parser.add_argument("--crop-run", type=str, help="Explicit source crop run name.")
     parser.add_argument("--input-format", choices=["gray", "rgb"], default="gray")

@@ -7,6 +7,7 @@ import numpy as np
 from fisheye.shared.eye_geometry_source import EYE_GEOMETRY_STAGE_REFINED_EYE
 from fisheye.shared.eye_geometry_source import EYE_GEOMETRY_STAGE_REFINED_SUBJECT
 from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
+from fisheye.utils import export_eye_mask_training_zarr as export_mod
 
 
 class _FakeArray:
@@ -176,3 +177,33 @@ def test_resolver_falls_back_to_refined_eye_masks() -> None:
     assert source.run_name == "refined_eye_001"
     assert source.ellipse_params.shape == (2, 2, 5)
     np.testing.assert_array_equal(np.asarray(source.eye_separation[:]), np.asarray([4.0, 5.0], dtype=np.float32))
+
+
+def test_eye_mask_training_export_auto_selects_refined_subject_geometry() -> None:
+    root = _FakeGroup()
+    _add_refined_eye_run(root)
+    subject = _add_refined_subject_run(root)
+    subject.attrs["source_crop_run"] = "crop_001"
+    subject.attrs["source_subject_mask_run"] = "subject_masks_001"
+
+    crop_parent = root.require_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.require_group("crop_001")
+    crop.create_array("roi_images", data=np.zeros((2, 3, 4), dtype=np.uint8))
+    crop.create_array("bbox_norm_coords", data=np.zeros((2, 4), dtype=np.float32))
+
+    selection, _crop_group, _eye_group, geometry = export_mod._select_source_runs(
+        root,
+        crop_run=None,
+        eye_stage="auto",
+        eye_run=None,
+    )
+
+    assert selection.eye_stage == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
+    assert selection.eye_stage_role == "canonical"
+    assert selection.authority_stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
+    assert selection.eye_run == "refined_subject_001"
+    assert selection.source_refined_subject_masks_run == "refined_subject_001"
+    assert selection.source_subject_mask_run == "subject_masks_001"
+    assert geometry is not None
+    np.testing.assert_array_equal(np.asarray(geometry.masks_roi[0, :, 0, 0]), np.asarray([11, 22], dtype=np.uint8))

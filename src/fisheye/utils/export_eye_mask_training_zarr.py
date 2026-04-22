@@ -30,6 +30,12 @@ from fisheye.shared.detect_reason_codec import (
     read_reason_labels,
     write_reason_columns,
 )
+from fisheye.shared.eye_geometry_source import (
+    EYE_GEOMETRY_STAGE_REFINED_EYE,
+    EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
+    EyeGeometrySource,
+    resolve_eye_geometry_source,
+)
 from fisheye.shared.type_conversions import normalize_attr as _as_text
 from fisheye.utils.refined_eye_masks_compat import refined_eye_masks_compat_context
 
@@ -53,6 +59,12 @@ except Exception:  # pragma: no cover - rich is optional
     TimeRemainingColumn = None  # type: ignore
 
 EYE_ROW_GATE_POLICIES = ("all_rows", "usable_only", "usable_plus_explicit_negatives")
+EYE_EXPORT_STAGE_CHOICES = (
+    "auto",
+    EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
+    EYE_GEOMETRY_STAGE_REFINED_EYE,
+    "eye_masks_runs",
+)
 
 
 _utc_now = utc_now
@@ -124,7 +136,7 @@ def _resolve_row_gate_selection(
     *,
     source_path: Path,
     source_dataset_id: str,
-    ellipse_success: zarr.Array,
+    ellipse_success: Any,
     reason_values: np.ndarray,
     row_gate_policy: str,
     explicit_negative_ratio: float,
@@ -444,9 +456,13 @@ def _write_string_array(group: zarr.Group, name: str, values: Sequence[str]) -> 
     return arr
 
 
+def _is_group_like(value: object) -> bool:
+    return value is not None and hasattr(value, "attrs") and hasattr(value, "get")
+
+
 def _resolve_run_name(root: zarr.Group, parent_name: str, explicit: Optional[str]) -> str:
     parent = root.get(parent_name)
-    if not isinstance(parent, zarr.Group):
+    if not _is_group_like(parent):
         raise ValueError(f"Missing required group '{parent_name}'.")
     if explicit:
         if explicit not in parent:
@@ -467,33 +483,56 @@ def _resolve_eye_source(
     *,
     eye_stage: str,
     eye_run: Optional[str],
-) -> Tuple[str, str, zarr.Group]:
-    if eye_stage not in {"auto", "eye_masks_runs", "refined_eye_masks_runs"}:
+) -> Tuple[str, str, zarr.Group, Optional[EyeGeometrySource]]:
+    if eye_stage not in EYE_EXPORT_STAGE_CHOICES:
         raise ValueError(f"Unsupported eye_stage '{eye_stage}'.")
 
-    stage_order = (
-        ["refined_eye_masks_runs", "eye_masks_runs"]
-        if eye_stage == "auto"
-        else [eye_stage]
-    )
+    if eye_stage == "auto":
+        try:
+            source = resolve_eye_geometry_source(
+                root,
+                refined_eye_run=eye_run,
+                prefer_subject=True,
+            )
+            return source.stage_group, source.run_name, source.group, source
+        except ValueError:
+            stage_order = ["eye_masks_runs"]
+    elif eye_stage == EYE_GEOMETRY_STAGE_REFINED_SUBJECT:
+        source = resolve_eye_geometry_source(
+            root,
+            refined_subject_run=eye_run,
+            prefer_subject=True,
+        )
+        if source.stage_group != EYE_GEOMETRY_STAGE_REFINED_SUBJECT:
+            raise ValueError("No refined_subject_masks_runs source with canonical eye geometry found.")
+        return source.stage_group, source.run_name, source.group, source
+    elif eye_stage == EYE_GEOMETRY_STAGE_REFINED_EYE:
+        source = resolve_eye_geometry_source(
+            root,
+            refined_eye_run=eye_run or "latest",
+            prefer_subject=True,
+        )
+        return source.stage_group, source.run_name, source.group, source
+    else:
+        stage_order = ["eye_masks_runs"]
 
     if eye_run:
         for stage in stage_order:
             parent = root.get(stage)
-            if isinstance(parent, zarr.Group) and eye_run in parent:
-                return stage, str(eye_run), parent[str(eye_run)]
+            if _is_group_like(parent) and eye_run in parent:
+                return stage, str(eye_run), parent[str(eye_run)], None
         raise ValueError(f"Eye run '{eye_run}' not found in selected stage(s): {stage_order}.")
 
     for stage in stage_order:
         parent = root.get(stage)
-        if not isinstance(parent, zarr.Group):
+        if not _is_group_like(parent):
             continue
         latest = _as_text(parent.attrs.get("latest"))
         if latest and latest in parent:
-            return stage, latest, parent[latest]
+            return stage, latest, parent[latest], None
         names = sorted(str(name) for name in parent.group_keys()) if hasattr(parent, "group_keys") else sorted(parent.keys())
         if names:
-            return stage, str(names[-1]), parent[str(names[-1])]
+            return stage, str(names[-1]), parent[str(names[-1])], None
     raise ValueError(f"No eye-mask runs found in selected stage(s): {stage_order}.")
 
 
@@ -525,6 +564,22 @@ def _resolve_mask_probs_name(run_group: zarr.Group) -> Optional[str]:
         if candidate in run_group:
             return candidate
     return None
+
+
+def _eye_geometry_export_context(source: EyeGeometrySource) -> dict[str, object]:
+    if source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT:
+        return {
+            "is_derived_compat": False,
+            "compatibility_role": None,
+            "source_refined_subject_masks_run": source.source_refined_subject_run or source.run_name,
+            "source_subject_mask_run": _as_text(source.group.attrs.get("source_subject_mask_run")),
+            "source_refined_eye_masks_run": source.source_refined_eye_run,
+            "compat_refined_eye_masks_run": _as_text(source.group.attrs.get("compat_refined_eye_masks_run")),
+            "authority_stage_group": EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
+            "stage_role": "canonical",
+            "stage_label": EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
+        }
+    return refined_eye_masks_compat_context(source.group, base_stage=source.stage_group)
 
 
 def _normalized_split_ratios(
@@ -593,22 +648,27 @@ def _select_source_runs(
     crop_run: Optional[str],
     eye_stage: str,
     eye_run: Optional[str],
-) -> Tuple[EyeExportSelection, zarr.Group, zarr.Group]:
-    stage_name, run_name, eye_group = _resolve_eye_source(
+) -> Tuple[EyeExportSelection, zarr.Group, zarr.Group, Optional[EyeGeometrySource]]:
+    stage_name, run_name, eye_group, eye_geometry = _resolve_eye_source(
         source_root,
         eye_stage=eye_stage,
         eye_run=eye_run,
     )
-    compat_context = refined_eye_masks_compat_context(eye_group, base_stage=stage_name)
+    compat_context = (
+        _eye_geometry_export_context(eye_geometry)
+        if eye_geometry is not None
+        else refined_eye_masks_compat_context(eye_group, base_stage=stage_name)
+    )
+    source_attrs = dict(eye_geometry.lineage_attrs) if eye_geometry is not None else eye_group.attrs
 
     selected_crop = _as_text(crop_run)
     if selected_crop is None:
-        selected_crop = _as_text(eye_group.attrs.get("source_crop_run"))
+        selected_crop = _as_text(source_attrs.get("source_crop_run"))
     if selected_crop is None:
         selected_crop = _resolve_run_name(source_root, "crop_runs", explicit=None)
 
     crop_parent = source_root.get("crop_runs")
-    if not isinstance(crop_parent, zarr.Group) or selected_crop not in crop_parent:
+    if not _is_group_like(crop_parent) or selected_crop not in crop_parent:
         raise ValueError(f"Crop run '{selected_crop}' not found under crop_runs.")
     crop_group = crop_parent[str(selected_crop)]
 
@@ -616,15 +676,16 @@ def _select_source_runs(
         raise ValueError(f"crop_runs/{selected_crop} missing roi_images.")
     if "bbox_norm_coords" not in crop_group:
         raise ValueError(f"crop_runs/{selected_crop} missing bbox_norm_coords.")
-    if "masks_roi" not in eye_group:
-        raise ValueError(f"{stage_name}/{run_name} missing masks_roi.")
-    if "ellipse_params" not in eye_group:
-        raise ValueError(f"{stage_name}/{run_name} missing ellipse_params.")
-    if "ellipse_success" not in eye_group:
-        raise ValueError(f"{stage_name}/{run_name} missing ellipse_success.")
+    if eye_geometry is None:
+        if "masks_roi" not in eye_group:
+            raise ValueError(f"{stage_name}/{run_name} missing masks_roi.")
+        if "ellipse_params" not in eye_group:
+            raise ValueError(f"{stage_name}/{run_name} missing ellipse_params.")
+        if "ellipse_success" not in eye_group:
+            raise ValueError(f"{stage_name}/{run_name} missing ellipse_success.")
 
     roi_images = crop_group["roi_images"]
-    masks_roi = eye_group["masks_roi"]
+    masks_roi = eye_geometry.masks_roi if eye_geometry is not None else eye_group["masks_roi"]
     if int(roi_images.shape[0]) != int(masks_roi.shape[0]):
         raise ValueError(
             f"Row mismatch: crop_runs/{selected_crop}/roi_images has {roi_images.shape[0]} rows "
@@ -643,9 +704,9 @@ def _select_source_runs(
         source_subject_mask_run=_as_text(compat_context.get("source_subject_mask_run")),
         total_samples=int(masks_roi.shape[0]),
         channels=int(masks_roi.shape[1]) if masks_roi.ndim >= 2 else 0,
-        mask_probs_name=_resolve_mask_probs_name(eye_group),
+        mask_probs_name=None if eye_geometry is not None else _resolve_mask_probs_name(eye_group),
     )
-    return selection, crop_group, eye_group
+    return selection, crop_group, eye_group, eye_geometry
 
 
 @dataclass(frozen=True)
@@ -802,9 +863,9 @@ class _ResolvedEyeMergeSource:
     roi_images: zarr.Array
     bbox_norm: zarr.Array
     crop_bbox: Optional[zarr.Array]
-    masks_roi: zarr.Array
-    ellipse_params: zarr.Array
-    ellipse_success: zarr.Array
+    masks_roi: Any
+    ellipse_params: Any
+    ellipse_success: Any
     mask_probs_name: Optional[str]
     mask_probs_src: Optional[zarr.Array]
     source_frame_idx: np.ndarray
@@ -865,7 +926,7 @@ def _copy_progress(total: int) -> Optional["Progress"]:
     )
 
 
-def _read_row_selection(array_obj: zarr.Array, row_indices: np.ndarray) -> np.ndarray:
+def _read_row_selection(array_obj: Any, row_indices: np.ndarray) -> np.ndarray:
     indices = np.asarray(row_indices, dtype=np.int64).reshape(-1)
     tail_shape = tuple(int(v) for v in array_obj.shape[1:])
     if indices.size == 0:
@@ -879,7 +940,7 @@ def _read_row_selection(array_obj: zarr.Array, row_indices: np.ndarray) -> np.nd
 
     if indices.size == 1:
         idx = int(indices[0])
-        return np.asarray(array_obj[idx:idx + 1, ...])
+        return np.asarray(array_obj[idx:idx + 1])
 
     starts: List[int] = []
     stops: List[int] = []
@@ -897,14 +958,14 @@ def _read_row_selection(array_obj: zarr.Array, row_indices: np.ndarray) -> np.nd
     starts.append(run_start)
     stops.append(prev + 1)
 
-    blocks = [np.asarray(array_obj[start:stop, ...]) for start, stop in zip(starts, stops, strict=False)]
+    blocks = [np.asarray(array_obj[start:stop]) for start, stop in zip(starts, stops, strict=False)]
     if len(blocks) == 1:
         return blocks[0]
     return np.concatenate(blocks, axis=0)
 
 
 def _copy_rows_indexed(
-    src_array: zarr.Array,
+    src_array: Any,
     dest_array: zarr.Array,
     dest_start: int,
     indices: np.ndarray,
@@ -1099,7 +1160,7 @@ def _resolve_merge_source(
     except TypeError:
         src_root = zarr.open_group(str(source_path), mode="r")
 
-    selection, crop_group, eye_group = _select_source_runs(
+    selection, crop_group, eye_group, eye_geometry = _select_source_runs(
         src_root,
         crop_run=source_spec.crop_run,
         eye_stage=source_spec.eye_stage,
@@ -1112,10 +1173,10 @@ def _resolve_merge_source(
     crop_frame_indices = crop_group.get("frame_indices")
     crop_detection_source = crop_group.get("detection_source")
 
-    masks_roi = eye_group["masks_roi"]
-    ellipse_params = eye_group["ellipse_params"]
-    ellipse_success = eye_group["ellipse_success"]
-    eye_separation = eye_group.get("eye_separation")
+    masks_roi = eye_geometry.masks_roi if eye_geometry is not None else eye_group["masks_roi"]
+    ellipse_params = eye_geometry.ellipse_params if eye_geometry is not None else eye_group["ellipse_params"]
+    ellipse_success = eye_geometry.ellipse_success if eye_geometry is not None else eye_group["ellipse_success"]
+    eye_separation = eye_geometry.eye_separation if eye_geometry is not None else eye_group.get("eye_separation")
     reason_labels = _resolve_reason_labels(eye_group)
     mask_probs_name = selection.mask_probs_name
     mask_probs_src = eye_group[mask_probs_name] if mask_probs_name else None
@@ -1722,6 +1783,8 @@ def export_merged_eye_mask_training_zarr_from_sources(
             },
         }
     )
+    if normalized_label_mode == "lr" and "eye_labels" not in dst_eye.attrs:
+        dst_eye.attrs["eye_labels"] = ["eye_left", "eye_right"]
     if len(resolved_sources) == 1:
         dst_eye.attrs["source_zarr_path"] = source_zarr_paths[0]
 
@@ -2385,9 +2448,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crop-run", help="Optional crop run override.")
     parser.add_argument(
         "--eye-stage",
-        choices=["auto", "eye_masks_runs", "refined_eye_masks_runs"],
+        choices=list(EYE_EXPORT_STAGE_CHOICES),
         default="auto",
-        help="Eye-mask stage selector (default: auto prefers refined).",
+        help=(
+            "Eye-mask stage selector. auto prefers refined_subject_masks_runs eye geometry, "
+            "then refined_eye_masks_runs, then eye_masks_runs."
+        ),
     )
     parser.add_argument("--eye-run", help="Optional explicit eye-mask run name.")
     parser.add_argument("--run-name", default="merged_export_smoke", help="Merged run name inside output zarr.")
