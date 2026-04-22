@@ -168,14 +168,14 @@ Key point:
 
 Current implementation note:
 
-- the shipped assembly/review path currently expects source inputs that are
-  readable through `subject_mask_runs`
-- for legacy eye-stage inputs, the implemented bridge is:
+- the shipped assembly/finalization path accepts source inputs readable through
+  `subject_mask_runs`
+- it also accepts direct `refined_eye_masks_runs` sources for canonical
+  `eye_left` / `eye_right` seeding
+- for legacy raw eye-stage inputs, the implemented bridge remains:
   `eye_masks_runs` or `refined_eye_masks_runs`
   -> projected/backfilled `subject_mask_runs/<run>`
   -> assembled/finalized `refined_subject_masks_runs/<run>`
-- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding
-  remains future work
 
 ## Recommended Canonical Refined Shape
 

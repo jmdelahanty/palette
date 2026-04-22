@@ -94,6 +94,35 @@ def _create_subject_run(
     return run
 
 
+def _create_refined_eye_run(root: zarr.Group, *, run_name: str = "refined_eye_masks_001") -> zarr.Group:
+    parent = root.require_group("refined_eye_masks_runs")
+    parent.attrs["latest"] = run_name
+    run = parent.create_group(run_name)
+    run.attrs.update(
+        {
+            "source_crop_run": "crop_001",
+            "source_eye_masks_run": "eye_masks_001",
+            "source_keypoints_run": "refined_kp_001",
+            "source_keypoint_run": "refined_kp_001",
+            "source_keypoint_group": "refined_keypoints_runs",
+            "method": "refine_eye_masks_v1",
+            "eye_labels": ["eye_left", "eye_right"],
+            "created_at_utc": "2026-04-02T00:00:00+00:00",
+        }
+    )
+    masks = np.zeros((2, 2, 8, 8), dtype=np.uint8)
+    masks[0, 0, 1:4, 1:4] = 1
+    masks[0, 1, 1:4, 4:7] = 1
+    masks[1, 0, 3:6, 1:4] = 1
+    masks[1, 1, 3:6, 4:7] = 1
+    run.create_array("masks_roi", data=masks, overwrite=True)
+    run.create_array("detection_source", data=np.asarray([0, 0], dtype=np.int8), overwrite=True)
+    run.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
+    run.create_array("detection_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
+    run.create_array("frame_counts", data=np.asarray([1, 1], dtype=np.int32), overwrite=True)
+    return run
+
+
 def _build_assembly_root() -> zarr.Group:
     root = zarr.group()
     crop_parent = root.create_group("crop_runs")
@@ -286,6 +315,67 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     assert provenance["inputs"]["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
     assert provenance["inputs"]["source_crop_revision"] == 4
     assert provenance["inputs"]["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
+
+
+def test_assemble_refined_subject_run_can_seed_eyes_directly_from_refined_eye_masks(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    del root["subject_mask_runs"]["eye_run_001"]
+    _create_refined_eye_run(root)
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        body_run="body_run_001",
+        refined_eye_run="refined_eye_masks_001",
+        swim_run="swim_run_001",
+        refined_run="refined_subject_masks_direct_refined_eye_001",
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    assert summary["source_refined_eye_masks_run"] == "refined_eye_masks_001"
+    assert summary["source_component_sources"]["eye_left"] == {
+        "source_stage": "refined_eye_masks_runs",
+        "source_run": "refined_eye_masks_001",
+    }
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_direct_refined_eye_001"]
+    assert run.attrs["source_subject_mask_run"] == "body_run_001"
+    assert run.attrs["source_refined_eye_masks_run"] == "refined_eye_masks_001"
+    assert "source_eye_subject_mask_run" not in run.attrs
+    np.testing.assert_array_equal(
+        np.asarray(run["available_channels"][:], dtype=bool),
+        np.asarray([True, True, True, True], dtype=bool),
+    )
+    left_provenance = run["components/eye_left/provenance"].attrs
+    right_provenance = run["components/eye_right/provenance"].attrs
+    assert left_provenance["source_stage"] == "refined_eye_masks_runs"
+    assert left_provenance["source_run"] == "refined_eye_masks_001"
+    assert left_provenance["source_method"] == "refine_eye_masks_v1"
+    assert left_provenance["source_channels"] == ["eye_left"]
+    assert left_provenance["source_eye_masks_run"] == "eye_masks_001"
+    assert right_provenance["source_stage"] == "refined_eye_masks_runs"
+    assert right_provenance["source_run"] == "refined_eye_masks_001"
+    assert right_provenance["source_channels"] == ["eye_right"]
+    np.testing.assert_array_equal(
+        np.asarray(run["components/eye_left/geometry/ellipse_success"][:], dtype=bool),
+        np.ones((2,), dtype=bool),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["relations/eye_pair/metrics/separation_valid"][:], dtype=bool),
+        np.ones((2,), dtype=bool),
+    )
+    refined = review_mod._open_existing_refined_subject_run(  # noqa: SLF001
+        root,
+        "refined_subject_masks_direct_refined_eye_001",
+    )
+    _primary_source, component_sources = review_mod._load_refined_component_source_runs(root, refined)  # noqa: SLF001
+    assert component_sources["eye_left"].run_name == "refined_eye_masks_001"
+    assert component_sources["eye_left"].mask_labels == ("eye_left", "eye_right")
+    np.testing.assert_array_equal(
+        np.asarray(component_sources["eye_left"].masks_roi[:, 0], dtype=np.uint8),
+        np.asarray(run["masks_roi"][:, 1], dtype=np.uint8),
+    )
 
 
 def test_refine_subject_masks_uses_component_provenance_for_assembled_run(monkeypatch) -> None:

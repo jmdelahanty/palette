@@ -109,6 +109,7 @@ REFINED_SUBJECT_SOURCE_SYNC_SCHEMA_ID = "refined_subject_source_sync_v1"
 SIGMA_NOISE_SMOOTHING_SIGMA = 3.0
 CURVATURE_VAR_SMOOTHING_SIGMA = 3.0
 CURVATURE_VAR_STEP = 5
+REFINED_EYE_COMPONENTS = ("eye_left", "eye_right")
 
 
 @dataclass(frozen=True)
@@ -1055,6 +1056,115 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     )
 
 
+def _normalize_refined_eye_label(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"eye_left", "left", "left_eye"}:
+        return "eye_left"
+    if text in {"eye_right", "right", "right_eye"}:
+        return "eye_right"
+    return text
+
+
+def _refined_eye_channel_indices(group: zarr.Group) -> tuple[int, int]:
+    labels_raw = group.attrs.get("eye_labels")
+    if labels_raw is None:
+        return 0, 1
+    if not isinstance(labels_raw, (list, tuple)):
+        raise ValueError("refined_eye_masks_runs source has non-list eye_labels attr.")
+    normalized = [_normalize_refined_eye_label(value) for value in labels_raw]
+    try:
+        left_idx = normalized.index("eye_left")
+        right_idx = normalized.index("eye_right")
+    except ValueError as exc:
+        raise ValueError(
+            "refined_eye_masks_runs source must expose anatomical eye_labels for direct refined-subject seeding."
+        ) from exc
+    return int(left_idx), int(right_idx)
+
+
+def _resolve_source_lineage_array(
+    root: zarr.Group,
+    *,
+    source_group: zarr.Group,
+    source_crop_run: str,
+    array_name: str,
+) -> Any | None:
+    if array_name in source_group:
+        return source_group[array_name]
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None or source_crop_run not in crop_parent:
+        return None
+    crop_group = crop_parent[source_crop_run]
+    return crop_group.get(array_name)
+
+
+def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[str]) -> SourceSubjectMaskRun:
+    parent = root.get("refined_eye_masks_runs")
+    run_name = refined_eye_run or _resolve_latest_run(parent, "refined_eye_masks_runs")
+    if parent is None or run_name not in parent:
+        raise RuntimeError(f"refined_eye_masks_runs/{run_name} not found.")
+    group = parent[run_name]
+    masks_arr = group.get("masks_roi")
+    if masks_arr is None:
+        raise RuntimeError(f"refined_eye_masks_runs/{run_name} missing masks_roi.")
+    if len(masks_arr.shape) != 4 or int(masks_arr.shape[1]) < 2:
+        raise RuntimeError(
+            f"refined_eye_masks_runs/{run_name}/masks_roi must have shape (N, >=2, H, W), got {masks_arr.shape}."
+        )
+    left_idx, right_idx = _refined_eye_channel_indices(group)
+    if max(left_idx, right_idx) >= int(masks_arr.shape[1]):
+        raise RuntimeError(
+            f"refined_eye_masks_runs/{run_name} eye_labels reference channels outside masks_roi shape {masks_arr.shape}."
+        )
+    raw_masks = np.asarray(masks_arr[:], dtype=np.uint8)
+    masks = raw_masks[:, [left_idx, right_idx], :, :]
+
+    crop_run = str(group.attrs.get("source_crop_run") or "")
+    if not crop_run:
+        crop_run = _resolve_latest_run(root.get("crop_runs"), "crop_runs")
+    crop_group = root.get(f"crop_runs/{crop_run}") if crop_run else None
+    stored_crop_snapshot = extract_source_crop_snapshot_attrs(group.attrs)
+    inferred_crop_storage_mode = stored_crop_snapshot.get("source_crop_storage_mode")
+    if inferred_crop_storage_mode is None and crop_group is not None:
+        inferred_crop_storage_mode = (
+            crop_group.attrs.get("crop_storage_mode")
+            or ("materialized" if crop_group.get("roi_images") is not None else "geometry_only")
+        )
+    source_crop_snapshot = build_source_crop_snapshot_attrs(
+        crop_group.attrs if crop_group is not None else None,
+        source_crop_storage_mode=inferred_crop_storage_mode,
+    )
+    source_crop_snapshot.update(stored_crop_snapshot)
+
+    detection_source = _resolve_source_lineage_array(
+        root,
+        source_group=group,
+        source_crop_run=crop_run,
+        array_name="detection_source",
+    )
+    if detection_source is None:
+        raise RuntimeError(f"Could not resolve detection_source for refined_eye_masks_runs/{run_name}.")
+
+    return SourceSubjectMaskRun(
+        run_name=run_name,
+        group=group,
+        crop_run=crop_run,
+        source_crop_snapshot=source_crop_snapshot,
+        masks_roi=masks,
+        detection_source=detection_source,
+        mask_labels=REFINED_EYE_COMPONENTS,
+        available_channels=np.ones((2,), dtype=bool),
+        frame_indices=_resolve_source_lineage_array(root, source_group=group, source_crop_run=crop_run, array_name="frame_indices"),
+        frame_counts=_resolve_source_lineage_array(root, source_group=group, source_crop_run=crop_run, array_name="frame_counts"),
+        detection_indices=_resolve_source_lineage_array(root, source_group=group, source_crop_run=crop_run, array_name="detection_indices"),
+        source_method=str(group.attrs.get("method")) if group.attrs.get("method") is not None else None,
+        source_keypoints_run=resolve_source_keypoints_run(group.attrs),
+        source_keypoint_group=(
+            str(group.attrs.get("source_keypoint_group")) if group.attrs.get("source_keypoint_group") is not None else None
+        ),
+    )
+
+
 def _resolve_primary_source_subject_mask_run_name(refined_group: zarr.Group) -> Optional[str]:
     direct = refined_group.attrs.get("source_subject_mask_run")
     if direct is not None and str(direct).strip():
@@ -1082,11 +1192,15 @@ def _load_refined_component_source_runs(
     cache: dict[str, SourceSubjectMaskRun] = {}
     if default_source is not None:
         cache[default_source.run_name] = default_source
+        cache[f"subject_mask_runs/{default_source.run_name}"] = default_source
 
     primary_source = default_source
     primary_run = _resolve_primary_source_subject_mask_run_name(refined.group)
     if primary_source is None and primary_run:
-        primary_source = cache.setdefault(primary_run, _load_source_subject_mask_run(root, primary_run))
+        primary_source = cache.setdefault(
+            f"subject_mask_runs/{primary_run}",
+            _load_source_subject_mask_run(root, primary_run),
+        )
 
     component_sources: dict[str, SourceSubjectMaskRun] = {}
     for component_name in refined.component_names:
@@ -1095,11 +1209,19 @@ def _load_refined_component_source_runs(
         source_run = str(provenance_group.attrs.get("source_run") or "") if provenance_group is not None else ""
         resolved_source: SourceSubjectMaskRun | None = None
         if source_run and source_stage == "subject_mask_runs":
-            resolved_source = cache.setdefault(source_run, _load_source_subject_mask_run(root, source_run))
+            resolved_source = cache.setdefault(
+                f"subject_mask_runs/{source_run}",
+                _load_source_subject_mask_run(root, source_run),
+            )
+        elif source_run and source_stage == "refined_eye_masks_runs":
+            resolved_source = cache.setdefault(
+                f"refined_eye_masks_runs/{source_run}",
+                _load_refined_eye_mask_source(root, source_run),
+            )
         elif source_run and source_stage and source_stage != "subject_mask_runs":
             # Editing still operates against a coarse subject_mask_runs source even
             # when the component's original lineage points at a legacy stage such
-            # as refined_eye_masks_runs. Preserve the true provenance on the
+            # as eye_masks_runs. Preserve the true provenance on the
             # component itself, but use the coarse source subject run for editor
             # overlay/save comparisons.
             if default_source is not None:
@@ -1112,7 +1234,7 @@ def _load_refined_component_source_runs(
             resolved_source = primary_source
         if resolved_source is None:
             raise RuntimeError(
-                f"Unable to resolve source subject-mask lineage for component {component_name!r} "
+                f"Unable to resolve source mask lineage for component {component_name!r} "
                 f"in refined_subject_masks_runs/{refined.run_name}."
             )
         component_sources[component_name] = resolved_source
@@ -1120,7 +1242,7 @@ def _load_refined_component_source_runs(
             primary_source = resolved_source
 
     if primary_source is None:
-        raise RuntimeError(f"Unable to resolve any source subject-mask run for refined_subject_masks_runs/{refined.run_name}.")
+        raise RuntimeError(f"Unable to resolve any source mask run for refined_subject_masks_runs/{refined.run_name}.")
     return primary_source, component_sources
 
 

@@ -20,6 +20,7 @@ from ..tune.refined_subject_mask_review import (
     _create_refined_subject_run_from_component_seeds,
     _default_refined_run_name,
     _infer_refined_label_schema_id,
+    _load_refined_eye_mask_source,
     _load_source_subject_mask_run,
 )
 from ..utils.zarr_io import open_zarr_root
@@ -27,6 +28,7 @@ from ..utils.zarr_io import open_zarr_root
 ASSEMBLE_REFINED_SUBJECT_METHOD = "assemble_refined_subject_masks_v1"
 CANONICAL_COMPONENT_ORDER = ("subject_body", "eye_left", "eye_right", "swim_bladder")
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_assemble_refined_subject_masks"
+_EYE_COMPONENTS = ("eye_left", "eye_right")
 
 
 def _required_array_equal(name: str, left: Any, right: Any) -> None:
@@ -91,10 +93,39 @@ def _component_seed_from_source(source: SourceSubjectMaskRun, component_name: st
     return _build_single_source_component_seeds(source, (component_name,))[component_name]
 
 
+def _component_seed_from_refined_eye_source(
+    source: SourceSubjectMaskRun,
+    component_name: str,
+) -> RefinedSubjectComponentSeed:
+    if component_name not in _EYE_COMPONENTS:
+        raise ValueError(f"Unsupported refined-eye component {component_name!r}.")
+    comp_idx = source.mask_labels.index(component_name)
+    source_payload: dict[str, object] = {
+        "source_stage": "refined_eye_masks_runs",
+        "source_run": source.run_name,
+        "source_method": source.source_method or source.group.attrs.get("method") or "unknown",
+        "source_channels": [component_name],
+        "source_crop_run": source.crop_run,
+        **source.source_crop_snapshot,
+    }
+    raw_eye_run = source.group.attrs.get("source_eye_masks_run")
+    if raw_eye_run is not None:
+        source_payload["source_eye_masks_run"] = str(raw_eye_run)
+    source_created_at = source.group.attrs.get("created_at_utc") or source.group.attrs.get("created_utc")
+    if source_created_at is not None:
+        source_payload["source_created_at_utc"] = str(source_created_at)
+    return RefinedSubjectComponentSeed(
+        component_name=component_name,
+        masks=np.asarray(source.masks_roi[:, comp_idx], dtype=np.uint8),
+        source_payload=source_payload,
+    )
+
+
 def _collect_component_seeds(
     *,
     body_source: Optional[SourceSubjectMaskRun],
     eye_source: Optional[SourceSubjectMaskRun],
+    refined_eye_source: Optional[SourceSubjectMaskRun],
     swim_source: Optional[SourceSubjectMaskRun],
 ) -> tuple[dict[str, RefinedSubjectComponentSeed], list[str]]:
     seeds: dict[str, RefinedSubjectComponentSeed] = {}
@@ -120,6 +151,10 @@ def _collect_component_seeds(
                 f"subject_mask_runs/{eye_source.run_name} does not have available eye_left/eye_right channels."
             )
 
+    if refined_eye_source is not None:
+        for component_name in _EYE_COMPONENTS:
+            seeds[component_name] = _component_seed_from_refined_eye_source(refined_eye_source, component_name)
+
     if swim_source is not None:
         if "swim_bladder" not in swim_source.mask_labels:
             raise ValueError(f"subject_mask_runs/{swim_source.run_name} does not expose swim_bladder.")
@@ -139,20 +174,24 @@ def assemble_refined_subject_run(
     *,
     body_run: Optional[str] = None,
     eye_run: Optional[str] = None,
+    refined_eye_run: Optional[str] = None,
     swim_run: Optional[str] = None,
     refined_run: Optional[str] = None,
     overwrite: bool = False,
     dry_run: bool = False,
 ) -> dict[str, object]:
+    if eye_run and refined_eye_run:
+        raise ValueError("Pass only one of eye_run or refined_eye_run.")
     body_source = _load_source_subject_mask_run(root, body_run) if body_run else None
     eye_source = _load_source_subject_mask_run(root, eye_run) if eye_run else None
+    refined_eye_source = _load_refined_eye_mask_source(root, refined_eye_run) if refined_eye_run else None
     swim_source = _load_source_subject_mask_run(root, swim_run) if swim_run else None
 
-    provided_sources = [source for source in (body_source, eye_source, swim_source) if source is not None]
+    provided_sources = [source for source in (body_source, eye_source, refined_eye_source, swim_source) if source is not None]
     if not provided_sources:
-        raise ValueError("At least one of body_run, eye_run, or swim_run is required.")
+        raise ValueError("At least one of body_run, eye_run, refined_eye_run, or swim_run is required.")
 
-    reference_source = body_source or eye_source or swim_source
+    reference_source = body_source or eye_source or refined_eye_source or swim_source
     assert reference_source is not None
     for source in provided_sources[1:]:
         _validate_source_alignment(reference_source, source)
@@ -160,14 +199,23 @@ def assemble_refined_subject_run(
     component_seeds, component_names = _collect_component_seeds(
         body_source=body_source,
         eye_source=eye_source,
+        refined_eye_source=refined_eye_source,
         swim_source=swim_source,
     )
+    coarse_subject_source = body_source or eye_source or swim_source
     target_run = str(refined_run or _default_refined_run_name())
     refined_parent = root.get("refined_subject_masks_runs")
     target_exists = refined_parent is not None and target_run in refined_parent
 
     source_component_runs = {
         component_name: str(component_seeds[component_name].source_payload.get("source_run") or "")
+        for component_name in component_names
+    }
+    source_component_sources = {
+        component_name: {
+            "source_stage": str(component_seeds[component_name].source_payload.get("source_stage") or ""),
+            "source_run": str(component_seeds[component_name].source_payload.get("source_run") or ""),
+        }
         for component_name in component_names
     }
     summary = {
@@ -179,9 +227,11 @@ def assemble_refined_subject_run(
         "component_names": list(component_names),
         "source_body_subject_mask_run": body_source.run_name if body_source is not None else None,
         "source_eye_subject_mask_run": eye_source.run_name if eye_source is not None else None,
+        "source_refined_eye_masks_run": refined_eye_source.run_name if refined_eye_source is not None else None,
         "source_swim_subject_mask_run": swim_source.run_name if swim_source is not None else None,
-        "source_subject_mask_run": reference_source.run_name,
+        "source_subject_mask_run": coarse_subject_source.run_name if coarse_subject_source is not None else None,
         "source_subject_mask_runs": source_component_runs,
+        "source_component_sources": source_component_sources,
         "source_crop_run": reference_source.crop_run,
         **reference_source.source_crop_snapshot,
         "roi_count": int(reference_source.masks_roi.shape[0]),
@@ -198,16 +248,23 @@ def assemble_refined_subject_run(
             )
         del refined_parent[target_run]
 
-    primary_component = "subject_body" if body_source is not None else ("eye_left" if eye_source is not None else "swim_bladder")
+    primary_component = (
+        "subject_body"
+        if body_source is not None
+        else ("eye_left" if (eye_source is not None or refined_eye_source is not None) else "swim_bladder")
+    )
     extra_attrs = {
         "assembly_semantics": "multi_source_component_seed",
         "assembly_primary_source_component": primary_component,
         "source_subject_mask_runs": source_component_runs,
+        "source_component_sources": source_component_sources,
     }
     if body_source is not None:
         extra_attrs["source_body_subject_mask_run"] = body_source.run_name
     if eye_source is not None:
         extra_attrs["source_eye_subject_mask_run"] = eye_source.run_name
+    if refined_eye_source is not None:
+        extra_attrs["source_refined_eye_masks_run"] = refined_eye_source.run_name
     if swim_source is not None:
         extra_attrs["source_swim_subject_mask_run"] = swim_source.run_name
 
@@ -216,11 +273,14 @@ def assemble_refined_subject_run(
     provenance_inputs = {
         "assembly_semantics": "multi_source_component_seed",
         "source_subject_mask_runs": source_component_runs,
+        "source_component_sources": source_component_sources,
     }
     if body_source is not None:
         provenance_inputs["source_body_subject_mask_run"] = body_source.run_name
     if eye_source is not None:
         provenance_inputs["source_eye_subject_mask_run"] = eye_source.run_name
+    if refined_eye_source is not None:
+        provenance_inputs["source_refined_eye_masks_run"] = refined_eye_source.run_name
     if swim_source is not None:
         provenance_inputs["source_swim_subject_mask_run"] = swim_source.run_name
 
@@ -230,8 +290,8 @@ def assemble_refined_subject_run(
         reference_source=reference_source,
         component_names=component_names,
         component_seeds=component_seeds,
-        coarse_source_subject_mask_run=reference_source.run_name,
-        coarse_source_subject_mask_method=reference_source.source_method,
+        coarse_source_subject_mask_run=coarse_subject_source.run_name if coarse_subject_source is not None else None,
+        coarse_source_subject_mask_method=coarse_subject_source.source_method if coarse_subject_source is not None else None,
         source_keypoints_run=shared_keypoints_run,
         source_keypoint_group=shared_keypoint_group,
         run_method=ASSEMBLE_REFINED_SUBJECT_METHOD,
@@ -247,6 +307,7 @@ def assemble_refined_subject_masks(
     *,
     body_run: Optional[str] = None,
     eye_run: Optional[str] = None,
+    refined_eye_run: Optional[str] = None,
     swim_run: Optional[str] = None,
     refined_run: Optional[str] = None,
     overwrite: bool = False,
@@ -257,6 +318,7 @@ def assemble_refined_subject_masks(
         root,
         body_run=body_run,
         eye_run=eye_run,
+        refined_eye_run=refined_eye_run,
         swim_run=swim_run,
         refined_run=refined_run,
         overwrite=overwrite,
@@ -284,6 +346,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", help="Path to the Palette zarr archive.")
     parser.add_argument("--body-run", help="subject_mask_runs/<run> providing subject_body.")
     parser.add_argument("--eye-run", help="subject_mask_runs/<run> providing eye_left/eye_right.")
+    parser.add_argument("--refined-eye-run", help="refined_eye_masks_runs/<run> providing eye_left/eye_right.")
     parser.add_argument("--swim-run", help="subject_mask_runs/<run> providing swim_bladder.")
     parser.add_argument("--refined-run", "--run-name", dest="refined_run", help="Target refined_subject_masks_runs/<run>.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing refined run of the same name.")
@@ -299,6 +362,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.zarr_path,
         body_run=args.body_run,
         eye_run=args.eye_run,
+        refined_eye_run=args.refined_eye_run,
         swim_run=args.swim_run,
         refined_run=args.refined_run,
         overwrite=bool(args.overwrite),

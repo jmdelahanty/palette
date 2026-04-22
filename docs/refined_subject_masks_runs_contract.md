@@ -132,16 +132,16 @@ Initial allowed seed sources for unified assembly:
 - raw `subject_mask_runs`
 - transitional `refined_eye_masks_runs` for eye components
 
-Current implementation note as of 2026-04-02:
+Current implementation note:
 
-- the shipped assembler/review helpers currently resolve seed inputs through
-  `subject_mask_runs`-backed sources
-- for legacy eye-stage data, the implemented path is:
+- the shipped assembler/finalizer accepts raw `subject_mask_runs` component
+  sources for body/eyes/swim bladder
+- it also accepts direct `refined_eye_masks_runs` sources for canonical
+  `eye_left` / `eye_right` component seeding
+- for legacy raw eye-stage data, the compatibility bridge remains:
   `refined_eye_masks_runs` or `eye_masks_runs`
   -> projected/backfilled `subject_mask_runs/<run>`
   -> assembled/finalized `refined_subject_masks_runs/<run>`
-- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding
-  remains a contract target and future extension, not current shipped behavior
 
 Deferred source pattern:
 

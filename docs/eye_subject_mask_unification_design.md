@@ -384,9 +384,10 @@ Current implementation note:
   geometry and `relations/eye_pair/metrics` arrays from its own component masks
   whenever both `eye_left` and `eye_right` are present during refined-run
   creation or finalization.
-- Direct seeding from `refined_eye_masks_runs` remains separate future work;
-  the current path can still arrive through projected/backfilled
-  `subject_mask_runs` sources.
+- Direct seeding from `refined_eye_masks_runs` into
+  `refined_subject_masks_runs` is supported for `eye_left` / `eye_right`
+  component seeds; raw eye-stage data can still arrive through
+  projected/backfilled `subject_mask_runs` sources.
 
 ### Phase C: canonical unification
 
