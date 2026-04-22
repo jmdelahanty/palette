@@ -123,7 +123,7 @@ use as training source:
 |----------|-------------|---------|
 | Detection | `--source-type` | `refined`, `detect`, `filtered`, `interpolated`, `manual` |
 | Keypoints | `--keypoint-run` | `latest_traditional`, `latest_yolo`, explicit name |
-| Eye Masks | `--eye-stage` + `--eye-run` | `auto`, `eye_masks_runs`, `refined_eye_masks_runs` + explicit run |
+| Eye Masks | `--eye-stage` + `--eye-run` | `auto`, `refined_subject_masks_runs`, `refined_eye_masks_runs`, `eye_masks_runs` + explicit run |
 
 For detection, `refined` is the current canonical curated source family.
 `filtered`, `interpolated`, and `manual` remain legacy compatibility options
@@ -218,6 +218,13 @@ Eye mask tables include a `stage_group` column
 refined masks. Detection and keypoints do not have this concept in their
 profile tables (detection distinguishes source type via `detection_source_type`;
 keypoints uses `keypoint_method`).
+
+Current merged eye-mask export source selection is broader than the historical
+profile table: `--eye-stage auto` now prefers canonical
+`refined_subject_masks_runs` eye geometry through `shared.eye_geometry_source`,
+then falls back to `refined_eye_masks_runs` and `eye_masks_runs`. Profile-stage
+filters remain eye-mask-specific because the profile registry is still keyed to
+the historical eye-mask families.
 
 ### 7e. Geometry metrics
 

@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-04-22
 -->
 
 This document defines the merged eye-mask training artifact expected by:
@@ -30,8 +30,14 @@ Required root attrs:
   - `created_at_utc`
   - `input_format` (`gray` or `rgb`)
   - `label_mode` (`lr` or `union`)
-  - `source_stage` (`eye_masks_runs` or `refined_eye_masks_runs`)
+  - `source_stage` (`refined_subject_masks_runs`, `refined_eye_masks_runs`,
+    `eye_masks_runs`, or `mixed`)
+  - `source_stage_role` (`canonical`, `derived_compat`, or `mixed`)
+  - `source_stage_label`
+  - `source_authority_stage`
   - `source_eye_run`
+  - `source_refined_subject_masks_run` when canonical refined-subject geometry
+    was used or a compatibility source maps to it
   - `source_crop_run`
   - `split_seed`
 
@@ -104,7 +110,12 @@ Required successful-ellipse invariant:
 Required attrs:
 
 - `source_eye_stage`
+- `source_eye_stage_role`
+- `source_eye_stage_label`
+- `source_eye_authority_stage`
 - `source_eye_run`
+- `source_refined_subject_masks_run` when canonical refined-subject geometry
+  was used or mapped
 - `source_crop_run`
 - `source_zarr_path`
 - `label_mode`
@@ -159,6 +170,28 @@ Required attrs:
 
 - `mapping_version`
 - `source_count` (`M`)
+
+## Source Selection
+
+The merged training artifact still writes its supervised masks under
+`eye_masks_runs/<latest>` so existing eye-mask trainers continue to load a
+self-contained artifact.
+
+Source selection is separate from output layout:
+
+- `--eye-stage auto` first uses canonical `refined_subject_masks_runs/<run>`
+  eye geometry when the run contains `eye_left` and `eye_right` components.
+- If no canonical refined-subject eye geometry is available, `auto` falls back
+  to `refined_eye_masks_runs/<run>` and then `eye_masks_runs/<run>`.
+- Explicit `--eye-stage refined_subject_masks_runs` requires canonical
+  refined-subject eye geometry.
+- Explicit `--eye-stage refined_eye_masks_runs` is compatibility behavior. If
+  the selected refined-eye run maps to a canonical refined-subject run, the
+  exporter uses the canonical source and records that authority in metadata.
+
+`refined_eye_masks_runs` should therefore be read as a compatibility or
+historical source unless the export was intentionally built from a legacy
+archive.
 
 ## Validator Entrypoints
 

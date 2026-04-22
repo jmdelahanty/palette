@@ -1,4 +1,8 @@
-"""Check eye-mask label coverage against keypoint-valid rows across many Zarrs.
+"""Check legacy eye-mask label coverage against keypoint-valid rows.
+
+This diagnostic intentionally reads ``eye_masks_runs`` and
+``refined_eye_masks_runs``. For the current reviewed subject-mask surface, use
+``fisheye.diagnostics.check_subject_mask_keypoint_coverage``.
 
 Rule enforced per selected eye-mask run:
 every ROI with valid keypoints must have two valid eye labels
@@ -556,7 +560,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage",
         choices=EYE_STAGE_CHOICES,
         default="auto",
-        help="Eye-mask stage to check (default: auto prefers refined_eye_masks_runs).",
+        help=(
+            "Legacy eye-mask stage to check (default: auto prefers "
+            "refined_eye_masks_runs). Use check_subject_mask_keypoint_coverage "
+            "for current refined subject masks."
+        ),
     )
     parser.add_argument("--eye-run", help="Specific eye-mask run name to check.")
     parser.add_argument(

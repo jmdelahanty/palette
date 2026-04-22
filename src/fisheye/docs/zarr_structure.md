@@ -638,6 +638,13 @@ applied during batch retuning.
 
 ## `refined_eye_masks_runs/`
 
+Compatibility and historical eye-specific refined layout. Current canonical
+reviewed eye geometry should be read from `refined_subject_masks_runs/<run>`
+when that run contains `eye_left` and `eye_right` components with geometry
+arrays. Active consumers that need old `(N, 2, ...)` arrays should use
+`fisheye.shared.eye_geometry_source`, which adapts canonical refined-subject
+geometry and falls back to this group for historical archives.
+
 See `fisheye.refinement.refine_eye_masks`.  Key arrays:
 Row lineage (`frame_indices`, `detection_indices`, `frame_counts`) is copied
 from `source_eye_masks_run`; see `docs/eye_mask_row_mapping_contract.md`.
@@ -679,7 +686,9 @@ source (used for traditional segmentation unless
 
 Important refined-output policy:
 
-- `masks_roi` is the canonical refined artifact.
+- `masks_roi` is the canonical artifact for this compatibility layout, not the
+  canonical reviewed eye-geometry authority for modern unified subject-mask
+  runs.
 - `mask_probs_roi_refined` is optional debug/high-fidelity output.
 - Refined runs record the threshold used to derive binary masks from
   probability inputs via `mask_probability_threshold`.
@@ -761,6 +770,12 @@ Canonical refined/editable subject-mask runs produced by
 `fisheye.tune.refined_subject_mask_review` and
 `fisheye.refinement.assemble_refined_subject_masks`.
 
+For modern archives, this is also the canonical reviewed eye-geometry surface
+when `mask_labels` includes `eye_left` and `eye_right`. Eye masks are stored in
+`masks_roi` by semantic component channel, per-eye geometry lives under
+`components/eye_left|eye_right/geometry/`, and cross-eye metrics live under
+`relations/eye_pair/metrics/`.
+
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
 | `frame_indices` *(recommended)* | `(n_rois,)` | `int32` | Copied from the upstream subject-mask/crop lineage when available |
@@ -800,6 +815,11 @@ Refined subject-mask runs preserve the same portable crop snapshot contract as
 their upstream `subject_mask_runs/<run>` source rather than re-deriving lineage
 from the latest crop run later. Component-local lineage continues to live under
 `components/<component>/provenance`.
+
+Eye geometry arrays used by current eye-angle analysis and eye-mask training
+export are read through `fisheye.shared.eye_geometry_source`, which exposes
+`eye_left`/`eye_right` component data as legacy-compatible `(N, 2, ...)`
+array-like views for callers that have not moved to component-native reads yet.
 
 ---
 

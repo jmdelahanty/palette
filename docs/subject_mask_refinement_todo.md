@@ -154,9 +154,11 @@ This is the near-term rollout order that should happen before more schema work.
 - [x] Move canonical manual eye review into `refined_subject_masks_runs`.
 - [x] Guard derived `refined_eye_masks_runs` compatibility artifacts against
       drift by treating them as read-only in legacy eye viewers.
-- [ ] Keep specialized eye geometry/export consumers readable from
-      `refined_eye_masks_runs` while canonical authoring authority remains
-      unified under `refined_subject_masks_runs`.
+- [x] Route the first active eye geometry/export consumers through canonical
+      `refined_subject_masks_runs` with `refined_eye_masks_runs` fallback
+      compatibility.
+- [ ] Audit remaining legacy eye-specific viewers/diagnostics and decide which
+      should become subject-mask-aware versus remain explicitly historical.
 - [ ] Prefer unified subject-mask component registry/query/operator surfaces for
       eye availability and review visibility, using legacy eye stages only as
       compatibility inputs or diagnostics.
@@ -217,8 +219,10 @@ Current implementation note:
 - when eye content starts in legacy eye stages, the implemented bridge is to
   project/backfill a compatibility `subject_mask_runs/<run>` first and then
   assemble or refine from that subject-mask source
-- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is a
-  future extension, not the current code path
+- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is
+  supported for `eye_left` / `eye_right`; remaining work is consumer cleanup,
+  docs/contracts, and deciding when compatibility materialization becomes
+  opt-in
 
 ### 3. Keep eye geometry migration deferred even though review authority is unified
 
@@ -236,6 +240,9 @@ For now:
   legacy viewers
 - subject-mask unification should keep eye-specific geometry/export consumers
   working without another schema reset
+- current eye-angle analysis and eye-mask training export already route through
+  `fisheye.shared.eye_geometry_source`, preferring canonical refined-subject
+  eye geometry with refined-eye fallback for historical archives
 - registry/query/operator surfaces should prefer unified subject-mask component
   rows for eye visibility, projecting legacy eye-stage data when necessary
 - contract target: unified assembly may later allow eye components to seed

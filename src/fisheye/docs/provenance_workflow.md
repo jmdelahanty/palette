@@ -5,8 +5,15 @@ This note captures the sequencing we used to align refined detections, crops, ke
 ## Stage Overview
 
 ```
-detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs → subject_mask_runs → refined_subject_masks_runs → eye_masks_runs → refined_eye_masks_runs → arena_assignment_runs → tracking_runs → track_kinematics_runs
+detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs
+                                           ├─ subject_mask_runs → refined_subject_masks_runs
+                                           └─ eye_masks_runs → refined_eye_masks_runs
+refined_detect_runs → arena_assignment_runs → tracking_runs → track_kinematics_runs
 ```
+
+Current eye geometry authority is `refined_subject_masks_runs/<run>` when that
+run contains `eye_left` and `eye_right` components. `refined_eye_masks_runs`
+remains readable for historical archives and as a derived compatibility layout.
 
 Relevant provenance attributes:
 
@@ -19,8 +26,8 @@ Relevant provenance attributes:
 | `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
 | `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `subject_mask_runs/<run>` | `masks_roi`, `mask_probs_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `label_schema_id`, `run_semantics` |
-| `refined_subject_masks_runs/<run>` | `masks_roi` | `source_subject_mask_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `refined_subject_mask_review_status`, `component_review_statuses` |
-| `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
+| `refined_subject_masks_runs/<run>` | `masks_roi`, component geometry, `relations/eye_pair/metrics/separation_px` | `source_subject_mask_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `refined_subject_mask_review_status`, `component_review_statuses`, `source_refined_eye_masks_run` *(when seeded from compatibility eye data)* |
+| `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | Compatibility/historical refined-eye layout. Key attrs include `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)*, and `source_refined_subject_masks_run` when derived from canonical refined-subject masks. |
 | `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
 | `tracking_runs/<run>` | `track_ids`, `track_arena_ids` | `source_detect_run`, `source_refined_run`, `source_arena_assignment_run`, `tracking_qc_state` |
 

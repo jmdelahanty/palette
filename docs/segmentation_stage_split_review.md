@@ -2,7 +2,7 @@
 
 <!-- review-meta
 status: active
-last_verified: 2026-03-28
+last_verified: 2026-04-22
 -->
 
 Purpose: record the current segmentation-stage layout in `palette`, confirm
@@ -64,7 +64,7 @@ without breaking the eye-specific refinement and training stack.
 | Surface | Entrypoint | Current write target | Notes |
 | --- | --- | --- | --- |
 | Eye refinement | `src/fisheye/refinement/refine_eye_masks.py` -> `refine_eye_masks(...)` | `refined_eye_masks_runs/<run>` | Still emitted for historical archives and legacy eye-specific consumers. Once canonical eye edits or eye review-state changes land in `refined_subject_masks_runs`, the matching `refined_eye_masks_runs/<run>` artifact is now refreshed as a derived compatibility run. |
-| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Canonical unified edit/save/approval surface. Default new-run component selection now follows the available components in the source `subject_mask_runs` input, including eyes when present. New run creation still seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. Canonical eye save/apply/review-state updates now materialize the legacy refined-eye layout as a compatibility artifact. |
+| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Canonical unified edit/save/approval surface. Default new-run component selection follows available source components, including eyes when present. Eye components can be seeded directly from `refined_eye_masks_runs` or through projected `subject_mask_runs` sources. Canonical eye save/apply/review-state updates materialize the legacy refined-eye layout as a compatibility artifact. |
 
 ### Read-Only Inspection Surface
 

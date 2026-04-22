@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive per-eye patch viewer for refined eye masks.
+"""Interactive per-eye patch viewer for legacy/compat refined eye masks.
 
 Displays, for each eye channel:
 1. A local crop around the eye center.
@@ -7,7 +7,10 @@ Displays, for each eye channel:
 3. The crop with refined mask overlay + fitted ellipse.
 4. The full ROI with that eye's mask + ellipse overlay.
 
-Intended for quick visual QA of refined-eye-mask geometry.
+Intended for quick visual QA of standalone historical ``refined_eye_masks_runs``.
+Derived compatibility views that redirect to ``refined_subject_masks_runs`` are
+opened read-only; canonical review/editing belongs in refined subject-mask
+tooling.
 """
 
 from __future__ import annotations

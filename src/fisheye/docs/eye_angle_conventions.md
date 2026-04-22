@@ -1,6 +1,6 @@
 # Eye-Angle Metrics: Data Layout and Computation
 
-This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and refined eye-mask fits. It reflects the post-`1.4` pipeline where deltas and frame-level series are also emitted.
+This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and refined eye geometry. It reflects the post-`1.4` pipeline where deltas and frame-level series are also emitted.
 
 ## Where the data lives
 
@@ -25,14 +25,29 @@ Key datasets:
 - `qa/roi/valid_left`, `valid_right`, `valid_frame`, and `reason_codes` provide flags and bitmasks that explain any exclusions.
 - `support/time_seconds`, `frame_indices`, `ellipse_*` expose timing metadata and ellipse diagnostics used by the visualizations.
 
-The refined keypoint and eye-mask runs referenced by the analysis are captured in the run attributes (`source_keypoint_run`, `source_refined_eye_run`), and the raw ROIs sampled by the viewer live under `keypoints_runs/<run>/roi_images`.
+Current runs resolve eye geometry through `fisheye.shared.eye_geometry_source`.
+The canonical source is `refined_subject_masks_runs/<run>` when it contains
+`eye_left` and `eye_right` components with geometry arrays. Historical
+`refined_eye_masks_runs/<run>` data remains a compatibility fallback.
+
+The referenced sources are captured in run attributes:
+
+- `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
+  and run used for geometry.
+- `source_refined_subject_masks_run`: canonical refined-subject source when
+  available.
+- `source_refined_eye_run`: compatibility refined-eye source when one was used
+  or mapped.
+- `source_keypoint_run`: refined keypoint source.
+
+The raw ROIs sampled by the viewer live under `keypoints_runs/<run>/roi_images`.
 
 ## Angle conventions
 
 Angles are generated inside `fisheye.analysis.eye_angle_analysis._process_chunk`, which receives:
 
 1. Keypoint ROIs (swim bladder, left/right eye centers).
-2. Refined eye-mask ellipse fits.
+2. Refined eye-geometry ellipse fits, preferably from `refined_subject_masks_runs`.
 3. Heading estimates exported by the keypoint run.
 
 ### Per-eye angles

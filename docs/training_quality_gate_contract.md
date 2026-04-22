@@ -198,11 +198,13 @@ Source: `src/fisheye/utils/prepare_eye_mask_training_from_registry.py`
 | `--eye-mask-method` | `str` | free-form | `None` |
 | `--profile-stage-group` | `str` (choice) | `eye_masks_runs`, `refined_eye_masks_runs` | `None` |
 
-`--eye-stage` (choices: `auto`, `eye_masks_runs`, `refined_eye_masks_runs`;
-default `auto`) interacts with the gate logic. When set to a concrete stage
-(not `auto`), it acts as an implicit `--profile-stage-group` if no explicit
-value was provided. It also controls the stage-preference order for candidate
-ranking.
+`--eye-stage` (choices: `auto`, `refined_subject_masks_runs`,
+`refined_eye_masks_runs`, `eye_masks_runs`; default `auto`) interacts with
+the gate logic. The profile registry is still keyed to the historical eye-mask
+families, so only `eye_masks_runs` and `refined_eye_masks_runs` act as implicit
+`--profile-stage-group` values when no explicit profile stage was provided.
+`refined_subject_masks_runs` controls export source selection, not profile-table
+filtering.
 
 ### Activation condition
 
@@ -228,8 +230,9 @@ stage, else `None`.
 
 2. **Candidate selection** (`_choose_profile_candidate`): For each dataset,
    returned profile rows are ranked by:
-   - stage-group preference (controlled by `--eye-stage`; default order:
-     `refined_eye_masks_runs` first, then `eye_masks_runs`)
+   - stage-group preference for profile rows (controlled by historical
+     eye-stage/profile filters; default order: `refined_eye_masks_runs` first,
+     then `eye_masks_runs`)
    - creation time descending (newest first)
    - review state/use match
 

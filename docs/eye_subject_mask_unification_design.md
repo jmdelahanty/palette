@@ -314,9 +314,11 @@ This is necessary for mixed-source refined runs such as:
 
 ### During transition
 
-During transition, `refined_eye_masks_runs` remains supported and may remain
-the live eye-specific refinement surface until the unified eye path reaches
-feature parity.
+During transition, `refined_eye_masks_runs` remains supported for historical
+archives, legacy diagnostics, and derived compatibility materialization. It is
+no longer the intended current authority for new reviewed eye geometry when a
+matching `refined_subject_masks_runs` run contains `eye_left` and `eye_right`
+components.
 
 That means:
 
@@ -331,6 +333,9 @@ That means:
 - those derived compatibility runs should be read-only in legacy viewers so
   they cannot drift away from canonical refined-subject eye state
 - migration/backfill into subject-mask stages remains non-destructive
+- current eye-angle analysis and eye-mask training export route through
+  `fisheye.shared.eye_geometry_source`, preferring canonical refined-subject
+  eye geometry and falling back to refined-eye geometry for historical archives
 
 ### Steady-state target
 

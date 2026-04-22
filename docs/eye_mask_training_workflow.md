@@ -47,7 +47,6 @@ scripts/py -m fisheye.utils.run_eye_mask_training_pipeline \
   --input-format gray \
   --model-input gray \
   --label-mode lr \
-  --eye-stage refined_eye_masks_runs \
   --require-review-state approved \
   --require-review-intended-use training \
   --set-name cedar_shadow_omnifin0_auto_gray_lr \
@@ -61,6 +60,9 @@ scripts/py -m fisheye.utils.run_eye_mask_training_pipeline \
 
 Notes:
 - `--build-dataset` enables merged export + data-card aggregation.
+- `--eye-stage` defaults to `auto`, which prefers canonical
+  `refined_subject_masks_runs` eye geometry when available, then falls back to
+  `refined_eye_masks_runs` and `eye_masks_runs` for historical sources.
 - `--merge-explicit-negative-ratio 1000` approximates “no practical cap”.
 - Aggregation is fail-closed by default on stale/missing profile rows.
 

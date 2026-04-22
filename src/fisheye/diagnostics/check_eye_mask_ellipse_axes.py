@@ -1,4 +1,8 @@
-"""Validate major/minor ellipse axis ordering for eye-mask runs.
+"""Validate major/minor ellipse axis ordering for legacy eye-mask runs.
+
+This diagnostic intentionally checks historical/compat ``eye_masks_runs`` and
+``refined_eye_masks_runs`` layouts. Current reviewed eye geometry is canonical
+under ``refined_subject_masks_runs``.
 
 This checks whether successful eye ellipse fits satisfy `major >= minor`
 consistently for `eye_masks_runs` and/or `refined_eye_masks_runs`.
@@ -215,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage",
         choices=("eye_masks_runs", "refined_eye_masks_runs", "both"),
         default="both",
-        help="Which stage(s) to check (default: both).",
+        help="Which legacy eye-mask stage(s) to check (default: both).",
     )
     parser.add_argument(
         "--eye-run",
@@ -323,4 +327,3 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

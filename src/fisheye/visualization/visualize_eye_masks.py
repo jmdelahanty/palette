@@ -1,11 +1,16 @@
-"""Interactive visualizer for eye mask segmentation runs.
+"""Interactive visualizer for legacy eye-mask segmentation runs.
 
-Displays ROI crops with eye masks overlaid, using the masks produced
-by the `eye_masks` pipeline stage. Handles both traditional left/right masks and
-YOLO index-ordered masks, highlighting when refinement has not yet been applied.
-If matching entries exist in ``refined_eye_masks_runs`` (or are specified via
-``--refined-run``), their results are loaded as additional variants that can be
-inspected alongside the original segmentation.
+This tool intentionally inspects standalone ``eye_masks_runs`` and
+``refined_eye_masks_runs`` layouts. Current reviewed eye geometry is canonical
+under ``refined_subject_masks_runs`` and is consumed through
+``fisheye.shared.eye_geometry_source``.
+
+Displays ROI crops with eye masks overlaid, using the masks produced by the
+legacy ``eye_masks`` pipeline stage. Handles both traditional left/right masks
+and YOLO index-ordered masks, highlighting when refinement has not yet been
+applied. If matching entries exist in ``refined_eye_masks_runs`` (or are
+specified via ``--refined-run``), their results are loaded as additional
+variants that can be inspected alongside the original segmentation.
 """
 
 from __future__ import annotations

@@ -198,6 +198,11 @@ scripts/py -m fisheye.utils.export_eye_mask_training_zarr \
   --split-seed 42
 ```
 
+By default, eye-mask export uses `--eye-stage auto`, which prefers canonical
+`refined_subject_masks_runs` eye geometry when `eye_left` and `eye_right`
+components are available. It falls back to `refined_eye_masks_runs` and then
+`eye_masks_runs` for historical archives.
+
 `--label-mode` controls how eye masks are encoded:
 - `lr`: separate left/right eye channels
 - `union`: single combined channel

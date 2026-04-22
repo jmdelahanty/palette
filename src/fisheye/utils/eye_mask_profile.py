@@ -1,3 +1,12 @@
+"""Profile historical eye-mask-family datasets for registry/training gates.
+
+The profile registry is still keyed around ``eye_masks_runs`` and
+``refined_eye_masks_runs`` because those are the legacy training artifact
+families. When a refined-eye compatibility view redirects to
+``refined_subject_masks_runs``, profile rows record the canonical subject-mask
+run separately instead of treating refined-eye as the current authority.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

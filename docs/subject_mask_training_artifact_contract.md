@@ -94,7 +94,7 @@ Recommended transition plan:
 3. Treat `refined_eye_masks_runs` as an eye-specific compatibility/derived
    stage during the transition to unified subject-mask refinement.
 4. Prefer `refined_subject_masks_runs` as the canonical refined source for new
-   eye-capable exports once unified LR eye components are available there.
+   eye-capable exports when unified LR eye components are available there.
 5. Deprecate authoring of new raw `eye_masks_runs` only after the
    `subject_mask_runs` path is stable.
 

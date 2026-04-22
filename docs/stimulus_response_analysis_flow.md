@@ -13,6 +13,8 @@ flowchart TD
         RDET --> CROP[crop_runs/]
         CROP --> KP[keypoints_runs/]
         KP --> RKP[refined_keypoints_runs/]
+        CROP --> SM[subject_mask_runs/]
+        SM --> RSM[refined_subject_masks_runs/]
         CROP --> EM[eye_masks_runs/]
         EM --> REM[refined_eye_masks_runs/]
         DET --> AA[arena_assignment_runs/]
@@ -26,7 +28,8 @@ flowchart TD
         RKP --> TKIN
         AA --> TKIN
         TKIN --> BOUTS[swim_bout_runs/]
-        REM --> EYE[eye_angle_runs/]
+        RSM --> EYE[eye_angle_runs/]
+        REM -. historical fallback .-> EYE
         RKP --> EYE
     end
 

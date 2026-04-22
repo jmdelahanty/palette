@@ -13,7 +13,8 @@ Define the registry model for `subject_mask_runs` so Palette can:
 - track component-level quality and review state for
   `subject_body`, `eyes_union`, and `swim_bladder`,
 - preserve the existing step-level recording dashboards,
-- keep `refined_eye_masks_runs` as a separate eye-specific derived artifact.
+- keep `refined_eye_masks_runs` representable as a historical or derived
+  compatibility artifact.
 
 This is a design contract. It does not by itself implement registry writers,
 schema migrations, or review UIs.
@@ -31,7 +32,7 @@ In scope:
 Out of scope:
 
 - `subject_shape_runs` registry design
-- `refined_eye_masks_runs` replacement
+- removal of `refined_eye_masks_runs` compatibility support
 - model-training registry surfaces
 - UI layout details beyond the required state model
 
@@ -84,17 +85,29 @@ Canonical stage relationship:
 ```text
 crop_runs/<run>
   -> subject_mask_runs/<run>
-  -> refined_eye_masks_runs/<run>
+  -> refined_subject_masks_runs/<run>
   -> subject_shape_runs/<run>
+```
+
+Historical and compatibility eye-mask relationship:
+
+```text
+crop_runs/<run>
+  -> eye_masks_runs/<run>
+  -> refined_eye_masks_runs/<run>
 ```
 
 Registry implication:
 
 - `subject_masks` becomes a coarse recording step
-- `refined_eye_masks` remains a separate coarse recording step
+- `refined_subject_masks` is the canonical refined component step
+- `refined_eye_masks` remains a separate coarse recording step for historical
+  and compatibility artifacts
 - component review for `eyes_union` lives under `subject_mask_runs`, not under
   `refined_eye_masks_runs`
-- left/right eye geometry review stays with `refined_eye_masks_runs`
+- left/right eye review authority for modern runs lives under
+  `refined_subject_masks_runs`; `refined_eye_masks_runs` can be projected for
+  legacy query and diagnostic compatibility
 
 ## Coarse Step Policy
 
