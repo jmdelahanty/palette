@@ -25,6 +25,7 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.utils.metadata import get_fps
 from fisheye.utils.system import get_git_info
@@ -449,7 +450,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--refined-eye-run",
         type=str,
-        help="Refined eye mask run under refined_eye_masks_runs (default: latest).",
+        help=(
+            "Compatibility refined eye mask run under refined_eye_masks_runs. "
+            "When it maps to refined_subject_masks_runs, canonical subject-eye geometry is used."
+        ),
+    )
+    parser.add_argument(
+        "--refined-subject-run",
+        type=str,
+        help="Canonical refined_subject_masks_runs/<run> providing eye geometry (default: latest with LR eyes).",
     )
     parser.add_argument(
         "--keypoint-run",
@@ -523,26 +532,22 @@ def run(args: argparse.Namespace) -> None:
     analysis_group = root.require_group("analysis")
     parent_group = analysis_group.require_group("eye_angle_runs")
 
-    refined_parent = root.require_group("refined_eye_masks_runs")
-    refined_run_name = args.refined_eye_run or refined_parent.attrs.get("latest")
-    if not refined_run_name or refined_run_name not in refined_parent:
-        raise ValueError("Refined eye mask run not found; specify --refined-eye-run.")
-    refined_group = refined_parent[refined_run_name]
+    eye_geometry = resolve_eye_geometry_source(
+        root,
+        refined_subject_run=args.refined_subject_run,
+        refined_eye_run=args.refined_eye_run,
+        prefer_subject=True,
+    )
 
     kp_parent = root.require_group("refined_keypoints_runs")
     keypoint_run_name = _resolve_keypoint_run_name(
         explicit_keypoint_run=args.keypoint_run,
-        refined_attrs=dict(refined_group.attrs),
+        refined_attrs=dict(eye_geometry.lineage_attrs),
         parent_latest=kp_parent.attrs.get("latest"),
     )
     if not keypoint_run_name or keypoint_run_name not in kp_parent:
         raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
     kp_group = kp_parent[keypoint_run_name]
-
-    required_refined = ["ellipse_params", "ellipse_success"]
-    for dataset in required_refined:
-        if dataset not in refined_group:
-            raise ValueError(f"Refined run '{refined_run_name}' missing dataset '{dataset}'.")
 
     # Refined keypoints runs may not have all datasets; fall back to source keypoints run
     source_kp_run_name = resolve_source_keypoints_run(kp_group.attrs)
@@ -586,9 +591,9 @@ def run(args: argparse.Namespace) -> None:
             "(not in refined or source keypoints run)."
         )
 
-    total_detections = refined_group["ellipse_params"].shape[0]
+    total_detections = eye_geometry.ellipse_params.shape[0]
     if kp_group["keypoints_roi"].shape[0] != total_detections:
-        raise ValueError("Mismatch between refined eye masks and keypoint detections.")
+        raise ValueError("Mismatch between eye geometry source and keypoint detections.")
     keypoint_indices = _resolve_head_keypoint_indices(kp_group)
 
     chunk_size = max(1, int(args.chunk_size))
@@ -621,8 +626,8 @@ def run(args: argparse.Namespace) -> None:
 
     for start in range(0, total_detections, chunk_size):
         stop = min(start + chunk_size, total_detections)
-        ellipse_params = refined_group["ellipse_params"][start:stop]
-        ellipse_success = refined_group["ellipse_success"][start:stop]
+        ellipse_params = eye_geometry.ellipse_params[start:stop]
+        ellipse_success = eye_geometry.ellipse_success[start:stop]
         keypoints_roi = kp_group["keypoints_roi"][start:stop]
         heading_deg = kp_group["heading"][start:stop]
         detection_success = detection_success_source[detection_success_key][start:stop].astype(bool, copy=False)
@@ -1184,7 +1189,10 @@ def run(args: argparse.Namespace) -> None:
         {
             "report_version": "1.4",
             "reason_code_map": REASON_CODE_MAP,
-            "source_refined_eye_run": refined_run_name,
+            "source_eye_geometry_stage": eye_geometry.stage_group,
+            "source_eye_geometry_run": eye_geometry.run_name,
+            "source_refined_eye_run": eye_geometry.source_refined_eye_run,
+            "source_refined_subject_masks_run": eye_geometry.source_refined_subject_run,
             **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
             "fps": float(fps) if fps else None,
             "num_detections": int(total_detections),
@@ -1215,7 +1223,10 @@ def run(args: argparse.Namespace) -> None:
         "git": get_git_info(),
         "arguments": {
             "zarr_path": str(args.zarr_path),
-            "refined_eye_run": refined_run_name,
+            "eye_geometry_stage": eye_geometry.stage_group,
+            "eye_geometry_run": eye_geometry.run_name,
+            "refined_eye_run": eye_geometry.source_refined_eye_run,
+            "refined_subject_run": eye_geometry.source_refined_subject_run,
             "keypoint_run": keypoint_run_name,
             "run_name": args.run_name,
             "chunk_size": chunk_size,

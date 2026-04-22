@@ -30,6 +30,7 @@ import zarr
 from matplotlib.widgets import Button, Slider
 
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
+from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 
 
@@ -472,15 +473,19 @@ def _load_keypoints(root: zarr.Group, keypoint_run: str) -> tuple[Optional[zarr.
     return None, None
 
 
-def _load_masks(root: zarr.Group, refined_run: str) -> tuple[zarr.Array, Optional[zarr.Array], Optional[zarr.Array], Optional[zarr.Array]]:
-    group_path = f"refined_eye_masks_runs/{refined_run}"
-    if group_path not in root:
-        raise RuntimeError(f"Refined eye mask run '{refined_run}' not found.")
-    group = root[group_path]
-    if "masks_roi" not in group:
-        raise RuntimeError(f"Group '{group_path}' missing 'masks_roi' dataset.")
-    ellipse = group["ellipse_params"] if "ellipse_params" in group else None
-    return group["masks_roi"], ellipse
+def _load_masks(
+    root: zarr.Group,
+    *,
+    refined_subject_run: Optional[str],
+    refined_eye_run: Optional[str],
+):
+    source = resolve_eye_geometry_source(
+        root,
+        refined_subject_run=refined_subject_run,
+        refined_eye_run=refined_eye_run,
+        prefer_subject=True,
+    )
+    return source.masks_roi, source.ellipse_params
 
 
 def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[AngleRecord], Dict[int, str]]:
@@ -636,7 +641,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Overlay refined eye masks with signed eye-angle metrics on ROI crops.")
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
     parser.add_argument("--eye-angle-run", dest="eye_angle_run", help="Specific analysis/eye_angle_runs/<run> to visualize.")
-    parser.add_argument("--refined-eye-run", dest="refined_run", help="Specific refined_eye_masks_runs/<run> to use.")
+    parser.add_argument("--refined-eye-run", dest="refined_run", help="Specific compatibility refined_eye_masks_runs/<run> to use.")
+    parser.add_argument("--refined-subject-run", dest="refined_subject_run", help="Specific canonical refined_subject_masks_runs/<run> to use.")
     parser.add_argument("--keypoint-run", dest="keypoint_run", help="Specific keypoints_runs/<run> providing ROI images.")
     parser.add_argument("--alpha", type=float, default=0.55, help="Mask overlay alpha (default 0.55).")
     parser.add_argument(
@@ -667,11 +673,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise RuntimeError("Eye angle run not found; specify --eye-angle-run.")
     run_group = eye_angle_parent[eye_angle_run]
 
-    refined_run = args.refined_run or run_group.attrs.get("source_refined_eye_run")
-    if not refined_run:
-        raise RuntimeError("Could not determine refined eye mask run; pass --refined-eye-run.")
-    refined_run = _get_latest(root, "refined_eye_masks", refined_run) if refined_run == "latest" else refined_run
-
+    source_stage = str(run_group.attrs.get("source_eye_geometry_stage") or "")
+    source_run = str(run_group.attrs.get("source_eye_geometry_run") or "")
+    refined_subject_run = args.refined_subject_run
+    refined_run = args.refined_run
+    if refined_subject_run is None and source_stage == "refined_subject_masks_runs" and source_run:
+        refined_subject_run = source_run
+    if refined_run is None and source_stage == "refined_eye_masks_runs" and source_run:
+        refined_run = source_run
+    if refined_subject_run is None:
+        refined_subject_run = run_group.attrs.get("source_refined_subject_masks_run")
+    if refined_run is None:
+        refined_run = run_group.attrs.get("source_refined_eye_run")
     keypoint_run = _resolve_keypoint_run_name(
         explicit_keypoint_run=args.keypoint_run,
         run_attrs=run_group.attrs,
@@ -682,7 +695,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     roi_images = _load_roi_images(root, keypoint_run)
     keypoints_roi, keypoint_indices = _load_keypoints(root, keypoint_run)
-    masks, ellipse_params = _load_masks(root, refined_run)
+    masks, ellipse_params = _load_masks(
+        root,
+        refined_subject_run=refined_subject_run,
+        refined_eye_run=refined_run,
+    )
 
     if roi_images.shape[0] != masks.shape[0]:
         raise ValueError(
