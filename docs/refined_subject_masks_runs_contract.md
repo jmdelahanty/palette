@@ -561,6 +561,17 @@ Geometry policy:
 - downstream `subject_shape_runs` should consume refined body masks or refined
   body geometry, not raw `subject_mask_runs`
 
+Current implementation note:
+
+- When both `eye_left` and `eye_right` are present,
+  `refined_subject_masks_runs` materializes:
+  - `components/eye_left|eye_right/geometry/ellipse_params`
+  - `components/eye_left|eye_right/geometry/ellipse_success`
+  - `components/eye_left|eye_right/contours/{ptr,len,points_xy}`
+  - `relations/eye_pair/metrics/{separation_px,separation_valid}`
+- These arrays are derived from the refined subject-mask component masks during
+  refined-run creation/finalization.
+
 ## Reason Encoding Policy
 
 If `reason_bytes` is present for a component subgroup, writers should also set:

@@ -1310,6 +1310,10 @@ def _create_refined_subject_run_from_component_seeds(
         inputs=stage_inputs_payload,
     )
     write_stage_provenance(run_group, provenance)
+    if {"eye_left", "eye_right"}.issubset(set(component_names)):
+        from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
+
+        write_refined_subject_eye_geometry(run_group)
     refined_parent.attrs["latest"] = target_run
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
     return RefinedSubjectMaskRun(
@@ -1797,6 +1801,10 @@ def _finalize_refined_subject_apply(
     updated_at_utc = _utc_now()
     refined.group.attrs["updated_at_utc"] = updated_at_utc
     refined.parent.attrs["latest"] = refined.run_name
+    if {"eye_left", "eye_right"}.issubset(set(refined.component_names)):
+        from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
+
+        write_refined_subject_eye_geometry(refined.group, updated_components=updated_components)
     _materialize_refined_eye_compat_if_needed(refined, updated_components=updated_components)
     return updated_at_utc
 

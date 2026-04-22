@@ -378,6 +378,16 @@ canonical and the other must be derived.
 - require subject-mask finalization after the seed/assembly step so the unified
   run has canonical refined QA and review metadata
 
+Current implementation note:
+
+- `refined_subject_masks_runs` now materializes canonical left/right eye
+  geometry and `relations/eye_pair/metrics` arrays from its own component masks
+  whenever both `eye_left` and `eye_right` are present during refined-run
+  creation or finalization.
+- Direct seeding from `refined_eye_masks_runs` remains separate future work;
+  the current path can still arrive through projected/backfilled
+  `subject_mask_runs` sources.
+
 ### Phase C: canonical unification
 
 - new eye-capable refined authoring writes canonical state to

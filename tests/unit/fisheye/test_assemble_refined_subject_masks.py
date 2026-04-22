@@ -118,10 +118,10 @@ def _build_assembly_root() -> zarr.Group:
     )
 
     eye_masks = np.zeros((2, 2, 8, 8), dtype=np.uint8)
-    eye_masks[0, 0, 2:3, 2:3] = 1
-    eye_masks[0, 1, 2:3, 5:6] = 1
-    eye_masks[1, 0, 3:4, 2:3] = 1
-    eye_masks[1, 1, 3:4, 5:6] = 1
+    eye_masks[0, 0, 1:4, 1:4] = 1
+    eye_masks[0, 1, 1:4, 4:7] = 1
+    eye_masks[1, 0, 3:6, 1:4] = 1
+    eye_masks[1, 1, 3:6, 4:7] = 1
     _create_subject_run(
         root,
         run_name="eye_run_001",
@@ -257,6 +257,28 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     assert run["components/eye_right/provenance"].attrs["source_run"] == "eye_run_001"
     assert run["components/swim_bladder/provenance"].attrs["source_run"] == "swim_run_001"
     assert run["components/swim_bladder/provenance"].attrs["last_update_mode"] == "create"
+    assert run.attrs["eye_geometry_schema_id"] == "refined_subject_eye_geometry_v1"
+    left_geometry = run["components/eye_left/geometry"]
+    right_geometry = run["components/eye_right/geometry"]
+    assert left_geometry.attrs["geometry_schema_id"] == "refined_subject_eye_geometry_v1"
+    assert right_geometry.attrs["geometry_schema_id"] == "refined_subject_eye_geometry_v1"
+    assert left_geometry["ellipse_params"].shape == (2, 5)
+    assert right_geometry["ellipse_params"].shape == (2, 5)
+    np.testing.assert_array_equal(np.asarray(left_geometry["ellipse_success"][:], dtype=bool), np.ones((2,), dtype=bool))
+    np.testing.assert_array_equal(np.asarray(right_geometry["ellipse_success"][:], dtype=bool), np.ones((2,), dtype=bool))
+    left_contours = run["components/eye_left/contours"]
+    right_contours = run["components/eye_right/contours"]
+    assert left_contours["ptr"].shape == (2,)
+    assert right_contours["ptr"].shape == (2,)
+    assert left_contours["points_xy"].shape[1] == 2
+    assert right_contours["points_xy"].shape[1] == 2
+    eye_pair_metrics = run["relations/eye_pair/metrics"]
+    assert eye_pair_metrics.attrs["relation_schema_id"] == "refined_subject_eye_pair_relation_v1"
+    np.testing.assert_array_equal(
+        np.asarray(eye_pair_metrics["separation_valid"][:], dtype=bool),
+        np.ones((2,), dtype=bool),
+    )
+    assert np.all(np.asarray(eye_pair_metrics["separation_px"][:], dtype=np.float32) > 0.0)
 
     provenance = run.attrs["provenance"]
     assert provenance["inputs"]["source_crop_run"] == "crop_001"
