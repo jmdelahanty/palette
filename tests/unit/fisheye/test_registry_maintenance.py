@@ -7820,7 +7820,8 @@ def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw
         SELECT
             component_name,
             stage_group,
-            run_name
+            run_name,
+            lifecycle_state
         FROM subject_mask_component_quality_latest
         WHERE dataset_id = ?
         ORDER BY component_name;
@@ -7828,10 +7829,222 @@ def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw
         (dataset_id,),
     ).fetchall()
     latest_by_component = {str(row["component_name"]): row for row in latest_rows}
-    assert str(latest_by_component["subject_body"]["stage_group"]) == "subject_mask_runs"
-    assert str(latest_by_component["subject_body"]["run_name"]) == "subject_masks_002"
-    assert str(latest_by_component["swim_bladder"]["stage_group"]) == "subject_mask_runs"
-    assert str(latest_by_component["swim_bladder"]["run_name"]) == "subject_masks_002"
+    assert str(latest_by_component["subject_body"]["stage_group"]) == "refined_subject_masks_runs"
+    assert str(latest_by_component["subject_body"]["run_name"]) == "refined_subject_masks_001"
+    assert str(latest_by_component["subject_body"]["lifecycle_state"]) == "stale"
+    assert str(latest_by_component["swim_bladder"]["stage_group"]) == "refined_subject_masks_runs"
+    assert str(latest_by_component["swim_bladder"]["run_name"]) == "refined_subject_masks_001"
+    assert str(latest_by_component["swim_bladder"]["lifecycle_state"]) == "stale"
+    registry.close()
+
+
+def test_subject_mask_component_latest_prefers_available_partial_refined_runs(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_partial",
+        session_uuid="session_partial",
+        zarr_path=tmp_path / "partial_subject.zarr",
+        recording_id="recording_partial",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_partial",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_all",
+        run_created_utc="2026-03-02T00:00:00+00:00",
+        recording_id="recording_partial",
+        zarr_use="analysis",
+        subject_mask_method="subject_mask_threshold_lr_v1",
+        label_schema_id="subject_v1_lr",
+        source_crop_run="crop_partial",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_partial",
+        source_subject_mask_run=None,
+        source_subject_mask_method=None,
+        run_semantics="component_source",
+        probability_semantics=None,
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=100,
+        rows_with_any_mask=100,
+        coverage_percent=100.0,
+        duration_seconds=None,
+        rois_per_second=None,
+        available_component_count=2,
+        available_components_json=json.dumps(["subject_body", "swim_bladder"]),
+        unavailable_components_json=json.dumps([]),
+        component_review_states_json=None,
+        eye_component_mode=None,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-02T00:01:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=333,
+    )
+    for component_name in ("subject_body", "swim_bladder"):
+        registry.upsert_subject_mask_component_quality(
+            dataset_id="dataset_partial",
+            stage_group="subject_mask_runs",
+            run_name="subject_masks_all",
+            component_name=component_name,
+            component_family=component_name,
+            run_created_utc="2026-03-02T00:00:00+00:00",
+            recording_id="recording_partial",
+            zarr_use="analysis",
+            subject_mask_method="subject_mask_threshold_lr_v1",
+            label_schema_id="subject_v1_lr",
+            eye_component_mode=None,
+            source_subject_mask_run=None,
+            available=1,
+            review_state="approved",
+            review_method="manual",
+            review_intended_use="training",
+            review_reviewer="pytest",
+            review_timestamp_utc="2026-03-02T00:01:00+00:00",
+            total_rois=100,
+            rows_with_component_mask=95,
+            rows_with_component_mask_rate=0.95,
+            lifecycle_state="approved",
+            lifecycle_reason="approved",
+            quality_updated_utc="2026-03-02T00:01:00+00:00",
+            zarr_mtime_ns=333,
+        )
+
+    for run_name, created_at, available_component, unavailable_component in (
+        ("refined_subject_body_only", "2026-03-02T00:10:00+00:00", "subject_body", "swim_bladder"),
+        ("refined_swim_only", "2026-03-02T00:05:00+00:00", "swim_bladder", "subject_body"),
+    ):
+        registry.upsert_subject_mask_performance(
+            dataset_id="dataset_partial",
+            stage_group="refined_subject_masks_runs",
+            run_name=run_name,
+            run_created_utc=created_at,
+            recording_id="recording_partial",
+            zarr_use="analysis",
+            subject_mask_method="refine_subject_masks",
+            label_schema_id="subject_v1_lr",
+            source_crop_run="crop_partial",
+            source_keypoint_group="refined_keypoints_runs",
+            source_keypoints_run="kp_partial",
+            source_subject_mask_run=None,
+            source_subject_mask_method=None,
+            run_semantics="refined_subject_mask_review",
+            probability_semantics=None,
+            source_background_run=None,
+            source_background_array=None,
+            source_dish_mask_array=None,
+            tuning_source=None,
+            tuning_timestamp=None,
+            total_rois=100,
+            rows_with_any_mask=100,
+            coverage_percent=100.0,
+            duration_seconds=None,
+            rois_per_second=None,
+            available_component_count=1,
+            available_components_json=json.dumps([available_component]),
+            unavailable_components_json=json.dumps([unavailable_component]),
+            component_review_states_json=json.dumps({available_component: "approved"}),
+            eye_component_mode=None,
+            reason_counts_json=None,
+            summary_statistics_json=None,
+            review_state="approved",
+            review_method="manual",
+            review_intended_use="training",
+            review_reviewer="pytest",
+            review_timestamp_utc=created_at,
+            lifecycle_state="approved",
+            lifecycle_reason="approved",
+            zarr_mtime_ns=333,
+        )
+        for component_name, available in (
+            (available_component, 1),
+            (unavailable_component, 0),
+        ):
+            registry.upsert_subject_mask_component_quality(
+                dataset_id="dataset_partial",
+                stage_group="refined_subject_masks_runs",
+                run_name=run_name,
+                component_name=component_name,
+                component_family=component_name,
+                run_created_utc=created_at,
+                recording_id="recording_partial",
+                zarr_use="analysis",
+                subject_mask_method="refine_subject_masks",
+                label_schema_id="subject_v1_lr",
+                eye_component_mode=None,
+                source_subject_mask_run=None,
+                available=available,
+                review_state="approved" if available else None,
+                review_method="manual" if available else None,
+                review_intended_use="training" if available else None,
+                review_reviewer="pytest" if available else None,
+                review_timestamp_utc=created_at if available else None,
+                total_rois=100,
+                rows_with_component_mask=92 if available else 0,
+                rows_with_component_mask_rate=0.92 if available else 0.0,
+                lifecycle_state="approved" if available else "na",
+                lifecycle_reason="approved" if available else "component_unavailable",
+                quality_updated_utc=created_at,
+                zarr_mtime_ns=333,
+            )
+
+    refined_current_rows = registry.conn.execute(
+        """
+        SELECT component_name, run_name, available
+        FROM subject_mask_component_quality_current
+        WHERE dataset_id = ?
+          AND stage_group = 'refined_subject_masks_runs'
+          AND component_name IN ('subject_body', 'swim_bladder')
+        ORDER BY component_name;
+        """,
+        ("dataset_partial",),
+    ).fetchall()
+    refined_current = {str(row["component_name"]): row for row in refined_current_rows}
+    assert str(refined_current["subject_body"]["run_name"]) == "refined_subject_body_only"
+    assert int(refined_current["subject_body"]["available"]) == 1
+    assert str(refined_current["swim_bladder"]["run_name"]) == "refined_swim_only"
+    assert int(refined_current["swim_bladder"]["available"]) == 1
+
+    latest_rows = registry.conn.execute(
+        """
+        SELECT component_name, stage_group, run_name
+        FROM subject_mask_component_quality_latest
+        WHERE dataset_id = ?
+          AND component_name IN ('subject_body', 'swim_bladder')
+        ORDER BY component_name;
+        """,
+        ("dataset_partial",),
+    ).fetchall()
+    latest = {str(row["component_name"]): row for row in latest_rows}
+    assert str(latest["subject_body"]["stage_group"]) == "refined_subject_masks_runs"
+    assert str(latest["subject_body"]["run_name"]) == "refined_subject_body_only"
+    assert str(latest["swim_bladder"]["stage_group"]) == "refined_subject_masks_runs"
+    assert str(latest["swim_bladder"]["run_name"]) == "refined_swim_only"
+
+    recording_rows = registry.conn.execute(
+        """
+        SELECT component_name, stage_group, run_name
+        FROM subject_mask_component_quality_latest_by_recording
+        WHERE recording_id = ?
+          AND component_name IN ('subject_body', 'swim_bladder')
+        ORDER BY component_name;
+        """,
+        ("recording_partial",),
+    ).fetchall()
+    recording_latest = {str(row["component_name"]): row for row in recording_rows}
+    assert str(recording_latest["subject_body"]["run_name"]) == "refined_subject_body_only"
+    assert str(recording_latest["swim_bladder"]["run_name"]) == "refined_swim_only"
     registry.close()
 
 
@@ -8003,8 +8216,8 @@ def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preser
         source_crop_run="crop_native",
         source_keypoint_group="refined_keypoints_runs",
         source_keypoints_run="kp_native",
-        source_subject_mask_run="subject_masks_native",
-        source_subject_mask_method="subject_mask_threshold_lr_v1",
+        source_subject_mask_run=None,
+        source_subject_mask_method=None,
         run_semantics=None,
         probability_semantics=None,
         source_background_run=None,
@@ -8051,7 +8264,7 @@ def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preser
             subject_mask_method="refine_subject_masks",
             label_schema_id="subject_v1_lr",
             eye_component_mode="lr",
-            source_subject_mask_run="subject_masks_native",
+            source_subject_mask_run=None,
             available=1,
             review_state="approved",
             review_method="manual",

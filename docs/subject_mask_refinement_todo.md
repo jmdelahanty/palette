@@ -157,11 +157,19 @@ This is the near-term rollout order that should happen before more schema work.
 - [x] Route the first active eye geometry/export consumers through canonical
       `refined_subject_masks_runs` with `refined_eye_masks_runs` fallback
       compatibility.
-- [ ] Audit remaining legacy eye-specific viewers/diagnostics and decide which
+- [x] Audit remaining legacy eye-specific viewers/diagnostics and decide which
       should become subject-mask-aware versus remain explicitly historical.
+      Outcome: active eye geometry/export consumers now use the shared refined
+      subject-mask resolver, while legacy eye-mask viewers, patch tools,
+      profile utilities, and old eye-stage diagnostics remain explicitly
+      historical/compatibility surfaces.
 - [ ] Prefer unified subject-mask component registry/query/operator surfaces for
       eye availability and review visibility, using legacy eye stages only as
       compatibility inputs or diagnostics.
+      Progress: registry component current/latest views now prefer available
+      per-component refined-subject rows, including partial refined runs, while
+      preserving stale lifecycle state instead of hiding stale refined rows
+      behind raw or legacy compatibility stages.
 
 ## What Is Actually Missing Now
 

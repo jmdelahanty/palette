@@ -2517,6 +2517,11 @@ class Registry:
                 "subject_mask_component_eye_compat_latest_views",
                 self._migration_037_subject_mask_component_eye_compat_latest_views,
             ),
+            (
+                38,
+                "subject_mask_component_partial_run_preference",
+                self._migration_038_subject_mask_component_partial_run_preference,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -8090,6 +8095,7 @@ class Registry:
                     ROW_NUMBER() OVER (
                         PARTITION BY smcq.dataset_id, smcq.stage_group, smcq.component_name
                         ORDER BY
+                            CASE WHEN COALESCE(smcq.available, 0) = 1 THEN 1 ELSE 0 END DESC,
                             COALESCE(smcq.review_timestamp_utc, smcq.run_created_utc, smcq.quality_updated_utc) DESC,
                             COALESCE(smcq.run_created_utc, '') DESC,
                             smcq.run_name DESC
@@ -8684,21 +8690,23 @@ class Registry:
                     CASE
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'refined_subject_masks_runs'
-                         AND COALESCE(cr.source_subject_mask_run, '') <> ''
-                         AND COALESCE(cr.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
                         THEN 5
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'refined_eye_masks_runs'
                         THEN 4
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'subject_mask_runs'
-                         AND cr.run_name = COALESCE(lr.latest_subject_mask_run, '')
                         THEN 3
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'eye_masks_runs'
                         THEN 2
                         ELSE 1
                     END AS eye_component_rank,
+                    CASE
+                        WHEN cr.stage_group = 'refined_subject_masks_runs' THEN 3
+                        WHEN cr.stage_group = 'subject_mask_runs' THEN 2
+                        ELSE 1
+                    END AS subject_component_rank,
                     CASE
                         WHEN cr.stage_group IN ('refined_subject_masks_runs', 'refined_eye_masks_runs') THEN 1
                         ELSE 0
@@ -8712,11 +8720,13 @@ class Registry:
                     ROW_NUMBER() OVER (
                         PARTITION BY s.dataset_id, s.component_name
                         ORDER BY
+                            CASE WHEN COALESCE(s.available, 0) = 1 THEN 1 ELSE 0 END DESC,
                             CASE
                                 WHEN s.component_name IN ('eye_left', 'eye_right')
                                 THEN s.eye_component_rank
-                                ELSE s.subject_mask_freshness_rank
+                                ELSE s.subject_component_rank
                             END DESC,
+                            s.subject_mask_freshness_rank DESC,
                             COALESCE(s.review_timestamp_utc, s.run_created_utc, s.quality_updated_utc) DESC,
                             s.refined_stage_rank DESC,
                             COALESCE(s.run_created_utc, '') DESC,
@@ -8867,21 +8877,23 @@ class Registry:
                     CASE
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'refined_subject_masks_runs'
-                         AND COALESCE(cr.source_subject_mask_run, '') <> ''
-                         AND COALESCE(cr.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
                         THEN 5
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'refined_eye_masks_runs'
                         THEN 4
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'subject_mask_runs'
-                         AND cr.run_name = COALESCE(lr.latest_subject_mask_run, '')
                         THEN 3
                         WHEN cr.component_name IN ('eye_left', 'eye_right')
                          AND cr.stage_group = 'eye_masks_runs'
                         THEN 2
                         ELSE 1
                     END AS eye_component_rank,
+                    CASE
+                        WHEN cr.stage_group = 'refined_subject_masks_runs' THEN 3
+                        WHEN cr.stage_group = 'subject_mask_runs' THEN 2
+                        ELSE 1
+                    END AS subject_component_rank,
                     CASE
                         WHEN cr.stage_group IN ('refined_subject_masks_runs', 'refined_eye_masks_runs') THEN 1
                         ELSE 0
@@ -8896,11 +8908,13 @@ class Registry:
                     ROW_NUMBER() OVER (
                         PARTITION BY s.recording_id, s.component_name
                         ORDER BY
+                            CASE WHEN COALESCE(s.available, 0) = 1 THEN 1 ELSE 0 END DESC,
                             CASE
                                 WHEN s.component_name IN ('eye_left', 'eye_right')
                                 THEN s.eye_component_rank
-                                ELSE s.subject_mask_freshness_rank
+                                ELSE s.subject_component_rank
                             END DESC,
+                            s.subject_mask_freshness_rank DESC,
                             COALESCE(s.review_timestamp_utc, s.run_created_utc, s.quality_updated_utc) DESC,
                             s.refined_stage_rank DESC,
                             COALESCE(s.run_created_utc, '') DESC,
@@ -8945,6 +8959,11 @@ class Registry:
             WHERE _rn = 1;
             """
         )
+
+    def _migration_038_subject_mask_component_partial_run_preference(self) -> None:
+        """Refresh component views so partial refined runs remain visible."""
+        self._migration_033_subject_mask_registry_semantics_columns()
+        self._migration_037_subject_mask_component_eye_compat_latest_views()
 
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
