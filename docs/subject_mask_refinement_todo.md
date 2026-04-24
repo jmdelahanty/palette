@@ -169,7 +169,10 @@ This is the near-term rollout order that should happen before more schema work.
       Progress: registry component current/latest views now prefer available
       per-component refined-subject rows, including partial refined runs, while
       preserving stale lifecycle state instead of hiding stale refined rows
-      behind raw or legacy compatibility stages.
+      behind raw or legacy compatibility stages. `check_recording_steps`
+      registry-mode summaries now overlay component availability/review state
+      from the unified subject-mask component registry views instead of trusting
+      stale step-detail snapshots.
 
 ## What Is Actually Missing Now
 

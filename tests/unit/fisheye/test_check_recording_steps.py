@@ -756,6 +756,139 @@ def test_registry_status_payload_reads_subject_mask_status_and_components(tmp_pa
     }
 
 
+def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_mask_component_overlay_analysis.zarr"
+    zarr_path.mkdir()
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_component_overlay",
+        session_uuid="session_component_overlay",
+        zarr_path=zarr_path,
+        recording_id="recording_component_overlay",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    upsert_recording_step_status(
+        registry,
+        dataset_id="dataset_component_overlay",
+        recording_id="recording_component_overlay",
+        step_name="subject_masks",
+        status="ok",
+        run_name="subject_masks_001",
+        method="subject_mask_threshold_lr_v1",
+        coverage_pct=100.0,
+        details_json={
+            "available_components": ["eye_left"],
+            "unavailable_components": ["subject_body", "eye_right", "swim_bladder"],
+            "component_review_states": {"eye_left": "approved"},
+        },
+        source="unit_test",
+    )
+    upsert_recording_step_status(
+        registry,
+        dataset_id="dataset_component_overlay",
+        recording_id="recording_component_overlay",
+        step_name="refined_subject_masks",
+        status="ok",
+        run_name="refined_subject_masks_partial",
+        method="refine_subject_masks",
+        coverage_pct=100.0,
+        details_json={
+            "available_components": ["subject_body"],
+            "unavailable_components": ["eye_left", "eye_right", "swim_bladder"],
+            "component_review_states": {"subject_body": "approved"},
+        },
+        source="unit_test",
+    )
+
+    def _upsert_component(
+        *,
+        stage_group: str,
+        run_name: str,
+        component_name: str,
+        available: int,
+        review_state: str | None,
+        lifecycle_state: str | None = None,
+    ) -> None:
+        registry.upsert_subject_mask_component_quality(
+            dataset_id="dataset_component_overlay",
+            stage_group=stage_group,
+            run_name=run_name,
+            component_name=component_name,
+            component_family="eyes" if component_name.startswith("eye_") else component_name,
+            run_created_utc="2026-03-03T00:00:00+00:00",
+            recording_id="recording_component_overlay",
+            zarr_use="analysis",
+            subject_mask_method=(
+                "refine_subject_masks"
+                if stage_group == "refined_subject_masks_runs"
+                else "subject_mask_threshold_lr_v1"
+            ),
+            label_schema_id="subject_v1_lr",
+            eye_component_mode="lr",
+            source_subject_mask_run=None,
+            available=available,
+            review_state=review_state,
+            review_method="manual" if review_state else None,
+            review_intended_use="training" if review_state else None,
+            review_reviewer="pytest" if review_state else None,
+            review_timestamp_utc="2026-03-03T00:01:00+00:00" if review_state else None,
+            total_rois=100,
+            rows_with_component_mask=90 if available else 0,
+            rows_with_component_mask_rate=0.9 if available else 0.0,
+            lifecycle_state=lifecycle_state or review_state,
+            lifecycle_reason=lifecycle_state or review_state,
+            quality_updated_utc="2026-03-03T00:01:00+00:00",
+            zarr_mtime_ns=123,
+        )
+
+    _upsert_component(
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_registry",
+        component_name="eyes_union",
+        available=1,
+        review_state="approved",
+    )
+    for component_name, review_state, lifecycle_state in (
+        ("subject_body", "approved", "approved"),
+        ("eye_left", "approved", "stale"),
+        ("eye_right", "approved", "approved"),
+        ("swim_bladder", "needs_review", "needs_review"),
+    ):
+        _upsert_component(
+            stage_group="refined_subject_masks_runs",
+            run_name=f"refined_{component_name}",
+            component_name=component_name,
+            available=1,
+            review_state=review_state,
+            lifecycle_state=lifecycle_state,
+        )
+
+    payload = mod._registry_status_payload(  # noqa: SLF001
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id="recording_component_overlay",
+        tuning_keys=[],
+    )
+    registry.close()
+
+    assert payload["subject_mask_available_components"] == ["eyes_union"]
+    assert payload["subject_mask_component_review_states"] == {"eyes_union": "approved"}
+    assert payload["refined_subject_mask_available_components"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    assert payload["refined_subject_mask_component_review_states"] == {
+        "subject_body": "approved",
+        "eye_left": "stale",
+        "eye_right": "approved",
+        "swim_bladder": "needs_review",
+    }
+
+
 def test_registry_crop_review_status_for_zarr_returns_none_when_row_is_stale(tmp_path: Path) -> None:
     zarr_path = tmp_path / "a_analysis.zarr"
     zarr.open_group(str(zarr_path), mode="w")

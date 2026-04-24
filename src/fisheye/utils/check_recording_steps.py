@@ -401,6 +401,111 @@ def _subject_mask_component_fields_from_details(details: Optional[Dict[str, obje
     }
 
 
+_SUBJECT_COMPONENT_ORDER = {
+    "subject_body": 0,
+    "eye_left": 1,
+    "eye_right": 2,
+    "eyes_union": 3,
+    "swim_bladder": 4,
+}
+
+
+def _sort_subject_components(component_names: Iterable[str]) -> List[str]:
+    unique = {name for name in component_names if name}
+    return sorted(unique, key=lambda name: (_SUBJECT_COMPONENT_ORDER.get(name, 100), name))
+
+
+def _registry_view_exists(registry: Registry, view_name: str) -> bool:
+    try:
+        row = registry.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ? LIMIT 1;",
+            (view_name,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _component_display_state(row: Dict[str, object]) -> Optional[str]:
+    lifecycle_state = _normalize_attr(row.get("lifecycle_state"))
+    if lifecycle_state in {"stale"}:
+        return lifecycle_state
+    return _normalize_attr(row.get("review_state")) or lifecycle_state
+
+
+def _registry_subject_component_fields_by_stage(
+    *,
+    registry: Registry,
+    recording_id: Optional[str],
+) -> Dict[str, Dict[str, object]]:
+    if not recording_id:
+        return {}
+    if not _registry_view_exists(registry, "recording_subject_mask_component_quality_overview"):
+        return {}
+
+    try:
+        rows = registry.conn.execute(
+            """
+            SELECT
+                stage_group,
+                component_name,
+                available,
+                review_state,
+                lifecycle_state
+            FROM recording_subject_mask_component_quality_overview
+            WHERE recording_id = ?
+              AND stage_group IN ('subject_mask_runs', 'refined_subject_masks_runs')
+            ORDER BY
+                CASE stage_group
+                    WHEN 'subject_mask_runs' THEN 0
+                    WHEN 'refined_subject_masks_runs' THEN 1
+                    ELSE 2
+                END,
+                component_name;
+            """,
+            (recording_id,),
+        ).fetchall()
+    except Exception:
+        return {}
+
+    grouped: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        stage_group = _normalize_attr(row["stage_group"])
+        component_name = _normalize_attr(row["component_name"])
+        if not stage_group or not component_name:
+            continue
+        fields = grouped.setdefault(
+            stage_group,
+            {
+                "available_components": [],
+                "unavailable_components": [],
+                "component_review_states": {},
+            },
+        )
+        available_components = fields["available_components"]
+        unavailable_components = fields["unavailable_components"]
+        review_states = fields["component_review_states"]
+        assert isinstance(available_components, list)
+        assert isinstance(unavailable_components, list)
+        assert isinstance(review_states, dict)
+        if _coerce_bool(row["available"]):
+            available_components.append(component_name)
+        else:
+            unavailable_components.append(component_name)
+        display_state = _component_display_state(dict(row))
+        if display_state:
+            review_states[component_name] = display_state
+
+    for fields in grouped.values():
+        fields["available_components"] = _sort_subject_components(
+            fields["available_components"]  # type: ignore[arg-type]
+        )
+        fields["unavailable_components"] = _sort_subject_components(
+            fields["unavailable_components"]  # type: ignore[arg-type]
+        )
+    return grouped
+
+
 def _subject_mask_tuning_component_statuses(raw: object) -> Dict[str, str]:
     payload = _normalize_subject_mask_tuning_payload(raw)
     components = payload.get("components", {})
@@ -983,6 +1088,21 @@ def _registry_status_payload(
     payload["refined_subject_mask_available_components"] = refined_subject_component_fields["available_components"]
     payload["refined_subject_mask_unavailable_components"] = refined_subject_component_fields["unavailable_components"]
     payload["refined_subject_mask_component_review_states"] = refined_subject_component_fields["component_review_states"]
+
+    registry_component_fields = _registry_subject_component_fields_by_stage(
+        registry=registry,
+        recording_id=recording_id,
+    )
+    subject_registry_fields = registry_component_fields.get("subject_mask_runs")
+    if subject_registry_fields:
+        payload["subject_mask_available_components"] = subject_registry_fields["available_components"]
+        payload["subject_mask_unavailable_components"] = subject_registry_fields["unavailable_components"]
+        payload["subject_mask_component_review_states"] = subject_registry_fields["component_review_states"]
+    refined_registry_fields = registry_component_fields.get("refined_subject_masks_runs")
+    if refined_registry_fields:
+        payload["refined_subject_mask_available_components"] = refined_registry_fields["available_components"]
+        payload["refined_subject_mask_unavailable_components"] = refined_registry_fields["unavailable_components"]
+        payload["refined_subject_mask_component_review_states"] = refined_registry_fields["component_review_states"]
 
     payload["arena_assignment_present"] = _step_row_status_ok(selected_rows.get("arena_assignment"))
     tracks_row = selected_rows.get("tracks")
@@ -2558,6 +2678,7 @@ _SUBJECT_REVIEW_LABELS = {
     "needs_review": "review",
     "pending": "pend",
     "rejected": "rej",
+    "stale": "stale",
 }
 
 
