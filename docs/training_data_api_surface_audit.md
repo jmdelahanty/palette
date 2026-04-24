@@ -264,13 +264,15 @@ use 3 (p10, p50, p90).
 | Detection | `run_detect_training_pipeline.py` | Yes |
 | Keypoints | `run_keypoint_training_pipeline.py` | Yes |
 | Eye Masks | `run_eye_mask_training_pipeline.py` | Yes |
-| Subject Masks | `run_subject_mask_training_pipeline.py` | Yes, manifest-driven |
+| Subject Masks | `prepare_subject_mask_training_from_registry.py` + `run_subject_mask_training_pipeline.py` | Yes, prepare-only registry preflight plus manifest-driven run wrapper |
 
 Detection, keypoints, and eye masks have prepare-first orchestrators that chain
 prepare -> export -> aggregate data card -> (optionally) train. Subject masks
-now has a narrower manifest-driven wrapper that chains selected-source merged
-export -> config/manifest rewrite -> optional train. Registry preflight
-selection and subject-mask data-card aggregation remain future parity work.
+now has a narrower prepare-only registry preflight that writes selected-source
+manifest/config artifacts, plus a manifest-driven wrapper that chains
+selected-source merged export -> config/manifest rewrite -> optional train.
+Direct refined-subject source export and subject-mask data-card aggregation
+remain future parity work.
 
 ### 8b. Training config audit
 

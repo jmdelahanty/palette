@@ -561,14 +561,18 @@ Implemented:
 
 - `scripts/py -m fisheye.utils.validate_subject_mask_training_zarr <merged>.zarr`
 - `scripts/py -m fisheye.utils.export_subject_mask_training_zarr <source>.zarr <merged>.zarr`
+- `scripts/py -m fisheye.utils.prepare_subject_mask_training_from_registry --registry <registry.sqlite> --out-manifest <manifest.json>`
 - `scripts/py -m fisheye.utils.run_subject_mask_training_pipeline --manifest <manifest.json> --config <config.yaml> --export-merged --train`
 
-The pipeline wrapper is currently manifest-driven. It consumes
-`selected_sources`, exports one merged subject-mask training zarr, rewrites the
-training config/manifest to the merged `crop_runs/<run>` and
+The registry preflight is prepare-only. It selects exportable unified
+`subject_mask_runs` sources from `subject_mask_component_quality_*` registry
+surfaces, writes `selected_sources`, and records when the canonical latest
+component rows are non-exportable `refined_subject_masks_runs`. The pipeline
+wrapper consumes that manifest, exports one merged subject-mask training zarr,
+rewrites the training config/manifest to the merged `crop_runs/<run>` and
 `subject_mask_runs/<run>`, and can launch
-`fisheye.segmentation.train_unet_subject_masks`. Registry preflight selection
-and subject-mask data-card aggregation are still separate future parity work.
+`fisheye.segmentation.train_unet_subject_masks`. Direct refined-subject source
+export and subject-mask data-card aggregation are still future parity work.
 
 ## Related Contracts
 
