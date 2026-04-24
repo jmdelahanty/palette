@@ -5,10 +5,11 @@ from typing import Iterable, Optional
 
 import zarr
 
+from .refined_detect_curation import has_sparse_curated_refined_detect_instances_arrays
 from .type_conversions import normalize_attr as _normalize_attr
 
 
-DEFAULT_DETECT_GROUP_PREFERENCE = ("manual", "interpolated", "filtered", "raw")
+DEFAULT_DETECT_GROUP_PREFERENCE = ("refined", "manual", "interpolated", "filtered", "raw")
 
 
 @dataclass(frozen=True)
@@ -27,16 +28,27 @@ def resolve_refined_detect_group(
     manual_label = _normalize_attr(refined_run.attrs.get("manual_review_latest"))
 
     if override_group:
-        if override_group == "raw":
+        requested = _normalize_attr(override_group) or ""
+        token = requested.lower()
+        if token == "raw":
             return RefinedDetectResolution("raw", None, source_detect_run)
-        if override_group in refined_run:
-            label = "manual" if manual_label and override_group == manual_label else override_group
-            return RefinedDetectResolution(label, override_group, source_detect_run)
+        if token in {"refined", "instances"} and has_sparse_curated_refined_detect_instances_arrays(
+            refined_run
+        ):
+            return RefinedDetectResolution("refined", "instances", source_detect_run)
+        if requested in refined_run:
+            label = "manual" if manual_label and requested == manual_label else requested
+            if requested == "instances":
+                label = "refined"
+            return RefinedDetectResolution(label, requested, source_detect_run)
         return RefinedDetectResolution(None, None, source_detect_run)
 
     pref_list = [str(item).lower() for item in (preference or DEFAULT_DETECT_GROUP_PREFERENCE)]
     for token in pref_list:
-        if token == "manual":
+        if token in {"refined", "instances"}:
+            if has_sparse_curated_refined_detect_instances_arrays(refined_run):
+                return RefinedDetectResolution("refined", "instances", source_detect_run)
+        elif token == "manual":
             if manual_label and manual_label in refined_run:
                 return RefinedDetectResolution("manual", manual_label, source_detect_run)
             if "manual" in refined_run:

@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Batch review refined detections by launching the detection visualizer per Zarr.
-
-Prefers manual refined groups when available.
-"""
+"""Batch review refined detections by launching the detection visualizer per Zarr."""
 
 from __future__ import annotations
 
@@ -18,12 +14,17 @@ from typing import Iterable, List, Optional
 
 import zarr
 
+from fisheye.shared.refined_detect_review import (
+    DEFAULT_DETECT_GROUP_PREFERENCE,
+    resolve_refined_detect_group,
+)
+
 
 @dataclass
 class ReviewPlan:
     zarr_path: Path
     refined_run: Optional[str]
-    manual_label: Optional[str]
+    source_label: Optional[str]
     status: str
     reason: Optional[str] = None
 
@@ -115,13 +116,21 @@ def _latest_run(parent: zarr.Group) -> Optional[str]:
     return sorted(names)[-1]
 
 
-def _manual_label(run_group: zarr.Group) -> Optional[str]:
+def _legacy_manual_label(run_group: zarr.Group) -> Optional[str]:
     label = run_group.attrs.get("manual_review_latest")
     if label and label in run_group:
         return str(label)
     if "manual" in run_group:
         return "manual"
     return None
+
+
+def _source_label(run_group: zarr.Group) -> Optional[str]:
+    resolution = resolve_refined_detect_group(
+        run_group,
+        preference=DEFAULT_DETECT_GROUP_PREFERENCE,
+    )
+    return resolution.label or resolution.group
 
 
 def _build_plans(roots: List[Path], recursive: bool, only_manual: bool) -> List[ReviewPlan]:
@@ -134,7 +143,7 @@ def _build_plans(roots: List[Path], recursive: bool, only_manual: bool) -> List[
                 ReviewPlan(
                     zarr_path=zarr_path,
                     refined_run=None,
-                    manual_label=None,
+                    source_label=None,
                     status="error",
                     reason=str(exc),
                 )
@@ -147,7 +156,7 @@ def _build_plans(roots: List[Path], recursive: bool, only_manual: bool) -> List[
                 ReviewPlan(
                     zarr_path=zarr_path,
                     refined_run=None,
-                    manual_label=None,
+                    source_label=None,
                     status="missing",
                     reason="no refined_detect_runs",
                 )
@@ -160,22 +169,23 @@ def _build_plans(roots: List[Path], recursive: bool, only_manual: bool) -> List[
                 ReviewPlan(
                     zarr_path=zarr_path,
                     refined_run=None,
-                    manual_label=None,
+                    source_label=None,
                     status="missing",
                     reason="no refined runs",
                 )
             )
             continue
 
-        manual_label = _manual_label(refined_parent[refined_run])
-        if only_manual and not manual_label:
+        run_group = refined_parent[refined_run]
+        legacy_manual_label = _legacy_manual_label(run_group)
+        if only_manual and not legacy_manual_label:
             continue
 
         plans.append(
             ReviewPlan(
                 zarr_path=zarr_path,
                 refined_run=refined_run,
-                manual_label=manual_label,
+                source_label=_source_label(run_group),
                 status="ok",
             )
         )
@@ -189,7 +199,10 @@ def _prompt_continue() -> bool:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Batch review refined detections by opening the detection visualizer for each Zarr."
+        description=(
+            "Batch review refined detections by opening the detection visualizer "
+            "for each Zarr."
+        )
     )
     parser.add_argument(
         "paths",
@@ -372,11 +385,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Frame flag file: {Path(args.frame_flag_file).expanduser().resolve(strict=False)}")
     for idx, plan in enumerate(plans):
         marker = "→" if start <= idx < end else " "
-        manual = plan.manual_label or "none"
+        source = plan.source_label or "none"
         refined = plan.refined_run or "none"
         status = plan.status
         reason = f" ({plan.reason})" if plan.reason else ""
-        print(f"{marker} [{idx:03d}] {plan.zarr_path} | refined={refined} | manual={manual} | {status}{reason}")
+        print(
+            f"{marker} [{idx:03d}] {plan.zarr_path} | refined={refined} | "
+            f"source={source} | {status}{reason}"
+        )
 
     if args.list:
         return 0

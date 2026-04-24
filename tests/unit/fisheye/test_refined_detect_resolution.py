@@ -8,6 +8,10 @@ from fisheye.shared.refined_detect_resolution import (
     resolve_active_curated_refined_run_name,
     resolve_detection_read_source,
 )
+from fisheye.shared.refined_detect_review import (
+    DEFAULT_DETECT_GROUP_PREFERENCE,
+    resolve_refined_detect_group,
+)
 
 
 class _FakeGroup:
@@ -167,6 +171,23 @@ def test_resolve_detection_read_source_accepts_instances_only_curated_surface() 
     assert resolved.refined_detect_run == "refined_detect_001"
     assert resolved.source_detect_run == "detect_001"
     assert resolved.curated_root is True
+
+
+def test_resolve_refined_detect_group_prefers_instances_over_legacy_manual() -> None:
+    refined = _FakeGroup(path="refined_detect_runs/refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["manual_review_latest"] = "manual_a"
+    refined.create_group("manual_a")
+    _seed_curated_instances(refined)
+
+    resolved = resolve_refined_detect_group(  # type: ignore[arg-type]
+        refined,
+        preference=DEFAULT_DETECT_GROUP_PREFERENCE,
+    )
+
+    assert resolved.label == "refined"
+    assert resolved.group == "instances"
+    assert resolved.source_detect_run == "detect_001"
 
 
 def test_resolve_detect_review_target_prefers_curated_refined_surface() -> None:

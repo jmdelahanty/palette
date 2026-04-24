@@ -706,6 +706,7 @@ def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[s
         "tuning_total": len(tuning_keys),
         "tuning_missing": list(tuning_keys),
         "tuning_status": {key: "miss" for key in tuning_keys},
+        "subject_mask_tuning_component_status": _subject_mask_tuning_component_statuses(None),
     }
 
 

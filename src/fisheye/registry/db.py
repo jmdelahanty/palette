@@ -433,7 +433,11 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
 
         resolved_group = _decode_attr(review_status.get("resolved_group")) if review_status else None
         resolved = None
-        if resolved_group == "refined":
+        instances = refined_group.get("instances")
+        if instances is not None:
+            resolved_group = "refined"
+            resolved = instances
+        elif resolved_group == "refined":
             resolved = refined_group.get("instances")
             if resolved is None:
                 active_sparse_group = _decode_attr(refined_group.attrs.get("active_sparse_group"))
@@ -443,23 +447,19 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
             resolved = refined_group.get(resolved_group)
 
         if resolved is None and not resolved_group:
-            if "instances" in refined_group:
-                resolved_group = "refined"
-                resolved = refined_group.get("instances")
+            manual_latest = _decode_attr(refined_group.attrs.get("manual_review_latest"))
+            if manual_latest and manual_latest in refined_group:
+                resolved_group = manual_latest
+                resolved = refined_group.get(manual_latest)
+            elif "interpolated" in refined_group:
+                resolved_group = "interpolated"
+                resolved = refined_group.get("interpolated")
+            elif "filtered" in refined_group:
+                resolved_group = "filtered"
+                resolved = refined_group.get("filtered")
             else:
-                manual_latest = _decode_attr(refined_group.attrs.get("manual_review_latest"))
-                if manual_latest and manual_latest in refined_group:
-                    resolved_group = manual_latest
-                    resolved = refined_group.get(manual_latest)
-                elif "interpolated" in refined_group:
-                    resolved_group = "interpolated"
-                    resolved = refined_group.get("interpolated")
-                elif "filtered" in refined_group:
-                    resolved_group = "filtered"
-                    resolved = refined_group.get("filtered")
-                else:
-                    resolved_group = "raw"
-                    resolved = refined_group.get("raw")
+                resolved_group = "raw"
+                resolved = refined_group.get("raw")
 
         total_detections: Optional[int] = None
         real_detections: Optional[int] = None

@@ -5238,6 +5238,14 @@ def _extract_refined_detect_coverage_pct(refined_group: object) -> Optional[floa
     if direct is not None:
         return direct
 
+    try:
+        instances_group = refined_group.get("instances")  # type: ignore[attr-defined]
+    except Exception:
+        instances_group = None
+    instances_cov = _extract_coverage_pct(instances_group)
+    if instances_cov is not None:
+        return instances_cov
+
     manual_latest = _decode_text(
         refined_group.attrs.get("manual_review_latest")  # type: ignore[attr-defined]
     )
