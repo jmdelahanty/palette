@@ -71,6 +71,13 @@ Downstream ROI-aligned stages should preserve `source_refined_row_ids` and
 `source_detect_row_index` when copying row lineage from crop/keypoint/mask
 sources.
 
+Merged training exports should carry the same row lineage under
+`source_index/source_refined_row_ids` and
+`source_index/source_detect_row_index`, alongside `source_dataset_idx`,
+`source_frame_idx`, and `source_roi_idx`. The stable sample key for review,
+repair, or cross-artifact joins is therefore source dataset plus refined row
+ID when present, with raw detect row index as the legacy/raw-backed fallback.
+
 Row-local repair and review consumers should resolve user-facing flag entries
 by `source_refined_row_id` first, `source_detect_row_index` second, and only
 then by legacy `frame_idx`/`roi_idx`. In-place crop repair may still use

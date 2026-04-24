@@ -51,7 +51,6 @@ def _write_valid_merged_eye_zarr(path: Path) -> None:
         data=np.array([0, 1, 0, 0], dtype=np.int8),
         chunks=(4,),
     )
-
     eye_parent = root.create_group("eye_masks_runs")
     eye_parent.attrs["latest"] = "merged_export_smoke"
     eye = eye_parent.create_group("merged_export_smoke")
@@ -117,6 +116,16 @@ def _write_valid_merged_eye_zarr(path: Path) -> None:
         data=np.arange(4, dtype=np.int64),
         chunks=(4,),
     )
+    source.create_array(
+        "source_refined_row_ids",
+        data=np.array([10, 11, 12, 13], dtype=np.int64),
+        chunks=(4,),
+    )
+    source.create_array(
+        "source_detect_row_index",
+        data=np.array([20, -1, 22, 23], dtype=np.int32),
+        chunks=(4,),
+    )
     export_mod._write_string_array(source, "source_dataset_id", ["dataset_a"])
     export_mod._write_string_array(source, "source_zarr_path", ["/tmp/source_a.zarr"])
 
@@ -163,6 +172,16 @@ def _write_source_eye_zarr(
     crop.create_array(
         "detection_source",
         data=np.array([0, 1, 0, 0], dtype=np.int8),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "source_refined_row_ids",
+        data=np.array([frame_start + 10, frame_start + 11, frame_start + 12, frame_start + 13], dtype=np.int64),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "source_detect_row_index",
+        data=np.array([frame_start + 20, -1, frame_start + 22, frame_start + 23], dtype=np.int32),
         chunks=(4,),
     )
 
@@ -437,12 +456,16 @@ def test_export_merged_eye_mask_training_zarr_from_multiple_sources_tracks_sourc
     source_dataset_idx = np.asarray(root["source_index/source_dataset_idx"][:], dtype=np.int64).tolist()
     source_frame_idx = np.asarray(root["source_index/source_frame_idx"][:], dtype=np.int64).tolist()
     source_roi_idx = np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist()
+    source_refined_row_ids = np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64).tolist()
+    source_detect_row_index = np.asarray(root["source_index/source_detect_row_index"][:], dtype=np.int64).tolist()
     source_dataset_ids = np.asarray(root["source_index/source_dataset_id"][:], dtype=object).tolist()
     source_zarr_paths = np.asarray(root["source_index/source_zarr_path"][:], dtype=object).tolist()
 
     assert source_dataset_idx == [0, 0, 0, 0, 1, 1, 1, 1]
     assert source_frame_idx == [100, 101, 102, 103, 200, 201, 202, 203]
     assert source_roi_idx == [0, 1, 2, 3, 0, 1, 2, 3]
+    assert source_refined_row_ids == [110, 111, 112, 113, 210, 211, 212, 213]
+    assert source_detect_row_index == [120, -1, 122, 123, 220, -1, 222, 223]
     assert source_dataset_ids == ["dataset_a", "dataset_b"]
     assert source_zarr_paths == [str(source_a.resolve()), str(source_b.resolve())]
 

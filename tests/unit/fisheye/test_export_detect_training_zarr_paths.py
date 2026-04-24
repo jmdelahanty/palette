@@ -16,10 +16,12 @@ from fisheye.utils.export_detect_training_zarr import (
     _build_merged_manifest_payload,
     _copy_indexed_frames,
     _ensure_suffix,
+    _export_merged,
     _normalize_manifest_stem,
     _resolve_detection_source_path,
     _resolve_default_dataset_root,
     _write_merged_config,
+    validate_merged_training_zarr,
 )
 
 
@@ -53,6 +55,45 @@ def _dataset_manifest(detection_source_path: str | None) -> DatasetManifest:
     )
 
 
+def _write_detect_source_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    raw = root.create_group("raw_video")
+    raw.create_array(
+        "images_ds",
+        data=np.arange(6 * 8 * 8, dtype=np.uint8).reshape(6, 8, 8),
+        chunks=(3, 8, 8),
+    )
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.create_group("crop_001")
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.zeros((4, 4), dtype=np.float32),
+        chunks=(4, 4),
+    )
+    crop.create_array(
+        "frame_indices",
+        data=np.array([1, 2, 4, 5], dtype=np.int64),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "detection_source",
+        data=np.array([0, 0, 1, 0], dtype=np.int8),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "source_refined_row_ids",
+        data=np.array([100, 101, 102, 103], dtype=np.int64),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "source_detect_row_index",
+        data=np.array([200, -1, 202, 203], dtype=np.int32),
+        chunks=(4,),
+    )
+
+
 def test_resolve_detection_source_path_ignores_group_path_and_uses_crop_array(tmp_path: Path) -> None:
     zarr_path = tmp_path / "sample.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -79,6 +120,75 @@ def test_resolve_detection_source_path_handles_manifest_array_path_suffix(tmp_pa
     resolved = _resolve_detection_source_path(root, manifest)
 
     assert resolved == "refined_detect_runs/refined_detect_001/manual/detection_source"
+
+
+def test_export_merged_detect_training_zarr_preserves_source_row_lineage(tmp_path: Path) -> None:
+    source_zarr = tmp_path / "source_detect.zarr"
+    out_zarr = tmp_path / "merged_detect.zarr"
+    manifest_path = tmp_path / "detect.manifest.json"
+    _write_detect_source_zarr(source_zarr)
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    manifest = TrainingManifest(
+        created_at_utc="2026-02-06T00:00:00+00:00",
+        task="detect",
+        source_type="refined",
+        input_format="gray",
+        imgsz=[640, 640],
+        datasets=[
+            DatasetManifest(
+                name="source_dataset",
+                zarr_path=str(source_zarr),
+                dataset_id="source_dataset",
+                session_uuid="source_dataset",
+                crop_run="crop_001",
+                bbox_array_path="crop_runs/crop_001/bbox_norm_coords",
+                detection_source_type="refined",
+                detection_source_path="crop_runs/crop_001/detection_source",
+                includes_interpolated=True,
+                input_format="gray",
+                images_ds_shape=[8, 8],
+                total_bboxes=4,
+                invalid_bboxes=0,
+            )
+        ],
+        provenance_policy="warn",
+        set_name="cedar_shadow",
+        set_version=1,
+        set_id="detect_cedar_shadow_v001",
+    )
+
+    result = _export_merged(
+        manifest=manifest,
+        manifest_path=manifest_path,
+        out_zarr=out_zarr,
+        merged_dataset_id=None,
+        overwrite=True,
+        train_ratio=0.5,
+        val_ratio=0.5,
+        test_ratio=0.0,
+        seed=42,
+        include_rgb=False,
+        copy_batch_size=2,
+        invocation={},
+    )
+
+    assert result.total_samples == 4
+    validate_merged_training_zarr(out_zarr, expected_input_format="gray", expected_total_samples=4)
+    root = zarr.open_group(str(out_zarr), mode="r")
+    assert np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist() == [0, 1, 2, 3]
+    assert np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64).tolist() == [
+        100,
+        101,
+        102,
+        103,
+    ]
+    assert np.asarray(root["source_index/source_detect_row_index"][:], dtype=np.int64).tolist() == [
+        200,
+        -1,
+        202,
+        203,
+    ]
 
 
 def test_copy_indexed_frames_reports_progress_callback() -> None:

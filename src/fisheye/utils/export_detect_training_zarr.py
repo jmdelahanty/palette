@@ -197,6 +197,7 @@ def _export_dataset(plan: ExportPlan, *, overwrite: bool, run_name: str, manifes
     crop_group = crop_parent.require_group(run_name)
     bbox_src = src_root[plan.bbox_path]
     _copy_array(bbox_src, crop_group, "bbox_norm_coords")
+    total_samples = int(bbox_src.shape[0])
 
     frame_indices_path = None
     if plan.crop_run and "crop_runs" in src_root and plan.crop_run in src_root["crop_runs"]:
@@ -204,6 +205,34 @@ def _export_dataset(plan: ExportPlan, *, overwrite: bool, run_name: str, manifes
             frame_indices_path = f"crop_runs/{plan.crop_run}/frame_indices"
     if frame_indices_path and frame_indices_path in src_root:
         _copy_array(src_root[frame_indices_path], crop_group, "frame_indices")
+
+    if plan.crop_run and "crop_runs" in src_root and plan.crop_run in src_root["crop_runs"]:
+        crop_src = src_root["crop_runs"][plan.crop_run]
+        for name in ("detection_indices",):
+            if name in crop_src and int(crop_src[name].shape[0]) == total_samples:
+                _copy_array(crop_src[name], crop_group, name)
+
+    source_refined_row_ids, source_detect_row_index = _resolve_source_row_identity(
+        src_root,
+        bbox_path=plan.bbox_path,
+        crop_run=plan.crop_run,
+        frame_indices_path=frame_indices_path,
+        total_rows=total_samples,
+    )
+    crop_group.create_array(
+        "source_refined_row_ids",
+        data=source_refined_row_ids,
+        chunks=(max(1, min(8192, total_samples)),),
+        overwrite=True,
+    )
+    crop_group.create_array(
+        "source_detect_row_index",
+        data=source_detect_row_index,
+        chunks=(max(1, min(8192, total_samples)),),
+        overwrite=True,
+    )
+    crop_group.attrs["source_refined_row_ids_available"] = bool(np.any(source_refined_row_ids >= 0))
+    crop_group.attrs["source_detect_row_index_available"] = bool(np.any(source_detect_row_index >= 0))
 
     if plan.detection_source_path and plan.detection_source_path in src_root:
         _copy_array(src_root[plan.detection_source_path], crop_group, "detection_source")
@@ -542,6 +571,25 @@ def validate_merged_training_zarr(
         else:
             errors.append(f"{src_frame_idx_path} must be integer dtype.")
 
+        optional_source_vectors = (
+            ("source_index/source_roi_idx", np.integer, True),
+            ("source_index/source_refined_row_ids", np.integer, False),
+            ("source_index/source_detect_row_index", np.integer, False),
+        )
+        for opt_path, dtype_kind, require_nonnegative in optional_source_vectors:
+            if opt_path not in root:
+                continue
+            opt_arr = np.asarray(root[opt_path][:])
+            if opt_arr.ndim != 1 or opt_arr.shape[0] != total_samples:
+                errors.append(f"{opt_path} must be 1D length N ({total_samples}), got {opt_arr.shape}.")
+                continue
+            if not np.issubdtype(opt_arr.dtype, dtype_kind):
+                errors.append(f"{opt_path} must be integer dtype, got {opt_arr.dtype}.")
+                continue
+            opt_i64 = opt_arr.astype(np.int64, copy=False)
+            if require_nonnegative and opt_i64.size > 0 and int(opt_i64.min()) < 0:
+                errors.append(f"{opt_path} contains negative indices.")
+
     if errors:
         raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
 
@@ -695,6 +743,93 @@ def _write_string_array(group: zarr.Group, name: str, values: Sequence[str]) -> 
         overwrite=True,
     )
     arr[:] = labels
+
+
+def _read_optional_vector(
+    group: zarr.Group,
+    names: Sequence[str],
+    *,
+    expected_len: int,
+    dtype: np.dtype | type,
+) -> Optional[np.ndarray]:
+    for name in names:
+        if name not in group:
+            continue
+        arr = np.asarray(group[name][:], dtype=dtype)
+        if arr.ndim == 1 and int(arr.shape[0]) == int(expected_len):
+            return arr
+    return None
+
+
+def _candidate_lineage_groups(
+    root: zarr.Group,
+    *,
+    bbox_path: str,
+    crop_run: Optional[str] = None,
+    frame_indices_path: Optional[str] = None,
+) -> List[zarr.Group]:
+    paths: List[str] = []
+    if crop_run:
+        paths.append(f"crop_runs/{crop_run}")
+    if frame_indices_path and "/" in frame_indices_path:
+        paths.append(frame_indices_path.rsplit("/", 1)[0])
+    if bbox_path and "/" in bbox_path:
+        paths.append(bbox_path.rsplit("/", 1)[0])
+
+    groups: List[zarr.Group] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path or path in seen or path not in root:
+            continue
+        seen.add(path)
+        group = root[path]
+        if isinstance(group, zarr.Group):
+            groups.append(group)
+    return groups
+
+
+def _resolve_source_row_identity(
+    root: zarr.Group,
+    *,
+    bbox_path: str,
+    total_rows: int,
+    crop_run: Optional[str] = None,
+    frame_indices_path: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    refined = None
+    detect = None
+    for group in _candidate_lineage_groups(
+        root,
+        bbox_path=bbox_path,
+        crop_run=crop_run,
+        frame_indices_path=frame_indices_path,
+    ):
+        if refined is None:
+            refined = _read_optional_vector(
+                group,
+                ("source_refined_row_ids", "refined_row_ids"),
+                expected_len=total_rows,
+                dtype=np.int64,
+            )
+        if detect is None:
+            detect = _read_optional_vector(
+                group,
+                ("source_detect_row_index",),
+                expected_len=total_rows,
+                dtype=np.int32,
+            )
+        if refined is not None and detect is not None:
+            break
+
+    if refined is None:
+        refined = np.full((total_rows,), -1, dtype=np.int64)
+    else:
+        refined = refined.astype(np.int64, copy=False)
+    if detect is None:
+        detect = np.full((total_rows,), -1, dtype=np.int32)
+    else:
+        detect = detect.astype(np.int32, copy=False)
+    return refined, detect
 
 
 def _json_list(raw: Any) -> List[str]:
@@ -994,6 +1129,27 @@ def _export_merged(
         chunks=vector_chunks,
         overwrite=True,
     )
+    src_roi_idx_dest = source_index_group.require_array(
+        "source_roi_idx",
+        shape=(total_samples,),
+        dtype=np.int64,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    src_refined_row_ids_dest = source_index_group.require_array(
+        "source_refined_row_ids",
+        shape=(total_samples,),
+        dtype=np.int64,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    src_detect_row_index_dest = source_index_group.require_array(
+        "source_detect_row_index",
+        shape=(total_samples,),
+        dtype=np.int32,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
 
     gray_dest = None
     rgb_dest = None
@@ -1045,6 +1201,12 @@ def _export_merged(
             root = zarr.open_group(str(spec.source_zarr), mode="r")
             bbox = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
             local_total = int(bbox.shape[0])
+            source_refined_row_ids, source_detect_row_index = _resolve_source_row_identity(
+                root,
+                bbox_path=spec.bbox_path,
+                frame_indices_path=spec.frame_indices_path,
+                total_rows=local_total,
+            )
 
             if spec.frame_indices_path:
                 src_frame_indices = np.asarray(root[spec.frame_indices_path][:], dtype=np.int64)
@@ -1111,6 +1273,9 @@ def _export_merged(
             det_src_dest[offset : offset + local_total] = detection_source
             src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
             src_frame_idx_dest[offset : offset + local_total] = src_frame_indices
+            src_roi_idx_dest[offset : offset + local_total] = np.arange(local_total, dtype=np.int64)
+            src_refined_row_ids_dest[offset : offset + local_total] = source_refined_row_ids
+            src_detect_row_index_dest[offset : offset + local_total] = source_detect_row_index
 
             uniques, counts = np.unique(detection_source, return_counts=True)
             for value, count in zip(uniques.tolist(), counts.tolist()):

@@ -61,6 +61,16 @@ def _write_source_subject_zarr(
         data=np.array([0, 1, 0, 0], dtype=np.int8),
         chunks=(4,),
     )
+    crop.create_array(
+        "source_refined_row_ids",
+        data=np.arange(frame_start + 10, frame_start + 14, dtype=np.int64),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "source_detect_row_index",
+        data=np.array([frame_start + 20, -1, frame_start + 22, frame_start + 23], dtype=np.int32),
+        chunks=(4,),
+    )
 
     subject_parent = root.create_group("subject_mask_runs")
     subject_parent.attrs["latest"] = "subject_masks_001"
@@ -128,9 +138,22 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
         expected_label_schema_id="subject_v1_lr",
     )
     assert recheck["total_samples"] == 4
-    assert recheck["channels"] == 4
 
     root = zarr.open_group(str(out_path), mode="r")
+    assert np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64).tolist() == [
+        110,
+        111,
+        112,
+        113,
+    ]
+    assert np.asarray(root["source_index/source_detect_row_index"][:], dtype=np.int64).tolist() == [
+        120,
+        -1,
+        122,
+        123,
+    ]
+    assert recheck["channels"] == 4
+
     latest = str(root["subject_mask_runs"].attrs["latest"])
     run = root[f"subject_mask_runs/{latest}"]
     target_valid = np.asarray(run["target_valid_channels"][:], dtype=np.bool_)

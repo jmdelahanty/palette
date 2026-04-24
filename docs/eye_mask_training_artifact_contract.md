@@ -158,12 +158,20 @@ Recommended array:
 - `source_roi_idx`
   - shape: `(N,)`
   - source ROI row index
+- `source_refined_row_ids`
+  - shape: `(N,)`
+  - stable refined-detection row identity when available, or `-1`
+- `source_detect_row_index`
+  - shape: `(N,)`
+  - raw detect row lineage when available, or `-1`
 
 Required constraints:
 
 - `source_dataset_idx` values in `[0, M-1]`
 - `source_frame_idx` non-negative
 - when present, `source_roi_idx` must be in `[0, N-1]`
+- when present, `source_refined_row_ids` and `source_detect_row_index`
+  must be 1D integer arrays of length `N`
 - `source_dataset_id` and `source_zarr_path` must be same length `M`
 
 Required attrs:

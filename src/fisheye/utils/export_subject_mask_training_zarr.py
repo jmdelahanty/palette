@@ -14,6 +14,7 @@ import zarr
 
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.frame_flags import resolve_row_identity_arrays
 from fisheye.shared.type_conversions import normalize_attr as _as_text
 from fisheye.utils.export_eye_mask_training_zarr import (
     _json_dict,
@@ -232,6 +233,8 @@ class SubjectResolvedSource:
     bbox_norm_coords: zarr.Array
     crop_bbox_norm_coords: zarr.Array
     frame_indices: np.ndarray
+    source_refined_row_ids: np.ndarray
+    source_detect_row_index: np.ndarray
     detection_source: np.ndarray
     masks_roi: zarr.Array
     row_count: int
@@ -278,6 +281,11 @@ def _resolve_source_spec(
         "detection_source",
         default=np.zeros((int(roi_images.shape[0]),), dtype=np.int8),
     ).astype(np.int8, copy=False)
+    source_refined_row_ids, source_detect_row_index = resolve_row_identity_arrays(
+        subject_group,
+        crop_group,
+        total_rois=int(roi_images.shape[0]),
+    )
 
     dataset_id = _resolve_source_dataset_id(
         source_root=root,
@@ -298,6 +306,8 @@ def _resolve_source_spec(
         bbox_norm_coords=bbox_norm,
         crop_bbox_norm_coords=crop_bbox,
         frame_indices=frame_indices,
+        source_refined_row_ids=source_refined_row_ids,
+        source_detect_row_index=source_detect_row_index,
         detection_source=detection_source,
         masks_roi=masks_roi,
         row_count=int(masks_roi.shape[0]),
@@ -671,6 +681,20 @@ def export_merged_subject_mask_training_zarr_from_sources(
         chunks=vector_chunks,
         overwrite=True,
     )
+    source_refined_row_ids_dest = source_index.create_array(
+        "source_refined_row_ids",
+        shape=(total_samples,),
+        dtype=np.int64,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    source_detect_row_index_dest = source_index.create_array(
+        "source_detect_row_index",
+        shape=(total_samples,),
+        dtype=np.int32,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
     label_origin_dest = source_index.create_array(
         "label_origin_codes",
         shape=(total_samples, len(target_labels)),
@@ -706,6 +730,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
         source_dataset_idx_dest[row_slice] = int(source_idx)
         source_frame_idx_dest[row_slice] = source.frame_indices
         source_roi_idx_dest[row_slice] = np.arange(count, dtype=np.int64)
+        source_refined_row_ids_dest[row_slice] = source.source_refined_row_ids
+        source_detect_row_index_dest[row_slice] = source.source_detect_row_index
 
         source_masks = np.asarray(source.masks_roi[:], dtype=np.uint8)
         projected_masks, projected_valid = _project_masks_and_validity(
@@ -961,6 +987,16 @@ def validate_merged_subject_mask_training_zarr(
     label_origin = np.asarray(source_index["label_origin_codes"][:], dtype=np.uint8)
     supervision_mode = np.asarray(source_index["supervision_mode_codes"][:], dtype=np.uint8)
     source_dataset_idx = np.asarray(source_index["source_dataset_idx"][:], dtype=np.int64)
+    source_refined_row_ids = (
+        np.asarray(source_index["source_refined_row_ids"][:])
+        if "source_refined_row_ids" in source_index
+        else None
+    )
+    source_detect_row_index = (
+        np.asarray(source_index["source_detect_row_index"][:])
+        if "source_detect_row_index" in source_index
+        else None
+    )
 
     if roi.ndim < 3:
         errors.append(f"roi_images must have shape (N, ...), got {tuple(roi.shape)}.")
@@ -996,6 +1032,16 @@ def validate_merged_subject_mask_training_zarr(
         errors.append("detection_source must be 1D length N.")
     if source_dataset_idx.ndim != 1 or int(source_dataset_idx.shape[0]) != total_samples:
         errors.append("source_dataset_idx must be 1D length N.")
+    for opt_name, opt_arr in (
+        ("source_refined_row_ids", source_refined_row_ids),
+        ("source_detect_row_index", source_detect_row_index),
+    ):
+        if opt_arr is None:
+            continue
+        if opt_arr.ndim != 1 or int(opt_arr.shape[0]) != total_samples:
+            errors.append(f"{opt_name} must be 1D length N.")
+        elif not np.issubdtype(opt_arr.dtype, np.integer):
+            errors.append(f"{opt_name} must be integer dtype.")
 
     source_count = int(source_index["source_dataset_id"].shape[0])
     if source_dataset_idx.ndim == 1 and source_count > 0:

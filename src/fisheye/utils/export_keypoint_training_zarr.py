@@ -31,6 +31,7 @@ from fisheye.pose.schema import (
     resolve_skeleton_identity_from_attrs,
 )
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.frame_flags import resolve_row_identity_arrays
 from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
@@ -1174,6 +1175,27 @@ def _export_merged(
         chunks=vector_chunks,
         overwrite=True,
     )
+    src_roi_idx_dest = source_index_group.require_array(
+        "source_roi_idx",
+        shape=(total_samples,),
+        dtype=np.int64,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    src_refined_row_ids_dest = source_index_group.require_array(
+        "source_refined_row_ids",
+        shape=(total_samples,),
+        dtype=np.int64,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    src_detect_row_index_dest = source_index_group.require_array(
+        "source_detect_row_index",
+        shape=(total_samples,),
+        dtype=np.int32,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
 
     copy_total = total_samples * 2  # roi + keypoints arrays
     copy_progress = _copy_progress(copy_total)
@@ -1199,10 +1221,18 @@ def _export_merged(
 
             root = zarr.open_group(str(spec.source_zarr), mode="r")
             roi_src = root[spec.roi_path]
+            crop_source_group = root[f"crop_runs/{spec.source_crop_run}"]
             selected = np.asarray(spec.selected_indices, dtype=np.int64)
             bbox_all = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
             keypoints_all = np.asarray(root[spec.keypoints_path][:], dtype=keypoint_dtype)
             success_all = np.asarray(root[spec.success_path][:], dtype=np.bool_)
+            annotation_group_path = spec.keypoints_path.rsplit("/", 1)[0]
+            annotation_group = root[annotation_group_path]
+            source_refined_row_ids, source_detect_row_index = resolve_row_identity_arrays(
+                annotation_group,
+                crop_source_group,
+                total_rois=spec.source_sample_count,
+            )
             keypoints = keypoints_all[selected]
             success = success_all[selected]
             crop_bbox = bbox_all[selected]
@@ -1284,6 +1314,9 @@ def _export_merged(
             det_source_dest[offset : offset + local_total] = detection_source
             src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
             src_frame_idx_dest[offset : offset + local_total] = source_frame_idx
+            src_roi_idx_dest[offset : offset + local_total] = selected
+            src_refined_row_ids_dest[offset : offset + local_total] = source_refined_row_ids[selected]
+            src_detect_row_index_dest[offset : offset + local_total] = source_detect_row_index[selected]
 
             total_successful += int(success.sum())
             keypoint_supervision_counts["box_only"] += int(np.sum(box_only_mask))
@@ -1779,6 +1812,24 @@ def validate_merged_keypoint_training_zarr(
                 errors.append(f"{src_frame_idx_path} contains negative indices.")
         else:
             errors.append(f"{src_frame_idx_path} must be integer dtype.")
+
+        for opt_path, require_nonnegative in (
+            ("source_index/source_roi_idx", True),
+            ("source_index/source_refined_row_ids", False),
+            ("source_index/source_detect_row_index", False),
+        ):
+            if opt_path not in root:
+                continue
+            opt_arr = np.asarray(root[opt_path][:])
+            if opt_arr.ndim != 1 or opt_arr.shape[0] != total_samples:
+                errors.append(f"{opt_path} must be 1D length N ({total_samples}), got {opt_arr.shape}.")
+                continue
+            if not np.issubdtype(opt_arr.dtype, np.integer):
+                errors.append(f"{opt_path} must be integer dtype, got {opt_arr.dtype}.")
+                continue
+            opt_i64 = opt_arr.astype(np.int64, copy=False)
+            if require_nonnegative and opt_i64.size > 0 and int(opt_i64.min()) < 0:
+                errors.append(f"{opt_path} contains negative indices.")
 
     if errors:
         raise ValueError("Merged keypoint zarr validation failed:\n- " + "\n- ".join(errors))

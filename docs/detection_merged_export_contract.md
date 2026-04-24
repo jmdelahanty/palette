@@ -85,6 +85,9 @@ Current default expectation:
   source_index/
     source_dataset_idx         (N,) int32
     source_frame_idx           (N,) int64
+    source_roi_idx             (N,) int64
+    source_refined_row_ids     (N,) int64
+    source_detect_row_index    (N,) int32
     source_dataset_id          (M,) unicode string
     source_zarr_path           (M,) unicode string
     attrs:
@@ -126,10 +129,18 @@ Required keys:
   - `crop_runs/<run_id>/detection_source`
   - `source_index/source_dataset_idx`
   - `source_index/source_frame_idx`
+  - `source_index/source_roi_idx`
+  - `source_index/source_refined_row_ids`
+  - `source_index/source_detect_row_index`
 - `train_indices`, `val_indices`, `test_indices` are disjoint.
 - Union of split indices equals `{0..N-1}` when test split is enabled.
 - `source_dataset_idx[i]` is within `[0, M-1]`.
 - `source_frame_idx[i]` is the original frame index in the source Zarr context.
+- `source_roi_idx[i]` is the source-local ROI row index before merge.
+- `source_refined_row_ids[i]` is the stable refined-detection row identity
+  when available, or `-1` for legacy/unmapped rows.
+- `source_detect_row_index[i]` is the raw detect row lineage when available,
+  or `-1` for rows without raw-detect backing.
 - `detection_source` encoding is stable:
   - `0` accepted curated sample (`refined` and manual-edited current rows both map here)
   - `1` interpolated/synthetic sample

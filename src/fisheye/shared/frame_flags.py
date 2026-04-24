@@ -324,3 +324,30 @@ def load_row_identity_arrays(
         else:
             arrays.append(None)
     return arrays[0], arrays[1]
+
+
+def resolve_row_identity_arrays(
+    primary_group: object,
+    fallback_group: object | None = None,
+    *,
+    total_rois: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resolve stable ROI row lineage from a preferred group with fallback."""
+
+    primary_refined, primary_detect = load_row_identity_arrays(primary_group, total_rois=total_rois)
+    fallback_refined = None
+    fallback_detect = None
+    if fallback_group is not None:
+        fallback_refined, fallback_detect = load_row_identity_arrays(fallback_group, total_rois=total_rois)
+
+    refined = primary_refined if primary_refined is not None else fallback_refined
+    detect = primary_detect if primary_detect is not None else fallback_detect
+    if refined is None:
+        refined = np.full((total_rois,), -1, dtype=np.int64)
+    else:
+        refined = refined.astype(np.int64, copy=False)
+    if detect is None:
+        detect = np.full((total_rois,), -1, dtype=np.int32)
+    else:
+        detect = detect.astype(np.int32, copy=False)
+    return refined, detect

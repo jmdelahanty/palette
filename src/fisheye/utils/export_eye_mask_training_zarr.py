@@ -25,6 +25,7 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry, resolve_dataset_id
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.frame_flags import resolve_row_identity_arrays
 from fisheye.shared.detect_reason_codec import (
     REASON_BYTES_ENCODING,
     read_reason_labels,
@@ -870,6 +871,8 @@ class _ResolvedEyeMergeSource:
     mask_probs_src: Optional[zarr.Array]
     source_frame_idx: np.ndarray
     source_roi_idx: np.ndarray
+    source_refined_row_ids: np.ndarray
+    source_detect_row_index: np.ndarray
     detection_source: np.ndarray
     eye_separation_data: np.ndarray
     reason_values: np.ndarray
@@ -1193,6 +1196,11 @@ def _resolve_merge_source(
         if isinstance(crop_detection_source, zarr.Array)
         else np.zeros((total_samples,), dtype=np.int8)
     )
+    source_refined_row_ids, source_detect_row_index = resolve_row_identity_arrays(
+        eye_group,
+        crop_group,
+        total_rois=total_samples,
+    )
     if eye_separation is None:
         eye_separation_data = np.full((total_samples,), np.nan, dtype=np.float32)
     else:
@@ -1238,6 +1246,8 @@ def _resolve_merge_source(
         mask_probs_src=mask_probs_src if isinstance(mask_probs_src, zarr.Array) else None,
         source_frame_idx=source_frame_idx,
         source_roi_idx=np.arange(total_samples, dtype=np.int64),
+        source_refined_row_ids=source_refined_row_ids,
+        source_detect_row_index=source_detect_row_index,
         detection_source=detection_source,
         eye_separation_data=eye_separation_data,
         reason_values=reason_values,
@@ -1405,6 +1415,28 @@ def export_merged_eye_mask_training_zarr_from_sources(
         ).astype(np.int64, copy=False)
         if total_samples > 0
         else np.empty((0,), dtype=np.int64)
+    )
+    source_refined_row_ids = (
+        np.concatenate(
+            [
+                np.asarray(source.source_refined_row_ids[source.selected_indices], dtype=np.int64)
+                for source in resolved_sources
+                if source.selected_samples > 0
+            ]
+        ).astype(np.int64, copy=False)
+        if total_samples > 0
+        else np.empty((0,), dtype=np.int64)
+    )
+    source_detect_row_index = (
+        np.concatenate(
+            [
+                np.asarray(source.source_detect_row_index[source.selected_indices], dtype=np.int32)
+                for source in resolved_sources
+                if source.selected_samples > 0
+            ]
+        ).astype(np.int32, copy=False)
+        if total_samples > 0
+        else np.empty((0,), dtype=np.int32)
     )
     eye_separation_data = (
         np.concatenate(
@@ -1838,6 +1870,18 @@ def export_merged_eye_mask_training_zarr_from_sources(
     source_index.create_array(
         "source_roi_idx",
         data=source_roi_idx.astype(np.int64, copy=False),
+        chunks=(max(1, min(total_samples, 65536)),),
+        overwrite=True,
+    )
+    source_index.create_array(
+        "source_refined_row_ids",
+        data=source_refined_row_ids.astype(np.int64, copy=False),
+        chunks=(max(1, min(total_samples, 65536)),),
+        overwrite=True,
+    )
+    source_index.create_array(
+        "source_detect_row_index",
+        data=source_detect_row_index.astype(np.int32, copy=False),
         chunks=(max(1, min(total_samples, 65536)),),
         overwrite=True,
     )
@@ -2359,6 +2403,16 @@ def validate_merged_eye_mask_training_zarr(
         source_dataset_id = np.asarray(root[src_dataset_id_path][:])
         source_zarr_path = np.asarray(root[src_zarr_path_path][:])
         source_roi_idx = np.asarray(root["source_index/source_roi_idx"][:]) if "source_index/source_roi_idx" in root else None
+        source_refined_row_ids = (
+            np.asarray(root["source_index/source_refined_row_ids"][:])
+            if "source_index/source_refined_row_ids" in root
+            else None
+        )
+        source_detect_row_index = (
+            np.asarray(root["source_index/source_detect_row_index"][:])
+            if "source_index/source_detect_row_index" in root
+            else None
+        )
 
         if source_dataset_idx.ndim != 1 or source_dataset_idx.shape[0] != total_samples:
             errors.append(
@@ -2415,6 +2469,17 @@ def validate_merged_eye_mask_training_zarr(
                             "source_index/source_roi_idx must reference non-negative source-local row indices "
                             f"(min={min_idx})."
                         )
+        for opt_name, opt_arr in (
+            ("source_refined_row_ids", source_refined_row_ids),
+            ("source_detect_row_index", source_detect_row_index),
+        ):
+            if opt_arr is None:
+                continue
+            path = f"source_index/{opt_name}"
+            if opt_arr.ndim != 1 or opt_arr.shape[0] != total_samples:
+                errors.append(f"{path} must be 1D length N ({total_samples}), got {opt_arr.shape}.")
+            elif not np.issubdtype(opt_arr.dtype, np.integer):
+                errors.append(f"{path} must be integer dtype, got {opt_arr.dtype}.")
 
     if errors:
         raise ValueError("Merged eye-mask zarr validation failed:\n- " + "\n- ".join(errors))

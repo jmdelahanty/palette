@@ -313,6 +313,12 @@ Recommended sample-aligned array:
 
 - `source_roi_idx`
   - shape: `(N,)`
+- `source_refined_row_ids`
+  - shape: `(N,)`
+  - stable refined-detection row identity when available, or `-1`
+- `source_detect_row_index`
+  - shape: `(N,)`
+  - raw detect row lineage when available, or `-1`
 
 Required source-table arrays:
 

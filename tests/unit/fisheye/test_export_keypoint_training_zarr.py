@@ -63,6 +63,16 @@ def _write_source_pose_zarr(
         data=np.zeros((4, 4), dtype=np.float32),
         chunks=(4, 4),
     )
+    crop.create_array(
+        "source_refined_row_ids",
+        data=np.array([1000, 1001, 1002, 1003], dtype=np.int64),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "source_detect_row_index",
+        data=np.array([2000, -1, 2002, 2003], dtype=np.int32),
+        chunks=(4,),
+    )
 
     kp_parent = root.create_group("keypoints_runs")
     kp_parent.attrs["latest"] = "kp_pose_001"
@@ -401,6 +411,17 @@ def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: 
     root = zarr.open_group(str(out_zarr), mode="r")
     keypoints = np.asarray(root["keypoints_runs"][result.run_name]["keypoints_roi"][:], dtype=np.float32)
     assert keypoints.shape == (3, 5, 2)
+    assert np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist() == [0, 1, 3]
+    assert np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64).tolist() == [
+        1000,
+        1001,
+        1003,
+    ]
+    assert np.asarray(root["source_index/source_detect_row_index"][:], dtype=np.int64).tolist() == [
+        2000,
+        -1,
+        2003,
+    ]
 
     summary = validate_merged_keypoint_training_zarr(out_zarr)
     assert summary["kpt_shape"] == [5, 3]

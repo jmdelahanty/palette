@@ -106,6 +106,21 @@ def _write_valid_merged_pose_zarr(path: Path, *, suppress_legacy_string_warning:
         data=np.array([10, 11, 20, 21], dtype=np.int64),
         chunks=(4,),
     )
+    source.create_array(
+        "source_roi_idx",
+        data=np.array([0, 1, 0, 1], dtype=np.int64),
+        chunks=(4,),
+    )
+    source.create_array(
+        "source_refined_row_ids",
+        data=np.array([100, 101, 200, 201], dtype=np.int64),
+        chunks=(4,),
+    )
+    source.create_array(
+        "source_detect_row_index",
+        data=np.array([300, -1, 400, 401], dtype=np.int32),
+        chunks=(4,),
+    )
     if suppress_legacy_string_warning:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UnstableSpecificationWarning)
