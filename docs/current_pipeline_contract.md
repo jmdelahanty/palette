@@ -64,6 +64,9 @@ Current rules:
 - `subject_mask_runs` is the canonical raw multi-component mask family.
 - `refined_subject_masks_runs` is the canonical editable/refined component mask
   family for body, eyes, and swim bladder.
+- Production assembly/export from `refined_subject_masks_runs` is
+  approved-only by default; pending or missing component reviews require an
+  explicit draft/QA override.
 - `eye_masks_runs` remains writable during migration because current eye
   producers and workflows still depend on it.
 - New eye orchestration should project or companion-write eye outputs into

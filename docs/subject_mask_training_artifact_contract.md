@@ -572,10 +572,14 @@ explicit assembly. The pipeline wrapper consumes that manifest, exports one
 merged subject-mask training zarr, rewrites the training config/manifest to the
 merged `crop_runs/<run>` and `subject_mask_runs/<run>`, and can launch
 `fisheye.segmentation.train_unet_subject_masks`. Subject-mask data-card
-aggregation is still future parity work. If registry latest component truth is
-split across multiple `refined_subject_masks_runs`, first assemble a new
-coherent refined run with `fisheye.refinement.assemble_refined_subject_masks`;
-the exporter should not silently combine split refined sources.
+aggregation is still future parity work. Refined-source export is approved-only
+by default: every available component in a `refined_subject_masks_runs/<run>`
+must have `component_review_statuses[component].state == "approved"`, with
+`--allow-unapproved-refined` reserved for draft/QA exports. If registry latest
+component truth is split across multiple `refined_subject_masks_runs`, first
+assemble a new coherent approved refined run with
+`fisheye.refinement.assemble_refined_subject_masks`; the exporter should not
+silently combine split refined sources.
 
 ## Related Contracts
 

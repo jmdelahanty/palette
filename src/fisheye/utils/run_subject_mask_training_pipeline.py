@@ -28,6 +28,14 @@ def _as_text(value: Any) -> Optional[str]:
     return text or None
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _parse_split_spec(value: str) -> tuple[float, float, float]:
     text = str(value).strip()
     if not text:
@@ -135,6 +143,7 @@ def _build_merge_source_specs(
                     or _as_text(entry.get("stage_group"))
                     or "subject_mask_runs"
                 ),
+                allow_unapproved_refined=_as_bool(entry.get("allow_unapproved_refined")),
             )
         )
     if not specs:
@@ -339,6 +348,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--input-format", choices=["gray", "rgb"], help="Optional explicit input format.")
     parser.add_argument("--merge-overwrite", action="store_true", help="Allow overwrite of merged output zarr.")
     parser.add_argument(
+        "--allow-unapproved-refined",
+        action="store_true",
+        help="Allow draft/QA merged export from refined_subject_masks_runs components without approved review state.",
+    )
+    parser.add_argument(
         "--train",
         action="store_true",
         help="Run fisheye.segmentation.train_unet_subject_masks after optional export.",
@@ -403,6 +417,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             registry=args.registry,
             training_set_id=set_id,
             training_set_name=set_name,
+            allow_unapproved_refined=bool(args.allow_unapproved_refined),
         )
         effective_config_path, effective_manifest_path = _write_merged_outputs(
             config_path=effective_config_path,

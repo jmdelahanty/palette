@@ -304,6 +304,29 @@ def _component_review_from_refined_source(
     return dict(_json_safe(payload))
 
 
+def _approved_component_review_from_refined_source(
+    source: SourceSubjectMaskRun,
+    component_name: str,
+    *,
+    allow_unapproved_components: bool,
+) -> dict[str, object] | None:
+    review_payload = _component_review_from_refined_source(source, component_name)
+    if allow_unapproved_components:
+        return review_payload
+    state = ""
+    if review_payload is not None:
+        state = str(review_payload.get("state") or "").strip().lower()
+    if state != "approved":
+        run_name = source.run_name
+        display_state = state or "missing"
+        raise ValueError(
+            f"refined_subject_masks_runs/{run_name} component {component_name!r} is not approved "
+            f"(review state: {display_state}). Pass allow_unapproved_components=True "
+            "or --allow-unapproved-components for draft/QA assembly."
+        )
+    return review_payload
+
+
 def _add_component_seed(
     seeds: dict[str, RefinedSubjectComponentSeed],
     review_overrides: dict[str, dict[str, object]],
@@ -337,6 +360,7 @@ def _collect_component_seeds(
     swim_source: Optional[SourceSubjectMaskRun],
     swim_refined_source: Optional[SourceSubjectMaskRun],
     refined_component_sources: Mapping[str, SourceSubjectMaskRun],
+    allow_unapproved_components: bool = False,
 ) -> tuple[dict[str, RefinedSubjectComponentSeed], list[str], dict[str, dict[str, object]]]:
     seeds: dict[str, RefinedSubjectComponentSeed] = {}
     review_overrides: dict[str, dict[str, object]] = {}
@@ -356,7 +380,11 @@ def _collect_component_seeds(
             review_overrides,
             "subject_body",
             _component_seed_from_refined_subject_source(body_refined_source, "subject_body"),
-            review_payload=_component_review_from_refined_source(body_refined_source, "subject_body"),
+            review_payload=_approved_component_review_from_refined_source(
+                body_refined_source,
+                "subject_body",
+                allow_unapproved_components=allow_unapproved_components,
+            ),
         )
 
     if eye_source is not None:
@@ -395,7 +423,11 @@ def _collect_component_seeds(
                 review_overrides,
                 component_name,
                 _component_seed_from_refined_subject_source(eye_refined_source, component_name),
-                review_payload=_component_review_from_refined_source(eye_refined_source, component_name),
+                review_payload=_approved_component_review_from_refined_source(
+                    eye_refined_source,
+                    component_name,
+                    allow_unapproved_components=allow_unapproved_components,
+                ),
             )
 
     if swim_source is not None:
@@ -413,7 +445,11 @@ def _collect_component_seeds(
             review_overrides,
             "swim_bladder",
             _component_seed_from_refined_subject_source(swim_refined_source, "swim_bladder"),
-            review_payload=_component_review_from_refined_source(swim_refined_source, "swim_bladder"),
+            review_payload=_approved_component_review_from_refined_source(
+                swim_refined_source,
+                "swim_bladder",
+                allow_unapproved_components=allow_unapproved_components,
+            ),
         )
 
     for component_name, source in refined_component_sources.items():
@@ -422,7 +458,11 @@ def _collect_component_seeds(
             review_overrides,
             component_name,
             _component_seed_from_refined_subject_source(source, component_name),
-            review_payload=_component_review_from_refined_source(source, component_name),
+            review_payload=_approved_component_review_from_refined_source(
+                source,
+                component_name,
+                allow_unapproved_components=allow_unapproved_components,
+            ),
         )
 
     component_names = [name for name in CANONICAL_COMPONENT_ORDER if name in seeds]
@@ -486,6 +526,7 @@ def assemble_refined_subject_run(
     refined_run: Optional[str] = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    allow_unapproved_components: bool = False,
 ) -> dict[str, object]:
     if eye_run and refined_eye_run:
         raise ValueError("Pass only one of eye_run or refined_eye_run.")
@@ -544,6 +585,7 @@ def assemble_refined_subject_run(
         swim_source=swim_source,
         swim_refined_source=swim_refined_source,
         refined_component_sources=refined_component_sources,
+        allow_unapproved_components=allow_unapproved_components,
     )
     coarse_subject_source = body_source or eye_source or swim_source
     coarse_source_subject_mask_run = (
@@ -707,6 +749,7 @@ def assemble_refined_subject_masks(
     refined_run: Optional[str] = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    allow_unapproved_components: bool = False,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="r" if dry_run else "a")
     summary = assemble_refined_subject_run(
@@ -722,6 +765,7 @@ def assemble_refined_subject_masks(
         refined_run=refined_run,
         overwrite=overwrite,
         dry_run=dry_run,
+        allow_unapproved_components=allow_unapproved_components,
     )
     summary["zarr_path"] = str(Path(zarr_path))
     if not dry_run:
@@ -765,6 +809,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing refined run of the same name.")
     parser.add_argument("--dry-run", action="store_true", help="Plan the assembly without mutating the archive.")
+    parser.add_argument(
+        "--allow-unapproved-components",
+        action="store_true",
+        help="Allow draft/QA assembly from pending or missing refined_subject_masks_runs component approvals.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit the result summary as JSON.")
     return parser
 
@@ -789,6 +838,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         refined_run=args.refined_run,
         overwrite=bool(args.overwrite),
         dry_run=bool(args.dry_run),
+        allow_unapproved_components=bool(args.allow_unapproved_components),
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

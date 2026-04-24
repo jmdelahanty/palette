@@ -548,6 +548,32 @@ def test_assemble_refined_subject_run_can_import_components_from_refined_subject
     assert run.attrs["refined_subject_mask_review_status"]["state"] == "approved"
 
 
+def test_assemble_refined_subject_run_requires_approved_refined_components(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        body_run="body_run_001",
+        refined_run="refined_subject_body_001",
+    )
+
+    with pytest.raises(ValueError, match="component 'subject_body' is not approved"):
+        assemble_mod.assemble_refined_subject_run(
+            root,
+            body_refined_run="refined_subject_body_001",
+            refined_run="refined_subject_requires_approved_001",
+        )
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        body_refined_run="refined_subject_body_001",
+        refined_run="refined_subject_draft_001",
+        allow_unapproved_components=True,
+    )
+    assert summary["status"] == "updated"
+    assert summary["component_names"] == ["subject_body"]
+
+
 def test_assemble_refined_subject_run_rejects_duplicate_component_sources(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()
@@ -555,6 +581,10 @@ def test_assemble_refined_subject_run_rejects_duplicate_component_sources(monkey
         root,
         body_run="body_run_001",
         refined_run="refined_subject_body_001",
+    )
+    _mark_refined_component_review(
+        root["refined_subject_masks_runs"]["refined_subject_body_001"],
+        "subject_body",
     )
 
     with pytest.raises(ValueError, match="Duplicate source for component 'subject_body'"):

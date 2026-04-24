@@ -144,6 +144,10 @@ Current implementation note:
   source for split-run consolidation; the new component provenance points to
   the immediate refined source and carries the upstream component provenance
   under `upstream_component_provenance`
+- refined component sources are approved-only by default: assembly from an
+  existing `refined_subject_masks_runs/<run>` requires the requested component
+  to have `component_review_statuses[component].state == "approved"`, with
+  `--allow-unapproved-components` reserved for draft/QA assembly
 - for legacy raw eye-stage data, the compatibility bridge remains:
   `refined_eye_masks_runs` or `eye_masks_runs`
   -> projected/backfilled `subject_mask_runs/<run>`
@@ -153,6 +157,9 @@ Safety rule:
 
 - the assembler must reject split refined component sources unless crop
   lineage, row lineage, row count, detection source, and ROI shape match
+- production assembly from split refined component sources must also reject
+  pending, missing, or non-approved component review states; unapproved sources
+  are only allowed with an explicit draft/QA override
 
 ## Output Layout
 

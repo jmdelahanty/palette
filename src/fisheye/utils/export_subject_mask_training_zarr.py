@@ -267,6 +267,7 @@ class SubjectMergeSourceSpec:
     subject_run: Optional[str] = None
     crop_run: Optional[str] = None
     stage_group: str = "subject_mask_runs"
+    allow_unapproved_refined: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,6 +299,7 @@ def _resolve_source_spec(
     registry_path: Optional[Path],
     target_schema_id: str,
     requested_input_format: Optional[str],
+    allow_unapproved_refined: bool = False,
 ) -> SubjectResolvedSource:
     source_path = Path(spec.source_zarr).expanduser().resolve()
     root = zarr.open_group(str(source_path), mode="r")
@@ -320,6 +322,16 @@ def _resolve_source_spec(
         subject_group,
         stage_group=stage_group,
     )
+    if stage_group == "refined_subject_masks_runs" and not (
+        bool(allow_unapproved_refined) or bool(spec.allow_unapproved_refined)
+    ):
+        _require_approved_refined_subject_components(
+            subject_group,
+            source_zarr=source_path,
+            run_name=subject_run,
+            mask_labels=source_labels,
+            available_channels=available_channels,
+        )
     projection_mode = _projection_mode(source_schema_id, target_schema_id)
     roi_images = crop_group["roi_images"]
     masks_roi = subject_group["masks_roi"]
@@ -377,6 +389,37 @@ def _resolve_source_spec(
 
 def _schema_label_index(label_schema_id: str) -> Dict[str, int]:
     return {label: idx for idx, label in enumerate(TARGET_SCHEMAS[label_schema_id])}
+
+
+def _review_state(payload: object) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    return str(payload.get("state") or "").strip().lower()
+
+
+def _require_approved_refined_subject_components(
+    subject_group: zarr.Group,
+    *,
+    source_zarr: Path,
+    run_name: str,
+    mask_labels: Sequence[str],
+    available_channels: np.ndarray,
+) -> None:
+    reviews = subject_group.attrs.get("component_review_statuses")
+    if not isinstance(reviews, Mapping):
+        reviews = {}
+    for index, component_name in enumerate(mask_labels):
+        if index >= int(available_channels.shape[0]) or not bool(available_channels[index]):
+            continue
+        state = _review_state(reviews.get(component_name))
+        if state != "approved":
+            display_state = state or "missing"
+            raise ValueError(
+                f"{source_zarr.name}: refined_subject_masks_runs/{run_name} component "
+                f"{component_name!r} is not approved for training export "
+                f"(review state: {display_state}). Pass allow_unapproved_refined=True "
+                "or --allow-unapproved-refined for draft/QA export."
+            )
 
 
 def _project_masks_and_validity(
@@ -573,6 +616,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
     registry: Optional[Path] = None,
     training_set_id: Optional[str] = None,
     training_set_name: Optional[str] = None,
+    allow_unapproved_refined: bool = False,
 ) -> Dict[str, Any]:
     if not source_specs:
         raise ValueError("At least one source spec is required.")
@@ -616,6 +660,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
             registry_path=registry_path,
             target_schema_id=target_schema_id,
             requested_input_format=input_format,
+            allow_unapproved_refined=allow_unapproved_refined,
         )
         for spec in source_specs
     ]
@@ -963,6 +1008,7 @@ def export_merged_subject_mask_training_zarr(
     registry: Optional[Path] = None,
     training_set_id: Optional[str] = None,
     training_set_name: Optional[str] = None,
+    allow_unapproved_refined: bool = False,
 ) -> Dict[str, Any]:
     return export_merged_subject_mask_training_zarr_from_sources(
         source_specs=[
@@ -985,6 +1031,7 @@ def export_merged_subject_mask_training_zarr(
         registry=registry,
         training_set_id=training_set_id,
         training_set_name=training_set_name,
+        allow_unapproved_refined=allow_unapproved_refined,
     )
 
 
@@ -1265,6 +1312,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path for merged-export registration.")
     parser.add_argument("--training-set-id", type=str, help="Optional training set identifier for registry linkage.")
     parser.add_argument("--training-set-name", type=str, help="Optional training set display name.")
+    parser.add_argument(
+        "--allow-unapproved-refined",
+        action="store_true",
+        help="Allow draft/QA export from refined_subject_masks_runs components without approved review state.",
+    )
     args = parser.parse_args(argv)
 
     source_specs = [
@@ -1290,6 +1342,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         registry=args.registry,
         training_set_id=args.training_set_id,
         training_set_name=args.training_set_name,
+        allow_unapproved_refined=bool(args.allow_unapproved_refined),
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

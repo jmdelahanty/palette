@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
@@ -114,18 +115,20 @@ def _write_refined_subject_source(
     path: Path,
     *,
     run_name: str = "refined_subject_masks_001",
+    review_state: str = "approved",
 ) -> None:
     root = zarr.open_group(str(path), mode="a")
     subject = root["subject_mask_runs/subject_masks_001"]
     parent = root.require_group("refined_subject_masks_runs")
     parent.attrs["latest"] = run_name
     refined = parent.create_group(run_name)
+    labels = list(subject.attrs["mask_labels"])
     refined.attrs.update(
         {
             "source_subject_mask_run": "subject_masks_001",
             "source_crop_run": "crop_001",
             "label_schema_id": subject.attrs["label_schema_id"],
-            "mask_labels": list(subject.attrs["mask_labels"]),
+            "mask_labels": labels,
             "method": "manual_refined_subject_masks",
         }
     )
@@ -137,6 +140,26 @@ def _write_refined_subject_source(
         data=np.asarray(subject["available_channels"][:], dtype=np.bool_),
         chunks=subject["available_channels"].chunks,
     )
+    available = np.asarray(subject["available_channels"][:], dtype=np.bool_)
+    review_payload = {
+        label: {
+            "state": review_state,
+            "method": "manual",
+            "intended_use": "training",
+            "reviewer": "pytest",
+            "timestamp_utc": "2026-04-03T00:00:00+00:00",
+        }
+        for index, label in enumerate(labels)
+        if index < int(available.shape[0]) and bool(available[index])
+    }
+    refined.attrs["component_review_statuses"] = review_payload
+    refined.attrs["refined_subject_mask_review_status"] = {
+        "state": review_state,
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-04-03T00:00:00+00:00",
+    }
 
 
 def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) -> None:
@@ -271,6 +294,40 @@ def test_export_subject_mask_training_reads_refined_subject_source(tmp_path: Pat
     assert int(np.sum(masks[:, 0])) > 0
     assert int(np.sum(masks[:, 1])) > 0
     assert int(np.sum(masks[:, 2])) > 0
+
+
+def test_export_subject_mask_training_rejects_unapproved_refined_source(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_refined_pending.zarr"
+    out_path = tmp_path / "merged_subject_refined_pending.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_refined_pending",
+        session_uuid="subject_source_refined_pending",
+        include_body=True,
+        include_swim_bladder=True,
+    )
+    _write_refined_subject_source(source_path, review_state="pending")
+
+    with pytest.raises(ValueError, match="component 'subject_body' is not approved"):
+        export_merged_subject_mask_training_zarr(
+            source_path,
+            out_path,
+            source_stage_group="refined_subject_masks_runs",
+            subject_run="refined_subject_masks_001",
+            subject_label_schema="subject_v1_union",
+            overwrite=True,
+        )
+
+    summary = export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        source_stage_group="refined_subject_masks_runs",
+        subject_run="refined_subject_masks_001",
+        subject_label_schema="subject_v1_union",
+        overwrite=True,
+        allow_unapproved_refined=True,
+    )
+    assert summary["total_samples"] == 4
 
 
 def test_validate_subject_mask_training_zarr_cli(tmp_path: Path, capsys) -> None:

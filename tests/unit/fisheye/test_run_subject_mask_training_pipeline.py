@@ -215,12 +215,14 @@ def test_export_merged_invokes_exporter_and_rewrites_outputs(tmp_path: Path, mon
     assert export_call["kwargs"]["registry"] == registry_path
     assert export_call["kwargs"]["training_set_id"] == "subject_mask_smoke_v001"
     assert export_call["kwargs"]["training_set_name"] == "Subject Mask Smoke"
+    assert export_call["kwargs"]["allow_unapproved_refined"] is False
     source_specs = export_call["source_specs"]
     assert len(source_specs) == 1
     assert source_specs[0].source_zarr == source_zarr
     assert source_specs[0].subject_run == "refined_subject_masks_001"
     assert source_specs[0].crop_run == "crop_001"
     assert source_specs[0].stage_group == "refined_subject_masks_runs"
+    assert source_specs[0].allow_unapproved_refined is False
 
     manifest_payload = json.loads(out_manifest.read_text(encoding="utf-8"))
     assert manifest_payload["datasets"][0]["out_zarr"] == str(merged_out)
