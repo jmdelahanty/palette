@@ -1409,6 +1409,23 @@ def test_schema_has_subject_mask_component_quality_table_views_and_indexes(tmp_p
         "idx_subject_mask_component_stage",
         "idx_subject_mask_component_recording",
     }
+    expected_source_stale_columns = {
+        "source_subject_mask_stale_state",
+        "source_subject_mask_stale_reason",
+        "source_subject_mask_stale_timestamp_utc",
+        "source_subject_mask_stale_json",
+    }
+    for view_name in (
+        "subject_mask_component_quality_overview",
+        "recording_subject_mask_component_quality_overview",
+        "subject_mask_component_quality_latest",
+        "subject_mask_component_quality_latest_by_recording",
+    ):
+        columns = {
+            str(row["name"])
+            for row in registry.conn.execute(f"PRAGMA table_info({view_name});").fetchall()
+        }
+        assert expected_source_stale_columns <= columns
     registry.close()
 
 
@@ -7821,6 +7838,8 @@ def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw
             component_name,
             stage_group,
             run_name,
+            source_subject_mask_stale_state,
+            source_subject_mask_stale_reason,
             lifecycle_state
         FROM subject_mask_component_quality_latest
         WHERE dataset_id = ?
@@ -7831,9 +7850,15 @@ def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw
     latest_by_component = {str(row["component_name"]): row for row in latest_rows}
     assert str(latest_by_component["subject_body"]["stage_group"]) == "refined_subject_masks_runs"
     assert str(latest_by_component["subject_body"]["run_name"]) == "refined_subject_masks_001"
+    assert str(latest_by_component["subject_body"]["source_subject_mask_stale_state"]) == "stale"
+    assert (
+        str(latest_by_component["subject_body"]["source_subject_mask_stale_reason"])
+        == "latest_subject_mask_run_mismatch"
+    )
     assert str(latest_by_component["subject_body"]["lifecycle_state"]) == "stale"
     assert str(latest_by_component["swim_bladder"]["stage_group"]) == "refined_subject_masks_runs"
     assert str(latest_by_component["swim_bladder"]["run_name"]) == "refined_subject_masks_001"
+    assert str(latest_by_component["swim_bladder"]["source_subject_mask_stale_state"]) == "stale"
     assert str(latest_by_component["swim_bladder"]["lifecycle_state"]) == "stale"
     registry.close()
 

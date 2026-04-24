@@ -35,6 +35,18 @@ _SHARED_REVIEW_FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_UNIFIED_SUBJECT_MASK_STAGES = {"subject_mask_runs", "refined_subject_masks_runs"}
+_LEGACY_EYE_MASK_STAGES = {"eye_masks_runs", "refined_eye_masks_runs"}
+
+
+def _mask_component_source_role(stage_group: object) -> Optional[str]:
+    stage = str(stage_group or "").strip()
+    if stage in _UNIFIED_SUBJECT_MASK_STAGES:
+        return "unified_subject_mask"
+    if stage in _LEGACY_EYE_MASK_STAGES:
+        return "legacy_eye_mask_compat"
+    return None
+
 
 def _as_float(value: Optional[str]) -> Optional[float]:
     if value is None:
@@ -477,6 +489,10 @@ def _query_subject_mask_component_map(
             total_rois,
             rows_with_component_mask,
             rows_with_component_mask_rate,
+            source_subject_mask_stale_state,
+            source_subject_mask_stale_reason,
+            source_subject_mask_stale_timestamp_utc,
+            source_subject_mask_stale_json,
             lifecycle_state,
             lifecycle_reason,
             quality_updated_utc
@@ -569,6 +585,43 @@ def _apply_shared_review_fields(
 ) -> None:
     for field_name in _SHARED_REVIEW_FIELDS:
         row[f"{prefix}_{field_name}"] = source.get(field_name)
+
+
+def _apply_subject_mask_component_fields(
+    row: dict[str, Any],
+    selected: dict[str, Any],
+    *,
+    match_count: int,
+) -> None:
+    field_map = {
+        "name": "component_name",
+        "stage_group": "stage_group",
+        "run": "run_name",
+        "created_utc": "run_created_utc",
+        "recording_id": "recording_id",
+        "family": "component_family",
+        "method": "subject_mask_method",
+        "label_schema_id": "label_schema_id",
+        "eye_component_mode": "eye_component_mode",
+        "source_subject_mask_run": "source_subject_mask_run",
+        "available": "available",
+        "total_rois": "total_rois",
+        "rows_with_component_mask": "rows_with_component_mask",
+        "rows_with_component_mask_rate": "rows_with_component_mask_rate",
+        "source_subject_mask_stale_state": "source_subject_mask_stale_state",
+        "source_subject_mask_stale_reason": "source_subject_mask_stale_reason",
+        "source_subject_mask_stale_timestamp_utc": "source_subject_mask_stale_timestamp_utc",
+        "source_subject_mask_stale_json": "source_subject_mask_stale_json",
+        "lifecycle_state": "lifecycle_state",
+        "lifecycle_reason": "lifecycle_reason",
+    }
+    source_role = _mask_component_source_role(selected.get("stage_group"))
+    for prefix in ("subject_mask_component", "mask_component"):
+        for output_suffix, source_key in field_map.items():
+            row[f"{prefix}_{output_suffix}"] = selected.get(source_key)
+        row[f"{prefix}_source_role"] = source_role
+        row[f"{prefix}_match_count"] = match_count
+        _apply_shared_review_fields(row, selected, prefix=prefix)
 
 
 def _pick_eye_mask_candidate(
@@ -1368,117 +1421,151 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--eye-mask-stage",
         choices=["eye_masks_runs", "refined_eye_masks_runs", "any"],
         default="any",
-        help="Filter eye-mask performance rows by stage group (default: any).",
+        help=(
+            "Legacy eye-mask compatibility/training diagnostic: filter "
+            "eye_mask performance rows by stage group (default: any). For "
+            "current mask state, prefer --mask-stage/--subject-mask-stage."
+        ),
     )
     parser.add_argument(
         "--eye-mask-method",
         type=str,
-        help="Eye-mask method filter from eye-mask performance view (or 'missing').",
+        help=(
+            "Legacy eye-mask compatibility/training diagnostic: method filter "
+            "from eye-mask performance views (or 'missing')."
+        ),
     )
     parser.add_argument(
         "--eye-mask-review-state",
         type=str,
-        help="Eye-mask review state filter (or 'missing').",
+        help=(
+            "Legacy eye-mask compatibility/training diagnostic: review state "
+            "filter (or 'missing'). For current eye-component review state, "
+            "prefer --mask-component eye_left/eye_right with --mask-review-state."
+        ),
     )
     parser.add_argument(
         "--eye-mask-review-intended-use",
         type=str,
-        help="Eye-mask review intended-use filter (or 'missing').",
+        help="Legacy eye-mask compatibility/training diagnostic: review intended-use filter (or 'missing').",
     )
     parser.add_argument(
         "--eye-mask-reviewer",
         type=str,
-        help="Eye-mask reviewer filter (or 'missing').",
+        help="Legacy eye-mask compatibility/training diagnostic: reviewer filter (or 'missing').",
     )
     parser.add_argument(
         "--eye-mask-stale-state",
         type=str,
-        help="Eye-mask source_keypoint_stale.state filter (or 'missing').",
+        help="Legacy eye-mask compatibility/training diagnostic: source_keypoint_stale.state filter (or 'missing').",
     )
     parser.add_argument(
         "--eye-mask-lifecycle-state",
         type=str,
-        help="Eye-mask lifecycle state filter (approved/rejected/in_progress/stale or 'missing').",
+        help=(
+            "Legacy eye-mask compatibility/training diagnostic: lifecycle state "
+            "filter (approved/rejected/in_progress/stale or 'missing')."
+        ),
     )
     parser.add_argument(
         "--eye-mask-source-keypoints-run",
         type=str,
-        help="Eye-mask source_keypoints_run filter (or 'missing').",
+        help="Legacy eye-mask compatibility/training diagnostic: source_keypoints_run filter (or 'missing').",
     )
     parser.add_argument(
         "--eye-mask-success-rate-min",
         type=float,
-        help="Minimum eye-mask successful_roi_pair_rate from eye-mask performance view.",
+        help="Legacy eye-mask compatibility/training diagnostic: minimum successful_roi_pair_rate.",
     )
     parser.add_argument(
         "--eye-mask-rois-per-second-min",
         type=float,
-        help="Minimum eye-mask rois_per_second from eye-mask performance view.",
+        help="Legacy eye-mask compatibility/training diagnostic: minimum rois_per_second.",
     )
     parser.add_argument(
         "--eye-mask-duration-max",
         type=float,
-        help="Maximum eye-mask duration_seconds from eye-mask performance view.",
+        help="Legacy eye-mask compatibility/training diagnostic: maximum duration_seconds.",
     )
     parser.add_argument(
         "--subject-mask-component",
+        "--mask-component",
+        dest="subject_mask_component",
         type=str,
         help=(
-            "Subject-mask component filter from the unified "
+            "Current mask-state component filter from the unified "
             "subject_mask_component_quality_latest view (for example eye_left or "
             "swim_bladder)."
         ),
     )
     parser.add_argument(
         "--subject-mask-stage",
+        "--mask-stage",
+        dest="subject_mask_stage",
         choices=["subject_mask_runs", "refined_subject_masks_runs", "eye_masks_runs", "refined_eye_masks_runs", "any"],
         default="any",
         help=(
-            "Filter unified subject-mask component rows by source stage group "
-            "(default: any). eye_masks_runs and refined_eye_masks_runs are "
+            "Current mask-state stage filter from unified subject-mask component "
+            "rows (default: any). eye_masks_runs and refined_eye_masks_runs are "
             "legacy compatibility source stages in this view."
         ),
     )
     parser.add_argument(
         "--subject-mask-method",
+        "--mask-method",
+        dest="subject_mask_method",
         type=str,
-        help="Subject-mask component method filter from subject-mask latest component view (or 'missing').",
+        help="Current mask-state component method filter from the latest component view (or 'missing').",
     )
     parser.add_argument(
         "--subject-mask-review-state",
+        "--mask-review-state",
+        dest="subject_mask_review_state",
         type=str,
-        help="Subject-mask component review state filter (or 'missing').",
+        help="Current mask-state component review state filter (or 'missing').",
     )
     parser.add_argument(
         "--subject-mask-review-intended-use",
+        "--mask-review-intended-use",
+        dest="subject_mask_review_intended_use",
         type=str,
-        help="Subject-mask component review intended-use filter (or 'missing').",
+        help="Current mask-state component review intended-use filter (or 'missing').",
     )
     parser.add_argument(
         "--subject-mask-reviewer",
+        "--mask-reviewer",
+        dest="subject_mask_reviewer",
         type=str,
-        help="Subject-mask component reviewer filter (or 'missing').",
+        help="Current mask-state component reviewer filter (or 'missing').",
     )
     parser.add_argument(
         "--subject-mask-lifecycle-state",
+        "--mask-lifecycle-state",
+        dest="subject_mask_lifecycle_state",
         type=str,
-        help="Subject-mask component lifecycle state filter (approved/rejected/in_progress/stale/na or 'missing').",
+        help="Current mask-state component lifecycle state filter (approved/rejected/in_progress/stale/na or 'missing').",
     )
     parser.add_argument(
         "--subject-mask-source-subject-mask-run",
+        "--mask-source-subject-mask-run",
+        dest="subject_mask_source_subject_mask_run",
         type=str,
-        help="Subject-mask component source_subject_mask_run filter (or 'missing').",
+        help="Current mask-state component source_subject_mask_run filter (or 'missing').",
     )
     parser.add_argument(
         "--subject-mask-available",
+        "--mask-available",
+        dest="subject_mask_available",
         choices=["0", "1", "any"],
         default="any",
-        help="Filter subject-mask components by available flag (default: any).",
+        help="Filter current mask-state components by available flag (default: any).",
     )
     parser.add_argument(
         "--subject-mask-coverage-min",
+        "--mask-coverage-min",
+        dest="subject_mask_coverage_min",
         type=float,
-        help="Minimum subject-mask component rows_with_component_mask_rate from subject-mask latest component view.",
+        help="Minimum current mask-state rows_with_component_mask_rate from the latest component view.",
     )
     parser.add_argument(
         "--detect-model-only",
@@ -2211,26 +2298,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     continue
 
                 selected = _pick_subject_mask_component_candidate(matching_candidates)
-                row["subject_mask_component_name"] = selected.get("component_name")
-                row["subject_mask_component_stage_group"] = selected.get("stage_group")
-                row["subject_mask_component_run"] = selected.get("run_name")
-                row["subject_mask_component_created_utc"] = selected.get("run_created_utc")
-                row["subject_mask_component_recording_id"] = selected.get("recording_id")
-                row["subject_mask_component_family"] = selected.get("component_family")
-                row["subject_mask_component_method"] = selected.get("subject_mask_method")
-                row["subject_mask_component_label_schema_id"] = selected.get("label_schema_id")
-                row["subject_mask_component_eye_component_mode"] = selected.get("eye_component_mode")
-                row["subject_mask_component_source_subject_mask_run"] = selected.get("source_subject_mask_run")
-                row["subject_mask_component_available"] = selected.get("available")
-                row["subject_mask_component_total_rois"] = selected.get("total_rois")
-                row["subject_mask_component_rows_with_component_mask"] = selected.get("rows_with_component_mask")
-                row["subject_mask_component_rows_with_component_mask_rate"] = selected.get(
-                    "rows_with_component_mask_rate"
+                _apply_subject_mask_component_fields(
+                    row,
+                    selected,
+                    match_count=len(matching_candidates),
                 )
-                row["subject_mask_component_lifecycle_state"] = selected.get("lifecycle_state")
-                row["subject_mask_component_lifecycle_reason"] = selected.get("lifecycle_reason")
-                row["subject_mask_component_match_count"] = len(matching_candidates)
-                _apply_shared_review_fields(row, selected, prefix="subject_mask_component")
                 filtered.append(row)
             result_rows = filtered
 

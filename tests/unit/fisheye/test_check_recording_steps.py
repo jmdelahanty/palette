@@ -827,7 +827,9 @@ def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path
             ),
             label_schema_id="subject_v1_lr",
             eye_component_mode="lr",
-            source_subject_mask_run=None,
+            source_subject_mask_run=(
+                "subject_masks_registry" if stage_group == "refined_subject_masks_runs" else None
+            ),
             available=available,
             review_state=review_state,
             review_method="manual" if review_state else None,
@@ -865,6 +867,37 @@ def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path
             lifecycle_state=lifecycle_state,
         )
 
+    registry.conn.execute(
+        """
+        INSERT INTO subject_mask_performance (
+            dataset_id,
+            stage_group,
+            run_name,
+            recording_id,
+            source_subject_mask_run,
+            source_subject_mask_stale_state,
+            source_subject_mask_stale_reason,
+            source_subject_mask_stale_timestamp_utc,
+            lifecycle_state,
+            lifecycle_reason
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_component_overlay",
+            "refined_subject_masks_runs",
+            "refined_eye_left",
+            "recording_component_overlay",
+            "subject_masks_registry",
+            "stale",
+            "source_subject_mask_changed",
+            "2026-03-03T00:02:00+00:00",
+            "stale",
+            "source_subject_mask_changed",
+        ),
+    )
+    registry.conn.commit()
+
     payload = mod._registry_status_payload(  # noqa: SLF001
         registry=registry,
         zarr_path=zarr_path,
@@ -875,6 +908,7 @@ def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path
 
     assert payload["subject_mask_available_components"] == ["eyes_union"]
     assert payload["subject_mask_component_review_states"] == {"eyes_union": "approved"}
+    assert payload["subject_mask_component_source_subject_mask_stale"] == {}
     assert payload["refined_subject_mask_available_components"] == [
         "subject_body",
         "eye_left",
@@ -886,6 +920,14 @@ def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path
         "eye_left": "stale",
         "eye_right": "approved",
         "swim_bladder": "needs_review",
+    }
+    assert payload["refined_subject_mask_component_source_subject_mask_stale"] == {
+        "eye_left": {
+            "state": "stale",
+            "reason": "source_subject_mask_changed",
+            "timestamp_utc": "2026-03-03T00:02:00+00:00",
+            "source_subject_mask_run": "subject_masks_registry",
+        }
     }
 
 

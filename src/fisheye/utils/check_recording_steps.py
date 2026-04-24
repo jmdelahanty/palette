@@ -433,6 +433,23 @@ def _component_display_state(row: Dict[str, object]) -> Optional[str]:
     return _normalize_attr(row.get("review_state")) or lifecycle_state
 
 
+def _component_source_subject_mask_stale(row: Dict[str, object]) -> Optional[Dict[str, object]]:
+    stale_state = _normalize_attr(row.get("source_subject_mask_stale_state"))
+    if not stale_state:
+        return None
+    payload: Dict[str, object] = {"state": stale_state}
+    stale_reason = _normalize_attr(row.get("source_subject_mask_stale_reason"))
+    stale_timestamp = _normalize_attr(row.get("source_subject_mask_stale_timestamp_utc"))
+    source_run = _normalize_attr(row.get("source_subject_mask_run"))
+    if stale_reason:
+        payload["reason"] = stale_reason
+    if stale_timestamp:
+        payload["timestamp_utc"] = stale_timestamp
+    if source_run:
+        payload["source_subject_mask_run"] = source_run
+    return payload
+
+
 def _registry_subject_component_fields_by_stage(
     *,
     registry: Registry,
@@ -451,6 +468,10 @@ def _registry_subject_component_fields_by_stage(
                 component_name,
                 available,
                 review_state,
+                source_subject_mask_run,
+                source_subject_mask_stale_state,
+                source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc,
                 lifecycle_state
             FROM recording_subject_mask_component_quality_overview
             WHERE recording_id = ?
@@ -480,14 +501,17 @@ def _registry_subject_component_fields_by_stage(
                 "available_components": [],
                 "unavailable_components": [],
                 "component_review_states": {},
+                "component_source_subject_mask_stale": {},
             },
         )
         available_components = fields["available_components"]
         unavailable_components = fields["unavailable_components"]
         review_states = fields["component_review_states"]
+        component_source_stale = fields["component_source_subject_mask_stale"]
         assert isinstance(available_components, list)
         assert isinstance(unavailable_components, list)
         assert isinstance(review_states, dict)
+        assert isinstance(component_source_stale, dict)
         if _coerce_bool(row["available"]):
             available_components.append(component_name)
         else:
@@ -495,6 +519,9 @@ def _registry_subject_component_fields_by_stage(
         display_state = _component_display_state(dict(row))
         if display_state:
             review_states[component_name] = display_state
+        stale_payload = _component_source_subject_mask_stale(dict(row))
+        if stale_payload:
+            component_source_stale[component_name] = stale_payload
 
     for fields in grouped.values():
         fields["available_components"] = _sort_subject_components(
@@ -1069,6 +1096,7 @@ def _registry_status_payload(
     payload["subject_mask_available_components"] = subject_component_fields["available_components"]
     payload["subject_mask_unavailable_components"] = subject_component_fields["unavailable_components"]
     payload["subject_mask_component_review_states"] = subject_component_fields["component_review_states"]
+    payload["subject_mask_component_source_subject_mask_stale"] = {}
 
     refined_subject_masks_row = selected_rows.get("refined_subject_masks")
     payload["refined_subject_masks_present"] = _step_row_status_ok(refined_subject_masks_row)
@@ -1088,6 +1116,7 @@ def _registry_status_payload(
     payload["refined_subject_mask_available_components"] = refined_subject_component_fields["available_components"]
     payload["refined_subject_mask_unavailable_components"] = refined_subject_component_fields["unavailable_components"]
     payload["refined_subject_mask_component_review_states"] = refined_subject_component_fields["component_review_states"]
+    payload["refined_subject_mask_component_source_subject_mask_stale"] = {}
 
     registry_component_fields = _registry_subject_component_fields_by_stage(
         registry=registry,
@@ -1098,11 +1127,17 @@ def _registry_status_payload(
         payload["subject_mask_available_components"] = subject_registry_fields["available_components"]
         payload["subject_mask_unavailable_components"] = subject_registry_fields["unavailable_components"]
         payload["subject_mask_component_review_states"] = subject_registry_fields["component_review_states"]
+        payload["subject_mask_component_source_subject_mask_stale"] = subject_registry_fields[
+            "component_source_subject_mask_stale"
+        ]
     refined_registry_fields = registry_component_fields.get("refined_subject_masks_runs")
     if refined_registry_fields:
         payload["refined_subject_mask_available_components"] = refined_registry_fields["available_components"]
         payload["refined_subject_mask_unavailable_components"] = refined_registry_fields["unavailable_components"]
         payload["refined_subject_mask_component_review_states"] = refined_registry_fields["component_review_states"]
+        payload["refined_subject_mask_component_source_subject_mask_stale"] = refined_registry_fields[
+            "component_source_subject_mask_stale"
+        ]
 
     payload["arena_assignment_present"] = _step_row_status_ok(selected_rows.get("arena_assignment"))
     tracks_row = selected_rows.get("tracks")

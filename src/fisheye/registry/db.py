@@ -2522,6 +2522,11 @@ class Registry:
                 "subject_mask_component_partial_run_preference",
                 self._migration_038_subject_mask_component_partial_run_preference,
             ),
+            (
+                39,
+                "subject_mask_component_source_stale_views",
+                self._migration_039_subject_mask_component_source_stale_views,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -8164,8 +8169,22 @@ class Registry:
                 smcqc.total_rois AS total_rois,
                 smcqc.rows_with_component_mask AS rows_with_component_mask,
                 smcqc.rows_with_component_mask_rate AS rows_with_component_mask_rate,
-                smcqc.lifecycle_state AS lifecycle_state,
-                smcqc.lifecycle_reason AS lifecycle_reason,
+                smp.source_subject_mask_stale_state AS source_subject_mask_stale_state,
+                smp.source_subject_mask_stale_reason AS source_subject_mask_stale_reason,
+                smp.source_subject_mask_stale_timestamp_utc AS source_subject_mask_stale_timestamp_utc,
+                smp.source_subject_mask_stale_json AS source_subject_mask_stale_json,
+                CASE
+                    WHEN COALESCE(smcqc.available, 0) = 1
+                     AND lower(trim(COALESCE(smp.source_subject_mask_stale_state, ''))) = 'stale'
+                    THEN 'stale'
+                    ELSE smcqc.lifecycle_state
+                END AS lifecycle_state,
+                CASE
+                    WHEN COALESCE(smcqc.available, 0) = 1
+                     AND lower(trim(COALESCE(smp.source_subject_mask_stale_state, ''))) = 'stale'
+                    THEN COALESCE(NULLIF(trim(smp.source_subject_mask_stale_reason), ''), 'source_subject_mask_stale')
+                    ELSE smcqc.lifecycle_reason
+                END AS lifecycle_reason,
                 smcqc.quality_updated_utc AS quality_updated_utc,
                 smcqc.zarr_mtime_ns AS zarr_mtime_ns,
                 CASE
@@ -8173,7 +8192,11 @@ class Registry:
                     ELSE 0
                 END AS quality_stale
             FROM subject_mask_component_quality_current smcqc
-            LEFT JOIN datasets d ON d.dataset_id = smcqc.dataset_id;
+            LEFT JOIN datasets d ON d.dataset_id = smcqc.dataset_id
+            LEFT JOIN subject_mask_performance smp
+              ON smp.dataset_id = smcqc.dataset_id
+             AND smp.stage_group = smcqc.stage_group
+             AND smp.run_name = smcqc.run_name;
             """
         )
 
@@ -8222,6 +8245,10 @@ class Registry:
                 total_rois,
                 rows_with_component_mask,
                 rows_with_component_mask_rate,
+                source_subject_mask_stale_state,
+                source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc,
+                source_subject_mask_stale_json,
                 lifecycle_state,
                 lifecycle_reason,
                 quality_updated_utc,
@@ -8570,6 +8597,10 @@ class Registry:
                 total_rois,
                 rows_with_component_mask,
                 rows_with_component_mask_rate,
+                source_subject_mask_stale_state,
+                source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc,
+                source_subject_mask_stale_json,
                 lifecycle_state,
                 lifecycle_reason,
                 quality_updated_utc,
@@ -8619,6 +8650,10 @@ class Registry:
                     label_schema_id,
                     eye_component_mode,
                     source_subject_mask_run,
+                    source_subject_mask_stale_state,
+                    source_subject_mask_stale_reason,
+                    source_subject_mask_stale_timestamp_utc,
+                    source_subject_mask_stale_json,
                     available,
                     review_state,
                     review_method,
@@ -8653,6 +8688,10 @@ class Registry:
                     'subject_v1_lr' AS label_schema_id,
                     'lr' AS eye_component_mode,
                     NULL AS source_subject_mask_run,
+                    NULL AS source_subject_mask_stale_state,
+                    NULL AS source_subject_mask_stale_reason,
+                    NULL AS source_subject_mask_stale_timestamp_utc,
+                    NULL AS source_subject_mask_stale_json,
                     1 AS available,
                     empl.review_state AS review_state,
                     empl.review_method AS review_method,
@@ -8752,6 +8791,10 @@ class Registry:
                 label_schema_id,
                 eye_component_mode,
                 source_subject_mask_run,
+                source_subject_mask_stale_state,
+                source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc,
+                source_subject_mask_stale_json,
                 available,
                 review_state,
                 review_method,
@@ -8806,6 +8849,10 @@ class Registry:
                     label_schema_id,
                     eye_component_mode,
                     source_subject_mask_run,
+                    source_subject_mask_stale_state,
+                    source_subject_mask_stale_reason,
+                    source_subject_mask_stale_timestamp_utc,
+                    source_subject_mask_stale_json,
                     available,
                     review_state,
                     review_method,
@@ -8840,6 +8887,10 @@ class Registry:
                     'subject_v1_lr' AS label_schema_id,
                     'lr' AS eye_component_mode,
                     NULL AS source_subject_mask_run,
+                    NULL AS source_subject_mask_stale_state,
+                    NULL AS source_subject_mask_stale_reason,
+                    NULL AS source_subject_mask_stale_timestamp_utc,
+                    NULL AS source_subject_mask_stale_json,
                     1 AS available,
                     empl.review_state AS review_state,
                     empl.review_method AS review_method,
@@ -8941,6 +8992,10 @@ class Registry:
                 label_schema_id,
                 eye_component_mode,
                 source_subject_mask_run,
+                source_subject_mask_stale_state,
+                source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc,
+                source_subject_mask_stale_json,
                 available,
                 review_state,
                 review_method,
@@ -8964,6 +9019,10 @@ class Registry:
         """Refresh component views so partial refined runs remain visible."""
         self._migration_033_subject_mask_registry_semantics_columns()
         self._migration_037_subject_mask_component_eye_compat_latest_views()
+
+    def _migration_039_subject_mask_component_source_stale_views(self) -> None:
+        """Expose refined-source stale metadata through component registry views."""
+        self._migration_038_subject_mask_component_partial_run_preference()
 
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {

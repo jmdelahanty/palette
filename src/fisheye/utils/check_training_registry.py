@@ -1569,6 +1569,9 @@ def _load_subject_mask_component_rows(
         "  smcql.label_schema_id AS label_schema_id,",
         "  smcql.eye_component_mode AS eye_component_mode,",
         "  smcql.source_subject_mask_run AS source_subject_mask_run,",
+        "  smcql.source_subject_mask_stale_state AS source_subject_mask_stale_state,",
+        "  smcql.source_subject_mask_stale_reason AS source_subject_mask_stale_reason,",
+        "  smcql.source_subject_mask_stale_timestamp_utc AS source_subject_mask_stale_timestamp_utc,",
         "  smcql.available AS available,",
         "  smcql.review_state AS review_state,",
         "  smcql.review_method AS review_method,",
@@ -2696,6 +2699,9 @@ def _subject_mask_component_stale_reason(
 ) -> Optional[str]:
     lifecycle_state = str(row.get("lifecycle_state") or "").strip().lower()
     if lifecycle_state == "stale":
+        stale_reason = str(row.get("source_subject_mask_stale_reason") or "").strip()
+        if stale_reason:
+            return f"source subject mask stale: {stale_reason}"
         return "stale lifecycle"
 
     expected_mtime = _coerce_int(row.get("zarr_mtime_ns"))

@@ -856,6 +856,92 @@ def _seed_subject_mask_component_rows(registry_path: Path) -> None:
     registry.close()
 
 
+def _mark_dataset_a_refined_subject_eye_left_stale(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+    stale_json = json.dumps(
+        {
+            "state": "stale",
+            "reason": "source_subject_mask_changed",
+            "timestamp_utc": "2026-02-12T00:07:00+00:00",
+            "source_subject_mask_run": "subject_masks_a",
+        }
+    )
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_masks_a",
+        run_created_utc="2026-02-12T00:05:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        subject_mask_method="refine_subject_masks",
+        label_schema_id="subject_v1_lr",
+        source_crop_run="crop_a",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_a",
+        source_subject_mask_run="subject_masks_a",
+        source_subject_mask_method="subject_mask_threshold_lr_v1",
+        run_semantics="manual_refined_subject_components",
+        probability_semantics=None,
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=200,
+        rows_with_any_mask=194,
+        coverage_percent=97.0,
+        duration_seconds=None,
+        rois_per_second=None,
+        available_component_count=1,
+        available_components_json=json.dumps(["eye_left"]),
+        unavailable_components_json=json.dumps(["subject_body", "eye_right", "swim_bladder"]),
+        component_review_states_json=json.dumps({"eye_left": {"state": "approved", "intended_use": "training"}}),
+        eye_component_mode="lr",
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-02-12T00:06:00+00:00",
+        source_subject_mask_stale_state="stale",
+        source_subject_mask_stale_reason="source_subject_mask_changed",
+        source_subject_mask_stale_timestamp_utc="2026-02-12T00:07:00+00:00",
+        source_subject_mask_stale_json=stale_json,
+        lifecycle_state="stale",
+        lifecycle_reason="source_subject_mask_changed",
+        zarr_mtime_ns=123456789,
+    )
+    registry.upsert_subject_mask_component_quality(
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_masks_a",
+        component_name="eye_left",
+        component_family="eyes",
+        run_created_utc="2026-02-12T00:05:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        subject_mask_method="refine_subject_masks",
+        label_schema_id="subject_v1_lr",
+        eye_component_mode="lr",
+        source_subject_mask_run="subject_masks_a",
+        available=1,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-02-12T00:06:00+00:00",
+        total_rois=200,
+        rows_with_component_mask=194,
+        rows_with_component_mask_rate=0.97,
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        quality_updated_utc="2026-02-12T00:06:00+00:00",
+        zarr_mtime_ns=123456789,
+    )
+    registry.close()
+
+
 def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
     registry = Registry(registry_path)
 
@@ -2722,6 +2808,15 @@ def test_registry_query_filters_by_eye_mask_stage_and_success_rate(tmp_path: Pat
     assert payload[0]["eye_mask_successful_roi_pair_rate"] == pytest.approx(0.9545)
 
 
+def test_registry_query_help_marks_eye_mask_filters_as_legacy(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        registry_query_main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--mask-component" in out
+    assert "Legacy eye-mask compatibility/training diagnostic" in out
+
+
 def test_registry_query_filters_by_subject_mask_component_eye_compat_stage(tmp_path: Path, capsys) -> None:
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry_for_detect_filters(registry_path)
@@ -2778,7 +2873,67 @@ def test_registry_query_subject_mask_component_prefers_native_refined_subject_ro
     assert by_dataset["dataset_a"]["subject_mask_component_stage_group"] == "refined_subject_masks_runs"
     assert by_dataset["dataset_a"]["subject_mask_component_run"] == "refined_subject_masks_a"
     assert by_dataset["dataset_a"]["subject_mask_component_method"] == "refine_subject_masks"
+    assert by_dataset["dataset_a"]["mask_component_source_role"] == "unified_subject_mask"
     assert by_dataset["dataset_b"]["subject_mask_component_stage_group"] == "refined_eye_masks_runs"
+    assert by_dataset["dataset_b"]["mask_component_source_role"] == "legacy_eye_mask_compat"
+
+
+def test_registry_query_mask_component_alias_preserves_stale_partial_refined_subject_truth(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_subject_mask_component_rows(registry_path)
+    _mark_dataset_a_refined_subject_eye_left_stale(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--mask-component",
+            "eye_left",
+            "--mask-available",
+            "1",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_dataset = {row["dataset_id"]: row for row in payload}
+    assert by_dataset["dataset_a"]["mask_component_stage_group"] == "refined_subject_masks_runs"
+    assert by_dataset["dataset_a"]["mask_component_run"] == "refined_subject_masks_a"
+    assert by_dataset["dataset_a"]["mask_component_lifecycle_state"] == "stale"
+    assert by_dataset["dataset_a"]["mask_component_lifecycle_reason"] == "source_subject_mask_changed"
+    assert by_dataset["dataset_a"]["mask_component_source_subject_mask_stale_state"] == "stale"
+    assert by_dataset["dataset_a"]["mask_component_source_subject_mask_stale_reason"] == "source_subject_mask_changed"
+    assert (
+        by_dataset["dataset_a"]["mask_component_source_subject_mask_stale_timestamp_utc"]
+        == "2026-02-12T00:07:00+00:00"
+    )
+    assert by_dataset["dataset_a"]["mask_component_source_role"] == "unified_subject_mask"
+    assert by_dataset["dataset_b"]["mask_component_stage_group"] == "refined_eye_masks_runs"
+    assert by_dataset["dataset_b"]["mask_component_source_role"] == "legacy_eye_mask_compat"
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--mask-component",
+            "eye_left",
+            "--mask-lifecycle-state",
+            "stale",
+            "--mask-available",
+            "1",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["dataset_id"] for row in payload] == ["dataset_a"]
+    assert payload[0]["subject_mask_component_stage_group"] == "refined_subject_masks_runs"
+    assert payload[0]["subject_mask_component_lifecycle_state"] == "stale"
+    assert payload[0]["subject_mask_component_source_subject_mask_stale_state"] == "stale"
 
 
 def test_registry_query_filters_by_subject_mask_component_raw_swim_state(tmp_path: Path, capsys) -> None:
