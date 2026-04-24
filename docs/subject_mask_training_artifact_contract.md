@@ -555,12 +555,20 @@ Exported row semantics:
 This preserves valuable eye supervision without pretending body or
 swim-bladder labels exist.
 
-## Validator Entrypoints
+## Implemented Entrypoints
 
 Implemented:
 
 - `scripts/py -m fisheye.utils.validate_subject_mask_training_zarr <merged>.zarr`
 - `scripts/py -m fisheye.utils.export_subject_mask_training_zarr <source>.zarr <merged>.zarr`
+- `scripts/py -m fisheye.utils.run_subject_mask_training_pipeline --manifest <manifest.json> --config <config.yaml> --export-merged --train`
+
+The pipeline wrapper is currently manifest-driven. It consumes
+`selected_sources`, exports one merged subject-mask training zarr, rewrites the
+training config/manifest to the merged `crop_runs/<run>` and
+`subject_mask_runs/<run>`, and can launch
+`fisheye.segmentation.train_unet_subject_masks`. Registry preflight selection
+and subject-mask data-card aggregation are still separate future parity work.
 
 ## Related Contracts
 

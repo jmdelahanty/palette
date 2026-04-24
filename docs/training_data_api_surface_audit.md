@@ -3,7 +3,7 @@
 Audit of the registry operations, CLI commands, and data schemas across the
 three training data pipelines: **detection**, **keypoints**, and **eye masks**.
 
-Updated 2026-04-12 for the sparse-first refined-detect workflow.
+Updated 2026-04-24 for the eye-mask and subject-mask orchestrator status.
 
 ---
 
@@ -263,11 +263,14 @@ use 3 (p10, p50, p90).
 |----------|--------|----------|
 | Detection | `run_detect_training_pipeline.py` | Yes |
 | Keypoints | `run_keypoint_training_pipeline.py` | Yes |
-| Eye Masks | (none) | **Missing** |
+| Eye Masks | `run_eye_mask_training_pipeline.py` | Yes |
+| Subject Masks | `run_subject_mask_training_pipeline.py` | Yes, manifest-driven |
 
-Detection and keypoints have an orchestrator that chains
-prepare -> export -> aggregate data card -> (optionally) train.
-Eye masks does not.
+Detection, keypoints, and eye masks have prepare-first orchestrators that chain
+prepare -> export -> aggregate data card -> (optionally) train. Subject masks
+now has a narrower manifest-driven wrapper that chains selected-source merged
+export -> config/manifest rewrite -> optional train. Registry preflight
+selection and subject-mask data-card aggregation remain future parity work.
 
 ### 8b. Training config audit
 
