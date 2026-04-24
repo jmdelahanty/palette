@@ -1,5 +1,10 @@
 # Provenance-Safe Refinement Workflow
 
+For the active operator-facing source-of-truth contract across stage families,
+see
+[current_pipeline_contract.md](../../../docs/current_pipeline_contract.md).
+This note remains the deeper provenance workflow reference.
+
 This note captures the sequencing we used to align refined detections, crops, keypoints, arena assignment, and tracking so downstream analysis (track kinematics, metrics, plots) stays consistent.
 
 ## Stage Overview

@@ -7,6 +7,11 @@ last_verified: 2026-02-27
 
 Purpose: define the canonical, operator-first contract for analysis processing per recording.
 
+For the repo-wide current source-of-truth contract across detect, keypoints,
+masks, registry, query, and operator surfaces, see
+[current_pipeline_contract.md](current_pipeline_contract.md). This document is
+the narrower import/detect/refine analysis pipeline contract.
+
 Date anchored: 2026-02-09.
 
 Related detect batch contract:

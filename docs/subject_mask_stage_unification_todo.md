@@ -1,5 +1,9 @@
 # Subject Mask Stage Unification TODO
 
+For the active operator-facing source-of-truth contract, see
+[current_pipeline_contract.md](current_pipeline_contract.md). This TODO tracks
+the remaining migration from eye-specific mask stages toward that contract.
+
 ## Goal
 
 Move future mask authoring and refinement onto one canonical stage family:

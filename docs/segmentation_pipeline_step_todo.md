@@ -5,6 +5,10 @@ status: active
 last_updated: 2026-04-04
 -->
 
+For the active operator-facing source-of-truth contract, see
+[current_pipeline_contract.md](current_pipeline_contract.md). This TODO tracks
+the future segmentation orchestration step needed to finish that transition.
+
 ## Goal
 
 Introduce one broader segmentation pipeline abstraction that can run the

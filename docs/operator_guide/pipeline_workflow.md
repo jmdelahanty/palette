@@ -5,6 +5,10 @@ recordings have been [organized](organize_recordings.md). Each step reads from
 the analysis Zarr and appends its outputs there, so the Zarr is the single
 source of truth for a recording's analysis state.
 
+For the current source-of-truth contract across canonical, refined,
+compatibility, and cache surfaces, see
+[current_pipeline_contract.md](../current_pipeline_contract.md).
+
 Recommended pre-import order:
 
 1. organize recordings into the standard recording directory layout

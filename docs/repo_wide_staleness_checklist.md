@@ -11,6 +11,10 @@ Turn the high-level policy in
 [repo_wide_staleness_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_policy.md)
 into a concrete checklist for the main Palette stage families.
 
+For the active source-of-truth contract that ties this stale policy to
+operator/query surfaces, see
+[current_pipeline_contract.md](current_pipeline_contract.md).
+
 For the current implementation/contract gaps against this checklist, see
 [repo_wide_staleness_gap_matrix.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_gap_matrix.md).
 

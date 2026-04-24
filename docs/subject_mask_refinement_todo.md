@@ -1,5 +1,9 @@
 # Subject Mask Refinement TODO
 
+For the active operator-facing source-of-truth contract, see
+[current_pipeline_contract.md](current_pipeline_contract.md). This TODO tracks
+subject-mask refinement rollout work against that contract.
+
 ## Goal
 
 Establish a first-class refinement and review model for subject-mask components
@@ -172,7 +176,9 @@ This is the near-term rollout order that should happen before more schema work.
       behind raw or legacy compatibility stages. `check_recording_steps`
       registry-mode summaries now overlay component availability/review state
       from the unified subject-mask component registry views instead of trusting
-      stale step-detail snapshots.
+      stale step-detail snapshots. Component registry/query/training/operator
+      surfaces now also project refined-run `source_subject_mask_stale_*`
+      metadata so stale source drift is visible separately from review state.
 
 ## What Is Actually Missing Now
 
