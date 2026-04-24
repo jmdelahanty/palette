@@ -51,6 +51,29 @@ def test_load_frame_flags_accepts_legacy_frame_lists(tmp_path: Path) -> None:
     assert parsed["/tmp/b.zarr"] == [{"frame_idx": 5, "roi_idx": 2}]
 
 
+def test_append_flagged_frame_preserves_row_identity(tmp_path: Path) -> None:
+    flag_path = tmp_path / "eye_mask_frame_flags.json"
+    zarr_path = "/tmp/recording_training.zarr"
+
+    _append_flagged_frame(
+        flag_path,
+        zarr_path,
+        frame_idx=20,
+        roi_idx=5,
+        extra_fields={"source_refined_row_id": 105, "source_detect_row_index": 9},
+    )
+
+    payload = json.loads(flag_path.read_text(encoding="utf-8"))
+    assert payload[zarr_path] == [
+        {
+            "frame_idx": 20,
+            "roi_idx": 5,
+            "source_detect_row_index": 9,
+            "source_refined_row_id": 105,
+        }
+    ]
+
+
 def test_is_refined_variant_detects_refined_group_path() -> None:
     assert _is_refined_variant("refined_eye_masks_runs/refined_eye_masks_001")
     assert not _is_refined_variant("eye_masks_runs/eye_masks_001")

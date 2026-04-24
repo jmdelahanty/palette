@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +27,13 @@ import zarr
 from skimage import measure
 from skimage.measure import EllipseModel
 
+from ..shared.frame_flags import (
+    candidate_flag_keys as _shared_candidate_flag_keys,
+    entries_for_zarr_path,
+    load_frame_flags as _load_shared_frame_flags,
+    load_row_identity_arrays,
+    resolve_flagged_roi_indices,
+)
 from ..utils.refined_eye_masks_compat import (
     refined_eye_masks_compat_context,
     refined_eye_masks_redirect_hint,
@@ -174,55 +180,11 @@ def _load_failure_indices(
 
 
 def _load_frame_flags(path: Path) -> Dict[str, list[Dict[str, Optional[int]]]]:
-    if not path.exists():
-        return {}
-    try:
-        raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return {}
-        data = json.loads(raw)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
-
-    parsed: Dict[str, list[Dict[str, Optional[int]]]] = {}
-    for key, value in data.items():
-        entries: list[Dict[str, Optional[int]]] = []
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    frame_val = item.get("frame_idx")
-                    roi_val = item.get("roi_idx")
-                    try:
-                        frame_idx = int(frame_val) if frame_val is not None else None
-                    except (TypeError, ValueError):
-                        frame_idx = None
-                    try:
-                        roi_idx = int(roi_val) if roi_val is not None else None
-                    except (TypeError, ValueError):
-                        roi_idx = None
-                    if frame_idx is not None or roi_idx is not None:
-                        entries.append({"frame_idx": frame_idx, "roi_idx": roi_idx})
-                else:
-                    try:
-                        frame_idx = int(item)
-                    except (TypeError, ValueError):
-                        continue
-                    entries.append({"frame_idx": frame_idx, "roi_idx": None})
-        parsed[str(key)] = entries
-    return parsed
+    return _load_shared_frame_flags(path)  # type: ignore[return-value]
 
 
 def _candidate_flag_keys(zarr_path: str) -> list[str]:
-    raw = str(zarr_path)
-    expanded = Path(raw).expanduser()
-    candidates = {raw, str(expanded)}
-    try:
-        candidates.add(str(expanded.resolve(strict=False)))
-    except Exception:
-        pass
-    return list(candidates)
+    return _shared_candidate_flag_keys(zarr_path)
 
 
 def _collect_flagged_roi_indices(
@@ -231,35 +193,24 @@ def _collect_flagged_roi_indices(
     zarr_path: str,
     total_rois: int,
     frame_indices: Optional[np.ndarray],
+    source_refined_row_ids: Optional[np.ndarray] = None,
+    source_detect_row_index: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     payload = _load_frame_flags(flag_path)
     if not payload:
         return np.zeros((0,), dtype=np.int32)
 
-    entries: list[Dict[str, Optional[int]]] = []
-    for key in _candidate_flag_keys(zarr_path):
-        value = payload.get(key)
-        if isinstance(value, list):
-            entries.extend(value)
+    entries = entries_for_zarr_path(payload, zarr_path)
     if not entries:
         return np.zeros((0,), dtype=np.int32)
 
-    roi_set: set[int] = set()
-    for entry in entries:
-        roi_idx = entry.get("roi_idx")
-        frame_idx = entry.get("frame_idx")
-
-        if roi_idx is not None and 0 <= int(roi_idx) < int(total_rois):
-            roi_set.add(int(roi_idx))
-        if frame_idx is not None and frame_indices is not None:
-            matches = np.where(frame_indices == int(frame_idx))[0]
-            for idx in matches.tolist():
-                if 0 <= int(idx) < int(total_rois):
-                    roi_set.add(int(idx))
-
-    if not roi_set:
-        return np.zeros((0,), dtype=np.int32)
-    return np.asarray(sorted(roi_set), dtype=np.int32)
+    return resolve_flagged_roi_indices(
+        entries,
+        total_rois=total_rois,
+        frame_indices=frame_indices,
+        source_refined_row_ids=source_refined_row_ids,
+        source_detect_row_index=source_detect_row_index,
+    )
 
 
 def _combine_review_indices(
@@ -513,6 +464,10 @@ def launch_review(
         if "frame_indices" in crop_group
         else None
     )
+    source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
+        crop_group,
+        total_rois=int(roi_images.shape[0]),
+    )
     failure_indices = _load_failure_indices(refined, min_sep, max_sep)
     flagged_indices = np.zeros((0,), dtype=np.int32)
     flag_path: Optional[Path] = Path(frame_flag_file).expanduser() if frame_flag_file else None
@@ -523,6 +478,8 @@ def launch_review(
                 zarr_path=str(zarr_path),
                 total_rois=int(roi_images.shape[0]),
                 frame_indices=frame_indices,
+                source_refined_row_ids=source_refined_row_ids,
+                source_detect_row_index=source_detect_row_index,
             )
         except RuntimeError as exc:
             print(f"Warning: failed to load frame flags ({exc}).")

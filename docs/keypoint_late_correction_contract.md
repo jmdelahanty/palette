@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-04-24
 stage_arrays_spec: REFINED_KEYPOINTS_SPEC
 -->
 
@@ -23,7 +23,12 @@ all keypoint tracking.
 ```json
 {
   "/path/to/recording_training.zarr": [
-    {"frame_idx": 1234, "roi_idx": 56},
+    {
+      "frame_idx": 1234,
+      "roi_idx": 56,
+      "source_refined_row_id": 8821,
+      "source_detect_row_index": 4410
+    },
     {"frame_idx": 1300},
     {"roi_idx": 77}
   ]
@@ -32,6 +37,14 @@ all keypoint tracking.
 
 Semantics:
 
+- `source_refined_row_id` and `source_detect_row_index` are optional stable
+  row-lineage fields copied from the active crop run when available.
+- ROI-aware consumers must prefer `source_refined_row_id`, then
+  `source_detect_row_index`, before falling back to legacy `frame_idx`/`roi_idx`
+  targeting.
+- If a flag carries a stable ID and the current crop run exposes the matching
+  identity array, an unresolved ID means the row is no longer present; consumers
+  should not silently retarget by stale ROI position.
 - `frame_idx` only: include all ROIs mapped to that frame.
 - `roi_idx` only: include that exact ROI row.
 - both present: include that exact ROI row (frame is informational/provenance).
@@ -62,6 +75,8 @@ Entry shape:
     {
       "frame_idx": 1234,
       "roi_idx": 56,
+      "source_refined_row_id": 8821,
+      "source_detect_row_index": 4410,
       "action": "keypoint_nudge",
       "preserve_eye_masks": true
     }
@@ -71,11 +86,12 @@ Entry shape:
 
 Semantics:
 
-- `frame_idx`/`roi_idx` targeting matches the main flag contract.
+- Stable row-lineage targeting and `frame_idx`/`roi_idx` fallback match the main
+  flag contract.
 - `action="keypoint_nudge"` + `preserve_eye_masks=true` declare operator intent:
   keypoints should be nudged without regenerating masks by default.
 - Extra metadata keys are advisory for operators/tools and do not change target
-  resolution semantics.
+  resolution semantics, except the stable row-lineage fields defined above.
 
 ## Targeted Manual Correction Contract
 
@@ -85,7 +101,9 @@ Semantics:
 - JSON/text file path.
 
 When JSON entries include `roi_idx`, manual review targets exact ROI rows.
-Nudge files using the shape above are accepted as valid target input.
+When JSON entries include stable row-lineage fields, manual review resolves
+those fields against the active/source crop run before falling back to legacy
+ROI rows. Nudge files using the shape above are accepted as valid target input.
 
 ## Automatic Downstream Stale Marking Contract
 

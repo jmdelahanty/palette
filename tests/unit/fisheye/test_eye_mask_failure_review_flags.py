@@ -61,6 +61,35 @@ def test_collect_flagged_roi_indices_matches_resolved_zarr_key(tmp_path: Path) -
     np.testing.assert_array_equal(out, np.array([0], dtype=np.int32))
 
 
+def test_collect_flagged_roi_indices_prefers_stable_row_identity(tmp_path: Path) -> None:
+    flag_path = tmp_path / "eye_mask_frame_flags.json"
+    zarr_path = "/tmp/recording_training.zarr"
+    flag_path.write_text(
+        json.dumps(
+            {
+                zarr_path: [
+                    {
+                        "frame_idx": 5,
+                        "roi_idx": 0,
+                        "source_refined_row_id": 102,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = mod._collect_flagged_roi_indices(
+        flag_path=flag_path,
+        zarr_path=zarr_path,
+        total_rois=3,
+        frame_indices=np.array([5, 5, 6], dtype=np.int64),
+        source_refined_row_ids=np.array([100, 101, 102], dtype=np.int64),
+    )
+
+    np.testing.assert_array_equal(out, np.array([2], dtype=np.int32))
+
+
 def test_next_review_position_wraps_when_current_removed_from_end() -> None:
     failures = np.array([100, 200], dtype=np.int32)
     out = mod._next_review_position(

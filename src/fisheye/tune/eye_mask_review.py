@@ -24,6 +24,7 @@ import numpy as np
 import zarr
 
 from ..shared.detect_reason_codec import read_reason_labels
+from ..shared.frame_flags import load_row_identity_arrays
 
 
 _DEFAULT_SUCCESS_MIN_EYE_AREA_PX = 50.0
@@ -343,12 +344,18 @@ def _resolve_manual_review_start_roi(
                 if "frame_indices" in crop_group
                 else None
             )
+            source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
+                crop_group,
+                total_rois=int(roi_images.shape[0]),
+            )
             try:
                 flagged_indices = _collect_flagged_roi_indices(
                     flag_path=Path(frame_flag_file).expanduser(),
                     zarr_path=str(zarr_path),
                     total_rois=int(roi_images.shape[0]),
                     frame_indices=frame_indices,
+                    source_refined_row_ids=source_refined_row_ids,
+                    source_detect_row_index=source_detect_row_index,
                 )
             except RuntimeError:
                 flagged_indices = np.zeros((0,), dtype=np.int32)

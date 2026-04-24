@@ -48,6 +48,14 @@ try:
     from ..pose.schema import schema_from_package
     from ..refinement.keypoint_quality import compute_geometry_metrics
     from ..refinement.refine_keypoints import _detect_eye_flip
+    from ..shared.frame_flags import (
+        append_flagged_frame as _append_shared_flagged_frame,
+        entries_for_zarr_path,
+        load_frame_flags as _load_shared_frame_flags,
+        load_row_identity_arrays,
+        resolve_flagged_roi_indices,
+        row_identity_payload,
+    )
     from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 except ImportError:  # pragma: no cover - fallback for script execution
     from fisheye.detection.detect_keypoints_traditional import detect_keypoints_traditional
@@ -60,6 +68,14 @@ except ImportError:  # pragma: no cover - fallback for script execution
     from fisheye.pose.schema import schema_from_package
     from fisheye.refinement.keypoint_quality import compute_geometry_metrics
     from fisheye.refinement.refine_keypoints import _detect_eye_flip
+    from fisheye.shared.frame_flags import (
+        append_flagged_frame as _append_shared_flagged_frame,
+        entries_for_zarr_path,
+        load_frame_flags as _load_shared_frame_flags,
+        load_row_identity_arrays,
+        resolve_flagged_roi_indices,
+        row_identity_payload,
+    )
     from fisheye.shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 
 MIN_AREA_SLIDER_MAX = 1000
@@ -549,43 +565,7 @@ def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
 
 
 def _load_frame_flags(path: Path) -> dict[str, list[Dict[str, Optional[int]]]]:
-    if not path.exists():
-        return {}
-    try:
-        raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return {}
-        data = json.loads(raw)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
-    parsed: dict[str, list[Dict[str, Optional[int]]]] = {}
-    for key, value in data.items():
-        entries: list[Dict[str, Optional[int]]] = []
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    frame_val = item.get("frame_idx")
-                    roi_val = item.get("roi_idx")
-                    try:
-                        frame_idx = int(frame_val) if frame_val is not None else None
-                    except (TypeError, ValueError):
-                        frame_idx = None
-                    try:
-                        roi_idx = int(roi_val) if roi_val is not None else None
-                    except (TypeError, ValueError):
-                        roi_idx = None
-                    if frame_idx is not None:
-                        entries.append({"frame_idx": frame_idx, "roi_idx": roi_idx})
-                else:
-                    try:
-                        frame_idx = int(item)
-                    except (TypeError, ValueError):
-                        continue
-                    entries.append({"frame_idx": frame_idx, "roi_idx": None})
-        parsed[str(key)] = entries
-    return parsed
+    return _load_shared_frame_flags(path)  # type: ignore[return-value]
 
 
 def _append_flagged_frame(
@@ -593,18 +573,16 @@ def _append_flagged_frame(
     zarr_path: str,
     frame_idx: int,
     roi_idx: Optional[int],
+    *,
+    extra_fields: Optional[dict[str, object]] = None,
 ) -> None:
-    flag_path.parent.mkdir(parents=True, exist_ok=True)
-    data = _load_frame_flags(flag_path)
-    entries = data.get(zarr_path, [])
-    dedupe = {(entry.get("frame_idx"), entry.get("roi_idx")) for entry in entries}
-    key = (int(frame_idx), int(roi_idx) if roi_idx is not None else None)
-    if key in dedupe:
-        return
-    entries.append({"frame_idx": int(frame_idx), "roi_idx": key[1]})
-    entries.sort(key=lambda item: (item.get("frame_idx") or 0, item.get("roi_idx") or -1))
-    data[zarr_path] = entries
-    flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    _append_shared_flagged_frame(
+        flag_path,
+        zarr_path,
+        frame_idx,
+        roi_idx,
+        extra_fields=extra_fields,
+    )
 
 
 def _load_detection_frame_flags(path: Path) -> dict[str, list[int]]:
@@ -975,6 +953,10 @@ def run_failure_tuner(
     roi_coords = crop_group["roi_coordinates_full"]
     frame_indices = crop_group["frame_indices"][:]
     det_indices = crop_group.get("detection_indices")
+    source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
+        crop_group,
+        total_rois=int(frame_indices.shape[0]),
+    )
 
     targeted = False
     if target_frames:
@@ -988,28 +970,17 @@ def run_failure_tuner(
         try:
             flag_path = Path(frame_flag_file).expanduser()
             flag_data = _load_frame_flags(flag_path)
-            flagged = flag_data.get(zarr_path, [])
-            flagged_frames = {
-                entry.get("frame_idx")
-                for entry in flagged
-                if isinstance(entry, dict) and entry.get("frame_idx") is not None and entry.get("roi_idx") is None
-            }
-            flagged_pairs = {
-                (entry.get("frame_idx"), entry.get("roi_idx"))
-                for entry in flagged
-                if isinstance(entry, dict) and entry.get("frame_idx") is not None and entry.get("roi_idx") is not None
-            }
-            if flagged_frames or flagged_pairs:
-                keep_mask = []
-                for roi_idx in failures:
-                    frame_idx = int(frame_indices[roi_idx])
-                    pair = (frame_idx, int(roi_idx))
-                    if frame_idx in flagged_frames:
-                        keep_mask.append(False)
-                    elif pair in flagged_pairs:
-                        keep_mask.append(False)
-                    else:
-                        keep_mask.append(True)
+            flagged = entries_for_zarr_path(flag_data, zarr_path)
+            flagged_indices = resolve_flagged_roi_indices(
+                flagged,
+                total_rois=int(frame_indices.shape[0]),
+                frame_indices=frame_indices,
+                source_refined_row_ids=source_refined_row_ids,
+                source_detect_row_index=source_detect_row_index,
+            )
+            if flagged_indices.size > 0:
+                flagged_set = {int(item) for item in flagged_indices.tolist()}
+                keep_mask = [int(roi_idx) not in flagged_set for roi_idx in failures]
                 keep_mask_arr = np.array(keep_mask, dtype=bool)
                 filtered_flags = int(np.sum(~keep_mask_arr))
                 failures = failures[keep_mask_arr]
@@ -1416,7 +1387,17 @@ def run_failure_tuner(
                 print("No frame flag file configured. Pass --frame-flag-file to enable frame flagging.")
             else:
                 try:
-                    _append_flagged_frame(flag_path, zarr_path, frame_idx, roi_idx)
+                    _append_flagged_frame(
+                        flag_path,
+                        zarr_path,
+                        frame_idx,
+                        roi_idx,
+                        extra_fields=row_identity_payload(
+                            roi_idx,
+                            source_refined_row_ids=source_refined_row_ids,
+                            source_detect_row_index=source_detect_row_index,
+                        ),
+                    )
                     print(f"Flagged frame {frame_idx} (ROI {roi_idx}) for keypoint follow-up.")
                 except Exception as exc:
                     print(f"Failed to flag frame: {exc}")

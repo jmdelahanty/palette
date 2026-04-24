@@ -16,7 +16,6 @@ variants that can be inspected alongside the original segmentation.
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -28,6 +27,12 @@ from matplotlib.patches import Patch
 from matplotlib.widgets import Button, Slider
 
 from ..shared.crop_image_source import CropImageSource
+from ..shared.frame_flags import (
+    append_flagged_frame as _append_shared_flagged_frame,
+    load_frame_flags as _load_shared_frame_flags,
+    load_row_identity_arrays,
+    row_identity_payload,
+)
 from ..shared.mask_source import load_mask_bundle
 
 
@@ -51,43 +56,7 @@ def get_latest_run(root: zarr.Group, run_group: str, explicit: Optional[str]) ->
 
 
 def _load_frame_flags(path: Path) -> dict[str, list[dict[str, Optional[int]]]]:
-    if not path.exists():
-        return {}
-    try:
-        raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return {}
-        data = json.loads(raw)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
-    parsed: dict[str, list[dict[str, Optional[int]]]] = {}
-    for key, value in data.items():
-        entries: list[dict[str, Optional[int]]] = []
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    frame_val = item.get("frame_idx")
-                    roi_val = item.get("roi_idx")
-                    try:
-                        frame_idx = int(frame_val) if frame_val is not None else None
-                    except (TypeError, ValueError):
-                        frame_idx = None
-                    try:
-                        roi_idx = int(roi_val) if roi_val is not None else None
-                    except (TypeError, ValueError):
-                        roi_idx = None
-                    if frame_idx is not None:
-                        entries.append({"frame_idx": frame_idx, "roi_idx": roi_idx})
-                else:
-                    try:
-                        frame_idx = int(item)
-                    except (TypeError, ValueError):
-                        continue
-                    entries.append({"frame_idx": frame_idx, "roi_idx": None})
-        parsed[str(key)] = entries
-    return parsed
+    return _load_shared_frame_flags(path)  # type: ignore[return-value]
 
 
 def _append_flagged_frame(
@@ -95,18 +64,16 @@ def _append_flagged_frame(
     zarr_path: str,
     frame_idx: int,
     roi_idx: Optional[int],
+    *,
+    extra_fields: Optional[dict[str, object]] = None,
 ) -> None:
-    flag_path.parent.mkdir(parents=True, exist_ok=True)
-    data = _load_frame_flags(flag_path)
-    entries = data.get(zarr_path, [])
-    dedupe = {(entry.get("frame_idx"), entry.get("roi_idx")) for entry in entries}
-    key = (int(frame_idx), int(roi_idx) if roi_idx is not None else None)
-    if key in dedupe:
-        return
-    entries.append({"frame_idx": int(frame_idx), "roi_idx": key[1]})
-    entries.sort(key=lambda item: (item.get("frame_idx") or 0, item.get("roi_idx") or -1))
-    data[zarr_path] = entries
-    flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    _append_shared_flagged_frame(
+        flag_path,
+        zarr_path,
+        frame_idx,
+        roi_idx,
+        extra_fields=extra_fields,
+    )
 
 
 def _is_refined_variant(group_path: str) -> bool:
@@ -654,6 +621,10 @@ def create_viewer(
                     frame_indices.shape[0], crop_source.total_rois
                 )
             )
+    source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
+        crop_group,
+        total_rois=int(crop_source.total_rois),
+    )
 
     kp_group = root[f"keypoints_runs/{keypoint_run}"]
     success_flags = np.asarray(kp_group["detection_success"][:])
@@ -1071,7 +1042,17 @@ def create_viewer(
                 return
             frame_idx = int(frame_indices[roi_idx])
             try:
-                _append_flagged_frame(flag_path, str(zarr_path), frame_idx, roi_idx)
+                _append_flagged_frame(
+                    flag_path,
+                    str(zarr_path),
+                    frame_idx,
+                    roi_idx,
+                    extra_fields=row_identity_payload(
+                        roi_idx,
+                        source_refined_row_ids=source_refined_row_ids,
+                        source_detect_row_index=source_detect_row_index,
+                    ),
+                )
                 print(
                     "Flagged cleanup frame {frame_idx} (roi {roi_idx}) from {group}".format(
                         frame_idx=frame_idx,

@@ -20,6 +20,11 @@ import numpy as np
 import zarr
 
 from ..shared.detect_reason_codec import read_reason_labels
+from ..shared.frame_flags import (
+    load_row_identity_arrays,
+    normalize_flag_entry,
+    resolve_flagged_roi_indices,
+)
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..utils.zarr_io import open_zarr_root
 
@@ -113,9 +118,127 @@ def _coerce_targets(value: object) -> tuple[Optional[list[int]], Optional[list[i
     return frames_out, roi_out
 
 
+def _coerce_frame_item(item: object) -> Optional[int]:
+    if isinstance(item, (int, np.integer)):
+        return int(item)
+    token = str(item).strip()
+    if not token:
+        return None
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _resolve_crop_group_for_target_flags(
+    root: zarr.Group,
+    *,
+    crop_run: Optional[str],
+    refined_run: Optional[str],
+) -> Optional[object]:
+    crop_parent = root.get("crop_runs")
+    resolved_crop_run = crop_run
+    if not resolved_crop_run and refined_run:
+        try:
+            refined = root[f"refined_keypoints_runs/{refined_run}"]
+        except Exception:
+            refined = None
+        if refined is not None:
+            resolved_crop_run = refined.attrs.get("source_crop_run")
+    if not resolved_crop_run and crop_parent is not None:
+        resolved_crop_run = crop_parent.attrs.get("latest")
+    if crop_parent is None or not resolved_crop_run:
+        return None
+    if resolved_crop_run not in crop_parent:
+        return None
+    crop_group = crop_parent[resolved_crop_run]
+    return crop_group if hasattr(crop_group, "get") else None
+
+
+def _coerce_manual_targets(
+    value: object,
+    *,
+    root: Optional[zarr.Group],
+    crop_run: Optional[str],
+    refined_run: Optional[str],
+) -> tuple[Optional[list[int]], Optional[list[int]]]:
+    """Parse manual targets without turning ROI-exact entries into frame-wide targets."""
+
+    items = value if isinstance(value, (list, tuple, np.ndarray)) else [value]
+    frame_targets: list[int] = []
+    exact_entries: list[dict[str, object]] = []
+
+    for item in items:
+        if isinstance(item, dict):
+            entry = normalize_flag_entry(item)
+            if entry is None:
+                continue
+            is_exact = (
+                entry.get("roi_idx") is not None
+                or "source_refined_row_id" in entry
+                or "source_detect_row_index" in entry
+            )
+            if is_exact:
+                exact_entries.append(entry)
+            else:
+                frame_idx = entry.get("frame_idx")
+                if frame_idx is not None:
+                    frame_targets.append(int(frame_idx))
+            continue
+        frame_idx = _coerce_frame_item(item)
+        if frame_idx is not None:
+            frame_targets.append(frame_idx)
+
+    roi_targets: list[int] = []
+    if exact_entries:
+        crop_group = (
+            _resolve_crop_group_for_target_flags(root, crop_run=crop_run, refined_run=refined_run)
+            if root is not None
+            else None
+        )
+        if crop_group is not None:
+            frame_indices = (
+                np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
+                if "frame_indices" in crop_group
+                else None
+            )
+            total_rois = int(frame_indices.shape[0]) if frame_indices is not None else 0
+            if total_rois <= 0 and "roi_images" in crop_group:
+                total_rois = int(crop_group["roi_images"].shape[0])
+            source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
+                crop_group,
+                total_rois=total_rois,
+            )
+            resolved = resolve_flagged_roi_indices(
+                exact_entries,
+                total_rois=total_rois,
+                frame_indices=frame_indices,
+                source_refined_row_ids=source_refined_row_ids,
+                source_detect_row_index=source_detect_row_index,
+            )
+            roi_targets.extend(int(item) for item in resolved.tolist())
+        else:
+            for entry in exact_entries:
+                roi_idx = entry.get("roi_idx")
+                if roi_idx is not None:
+                    try:
+                        roi_targets.append(int(roi_idx))
+                    except (TypeError, ValueError):
+                        pass
+
+    frames_out = sorted(set(frame_targets)) if frame_targets else None
+    roi_out = sorted(set(roi_targets)) if roi_targets else None
+    return frames_out, roi_out
+
+
 def _parse_targets_arg(
     value: Optional[str],
     zarr_path: Optional[str],
+    *,
+    manual_exact: bool = False,
+    root: Optional[zarr.Group] = None,
+    crop_run: Optional[str] = None,
+    refined_run: Optional[str] = None,
 ) -> tuple[Optional[list[int]], Optional[list[int]]]:
     if value is None:
         return None, None
@@ -143,8 +266,22 @@ def _parse_targets_arg(
                             break
                     except Exception:
                         continue
+            if manual_exact:
+                return _coerce_manual_targets(
+                    frames_val,
+                    root=root,
+                    crop_run=crop_run,
+                    refined_run=refined_run,
+                )
             return _coerce_targets(frames_val)
         if isinstance(data, list):
+            if manual_exact:
+                return _coerce_manual_targets(
+                    data,
+                    root=root,
+                    crop_run=crop_run,
+                    refined_run=refined_run,
+                )
             return _coerce_targets(data)
         items = re.split(r"[,\s]+", raw.strip())
         return _coerce_targets(items)
@@ -333,7 +470,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help=(
             "Frame indices to review (manual/retune only). Accepts comma/space-separated "
             "indices or a path to a JSON/text list. JSON mapping values may be frame integers "
-            "or objects with frame_idx/roi_idx for ROI-exact targeting in manual mode."
+            "or objects with frame_idx/roi_idx/source_refined_row_id/source_detect_row_index "
+            "for ROI-exact targeting in manual mode."
         ),
     )
     parser.add_argument(
@@ -389,7 +527,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     root = open_zarr_root(args.zarr_path, mode="a")
     refined_run = args.refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_keypoints_runs/{refined_run}"]
-    target_frames, target_roi_indices = _parse_targets_arg(args.frames, str(args.zarr_path))
+    target_frames, target_roi_indices = _parse_targets_arg(
+        args.frames,
+        str(args.zarr_path),
+        manual_exact=bool(args.manual),
+        root=root,
+        crop_run=args.crop_run,
+        refined_run=refined_run,
+    )
     if args.frames and not target_frames and not target_roi_indices:
         print("No target frames/ROIs found for this recording; skipping review.")
         return

@@ -171,6 +171,8 @@ def test_append_flagged_frame_preserves_extra_metadata(tmp_path: Path) -> None:
             "action": "keypoint_nudge",
             "preserve_eye_masks": True,
             "requested_by": "reviewer_a",
+            "source_refined_row_id": 104,
+            "source_detect_row_index": 40,
         },
     )
 
@@ -182,6 +184,8 @@ def test_append_flagged_frame_preserves_extra_metadata(tmp_path: Path) -> None:
             "preserve_eye_masks": True,
             "requested_by": "reviewer_a",
             "roi_idx": 4,
+            "source_detect_row_index": 40,
+            "source_refined_row_id": 104,
         }
     ]
 
