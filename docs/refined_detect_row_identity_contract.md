@@ -71,6 +71,20 @@ Downstream ROI-aligned stages should preserve `source_refined_row_ids` and
 `source_detect_row_index` when copying row lineage from crop/keypoint/mask
 sources.
 
+Legacy crop runs that predate row-lineage propagation can be audited or
+backfilled from their refined-detect `detection_source_path` when that source
+points at an `instances/` surface:
+
+```bash
+scripts/py -m fisheye.utils.backfill_crop_row_lineage /nvme1/recordings --recursive
+scripts/py -m fisheye.utils.backfill_crop_row_lineage /nvme1/recordings --recursive --apply --consolidate-metadata
+```
+
+The utility maps each crop row's physical `detection_indices` value into
+`instances/refined_row_ids` and `instances/source_detect_row_index`. Rows whose
+physical index no longer resolves are written as `-1`; they must not be guessed
+from frame-local ordinal position.
+
 When a bbox edit preserves `refined_row_id`, downstream crop/keypoint/mask rows
 may be preserved and marked stale for targeted review or refresh.
 
