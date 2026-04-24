@@ -67,12 +67,40 @@ def _resolve_run(
     return names[-1], parent[names[-1]]
 
 
-def _require_1d_indices(root: zarr.Group, name: str) -> np.ndarray:
+def _require_1d_indices(root: zarr.Group, name: str, *, total_rows: int) -> np.ndarray:
     splits = root.get("splits")
     if not isinstance(splits, zarr.Group) or name not in splits:
         raise ValueError(f"Missing required split array splits/{name}.")
-    values = np.asarray(splits[name][:], dtype=np.int64).reshape(-1)
+    raw = np.asarray(splits[name][:])
+    if raw.ndim != 1:
+        raise ValueError(f"splits/{name} must be 1D, got shape {raw.shape}.")
+    if not np.issubdtype(raw.dtype, np.integer):
+        raise ValueError(f"splits/{name} must be integer dtype, got {raw.dtype}.")
+    values = raw.astype(np.int64, copy=False)
+    if values.size > 0:
+        min_idx = int(values.min())
+        max_idx = int(values.max())
+        if min_idx < 0 or max_idx >= int(total_rows):
+            raise ValueError(
+                f"splits/{name} contains out-of-bounds row indices "
+                f"(min={min_idx}, max={max_idx}, rows={int(total_rows)})."
+            )
+        if np.unique(values).shape[0] != values.shape[0]:
+            raise ValueError(f"splits/{name} contains duplicate row indices.")
     return values
+
+
+def _validate_split_disjointness(splits: Dict[str, np.ndarray]) -> None:
+    seen: Dict[int, str] = {}
+    for split_name, values in splits.items():
+        for value in values.tolist():
+            row_idx = int(value)
+            previous = seen.get(row_idx)
+            if previous is not None:
+                raise ValueError(
+                    f"splits/{split_name} overlaps with splits/{previous} at row index {row_idx}."
+                )
+            seen[row_idx] = split_name
 
 
 def _normalize_roi_batch(batch: np.ndarray) -> np.ndarray:
@@ -181,8 +209,14 @@ def load_subject_mask_training_artifact(
             f"and target_valid_channels ({valid_array.shape[1]})."
         )
 
-    train_indices = _require_1d_indices(root, "train_indices")
-    val_indices = _require_1d_indices(root, "val_indices")
+    total_rows = int(roi_array.shape[0])
+    train_indices = _require_1d_indices(root, "train_indices", total_rows=total_rows)
+    val_indices = _require_1d_indices(root, "val_indices", total_rows=total_rows)
+    split_arrays = {"train_indices": train_indices, "val_indices": val_indices}
+    split_group = root.get("splits")
+    if isinstance(split_group, zarr.Group) and "test_indices" in split_group:
+        split_arrays["test_indices"] = _require_1d_indices(root, "test_indices", total_rows=total_rows)
+    _validate_split_disjointness(split_arrays)
     training_export = root.attrs.get("training_export")
     training_export_meta = training_export if isinstance(training_export, Mapping) else {}
     source_subject_mask_runs = _normalize_str_list(training_export_meta.get("source_subject_mask_runs"))

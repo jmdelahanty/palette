@@ -8,10 +8,16 @@ import sys
 import numpy as np
 import pytest
 from rich.console import Console
+import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.segmentation import train_unet_eye_masks as mod
+
+
+class _FakeArray:
+    shape = (4, 8, 8)
+    chunks = (2, 8, 8)
 
 
 class _TinyChunkedDataset:
@@ -62,6 +68,45 @@ def _write_minimal_config(path: Path, zarr_path: Path, *, label_mode: str = "lr"
         ),
         encoding="utf-8",
     )
+
+
+def test_assemble_training_datasets_honors_artifact_splits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    zarr_path = tmp_path / "eye_training.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["zarr_purpose"] = "training"
+    splits = root.create_group("splits")
+    splits.create_array("train_indices", data=np.array([3, 1], dtype=np.int64), chunks=(2,))
+    splits.create_array("val_indices", data=np.array([0], dtype=np.int64), chunks=(1,))
+
+    cfg_path = tmp_path / "eye_mask.yaml"
+    _write_minimal_config(cfg_path, zarr_path, label_mode="lr")
+    config = mod.EyeMaskTrainingConfig.from_yaml(cfg_path)
+
+    store = mod.YOLOTargetStore(
+        roi_array=_FakeArray(),
+        mask_probs_array=None,
+        masks_array=None,
+        use_probs=False,
+        meta={"length": 4},
+    )
+    monkeypatch.setattr(mod, "_load_arrays_for_dataset", lambda *args, **kwargs: store)
+
+    class _CaptureDataset:
+        def __init__(self, entries, label_mode: str, shuffle_chunks: bool, seed: int) -> None:
+            self.entries = [(entry_store, np.asarray(indices, dtype=np.int64).copy()) for entry_store, indices in entries]
+
+        def __len__(self) -> int:
+            return sum(int(indices.size) for _store, indices in self.entries)
+
+    monkeypatch.setattr(mod, "YOLOChunkedDataset", _CaptureDataset)
+
+    train_ds, val_ds, meta_list = mod._assemble_training_datasets(config, Console())
+
+    assert train_ds.entries[0][1].tolist() == [3, 1]
+    assert val_ds.entries[0][1].tolist() == [0]
+    assert meta_list[0]["split_source"] == "artifact_splits"
+    assert meta_list[0]["train_rows"] == 2
+    assert meta_list[0]["val_rows"] == 1
 
 
 def test_train_unet_logs_registry_in_progress_then_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

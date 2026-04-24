@@ -265,6 +265,8 @@ class DatasetMetadata:
     frame_indices_path: Optional[str] = None
     detection_source_path: Optional[str] = None
     status_codes_path: Optional[str] = None
+    artifact_train_indices_path: Optional[str] = None
+    artifact_val_indices_path: Optional[str] = None
     uses_crop_data: bool = True
     input_format: str = "gray"
     frame_array_path: str = "raw_video/images_ds"
@@ -310,6 +312,18 @@ class GlobalIndexManager:
             return "latest_yolo"
         return value
 
+    @staticmethod
+    def _resolve_training_split_paths(root: zarr.Group) -> Tuple[Optional[str], Optional[str]]:
+        zarr_purpose = str(root.attrs.get("zarr_purpose") or "").strip().lower()
+        if zarr_purpose != "training":
+            return None, None
+        split_group = root.get("splits")
+        if split_group is None or not hasattr(split_group, "__contains__"):
+            return None, None
+        if "train_indices" in split_group and "val_indices" in split_group:
+            return "splits/train_indices", "splits/val_indices"
+        return None, None
+
     def _validate_and_get_metadata(self) -> List[DatasetMetadata]:
         zarr_paths = self.config.get_zarr_paths()
         logger.info(f"Validating {len(zarr_paths)} Zarr files...")
@@ -354,10 +368,13 @@ class GlobalIndexManager:
                 frame_indices_path: Optional[str] = None
                 detection_source_path: Optional[str] = None
                 status_codes_path: Optional[str] = None
+                artifact_train_indices_path: Optional[str] = None
+                artifact_val_indices_path: Optional[str] = None
                 actual_source_type = requested_source
                 has_interpolated = False
                 n_real_rois = 0
                 n_interpolated_rois = 0
+                artifact_train_indices_path, artifact_val_indices_path = self._resolve_training_split_paths(root)
 
                 if self.config.task == 'detect':
                     refined_parent_name = None
@@ -670,6 +687,8 @@ class GlobalIndexManager:
                         frame_indices_path=frame_indices_path,
                         detection_source_path=detection_source_path,
                         status_codes_path=status_codes_path,
+                        artifact_train_indices_path=artifact_train_indices_path,
+                        artifact_val_indices_path=artifact_val_indices_path,
                         uses_crop_data=uses_crop_data,
                     input_format=requested_input_format,
                     frame_array_path=frame_array_path,
@@ -733,6 +752,48 @@ class GlobalIndexManager:
         
         return np.where(valid_mask)[0]
 
+    def _load_artifact_split_indices(self, metadata: DatasetMetadata, split_name: str) -> np.ndarray:
+        path = (
+            metadata.artifact_train_indices_path
+            if split_name == "train"
+            else metadata.artifact_val_indices_path
+            if split_name == "val"
+            else None
+        )
+        if not path:
+            return np.empty(0, dtype=np.int64)
+
+        root = zarr.open(metadata.path, mode="r")
+        raw_values = np.asarray(root[path][:])
+        if raw_values.ndim != 1:
+            raise ValueError(f"{metadata.name}: {path} must be 1D, got shape {raw_values.shape}.")
+        if not np.issubdtype(raw_values.dtype, np.integer):
+            raise ValueError(f"{metadata.name}: {path} must be integer dtype, got {raw_values.dtype}.")
+        values = raw_values.astype(np.int64, copy=False)
+
+        row_count = int(root[metadata.bbox_array_path].shape[0])
+        if values.size > 0:
+            min_idx = int(values.min())
+            max_idx = int(values.max())
+            if min_idx < 0 or max_idx >= row_count:
+                raise ValueError(
+                    f"{metadata.name}: {path} contains out-of-bounds sample indices "
+                    f"(min={min_idx}, max={max_idx}, rows={row_count})."
+                )
+        return values
+
+    def _load_artifact_train_val_indices(self, metadata: DatasetMetadata) -> Tuple[np.ndarray, np.ndarray]:
+        train = self._load_artifact_split_indices(metadata, "train")
+        val = self._load_artifact_split_indices(metadata, "val")
+        if train.size > 0 and val.size > 0:
+            overlap = np.intersect1d(train, val)
+            if overlap.size > 0:
+                raise ValueError(
+                    f"{metadata.name}: artifact train/val splits overlap at sample indices "
+                    f"{overlap[:10].tolist()}."
+                )
+        return train, val
+
     @staticmethod
     def _sample_without_replacement(indices: np.ndarray, sample_count: int, rng: np.random.Generator) -> np.ndarray:
         """Sample deterministic subset without replacement."""
@@ -742,20 +803,21 @@ class GlobalIndexManager:
             return indices.copy()
         return rng.choice(indices, size=sample_count, replace=False)
 
-    def _resolve_weight_map(self) -> Dict[str, float]:
+    def _resolve_weight_map(self, metadata_rows: Optional[List[DatasetMetadata]] = None) -> Dict[str, float]:
         """Resolve dataset weights keyed by zarr path."""
         raw_weights = self.config.dataset_weights or {}
         if not raw_weights:
             raise ValueError("dataset_weights is required when sampling_strategy='weighted'.")
 
+        rows = metadata_rows if metadata_rows is not None else self.metadata_list
         path_to_dataset_name = {
             metadata.path: self.config.get_dataset_name(metadata.path)
-            for metadata in self.metadata_list
+            for metadata in rows
         }
         matched_keys = set()
         path_weights: Dict[str, float] = {}
 
-        for metadata in self.metadata_list:
+        for metadata in rows:
             dataset_name = path_to_dataset_name[metadata.path]
             candidates = [dataset_name, metadata.name, metadata.path]
             selected_key = next((key for key in candidates if key in raw_weights), None)
@@ -773,7 +835,12 @@ class GlobalIndexManager:
                 )
             path_weights[metadata.path] = weight_value
 
-        unknown_keys = sorted(set(raw_weights.keys()) - matched_keys)
+        unknown_keys = sorted(
+            key for key in set(raw_weights.keys()) - matched_keys
+            if key not in {self.config.get_dataset_name(metadata.path) for metadata in self.metadata_list}
+            and key not in {metadata.name for metadata in self.metadata_list}
+            and key not in {metadata.path for metadata in self.metadata_list}
+        )
         if unknown_keys:
             raise ValueError(
                 "dataset_weights has unknown keys that do not match configured datasets: "
@@ -791,12 +858,26 @@ class GlobalIndexManager:
         if any_filtering:
             logger.info("  ℹ Using only real detections (filtering interpolated data)")
         
-        all_valid_indices = {m.path: self._get_valid_indices(m) for m in self.metadata_list}
+        artifact_split_rows = [
+            m for m in self.metadata_list
+            if m.artifact_train_indices_path and m.artifact_val_indices_path
+        ]
+        artifact_paths = {m.path for m in artifact_split_rows}
+        regular_rows = [m for m in self.metadata_list if m.path not in artifact_paths]
+        all_valid_indices = {m.path: self._get_valid_indices(m) for m in regular_rows}
         rng = np.random.default_rng(self.config.random_seed)
 
         strategy = self.config.sampling_strategy
-        selected_by_path: Dict[str, np.ndarray] = {path: np.empty(0, dtype=int) for path in all_valid_indices}
+        selected_by_path: Dict[str, np.ndarray] = {m.path: np.empty(0, dtype=int) for m in self.metadata_list}
         path_weights_for_logging: Dict[str, float] = {}
+
+        for metadata in artifact_split_rows:
+            train_part, val_part = self._load_artifact_train_val_indices(metadata)
+            selected_by_path[metadata.path] = np.concatenate([train_part, val_part]).astype(int, copy=False)
+            logger.info(
+                f"  ✓ {metadata.name}: using artifact splits "
+                f"(train={train_part.size}, val={val_part.size})."
+            )
 
         if strategy == SamplingStrategy.PROPORTIONAL:
             for path, indices in all_valid_indices.items():
@@ -814,8 +895,6 @@ class GlobalIndexManager:
             )
 
         elif strategy == SamplingStrategy.WEIGHTED:
-            path_weights = self._resolve_weight_map()
-            path_weights_for_logging = path_weights
             available_counts = {
                 path: indices.size
                 for path, indices in all_valid_indices.items()
@@ -823,29 +902,33 @@ class GlobalIndexManager:
             }
             if not available_counts:
                 logger.warning("  ⚠ No valid samples available after filtering.")
-                self.selected_indices_by_path = {
-                    path: indices.copy() for path, indices in selected_by_path.items()
+                if not artifact_split_rows:
+                    self.selected_indices_by_path = {
+                        path: indices.copy() for path, indices in selected_by_path.items()
+                    }
+                    return []
+            else:
+                path_weights = self._resolve_weight_map(regular_rows)
+                path_weights_for_logging = path_weights
+
+                limiting_scale = min(
+                    available_counts[path] / path_weights[path] for path in available_counts
+                )
+                target_counts = {
+                    path: int(np.floor(path_weights[path] * limiting_scale))
+                    for path in available_counts
                 }
-                return []
 
-            limiting_scale = min(
-                available_counts[path] / path_weights[path] for path in available_counts
-            )
-            target_counts = {
-                path: int(np.floor(path_weights[path] * limiting_scale))
-                for path in available_counts
-            }
+                # Guard against all-zero rounding for highly skewed weights.
+                if all(count == 0 for count in target_counts.values()):
+                    max_path = max(available_counts, key=lambda p: path_weights[p])
+                    target_counts[max_path] = 1
 
-            # Guard against all-zero rounding for highly skewed weights.
-            if all(count == 0 for count in target_counts.values()):
-                max_path = max(available_counts, key=lambda p: path_weights[p])
-                target_counts[max_path] = 1
+                for path, indices in all_valid_indices.items():
+                    target_count = target_counts.get(path, 0)
+                    selected_by_path[path] = self._sample_without_replacement(indices, target_count, rng)
 
-            for path, indices in all_valid_indices.items():
-                target_count = target_counts.get(path, 0)
-                selected_by_path[path] = self._sample_without_replacement(indices, target_count, rng)
-
-            logger.info("  ✓ sampling_strategy=weighted (downsampled by dataset_weights).")
+                logger.info("  ✓ sampling_strategy=weighted (downsampled by dataset_weights).")
 
         else:
             raise ValueError(f"Unknown sampling strategy '{strategy}'.")
@@ -862,13 +945,22 @@ class GlobalIndexManager:
 
         logger.info(f"Global index created with {len(global_indices)} total samples.")
         for metadata in self.metadata_list:
+            if metadata.path not in all_valid_indices:
+                logger.info(
+                    f"  {metadata.name}: {len(selected_by_path[metadata.path])} samples "
+                    "(artifact split-controlled)"
+                )
+                continue
             available = len(all_valid_indices[metadata.path])
             selected = len(selected_by_path[metadata.path])
             if strategy == SamplingStrategy.WEIGHTED:
-                weight = path_weights_for_logging[metadata.path]
-                logger.info(
-                    f"  {metadata.name}: {selected}/{available} samples (weight={weight:.4g})"
-                )
+                weight = path_weights_for_logging.get(metadata.path)
+                if weight is not None:
+                    logger.info(
+                        f"  {metadata.name}: {selected}/{available} samples (weight={weight:.4g})"
+                    )
+                else:
+                    logger.info(f"  {metadata.name}: {selected}/{available} samples")
             else:
                 logger.info(f"  {metadata.name}: {selected}/{available} samples")
 
@@ -919,6 +1011,17 @@ class GlobalIndexManager:
 
         for metadata in self.metadata_list:
             path = metadata.path
+            if metadata.artifact_train_indices_path and metadata.artifact_val_indices_path:
+                train_part, val_part = self._load_artifact_train_val_indices(metadata)
+                self.selected_indices_by_path[path] = np.concatenate([train_part, val_part]).astype(int, copy=False)
+                train_indices.extend((path, int(det_idx)) for det_idx in train_part)
+                val_indices.extend((path, int(det_idx)) for det_idx in val_part)
+                logger.info(
+                    f"  {metadata.name}: train={train_part.size} val={val_part.size} "
+                    "(source=artifact_splits)"
+                )
+                continue
+
             selected = self.selected_indices_by_path.get(path, np.empty(0, dtype=int))
             total = int(selected.size)
             if total == 0:

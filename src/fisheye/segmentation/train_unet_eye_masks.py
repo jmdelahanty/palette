@@ -17,6 +17,7 @@ import shutil
 import numpy as np
 import torch
 import torch._dynamo
+import zarr
 from PIL import Image
 from rich.console import Console
 from rich.table import Table
@@ -36,7 +37,11 @@ from ..training.losses import BCEDiceCriterion
 from ..training.training_run_shared import (
     record_registry_training_run as _shared_record_registry_training_run,
 )
-from ..training.zarr_eye_mask_dataset import YOLOTargetStore, load_yolo_targets
+from ..training.zarr_eye_mask_dataset import (
+    YOLOTargetStore,
+    load_yolo_targets,
+    read_training_artifact_splits,
+)
 from ..utils.system import (
     build_invocation_record,
     get_git_info,
@@ -311,6 +316,14 @@ def _dataset_split_indices(
     return train_indices, val_indices
 
 
+def _load_training_artifact_splits(
+    zarr_path: Path,
+    total: int,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    root = zarr.open(str(zarr_path), mode="r")
+    return read_training_artifact_splits(root, total_rois=total)
+
+
 def _load_arrays_for_dataset(
     name: str,
     cfg: EyeMaskDatasetConfig,
@@ -368,14 +381,27 @@ def _assemble_training_datasets(
 
         meta_list.append(meta)
 
-        split_cfg = ds_cfg.split or config.default_split
-        rng = np.random.default_rng(rng_seed + ds_idx)
-        train_local, val_local = _dataset_split_indices(total, float(split_cfg.train), rng)
+        artifact_splits = _load_training_artifact_splits(ds_cfg.zarr_path, total)
+        if artifact_splits is not None:
+            train_local, val_local = artifact_splits
+            meta["split_source"] = "artifact_splits"
+            meta["train_rows"] = int(train_local.size)
+            meta["val_rows"] = int(val_local.size)
+        else:
+            split_cfg = ds_cfg.split or config.default_split
+            rng = np.random.default_rng(rng_seed + ds_idx)
+            train_local, val_local = _dataset_split_indices(total, float(split_cfg.train), rng)
+            meta["split_source"] = "config_ratio"
+            meta["train_rows"] = int(train_local.size)
+            meta["val_rows"] = int(val_local.size)
 
         if train_local.size == 0:
             raise ValueError(f"Training split for dataset '{name}' is empty; adjust split configuration.")
-        if val_local.size == 0:
+        if val_local.size == 0 and artifact_splits is None:
             val_local = train_local[:1].copy()
+            meta["val_rows"] = int(val_local.size)
+        if val_local.size == 0:
+            raise ValueError(f"Validation split for dataset '{name}' is empty; adjust artifact splits.")
 
         train_entries.append((store, train_local))
         val_entries.append((store, val_local))

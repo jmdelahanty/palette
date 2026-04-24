@@ -208,6 +208,21 @@ def main() -> int:
         if "source_index/source_frame_idx" in root
         else None
     )
+    source_roi_idx = (
+        np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64)
+        if "source_index/source_roi_idx" in root
+        else None
+    )
+    source_refined_row_ids = (
+        np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64)
+        if "source_index/source_refined_row_ids" in root
+        else None
+    )
+    source_detect_row_index = (
+        np.asarray(root["source_index/source_detect_row_index"][:], dtype=np.int64)
+        if "source_index/source_detect_row_index" in root
+        else None
+    )
     source_dataset_id = (
         _decode_string_array(np.asarray(root["source_index/source_dataset_id"][:]))
         if "source_index/source_dataset_id" in root
@@ -258,14 +273,28 @@ def main() -> int:
             if source_frame_idx is not None and sample_idx < source_frame_idx.shape[0]
             else "source_frame=?"
         )
+        roi_text = (
+            f"source_roi={int(source_roi_idx[sample_idx])}"
+            if source_roi_idx is not None and sample_idx < source_roi_idx.shape[0]
+            else "source_roi=?"
+        )
+        refined_text = "refined_row=?"
+        if source_refined_row_ids is not None and sample_idx < source_refined_row_ids.shape[0]:
+            refined_value = int(source_refined_row_ids[sample_idx])
+            refined_text = f"refined_row={refined_value}" if refined_value >= 0 else "refined_row=-"
+        raw_text = "raw_row=?"
+        if source_detect_row_index is not None and sample_idx < source_detect_row_index.shape[0]:
+            raw_value = int(source_detect_row_index[sample_idx])
+            raw_text = f"raw_row={raw_value}" if raw_value >= 0 else "raw_row=-"
         src_text = (
-            f"det_source={int(detection_source[sample_idx])}"
+            f"det_code={int(detection_source[sample_idx])}"
             if detection_source is not None and sample_idx < detection_source.shape[0]
-            else "det_source=?"
+            else "det_code=?"
         )
         return (
             f"split_pos={split_pos}/{int(selected.shape[0]) - 1} sample_idx={sample_idx} "
-            f"success={int(success)}\n{ds_text} {frame_text} {src_text}"
+            f"success={int(success)}\n{ds_text} {frame_text} {roi_text}\n"
+            f"{refined_text} {raw_text} {src_text}"
         )
 
     def render_to_axis(ax, split_pos: int) -> None:

@@ -62,6 +62,14 @@ def _write_detect_zarr(path: Path, *, num_frames: int = 2, frame_chunk: int = 1)
     )
 
 
+def _write_training_splits(path: Path, *, train: list[int], val: list[int]) -> None:
+    root = zarr.open_group(str(path), mode="a")
+    root.attrs["zarr_purpose"] = "training"
+    splits = root.create_group("splits")
+    splits.create_array("train_indices", data=np.asarray(train, dtype=np.int64), chunks=(max(1, len(train)),))
+    splits.create_array("val_indices", data=np.asarray(val, dtype=np.int64), chunks=(max(1, len(val)),))
+
+
 def _write_curated_refined_detect_zarr(path: Path) -> None:
     root = zarr.open_group(str(path), mode="w")
     raw = root.create_group("raw_video")
@@ -230,6 +238,19 @@ def test_detect_val_mode_skips_train_augmentations(tmp_path: Path) -> None:
     assert np.array_equal(base["bboxes"], aug["bboxes"])
 
 
+def test_detect_loader_honors_training_artifact_splits(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "detect_training.zarr"
+    _write_detect_zarr(zarr_path, num_frames=4)
+    _write_training_splits(zarr_path, train=[3], val=[0, 2])
+
+    cfg = _build_config(zarr_path, split_train=0.5, split_val=0.5)
+    train_ds = create_zarr_dataset(cfg, mode="train")
+    val_ds = create_zarr_dataset(cfg, mode="val")
+
+    assert [int(det_idx) for _path, det_idx in train_ds.indices] == [3]
+    assert sorted(int(det_idx) for _path, det_idx in val_ds.indices) == [0, 2]
+
+
 def test_detect_train_erasing_changes_pixels(tmp_path: Path) -> None:
     zarr_path = tmp_path / "sample.zarr"
     _write_detect_zarr(zarr_path)
@@ -304,6 +325,31 @@ def test_pose_loader_supports_box_only_rows_with_visibility_zero(tmp_path: Path)
     full_sample = ds[full_pos]
     full_vis = full_sample["keypoints"].reshape(1, 3, 3)[0, :, 2]
     assert np.allclose(full_vis, np.full((3,), 2.0, dtype=np.float32))
+
+
+def test_pose_loader_honors_training_artifact_splits(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_training_splits.zarr"
+    _write_pose_merged_zarr_with_box_only(zarr_path)
+    _write_training_splits(zarr_path, train=[1], val=[0, 2])
+
+    cfg = ZarrDatasetConfig(
+        datasets={
+            "pose": {
+                "zarr_path": str(zarr_path),
+                "source_type": "filtered",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            }
+        },
+        task="pose",
+        random_seed=11,
+        sampling_strategy="proportional",
+    )
+    train_ds = create_zarr_dataset(cfg, mode="train")
+    val_ds = create_zarr_dataset(cfg, mode="val")
+
+    assert [int(det_idx) for _path, det_idx in train_ds.indices] == [1]
+    assert sorted(int(det_idx) for _path, det_idx in val_ds.indices) == [0, 2]
 
 
 def test_pose_loader_uses_metadata_keypoint_labels(tmp_path: Path) -> None:

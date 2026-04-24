@@ -7,7 +7,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import zarr
@@ -31,13 +31,18 @@ TARGET_SCHEMAS: Dict[str, Tuple[str, ...]] = {
 LABEL_SCHEMA_CHOICES = ("auto", "subject_v1_union", "subject_v1_lr")
 SUBJECT_STAGE_CHOICES = ("subject_mask_runs",)
 LABEL_ORIGIN_CODES = {
-    "no_supervision": 0,
-    "subject_mask_runs": 1,
+    "unknown": 0,
+    "auto": 1,
+    "manual_review": 2,
+    "manual_training": 3,
+    "interpolated": 4,
+    "synthetic": 5,
 }
 SUPERVISION_MODE_CODES = {
     "no_supervision": 0,
     "dense": 1,
     "explicit_negative": 2,
+    "box_only": 3,
 }
 
 _utc_now = utc_now
@@ -210,6 +215,22 @@ def _copy_optional_array(
     if default is not None:
         return default
     raise ValueError(f"Missing required array '{name}'.")
+
+
+def _codebook_attr(codebook: Dict[str, int]) -> Dict[str, int]:
+    return {str(name): int(code) for name, code in codebook.items()}
+
+
+def _normalize_codebook_attr(value: Any) -> Optional[Dict[str, int]]:
+    if not isinstance(value, Mapping):
+        return None
+    normalized: Dict[str, int] = {}
+    for key, raw_code in value.items():
+        try:
+            normalized[str(key)] = int(raw_code)
+        except (TypeError, ValueError):
+            return None
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -745,7 +766,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
 
         label_codes = np.zeros((count, len(target_labels)), dtype=np.uint8)
         supervision_codes = np.zeros((count, len(target_labels)), dtype=np.uint8)
-        label_codes[projected_valid] = np.uint8(LABEL_ORIGIN_CODES["subject_mask_runs"])
+        label_codes[projected_valid] = np.uint8(LABEL_ORIGIN_CODES["auto"])
         supervision_codes[projected_valid] = np.uint8(SUPERVISION_MODE_CODES["dense"])
         label_origin_dest[row_slice] = label_codes
         supervision_mode_dest[row_slice] = supervision_codes
@@ -765,7 +786,14 @@ def export_merged_subject_mask_training_zarr_from_sources(
     _write_string_array(source_index, "source_run_name", source_run_names)
     _write_string_array(source_index, "source_label_schema_id", source_schema_ids)
     _write_string_array(source_index, "source_projection_mode", source_projection_modes)
-    source_index.attrs.update({"mapping_version": 1, "source_count": int(len(resolved_sources))})
+    source_index.attrs.update(
+        {
+            "mapping_version": 1,
+            "source_count": int(len(resolved_sources)),
+            "label_origin_codebook": _codebook_attr(LABEL_ORIGIN_CODES),
+            "supervision_mode_codebook": _codebook_attr(SUPERVISION_MODE_CODES),
+        }
+    )
 
     masks_final = np.asarray(masks_dest[:], dtype=np.uint8)
     valid_final = np.asarray(target_valid_dest[:], dtype=np.bool_)
@@ -974,6 +1002,14 @@ def validate_merged_subject_mask_training_zarr(
     for name in required_source_arrays:
         if name not in source_index:
             errors.append(f"missing required array source_index/{name}.")
+    label_origin_codebook = _normalize_codebook_attr(source_index.attrs.get("label_origin_codebook"))
+    if label_origin_codebook != LABEL_ORIGIN_CODES:
+        errors.append("source_index attr label_origin_codebook missing or does not match the stable subject-mask codebook.")
+    supervision_mode_codebook = _normalize_codebook_attr(source_index.attrs.get("supervision_mode_codebook"))
+    if supervision_mode_codebook != SUPERVISION_MODE_CODES:
+        errors.append(
+            "source_index attr supervision_mode_codebook missing or does not match the stable subject-mask codebook."
+        )
     if errors:
         raise ValueError("Merged subject-mask zarr validation failed:\n- " + "\n- ".join(errors))
 
@@ -1020,8 +1056,12 @@ def validate_merged_subject_mask_training_zarr(
         )
     if label_origin.shape != target_valid.shape:
         errors.append("label_origin_codes shape must match target_valid_channels.")
+    elif not set(np.unique(label_origin).astype(int).tolist()).issubset(set(LABEL_ORIGIN_CODES.values())):
+        errors.append("label_origin_codes contains values outside label_origin_codebook.")
     if supervision_mode.shape != target_valid.shape:
         errors.append("supervision_mode_codes shape must match target_valid_channels.")
+    elif not set(np.unique(supervision_mode).astype(int).tolist()).issubset(set(SUPERVISION_MODE_CODES.values())):
+        errors.append("supervision_mode_codes contains values outside supervision_mode_codebook.")
 
     if frame_indices.ndim != 1 or int(frame_indices.shape[0]) != total_samples:
         errors.append(f"frame_indices must be 1D length N, got {tuple(frame_indices.shape)}.")

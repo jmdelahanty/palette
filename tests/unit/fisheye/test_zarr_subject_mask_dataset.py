@@ -154,6 +154,58 @@ def test_load_subject_mask_training_artifact_falls_back_to_source_index_run_name
     assert store.meta["source_crop_run"] == "crop_source_001"
 
 
+def test_load_subject_mask_training_artifact_rejects_out_of_bounds_split(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "subject_training.zarr"
+    artifact.mkdir()
+    (artifact / "zarr.json").write_text("{}", encoding="utf-8")
+    fake_root = _build_training_root()
+    fake_root["splits"].create_array(
+        "train_indices",
+        data=np.array([0, 4], dtype=np.int64),
+        chunks=(2,),
+        overwrite=True,
+    )
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(mod.zarr, "Group", _FakeGroup)
+
+    with pytest.raises(ValueError, match="out-of-bounds row indices"):
+        mod.load_subject_mask_training_artifact(
+            artifact,
+            subject_mask_run=None,
+            crop_run=None,
+            expected_label_schema_id="subject_v1_union",
+        )
+
+
+def test_load_subject_mask_training_artifact_rejects_overlapping_splits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "subject_training.zarr"
+    artifact.mkdir()
+    (artifact / "zarr.json").write_text("{}", encoding="utf-8")
+    fake_root = _build_training_root()
+    fake_root["splits"].create_array(
+        "val_indices",
+        data=np.array([1, 3], dtype=np.int64),
+        chunks=(2,),
+        overwrite=True,
+    )
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(mod.zarr, "Group", _FakeGroup)
+
+    with pytest.raises(ValueError, match="overlaps"):
+        mod.load_subject_mask_training_artifact(
+            artifact,
+            subject_mask_run=None,
+            crop_run=None,
+            expected_label_schema_id="subject_v1_union",
+        )
+
+
 def test_build_subject_mask_training_datasets_returns_valid_channel_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

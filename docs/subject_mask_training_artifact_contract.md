@@ -22,7 +22,7 @@ discarding existing eye-mask training data.
   "swim_bladder"]`.
 - Allow one target schema such as `["subject_body", "eye_left", "eye_right",
   "swim_bladder"]` when the export explicitly targets LR semantics.
-- Allow mixed source stages:
+- Allow mixed source stages at the contract level:
   - `subject_mask_runs/<run>`
   - `refined_subject_masks_runs/<run>`
   - `eye_masks_runs/<run>`
@@ -53,6 +53,10 @@ The new subject-mask artifact is additive:
 - `training_task = "subject_masks"` is a separate training task.
 - Exporters may project eye-mask labels into the subject-mask schema when that
   projection is explicit and loss-masked.
+- Current implementation ingests `subject_mask_runs` directly. Legacy
+  `eye_masks_runs` / `refined_eye_masks_runs` and refined-subject sources should
+  be projected or materialized into a `subject_mask_runs` adapter first until
+  direct source adapters are implemented.
 
 Runtime/source-stage compatibility note:
 
@@ -76,7 +80,9 @@ This training contract is intended to support:
 3. later component-scoped exports where a dataset intentionally supervises only
    one subset of subject-mask labels.
 
-V1 directly supports cases 1 and 2.
+V1 artifact semantics support cases 1 and 2. The current exporter supports
+those cases when the source has already been materialized as
+`subject_mask_runs`.
 
 Case 3 is intentionally deferred at the exporter/workflow level, but the
 contract is already compatible with it because supervision is expressed per
@@ -454,6 +460,13 @@ Required rule:
 - exporters must not mark `subject_body` or `swim_bladder` as valid when only
   eye masks are available
 
+Implementation status:
+
+- Direct `eye_masks_runs` / `refined_eye_masks_runs` ingestion is not currently
+  implemented by `fisheye.utils.export_subject_mask_training_zarr`.
+- For now, project or backfill those sources into `subject_mask_runs` first,
+  then export the subject-mask training artifact from that adapter run.
+
 ### 3. No fabricated negatives
 
 Missing labels must remain unsupervised.
@@ -544,7 +557,7 @@ swim-bladder labels exist.
 
 ## Validator Entrypoints
 
-Proposed:
+Implemented:
 
 - `scripts/py -m fisheye.utils.validate_subject_mask_training_zarr <merged>.zarr`
 - `scripts/py -m fisheye.utils.export_subject_mask_training_zarr <source>.zarr <merged>.zarr`

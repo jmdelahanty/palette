@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.utils import check_training_registry as registry_view
+from fisheye.utils import validate_subject_mask_training_zarr as validate_cli
 from fisheye.utils.export_subject_mask_training_zarr import (
     SubjectMergeSourceSpec,
     export_merged_subject_mask_training_zarr,
@@ -140,6 +141,21 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
     assert recheck["total_samples"] == 4
 
     root = zarr.open_group(str(out_path), mode="r")
+    source_index = root["source_index"]
+    assert source_index.attrs["label_origin_codebook"] == {
+        "unknown": 0,
+        "auto": 1,
+        "manual_review": 2,
+        "manual_training": 3,
+        "interpolated": 4,
+        "synthetic": 5,
+    }
+    assert source_index.attrs["supervision_mode_codebook"] == {
+        "no_supervision": 0,
+        "dense": 1,
+        "explicit_negative": 2,
+        "box_only": 3,
+    }
     assert np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64).tolist() == [
         110,
         111,
@@ -175,6 +191,62 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
         "eye_right": 4,
         "swim_bladder": 0,
     }
+
+
+def test_validate_subject_mask_training_zarr_cli(tmp_path: Path, capsys) -> None:
+    source_path = tmp_path / "source_subject_lr.zarr"
+    out_path = tmp_path / "merged_subject_lr.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_a",
+        session_uuid="subject_source_a",
+    )
+    export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        subject_label_schema="subject_v1_lr",
+        overwrite=True,
+    )
+
+    assert validate_cli.main(
+        [
+            str(out_path),
+            "--expected-input-format",
+            "gray",
+            "--expected-label-schema-id",
+            "subject_v1_lr",
+            "--expected-total-samples",
+            "4",
+        ]
+    ) == 0
+    stdout = capsys.readouterr().out
+    assert "Validation passed." in stdout
+    assert '"label_schema_id": "subject_v1_lr"' in stdout
+
+
+def test_validate_subject_mask_training_zarr_rejects_bad_codebook(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_lr.zarr"
+    out_path = tmp_path / "merged_subject_lr.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_a",
+        session_uuid="subject_source_a",
+    )
+    export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        subject_label_schema="subject_v1_lr",
+        overwrite=True,
+    )
+    root = zarr.open_group(str(out_path), mode="a")
+    root["source_index"].attrs["label_origin_codebook"] = {"unknown": 0}
+
+    try:
+        validate_merged_subject_mask_training_zarr(out_path)
+    except ValueError as exc:
+        assert "label_origin_codebook" in str(exc)
+    else:  # pragma: no cover - defensive assertion path
+        raise AssertionError("Expected bad label_origin_codebook to fail validation.")
 
 
 def test_export_subject_mask_lr_to_union_collapses_eyes_and_preserves_unsupervised_channels(tmp_path: Path) -> None:

@@ -834,6 +834,50 @@ def _resolve_runs(root: zarr.Group, cfg: EyeMaskDatasetConfig) -> Tuple[str, str
     return crop_run, mask_run
 
 
+def read_training_artifact_splits(
+    root: zarr.Group,
+    *,
+    total_rois: int,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Return explicit train/val row indices for merged training artifacts."""
+
+    zarr_purpose = str(root.attrs.get("zarr_purpose") or "").strip().lower()
+    if zarr_purpose != "training":
+        return None
+    split_group = root.get("splits")
+    if split_group is None or "train_indices" not in split_group or "val_indices" not in split_group:
+        return None
+
+    def _read(name: str) -> np.ndarray:
+        raw = np.asarray(split_group[name][:])
+        if raw.ndim != 1:
+            raise ValueError(f"splits/{name} must be 1D, got shape {raw.shape}.")
+        if not np.issubdtype(raw.dtype, np.integer):
+            raise ValueError(f"splits/{name} must be integer dtype, got {raw.dtype}.")
+        values = raw.astype(np.int64, copy=False)
+        if values.size > 0:
+            min_idx = int(values.min())
+            max_idx = int(values.max())
+            if min_idx < 0 or max_idx >= int(total_rois):
+                raise ValueError(
+                    f"splits/{name} contains out-of-bounds ROI indices "
+                    f"(min={min_idx}, max={max_idx}, rows={total_rois})."
+                )
+        return values
+
+    train_indices = _read("train_indices")
+    val_indices = _read("val_indices")
+    if train_indices.size > 0 and val_indices.size > 0:
+        overlap = np.intersect1d(train_indices, val_indices)
+        if overlap.size > 0:
+            raise ValueError(f"artifact train/val splits overlap at ROI indices {overlap[:10].tolist()}.")
+    return train_indices, val_indices
+
+
+def _artifact_split_indices(root: zarr.Group, *, total_rois: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    return read_training_artifact_splits(root, total_rois=total_rois)
+
+
 def _build_entries_for_dataset(
     dataset_name: str,
     cfg: EyeMaskDatasetConfig,
@@ -874,13 +918,18 @@ def _build_entries_for_dataset(
             raise ValueError(f"Background run '{bg_run_name}' missing '{array_name}' array")
         background_full = np.asarray(bg_group[array_name][:])
 
-    indices = np.arange(total_rois, dtype=np.int32)
-    rng.shuffle(indices)
-
-    split = cfg.split or default_split
-    train_count = int(round(split.train * total_rois))
-    train_indices = indices[:train_count]
-    val_indices = indices[train_count:]
+    artifact_splits = _artifact_split_indices(root, total_rois=int(total_rois))
+    if artifact_splits is not None:
+        train_indices, val_indices = artifact_splits
+        split_source = "artifact_splits"
+    else:
+        indices = np.arange(total_rois, dtype=np.int32)
+        rng.shuffle(indices)
+        split = cfg.split or default_split
+        train_count = int(round(split.train * total_rois))
+        train_indices = indices[:train_count]
+        val_indices = indices[train_count:]
+        split_source = "config_ratio"
 
     positive_count = 0
     negative_count = 0
@@ -893,6 +942,7 @@ def _build_entries_for_dataset(
         console.log(
             f"[yellow]{dataset_name}[/yellow] • total_rois={total_rois:,} • "
             f"target_split=train:{len(train_indices):,}, val:{len(val_indices):,} • "
+            f"split_source={split_source} • "
             f"require_both_eyes={cfg.require_both_eyes} • "
             f"using_ellipse_success_filter=True • "
             f"include_empty={cfg.include_empty} • "
