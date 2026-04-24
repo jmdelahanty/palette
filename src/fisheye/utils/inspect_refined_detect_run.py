@@ -21,6 +21,7 @@ from fisheye.shared.refined_detect_curation import (
     present_curated_row_mask,
     resolve_curated_refined_detect_run,
 )
+from fisheye.shared.refined_detect_identity import collect_refined_detect_identity_validation
 
 
 def _open_root(zarr_path: Path) -> zarr.Group:
@@ -169,6 +170,7 @@ def collect_refined_detect_report(
             limit=source_limit,
             decision_labels=source_decisions,
         ),
+        "identity_validation": collect_refined_detect_identity_validation(refined_group),
     }
 
 
@@ -234,6 +236,25 @@ def _print_text_report(payload: Dict[str, Any]) -> None:
         print("  - none")
     print()
 
+    validation = payload.get("identity_validation", {})
+    print("Identity validation:")
+    print(f"- ok: {bool(validation.get('ok', False))}")
+    print(f"- errors: {int(validation.get('error_count', 0) or 0)}")
+    print(f"- warnings: {int(validation.get('warning_count', 0) or 0)}")
+    issues = validation.get("issues") or []
+    if issues:
+        print("- issues:")
+        for issue in issues:
+            path = issue.get("path")
+            location = f" {path}" if path else ""
+            print(
+                f"  - [{issue.get('severity')}] {issue.get('code')}{location}: "
+                f"{issue.get('message')}"
+            )
+    else:
+        print("- issues: none")
+    print()
+
     source = payload.get("source_detections", {})
     print("Source detections:")
     print(f"- available: {bool(source.get('available', False))}")
@@ -281,6 +302,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Restrict source-detection preview rows to a decision label. Repeatable.",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
+    parser.add_argument(
+        "--fail-on-validation-error",
+        action="store_true",
+        help="Exit non-zero when refined-detect identity validation reports errors.",
+    )
     args = parser.parse_args(argv)
 
     payload = inspect_refined_detect_run(
@@ -294,6 +320,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(payload, indent=2))
     else:
         _print_text_report(payload)
+    if args.fail_on_validation_error:
+        validation = payload.get("identity_validation", {})
+        if int(validation.get("error_count", 0) or 0) > 0:
+            return 2
     return 0
 
 

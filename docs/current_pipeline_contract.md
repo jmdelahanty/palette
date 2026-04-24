@@ -140,6 +140,9 @@ desired design:
   exposes refined-run source-stale state.
 - Older operator docs may list component-specific segmentation commands before
   describing the unified target.
+- Detect row-local stale repair now has a contract and validator, but downstream
+  crop/keypoint/mask consumers still need a full audit for positional or legacy
+  manual-subgroup assumptions.
 
 ## Review Checklist
 
@@ -162,4 +165,5 @@ When reviewing new pipeline work, ask:
 - [subject_mask_stage_unification_todo.md](subject_mask_stage_unification_todo.md)
 - [repo_wide_staleness_checklist.md](repo_wide_staleness_checklist.md)
 - [repo_wide_staleness_gap_matrix.md](repo_wide_staleness_gap_matrix.md)
+- [refined_detect_row_identity_contract.md](refined_detect_row_identity_contract.md)
 - [src/fisheye/docs/provenance_workflow.md](../src/fisheye/docs/provenance_workflow.md)

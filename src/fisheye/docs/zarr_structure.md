@@ -450,6 +450,10 @@ Reader rule:
 
 - rows in `instances/` are already the curated accepted detections; render only
   rows with finite bbox geometry
+- `refined_row_ids` are stable logical row identity and must not be treated as
+  physical row positions or biological identity
+- current sparse rows should be sorted by `frame_indices` then
+  `refined_row_ids`; `frame_offsets` and `frame_counts` must match that order
 
 #### `source_detections/`
 
@@ -477,6 +481,8 @@ Reader rule:
 
 - treat `source_detections/` as an audit/provenance surface, not the primary
   bbox render surface
+- accepted source rows should resolve to current `instances/refined_row_ids`
+  values; stale or missing mappings mean row-local downstream repair is unsafe
 
 ### Legacy Sparse Subgroups
 

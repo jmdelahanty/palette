@@ -83,7 +83,7 @@ def test_write_curated_refined_detect_surfaces_persists_summary_metadata_on_real
     assert run.attrs["curated_row_storage"] == "sparse_instances_v1"
     assert run.attrs["curated_primary_surface"] == "instances"
     assert run.attrs["refined_storage_semantics"] == "sparse_instances_v1"
-    assert run.attrs["dense_projection_storage"] == "dense_frame_entity_v3"
+    assert "dense_projection_storage" not in run.attrs
     assert summary["rows_present"] == 2
     assert summary["rows_missing"] == 3
     assert summary["source_detection_filtered"] == 1

@@ -230,6 +230,12 @@ Minimum expectation:
 - stable `detection_indices` or equivalent row identity
 - no ambiguous reordering, merge, or split of the underlying source object
 
+For current refined detections, the equivalent row identity is
+`refined_detect_runs/<run>/instances/refined_row_ids`; raw lineage is carried by
+`instances/source_detect_row_index` and audited through
+`source_detections/resolved_refined_row_id`. See
+[refined_detect_row_identity_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_detect_row_identity_contract.md).
+
 If those conditions fail, the repo should escalate from row-level stale repair
 to broader rerun or invalidation.
 
@@ -345,4 +351,5 @@ they should not be the only way to discover stale work.
 - [mask_review_save_approval_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/mask_review_save_approval_policy.md)
 - [repo_wide_staleness_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_checklist.md)
 - [repo_wide_staleness_gap_matrix.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_gap_matrix.md)
+- [refined_detect_row_identity_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_detect_row_identity_contract.md)
 - [refined_subject_mask_staleness_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_mask_staleness_todo.md)
