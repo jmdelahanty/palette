@@ -131,6 +131,8 @@ Initial allowed seed sources for unified assembly:
 
 - raw `subject_mask_runs`
 - transitional `refined_eye_masks_runs` for eye components
+- canonical `refined_subject_masks_runs` component sources when assembling a
+  new coherent refined run from previously split refined component runs
 
 Current implementation note:
 
@@ -138,16 +140,19 @@ Current implementation note:
   sources for body/eyes/swim bladder
 - it also accepts direct `refined_eye_masks_runs` sources for canonical
   `eye_left` / `eye_right` component seeding
+- it now accepts `refined_subject_masks_runs/<run>` as an explicit component
+  source for split-run consolidation; the new component provenance points to
+  the immediate refined source and carries the upstream component provenance
+  under `upstream_component_provenance`
 - for legacy raw eye-stage data, the compatibility bridge remains:
   `refined_eye_masks_runs` or `eye_masks_runs`
   -> projected/backfilled `subject_mask_runs/<run>`
   -> assembled/finalized `refined_subject_masks_runs/<run>`
 
-Deferred source pattern:
+Safety rule:
 
-- importing components from another `refined_subject_masks_runs/<run>` is not
-  part of the initial unification plan and should be treated as a later
-  extension if needed
+- the assembler must reject split refined component sources unless crop
+  lineage, row lineage, row count, detection source, and ROI shape match
 
 ## Output Layout
 

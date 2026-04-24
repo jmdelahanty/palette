@@ -228,8 +228,9 @@ Policy note:
 
 Current implementation note:
 
-- the shipped subject-mask review/assembly helpers still load source inputs
-  from `subject_mask_runs`
+- the shipped subject-mask review/assembly helpers load source inputs from
+  `subject_mask_runs`, direct eye components from `refined_eye_masks_runs`,
+  and component-specific sources from existing `refined_subject_masks_runs`
 - new raw eye orchestration now writes a companion eye-only
   `subject_mask_runs/<run>` immediately after successful `eye_masks_runs/<run>`
   completion, using `subject_v1_union`
@@ -237,9 +238,12 @@ Current implementation note:
   project/backfill a compatibility `subject_mask_runs/<run>` first and then
   assemble or refine from that subject-mask source
 - direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is
-  supported for `eye_left` / `eye_right`; remaining work is consumer cleanup,
-  docs/contracts, and deciding when compatibility materialization becomes
-  opt-in
+  supported for `eye_left` / `eye_right`
+- split refined component consolidation is explicit: assemble a new
+  `refined_subject_masks_runs/<run>` from safe component sources rather than
+  having exporters silently stitch split refined runs
+- remaining work is consumer cleanup and deciding when compatibility
+  materialization becomes opt-in
 
 ### 3. Keep eye geometry migration deferred even though review authority is unified
 

@@ -572,7 +572,11 @@ wrapper consumes that manifest, exports one merged subject-mask training zarr,
 rewrites the training config/manifest to the merged `crop_runs/<run>` and
 `subject_mask_runs/<run>`, and can launch
 `fisheye.segmentation.train_unet_subject_masks`. Direct refined-subject source
-export and subject-mask data-card aggregation are still future parity work.
+export and subject-mask data-card aggregation are still future parity work. If
+registry latest component truth is split across multiple
+`refined_subject_masks_runs`, first assemble a new coherent refined run with
+`fisheye.refinement.assemble_refined_subject_masks`; the exporter should not
+silently combine split refined sources.
 
 ## Related Contracts
 

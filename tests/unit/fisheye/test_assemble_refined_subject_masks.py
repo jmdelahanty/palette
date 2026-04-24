@@ -442,3 +442,125 @@ def test_assemble_refined_subject_run_rejects_crop_snapshot_mismatch(monkeypatch
         assert "Alignment mismatch for crop snapshot fields" in str(exc)
     else:  # pragma: no cover - defensive
         raise AssertionError("Expected crop snapshot mismatch to raise ValueError.")
+
+
+def _mark_refined_component_review(run: zarr.Group, component_name: str, *, state: str = "approved") -> None:
+    reviews = dict(run.attrs.get("component_review_statuses") or {})
+    reviews[component_name] = {
+        "state": state,
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-04-03T00:00:00+00:00",
+    }
+    run.attrs["component_review_statuses"] = reviews
+    run.attrs["refined_subject_mask_review_status"] = {
+        "state": state,
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-04-03T00:00:00+00:00",
+    }
+
+
+def test_assemble_refined_subject_run_can_import_components_from_refined_subject_runs(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        body_run="body_run_001",
+        refined_run="refined_subject_body_001",
+    )
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        eye_run="eye_run_001",
+        refined_run="refined_subject_eyes_001",
+    )
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        swim_run="swim_run_001",
+        refined_run="refined_subject_swim_001",
+    )
+    body_refined = root["refined_subject_masks_runs"]["refined_subject_body_001"]
+    eye_refined = root["refined_subject_masks_runs"]["refined_subject_eyes_001"]
+    swim_refined = root["refined_subject_masks_runs"]["refined_subject_swim_001"]
+    _mark_refined_component_review(body_refined, "subject_body")
+    _mark_refined_component_review(eye_refined, "eye_left")
+    _mark_refined_component_review(eye_refined, "eye_right")
+    _mark_refined_component_review(swim_refined, "swim_bladder")
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        body_refined_run="refined_subject_body_001",
+        eye_refined_run="refined_subject_eyes_001",
+        swim_refined_run="refined_subject_swim_001",
+        refined_run="refined_subject_assembled_from_refined_001",
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    assert summary["source_component_sources"]["subject_body"] == {
+        "source_stage": "refined_subject_masks_runs",
+        "source_run": "refined_subject_body_001",
+    }
+    assert summary["source_component_sources"]["eye_left"] == {
+        "source_stage": "refined_subject_masks_runs",
+        "source_run": "refined_subject_eyes_001",
+    }
+    assert summary["source_component_sources"]["swim_bladder"] == {
+        "source_stage": "refined_subject_masks_runs",
+        "source_run": "refined_subject_swim_001",
+    }
+    assert summary["source_subject_mask_run"] == "body_run_001"
+
+    run = root["refined_subject_masks_runs"]["refined_subject_assembled_from_refined_001"]
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][:, 0], dtype=np.uint8),
+        np.asarray(body_refined["masks_roi"][:, 0], dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][:, 1:3], dtype=np.uint8),
+        np.asarray(eye_refined["masks_roi"][:, :], dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][:, 3], dtype=np.uint8),
+        np.asarray(swim_refined["masks_roi"][:, 0], dtype=np.uint8),
+    )
+
+    body_provenance = run["components/subject_body/provenance"].attrs
+    swim_provenance = run["components/swim_bladder/provenance"].attrs
+    assert body_provenance["source_stage"] == "refined_subject_masks_runs"
+    assert body_provenance["source_run"] == "refined_subject_body_001"
+    assert body_provenance["source_channels"] == ["subject_body"]
+    assert body_provenance["upstream_component_provenance"]["source_stage"] == "subject_mask_runs"
+    assert body_provenance["upstream_component_provenance"]["source_run"] == "body_run_001"
+    assert run["components/eye_left/provenance"].attrs["source_run"] == "refined_subject_eyes_001"
+    assert swim_provenance["source_stage"] == "refined_subject_masks_runs"
+    assert swim_provenance["source_run"] == "refined_subject_swim_001"
+    assert swim_provenance["upstream_component_provenance"]["source_run"] == "swim_run_001"
+
+    reviews = run.attrs["component_review_statuses"]
+    assert reviews["subject_body"]["state"] == "approved"
+    assert reviews["swim_bladder"]["state"] == "approved"
+    assert reviews["eye_left"]["state"] == "approved"
+    assert reviews["eye_right"]["state"] == "approved"
+    assert run.attrs["refined_subject_mask_review_status"]["state"] == "approved"
+
+
+def test_assemble_refined_subject_run_rejects_duplicate_component_sources(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        body_run="body_run_001",
+        refined_run="refined_subject_body_001",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate source for component 'subject_body'"):
+        assemble_mod.assemble_refined_subject_run(
+            root,
+            body_run="body_run_001",
+            body_refined_run="refined_subject_body_001",
+            refined_run="refined_subject_duplicate_001",
+        )
