@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import zarr
@@ -29,6 +28,12 @@ from ..refinement.refine_keypoints import (
     _process_refinement_chunk,
 )
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.frame_flags import (
+    entries_for_zarr_path,
+    load_frame_flags,
+    load_row_identity_arrays,
+    resolve_flagged_roi_indices,
+)
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
@@ -46,41 +51,11 @@ _TRADITIONAL_OUTPUT_LABEL_TO_KEY = {
 class PatchPlan:
     zarr_path: Path
     frames: List[int]
+    flag_entries: Optional[List[dict[str, object]]] = None
 
 
-def _load_frame_flags(path: Path) -> Dict[str, List[int]]:
-    if not path.exists():
-        return {}
-    raw = path.read_text(encoding="utf-8").strip()
-    if not raw:
-        return {}
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError(f"Frame flag file must be a JSON object: {path}")
-    out: Dict[str, List[int]] = {}
-    for key, value in data.items():
-        if isinstance(value, list):
-            frames: List[int] = []
-            for item in value:
-                if isinstance(item, dict):
-                    frame_val = item.get("frame_idx")
-                    if frame_val is None:
-                        frame_val = item.get("frame")
-                    if frame_val is None:
-                        frame_val = item.get("frame_index")
-                    if frame_val is None:
-                        continue
-                    try:
-                        frames.append(int(frame_val))
-                    except (TypeError, ValueError):
-                        continue
-                else:
-                    try:
-                        frames.append(int(item))
-                    except (TypeError, ValueError):
-                        continue
-            out[str(key)] = sorted(set(frames))
-    return out
+def _load_frame_flags(path: Path) -> Dict[str, List[dict[str, object]]]:
+    return load_frame_flags(path)  # type: ignore[return-value]
 
 
 def _read_file_list(path: Path) -> List[Path]:
@@ -126,7 +101,7 @@ def _parse_frames(text: Optional[str]) -> List[int]:
 def _collect_plans(
     paths: Sequence[Path],
     file_list: Optional[Path],
-    frame_flags: Dict[str, List[int]],
+    frame_flags: Mapping[str, Sequence[Mapping[str, object]]],
     explicit_frames: List[int],
 ) -> List[PatchPlan]:
     targets: List[Path] = []
@@ -140,11 +115,24 @@ def _collect_plans(
     plans: List[PatchPlan] = []
     for path in targets:
         path = Path(path)
-        frames = explicit_frames or frame_flags.get(str(path), [])
+        flag_entries: Optional[List[dict[str, object]]] = None
+        if explicit_frames:
+            frames = list(explicit_frames)
+        else:
+            flag_entries = entries_for_zarr_path(frame_flags, str(path))
+            frames = []
+            for entry in flag_entries:
+                frame_idx = entry.get("frame_idx")
+                if frame_idx is None:
+                    continue
+                try:
+                    frames.append(int(frame_idx))
+                except (TypeError, ValueError):
+                    continue
         frames = sorted({int(f) for f in frames})
-        if not frames:
+        if not frames and not flag_entries:
             continue
-        plans.append(PatchPlan(zarr_path=path, frames=frames))
+        plans.append(PatchPlan(zarr_path=path, frames=frames, flag_entries=flag_entries))
     return plans
 
 
@@ -431,6 +419,41 @@ def _update_keypoints_summary(
     keypoints_group.attrs["success_rate"] = round(success_rate, 2)
 
 
+def _resolve_target_keypoint_indices(
+    keypoints_group: zarr.Group,
+    frames: Sequence[int],
+    *,
+    flag_entries: Optional[Sequence[Mapping[str, object]]] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    frame_indices = keypoints_group["frame_indices"][:].astype(np.int64, copy=False)
+    total_rois = int(frame_indices.shape[0])
+    source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
+        keypoints_group,
+        total_rois=total_rois,
+    )
+    if flag_entries:
+        target_indices = resolve_flagged_roi_indices(
+            flag_entries,
+            total_rois=total_rois,
+            frame_indices=frame_indices,
+            source_refined_row_ids=source_refined_row_ids,
+            source_detect_row_index=source_detect_row_index,
+        ).astype(np.int64, copy=False)
+    else:
+        frames_arr = np.asarray(list(frames), dtype=np.int64)
+        target_indices = (
+            np.where(np.isin(frame_indices, frames_arr))[0].astype(np.int64, copy=False)
+            if frames_arr.size
+            else np.zeros((0,), dtype=np.int64)
+        )
+    target_frames = (
+        np.unique(frame_indices[target_indices])
+        if target_indices.size
+        else np.array([], dtype=np.int64)
+    )
+    return target_indices, target_frames, frame_indices
+
+
 def _patch_keypoints_run(
     root: zarr.Group,
     keypoints_group: zarr.Group,
@@ -440,11 +463,18 @@ def _patch_keypoints_run(
     *,
     apply: bool,
     patch_context: Optional[Dict[str, object]] = None,
+    flag_entries: Optional[Sequence[Mapping[str, object]]] = None,
+    target_indices: Optional[np.ndarray] = None,
 ) -> Dict[str, object]:
-    frame_indices = keypoints_group["frame_indices"][:].astype(np.int64, copy=False)
-    frames_arr = np.array(frames, dtype=np.int64)
-    target_mask = np.isin(frame_indices, frames_arr)
-    target_indices = np.where(target_mask)[0]
+    if target_indices is None:
+        target_indices, _target_frames, frame_indices = _resolve_target_keypoint_indices(
+            keypoints_group,
+            frames,
+            flag_entries=flag_entries,
+        )
+    else:
+        frame_indices = keypoints_group["frame_indices"][:].astype(np.int64, copy=False)
+        target_indices = np.asarray(target_indices, dtype=np.int64).reshape(-1)
     if target_indices.size == 0:
         return {"patched": 0, "frames": 0, "success": 0, "failed": 0}
 
@@ -846,9 +876,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         root = zarr.open_group(str(plan.zarr_path), mode="a")
 
         keypoints_group, keypoints_run = _resolve_keypoints_run(root, args.keypoints_run)
-        frame_indices = keypoints_group["frame_indices"][:].astype(np.int64, copy=False)
-        target_indices = np.where(np.isin(frame_indices, np.array(plan.frames, dtype=np.int64)))[0]
-        target_frames = np.unique(frame_indices[target_indices]) if target_indices.size else np.array([], dtype=np.int64)
+        target_indices, target_frames, _frame_indices = _resolve_target_keypoint_indices(
+            keypoints_group,
+            plan.frames,
+            flag_entries=plan.flag_entries,
+        )
         method = keypoints_group.attrs.get("method")
         if method and str(method).lower() not in {"traditional_pose", "traditional"}:
             msg = f"keypoints_run method is '{method}', patching expects traditional_pose."
@@ -891,6 +923,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 plan.frames,
                 apply=args.apply,
                 patch_context=patch_context,
+                flag_entries=plan.flag_entries,
+                target_indices=target_indices,
             )
             print(
                 f"  keypoints_run={keypoints_run} crop_run={crop_run} "

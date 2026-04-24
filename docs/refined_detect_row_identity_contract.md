@@ -71,6 +71,12 @@ Downstream ROI-aligned stages should preserve `source_refined_row_ids` and
 `source_detect_row_index` when copying row lineage from crop/keypoint/mask
 sources.
 
+Row-local repair and review consumers should resolve user-facing flag entries
+by `source_refined_row_id` first, `source_detect_row_index` second, and only
+then by legacy `frame_idx`/`roi_idx`. In-place crop repair may still use
+`detection_indices` to address the resolved source row after the stable row ID
+selects the target crop row.
+
 Legacy crop runs that predate row-lineage propagation can be audited or
 backfilled from their refined-detect `detection_source_path` when that source
 points at an `instances/` surface:

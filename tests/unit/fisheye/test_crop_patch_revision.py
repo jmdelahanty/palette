@@ -89,3 +89,69 @@ def test_patch_crop_run_bumps_revision_and_signature(tmp_path) -> None:
     assert signature["crop_revision"] == 1
     assert signature["detection_source_path"] == "refined_detect_runs/refined_001/manual"
     assert signature["detection_source_type"] == "manual"
+
+
+def test_patch_crop_run_prefers_refined_row_identity_over_stale_roi_index(tmp_path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+
+    raw_video = root.create_group("raw_video")
+    raw_video.create_array(
+        "images_full",
+        data=np.arange(64, dtype=np.uint8).reshape(1, 8, 8),
+        overwrite=True,
+    )
+
+    crop_parent = root.create_group("crop_runs")
+    crop = crop_parent.create_group("crop_001")
+    crop.attrs["roi_size"] = [2, 2]
+    crop.create_array("roi_images", data=np.zeros((2, 2, 2), dtype=np.uint8), overwrite=True)
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.array([[0, 0], [0, 0]], dtype=np.int32),
+        overwrite=True,
+    )
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.1, 0.1, 0.2, 0.2], [0.2, 0.2, 0.2, 0.2]], dtype=np.float32),
+        overwrite=True,
+    )
+    crop.create_array("frame_indices", data=np.array([0, 0], dtype=np.int32), overwrite=True)
+    crop.create_array("detection_indices", data=np.array([1, 0], dtype=np.int32), overwrite=True)
+    crop.create_array(
+        "source_refined_row_ids",
+        data=np.array([20, 10], dtype=np.int64),
+        overwrite=True,
+    )
+
+    detect = root.create_group("manual_detect")
+    detect.create_array("frame_indices", data=np.array([0, 0], dtype=np.int64), overwrite=True)
+    detect.create_array("refined_row_ids", data=np.array([10, 20], dtype=np.int64), overwrite=True)
+    detect.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.25, 0.25, 0.2, 0.2], [0.75, 0.75, 0.2, 0.2]], dtype=np.float32),
+        overwrite=True,
+    )
+
+    result = _patch_crop_run(
+        root,
+        crop,
+        detect,
+        [],
+        apply=True,
+        flag_entries=[
+            {
+                "frame_idx": 0,
+                "roi_idx": 1,
+                "source_refined_row_id": 20,
+            }
+        ],
+    )
+
+    assert result["patched"] == 1
+    np.testing.assert_allclose(crop["bbox_norm_coords"][0], np.array([0.75, 0.75, 0.2, 0.2]))
+    np.testing.assert_allclose(crop["bbox_norm_coords"][1], np.array([0.2, 0.2, 0.2, 0.2]))
+    history = crop.attrs["crop_patch_history"]
+    assert history[0]["patched_detection_indices"] == [0]
+    assert history[0]["patched_refined_row_ids"] == [20]
+    assert history[0]["patched_source_detection_indices"] == [1]

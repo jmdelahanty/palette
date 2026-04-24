@@ -8,16 +8,21 @@ crop run while preserving the rest of the dataset.
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import zarr
 
 from ..shared.crop_signature import bump_crop_revision
+from ..shared.frame_flags import (
+    entries_for_zarr_path,
+    load_frame_flags,
+    load_row_identity_arrays,
+    resolve_flagged_roi_indices,
+)
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -28,23 +33,11 @@ from ..shared.refined_detect_review import (
 class PatchPlan:
     zarr_path: Path
     frames: List[int]
+    flag_entries: Optional[List[dict[str, object]]] = None
 
 
-def _load_frame_flags(path: Path) -> Dict[str, List[int]]:
-    if not path.exists():
-        return {}
-    raw = path.read_text(encoding="utf-8").strip()
-    if not raw:
-        return {}
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError(f"Frame flag file must be a JSON object: {path}")
-    out: Dict[str, List[int]] = {}
-    for key, value in data.items():
-        if isinstance(value, list):
-            frames = [int(v) for v in value]
-            out[str(key)] = frames
-    return out
+def _load_frame_flags(path: Path) -> Dict[str, List[dict[str, object]]]:
+    return load_frame_flags(path)  # type: ignore[return-value]
 
 
 def _read_file_list(path: Path) -> List[Path]:
@@ -74,7 +67,7 @@ def _parse_frames(text: Optional[str]) -> List[int]:
 def _collect_plans(
     paths: Sequence[Path],
     file_list: Optional[Path],
-    frame_flags: Dict[str, List[int]],
+    frame_flags: Mapping[str, Sequence[Mapping[str, object]]],
     explicit_frames: List[int],
 ) -> List[PatchPlan]:
     targets: List[Path] = []
@@ -88,11 +81,24 @@ def _collect_plans(
     plans: List[PatchPlan] = []
     for path in targets:
         path = Path(path)
-        frames = explicit_frames or frame_flags.get(str(path), [])
+        flag_entries: Optional[List[dict[str, object]]] = None
+        if explicit_frames:
+            frames = list(explicit_frames)
+        else:
+            flag_entries = entries_for_zarr_path(frame_flags, str(path))
+            frames = []
+            for entry in flag_entries:
+                frame_idx = entry.get("frame_idx")
+                if frame_idx is None:
+                    continue
+                try:
+                    frames.append(int(frame_idx))
+                except (TypeError, ValueError):
+                    continue
         frames = sorted({int(f) for f in frames})
-        if not frames:
+        if not frames and not flag_entries:
             continue
-        plans.append(PatchPlan(zarr_path=path, frames=frames))
+        plans.append(PatchPlan(zarr_path=path, frames=frames, flag_entries=flag_entries))
     return plans
 
 
@@ -221,6 +227,145 @@ def _values_by_frame(frame_indices: np.ndarray, values: np.ndarray) -> Dict[str,
     return grouped
 
 
+def _optional_int_vector(
+    group: zarr.Group,
+    name: str,
+    *,
+    expected_len: Optional[int] = None,
+) -> Optional[np.ndarray]:
+    raw = group.get(name)
+    if raw is None:
+        return None
+    arr = np.asarray(raw[:], dtype=np.int64).reshape(-1)
+    if expected_len is not None and int(arr.shape[0]) != int(expected_len):
+        return None
+    return arr
+
+
+def _resolve_crop_frame_indices(
+    crop_group: zarr.Group,
+    detect_frame_indices: np.ndarray,
+    *,
+    total_rows: int,
+) -> np.ndarray:
+    crop_frame_indices = _optional_int_vector(
+        crop_group,
+        "frame_indices",
+        expected_len=total_rows,
+    )
+    if crop_frame_indices is not None:
+        return crop_frame_indices
+    if int(detect_frame_indices.shape[0]) == int(total_rows):
+        return np.asarray(detect_frame_indices, dtype=np.int64).reshape(-1)
+    raise RuntimeError("crop run missing frame_indices and cannot safely infer crop row frames.")
+
+
+def _identity_lookup(values: np.ndarray) -> Dict[int, List[int]]:
+    lookup: Dict[int, List[int]] = {}
+    for idx, value in enumerate(np.asarray(values, dtype=np.int64).reshape(-1).tolist()):
+        int_value = int(value)
+        if int_value < 0:
+            continue
+        lookup.setdefault(int_value, []).append(int(idx))
+    return lookup
+
+
+def _resolve_source_detection_rows(
+    crop_group: zarr.Group,
+    detect_group: zarr.Group,
+    crop_indices: np.ndarray,
+    *,
+    total_crop_rows: int,
+    total_source_rows: int,
+) -> np.ndarray:
+    crop_refined_row_ids, crop_source_detect_rows = load_row_identity_arrays(
+        crop_group,
+        total_rois=total_crop_rows,
+    )
+    detect_refined_row_ids = _optional_int_vector(
+        detect_group,
+        "refined_row_ids",
+        expected_len=total_source_rows,
+    )
+    has_refined_identity_surface = (
+        crop_refined_row_ids is not None and detect_refined_row_ids is not None
+    )
+    refined_lookup = _identity_lookup(detect_refined_row_ids) if detect_refined_row_ids is not None else None
+    detection_indices = _optional_int_vector(
+        crop_group,
+        "detection_indices",
+        expected_len=total_crop_rows,
+    )
+
+    source_rows: List[int] = []
+    for crop_idx_raw in np.asarray(crop_indices, dtype=np.int64).reshape(-1).tolist():
+        crop_idx = int(crop_idx_raw)
+        source_idx: Optional[int] = None
+        if (
+            crop_refined_row_ids is not None
+            and refined_lookup is not None
+            and 0 <= crop_idx < int(crop_refined_row_ids.shape[0])
+        ):
+            refined_row_id = int(crop_refined_row_ids[crop_idx])
+            if refined_row_id >= 0:
+                matches = refined_lookup.get(refined_row_id, [])
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"source_refined_row_id {refined_row_id} maps to {len(matches)} source rows."
+                    )
+                source_idx = int(matches[0])
+
+        if source_idx is None and detection_indices is not None:
+            source_idx = int(detection_indices[crop_idx])
+        if (
+            source_idx is None
+            and crop_source_detect_rows is not None
+            and detect_refined_row_ids is None
+        ):
+            source_idx = int(crop_source_detect_rows[crop_idx])
+        if source_idx is None:
+            if has_refined_identity_surface:
+                raise RuntimeError(
+                    f"crop row {crop_idx} lacks usable refined row identity or detection_indices."
+                )
+            source_idx = crop_idx
+
+        if source_idx < 0 or source_idx >= int(total_source_rows):
+            raise RuntimeError(
+                f"crop row {crop_idx} maps to out-of-bounds source detection row {source_idx}."
+            )
+        source_rows.append(source_idx)
+
+    return np.asarray(source_rows, dtype=np.int64)
+
+
+def _resolve_target_crop_indices(
+    crop_group: zarr.Group,
+    frames: Sequence[int],
+    *,
+    flag_entries: Optional[Sequence[Mapping[str, object]]],
+    crop_frame_indices: np.ndarray,
+    total_rows: int,
+) -> np.ndarray:
+    source_refined_row_ids, source_detect_row_index = load_row_identity_arrays(
+        crop_group,
+        total_rois=total_rows,
+    )
+    if flag_entries:
+        return resolve_flagged_roi_indices(
+            flag_entries,
+            total_rois=total_rows,
+            frame_indices=crop_frame_indices,
+            source_refined_row_ids=source_refined_row_ids,
+            source_detect_row_index=source_detect_row_index,
+        ).astype(np.int64, copy=False)
+
+    frames_arr = np.asarray(list(frames), dtype=np.int64)
+    if frames_arr.size == 0:
+        return np.zeros((0,), dtype=np.int64)
+    return np.where(np.isin(crop_frame_indices, frames_arr))[0].astype(np.int64, copy=False)
+
+
 def _build_patch_audit_entry(
     *,
     timestamp_utc: str,
@@ -273,25 +418,42 @@ def _patch_crop_run(
     detection_source_path: Optional[str] = None,
     detection_source_type: Optional[str] = None,
     source_refined_run: Optional[str] = None,
+    flag_entries: Optional[Sequence[Mapping[str, object]]] = None,
 ) -> Dict[str, object]:
-    frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
+    source_frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
     bbox_norm = detect_group["bbox_norm_coords"][:]
-    refined_row_ids = None
-    if "refined_row_ids" in detect_group:
-        refined_row_ids = detect_group["refined_row_ids"][:].astype(np.int64, copy=False)
 
     roi_images = crop_group["roi_images"]
     total_detections = int(roi_images.shape[0])
-    if frame_indices.shape[0] != total_detections:
+    if int(bbox_norm.shape[0]) != int(source_frame_indices.shape[0]):
         raise RuntimeError(
-            f"Detection count {frame_indices.shape[0]} does not match crop count {total_detections}."
+            f"Detection bbox count {bbox_norm.shape[0]} does not match frame count {source_frame_indices.shape[0]}."
         )
-
-    frames_arr = np.array(frames, dtype=np.int64)
-    target_mask = np.isin(frame_indices, frames_arr)
-    target_indices = np.where(target_mask)[0]
+    crop_frame_indices = _resolve_crop_frame_indices(
+        crop_group,
+        source_frame_indices,
+        total_rows=total_detections,
+    )
+    target_indices = _resolve_target_crop_indices(
+        crop_group,
+        frames,
+        flag_entries=flag_entries,
+        crop_frame_indices=crop_frame_indices,
+        total_rows=total_detections,
+    )
     if target_indices.size == 0:
         return {"patched": 0, "frames": 0}
+    source_indices = _resolve_source_detection_rows(
+        crop_group,
+        detect_group,
+        target_indices,
+        total_crop_rows=total_detections,
+        total_source_rows=int(source_frame_indices.shape[0]),
+    )
+    selected_source_frames = source_frame_indices[source_indices]
+    selected_crop_frames = crop_frame_indices[target_indices]
+    if not np.array_equal(selected_source_frames, selected_crop_frames):
+        raise RuntimeError("crop row frame_indices do not match mapped source detection rows.")
 
     roi_size = crop_group.attrs.get("roi_size")
     if isinstance(roi_size, (list, tuple)) and len(roi_size) == 2:
@@ -310,8 +472,8 @@ def _patch_crop_run(
     rois = np.zeros((target_indices.size, roi_sz[0], roi_sz[1]), dtype=np.uint8)
 
     frame_cache: Dict[int, np.ndarray] = {}
-    for i, det_idx in enumerate(target_indices):
-        frame_idx = int(frame_indices[det_idx])
+    for i, det_idx in enumerate(source_indices):
+        frame_idx = int(source_frame_indices[det_idx])
         frame = frame_cache.get(frame_idx)
         if frame is None:
             if frame_idx < 0 or frame_idx >= images_full.shape[0]:
@@ -327,21 +489,22 @@ def _patch_crop_run(
     if not apply:
         return {
             "patched": int(target_indices.size),
-            "frames": int(np.unique(frame_indices[target_indices]).size),
+            "frames": int(np.unique(crop_frame_indices[target_indices]).size),
         }
 
-    for i, det_idx in enumerate(target_indices):
-        roi_images[det_idx] = rois[i]
-        crop_group["roi_coordinates_full"][det_idx] = coords_full[i]
+    for i, crop_idx in enumerate(target_indices):
+        source_idx = int(source_indices[i])
+        roi_images[crop_idx] = rois[i]
+        crop_group["roi_coordinates_full"][crop_idx] = coords_full[i]
         if coords_ds is not None:
-            crop_group["roi_coordinates_ds"][det_idx] = coords_ds[i]
-        crop_group["bbox_norm_coords"][det_idx] = bbox_norm[det_idx]
+            crop_group["roi_coordinates_ds"][crop_idx] = coords_ds[i]
+        crop_group["bbox_norm_coords"][crop_idx] = bbox_norm[source_idx]
 
     patched_det = _update_index_array(crop_group, "patched_detection_indices", target_indices)
     patched_frames = _update_index_array(
         crop_group,
         "patched_frame_indices",
-        np.unique(frame_indices[target_indices]),
+        np.unique(crop_frame_indices[target_indices]),
     )
 
     attrs = dict(crop_group.attrs)
@@ -349,12 +512,21 @@ def _patch_crop_run(
     if not isinstance(history, list):
         history = []
     patch_timestamp = datetime.now(timezone.utc).isoformat()
+    crop_refined_row_ids, _crop_source_detect_rows = load_row_identity_arrays(
+        crop_group,
+        total_rois=total_detections,
+    )
     patch_entry = _build_patch_audit_entry(
         timestamp_utc=patch_timestamp,
-        frame_indices=frame_indices,
+        frame_indices=crop_frame_indices,
         target_indices=target_indices,
         patch_context=patch_context,
-        refined_row_ids=refined_row_ids,
+        refined_row_ids=crop_refined_row_ids,
+    )
+    patch_entry["patched_source_detection_indices"] = _int_list(source_indices)
+    patch_entry["patched_source_detection_indices_by_frame"] = _values_by_frame(
+        crop_frame_indices[target_indices],
+        source_indices,
     )
     history.append(patch_entry)
     attrs["crop_patch_history"] = history
@@ -377,7 +549,7 @@ def _patch_crop_run(
 
     return {
         "patched": int(target_indices.size),
-        "frames": int(np.unique(frame_indices[target_indices]).size),
+        "frames": int(np.unique(crop_frame_indices[target_indices]).size),
     }
 
 
@@ -474,6 +646,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             detection_source_path=detect_path,
             detection_source_type=detect_label,
             source_refined_run=refined_run,
+            flag_entries=plan.flag_entries,
         )
         print(
             f"  crop_run={crop_run} refined_run={refined_run} "

@@ -70,8 +70,9 @@ captured at two levels:
 - run-level cumulative arrays: `patched_detection_indices`,
   `patched_frame_indices`
 - per-event history entries in `crop_patch_history`, including exact
-  `patched_detection_indices`, `patched_frame_indices`, and when the source is
-  curated refined detect, `patched_refined_row_ids`
+  crop-run row targets in `patched_detection_indices`, mapped source rows in
+  `patched_source_detection_indices`, `patched_frame_indices`, and when the
+  source is curated refined detect, `patched_refined_row_ids`
 
 `bbox_norm_coords` in detect/refined-detect groups use normalized
 `[cx, cy, w, h]`.
