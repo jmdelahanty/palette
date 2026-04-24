@@ -20,7 +20,8 @@
 - If a real-zarr test hangs or is known to hang in sandbox:
   - stop that test path,
   - run non-hanging validation (`scripts/py -m py_compile` and relevant fast unit tests),
-  - report the skipped test as deferred local validation.
+  - if the real-zarr test is important to the current change, rerun that exact focused test outside the sandbox with escalation,
+  - if outside-sandbox execution is unavailable or still fails, report the skipped test as deferred local validation.
 - For deferred local validation, provide exact commands for the user to run in their terminal.
 - For new zarr-heavy tests, default to deterministic in-memory coverage first; add real-zarr integration checks only when required and mark them for local execution if sandbox stability is an issue.
 
