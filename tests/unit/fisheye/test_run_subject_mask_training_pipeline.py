@@ -61,7 +61,8 @@ def _write_manifest(path: Path, source_zarr: Path) -> None:
                     {
                         "dataset_id": "dataset_1",
                         "zarr_path": str(source_zarr),
-                        "source_subject_mask_run": "subject_masks_001",
+                        "source_stage_group": "refined_subject_masks_runs",
+                        "source_subject_mask_run": "refined_subject_masks_001",
                         "source_crop_run": "crop_001",
                     }
                 ],
@@ -217,8 +218,9 @@ def test_export_merged_invokes_exporter_and_rewrites_outputs(tmp_path: Path, mon
     source_specs = export_call["source_specs"]
     assert len(source_specs) == 1
     assert source_specs[0].source_zarr == source_zarr
-    assert source_specs[0].subject_run == "subject_masks_001"
+    assert source_specs[0].subject_run == "refined_subject_masks_001"
     assert source_specs[0].crop_run == "crop_001"
+    assert source_specs[0].stage_group == "refined_subject_masks_runs"
 
     manifest_payload = json.loads(out_manifest.read_text(encoding="utf-8"))
     assert manifest_payload["datasets"][0]["out_zarr"] == str(merged_out)

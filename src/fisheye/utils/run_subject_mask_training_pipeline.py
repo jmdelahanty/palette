@@ -130,6 +130,11 @@ def _build_merge_source_specs(
                     _as_text(entry.get("source_crop_run"))
                     or _as_text(entry.get("crop_run"))
                 ),
+                stage_group=(
+                    _as_text(entry.get("source_stage_group"))
+                    or _as_text(entry.get("stage_group"))
+                    or "subject_mask_runs"
+                ),
             )
         )
     if not specs:

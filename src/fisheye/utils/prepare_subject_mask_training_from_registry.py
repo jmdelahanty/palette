@@ -23,7 +23,7 @@ from fisheye.utils.system import build_invocation_record
 
 _as_text = _shared_as_text
 
-EXPORTABLE_STAGE_GROUP = "subject_mask_runs"
+EXPORTABLE_STAGE_GROUPS = ("subject_mask_runs", "refined_subject_masks_runs")
 TARGET_LABEL_SCHEMA = "subject_v1_union"
 TARGET_LABELS = ["subject_body", "eyes_union", "swim_bladder"]
 KNOWN_COMPONENTS = {"subject_body", "eyes_union", "eye_left", "eye_right", "swim_bladder"}
@@ -338,6 +338,7 @@ def _row_timestamp(row: Mapping[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class SubjectSourceSelection:
+    stage_group: str
     run_name: str
     crop_run: Optional[str]
     subject_mask_method: Optional[str]
@@ -363,6 +364,8 @@ def _source_exclusion_reason(
     label_schema = _as_text(component_rows[0].get("label_schema_id"))
     if source_label_schema is not None and label_schema != source_label_schema:
         return "source_label_schema_mismatch"
+    if label_schema not in {"subject_v1_union", "subject_v1_lr"}:
+        return "unsupported_source_label_schema"
 
     by_component = {str(row.get("component_name")): row for row in component_rows}
     available_rows = [
@@ -413,9 +416,10 @@ def _select_subject_sources(
     for row in latest_rows:
         latest_by_dataset.setdefault(str(row.get("dataset_id")), []).append(dict(row))
 
-    by_dataset_run: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+    by_dataset_run: Dict[tuple[str, str, str], List[Dict[str, Any]]] = {}
     for row in component_rows:
-        if _as_text(row.get("stage_group")) != EXPORTABLE_STAGE_GROUP:
+        stage_group = _as_text(row.get("stage_group"))
+        if stage_group not in EXPORTABLE_STAGE_GROUPS:
             continue
         dataset_id = _as_text(row.get("dataset_id"))
         run_name = _as_text(row.get("run_name"))
@@ -423,12 +427,12 @@ def _select_subject_sources(
             continue
         if args.subject_run is not None and run_name != str(args.subject_run):
             continue
-        by_dataset_run.setdefault((dataset_id, run_name), []).append(dict(row))
+        by_dataset_run.setdefault((dataset_id, stage_group, run_name), []).append(dict(row))
 
     candidates_by_dataset: Dict[str, List[SubjectSourceSelection]] = {}
     exclusions: List[Dict[str, str]] = []
     excluded_dataset_ids: set[str] = set()
-    for (dataset_id, run_name), rows_for_run in by_dataset_run.items():
+    for (dataset_id, stage_group, run_name), rows_for_run in by_dataset_run.items():
         reason = _source_exclusion_reason(
             component_rows=rows_for_run,
             required_components=required_components,
@@ -443,6 +447,7 @@ def _select_subject_sources(
                 {
                     "dataset_id": dataset_id,
                     "zarr_path": str(source_row.get("zarr_path") or ""),
+                    "stage_group": stage_group,
                     "run_name": run_name,
                     "reason": reason,
                 }
@@ -452,8 +457,9 @@ def _select_subject_sources(
         available_rows = [row for row in rows_for_run if int(row.get("available") or 0) == 1]
         available_components = sorted(str(row["component_name"]) for row in available_rows)
         first = rows_for_run[0]
-        performance = performance_by_key.get((dataset_id, EXPORTABLE_STAGE_GROUP, run_name), {})
+        performance = performance_by_key.get((dataset_id, stage_group, run_name), {})
         selection = SubjectSourceSelection(
+            stage_group=stage_group,
             run_name=run_name,
             crop_run=_as_text(performance.get("source_crop_run")),
             subject_mask_method=_as_text(first.get("subject_mask_method"))
@@ -486,10 +492,40 @@ def _select_subject_sources(
                 )
             continue
 
-        def candidate_key(selection: SubjectSourceSelection) -> tuple[int, int, str, str]:
+        latest_available = [
+            item
+            for item in latest_by_dataset.get(dataset_id, [])
+            if int(item.get("available") or 0) == 1
+            and _as_text(item.get("stage_group")) in EXPORTABLE_STAGE_GROUPS
+        ]
+        latest_available_components = {
+            str(item.get("component_name"))
+            for item in latest_available
+            if _as_text(item.get("component_name")) is not None
+        }
+
+        def candidate_key(selection: SubjectSourceSelection) -> tuple[int, int, int, int, str, str]:
             required_count = sum(1 for component in required_components if component in selection.available_components)
+            latest_match_count = sum(
+                1
+                for item in latest_available
+                if _as_text(item.get("stage_group")) == selection.stage_group
+                and _as_text(item.get("run_name")) == selection.run_name
+            )
+            coherent_latest = (
+                bool(latest_available_components)
+                and latest_match_count == len(latest_available_components)
+            )
+            stage_priority = 1 if selection.stage_group == "refined_subject_masks_runs" else 0
             latest_ts = max((_row_timestamp(component) for component in selection.component_rows), default="")
-            return (required_count, len(selection.available_components), latest_ts, selection.run_name)
+            return (
+                int(coherent_latest),
+                required_count,
+                len(selection.available_components),
+                latest_match_count,
+                latest_ts,
+                f"{stage_priority}:{selection.run_name}",
+            )
 
         selected = sorted(candidates, key=candidate_key, reverse=True)[0]
         source_zarr = Path(str(row["zarr_path"]))
@@ -509,15 +545,31 @@ def _select_subject_sources(
         non_exportable_latest = [
             item
             for item in latest_summary
-            if item.get("stage_group") is not None and item.get("stage_group") != EXPORTABLE_STAGE_GROUP
+            if item.get("stage_group") is not None and item.get("stage_group") not in EXPORTABLE_STAGE_GROUPS
         ]
+        selected_latest_components = [
+            item
+            for item in latest_summary
+            if item.get("stage_group") == selected.stage_group and item.get("run_name") == selected.run_name
+        ]
+        latest_exportable_runs = sorted(
+            {
+                (str(item.get("stage_group")), str(item.get("run_name")))
+                for item in latest_summary
+                if item.get("stage_group") in EXPORTABLE_STAGE_GROUPS and item.get("available") == 1
+            }
+        )
+        canonical_latest_requires_assembly = (
+            len(latest_exportable_runs) > 1
+            and any(stage_group == "refined_subject_masks_runs" for stage_group, _run_name in latest_exportable_runs)
+        )
         selected_payload.append(
             {
                 "name": _choose_dataset_name(seen_names, source_zarr, ordinal),
                 "dataset_id": dataset_id,
                 "session_uuid": _as_text(row.get("session_uuid")),
                 "zarr_path": str(source_zarr),
-                "source_stage_group": EXPORTABLE_STAGE_GROUP,
+                "source_stage_group": selected.stage_group,
                 "source_subject_mask_run": selected.run_name,
                 "source_crop_run": args.crop_run or selected.crop_run,
                 "source_subject_mask_method": selected.subject_mask_method,
@@ -537,7 +589,9 @@ def _select_subject_sources(
                     for component in selected.component_rows
                 ],
                 "canonical_latest_components": latest_summary,
+                "canonical_latest_selected_components": selected_latest_components,
                 "canonical_latest_non_exportable_components": non_exportable_latest,
+                "canonical_latest_requires_assembly": bool(canonical_latest_requires_assembly),
                 "dish_design": _as_text(row.get("dish_design")),
                 "canvas_name": _as_text(row.get("canvas_name")),
                 "rig_id": _as_text(row.get("rig_id")),
@@ -562,7 +616,7 @@ def _build_query_filter_payload(
         "input_format": args.input_format,
         "model_input": model_input,
         "subject_label_schema": TARGET_LABEL_SCHEMA,
-        "source_stage_group": EXPORTABLE_STAGE_GROUP,
+        "source_stage_groups": list(EXPORTABLE_STAGE_GROUPS),
         "subject_run": args.subject_run,
         "crop_run": args.crop_run,
         "subject_mask_method": args.subject_mask_method,
@@ -850,7 +904,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         args=args,
     )
     if not selected_sources_payload:
-        raise SystemExit("No exportable subject_mask_runs sources remain after component filtering.")
+        raise SystemExit("No exportable subject-mask sources remain after component filtering.")
 
     resolved_set_name: Optional[str] = None
     set_version: Optional[int] = None
@@ -956,6 +1010,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     command_lines = [" ".join(command)]
 
     total_selected_samples = sum(int(source.get("total_samples") or 0) for source in selected_sources_payload)
+    selected_stage_groups = sorted(
+        {
+            str(source.get("source_stage_group"))
+            for source in selected_sources_payload
+            if source.get("source_stage_group")
+        }
+    )
+    manifest_source_stage_group = selected_stage_groups[0] if len(selected_stage_groups) == 1 else "mixed"
     merged_dataset_payload: Dict[str, Any] = {
         "name": merged_dataset_name,
         "run_name": merged_run_name,
@@ -1017,7 +1079,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "set_id": set_id,
         "input_format": args.input_format,
         "subject_label_schema": TARGET_LABEL_SCHEMA,
-        "source_stage_group": EXPORTABLE_STAGE_GROUP,
+        "source_stage_group": manifest_source_stage_group,
+        "source_stage_groups": selected_stage_groups,
         "subject_run": args.subject_run,
         "crop_run": args.crop_run,
         "base_config_path": str(args.base_config),

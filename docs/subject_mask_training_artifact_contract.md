@@ -565,18 +565,17 @@ Implemented:
 - `scripts/py -m fisheye.utils.run_subject_mask_training_pipeline --manifest <manifest.json> --config <config.yaml> --export-merged --train`
 
 The registry preflight is prepare-only. It selects exportable unified
-`subject_mask_runs` sources from `subject_mask_component_quality_*` registry
-surfaces, writes `selected_sources`, and records when the canonical latest
-component rows are non-exportable `refined_subject_masks_runs`. The pipeline
-wrapper consumes that manifest, exports one merged subject-mask training zarr,
-rewrites the training config/manifest to the merged `crop_runs/<run>` and
-`subject_mask_runs/<run>`, and can launch
-`fisheye.segmentation.train_unet_subject_masks`. Direct refined-subject source
-export and subject-mask data-card aggregation are still future parity work. If
-registry latest component truth is split across multiple
-`refined_subject_masks_runs`, first assemble a new coherent refined run with
-`fisheye.refinement.assemble_refined_subject_masks`; the exporter should not
-silently combine split refined sources.
+`subject_mask_runs` or coherent `refined_subject_masks_runs` sources from
+`subject_mask_component_quality_*` registry surfaces, writes
+`selected_sources`, and flags split refined latest component truth that needs
+explicit assembly. The pipeline wrapper consumes that manifest, exports one
+merged subject-mask training zarr, rewrites the training config/manifest to the
+merged `crop_runs/<run>` and `subject_mask_runs/<run>`, and can launch
+`fisheye.segmentation.train_unet_subject_masks`. Subject-mask data-card
+aggregation is still future parity work. If registry latest component truth is
+split across multiple `refined_subject_masks_runs`, first assemble a new
+coherent refined run with `fisheye.refinement.assemble_refined_subject_masks`;
+the exporter should not silently combine split refined sources.
 
 ## Related Contracts
 

@@ -29,7 +29,7 @@ TARGET_SCHEMAS: Dict[str, Tuple[str, ...]] = {
     "subject_v1_lr": ("subject_body", "eye_left", "eye_right", "swim_bladder"),
 }
 LABEL_SCHEMA_CHOICES = ("auto", "subject_v1_union", "subject_v1_lr")
-SUBJECT_STAGE_CHOICES = ("subject_mask_runs",)
+SUBJECT_STAGE_CHOICES = ("subject_mask_runs", "refined_subject_masks_runs")
 LABEL_ORIGIN_CODES = {
     "unknown": 0,
     "auto": 1,
@@ -85,6 +85,16 @@ def _normalize_label_schema(value: Optional[str]) -> Optional[str]:
     return None
 
 
+def _normalize_subject_stage_group(value: Optional[str]) -> str:
+    text = _as_text(value) or "subject_mask_runs"
+    if text not in SUBJECT_STAGE_CHOICES:
+        raise ValueError(
+            f"Unsupported subject-mask source stage {text!r}. "
+            f"Expected one of {sorted(SUBJECT_STAGE_CHOICES)}."
+        )
+    return text
+
+
 def _normalize_bool_array(value: Any, *, expected_len: int) -> np.ndarray:
     if value is None:
         return np.ones((expected_len,), dtype=np.bool_)
@@ -108,24 +118,38 @@ def _normalize_mask_labels(value: Any) -> List[str]:
     return []
 
 
-def _resolve_source_run(root: zarr.Group, *, run_name: Optional[str]) -> Tuple[str, zarr.Group]:
-    parent = root.get("subject_mask_runs")
+def _resolve_source_run(
+    root: zarr.Group,
+    *,
+    stage_group: str,
+    run_name: Optional[str],
+) -> Tuple[str, zarr.Group]:
+    parent = root.get(stage_group)
     if not isinstance(parent, zarr.Group):
-        raise ValueError("Missing required group 'subject_mask_runs'.")
+        raise ValueError(f"Missing required group '{stage_group}'.")
     if run_name:
         if run_name not in parent:
-            raise ValueError(f"Subject-mask run '{run_name}' not found under subject_mask_runs.")
+            raise ValueError(f"Subject-mask run '{run_name}' not found under {stage_group}.")
         return str(run_name), parent[str(run_name)]
     latest = _as_text(parent.attrs.get("latest"))
     if latest and latest in parent:
         return latest, parent[latest]
-    names = sorted(str(name) for name in parent.group_keys()) if hasattr(parent, "group_keys") else sorted(parent.keys())
+    names = (
+        sorted(str(name) for name in parent.group_keys())
+        if hasattr(parent, "group_keys")
+        else sorted(parent.keys())
+    )
     if not names:
-        raise ValueError("No subject-mask runs found under subject_mask_runs.")
+        raise ValueError(f"No subject-mask runs found under {stage_group}.")
     return str(names[-1]), parent[str(names[-1])]
 
 
-def _resolve_crop_run(root: zarr.Group, *, requested: Optional[str], source_group: zarr.Group) -> Tuple[str, zarr.Group]:
+def _resolve_crop_run(
+    root: zarr.Group,
+    *,
+    requested: Optional[str],
+    source_group: zarr.Group,
+) -> Tuple[str, zarr.Group]:
     crop_name = _as_text(requested) or _as_text(source_group.attrs.get("source_crop_run"))
     crop_parent = root.get("crop_runs")
     if not isinstance(crop_parent, zarr.Group):
@@ -135,7 +159,11 @@ def _resolve_crop_run(root: zarr.Group, *, requested: Optional[str], source_grou
         if latest and latest in crop_parent:
             crop_name = latest
     if crop_name is None:
-        names = sorted(str(name) for name in crop_parent.group_keys()) if hasattr(crop_parent, "group_keys") else sorted(crop_parent.keys())
+        names = (
+            sorted(str(name) for name in crop_parent.group_keys())
+            if hasattr(crop_parent, "group_keys")
+            else sorted(crop_parent.keys())
+        )
         if not names:
             raise ValueError("No crop runs found under crop_runs.")
         crop_name = str(names[-1])
@@ -144,7 +172,7 @@ def _resolve_crop_run(root: zarr.Group, *, requested: Optional[str], source_grou
     return str(crop_name), crop_parent[str(crop_name)]
 
 
-def _resolve_source_schema(source_group: zarr.Group) -> Tuple[str, List[str], np.ndarray]:
+def _resolve_source_schema(source_group: zarr.Group, *, stage_group: str) -> Tuple[str, List[str], np.ndarray]:
     label_schema_id = _as_text(source_group.attrs.get("label_schema_id"))
     if label_schema_id not in TARGET_SCHEMAS:
         raise ValueError(
@@ -154,7 +182,7 @@ def _resolve_source_schema(source_group: zarr.Group) -> Tuple[str, List[str], np
     expected = list(TARGET_SCHEMAS[label_schema_id])
     if mask_labels != expected:
         raise ValueError(
-            f"subject_mask_runs mask_labels mismatch for schema {label_schema_id}: "
+            f"{stage_group} mask_labels mismatch for schema {label_schema_id}: "
             f"{mask_labels!r} != {expected!r}."
         )
     available = _normalize_bool_array(
@@ -238,12 +266,14 @@ class SubjectMergeSourceSpec:
     source_zarr: Path
     subject_run: Optional[str] = None
     crop_run: Optional[str] = None
+    stage_group: str = "subject_mask_runs"
 
 
 @dataclass(frozen=True)
 class SubjectResolvedSource:
     source_zarr: Path
     dataset_id: str
+    stage_group: str
     subject_run: str
     crop_run: str
     source_schema_id: str
@@ -271,7 +301,12 @@ def _resolve_source_spec(
 ) -> SubjectResolvedSource:
     source_path = Path(spec.source_zarr).expanduser().resolve()
     root = zarr.open_group(str(source_path), mode="r")
-    subject_run, subject_group = _resolve_source_run(root, run_name=spec.subject_run)
+    stage_group = _normalize_subject_stage_group(spec.stage_group)
+    subject_run, subject_group = _resolve_source_run(
+        root,
+        stage_group=stage_group,
+        run_name=spec.subject_run,
+    )
     crop_run, crop_group = _resolve_crop_run(root, requested=spec.crop_run, source_group=subject_group)
 
     if "roi_images" not in crop_group:
@@ -279,9 +314,12 @@ def _resolve_source_spec(
     if "bbox_norm_coords" not in crop_group:
         raise ValueError(f"{source_path.name}: crop_runs/{crop_run} missing bbox_norm_coords.")
     if "masks_roi" not in subject_group:
-        raise ValueError(f"{source_path.name}: subject_mask_runs/{subject_run} missing masks_roi.")
+        raise ValueError(f"{source_path.name}: {stage_group}/{subject_run} missing masks_roi.")
 
-    source_schema_id, source_labels, available_channels = _resolve_source_schema(subject_group)
+    source_schema_id, source_labels, available_channels = _resolve_source_schema(
+        subject_group,
+        stage_group=stage_group,
+    )
     projection_mode = _projection_mode(source_schema_id, target_schema_id)
     roi_images = crop_group["roi_images"]
     masks_roi = subject_group["masks_roi"]
@@ -317,6 +355,7 @@ def _resolve_source_spec(
     return SubjectResolvedSource(
         source_zarr=source_path,
         dataset_id=dataset_id,
+        stage_group=stage_group,
         subject_run=subject_run,
         crop_run=crop_run,
         source_schema_id=source_schema_id,
@@ -555,8 +594,16 @@ def export_merged_subject_mask_training_zarr_from_sources(
     source_roots: List[Tuple[Path, zarr.Group, str, List[str], np.ndarray]] = []
     for spec in source_specs:
         root = zarr.open_group(str(Path(spec.source_zarr).expanduser().resolve()), mode="r")
-        subject_run, subject_group = _resolve_source_run(root, run_name=spec.subject_run)
-        schema_id, mask_labels, available = _resolve_source_schema(subject_group)
+        stage_group = _normalize_subject_stage_group(spec.stage_group)
+        _subject_run, subject_group = _resolve_source_run(
+            root,
+            stage_group=stage_group,
+            run_name=spec.subject_run,
+        )
+        schema_id, mask_labels, available = _resolve_source_schema(
+            subject_group,
+            stage_group=stage_group,
+        )
         source_roots.append((Path(spec.source_zarr).expanduser().resolve(), root, schema_id, mask_labels, available))
 
     target_schema_id = _resolve_target_schema(
@@ -771,7 +818,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
         label_origin_dest[row_slice] = label_codes
         supervision_mode_dest[row_slice] = supervision_codes
 
-        source_stage_groups.append("subject_mask_runs")
+        source_stage_groups.append(str(source.stage_group))
         source_run_names.append(str(source.subject_run))
         source_schema_ids.append(str(source.source_schema_id))
         source_projection_modes.append(str(source.projection_mode))
@@ -817,7 +864,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
             "label_schema_id": target_schema_id,
             "mask_labels": target_labels,
             "allow_partial_supervision": True,
-            "source_mask_stage": "subject_mask_runs" if len(set(source_stage_groups)) == 1 else "mixed",
+            "source_mask_stage": source_stage_groups[0] if len(set(source_stage_groups)) == 1 else "mixed",
             "source_subject_mask_run": source_subject_mask_run,
             "source_crop_run": source_crop_run,
             "valid_channel_counts": supervision_summary["supervised_row_counts"],
@@ -846,9 +893,10 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "label_schema_id": target_schema_id,
         "mask_labels": target_labels,
         "allow_partial_supervision": True,
-        "source_stage": "subject_mask_runs" if len(set(source_stage_groups)) == 1 else "mixed",
+        "source_stage": source_stage_groups[0] if len(set(source_stage_groups)) == 1 else "mixed",
         "source_count": int(len(resolved_sources)),
         "source_zarr_paths": source_paths,
+        "source_stage_groups": list(source_stage_groups),
         "source_subject_mask_run": source_subject_mask_run,
         "source_subject_mask_runs": list(source_run_names),
         "source_crop_run": source_crop_run,
@@ -903,6 +951,7 @@ def export_merged_subject_mask_training_zarr(
     *,
     subject_run: Optional[str] = None,
     crop_run: Optional[str] = None,
+    source_stage_group: str = "subject_mask_runs",
     subject_label_schema: str = "auto",
     input_format: Optional[str] = None,
     train_ratio: float = 0.8,
@@ -921,6 +970,7 @@ def export_merged_subject_mask_training_zarr(
                 source_zarr=Path(source_zarr),
                 subject_run=subject_run,
                 crop_run=crop_run,
+                stage_group=source_stage_group,
             )
         ],
         out_zarr=Path(out_zarr),
@@ -1004,7 +1054,9 @@ def validate_merged_subject_mask_training_zarr(
             errors.append(f"missing required array source_index/{name}.")
     label_origin_codebook = _normalize_codebook_attr(source_index.attrs.get("label_origin_codebook"))
     if label_origin_codebook != LABEL_ORIGIN_CODES:
-        errors.append("source_index attr label_origin_codebook missing or does not match the stable subject-mask codebook.")
+        errors.append(
+            "source_index attr label_origin_codebook missing or does not match the stable subject-mask codebook."
+        )
     supervision_mode_codebook = _normalize_codebook_attr(source_index.attrs.get("supervision_mode_codebook"))
     if supervision_mode_codebook != SUPERVISION_MODE_CODES:
         errors.append(
@@ -1135,7 +1187,11 @@ def validate_merged_subject_mask_training_zarr(
             errors.append("roi_images appears rgb but expected gray input format.")
     if expected_label_schema_id is not None:
         expected_schema = _normalize_label_schema(expected_label_schema_id)
-        actual_schema = _as_text(root.attrs.get("training_export", {}).get("label_schema_id")) if isinstance(root.attrs.get("training_export"), dict) else None
+        actual_schema = (
+            _as_text(root.attrs.get("training_export", {}).get("label_schema_id"))
+            if isinstance(root.attrs.get("training_export"), dict)
+            else None
+        )
         if expected_schema != actual_schema:
             errors.append(f"label schema mismatch ({actual_schema!r} != expected {expected_schema!r}).")
 
@@ -1167,16 +1223,31 @@ def validate_merged_subject_mask_training_zarr(
         "channels": int(masks_roi.shape[1]),
         "source_count": source_count,
         "split_counts": split_counts,
-        "label_schema_id": _as_text(training_export.get("label_schema_id")) if isinstance(training_export, dict) else None,
+        "label_schema_id": (
+            _as_text(training_export.get("label_schema_id"))
+            if isinstance(training_export, dict)
+            else None
+        ),
         "coverage_class": summary.get("coverage_class") if isinstance(summary, dict) else None,
     }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Export merged subject-mask training zarr.")
-    parser.add_argument("sources", nargs="+", type=Path, help="One or more source zarr paths containing subject_mask_runs.")
+    parser.add_argument(
+        "sources",
+        nargs="+",
+        type=Path,
+        help="One or more source zarr paths containing subject-mask source runs.",
+    )
     parser.add_argument("out_zarr", type=Path, help="Output merged training zarr path.")
-    parser.add_argument("--subject-run", type=str, help="Optional subject_mask_runs/<run> to export from each source.")
+    parser.add_argument("--subject-run", type=str, help="Optional source run name to export from each source.")
+    parser.add_argument(
+        "--source-stage-group",
+        choices=list(SUBJECT_STAGE_CHOICES),
+        default="subject_mask_runs",
+        help="Source stage group to export from each source.",
+    )
     parser.add_argument("--crop-run", type=str, help="Optional crop_runs/<run> to use from each source.")
     parser.add_argument(
         "--subject-label-schema",
@@ -1201,6 +1272,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             source_zarr=source,
             subject_run=args.subject_run,
             crop_run=args.crop_run,
+            stage_group=args.source_stage_group,
         )
         for source in args.sources
     ]

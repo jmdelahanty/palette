@@ -110,6 +110,35 @@ def _write_source_subject_zarr(
     subject.create_array("available_channels", data=available, chunks=(len(labels),))
 
 
+def _write_refined_subject_source(
+    path: Path,
+    *,
+    run_name: str = "refined_subject_masks_001",
+) -> None:
+    root = zarr.open_group(str(path), mode="a")
+    subject = root["subject_mask_runs/subject_masks_001"]
+    parent = root.require_group("refined_subject_masks_runs")
+    parent.attrs["latest"] = run_name
+    refined = parent.create_group(run_name)
+    refined.attrs.update(
+        {
+            "source_subject_mask_run": "subject_masks_001",
+            "source_crop_run": "crop_001",
+            "label_schema_id": subject.attrs["label_schema_id"],
+            "mask_labels": list(subject.attrs["mask_labels"]),
+            "method": "manual_refined_subject_masks",
+        }
+    )
+    masks = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    masks[:, 0, 1:15, 1:15] = 1
+    refined.create_array("masks_roi", data=masks, chunks=subject["masks_roi"].chunks)
+    refined.create_array(
+        "available_channels",
+        data=np.asarray(subject["available_channels"][:], dtype=np.bool_),
+        chunks=subject["available_channels"].chunks,
+    )
+
+
 def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) -> None:
     source_path = tmp_path / "source_subject_lr.zarr"
     out_path = tmp_path / "merged_subject_lr.zarr"
@@ -191,6 +220,57 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
         "eye_right": 4,
         "swim_bladder": 0,
     }
+
+
+def test_export_subject_mask_training_reads_refined_subject_source(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_refined.zarr"
+    out_path = tmp_path / "merged_subject_refined.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_refined",
+        session_uuid="subject_source_refined",
+        include_body=True,
+        include_swim_bladder=True,
+    )
+    _write_refined_subject_source(source_path)
+
+    summary = export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        source_stage_group="refined_subject_masks_runs",
+        subject_run="refined_subject_masks_001",
+        subject_label_schema="subject_v1_union",
+        overwrite=True,
+    )
+
+    assert summary["total_samples"] == 4
+    assert summary["channels"] == 3
+    assert summary["coverage_class"] == "dense_all_components"
+    assert summary["source_subject_mask_run"] == "refined_subject_masks_001"
+
+    recheck = validate_merged_subject_mask_training_zarr(
+        out_path,
+        expected_input_format="gray",
+        expected_total_samples=4,
+        expected_label_schema_id="subject_v1_union",
+    )
+    assert recheck["channels"] == 3
+
+    root = zarr.open_group(str(out_path), mode="r")
+    source_index = root["source_index"]
+    assert source_index["source_stage_group"][:].tolist() == ["refined_subject_masks_runs"]
+    latest = str(root["subject_mask_runs"].attrs["latest"])
+    run = root[f"subject_mask_runs/{latest}"]
+    assert run.attrs["source_mask_stage"] == "refined_subject_masks_runs"
+    assert run.attrs["source_subject_mask_run"] == "refined_subject_masks_001"
+    assert root.attrs["training_export"]["source_stage"] == "refined_subject_masks_runs"
+    assert root.attrs["training_export"]["source_stage_groups"] == ["refined_subject_masks_runs"]
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    valid = np.asarray(run["target_valid_channels"][:], dtype=np.bool_)
+    assert valid.tolist() == [[True, True, True]] * 4
+    assert int(np.sum(masks[:, 0])) > 0
+    assert int(np.sum(masks[:, 1])) > 0
+    assert int(np.sum(masks[:, 2])) > 0
 
 
 def test_validate_subject_mask_training_zarr_cli(tmp_path: Path, capsys) -> None:

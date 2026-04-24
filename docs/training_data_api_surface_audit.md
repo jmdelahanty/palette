@@ -271,10 +271,11 @@ prepare -> export -> aggregate data card -> (optionally) train. Subject masks
 now has a narrower prepare-only registry preflight that writes selected-source
 manifest/config artifacts, plus a manifest-driven wrapper that chains
 selected-source merged export -> config/manifest rewrite -> optional train.
-Direct refined-subject source export and subject-mask data-card aggregation
-remain future parity work. When registry truth is split across multiple
-refined subject-mask runs, `assemble_refined_subject_masks.py` is the explicit
-consolidation step before export; exporters should stay read-only.
+Direct refined-subject source export is now supported for one coherent
+`refined_subject_masks_runs/<run>`. Subject-mask data-card aggregation remains
+future parity work. When registry truth is split across multiple refined
+subject-mask runs, `assemble_refined_subject_masks.py` is the explicit
+consolidation step before export; exporters stay read-only.
 
 ### 8b. Training config audit
 

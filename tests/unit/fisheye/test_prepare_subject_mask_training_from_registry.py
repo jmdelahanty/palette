@@ -268,6 +268,7 @@ def test_prepare_subject_mask_filters_by_component_review_state(tmp_path: Path) 
         {
             "dataset_id": "dataset_b",
             "zarr_path": str(source_b),
+            "stage_group": "subject_mask_runs",
             "run_name": "subject_masks_001",
             "reason": "review_state_mismatch",
         }
@@ -277,7 +278,7 @@ def test_prepare_subject_mask_filters_by_component_review_state(tmp_path: Path) 
     assert out_config.exists()
 
 
-def test_prepare_subject_mask_records_refined_latest_but_uses_exportable_raw_source(
+def test_prepare_subject_mask_selects_coherent_refined_latest_source(
     tmp_path: Path,
 ) -> None:
     registry_path = tmp_path / "registry.sqlite"
@@ -321,12 +322,78 @@ def test_prepare_subject_mask_records_refined_latest_but_uses_exportable_raw_sou
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     source = payload["selected_sources"][0]
 
+    assert payload["source_stage_group"] == "refined_subject_masks_runs"
+    assert source["source_stage_group"] == "refined_subject_masks_runs"
+    assert source["source_subject_mask_run"] == "refined_subject_masks_001"
+    assert source["canonical_latest_non_exportable_components"] == []
+    selected_latest = source["canonical_latest_selected_components"]
+    assert selected_latest
+    assert {row["stage_group"] for row in selected_latest} == {"refined_subject_masks_runs"}
+    assert {row["run_name"] for row in selected_latest} == {"refined_subject_masks_001"}
+    assert source["canonical_latest_requires_assembly"] is False
+
+
+def test_prepare_subject_mask_flags_split_refined_latest_for_assembly(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    base_config_path = _write_base_config(tmp_path / "subject_base.yaml")
+    source_path = tmp_path / "source_a.zarr"
+    manifest_path = tmp_path / "prepared.manifest.json"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", zarr_path=source_path)
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_001",
+        created_utc="2026-04-01T00:00:00+00:00",
+    )
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_body_001",
+        source_subject_mask_run="subject_masks_001",
+        available_components=("subject_body",),
+        created_utc="2026-04-02T00:00:00+00:00",
+    )
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_eyes_001",
+        source_subject_mask_run="subject_masks_001",
+        available_components=("eyes_union",),
+        created_utc="2026-04-03T00:00:00+00:00",
+    )
+    db.close()
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--out-manifest",
+            str(manifest_path),
+            "--require-review-state",
+            "approved",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source = payload["selected_sources"][0]
+
     assert source["source_stage_group"] == "subject_mask_runs"
     assert source["source_subject_mask_run"] == "subject_masks_001"
-    non_exportable = source["canonical_latest_non_exportable_components"]
-    assert non_exportable
-    assert {row["stage_group"] for row in non_exportable} == {"refined_subject_masks_runs"}
-    assert {row["run_name"] for row in non_exportable} == {"refined_subject_masks_001"}
+    assert source["canonical_latest_requires_assembly"] is True
+    latest_runs = {
+        (row["component_name"], row["stage_group"], row["run_name"])
+        for row in source["canonical_latest_components"]
+        if row["available"] == 1
+    }
+    assert ("subject_body", "refined_subject_masks_runs", "refined_subject_body_001") in latest_runs
+    assert ("eyes_union", "refined_subject_masks_runs", "refined_subject_eyes_001") in latest_runs
 
 
 def test_prepare_subject_mask_rejects_unknown_component(tmp_path: Path) -> None:
