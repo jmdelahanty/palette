@@ -113,8 +113,9 @@ Why this matters:
 - downstream keypoints and masks are usually written in ROI coordinates and
   need a stable mapping back to full-frame space
 - row-local stale repair depends on stable crop identity fields such as
-  `frame_indices`, `detection_indices`, `roi_coordinates_full`, and
-  crop signature/revision
+  `frame_indices`, `source_refined_row_ids` when refined detections are the
+  source, `detection_indices` for physical source-row addressing,
+  `roi_coordinates_full`, and crop signature/revision
 
 So the clean long-term policy is not "detections only." It is "shared
 crop-stage geometry/provenance remains canonical, while persisted ROI pixels
@@ -227,12 +228,16 @@ Row-level stale repair is safe only when row identity is stable.
 Minimum expectation:
 
 - stable `frame_indices`
-- stable `detection_indices` or equivalent row identity
+- stable `source_refined_row_ids` for current refined-detect sources, or
+  `detection_indices` only for source rowsets whose physical row order is known
+  stable
 - no ambiguous reordering, merge, or split of the underlying source object
 
 For current refined detections, the equivalent row identity is
-`refined_detect_runs/<run>/instances/refined_row_ids`; raw lineage is carried by
-`instances/source_detect_row_index` and audited through
+`refined_detect_runs/<run>/instances/refined_row_ids`, copied onto crop runs as
+`crop_runs/<run>/source_refined_row_ids`; raw lineage is carried by
+`instances/source_detect_row_index` and optionally by
+`crop_runs/<run>/source_detect_row_index`, and audited through
 `source_detections/resolved_refined_row_id`. See
 [refined_detect_row_identity_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_detect_row_identity_contract.md).
 

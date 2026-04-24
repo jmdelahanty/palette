@@ -61,6 +61,16 @@ Required linkage fields on `source_detections/`:
 
 ## Downstream Stale Semantics
 
+Crop runs sourced from canonical refined detections must preserve this logical
+identity as `crop_runs/<run>/source_refined_row_ids`, aligned one-to-one with
+`crop_runs/<run>/frame_indices`, `bbox_norm_coords`, and `detection_indices`.
+`detection_indices` remains the physical row index into the resolved
+`detection_source_path`; it is useful for array addressing but is not stable
+enough by itself for row-local repair after insertions or deletions.
+Downstream ROI-aligned stages should preserve `source_refined_row_ids` and
+`source_detect_row_index` when copying row lineage from crop/keypoint/mask
+sources.
+
 When a bbox edit preserves `refined_row_id`, downstream crop/keypoint/mask rows
 may be preserved and marked stale for targeted review or refresh.
 

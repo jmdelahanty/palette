@@ -18,6 +18,7 @@ from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..refinement.refine_eye_masks import _compute_roi_metrics, _measure_mask, _write_contours_from_masks
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..utils.refined_eye_masks_compat import (
     DERIVED_REFINED_EYE_MASKS_COMPAT_ROLE as DERIVED_COMPAT_ROLE,
@@ -370,12 +371,6 @@ def _load_eye_masks_and_edit_state(refined_group: zarr.Group) -> tuple[np.ndarra
             axis=1,
         )
     return eye_masks, edit_applied
-
-
-def _copy_optional_array(dest: zarr.Group, source: zarr.Group, name: str) -> None:
-    if name not in source:
-        return
-    dest.create_array(name, data=np.asarray(source[name][:]), overwrite=True)
 
 
 def _empty_summary_statistics(carryover_attrs: Mapping[str, object]) -> dict[str, object]:
@@ -759,8 +754,7 @@ def materialize_refined_eye_masks_compat(
             overwrite=True,
         )
 
-    for name in ("frame_indices", "frame_counts", "detection_indices"):
-        _copy_optional_array(run_group, refined_group, name)
+    copy_row_lineage_arrays(run_group, refined_group, total_rois=total_rois)
 
     metrics_group = run_group.require_group("metrics")
     metrics_group.create_array("area_refined", data=area_refined, chunks=(chunk_rois, 2), overwrite=True)

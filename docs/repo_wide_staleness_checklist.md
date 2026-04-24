@@ -110,8 +110,9 @@ Safe only when:
 - the crop row still maps to the same frame/detection identity
 - bbox/crop geometry can be recomputed without changing row identity
 - the canonical crop identity fields remain stable enough to reproduce the same
-  downstream ROI mapping (`frame_indices`, `detection_indices`,
-  `roi_coordinates_full`, ROI size, signature/revision)
+  downstream ROI mapping (`frame_indices`, `source_refined_row_ids` for current
+  refined-detect sources, `detection_indices` for physical source-row
+  addressing, `roi_coordinates_full`, ROI size, signature/revision)
 
 ### Escalate to rerun/invalidation when
 
@@ -154,7 +155,10 @@ Safe only when:
 Safe only when:
 
 - the edited row still maps to the same crop/detection row
-- `frame_indices` and `detection_indices` remain stable
+- `frame_indices` remain stable
+- `source_refined_row_ids` remain stable for current refined-detect sources, or
+  `detection_indices` remain stable for legacy/raw source rowsets with stable
+  physical row order
 
 ### Escalate to rerun/invalidation when
 
@@ -235,7 +239,10 @@ Safe only when:
 
 Safe only when:
 
-- `frame_indices` and `detection_indices` remain stable
+- `frame_indices` remain stable
+- `source_refined_row_ids` remain stable for current refined-detect sources, or
+  `detection_indices` remain stable for legacy/raw source rowsets with stable
+  physical row order
 - the changed source row still refers to the same ROI identity
 - the affected component can be reconciled without changing row alignment
 

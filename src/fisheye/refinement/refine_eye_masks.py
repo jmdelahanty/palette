@@ -57,6 +57,7 @@ from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.registry_stage_complete import emit_stage_completion, extract_dataset_metadata
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, coerce_positive_float, normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -2310,41 +2311,14 @@ def refine_eye_masks(
         fill_value="",
     )
 
-    def _copy_from_source(
-        array_name: str,
-        chunk_fallback: Tuple[int, ...],
-    ) -> None:
-        """Copy bookkeeping arrays from the source run if they exist."""
-        if array_name not in src_run:
-            console.print(
-                f"[yellow]Source eye-mask run missing '{array_name}'; refined run will too.[/yellow]"
-            )
-            return
-        src_arr = src_run[array_name]
-        src_data = src_arr[:]
-        chunks = getattr(src_arr, "chunks", None)
-        if not chunks:
-            chunks = chunk_fallback
-        elif isinstance(chunks, int):
-            chunks = (chunks,)
-        chunk_dims: List[int] = []
-        for axis, dim in enumerate(src_data.shape):
-            source_chunk = chunks[axis] if axis < len(chunks) else chunks[-1]
-            chunk_dims.append(int(max(1, min(dim, int(source_chunk)))))
-        chunks = tuple(chunk_dims)
-        target = _prepare_dataset(
-            array_name,
-            shape=src_data.shape,
-            chunks=chunks,
-            dtype=src_data.dtype,
-        )
-        target[:] = src_data
-        console.print(f"[dim]Copied {array_name} from source run[/dim]")
-
     # Preserve frame/detection mappings so downstream tooling can align ROIs.
-    _copy_from_source("frame_indices", (chunk_rois,))
-    _copy_from_source("detection_indices", (chunk_rois,))
-    _copy_from_source("frame_counts", (max(1, chunk_rois),))
+    lineage_result = copy_row_lineage_arrays(run_group, src_run, total_rois=total_rois)
+    for array_name in lineage_result.copied:
+        console.print(f"[dim]Copied {array_name} from source run[/dim]")
+    for array_name in lineage_result.missing:
+        console.print(
+            f"[yellow]Source eye-mask run missing '{array_name}'; refined run will too.[/yellow]"
+        )
 
     run_group_path = f"{REFINED_STAGE_NAME}_runs/{resolved_run_name}"
 

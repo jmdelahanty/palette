@@ -26,14 +26,17 @@ def test_copy_lineage_prefers_crop_when_crop_and_keypoint_match(tmp_path) -> Non
 
     frame_indices = np.array([0, 1, 2], dtype=np.int32)
     detection_indices = np.array([10, 11, 12], dtype=np.int32)
+    source_refined_row_ids = np.array([100, 101, 102], dtype=np.int64)
     frame_counts = np.array([1, 1, 1], dtype=np.int32)
 
     crop_group.create_array("frame_indices", data=frame_indices, chunks=(2,), overwrite=True)
     crop_group.create_array("detection_indices", data=detection_indices, chunks=(2,), overwrite=True)
+    crop_group.create_array("source_refined_row_ids", data=source_refined_row_ids, chunks=(2,), overwrite=True)
     crop_group.create_array("frame_counts", data=frame_counts, chunks=(2,), overwrite=True)
 
     kp_group.create_array("frame_indices", data=frame_indices, chunks=(1,), overwrite=True)
     kp_group.create_array("detection_indices", data=detection_indices, chunks=(1,), overwrite=True)
+    kp_group.create_array("source_refined_row_ids", data=source_refined_row_ids, chunks=(1,), overwrite=True)
     kp_group.create_array("frame_counts", data=frame_counts, chunks=(1,), overwrite=True)
 
     console, _ = _console_capture()
@@ -50,6 +53,7 @@ def test_copy_lineage_prefers_crop_when_crop_and_keypoint_match(tmp_path) -> Non
 
     np.testing.assert_array_equal(run_group["frame_indices"][:], frame_indices)
     np.testing.assert_array_equal(run_group["detection_indices"][:], detection_indices)
+    np.testing.assert_array_equal(run_group["source_refined_row_ids"][:], source_refined_row_ids)
     np.testing.assert_array_equal(run_group["frame_counts"][:], frame_counts)
 
 

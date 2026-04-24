@@ -5,7 +5,12 @@ from typing import Any
 import numpy as np
 import pytest
 
-from fisheye.tracking.crop import _ensure_numpy_array, get_detection_source_info
+from fisheye.tracking.crop import (
+    _ensure_numpy_array,
+    _extract_detection_rows,
+    get_detection_source_info,
+    save_crop_metadata,
+)
 
 
 class _FakeArray:
@@ -44,9 +49,11 @@ class _FakeGroup:
         self._children[name] = child
         return child
 
-    def create_array(self, name: str, *, data: Any, overwrite: bool = False) -> _FakeArray:
+    def create_array(self, name: str, *, data: Any = None, overwrite: bool = False, **kwargs: Any) -> _FakeArray:
         if not overwrite and name in self._children:
             raise ValueError(f"{name} already exists")
+        if data is None:
+            data = np.zeros(kwargs["shape"], dtype=kwargs.get("dtype", np.float32))
         arr = _FakeArray(data)
         self._children[name] = arr
         return arr
@@ -249,6 +256,115 @@ def test_explicit_instances_override_uses_curated_detection_source_array() -> No
     assert source_type == "refined"
     assert detection_source is not None
     assert detection_source.tolist() == [0, 1]
+
+
+def _seed_curated_instances_source(parent: _FakeGroup) -> _FakeGroup:
+    instances = parent.create_group("instances")
+    instances.create_array(
+        "refined_row_ids",
+        data=np.array([10, 12], dtype=np.int64),
+        overwrite=True,
+    )
+    instances.create_array(
+        "frame_indices",
+        data=np.array([2, 3], dtype=np.int32),
+        overwrite=True,
+    )
+    instances.create_array(
+        "frame_offsets",
+        data=np.array([0, 0, 1, 2, 2], dtype=np.int64),
+        overwrite=True,
+    )
+    instances.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[10, 10, 20, 20], [30, 30, 44, 44]], dtype=np.float64),
+        overwrite=True,
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.1, 0.1], [0.4, 0.4, 0.2, 0.2]], dtype=np.float64),
+        overwrite=True,
+    )
+    instances.create_array(
+        "source_kind_codes",
+        data=np.array([1, 3], dtype=np.int8),
+        overwrite=True,
+    )
+    instances.create_array(
+        "manual_edit_flags",
+        data=np.array([0, 1], dtype=np.int8),
+        overwrite=True,
+    )
+    instances.create_array(
+        "source_detect_row_index",
+        data=np.array([4, -1], dtype=np.int32),
+        overwrite=True,
+    )
+    instances.create_array(
+        "frame_counts",
+        data=np.array([0, 0, 1, 1], dtype=np.int32),
+        overwrite=True,
+    )
+    return instances
+
+
+def test_save_crop_metadata_copies_refined_row_identity_from_curated_run_root() -> None:
+    source = _FakeGroup(path="refined_detect_runs/refined_a")
+    _seed_curated_instances_source(source)
+    crop = _FakeGroup(path="crop_runs/crop_a")
+
+    save_crop_metadata(
+        crop_group=crop,  # type: ignore[arg-type]
+        source_group=source,  # type: ignore[arg-type]
+        source_path="refined_detect_runs/refined_a/instances",
+        source_type="refined",
+        detection_source=np.array([0, 0], dtype=np.int8),
+        total_detections=2,
+        num_frames=5,
+    )
+
+    assert crop["detection_indices"][:].tolist() == [0, 1]
+    assert crop["source_refined_row_ids"][:].tolist() == [10, 12]
+    assert crop["source_detect_row_index"][:].tolist() == [4, -1]
+    assert crop.attrs["source_refined_row_ids_available"] is True
+    assert crop.attrs["source_refined_row_id_policy"] == "copied_from_detection_source"
+    assert crop.attrs["source_detect_row_index_available"] is True
+
+
+def test_extract_detection_rows_supports_direct_curated_instances_group() -> None:
+    source = _FakeGroup(path="refined_detect_runs/refined_a")
+    instances = _seed_curated_instances_source(source)
+
+    frame_indices, bbox_norm = _extract_detection_rows(instances)  # type: ignore[arg-type]
+
+    assert frame_indices.tolist() == [2, 3]
+    assert bbox_norm.tolist() == [[0.5, 0.5, 0.1, 0.1], [0.4, 0.4, 0.2, 0.2]]
+
+
+def test_save_crop_metadata_rejects_misaligned_refined_row_identity() -> None:
+    source = _FakeGroup(path="refined_detect_runs/refined_a/instances")
+    source.create_array("refined_row_ids", data=np.array([10], dtype=np.int64), overwrite=True)
+    source.create_array("frame_indices", data=np.array([2, 3], dtype=np.int32), overwrite=True)
+    source.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.1, 0.1], [0.4, 0.4, 0.2, 0.2]], dtype=np.float64),
+        overwrite=True,
+    )
+    crop = _FakeGroup(path="crop_runs/crop_a")
+
+    with pytest.raises(
+        ValueError,
+        match="refined_row_ids length 1 does not match detection row count 2",
+    ):
+        save_crop_metadata(
+            crop_group=crop,  # type: ignore[arg-type]
+            source_group=source,  # type: ignore[arg-type]
+            source_path="refined_detect_runs/refined_a/instances",
+            source_type="refined",
+            detection_source=None,
+            total_detections=2,
+            num_frames=5,
+        )
 
 
 class _FakeGpuArray:

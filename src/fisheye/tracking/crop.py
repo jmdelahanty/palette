@@ -449,16 +449,135 @@ def _ensure_numpy_array(
 def _extract_detection_rows(
     source_group: zarr.Group,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    payload = _extract_detection_row_payload(source_group)
+    return payload["frame_indices"], payload["bbox_norm_coords"]
+
+
+def _extract_optional_detection_row_array(
+    source_group: zarr.Group,
+    name: str,
+    *,
+    dtype: np.dtype | str,
+    expected_len: int,
+) -> Optional[np.ndarray]:
+    if name not in source_group:
+        return None
+    values = _ensure_numpy_array(source_group[name][:], dtype=dtype, name=name).reshape(-1)
+    if values.shape[0] != expected_len:
+        raise ValueError(
+            f"{name} length {values.shape[0]} does not match detection row count {expected_len}"
+        )
+    return values
+
+
+def _extract_detection_row_payload(source_group: zarr.Group) -> Dict[str, np.ndarray]:
+    """Return source detection rows plus optional stable row identity fields."""
     if has_curated_refined_detect_surface(source_group):
         curated_rows = extract_present_curated_rows(source_group)
-        return (
-            _ensure_numpy_array(curated_rows["frame_indices"], dtype="i4", name="frame_indices"),
-            _ensure_numpy_array(curated_rows["bbox_norm_coords"], dtype="f8", name="bbox_norm_coords"),
-        )
-    return (
-        _ensure_numpy_array(source_group["frame_indices"][:], dtype="i4", name="frame_indices"),
-        _ensure_numpy_array(source_group["bbox_norm_coords"][:], dtype="f8", name="bbox_norm_coords"),
+        payload: Dict[str, np.ndarray] = {
+            "frame_indices": _ensure_numpy_array(
+                curated_rows["frame_indices"],
+                dtype="i4",
+                name="frame_indices",
+            ),
+            "bbox_norm_coords": _ensure_numpy_array(
+                curated_rows["bbox_norm_coords"],
+                dtype="f8",
+                name="bbox_norm_coords",
+            ),
+        }
+        for source_name, dtype in (
+            ("refined_row_ids", "i8"),
+            ("source_detect_row_index", "i4"),
+        ):
+            if source_name in curated_rows:
+                payload[source_name] = _ensure_numpy_array(
+                    curated_rows[source_name],
+                    dtype=dtype,
+                    name=source_name,
+                ).reshape(-1)
+        return payload
+
+    frame_indices = _ensure_numpy_array(
+        source_group["frame_indices"][:],
+        dtype="i4",
+        name="frame_indices",
     )
+    bbox_norm_coords = _ensure_numpy_array(
+        source_group["bbox_norm_coords"][:],
+        dtype="f8",
+        name="bbox_norm_coords",
+    )
+    row_count = int(frame_indices.shape[0])
+    payload = {
+        "frame_indices": frame_indices,
+        "bbox_norm_coords": bbox_norm_coords,
+    }
+    for source_name, dtype in (
+        ("refined_row_ids", "i8"),
+        ("source_detect_row_index", "i4"),
+    ):
+        values = _extract_optional_detection_row_array(
+            source_group,
+            source_name,
+            dtype=dtype,
+            expected_len=row_count,
+        )
+        if values is not None:
+            payload[source_name] = values
+    return payload
+
+
+def _write_optional_detection_row_lineage(
+    crop_group: zarr.Group,
+    payload: Mapping[str, np.ndarray],
+    *,
+    total_detections: int,
+) -> None:
+    source_refined_row_ids = payload.get("refined_row_ids")
+    if source_refined_row_ids is not None:
+        source_refined_row_ids = _ensure_numpy_array(
+            source_refined_row_ids,
+            dtype="i8",
+            name="refined_row_ids",
+        ).reshape(-1)
+        if source_refined_row_ids.shape[0] != total_detections:
+            raise ValueError(
+                "refined_row_ids length "
+                f"{source_refined_row_ids.shape[0]} does not match total detections {total_detections}"
+            )
+        crop_group.create_array(
+            "source_refined_row_ids",
+            chunks=(min(1000, total_detections),),
+            data=source_refined_row_ids,
+            overwrite=True,
+        )
+        crop_group.attrs["source_refined_row_ids_available"] = True
+        crop_group.attrs["source_refined_row_id_policy"] = "copied_from_detection_source"
+    else:
+        crop_group.attrs["source_refined_row_ids_available"] = False
+
+    source_detect_row_index = payload.get("source_detect_row_index")
+    if source_detect_row_index is not None:
+        source_detect_row_index = _ensure_numpy_array(
+            source_detect_row_index,
+            dtype="i4",
+            name="source_detect_row_index",
+        ).reshape(-1)
+        if source_detect_row_index.shape[0] != total_detections:
+            raise ValueError(
+                "source_detect_row_index length "
+                f"{source_detect_row_index.shape[0]} does not match total detections {total_detections}"
+            )
+        crop_group.create_array(
+            "source_detect_row_index",
+            chunks=(min(1000, total_detections),),
+            data=source_detect_row_index,
+            overwrite=True,
+        )
+        crop_group.attrs["source_detect_row_index_available"] = True
+    else:
+        crop_group.attrs["source_detect_row_index_available"] = False
 
 
 def resolve_source_run_info(
@@ -2433,8 +2552,18 @@ def save_crop_metadata(
         total_detections: Total number of detections
         num_frames: Total number of frames in video  # ADD THIS
     """
-    # Copy bbox coordinates
-    frame_indices, bbox_coords = _extract_detection_rows(source_group)
+    # Copy bbox coordinates and row identity from the exact source rowset used.
+    row_payload = _extract_detection_row_payload(source_group)
+    frame_indices = row_payload["frame_indices"]
+    bbox_coords = row_payload["bbox_norm_coords"]
+    if frame_indices.shape[0] != total_detections:
+        raise ValueError(
+            f"frame_indices length {frame_indices.shape[0]} does not match total detections {total_detections}"
+        )
+    if bbox_coords.shape[0] != total_detections:
+        raise ValueError(
+            f"bbox_norm_coords length {bbox_coords.shape[0]} does not match total detections {total_detections}"
+        )
     crop_group.create_array(
         'bbox_norm_coords',
         chunks=(min(1000, len(bbox_coords)), 4),
@@ -2466,6 +2595,11 @@ def save_crop_metadata(
         chunks=(min(1000, total_detections),),
         data=detection_indices,
         overwrite=True
+    )
+    _write_optional_detection_row_lineage(
+        crop_group,
+        row_payload,
+        total_detections=total_detections,
     )
     
     # Copy detection_source if provided (refined metadata)

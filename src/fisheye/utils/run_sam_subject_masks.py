@@ -22,6 +22,7 @@ from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.inference_timing import InferenceTimingProfiler
 from fisheye.shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_keypoints_attrs
+from fisheye.shared.row_lineage import copy_row_lineage_arrays
 from fisheye.shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -1379,11 +1380,11 @@ def _compute_channel_metrics(
     }
 
 
-def _copy_lineage_array(
+def _copy_detection_source_array(
     run_group: zarr.Group,
     crop_group: zarr.Group,
-    name: str,
 ) -> None:
+    name = "detection_source"
     source_arr = crop_group.get(name)
     if source_arr is None:
         return
@@ -1688,10 +1689,8 @@ def write_sam_subject_mask_run(
     if source_roi_cache_path is not None:
         run_group.attrs["source_roi_cache_path"] = source_roi_cache_path
 
-    _copy_lineage_array(run_group, crop_group, "frame_indices")
-    _copy_lineage_array(run_group, crop_group, "frame_counts")
-    _copy_lineage_array(run_group, crop_group, "detection_indices")
-    _copy_lineage_array(run_group, crop_group, "detection_source")
+    copy_row_lineage_arrays(run_group, crop_group, total_rois=n_rows)
+    _copy_detection_source_array(run_group, crop_group)
 
     storage_chunks = subject_mask_storage_chunks(n_rows, height, width)
     metric_row_chunk = subject_mask_metric_row_chunk(n_rows)

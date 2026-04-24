@@ -29,6 +29,7 @@ from ..shared.provenance_attrs import (
     extract_source_crop_snapshot_attrs,
     resolve_source_keypoints_run,
 )
+from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
 from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
@@ -128,6 +129,8 @@ class SourceSubjectMaskRun:
     source_method: Optional[str]
     source_keypoints_run: Optional[str]
     source_keypoint_group: Optional[str]
+    source_refined_row_ids: Any | None = None
+    source_detect_row_index: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -283,17 +286,6 @@ def _review_payload(
     if notes:
         payload["notes"] = notes
     return payload
-
-
-def _copy_optional_array(dest: zarr.Group, source: zarr.Group, name: str) -> None:
-    if name not in source or name in dest:
-        return
-    source_arr = source[name]
-    kwargs: dict[str, object] = {"overwrite": True}
-    chunks = getattr(source_arr, "chunks", None)
-    if chunks is not None:
-        kwargs["chunks"] = tuple(int(v) for v in chunks)
-    dest.create_array(name, data=np.asarray(source_arr[:]), **kwargs)
 
 
 def _refined_metric_chunks(total_rows: int) -> tuple[int]:
@@ -1036,6 +1028,13 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     available = group.get("available_channels")
     if available is None:
         raise RuntimeError(f"subject_mask_runs/{run_name} missing available_channels.")
+    def _lineage_array(name: str) -> Any | None:
+        if name in group:
+            return group[name]
+        if crop_group is not None:
+            return crop_group.get(name)
+        return None
+
     return SourceSubjectMaskRun(
         run_name=run_name,
         group=group,
@@ -1045,14 +1044,16 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         detection_source=group["detection_source"],
         mask_labels=tuple(str(item) for item in labels_raw),
         available_channels=np.asarray(available[:], dtype=bool),
-        frame_indices=group.get("frame_indices"),
-        frame_counts=group.get("frame_counts"),
-        detection_indices=group.get("detection_indices"),
+        frame_indices=_lineage_array("frame_indices"),
+        frame_counts=_lineage_array("frame_counts"),
+        detection_indices=_lineage_array("detection_indices"),
         source_method=str(group.attrs.get("method")) if group.attrs.get("method") is not None else None,
         source_keypoints_run=resolve_source_keypoints_run(group.attrs),
         source_keypoint_group=(
             str(group.attrs.get("source_keypoint_group")) if group.attrs.get("source_keypoint_group") is not None else None
         ),
+        source_refined_row_ids=_lineage_array("source_refined_row_ids"),
+        source_detect_row_index=_lineage_array("source_detect_row_index"),
     )
 
 
@@ -1162,6 +1163,18 @@ def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[st
         source_keypoint_group=(
             str(group.attrs.get("source_keypoint_group")) if group.attrs.get("source_keypoint_group") is not None else None
         ),
+        source_refined_row_ids=_resolve_source_lineage_array(
+            root,
+            source_group=group,
+            source_crop_run=crop_run,
+            array_name="source_refined_row_ids",
+        ),
+        source_detect_row_index=_resolve_source_lineage_array(
+            root,
+            source_group=group,
+            source_crop_run=crop_run,
+            array_name="source_detect_row_index",
+        ),
     )
 
 
@@ -1214,10 +1227,23 @@ def _load_refined_component_source_runs(
                 _load_source_subject_mask_run(root, source_run),
             )
         elif source_run and source_stage == "refined_eye_masks_runs":
-            resolved_source = cache.setdefault(
-                f"refined_eye_masks_runs/{source_run}",
-                _load_refined_eye_mask_source(root, source_run),
-            )
+            cache_key = f"refined_eye_masks_runs/{source_run}"
+            if cache_key in cache:
+                resolved_source = cache[cache_key]
+            else:
+                try:
+                    resolved_source = _load_refined_eye_mask_source(root, source_run)
+                except RuntimeError:
+                    # Older refined-subject runs may preserve legacy refined-eye
+                    # provenance even when the editor source is the coarse
+                    # subject-mask run.
+                    if default_source is not None:
+                        resolved_source = default_source
+                    elif primary_source is not None:
+                        resolved_source = primary_source
+                    else:
+                        raise
+                cache[cache_key] = resolved_source
         elif source_run and source_stage and source_stage != "subject_mask_runs":
             # Editing still operates against a coarse subject_mask_runs source even
             # when the component's original lineage points at a legacy stage such
@@ -1299,9 +1325,17 @@ def _create_refined_subject_run_from_component_seeds(
         overwrite=True,
     )
     run_group.create_array("edit_applied", data=edit_applied, chunks=metric_chunks, overwrite=True)
-    _copy_optional_array(run_group, reference_source.group, "frame_indices")
-    _copy_optional_array(run_group, reference_source.group, "frame_counts")
-    _copy_optional_array(run_group, reference_source.group, "detection_indices")
+    copy_row_lineage_arrays_from_sources(
+        run_group,
+        {
+            "frame_indices": reference_source.frame_indices,
+            "frame_counts": reference_source.frame_counts,
+            "detection_indices": reference_source.detection_indices,
+            "source_refined_row_ids": reference_source.source_refined_row_ids,
+            "source_detect_row_index": reference_source.source_detect_row_index,
+        },
+        total_rois=total_rois,
+    )
 
     metrics = run_group.require_group("metrics")
     metrics.create_array("mask_present", data=mask_present, chunks=metric_chunks, overwrite=True)

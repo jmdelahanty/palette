@@ -26,7 +26,7 @@ Relevant provenance attributes:
 | --- | --- | --- |
 | `detect_runs/<run>` | `bbox_norm_coords` | `detect_timestamp_utc`, `total_detections` |
 | `refined_detect_runs/<run>` | `instances/bbox_norm_coords`, `source_detections/bbox_norm_coords` | `source_detect_run`, `detect_review_status`, `refined_storage_semantics`, `source_detection_decision_code_map` |
-| `crop_runs/<run>` | `roi_images` | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_selection_policy`, `crop_signature`, `crop_review_status` |
+| `crop_runs/<run>` | `roi_images`, `source_refined_row_ids` *(when sourced from canonical refined detect)* | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_selection_policy`, `crop_signature`, `crop_review_status` |
 | `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref` |
 | `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
 | `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
@@ -44,8 +44,9 @@ Keypoint-lineage attribute contract for eye-mask stages:
 - Readers/diagnostics resolve canonical first, then legacy alias fallback.
 - `check_eye_masks` reports legacy-only lineage as `legacy` (warning) and missing/empty lineage as `incomplete`.
 
-Eye-mask lineage arrays (`frame_indices`, `detection_indices`, `frame_counts`)
-follow the contract in `docs/eye_mask_row_mapping_contract.md`:
+Eye-mask lineage arrays (`frame_indices`, `detection_indices`, `frame_counts`,
+`source_refined_row_ids`, `source_detect_row_index`) follow the contract in
+`docs/eye_mask_row_mapping_contract.md`:
 
 - segmentation writes should anchor lineage to source crop runs;
 - keypoint lineage arrays are used for cross-check/fallback compatibility;

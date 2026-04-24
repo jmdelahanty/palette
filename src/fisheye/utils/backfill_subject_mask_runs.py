@@ -21,6 +21,7 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.row_lineage import ROW_LINEAGE_ARRAYS
 from fisheye.shared.subject_mask_chunks import subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
@@ -576,7 +577,7 @@ def backfill_subject_mask_run(
         overwrite=True,
     )
 
-    for name in ("frame_indices", "frame_counts", "detection_indices"):
+    for name in ROW_LINEAGE_ARRAYS:
         source_array = _resolve_lineage_array(root, source, source_crop_run=source_crop_run, array_name=name)
         if source_array is not None:
             _copy_array(run_group, name, source_array)

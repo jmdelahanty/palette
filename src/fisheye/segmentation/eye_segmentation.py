@@ -25,6 +25,7 @@ from skimage import filters, measure, morphology
 from skimage.measure import EllipseModel
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_keypoints_attrs
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.row_lineage import ROW_LINEAGE_ARRAYS, copy_row_lineage_arrays_with_fallback
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
@@ -164,24 +165,6 @@ def _validate_input_row_alignment(
         stage="eye_segmentation input",
     )
 
-
-def _normalize_chunks_for_data(
-    source_chunks: Optional[Tuple[int, ...] | int],
-    data_shape: Tuple[int, ...],
-) -> Tuple[int, ...]:
-    if len(data_shape) == 0:
-        return (1,)
-    if isinstance(source_chunks, int):
-        source_chunks = (source_chunks,)
-    if not source_chunks:
-        return tuple(max(1, min(dim, 1024)) for dim in data_shape)
-    chunk_dims: List[int] = []
-    for axis, dim in enumerate(data_shape):
-        source_chunk = source_chunks[axis] if axis < len(source_chunks) else source_chunks[-1]
-        chunk_dims.append(int(max(1, min(dim, int(source_chunk)))))
-    return tuple(chunk_dims)
-
-
 def _copy_lineage_arrays_from_crop_with_keypoint_fallback(
     *,
     run_group: zarr.Group,
@@ -193,65 +176,28 @@ def _copy_lineage_arrays_from_crop_with_keypoint_fallback(
     total_rois: int,
     console: Console,
 ) -> None:
-    for array_name in ("frame_indices", "detection_indices", "frame_counts"):
-        crop_arr = crop_group.get(array_name)
-        kp_arr = kp_group.get(array_name)
-
-        crop_data = np.asarray(crop_arr[:]) if crop_arr is not None else None
-        kp_data = np.asarray(kp_arr[:]) if kp_arr is not None else None
-
-        if crop_data is not None and kp_data is not None:
-            if crop_data.shape != kp_data.shape or not np.array_equal(crop_data, kp_data):
-                raise ValueError(
-                    "eye_masks lineage mismatch for "
-                    f"'{array_name}': crop_runs/{crop_run}/{array_name} and "
-                    f"{keypoint_group_name}/{keypoint_run}/{array_name} differ"
-                )
-
-        chosen_data: Optional[np.ndarray]
-        chosen_chunks: Optional[Tuple[int, ...]]
-        if crop_data is not None:
-            chosen_data = crop_data
-            chosen_chunks = getattr(crop_arr, "chunks", None)
-        elif kp_data is not None:
-            chosen_data = kp_data
-            chosen_chunks = getattr(kp_arr, "chunks", None)
-            console.print(
-                "[yellow]Crop run missing "
-                f"'{array_name}'; falling back to "
-                f"{keypoint_group_name}/{keypoint_run}/{array_name}.[/yellow]"
-            )
-        else:
-            console.print(
-                "[yellow]Missing lineage array "
-                f"'{array_name}' in both crop_runs/{crop_run} and "
-                f"{keypoint_group_name}/{keypoint_run}; skipping.[/yellow]"
-            )
-            continue
-
-        if chosen_data.ndim == 0:
-            raise ValueError(
-                f"eye_masks lineage array '{array_name}' must be 1D, got scalar value"
-            )
-        if array_name in {"frame_indices", "detection_indices"} and int(chosen_data.shape[0]) != int(total_rois):
-            raise ValueError(
-                f"eye_masks lineage array '{array_name}' has {chosen_data.shape[0]} rows, expected {total_rois}"
-            )
-        if array_name == "frame_counts" and int(np.sum(chosen_data, dtype=np.int64)) != int(total_rois):
-            raise ValueError(
-                f"eye_masks lineage array 'frame_counts' sums to "
-                f"{int(np.sum(chosen_data, dtype=np.int64))}, expected {total_rois}"
-            )
-
-        if array_name in run_group:
-            del run_group[array_name]
-        run_group.create_array(
-            array_name,
-            data=chosen_data,
-            chunks=_normalize_chunks_for_data(chosen_chunks, chosen_data.shape),
-            overwrite=True,
+    result = copy_row_lineage_arrays_with_fallback(
+        run_group,
+        crop_group,
+        kp_group,
+        names=ROW_LINEAGE_ARRAYS,
+        total_rois=total_rois,
+    )
+    for array_name in result.fallback_copied:
+        console.print(
+            "[yellow]Crop run missing "
+            f"'{array_name}'; falling back to "
+            f"{keypoint_group_name}/{keypoint_run}/{array_name}.[/yellow]"
         )
-        if crop_data is not None:
+    for array_name in result.missing:
+        console.print(
+            "[yellow]Missing lineage array "
+            f"'{array_name}' in both crop_runs/{crop_run} and "
+            f"{keypoint_group_name}/{keypoint_run}; skipping.[/yellow]"
+        )
+    fallback_set = set(result.fallback_copied)
+    for array_name in result.copied:
+        if array_name not in fallback_set:
             console.print(f"[dim]Copied {array_name} from crop run[/dim]")
 
 

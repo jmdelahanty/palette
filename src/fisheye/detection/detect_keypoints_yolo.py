@@ -28,6 +28,7 @@ from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.registry_stage_complete import emit_stage_completion
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -457,24 +458,12 @@ def detect_keypoints_yolo(
 
     arrays = _create_output_arrays(run_group, total_rois, chunk_hint=batch_size * 4)
 
-    frame_chunks = (min(batch_size * 4, len(frame_indices)),) if frame_indices.size > 0 else None
-    run_group.create_array(
-        "frame_indices",
-        data=frame_indices,
-        chunks=frame_chunks,
-        overwrite=True,
+    lineage_result = copy_row_lineage_arrays(
+        run_group,
+        crop_group,
+        total_rois=total_rois,
     )
-
-    if "detection_indices" in crop_group:
-        det_idx = crop_group["detection_indices"][:].astype("i4", copy=False)
-        det_chunks = (min(batch_size * 4, det_idx.shape[0]),) if det_idx.size > 0 else None
-        run_group.create_array(
-            "detection_indices",
-            data=det_idx,
-            chunks=det_chunks,
-            overwrite=True,
-        )
-    else:
+    if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")
 
     total_frames_attr = (
@@ -515,11 +504,14 @@ def detect_keypoints_yolo(
     if total_frames is None:
         total_frames = int(frame_indices.max() + 1) if frame_indices.size > 0 else 0
 
-    frame_counts_total = (
-        np.bincount(frame_indices, minlength=total_frames).astype("i4", copy=False)
-        if frame_indices.size > 0
-        else np.zeros(total_frames, dtype="i4")
-    )
+    if "frame_counts" in lineage_result.copied:
+        frame_counts_total = run_group["frame_counts"][:].astype("i4", copy=False)
+    else:
+        frame_counts_total = (
+            np.bincount(frame_indices, minlength=total_frames).astype("i4", copy=False)
+            if frame_indices.size > 0
+            else np.zeros(total_frames, dtype="i4")
+        )
     count_chunks = (min(len(frame_counts_total), batch_size * 4),) if frame_counts_total.size > 0 else None
     run_group.create_array(
         "n_rois",
@@ -527,12 +519,13 @@ def detect_keypoints_yolo(
         chunks=count_chunks,
         overwrite=True,
     )
-    run_group.create_array(
-        "frame_counts",
-        data=frame_counts_total,
-        chunks=count_chunks,
-        overwrite=True,
-    )
+    if "frame_counts" not in lineage_result.copied:
+        run_group.create_array(
+            "frame_counts",
+            data=frame_counts_total,
+            chunks=count_chunks,
+            overwrite=True,
+        )
 
     crop_detection_source = crop_group.get("detection_source")
     if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:

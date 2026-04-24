@@ -23,6 +23,7 @@ from fisheye.shared.provenance_attrs import (
     extract_source_crop_snapshot_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.row_lineage import assert_row_lineage_sources_equal, copy_row_lineage_arrays
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -56,6 +57,8 @@ class ResolvedSubjectRun:
     frame_indices: Optional[zarr.Array]
     frame_counts: Optional[zarr.Array]
     detection_indices: Optional[zarr.Array]
+    source_refined_row_ids: Optional[zarr.Array]
+    source_detect_row_index: Optional[zarr.Array]
     source_keypoints_run: Optional[str]
     source_keypoint_group: Optional[str]
     source_crop_snapshot: dict[str, Any]
@@ -131,6 +134,16 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
     crop_run = normalize_attr(group.attrs.get("source_crop_run"))
     if not crop_run:
         raise ValueError(f"subject_mask_runs/{run_name} missing source_crop_run attr.")
+    crop_parent = root.get("crop_runs")
+    crop_group = crop_parent.get(crop_run) if crop_parent is not None else None
+
+    def _lineage_array(name: str) -> Optional[zarr.Array]:
+        if name in group:
+            return group[name]
+        if crop_group is not None:
+            return crop_group.get(name)
+        return None
+
     mask_probs_roi = group.get("mask_probs_roi")
     if mask_probs_roi is not None and tuple(mask_probs_roi.shape) != tuple(masks_roi.shape):
         raise ValueError(
@@ -153,9 +166,11 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
         mask_labels=tuple(str(item) for item in labels_raw),
         available_channels=np.asarray(available[:], dtype=bool),
         detection_source=detection_source,
-        frame_indices=group.get("frame_indices"),
-        frame_counts=group.get("frame_counts"),
-        detection_indices=group.get("detection_indices"),
+        frame_indices=_lineage_array("frame_indices"),
+        frame_counts=_lineage_array("frame_counts"),
+        detection_indices=_lineage_array("detection_indices"),
+        source_refined_row_ids=_lineage_array("source_refined_row_ids"),
+        source_detect_row_index=_lineage_array("source_detect_row_index"),
         source_keypoints_run=normalize_attr(resolve_source_keypoints_run(group.attrs)),
         source_keypoint_group=normalize_attr(group.attrs.get("source_keypoint_group")),
         source_crop_snapshot=extract_source_crop_snapshot_attrs(group.attrs),
@@ -164,22 +179,21 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
     )
 
 
-def _optional_array_equal(name: str, left: Optional[zarr.Array], right: Optional[zarr.Array]) -> None:
-    if left is None and right is None:
-        return
-    if left is None or right is None:
-        raise ValueError(f"Alignment mismatch: one source is missing {name}.")
-    if tuple(left.shape) != tuple(right.shape):
-        raise ValueError(f"Alignment mismatch for {name}: {left.shape} != {right.shape}.")
-    if not np.array_equal(np.asarray(left[:]), np.asarray(right[:])):
-        raise ValueError(f"Alignment mismatch for {name}.")
-
-
 def _required_array_equal(name: str, left: zarr.Array, right: zarr.Array) -> None:
     if tuple(left.shape) != tuple(right.shape):
         raise ValueError(f"Alignment mismatch for {name}: {left.shape} != {right.shape}.")
     if not np.array_equal(np.asarray(left[:]), np.asarray(right[:])):
         raise ValueError(f"Alignment mismatch for {name}.")
+
+
+def _source_lineage_arrays(source: ResolvedSubjectRun) -> dict[str, object | None]:
+    return {
+        "frame_indices": source.frame_indices,
+        "frame_counts": source.frame_counts,
+        "detection_indices": source.detection_indices,
+        "source_refined_row_ids": source.source_refined_row_ids,
+        "source_detect_row_index": source.source_detect_row_index,
+    }
 
 
 def _semantic_probabilities(
@@ -316,9 +330,7 @@ def merge_subject_mask_runs(
             f"ROI shape mismatch: {body_source.masks_roi.shape[2:]} != {eye_source.masks_roi.shape[2:]}."
         )
     _required_array_equal("detection_source", body_source.detection_source, eye_source.detection_source)
-    _optional_array_equal("frame_indices", body_source.frame_indices, eye_source.frame_indices)
-    _optional_array_equal("frame_counts", body_source.frame_counts, eye_source.frame_counts)
-    _optional_array_equal("detection_indices", body_source.detection_indices, eye_source.detection_indices)
+    assert_row_lineage_sources_equal(_source_lineage_arrays(body_source), _source_lineage_arrays(eye_source))
 
     total_rows = int(body_source.masks_roi.shape[0])
     height = int(body_source.masks_roi.shape[2])
@@ -454,13 +466,7 @@ def merge_subject_mask_runs(
     )
     platform_info = env_info.get("platform", {})
 
-    for name, source_array in (
-        ("frame_indices", body_source.frame_indices),
-        ("frame_counts", body_source.frame_counts),
-        ("detection_indices", body_source.detection_indices),
-    ):
-        if source_array is not None:
-            run_group.create_array(name, data=np.asarray(source_array[:]), overwrite=True)
+    copy_row_lineage_arrays(run_group, body_source.run_group, total_rois=total_rows)
     run_group.create_array("detection_source", data=np.asarray(body_source.detection_source[:], dtype=np.int8), overwrite=True)
 
     storage_chunks = _target_mask_chunks(total_rows, height, width)

@@ -28,6 +28,7 @@ from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, clean_mapping, normalize_attr
 from ..shared.zarr.schema import add_processing_run
@@ -787,33 +788,7 @@ def main(
             total_rois=total_rois,
         )
 
-        def _copy_metadata_array(array_name: str) -> None:
-            if array_name not in crop_group:
-                console.print(f"[yellow]Crop run missing '{array_name}'; new eye-mask run will skip it.[/yellow]")
-                return
-            src = crop_group[array_name]
-            data = src[:]
-            chunks = getattr(src, "chunks", None)
-            if not chunks:
-                chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
-            else:
-                chunk_list = []
-                for axis, dim in enumerate(data.shape):
-                    chunk_val = chunks[axis] if axis < len(chunks) else chunks[-1]
-                    chunk_list.append(int(max(1, min(dim, chunk_val))))
-                chunks = tuple(chunk_list)
-            if array_name in run_group:
-                del run_group[array_name]
-            run_group.create_array(
-                array_name,
-                data=data,
-                chunks=chunks,
-                overwrite=True,
-            )
-
-        _copy_metadata_array("frame_indices")
-        _copy_metadata_array("detection_indices")
-        _copy_metadata_array("frame_counts")
+        copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
 
         crop_detection_source = crop_group.get("detection_source")
         if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:

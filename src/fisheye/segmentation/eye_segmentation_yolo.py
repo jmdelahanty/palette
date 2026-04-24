@@ -33,6 +33,7 @@ from ..shared.provenance_attrs import (
 )
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, clean_mapping, normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -853,33 +854,7 @@ def segment_eye_masks_yolo(
 
         run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
-        def _copy_metadata_array(array_name: str) -> None:
-            if array_name not in crop_group:
-                console.print(f"[yellow]Crop run missing '{array_name}'; new eye mask run will skip it.[/yellow]")
-                return
-            source = crop_group[array_name]
-            data = source[:]
-            source_chunks = getattr(source, "chunks", None)
-            if not source_chunks:
-                source_chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
-            else:
-                chunk_list: List[int] = []
-                for axis, dim in enumerate(data.shape):
-                    chunk_val = source_chunks[axis] if axis < len(source_chunks) else source_chunks[-1]
-                    chunk_list.append(int(max(1, min(dim, chunk_val))))
-                source_chunks = tuple(chunk_list)
-            if array_name in run_group:
-                del run_group[array_name]
-            run_group.create_array(
-                array_name,
-                data=data,
-                chunks=source_chunks,
-                overwrite=True,
-            )
-
-        _copy_metadata_array("frame_indices")
-        _copy_metadata_array("detection_indices")
-        _copy_metadata_array("frame_counts")
+        copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
 
         masks = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.uint8)
         mask_probs = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.float16)

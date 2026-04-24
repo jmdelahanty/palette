@@ -195,5 +195,8 @@ class TestZarrSchema:
             "detect_review_status_ref",
             "source_detect_run",
             "source_refined_run",
+            "source_refined_row_ids_available",
+            "source_refined_row_id_policy",
+            "source_detect_row_index_available",
         }
         assert expected.issubset(set(attrs.keys()))

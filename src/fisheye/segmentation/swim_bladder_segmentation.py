@@ -20,6 +20,7 @@ from dask.diagnostics import ProgressBar
 
 from ..shared.crop_image_source import CropImageSource
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -40,7 +41,6 @@ from .subject_segmentation import (
     SUBJECT_MASK_LABEL_SCHEMA,
     _coerce_roi_to_gray,
     _compute_channel_metrics,
-    _copy_lineage_array,
     _snapshot_tuning_entry,
     _prepare_run_group,
 )
@@ -804,9 +804,7 @@ def segment_swim_bladder_masks_from_root(
                 else np.zeros((roi_count,), dtype=np.int8)
             )
 
-            _copy_lineage_array(run_group, crop_group, "frame_indices")
-            _copy_lineage_array(run_group, crop_group, "frame_counts")
-            _copy_lineage_array(run_group, crop_group, "detection_indices")
+            copy_row_lineage_arrays(run_group, crop_group, total_rois=roi_count)
             storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
             run_group.create_array("detection_source", data=detection_source, overwrite=True)
             run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)

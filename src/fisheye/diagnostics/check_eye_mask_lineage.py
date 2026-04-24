@@ -5,6 +5,8 @@ This checks that eye-mask run lineage arrays:
 - `frame_indices`
 - `detection_indices`
 - `frame_counts`
+- `source_refined_row_ids` when present on the crop source
+- `source_detect_row_index` when present on the crop source
 
 match exactly against `crop_runs/<source_crop_run>`.
 """
@@ -23,10 +25,12 @@ import zarr
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.row_lineage import PER_ROI_ROW_LINEAGE_ARRAYS, ROW_LINEAGE_ARRAYS
 from fisheye.shared.type_conversions import normalize_attr
 
 
-LINEAGE_ARRAYS = ("frame_indices", "detection_indices", "frame_counts")
+LINEAGE_ARRAYS = ROW_LINEAGE_ARRAYS
+REQUIRED_LINEAGE_ARRAYS = ("frame_indices", "detection_indices", "frame_counts")
 
 
 _utc_now = utc_now
@@ -138,15 +142,16 @@ def _analyze_run_group(
     for array_name in LINEAGE_ARRAYS:
         run_arr = run_group.get(array_name)
         crop_arr = crop_group.get(array_name)
-        if run_arr is None:
+        should_require = array_name in REQUIRED_LINEAGE_ARRAYS or crop_arr is not None or run_arr is not None
+        if run_arr is None and should_require:
             report.missing_run_arrays.append(array_name)
-        if crop_arr is None:
+        if crop_arr is None and should_require:
             report.missing_crop_arrays.append(array_name)
 
         run_data = np.asarray(run_arr[:]) if run_arr is not None else None
         crop_data = np.asarray(crop_arr[:]) if crop_arr is not None else None
 
-        if run_data is not None and total_rois is not None and array_name in {"frame_indices", "detection_indices"}:
+        if run_data is not None and total_rois is not None and array_name in PER_ROI_ROW_LINEAGE_ARRAYS:
             if int(run_data.shape[0]) != int(total_rois):
                 report.row_length_issues.append(
                     f"{array_name}: len={run_data.shape[0]} expected={total_rois}"

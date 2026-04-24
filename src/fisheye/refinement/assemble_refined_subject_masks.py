@@ -12,6 +12,7 @@ import numpy as np
 import zarr
 
 from ..shared.provenance_attrs import CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS
+from ..shared.row_lineage import assert_row_lineage_sources_equal
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
 from ..tune.refined_subject_mask_review import (
     RefinedSubjectComponentSeed,
@@ -38,12 +39,14 @@ def _required_array_equal(name: str, left: Any, right: Any) -> None:
         raise ValueError(f"Alignment mismatch for {name}.")
 
 
-def _optional_array_equal(name: str, left: Any | None, right: Any | None) -> None:
-    if left is None and right is None:
-        return
-    if left is None or right is None:
-        raise ValueError(f"Alignment mismatch for optional {name}: one source is missing it.")
-    _required_array_equal(name, left, right)
+def _source_lineage_arrays(source: SourceSubjectMaskRun) -> dict[str, object | None]:
+    return {
+        "frame_indices": source.frame_indices,
+        "frame_counts": source.frame_counts,
+        "detection_indices": source.detection_indices,
+        "source_refined_row_ids": source.source_refined_row_ids,
+        "source_detect_row_index": source.source_detect_row_index,
+    }
 
 
 def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSubjectMaskRun) -> None:
@@ -74,9 +77,7 @@ def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSub
             f"ROI shape mismatch: {reference.masks_roi.shape[2:]} != {other.masks_roi.shape[2:]}."
         )
     _required_array_equal("detection_source", reference.detection_source, other.detection_source)
-    _optional_array_equal("frame_indices", reference.frame_indices, other.frame_indices)
-    _optional_array_equal("frame_counts", reference.frame_counts, other.frame_counts)
-    _optional_array_equal("detection_indices", reference.detection_indices, other.detection_indices)
+    assert_row_lineage_sources_equal(_source_lineage_arrays(reference), _source_lineage_arrays(other))
 
 
 def _shared_value(sources: Sequence[SourceSubjectMaskRun], attr_name: str) -> Optional[str]:

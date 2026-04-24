@@ -30,6 +30,7 @@ from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import resolve_materialized_crop_run
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.registry_stage_complete import emit_stage_completion
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
@@ -709,20 +710,27 @@ def detect_keypoints(
     
     console.print(f"Total ROIs to process: [green]{total_rois}[/green]")
     
-    # Precompute frame indices and counts (align with detection outputs)
+    # Precompute frame indices and copy crop row-lineage arrays.
     frame_indices = crop_group['frame_indices'][:].astype('i4', copy=False)
-    frame_chunks = (min(chunk_size, total_rois),) if total_rois > 0 else None
-    keypoint_group.create_array(
-        'frame_indices',
-        data=frame_indices,
-        chunks=frame_chunks,
-        overwrite=True
+    lineage_result = copy_row_lineage_arrays(
+        keypoint_group,
+        crop_group,
+        total_rois=total_rois,
     )
-    
-    frame_counts_total = (
-        np.bincount(frame_indices, minlength=root['raw_video/images_full'].shape[0]).astype('i4', copy=False)
-        if total_rois > 0 else np.zeros(root['raw_video/images_full'].shape[0], dtype='i4')
-    )
+    if "frame_counts" in lineage_result.copied:
+        frame_counts_total = keypoint_group["frame_counts"][:].astype("i4", copy=False)
+    else:
+        frame_counts_total = (
+            np.bincount(frame_indices, minlength=root['raw_video/images_full'].shape[0]).astype('i4', copy=False)
+            if total_rois > 0 else np.zeros(root['raw_video/images_full'].shape[0], dtype='i4')
+        )
+        count_chunks = (min(chunk_size, len(frame_counts_total)),) if len(frame_counts_total) > 0 else None
+        keypoint_group.create_array(
+            'frame_counts',
+            data=frame_counts_total,
+            chunks=count_chunks,
+            overwrite=True
+        )
     count_chunks = (min(chunk_size, len(frame_counts_total)),) if len(frame_counts_total) > 0 else None
     keypoint_group.create_array(
         'n_rois',
@@ -730,23 +738,8 @@ def detect_keypoints(
         chunks=count_chunks,
         overwrite=True
     )
-    keypoint_group.create_array(
-        'frame_counts',
-        data=frame_counts_total,
-        chunks=count_chunks,
-        overwrite=True
-    )
 
-    if 'detection_indices' in crop_group:
-        detection_indices = crop_group['detection_indices'][:].astype('i4', copy=False)
-        det_chunks = (min(chunk_size, detection_indices.shape[0]),) if detection_indices.size > 0 else None
-        keypoint_group.create_array(
-            'detection_indices',
-            data=detection_indices,
-            chunks=det_chunks,
-            overwrite=True
-        )
-    else:
+    if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; keypoint run will omit them.[/yellow]")
     
     # Create output arrays matching detection-style layout

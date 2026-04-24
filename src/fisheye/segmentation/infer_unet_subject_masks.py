@@ -19,6 +19,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -185,7 +186,8 @@ def _prepare_run_group(
     return run_group, str(resolved_name)
 
 
-def _copy_lineage_array(run_group: zarr.Group, crop_group: zarr.Group, array_name: str) -> None:
+def _copy_detection_source_array(run_group: zarr.Group, crop_group: zarr.Group) -> None:
+    array_name = "detection_source"
     if array_name not in crop_group:
         return
     src = crop_group[array_name]
@@ -459,10 +461,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     timing_profiler = InferenceTimingProfiler(enabled=bool(args.profile_timings))
 
     try:
-        _copy_lineage_array(run_group, crop_group, "frame_indices")
-        _copy_lineage_array(run_group, crop_group, "frame_counts")
-        _copy_lineage_array(run_group, crop_group, "detection_indices")
-        _copy_lineage_array(run_group, crop_group, "detection_source")
+        copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
+        _copy_detection_source_array(run_group, crop_group)
         if "detection_source" not in run_group:
             run_group.create_array(
                 "detection_source",

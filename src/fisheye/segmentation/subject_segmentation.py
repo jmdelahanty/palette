@@ -23,6 +23,7 @@ from ..diagnostics.preview_eye_mask_background_subtraction import (
 )
 from ..shared.crop_image_source import CropImageSource
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -289,13 +290,6 @@ def _extract_dish_mask_roi(
     return _extract_background_roi_full(dish_mask_image, top_left_xy_full, roi_shape)
 
 
-def _copy_lineage_array(run_group: zarr.Group, crop_group: zarr.Group, name: str) -> None:
-    source = crop_group.get(name)
-    if source is None:
-        return
-    run_group.create_array(name, data=np.asarray(source[:]), overwrite=True)
-
-
 def _compute_channel_metrics(
     binary_masks: np.ndarray,
     probs: np.ndarray,
@@ -535,9 +529,7 @@ def segment_subject_masks_from_root(
         if tuning_entry_snapshot is not None:
             run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
 
-        _copy_lineage_array(run_group, crop_group, "frame_indices")
-        _copy_lineage_array(run_group, crop_group, "frame_counts")
-        _copy_lineage_array(run_group, crop_group, "detection_indices")
+        copy_row_lineage_arrays(run_group, crop_group, total_rois=roi_count)
         storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
         metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
         run_group.create_array("detection_source", data=detection_source, overwrite=True)

@@ -21,6 +21,10 @@ Lineage arrays covered by this contract:
 - `frame_indices` (`(n_rois,)`)
 - `detection_indices` (`(n_rois,)`, optional only for legacy compatibility)
 - `frame_counts` (`(n_frames,)`)
+- `source_refined_row_ids` (`(n_rois,)`, optional when refined detect lineage
+  exists)
+- `source_detect_row_index` (`(n_rois,)`, optional when raw detect lineage
+  exists)
 
 ## Canonical Source of Truth
 
@@ -60,6 +64,8 @@ Recommended strict-mode checks:
 
 - `len(frame_indices) == n_rois`
 - if present: `len(detection_indices) == n_rois`
+- if present: `len(source_refined_row_ids) == n_rois`
+- if present: `len(source_detect_row_index) == n_rois`
 - if present: `sum(frame_counts) == n_rois`
 - if both crop and keypoint lineage arrays are available during write-time
   validation: values must match exactly.
