@@ -570,16 +570,32 @@ _REFINED_EYE_MASK_METRICS: Tuple[ArraySpec, ...] = (
     ArraySpec("area_source", "float32", ("n_rois", 2)),
     ArraySpec("area_zscore", "float32", ("n_rois", 2)),
     ArraySpec("area_delta_vs_source", "float32", ("n_rois", 2)),
+    ArraySpec("area_ratio_vs_source", "float32", ("n_rois", 2)),
     ArraySpec("centroid_error", "float32", ("n_rois", 2)),
     ArraySpec("symmetry_offsets", "float32", ("n_rois", 2)),
-    ArraySpec("separation_refined", "float32", ("n_rois",)),
     ArraySpec("axis_ratio", "float32", ("n_rois", 2)),
     ArraySpec("circularity", "float32", ("n_rois", 2)),
+    ArraySpec("probability_mean", "float32", ("n_rois", 2)),
+    ArraySpec("probability_max", "float32", ("n_rois", 2)),
+    ArraySpec("probability_var", "float32", ("n_rois", 2)),
+    ArraySpec("probability_high_fraction", "float32", ("n_rois", 2)),
+    ArraySpec("area_union_refined", "float32", ("n_rois",)),
+    ArraySpec("area_union_source", "float32", ("n_rois",)),
+    ArraySpec("area_ratio_left_right", "float32", ("n_rois",)),
+    ArraySpec("area_diff_left_right", "float32", ("n_rois",)),
+    ArraySpec("area_union_delta", "float32", ("n_rois",)),
+    ArraySpec("area_union_ratio", "float32", ("n_rois",)),
+    ArraySpec("symmetry_sum", "float32", ("n_rois",)),
+    ArraySpec("symmetry_abs_diff", "float32", ("n_rois",)),
+    ArraySpec("separation_refined", "float32", ("n_rois",)),
+    ArraySpec("separation_keypoint", "float32", ("n_rois",)),
+    ArraySpec("separation_delta", "float32", ("n_rois",)),
     ArraySpec("connectivity_flags", "uint8", ("n_rois",)),
     ArraySpec("smoothing_flags", "uint8", ("n_rois", 2)),
     ArraySpec("pixels_reassigned", "int32", ("n_rois",)),
     ArraySpec("probabilities_used", "bool", ("n_rois",)),
-    ArraySpec("filter_flags", "uint8", ("n_rois", 2)),
+    ArraySpec("filter_flags", "bool", ("n_rois", 2)),
+    ArraySpec("reason_bytes", "uint8", ("n_rois", "width")),
     ArraySpec("reason", "string", ("n_rois",)),
 )
 
@@ -639,6 +655,45 @@ SUBJECT_MASKS_SPEC = StageSpec(
 _REFINED_SUBJECT_MASK_METRICS: Tuple[ArraySpec, ...] = (
     ArraySpec("mask_present", "bool", ("n_rois", "n_channels")),
     ArraySpec("area_px", "float32", ("n_rois", "n_channels")),
+    ArraySpec("centroid_xy", "float32", ("n_rois", "n_channels", 2)),
+    ArraySpec("centroid_valid", "bool", ("n_rois", "n_channels")),
+    ArraySpec("bbox_xyxy", "float32", ("n_rois", "n_channels", 4)),
+    ArraySpec("bbox_valid", "bool", ("n_rois", "n_channels")),
+)
+
+REFINED_SUBJECT_COMPONENT_ARRAYS: Tuple[ArraySpec, ...] = (
+    ArraySpec("mask_present", "bool", ("n_rois",)),
+    ArraySpec("area_px", "float32", ("n_rois",)),
+    ArraySpec("edit_applied", "bool", ("n_rois",)),
+    ArraySpec("reason_bytes", "uint8", ("n_rois", "width")),
+    ArraySpec("reason", "string", ("n_rois",)),
+)
+
+REFINED_SUBJECT_COMPONENT_METRICS: Tuple[ArraySpec, ...] = (
+    ArraySpec("component_count", "int32", ("n_rois",)),
+    ArraySpec("largest_component_fraction", "float32", ("n_rois",)),
+    ArraySpec("hole_count", "int32", ("n_rois",)),
+    ArraySpec("hole_area_fraction", "float32", ("n_rois",)),
+    ArraySpec("sigma_noise", "float32", ("n_rois",)),
+    ArraySpec("curvature_var", "float32", ("n_rois",)),
+    ArraySpec("ipr", "float32", ("n_rois",)),
+    ArraySpec("solidity", "float32", ("n_rois",)),
+)
+
+REFINED_SUBJECT_EYE_GEOMETRY: Tuple[ArraySpec, ...] = (
+    ArraySpec("ellipse_params", "float32", ("n_rois", 5)),
+    ArraySpec("ellipse_success", "bool", ("n_rois",)),
+)
+
+REFINED_SUBJECT_EYE_CONTOURS: Tuple[ArraySpec, ...] = (
+    ArraySpec("ptr", "int64", ("n_rois",)),
+    ArraySpec("len", "int32", ("n_rois",)),
+    ArraySpec("points_xy", "float32", ("n_points", 2)),
+)
+
+REFINED_SUBJECT_EYE_PAIR_METRICS: Tuple[ArraySpec, ...] = (
+    ArraySpec("separation_px", "float32", ("n_rois",)),
+    ArraySpec("separation_valid", "bool", ("n_rois",)),
 )
 
 REFINED_SUBJECT_MASKS_SPEC = StageSpec(
@@ -715,6 +770,11 @@ __all__ = [
     "REFINED_EYE_MASKS_SPEC",
     "SUBJECT_MASKS_SPEC",
     "REFINED_SUBJECT_MASKS_SPEC",
+    "REFINED_SUBJECT_COMPONENT_ARRAYS",
+    "REFINED_SUBJECT_COMPONENT_METRICS",
+    "REFINED_SUBJECT_EYE_GEOMETRY",
+    "REFINED_SUBJECT_EYE_CONTOURS",
+    "REFINED_SUBJECT_EYE_PAIR_METRICS",
     "ARENA_ASSIGNMENT_SPEC",
     "TRACKING_SPEC",
     "STAGES",

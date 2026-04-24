@@ -18,9 +18,14 @@ from fisheye.shared.zarr.stage_arrays import (
     EYE_MASKS_SPEC,
     KEYPOINTS_SPEC,
     REFINED_DETECT_SPEC,
+    REFINED_EYE_MASKS_SPEC,
+    REFINED_SUBJECT_COMPONENT_METRICS,
+    REFINED_SUBJECT_EYE_PAIR_METRICS,
+    REFINED_SUBJECT_MASKS_SPEC,
     STAGES,
     ArraySpec,
     StageSpec,
+    array_specs_by_name,
     validate_run,
 )
 
@@ -34,6 +39,7 @@ DEFAULT_DIMS: Dict[str, int] = {
     "n_instances": 3,
     "n_frame_offsets": 4,
     "n_rois": 4,
+    "n_channels": 4,
     "n_keypoints": 5,
     "n_import_frames": 2,
     "n_samples": 3,
@@ -162,6 +168,51 @@ def test_validate_run_accepts_detect_crop_keypoints_and_eye_masks_groups() -> No
         KEYPOINTS_SPEC,
         EYE_MASKS_SPEC,
     ):
+        group = zarr.group()
+        _write_required_arrays(group, stage_spec)
+
+        result = validate_run(group, stage_spec)
+        assert result.valid, f"{stage_spec.stage_name} errors: {result.errors}"
+
+
+def test_refined_mask_stage_specs_cover_writer_metric_surfaces() -> None:
+    refined_eye_metrics = array_specs_by_name(REFINED_EYE_MASKS_SPEC, subgroup="metrics")
+    for name in (
+        "area_ratio_vs_source",
+        "area_union_refined",
+        "area_union_source",
+        "area_union_ratio",
+        "separation_keypoint",
+        "separation_delta",
+        "probability_mean",
+        "probability_high_fraction",
+        "reason_bytes",
+    ):
+        assert name in refined_eye_metrics
+    assert refined_eye_metrics["filter_flags"].dtype == "bool"
+
+    refined_subject_metrics = array_specs_by_name(REFINED_SUBJECT_MASKS_SPEC, subgroup="metrics")
+    for name in ("mask_present", "area_px", "centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid"):
+        assert name in refined_subject_metrics
+
+    component_metric_names = {spec.name for spec in REFINED_SUBJECT_COMPONENT_METRICS}
+    assert {
+        "component_count",
+        "largest_component_fraction",
+        "hole_count",
+        "hole_area_fraction",
+        "sigma_noise",
+        "curvature_var",
+        "ipr",
+        "solidity",
+    }.issubset(component_metric_names)
+
+    eye_pair_metric_names = {spec.name for spec in REFINED_SUBJECT_EYE_PAIR_METRICS}
+    assert eye_pair_metric_names == {"separation_px", "separation_valid"}
+
+
+def test_validate_run_accepts_current_refined_mask_specs() -> None:
+    for stage_spec in (REFINED_EYE_MASKS_SPEC, REFINED_SUBJECT_MASKS_SPEC):
         group = zarr.group()
         _write_required_arrays(group, stage_spec)
 

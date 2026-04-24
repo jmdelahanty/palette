@@ -222,15 +222,12 @@ Required arrays:
   - true when the refined mask row/channel was changed relative to the source
     subject-mask run
 
-Required `metrics/` arrays:
+Required common `metrics/` arrays:
 
 - `mask_present`
   - shape: `(N, C)`
 - `area_px`
   - shape: `(N, C)`
-
-Recommended common geometry `metrics/` arrays:
-
 - `centroid_xy`
   - shape: `(N, C, 2)`
 - `centroid_valid`
@@ -239,6 +236,10 @@ Recommended common geometry `metrics/` arrays:
   - shape: `(N, C, 4)`
 - `bbox_valid`
   - shape: `(N, C)`
+
+These are the shared run-level mask geometry arrays. They apply uniformly to
+every refined component channel and are represented in code by
+`REFINED_SUBJECT_MASKS_SPEC`.
 
 Recommended lineage arrays:
 
@@ -500,7 +501,8 @@ Recommended examples for `components/<component>/metrics/`:
 
 Common cross-component geometry such as centroid and bbox should stay at
 run-level `metrics/`, while component-specific QC should live under
-`components/<component>/metrics/`.
+`components/<component>/metrics/`. These component-local arrays are represented
+in code by `REFINED_SUBJECT_COMPONENT_METRICS`.
 
 Why per-component subgroups:
 
@@ -524,6 +526,8 @@ Why this belongs under `relations/` rather than under one eye component:
 - `eye_separation` is a pairwise derived value
 - duplicating it under both eye components creates synchronization risk
 - it should not require inventing a fake mask component such as `eye_pair`
+- this relation surface is represented in code by
+  `REFINED_SUBJECT_EYE_PAIR_METRICS`
 
 ## Geometry Extension Policy
 

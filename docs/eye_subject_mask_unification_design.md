@@ -216,6 +216,14 @@ is truly per-eye, for example:
 Run-level `metrics/` should continue to hold only cross-component fixed-shape
 summary arrays that already apply to every subject-mask component.
 
+The current code contract mirrors this split:
+
+- `REFINED_SUBJECT_MASKS_SPEC` covers common run-level mask geometry.
+- `REFINED_SUBJECT_COMPONENT_METRICS` covers component-local QC.
+- `REFINED_SUBJECT_EYE_PAIR_METRICS` covers pairwise eye relation metrics.
+- `REFINED_EYE_MASKS_SPEC` remains the compatibility contract for legacy
+  `refined_eye_masks_runs`.
+
 ## Review And Registry Alignment
 
 Eye unification should also align semantics above the storage layer.

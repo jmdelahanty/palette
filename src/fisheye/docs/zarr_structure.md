@@ -695,11 +695,20 @@ Row lineage (`frame_indices`, `detection_indices`, `frame_counts`,
 
 `metrics/` subgroup:
 
-- Scalar QA arrays such as `area_refined`, `area_delta_vs_source`,
-  `centroid_error`, `symmetry_offsets`, `separation_delta`, `axis_ratio`,
-  `circularity`, `probability_*`, `filter_flags`, `connectivity_flags`,
-  `smoothing_flags`, `pixels_reassigned`, `reason` (tags include
-  `refined`, `copied_original`, `filtered_*`, `retuned`, `manual_correction`).
+- Per-eye area arrays: `area_refined`, `area_source`, `area_zscore`,
+  `area_delta_vs_source`, `area_ratio_vs_source`.
+- Eye-pair area/symmetry arrays: `area_union_refined`,
+  `area_union_source`, `area_ratio_left_right`, `area_diff_left_right`,
+  `area_union_delta`, `area_union_ratio`, `symmetry_sum`,
+  `symmetry_abs_diff`.
+- Geometry/QC arrays: `centroid_error`, `symmetry_offsets`,
+  `separation_refined`, `separation_keypoint`, `separation_delta`,
+  `axis_ratio`, `circularity`, `connectivity_flags`, `smoothing_flags`,
+  `filter_flags`, `pixels_reassigned`.
+- Probability arrays: `probabilities_used`, `probability_mean`,
+  `probability_max`, `probability_var`, `probability_high_fraction`.
+- Reason arrays: `reason_bytes` and `reason` (tags include `refined`,
+  `copied_original`, `filtered_*`, `retuned`, `manual_correction`).
 
 Attributes expose `metrics_summary`, configuration snapshots, per-eye filter
 thresholds, `summary_statistics`, `retune_params`, and links to source runs
@@ -820,8 +829,15 @@ when `mask_labels` includes `eye_left` and `eye_right`. Eye masks are stored in
 
 `metrics/` subgroup:
 
-- required: `mask_present`, `area_px`
-- recommended: `centroid_xy`, `centroid_valid`, `bbox_xyxy`, `bbox_valid`
+- required common mask geometry: `mask_present`, `area_px`,
+  `centroid_xy`, `centroid_valid`, `bbox_xyxy`, `bbox_valid`
+- component-local QC lives under `components/<component>/metrics/` and
+  includes `component_count`, `largest_component_fraction`, `hole_count`,
+  `hole_area_fraction`, `sigma_noise`, `curvature_var`, `ipr`, and
+  `solidity`
+- eye-pair relation metrics live under
+  `relations/eye_pair/metrics/{separation_px,separation_valid}` when both
+  `eye_left` and `eye_right` are present
 
 Important attrs:
 

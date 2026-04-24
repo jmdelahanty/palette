@@ -71,6 +71,37 @@ The distinction is intentional:
 - `target_valid_channels` means a specific training row-channel pair is
   supervised and should contribute to loss
 
+## Source Parity Audit
+
+The preflight manifest is the canonical source-selection contract for a merged
+subject-mask training export. It records the exact source zarr, source stage,
+source run, crop run, label schema, sample count, available components, and
+registry component-quality rows selected for export.
+
+Before export or training, operators should be able to verify that those
+registry-surfaced rows still match the on-disk source representation:
+
+```bash
+scripts/py -m fisheye.utils.audit_subject_mask_training_sources \
+  /path/to/subject_mask_training.manifest.json
+```
+
+The audit checks the manifest `selected_sources` rows against source zarrs:
+
+- selected `source_stage_group/source_subject_mask_run` exists
+- selected crop run exists and row-counts match `masks_roi`
+- `label_schema_id`, `mask_labels`, `available_channels`, and
+  `available_components` agree
+- component review state/intended-use from registry agrees with
+  `component_review_statuses`
+- component mask-present rates agree when `metrics/mask_present` is present
+- `refined_subject_masks_runs` sources have approved available components by
+  default, matching the merged exporter policy
+
+Use `--allow-unapproved-refined` only for draft/QA exports that intentionally
+mirror the exporter override. Use `--read-masks-for-rates` when
+`metrics/mask_present` is missing and a heavier `masks_roi` scan is acceptable.
+
 ## Evolution Policy
 
 This training contract is intended to support:
