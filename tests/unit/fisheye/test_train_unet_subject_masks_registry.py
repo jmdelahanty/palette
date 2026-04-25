@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 
@@ -173,6 +174,21 @@ def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
     assert model_summary["component_coverage_key"] == "body+eyes"
     assert Path(calls[1]["model_path"]).name == "best_model.pt"
     assert Path(calls[1]["metrics_path"]).name == "training_history.json"
+    live_history_path = (
+        tmp_path
+        / "runs"
+        / "subject_mask_unet_registry_test"
+        / "training_history_live.jsonl"
+    )
+    assert live_history_path.exists()
+    live_rows = [
+        json.loads(line)
+        for line in live_history_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert live_rows[0]["event"] == "epoch_metrics"
+    assert live_rows[0]["epoch"] == 1
+    assert "val_dice_subject_body" in live_rows[0]
 
 
 def test_subject_mask_model_summary_tracks_component_combinations() -> None:
@@ -237,7 +253,7 @@ def test_validation_preview_writer_outputs_composite_png(tmp_path: Path) -> None
         valid_channels=[np.array([1.0, 1.0, 1.0], dtype=np.float32)],
         mask_labels=("subject_body", "eyes_union", "swim_bladder"),
         epoch=1,
-        threshold=0.5,
+        thresholds=[0.10, 0.25, 0.50],
     )
 
     assert written == [tmp_path / "validation_previews" / "epoch_001" / "sample_000.png"]

@@ -116,6 +116,8 @@ def test_train_runs_subject_mask_trainer(tmp_path: Path, monkeypatch) -> None:
             "cpu",
             "--epochs",
             "1",
+            "--tb-logdir",
+            str(tmp_path / "tb"),
             "--no-progress",
             "--no-compile",
         ]
@@ -134,6 +136,8 @@ def test_train_runs_subject_mask_trainer(tmp_path: Path, monkeypatch) -> None:
     assert train_cmd[train_cmd.index("--output-dir") + 1] == str(tmp_path / "models")
     assert "--device" in train_cmd and "cpu" in train_cmd
     assert "--epochs" in train_cmd and "1" in train_cmd
+    assert "--tb-logdir" in train_cmd
+    assert train_cmd[train_cmd.index("--tb-logdir") + 1] == str(tmp_path / "tb")
     assert "--no-progress" in train_cmd
     assert "--no-compile" in train_cmd
 

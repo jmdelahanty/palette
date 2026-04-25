@@ -42,6 +42,14 @@ from ..training.zarr_subject_mask_dataset import (
 from ..utils.system import build_invocation_record, get_environment_info, get_git_info
 from .unet import UNetSmall
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+
+    TB_AVAILABLE = True
+except Exception:
+    TB_AVAILABLE = False
+    SummaryWriter = None  # type: ignore
+
 
 class EMA:
     def __init__(self, beta: float = 0.98) -> None:
@@ -159,7 +167,7 @@ def _save_validation_preview(
     mask_labels: Sequence[str],
     epoch: int,
     sample_index: int,
-    threshold: float,
+    thresholds: Sequence[float],
 ) -> None:
     import matplotlib
 
@@ -167,7 +175,8 @@ def _save_validation_preview(
     import matplotlib.pyplot as plt
 
     labels = [str(label) for label in mask_labels]
-    ncols = max(3, len(labels))
+    display_thresholds = [float(threshold) for threshold in thresholds]
+    ncols = max(2 + len(display_thresholds), len(labels))
     fig, axes = plt.subplots(3, ncols, figsize=(3.2 * ncols, 8.8), squeeze=False)
     fig.suptitle(f"Validation epoch {epoch} sample {sample_index}", fontsize=14)
 
@@ -177,23 +186,23 @@ def _save_validation_preview(
         mask_labels=labels,
         threshold=None,
     )
-    pred_overlay = _compose_subject_mask_overlay(
-        image_chw,
-        pred_probs_chw,
-        mask_labels=labels,
-        threshold=threshold,
-    )
-
-    panels = (
+    panels = [
         (0, "ROI", _to_display_image(image_chw), None),
         (1, "Target composite", target_overlay, None),
-        (2, f"Pred composite >= {threshold:.2f}", pred_overlay, None),
-    )
+    ]
+    for offset, threshold in enumerate(display_thresholds, start=2):
+        pred_overlay = _compose_subject_mask_overlay(
+            image_chw,
+            pred_probs_chw,
+            mask_labels=labels,
+            threshold=threshold,
+        )
+        panels.append((offset, f"Pred composite >= {threshold:.2f}", pred_overlay, None))
     for col, title, image, cmap in panels:
         axes[0, col].imshow(image, cmap=cmap, vmin=0.0, vmax=1.0)
         axes[0, col].set_title(title)
 
-    for col in range(3, ncols):
+    for col in range(len(panels), ncols):
         axes[0, col].axis("off")
 
     valid = np.asarray(valid_channels, dtype=np.bool_)
@@ -228,7 +237,7 @@ def _write_validation_previews(
     valid_channels: Sequence[np.ndarray],
     mask_labels: Sequence[str],
     epoch: int,
-    threshold: float,
+    thresholds: Sequence[float],
 ) -> List[Path]:
     written: List[Path] = []
     epoch_dir = output_dir / f"epoch_{epoch:03d}"
@@ -245,10 +254,29 @@ def _write_validation_previews(
             mask_labels=mask_labels,
             epoch=epoch,
             sample_index=sample_idx,
-            threshold=threshold,
+            thresholds=thresholds,
         )
         written.append(out_path)
     return written
+
+
+def _parse_preview_thresholds(raw: str) -> List[float]:
+    parts = [part.strip() for part in str(raw).replace(";", ",").split(",")]
+    thresholds = [float(part) for part in parts if part]
+    if not thresholds:
+        raise ValueError("at least one threshold is required")
+    return thresholds
+
+
+def _json_metric(value: float) -> Optional[float]:
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
+
+
+def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(dict(payload), allow_nan=False, sort_keys=True) + "\n")
 
 
 def _collate_triplets(batch: Sequence[Dict[str, np.ndarray]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -571,9 +599,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Override probability threshold used for validation prediction composite overlays.",
     )
     parser.add_argument(
+        "--val-preview-thresholds",
+        help="Comma-separated probability thresholds used for validation prediction composite overlays.",
+    )
+    parser.add_argument(
         "--no-val-previews",
         action="store_true",
         help="Disable validation preview PNG generation.",
+    )
+    parser.add_argument(
+        "--tb-logdir",
+        type=str,
+        default=None,
+        help="TensorBoard log directory (enables TB logging if provided and TensorBoard is installed).",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable rich progress bars.")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile even if available.")
@@ -690,17 +728,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     val_preview_every = int(
         args.val_preview_every if args.val_preview_every is not None else train_params.val_preview_every
     )
-    val_preview_threshold = float(
-        args.val_preview_threshold
-        if args.val_preview_threshold is not None
-        else train_params.val_preview_threshold
-    )
+    try:
+        if args.val_preview_thresholds is not None:
+            val_preview_thresholds = _parse_preview_thresholds(args.val_preview_thresholds)
+        elif args.val_preview_threshold is not None:
+            val_preview_thresholds = [float(args.val_preview_threshold)]
+        else:
+            val_preview_thresholds = [
+                float(threshold)
+                for threshold in (
+                    train_params.val_preview_thresholds or [train_params.val_preview_threshold]
+                )
+            ]
+    except ValueError as exc:
+        parser.error(f"--val-preview-thresholds: {exc}")
     if val_preview_samples < 0:
         parser.error("--val-preview-samples must be >= 0")
     if val_preview_every < 1:
         parser.error("--val-preview-every must be >= 1")
-    if not (0.0 <= val_preview_threshold <= 1.0):
-        parser.error("--val-preview-threshold must be between 0 and 1")
+    for threshold in val_preview_thresholds:
+        if not (0.0 <= threshold <= 1.0):
+            parser.error("--val-preview-thresholds entries must be between 0 and 1")
 
     default_run_name = f"unet_{bundle.label_schema_id}"
     project_base_dir = _resolve_output_base_dir(
@@ -715,11 +763,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     registry_run_id = run_dir.name
     console.print(f"[green]Output directory:[/green] {run_dir}\n")
     preview_dir = run_dir / "validation_previews"
+    live_history_path = run_dir / "training_history_live.jsonl"
     if val_preview_samples > 0:
+        thresholds_text = ", ".join(f"{threshold:.2f}" for threshold in val_preview_thresholds)
         console.print(
             f"[cyan]Validation previews:[/cyan] {val_preview_samples} sample(s) every "
-            f"{val_preview_every} epoch(s) -> {preview_dir}\n"
+            f"{val_preview_every} epoch(s), threshold(s) {thresholds_text} -> {preview_dir}\n"
         )
+    console.print(f"[cyan]Live training history:[/cyan] {live_history_path}\n")
 
     if args.log_registry:
         _record_registry_training_run(
@@ -742,8 +793,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     success_summary: Optional[Dict[str, object]] = None
     validation_preview_paths: List[str] = []
     preview_warning_emitted = False
+    writer = None
+    tb_dir: Optional[Path] = None
 
     try:
+        if args.tb_logdir and TB_AVAILABLE:
+            tb_dir = Path(args.tb_logdir).expanduser().resolve()
+            tb_dir.mkdir(parents=True, exist_ok=True)
+            writer = SummaryWriter(log_dir=str(tb_dir))
+            console.print(f"[cyan]TensorBoard:[/cyan] logging to {tb_dir}\n")
+        elif args.tb_logdir and not TB_AVAILABLE:
+            console.print("[yellow]TensorBoard not available; install tensorboard to enable logging.[/yellow]\n")
+
         torch.manual_seed(rng_seed)
         np.random.seed(rng_seed)
         if torch.cuda.is_available():
@@ -964,7 +1025,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         valid_channels=preview_valid,
                         mask_labels=bundle.mask_labels,
                         epoch=epoch + 1,
-                        threshold=val_preview_threshold,
+                        thresholds=val_preview_thresholds,
                     )
                     validation_preview_paths.extend(str(path) for path in written)
                     if written:
@@ -1008,6 +1069,37 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 summary.add_row(f"val_dice_{label}", f"{per_channel_mean[idx]:.4f}")
             console.print(summary)
 
+            is_best_epoch = math.isfinite(val_dice) and val_dice > best_dice
+            live_best_dice = val_dice if is_best_epoch else best_dice
+            live_best_epoch = epoch + 1 if is_best_epoch else best_epoch
+            live_entry: Dict[str, object] = {
+                "event": "epoch_metrics",
+                "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "epoch": int(epoch + 1),
+                "train_loss": _json_metric(train_loss),
+                "val_loss": _json_metric(val_loss),
+                "val_dice": _json_metric(val_dice),
+                "best_val_dice": _json_metric(live_best_dice),
+                "best_epoch": int(live_best_epoch) if live_best_epoch > 0 else None,
+                "is_best_epoch": bool(is_best_epoch),
+            }
+            for idx, label in enumerate(bundle.mask_labels):
+                live_entry[f"val_dice_{label}"] = _json_metric(per_channel_mean[idx])
+            _append_jsonl(live_history_path, live_entry)
+
+            if writer is not None:
+                global_step = epoch + 1
+                if math.isfinite(train_loss):
+                    writer.add_scalar("loss/train", train_loss, global_step)
+                if math.isfinite(val_loss):
+                    writer.add_scalar("loss/val", val_loss, global_step)
+                if math.isfinite(val_dice):
+                    writer.add_scalar("dice/val_mean", val_dice, global_step)
+                for idx, label in enumerate(bundle.mask_labels):
+                    if math.isfinite(per_channel_mean[idx]):
+                        writer.add_scalar(f"dice/val_{label}", float(per_channel_mean[idx]), global_step)
+                writer.flush()
+
             if val_dice > best_dice:
                 best_dice = val_dice
                 best_epoch = epoch + 1
@@ -1049,7 +1141,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "validation_preview_paths": validation_preview_paths,
             "validation_preview_samples": int(val_preview_samples),
             "validation_preview_every": int(val_preview_every),
-            "validation_preview_threshold": float(val_preview_threshold),
+            "validation_preview_threshold": float(val_preview_thresholds[-1]),
+            "validation_preview_thresholds": [float(threshold) for threshold in val_preview_thresholds],
+            "training_history_live_path": str(live_history_path),
+            "tensorboard_logdir": str(tb_dir) if tb_dir is not None else None,
             "device": str(device),
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
@@ -1085,6 +1180,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 },
             )
         raise
+    finally:
+        if writer is not None:
+            writer.close()
 
     if args.log_registry:
         best_model_path = run_dir / "best_model.pt"

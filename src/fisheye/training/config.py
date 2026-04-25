@@ -216,6 +216,20 @@ class SubjectMaskTrainingParams(TrainingParams):
         le=1.0,
         description="Probability threshold used for validation prediction composite overlays.",
     )
+    val_preview_thresholds: List[float] = Field(
+        default_factory=lambda: [0.10, 0.25, 0.50],
+        description="Probability thresholds rendered as validation prediction composite overlays.",
+    )
+
+    @field_validator("val_preview_thresholds")
+    @classmethod
+    def validate_val_preview_thresholds(cls, value: List[float]) -> List[float]:
+        if not value:
+            raise ValueError("val_preview_thresholds must contain at least one threshold")
+        for threshold in value:
+            if not 0.0 <= float(threshold) <= 1.0:
+                raise ValueError("val_preview_thresholds entries must be between 0 and 1")
+        return [float(threshold) for threshold in value]
 
 
 class DetectConfig(BaseModel):

@@ -286,6 +286,7 @@ def _run_training(
     output_dir: Optional[str],
     device: Optional[str],
     epochs: Optional[int],
+    tb_logdir: Optional[str],
     no_progress: bool,
     no_compile: bool,
 ) -> int:
@@ -307,6 +308,7 @@ def _run_training(
     _add_arg(cmd, "--output-dir", output_dir)
     _add_arg(cmd, "--device", device)
     _add_arg(cmd, "--epochs", epochs)
+    _add_arg(cmd, "--tb-logdir", tb_logdir)
     if no_progress:
         cmd.append("--no-progress")
     if no_compile:
@@ -361,6 +363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--project", type=str, help="Optional training output directory override.")
     parser.add_argument("--device", type=str, help="Optional training device override.")
     parser.add_argument("--epochs", type=int, help="Optional training epoch override.")
+    parser.add_argument("--tb-logdir", type=str, help="Optional TensorBoard log directory for training.")
     parser.add_argument("--no-progress", action="store_true", help="Disable rich progress bars in training.")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile in training.")
     args = parser.parse_args(argv)
@@ -460,6 +463,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             output_dir=args.project,
             device=args.device,
             epochs=args.epochs,
+            tb_logdir=args.tb_logdir,
             no_progress=bool(args.no_progress),
             no_compile=bool(args.no_compile),
         )
