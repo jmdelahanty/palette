@@ -611,6 +611,10 @@ component truth is split across multiple `refined_subject_masks_runs`, first
 assemble a new coherent approved refined run with
 `fisheye.refinement.assemble_refined_subject_masks`; the exporter should not
 silently combine split refined sources.
+For historical refined-eye plus refined swim-bladder consolidation, follow the
+additive unified eye/swim migration procedure in
+`refined_subject_masks_runs_contract.md` so legacy refined-eye approval is
+promoted only when `eye_mask_review_status` is approved for training.
 
 ## Related Contracts
 

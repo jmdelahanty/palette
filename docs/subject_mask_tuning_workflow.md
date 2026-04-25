@@ -535,10 +535,15 @@ Current implementation note:
 
 - `--body-run`, `--eye-run`, and `--swim-run` currently name
   `subject_mask_runs/<run>` sources
-- if eye content starts in `eye_masks_runs` or `refined_eye_masks_runs`, first
-  project/backfill it into a compatibility `subject_mask_runs/<run>`
-- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` assembly is a
-  future extension, not the current CLI behavior
+- `--refined-eye-run` names a `refined_eye_masks_runs/<run>` source and can
+  seed canonical `eye_left` / `eye_right` components directly
+- `--swim-refined-run` names a `refined_subject_masks_runs/<run>` source and
+  can seed `swim_bladder` directly when that component is approved
+- if eye content starts in raw `eye_masks_runs`, project/backfill it into a
+  compatibility subject-mask or refined-eye source before unified assembly
+- approved legacy `refined_eye_masks_runs/<run>.attrs["eye_mask_review_status"]`
+  is promoted onto both unified eye components when the review state is
+  `approved` and the intended use is `training`
 
 Canary validation on 2026-04-01:
 

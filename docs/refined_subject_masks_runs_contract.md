@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-02
+last_verified: 2026-04-25
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
@@ -157,9 +157,104 @@ Safety rule:
 
 - the assembler must reject split refined component sources unless crop
   lineage, row lineage, row count, detection source, and ROI shape match
+- a historical refined source-view crop signature mismatch is allowed only
+  when the mismatch is limited to
+  `source_crop_signature.detection_source_path` and
+  `source_crop_signature.detection_source_type`, and the sources otherwise
+  share crop identity, row lineage, row count, detection source, and ROI shape
 - production assembly from split refined component sources must also reject
   pending, missing, or non-approved component review states; unapproved sources
   are only allowed with an explicit draft/QA override
+
+## Additive Unified Eye/Swim Migration Procedure
+
+Use this procedure when historical `refined_eye_masks_runs/<run>` eye masks
+and approved `refined_subject_masks_runs/<run>` swim-bladder components need a
+single canonical refined-subject surface.
+
+Principles:
+
+- do not delete or rewrite historical refined-eye or refined-subject component
+  source runs
+- create a new additive `refined_subject_masks_runs/<run>` target
+- seed `eye_left` and `eye_right` directly from `refined_eye_masks_runs`
+- seed `swim_bladder` from the existing approved refined-subject component run
+- keep immediate component provenance pointing to the true source stage/run
+- use approved-only assembly by default
+- promote legacy refined-eye review only when
+  `eye_mask_review_status.state == "approved"` and
+  `eye_mask_review_status.intended_use == "training"`
+
+Recommended sequence:
+
+1. Discover source pairs per archive.
+
+   - choose the refined-eye source from `refined_eye_masks_runs`
+   - choose the swim-bladder source from `refined_subject_masks_runs` where
+     `component_review_statuses["swim_bladder"].state == "approved"`
+
+2. Run assembly in dry-run mode.
+
+   ```bash
+   scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
+     <archive>.zarr \
+     --refined-eye-run <refined_eye_run> \
+     --swim-refined-run <refined_subject_swim_run> \
+     --run-name refined_subject_masks_unified_eye_swim_<stamp> \
+     --dry-run
+   ```
+
+3. If dry-run reports only historical refined source-view crop-signature
+   differences, verify that the mismatch is metadata-only.
+
+   The only acceptable crop-signature differences are:
+
+   - `source_crop_signature.detection_source_path`
+   - `source_crop_signature.detection_source_type`
+
+   Row lineage, row count, detection source, ROI shape, and crop identity must
+   still match. Do not use this exception for real crop-policy or source-run
+   drift.
+
+4. Apply only to approved-compatible archives.
+
+   ```bash
+   scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
+     <archive>.zarr \
+     --refined-eye-run <refined_eye_run> \
+     --swim-refined-run <refined_subject_swim_run> \
+     --run-name refined_subject_masks_unified_eye_swim_<stamp>
+   ```
+
+5. Verify the new run.
+
+   Expected surface:
+
+   - `mask_labels = ["eye_left", "eye_right", "swim_bladder"]`
+   - `available_channels = [true, true, true]`
+   - component provenance:
+     - `eye_left` / `eye_right`: `source_stage = "refined_eye_masks_runs"`
+     - `swim_bladder`: `source_stage = "refined_subject_masks_runs"`
+
+6. Verify review state.
+
+   Expected review behavior:
+
+   - approved legacy refined-eye review is promoted onto both eye components
+   - approved swim-bladder review is copied from the refined-subject component
+     source
+   - the assembled run becomes `approved` only when all available components
+     are approved
+   - pending legacy eye review or pending swim-bladder review keeps the
+     assembled run pending
+
+Example batch result from the 2026-04-25 recording migration:
+
+- 52 recording training zarrs scanned
+- 51 approved-compatible unified eye/swim runs written
+- 50 runs became fully approved after legacy refined-eye review promotion
+- 1 run remained pending because the legacy refined-eye source review was
+  pending
 
 ## Output Layout
 
