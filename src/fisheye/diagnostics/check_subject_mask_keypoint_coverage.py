@@ -21,6 +21,7 @@ import numpy as np
 import zarr
 
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
+from fisheye.refinement.subject_eye_assignment import assign_eyes_union_to_lr
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
@@ -87,6 +88,8 @@ class CoverageReport:
     rows_with_eye_component_masks: int = 0
     rows_missing_eye_component_masks: int = 0
     component_present_rows: dict[str, int] = field(default_factory=dict)
+    eyes_union_assignment_status: Optional[str] = None
+    eyes_union_assignment_summary: dict[str, object] = field(default_factory=dict)
     failure_targets: list[dict[str, int]] = field(default_factory=list)
     sample_missing: list[dict[str, int]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -701,6 +704,45 @@ def _collect_failure_samples(
     return samples
 
 
+def _evaluate_eyes_union_assignment(
+    masks_arr: object,
+    *,
+    union_component_index: int,
+    keypoints_roi: np.ndarray,
+    success_flags: np.ndarray,
+    keypoint_valid: np.ndarray,
+    eye_indices: Mapping[str, int],
+) -> tuple[str, dict[str, object]]:
+    assignment = assign_eyes_union_to_lr(
+        np.asarray(masks_arr[:, union_component_index, :, :], dtype=np.uint8),  # type: ignore[index]
+        keypoints_roi=np.asarray(keypoints_roi, dtype=np.float32),
+        keypoint_success=np.asarray(success_flags, dtype=bool),
+        eye_keypoint_indices=(int(eye_indices["eye_left"]), int(eye_indices["eye_right"])),
+    )
+    summary = dict(assignment.summary)
+    status = np.asarray(assignment.assignment_status, dtype=object)
+    usable_status = np.isin(status, ["assigned", "assigned_needs_review"])
+    valid_rows = np.asarray(keypoint_valid, dtype=bool)
+    valid_usable_rows = int(np.count_nonzero(valid_rows & usable_status))
+    valid_needs_review_rows = int(np.count_nonzero(valid_rows & (status == "assigned_needs_review")))
+    valid_failed_rows = int(np.count_nonzero(valid_rows & ~usable_status))
+
+    summary["keypoint_valid_rows"] = int(np.count_nonzero(valid_rows))
+    summary["keypoint_valid_assigned_rows"] = valid_usable_rows
+    summary["keypoint_valid_assigned_needs_review_rows"] = valid_needs_review_rows
+    summary["keypoint_valid_failed_rows"] = valid_failed_rows
+
+    if int(summary["keypoint_valid_rows"]) <= 0:
+        readiness = "no_keypoint_valid_rows"
+    elif valid_usable_rows <= 0:
+        readiness = "not_ready"
+    elif valid_failed_rows > 0 or valid_needs_review_rows > 0:
+        readiness = "ready_partial"
+    else:
+        readiness = "ready"
+    return readiness, summary
+
+
 def _analyze_root(
     *,
     root: zarr.Group,
@@ -873,6 +915,22 @@ def _analyze_root(
             eye_component_present &= np.asarray(component_present[component], dtype=bool)
     else:
         eye_component_present = np.asarray(component_present[EYE_UNION_COMPONENT], dtype=bool)
+        try:
+            assignment_status, assignment_summary = _evaluate_eyes_union_assignment(
+                masks_arr,
+                union_component_index=int(selection.component_indices[EYE_UNION_COMPONENT]),
+                keypoints_roi=keypoints_roi,
+                success_flags=success_flags,
+                keypoint_valid=keypoint_valid,
+                eye_indices=eye_indices,
+            )
+            report.eyes_union_assignment_status = assignment_status
+            report.eyes_union_assignment_summary = assignment_summary
+            report.notes.append("eyes_union_assignment_dry_run_checked")
+        except ValueError as exc:
+            report.eyes_union_assignment_status = "error"
+            report.eyes_union_assignment_summary = {"error": str(exc)}
+            report.notes.append("eyes_union_assignment_dry_run_error")
 
     fail_rows = np.flatnonzero(keypoint_valid & ~eye_component_present)
     frame_indices = _resolve_frame_indices(root, subject_group, report.total_rois)
@@ -916,6 +974,8 @@ def _report_to_log_payload(report: CoverageReport) -> dict[str, object]:
         "rows_with_eye_component_masks": report.rows_with_eye_component_masks,
         "rows_missing_eye_component_masks": report.rows_missing_eye_component_masks,
         "component_present_rows": report.component_present_rows,
+        "eyes_union_assignment_status": report.eyes_union_assignment_status,
+        "eyes_union_assignment_summary": report.eyes_union_assignment_summary,
         "failure_targets": report.failure_targets,
         "sample_missing": report.sample_missing,
         "notes": report.notes,
@@ -957,6 +1017,20 @@ def _print_report(report: CoverageReport, *, show_pass: bool) -> None:
         print(f"rows_missing_eye_component_masks: {report.rows_missing_eye_component_masks}")
         if report.component_present_rows:
             print(f"component_present_rows: {report.component_present_rows}")
+    if report.eyes_union_assignment_status:
+        print(f"eyes_union_assignment_status: {report.eyes_union_assignment_status}")
+    if report.eyes_union_assignment_summary:
+        summary = report.eyes_union_assignment_summary
+        fields = [
+            "assigned_rows",
+            "assigned_needs_review_rows",
+            "failed_rows",
+            "keypoint_valid_assigned_rows",
+            "keypoint_valid_assigned_needs_review_rows",
+            "keypoint_valid_failed_rows",
+        ]
+        compact = {key: summary[key] for key in fields if key in summary}
+        print(f"eyes_union_assignment_summary: {compact}")
     for note in report.notes:
         print(f"note: {note}")
     for sample in report.sample_missing:
@@ -1311,6 +1385,7 @@ def run(args: argparse.Namespace) -> int:
     zarr_missing = 0
     zarr_error = 0
     filtered_zarr_use = 0
+    union_assignment_status_counts: dict[str, int] = {}
     failing_paths: list[Path] = []
     failing_reports: list[CoverageReport] = []
 
@@ -1361,6 +1436,11 @@ def run(args: argparse.Namespace) -> int:
             zarr_missing += 1
         else:
             zarr_error += 1
+        if report.eyes_union_assignment_status:
+            status_key = str(report.eyes_union_assignment_status)
+            union_assignment_status_counts[status_key] = (
+                union_assignment_status_counts.get(status_key, 0) + 1
+            )
         if logger is not None:
             logger.log("zarr_checked", **_report_to_log_payload(report))
 
@@ -1442,6 +1522,7 @@ def run(args: argparse.Namespace) -> int:
         f"review_list_added={review_list_added} "
         f"frame_flag_targets_written={frame_flag_targets_written} "
         f"repair_plan_rows_written={repair_plan_rows_written} "
+        f"union_assignment_statuses={union_assignment_status_counts} "
         f"issues={'yes' if issues else 'no'}"
     )
 
@@ -1459,6 +1540,7 @@ def run(args: argparse.Namespace) -> int:
             frame_flag_zarrs_written=frame_flag_zarrs_written,
             frame_flag_targets_written=frame_flag_targets_written,
             repair_plan_rows_written=repair_plan_rows_written,
+            union_assignment_statuses=dict(union_assignment_status_counts),
             issues=issues,
         )
         logger.close()

@@ -216,8 +216,10 @@ def test_analyze_root_auto_selects_eye_capable_subject_run_over_component_scoped
 def test_analyze_root_uses_union_component_when_lr_components_are_not_available(tmp_path: Path) -> None:
     root, _kp = _keypoint_root()
     masks = np.zeros((3, 3, 8, 8), dtype=np.uint8)
-    masks[0, 1, 2:4, 2:4] = 1
-    masks[1, 1, 2:4, 2:4] = 1
+    masks[0, 1, 1:4, 1:4] = 1
+    masks[0, 1, 1:4, 4:7] = 1
+    masks[1, 1, 1:4, 1:4] = 1
+    masks[1, 1, 1:4, 4:7] = 1
     _add_refined_subject_run(
         root,
         masks_roi=masks,
@@ -243,6 +245,43 @@ def test_analyze_root_uses_union_component_when_lr_components_are_not_available(
     assert report.keypoint_valid_rows == 2
     assert report.rows_with_eye_component_masks == 2
     assert report.rows_missing_eye_component_masks == 0
+    assert report.eyes_union_assignment_status == "ready"
+    assert report.eyes_union_assignment_summary["assigned_rows"] == 2
+    assert report.eyes_union_assignment_summary["keypoint_valid_assigned_rows"] == 2
+    assert report.eyes_union_assignment_summary["keypoint_valid_failed_rows"] == 0
+
+
+def test_analyze_root_reports_union_assignment_not_ready_for_unsplittable_union(
+    tmp_path: Path,
+) -> None:
+    root, _kp = _keypoint_root()
+    masks = np.zeros((3, 3, 8, 8), dtype=np.uint8)
+    masks[0, 1, 2:4, 2:4] = 1
+    masks[1, 1, 2:4, 2:4] = 1
+    _add_refined_subject_run(
+        root,
+        masks_roi=masks,
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([False, True, False], dtype=bool),
+    )
+
+    report = mod._analyze_root(
+        root=root,
+        zarr_path=tmp_path / "demo_training.zarr",
+        stage="auto",
+        subject_run=None,
+        eye_mode="auto",
+        keypoint_group=None,
+        keypoint_run=None,
+        allow_latest_keypoint_fallback=False,
+        sample_limit=5,
+    )
+
+    assert report.status == "pass"
+    assert report.eye_component_mode == "union"
+    assert report.eyes_union_assignment_status == "not_ready"
+    assert report.eyes_union_assignment_summary["assigned_rows"] == 0
+    assert report.eyes_union_assignment_summary["keypoint_valid_failed_rows"] == 2
 
 
 def test_analyze_root_requires_available_channels_for_modern_surface(tmp_path: Path) -> None:

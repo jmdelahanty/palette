@@ -26,6 +26,27 @@ The JSONL report goes in `--log-dir`. The frame flag file is overwritten on
 each run and contains only current failures. The repair plan is JSONL with one
 row per failing ROI/frame.
 
+To audit whether raw `eyes_union` subject-mask runs can be dry-run split into
+future `eye_left`/`eye_right` refined-subject seeds, force the modern raw
+subject-mask surface and union eye mode:
+
+```bash
+scripts/py -m fisheye.diagnostics.check_subject_mask_keypoint_coverage \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use training \
+  --stage subject_mask_runs \
+  --eye-mode union \
+  --show-pass \
+  --log-dir /tmp/subject-mask-union-assignment-audit
+```
+
+For union-mode reports, inspect `eyes_union_assignment_status` and
+`eyes_union_assignment_summary`. `ready` means every keypoint-valid row produced
+usable LR eye seeds in the dry run. `ready_partial` means at least one
+keypoint-valid row still needs review or failed assignment. `not_ready` means no
+keypoint-valid row produced usable LR eye seeds.
+
 A clean run looks like:
 
 ```text
