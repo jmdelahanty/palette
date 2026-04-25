@@ -192,6 +192,253 @@ For each touched ROI/component chunk, the engine should own recomputation of:
 Shared attrs or aggregate summaries should be written once in the driver after
 chunk tasks complete.
 
+## Component Cleanup And Finalization Policy
+
+The refinement engine should own the conversion from raw probability evidence
+or seed masks into canonical refined binary masks. This is where high-probability
+islands, holes, and small gaps should be handled.
+
+Core boundary:
+
+- raw `subject_mask_runs/<run>` probability maps are immutable evidence
+- `refined_subject_masks_runs/<run>/masks_roi` is the post-finalization binary
+  candidate surface
+- cleanup must be component-aware; one morphology policy is not valid for body,
+  eyes, and swim bladder
+- cleanup should be auditable, not silent
+
+### Finalization Order
+
+For raw probability sources, the preferred order is:
+
+1. Decode probability surface.
+2. Apply component-specific threshold policy.
+3. Apply component-specific gap/hole repair.
+4. Run connected-component analysis.
+5. Select or remove components according to component semantics.
+6. Recompute masks, metrics, reasons, and review gates.
+
+For existing refined binary sources, the same metric/review logic should run,
+but thresholding is skipped unless the operator explicitly asks to rederive the
+component from raw probabilities.
+
+### Threshold Policy
+
+The finalizer should support per-component thresholds, and should not bake a
+single global `0.5` policy into the storage contract.
+
+Recommended configuration fields:
+
+- `threshold_by_component`
+- `low_threshold_by_component`
+- `high_threshold_by_component`
+- `min_component_area_px_by_component`
+- `max_removed_high_prob_mass_fraction_by_component`
+- `cleanup_policy_by_component`
+
+For components where islands are common, a hysteresis-style policy is useful:
+
+- high threshold identifies confident seeds
+- low threshold identifies spatial support around those seeds
+- connected components are selected from the supported mask, but only if they
+  touch or contain valid high-confidence seed evidence
+
+This helps avoid both failure modes:
+
+- dropping underconfident true body regions too aggressively
+- keeping tiny high-confidence islands that are not part of the fish
+
+### `subject_body`
+
+Target semantics:
+
+- one connected fish-body silhouette per ROI row
+- internal holes are usually artifacts
+- tiny detached islands outside the body are usually artifacts
+
+Recommended operation order:
+
+1. threshold or hysteresis threshold
+2. modest binary closing to bridge small gaps
+3. hole fill
+4. remove tiny islands
+5. keep the best body component
+
+The "best body component" should usually be the largest component after gap
+repair, but the design should leave room for stronger evidence later:
+
+- crop center proximity
+- overlap with source detection box
+- overlap with keypoint/body-axis evidence
+- temporal continuity for full-recording runs
+
+Safety rule:
+
+- if high-probability removed islands exceed a configured fraction of total
+  probability mass or area, the row/component should be marked `needs_review`
+  instead of treated as clean
+
+### `swim_bladder`
+
+Target semantics:
+
+- one compact internal organ per ROI row when visible
+- holes are usually artifacts
+- multiple detached components are suspicious unless one clearly dominates
+
+Recommended operation order:
+
+1. threshold or hysteresis threshold
+2. fill small enclosed holes
+3. remove tiny islands
+4. select compact component using body-interior and expected-location evidence
+   when available
+
+Selection should be more conservative than body masks. If several components
+have similar support, or if a removed island has substantial probability mass,
+mark `needs_review`.
+
+### `eyes_union`
+
+Target semantics:
+
+- one or two eye components may be valid
+- keeping only the largest component is wrong
+
+Recommended policy:
+
+- remove tiny islands below area/probability thresholds
+- allow up to two strong components
+- if more than two plausible components remain, mark ambiguous/needs-review
+- if later LR assignment is requested, pass remaining components to the
+  assignment step rather than collapsing them prematurely
+
+### `eye_left` / `eye_right`
+
+Target semantics:
+
+- one component per anatomical eye channel
+- side identity must be justified by assignment evidence
+
+Recommended policy:
+
+- choose the component nearest the assigned eye keypoint or ellipse seed
+- remove other detached components
+- preserve assignment provenance and confidence
+- mark ambiguous rows when the selected component is not clearly separated from
+  alternatives
+
+### Cleanup Metrics
+
+The finalizer should record enough metrics to explain what changed. Recommended
+component-local metrics include:
+
+- `component_count_before`
+- `component_count_after`
+- `largest_component_fraction_before`
+- `largest_component_fraction_after`
+- `removed_component_count`
+- `removed_area_px`
+- `removed_area_fraction`
+- `removed_prob_mass`
+- `removed_prob_mass_fraction`
+- `removed_high_prob_area_px`
+- `changed_area_px`
+- `changed_area_fraction`
+- `hole_count_before`
+- `hole_count_after`
+- `hole_area_fraction_before`
+- `hole_area_fraction_after`
+
+Existing summary metrics such as `component_count`,
+`largest_component_fraction`, `hole_count`, and `hole_area_fraction` should
+continue to describe the finalized mask unless the metric name explicitly says
+`before`.
+
+### Review Gates And Reasons
+
+Cleanup should not automatically imply approval.
+
+Recommended reason tags:
+
+- `clean`
+- `cleanup_removed_small_islands`
+- `cleanup_filled_holes`
+- `cleanup_closed_gaps`
+- `needs_review_removed_high_prob_island`
+- `needs_review_multiple_components`
+- `needs_review_large_hole_fill`
+- `needs_review_ambiguous_component_selection`
+- `needs_review_large_cleanup_delta`
+
+Rows/components should be forced to `needs_review` when:
+
+- removed high-probability area is too large
+- removed probability mass fraction exceeds the component threshold
+- component count remains invalid after cleanup
+- cleanup changes more than the configured area fraction
+- a component-specific selector has no clear winner
+
+Run/component approval should remain an explicit review action or a separate
+auto-approval gate with documented thresholds.
+
+### Temporal QC
+
+Temporal QC should be a review-prioritization layer, not an automatic repair
+layer.
+
+Recommended order:
+
+1. Run per-frame/per-row finalization and cleanup.
+2. Compute temporal metrics over the finalized component masks.
+3. Add temporal reason tags and quality scores to the component-local review
+   queue.
+4. Leave mask pixels unchanged unless a later explicit repair tool or human edit
+   applies a correction.
+
+Recommended temporal metrics:
+
+- `area_ratio_prev`
+- `area_delta_zscore`
+- `centroid_jump_px`
+- `bbox_area_ratio_prev`
+- `mask_present_gap`
+- `component_count_jump`
+
+Recommended temporal reason tags:
+
+- `needs_review_area_drop`
+- `needs_review_area_spike`
+- `needs_review_centroid_jump`
+- `needs_review_temporal_gap`
+- `needs_review_component_count_jump`
+
+Temporal metrics should be computed component-locally and should respect the
+row lineage of the source crop/detection sequence. Do not compare arbitrary
+rows unless they are known to be consecutive observations of the same ROI/entity
+within the same recording context.
+
+### Review Queue Surface
+
+The finalizer should materialize one component-local queue surface that both
+batch tools and UI navigation can consume.
+
+Recommended arrays under `components/<component>/`:
+
+- `quality_code`
+  - compact integer enum for fast filtering
+- `quality_score`
+  - numeric severity; larger means review earlier
+- `reason_bytes` / `reason`
+  - human-readable reason tags for navigation and audit
+
+Recommended navigation behavior:
+
+- filter by component name
+- skip rows already approved unless explicitly requested
+- sort by `quality_score` descending
+- expose reason tags in the UI so the operator knows why the frame was queued
+
 ## Write-Safety Rules
 
 To avoid the same distributed-write pitfalls seen elsewhere:

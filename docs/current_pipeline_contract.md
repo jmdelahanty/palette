@@ -48,10 +48,10 @@ The default rule is:
 | Detect quality | detect-run quality reports | refined detect review/status metadata | legacy detect-quality aliases | quality labels feed refine; review state belongs to refined detect |
 | Crop | `crop_runs/<run>` | none in normal operation | geometry-only or repaired crop variants | current crop run that still matches selected detect/refined lineage |
 | Keypoints | `keypoints_runs/<run>` | `refined_keypoints_runs/<run>` | legacy keypoint attrs such as singular `source_keypoint_run` | refined keypoints when present; metadata-driven pose and heading semantics |
-| Raw segmentation | `subject_mask_runs/<run>` | none | `eye_masks_runs/<run>` remains a legacy eye-specific raw stage during migration | unified subject-mask component availability for current mask state |
+| Raw segmentation | `subject_mask_runs/<run>` probability surfaces plus model/config/provenance | none | optional thresholded compatibility caches and `eye_masks_runs/<run>` during migration | unified subject-mask component availability for current mask state |
 | Refined subject masks | `subject_mask_runs/<run>` sources plus component provenance | `refined_subject_masks_runs/<run>` | none; this is the canonical refined component surface | component availability, review state, and lifecycle from refined subject-mask component rows |
 | Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
-| Swim bladder | coarse masks materialized in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse swim-bladder materialization is a refreshable source cache | refined subject-mask swim-bladder component state |
+| Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -61,7 +61,9 @@ steady state.
 
 Current rules:
 
-- `subject_mask_runs` is the canonical raw multi-component mask family.
+- `subject_mask_runs` is the canonical raw multi-component mask family, with
+  raw model output represented by probability surfaces plus model/config and
+  provenance rather than thresholded masks.
 - `refined_subject_masks_runs` is the canonical editable/refined component mask
   family for body, eyes, and swim bladder.
 - Production assembly/export from `refined_subject_masks_runs` is
@@ -79,9 +81,11 @@ Current rules:
   for historical archives.
 
 The target steady state is one segmentation orchestration surface that writes
-one coherent `subject_mask_runs/<run>` snapshot with component-scoped method and
-provenance metadata. Until that exists, old eye-specific stages are tolerated as
-transition surfaces, not design precedent.
+one coherent probability-backed `subject_mask_runs/<run>` snapshot with
+component-scoped method and provenance metadata. Thresholding, morphology,
+review, and approval happen in `refined_subject_masks_runs/<run>`. Until that
+exists, old eye-specific stages are tolerated as transition surfaces, not design
+precedent.
 
 ## Registry And Operator Surface Rules
 

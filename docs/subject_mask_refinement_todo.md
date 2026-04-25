@@ -113,6 +113,10 @@ breaking the current eye tools before the unified model is ready.
   canonical eye identity as `eye_left` / `eye_right`; `eyes_union` should remain
   raw/model input, seed/provenance context, or review/debug evidence rather than
   the refined eye authority.
+- Subject-mask training now writes live epoch metrics to
+  `training_history_live.jsonl` during the run, writes final
+  `training_history.json` on completion, and supports optional TensorBoard
+  scalar logging via `--tb-logdir`.
 
 ## Immediate Remaining Work
 
@@ -339,9 +343,30 @@ Preferred future all-component assembly path:
 
 ```text
 crop_runs/<run>
-  -> subject_mask_runs/<unet run>       # subject_body, eyes_union, swim_bladder, later LR seeds if available
+  -> subject_mask_runs/<unet run>       # raw probabilities for subject_body, eyes_union, swim_bladder
   -> refined_subject_masks_runs/<run>   # canonical subject_body, eye_left, eye_right, swim_bladder
 ```
+
+Raw/refined storage policy:
+
+- raw U-Net/model outputs should persist probability masks plus
+  model/config/provenance in `subject_mask_runs/<run>`
+- thresholded masks should not be the canonical raw payload for native model
+  output
+- thresholding, hole filling, gap closing, island removal, left/right eye
+  assignment, QC metrics, review state, and approval belong to the refined
+  candidate in `refined_subject_masks_runs/<run>`
+- refined candidates do not need to duplicate the pre-refinement binary mask;
+  the "before" state is recoverable from the source raw probability run and its
+  explicit threshold/refinement policy
+- topology cleanup is a refined-subject finalization responsibility:
+  body masks may close small gaps, fill holes, remove tiny detached islands, and
+  keep one best body component; swim-bladder masks should use stricter compact
+  component selection; eye-union masks must allow two valid eye components
+  rather than blindly keeping the largest component
+- cleanup must write metrics/reasons for removed area, removed probability
+  mass, hole filling, and large cleanup deltas; high-confidence removed islands
+  should force `needs_review`, not silent approval
 
 Current sparse-source assembly and repair path:
 

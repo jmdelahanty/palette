@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-04
+last_verified: 2026-04-25
 -->
 
 Purpose: define the runtime/storage contract for a generalized ROI-local
@@ -22,6 +22,7 @@ without overloading the existing eye-specific stages.
 - Replacing `refined_eye_masks_runs`.
 - Storing eye ellipses, eye separation, or eye-specific QA summaries here.
 - Storing subject centerlines, splines, or tail kinematics here.
+- Storing thresholded model masks as canonical raw model output.
 - Defining merged training dataset layout. See
   [subject_mask_training_artifact_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_training_artifact_contract.md).
 
@@ -88,6 +89,11 @@ segmentation later without another schema reset.
 
 ## Output Layout
 
+Native raw model-output runs should store probability surfaces as the
+operator-independent raw evidence. Thresholded or morphologically repaired masks
+belong in `refined_subject_masks_runs/<run>` after refinement/finalization, not
+as canonical payload in the raw run.
+
 ```text
 subject_mask_runs/
   attrs:
@@ -97,12 +103,11 @@ subject_mask_runs/
     frame_counts               (F,) int32           # new runs should include
     detection_indices          (N,) int32           # new runs should include
     detection_source           (N,) int8
-    masks_roi                  (N, C, H, W) uint8
     mask_probs_roi             (N, C, H, W) float16/float32/uint8
     available_channels         (C,) bool
     metrics/
       prob_max                 (N, C) float32
-      mask_present             (N, C) bool
+      probability_present      (N, C) bool          # recommended
     components/
       <component_name>/
         provenance/            # attrs-only subgroup describing component origin
@@ -116,9 +121,6 @@ Required arrays:
 - `detection_source`
   - shape: `(N,)`
   - expected to match the source crop run
-- `masks_roi`
-  - shape: `(N, C, H, W)`
-  - binary values `{0, 1}`
 - `mask_probs_roi`
   - shape: `(N, C, H, W)`
   - finite semantic probabilities in `[0, 1]`
@@ -139,12 +141,27 @@ Required `metrics/` subgroup arrays:
 - `prob_max`
   - shape: `(N, C)`
   - per-row per-channel maximum decoded probability in `[0, 1]`
-- `mask_present`
-  - shape: `(N, C)`
-  - true when the binary mask contains at least one positive pixel
+
+Compatibility arrays:
+
+- `masks_roi`
+  - allowed for legacy projection/backfill runs and existing raw producers
+    during migration
+  - if present in a native raw model-output run, it is a derived compatibility
+    cache, not the canonical raw evidence
+  - future native raw model-output writers should omit it
+  - threshold policy attrs must make any generated cache reproducible
 
 Recommended `metrics/` subgroup arrays:
 
+- `probability_present`
+  - shape: `(N, C)`
+  - true when the probability surface has meaningful foreground evidence under
+    the run's declared probability semantics
+- `mask_present`
+  - shape: `(N, C)`
+  - compatibility/cache metric derived from a binary compatibility mask or an
+    explicitly recorded threshold policy
 - `area_px`
   - shape: `(N, C)`
 - `centroid_xy`
@@ -207,6 +224,8 @@ Optional attrs:
 - `projection_mode`
 - `model_info`
 - `thresholds_by_label`
+  - required only when a writer materializes optional compatibility binary masks
+    from `mask_probs_roi`
 - `summary_statistics`
 
 Crop-snapshot semantics:
@@ -316,11 +335,13 @@ Interpretation:
 - SAM returns candidate mask logits and separate per-candidate quality scores
 - Palette currently chooses the candidate with the highest predicted quality
   score
-- `masks_roi` stores the selected candidate thresholded at logit `> 0`
-- `mask_probs_roi` stores `sigmoid(selected_candidate_logits)`, not a directly
+- native raw output stores `sigmoid(selected_candidate_logits)`, not a directly
   emitted calibrated semantic probability map from SAM
 - `metrics/sam_quality_score` stores the selected candidate's separate quality
   score and should be interpreted separately from `mask_probs_roi`
+- existing SAM/raw writers may still materialize `masks_roi` as a compatibility
+  cache thresholded at logit `> 0`; that cache is not the canonical raw
+  artifact and should be moved behind refined/finalized outputs over time
 
 Interpretation:
 
@@ -359,8 +380,8 @@ Current implementation note:
   but any channel without semantic support in that checkpoint should be written
   as an unavailable placeholder:
   - `available_channels[c] = false`
-  - `masks_roi[:, c] = 0`
   - decoded `mask_probs_roi[:, c] = 0`
+  - optional compatibility `masks_roi[:, c] = 0` if that cache exists
 - future U-Net variants may support other schemas such as `subject_v1_lr`, but
   readers must continue relying on `label_schema_id` and `mask_labels`, not
   channel position assumptions
@@ -379,9 +400,10 @@ Meaning:
 
 Required invariant:
 
-- if `available_channels[c] == false`, then `masks_roi[:, c]` must be all-zero
 - if `available_channels[c] == false`, then decoded `mask_probs_roi[:, c]` must
   be all-zero
+- if an optional compatibility `masks_roi` array exists and
+  `available_channels[c] == false`, then `masks_roi[:, c]` must be all-zero
 
 This is intentionally different from training
 `target_valid_channels`, which is row-level supervision metadata.
@@ -493,18 +515,22 @@ Current implementation note:
 
 ## Projection rules from legacy eye-mask stages
 
+Legacy projection/backfill runs may include binary `masks_roi` because the
+source artifact is already a binary mask surface. These arrays are
+compatibility labels/caches, not native raw model-output masks.
+
 ### Projection into `subject_v1_union`
 
 If the source stage is `eye_masks_runs` or `refined_eye_masks_runs` and the
 target schema is `subject_v1_union`:
 
 - if source channels are `["eye_left", "eye_right"]`:
-  - `masks_roi[:, eyes_union] = union(left, right)`
+  - optional compatibility `masks_roi[:, eyes_union] = union(left, right)`
   - `mask_probs_roi[:, eyes_union] = max(prob_left, prob_right)`
   - `projection_mode = "eyes_union_from_lr"`
 - if source channels are a non-anatomical two-eye pair (for example
   `["eye_0", "eye_1"]`):
-  - `masks_roi[:, eyes_union] = union(channel_0, channel_1)`
+  - optional compatibility `masks_roi[:, eyes_union] = union(channel_0, channel_1)`
   - `mask_probs_roi[:, eyes_union] = max(prob_0, prob_1)`
   - `components/eyes_union/provenance/source_channels = ["channel_0", "channel_1"]`
   - `projection_mode = "eyes_union_from_pair"`
@@ -516,8 +542,8 @@ target schema is `subject_v1_union`:
 In both cases:
 
 - `available_channels = [false, true, false]`
-- `subject_body` is written as a zero placeholder channel
-- `swim_bladder` is written as a zero placeholder channel
+- `subject_body` probability payload is written as a zero placeholder channel
+- `swim_bladder` probability payload is written as a zero placeholder channel
 - attrs should record the source eye stage and source run name
 
 ### Projection into `subject_v1_lr`
@@ -526,8 +552,8 @@ If the source stage is `eye_masks_runs` or `refined_eye_masks_runs` and the
 target schema is `subject_v1_lr`:
 
 - source channels must carry anatomical left/right identity
-- `masks_roi[:, eye_left] = source_left`
-- `masks_roi[:, eye_right] = source_right`
+- optional compatibility `masks_roi[:, eye_left] = source_left`
+- optional compatibility `masks_roi[:, eye_right] = source_right`
 - `components/eye_left/provenance/source_channels = ["eye_left"]`
 - `components/eye_right/provenance/source_channels = ["eye_right"]`
 - if probability masks also preserve left/right identity:
@@ -540,16 +566,20 @@ target schema is `subject_v1_lr`:
 In both cases:
 
 - `available_channels = [false, true, true, false]`
-- `subject_body` is written as a zero placeholder channel
-- `swim_bladder` is written as a zero placeholder channel
+- `subject_body` probability payload is written as a zero placeholder channel
+- `swim_bladder` probability payload is written as a zero placeholder channel
 - writers must reject `subject_v1_lr` projection from unlabeled two-eye pair
   channels such as `["eye_0", "eye_1"]`
 
 ## Reader contract
 
-- `masks_roi` and `mask_probs_roi` are ROI-local, not full-frame.
+- `mask_probs_roi` is ROI-local, not full-frame.
 - Readers should decode `mask_probs_roi` into semantic probabilities in
   `[0, 1]` regardless of physical dtype.
+- Native raw model-output readers should not require `masks_roi`; thresholding
+  belongs in an explicit refinement/finalization step.
+- If optional compatibility `masks_roi` exists, readers should treat it as a
+  derived cache or projected label surface, not as the raw model authority.
 - Readers must consult `available_channels` before interpreting an all-zero
   channel as biological absence.
 - Full-frame placement must be derived from the source crop geometry.

@@ -134,19 +134,33 @@ Required behavior:
 
 - the preferred future seed path is a single raw
   `subject_mask_runs/<run>` containing all model-predicted subject-mask
-  components
+  probability components plus model/config/provenance
 - sparse multi-source assembly may seed a new
   `refined_subject_masks_runs/<run>` directly, but this is a compatibility and
   repair path rather than the steady-state model-output path
+- thresholding raw probabilities into binary masks is part of
+  refined-subject finalization, not a requirement of native raw model output
 - the seed/assembly step must be followed by subject-mask finalization before
   the run is treated as a valid refined artifact
 - finalization is responsible for canonical run/component metrics, reasons,
   review scaffolding, provenance updates, and any refinement-time geometry
   derived by this stage family
+- refined candidates store the post-refinement binary mask and QC surface; they
+  do not need to duplicate the pre-refinement thresholded mask because the
+  source raw probability run and threshold/refinement policy are the recoverable
+  "before" state
 - for eye-capable runs, finalization is also responsible for promoting
   `eyes_union` or unordered eye seeds into canonical `eye_left` / `eye_right`
   components when the assignment is safe, or marking the affected rows/components
   ambiguous for review when it is not
+- finalization is also responsible for component-specific topology cleanup:
+  body masks may close small gaps, fill holes, remove detached islands, and keep
+  one best body component; swim-bladder masks may fill small holes and choose
+  one compact internal component; eye-union masks may preserve two valid eye
+  components instead of keeping only the largest
+- topology cleanup must write metrics/reasons that expose removed area and
+  probability mass, and rows with large or ambiguous cleanup deltas must be
+  marked for review instead of silently approved
 
 Initial allowed seed sources for unified assembly:
 
@@ -594,6 +608,12 @@ component-specific refinement metadata.
 
 Recommended arrays per available component:
 
+- `quality_code`
+  - shape: `(N,)`
+  - compact machine-generated review-routing enum
+- `quality_score`
+  - shape: `(N,)`
+  - numeric severity for "next problematic frame" navigation
 - `reason_bytes`
   - shape: `(N, width)`
   - null-terminated UTF-8 primary encoding
@@ -644,6 +664,12 @@ Recommended examples for `components/<component>/metrics/`:
 - `largest_component_fraction`
 - `hole_count`
 - `hole_area_fraction`
+- `area_ratio_prev`
+- `area_delta_zscore`
+- `centroid_jump_px`
+- `bbox_area_ratio_prev`
+- `mask_present_gap`
+- `component_count_jump`
 - `sigma_noise`
 - `curvature_var`
 - `ipr`
@@ -659,6 +685,15 @@ Why per-component subgroups:
 - body and swim bladder will not share identical derived geometry
 - eye refinement is even more specialized
 - this avoids freezing the whole stage around one component’s geometry layout
+
+Review queue policy:
+
+- `quality_code`, `quality_score`, and reason tags are machine-generated
+  review-routing signals, not human approval state
+- temporal QC should add reason tags and quality score contributions but should
+  not overwrite masks by itself
+- UI navigation should be able to filter by component and jump to the next row
+  with highest unresolved `quality_score`
 
 ## Cross-Component Relation Subgroups
 

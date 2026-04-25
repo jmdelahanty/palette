@@ -125,6 +125,10 @@ The better separation is:
 
 Recommended direction for `subject_mask_runs/<run>`:
 
+Native raw model-output runs should store probability surfaces plus
+model/config/provenance. Thresholded masks are a refinement/finalization output,
+not the canonical raw payload.
+
 ```text
 subject_mask_runs/
   <run>/
@@ -132,12 +136,11 @@ subject_mask_runs/
     frame_counts
     detection_indices
     detection_source
-    masks_roi
     mask_probs_roi
     available_channels
     metrics/
       prob_max
-      mask_present
+      probability_present
       area_px
       centroid_xy
       centroid_valid
@@ -160,7 +163,12 @@ subject_mask_runs/
 
 Key point:
 
-- `masks_roi` and `mask_probs_roi` remain the canonical unified tensor surface
+- `mask_probs_roi` is the canonical unified raw tensor surface
+- optional `masks_roi` arrays may exist in legacy/projection runs as
+  compatibility caches, but native raw model writers should not require or
+  create thresholded masks as raw authority
+- `refined_subject_masks_runs/<run>/masks_roi` is the canonical thresholded,
+  reviewable/refined mask surface
 - `components/<name>/...` holds component-scoped metadata, provenance, and any
   component-specific details
 - sparse multi-source workflows should assemble directly into
