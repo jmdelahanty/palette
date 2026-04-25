@@ -284,6 +284,44 @@ def test_analyze_root_reports_union_assignment_not_ready_for_unsplittable_union(
     assert report.eyes_union_assignment_summary["keypoint_valid_failed_rows"] == 2
 
 
+def test_analyze_root_uses_assignment_keypoint_lineage_for_union_audit(tmp_path: Path) -> None:
+    root, _kp = _keypoint_root()
+    masks = np.zeros((3, 3, 8, 8), dtype=np.uint8)
+    masks[0, 1, 1:4, 1:4] = 1
+    masks[0, 1, 1:4, 4:7] = 1
+    masks[1, 1, 1:4, 1:4] = 1
+    masks[1, 1, 1:4, 4:7] = 1
+    run = _add_subject_run(
+        root,
+        run_name="subject_masks_union_canary_001",
+        masks_roi=masks,
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([False, True, False], dtype=bool),
+    )
+    run.attrs["source_keypoint_group"] = "refined_keypoints_runs"
+    run.attrs["source_keypoints_run"] = "missing_source_kp"
+    run.attrs["source_keypoint_run"] = "missing_source_kp"
+    run.attrs["assignment_keypoint_group"] = "refined_keypoints_runs"
+    run.attrs["assignment_keypoints_run"] = "kp_001"
+
+    report = mod._analyze_root(
+        root=root,
+        zarr_path=tmp_path / "demo_training.zarr",
+        stage="subject_mask_runs",
+        subject_run="subject_masks_union_canary_001",
+        eye_mode="union",
+        keypoint_group=None,
+        keypoint_run=None,
+        allow_latest_keypoint_fallback=False,
+        sample_limit=5,
+    )
+
+    assert report.status == "pass"
+    assert report.keypoint_run == "kp_001"
+    assert report.eyes_union_assignment_status == "ready"
+    assert "using_assignment_keypoint_lineage:refined_keypoints_runs/kp_001" in report.notes
+
+
 def test_analyze_root_requires_available_channels_for_modern_surface(tmp_path: Path) -> None:
     root, _kp = _keypoint_root()
     masks = np.zeros((3, 4, 8, 8), dtype=np.uint8)

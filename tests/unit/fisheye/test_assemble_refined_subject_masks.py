@@ -552,10 +552,15 @@ def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoin
     assert assignment_summary["assignment_method"] == "subject_eyes_union_keypoint_assignment_v1"
     assert assignment_summary["assigned_rows"] == 2
     assert assignment_summary["failed_rows"] == 0
+    assert assignment_summary["keypoint_source_kind"] == "source_keypoint_lineage"
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_assigned_eye_union_001"]
     assert run.attrs["assembly_semantics"] == "single_source_subject_run_seed"
     assert run.attrs["eyes_union_assignment_summary"]["assigned_rows"] == 2
+    assert run.attrs["assignment_keypoints_run"] == "refined_kp_001"
+    assert run.attrs["assignment_keypoint_group"] == "refined_keypoints_runs"
+    assert run.attrs["assignment_keypoint_contract"] == "subject_eyes_union_assignment_keypoints_v1"
+    assert run.attrs["assignment_keypoint_selection"] == "source_keypoint_lineage"
     expected_left = np.zeros((2, 8, 8), dtype=np.uint8)
     expected_left[0, 1:4, 1:4] = 1
     expected_left[1, 3:6, 1:4] = 1
@@ -582,6 +587,7 @@ def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoin
     assert eye_left_provenance["source_channels"] == ["eyes_union"]
     assert eye_right_provenance["source_channels"] == ["eyes_union"]
     assert eye_left_provenance["assignment_method"] == "subject_eyes_union_keypoint_assignment_v1"
+    assert eye_left_provenance["assignment_keypoint_source_kind"] == "source_keypoint_lineage"
     assert eye_right_provenance["assignment_keypoint_group"] == "refined_keypoints_runs"
 
     eye_left_reasons = read_reason_labels(run["components/eye_left"])
@@ -602,6 +608,48 @@ def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoin
         np.asarray(run["relations/eye_pair/metrics/separation_valid"][:], dtype=bool),
         np.ones((2,), dtype=bool),
     )
+
+
+def test_assemble_refined_subject_run_prefers_assignment_keypoint_attrs(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    _create_keypoint_run(root, run_name="assignment_kp_001")
+    masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
+    masks[:, 0, 1:7, 1:7] = 1
+    masks[0, 1, 1:4, 1:4] = 1
+    masks[0, 1, 1:4, 4:7] = 1
+    masks[1, 1, 3:6, 1:4] = 1
+    masks[1, 1, 3:6, 4:7] = 1
+    masks[:, 2, 4:6, 4:6] = 1
+    run = _create_subject_run(
+        root,
+        run_name="subject_body_eye_union_swim_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, True, True], dtype=bool),
+        masks=masks,
+        source_keypoints_run="missing_source_kp",
+    )
+    run.attrs["assignment_keypoint_group"] = "refined_keypoints_runs"
+    run.attrs["assignment_keypoints_run"] = "assignment_kp_001"
+    run.attrs["assignment_keypoint_contract"] = "subject_eyes_union_assignment_keypoints_v1"
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        subject_run="subject_body_eye_union_swim_001",
+        refined_run="refined_subject_masks_assignment_attrs_001",
+    )
+
+    assignment_summary = summary["eyes_union_assignment_summary"]
+    assert assignment_summary["keypoint_group"] == "refined_keypoints_runs"
+    assert assignment_summary["keypoint_run"] == "assignment_kp_001"
+    assert assignment_summary["keypoint_source_kind"] == "assignment_keypoint_attrs"
+
+    refined = root["refined_subject_masks_runs"]["refined_subject_masks_assignment_attrs_001"]
+    assert refined.attrs["assignment_keypoints_run"] == "assignment_kp_001"
+    eye_left_provenance = refined["components/eye_left/provenance"].attrs
+    assert eye_left_provenance["assignment_keypoint_run"] == "assignment_kp_001"
+    assert eye_left_provenance["assignment_keypoint_source_kind"] == "assignment_keypoint_attrs"
 
 
 def test_assemble_refined_subject_run_can_pair_subject_run_with_refined_eye_source(monkeypatch) -> None:

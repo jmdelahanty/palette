@@ -14,9 +14,13 @@ import zarr
 
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.provenance_attrs import (
+    ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
     CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS,
+    build_assignment_keypoint_attrs,
     build_source_crop_snapshot_attrs,
     extract_source_crop_snapshot_attrs,
+    resolve_assignment_keypoint_group,
+    resolve_assignment_keypoints_run,
     resolve_source_keypoints_run,
 )
 from ..shared.row_lineage import assert_row_lineage_sources_equal
@@ -44,6 +48,7 @@ CANONICAL_COMPONENT_ORDER = ("subject_body", "eye_left", "eye_right", "swim_blad
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_assemble_refined_subject_masks"
 _EYE_COMPONENTS = ("eye_left", "eye_right")
 _RAW_EYE_UNION_COMPONENT = "eyes_union"
+_KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
 _KEYPOINT_SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
 _SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS = frozenset(
     {
@@ -289,6 +294,16 @@ def _load_refined_subject_mask_source(root: zarr.Group, refined_subject_run: Opt
             if group.attrs.get("source_keypoint_group") is not None
             else None
         ),
+        assignment_keypoints_run=(
+            str(resolve_assignment_keypoints_run(group.attrs))
+            if resolve_assignment_keypoints_run(group.attrs) is not None
+            else None
+        ),
+        assignment_keypoint_group=(
+            str(resolve_assignment_keypoint_group(group.attrs))
+            if resolve_assignment_keypoint_group(group.attrs) is not None
+            else None
+        ),
         source_refined_row_ids=_lineage_array(root, group, crop_run=crop_run, name="source_refined_row_ids"),
         source_detect_row_index=_lineage_array(root, group, crop_run=crop_run, name="source_detect_row_index"),
     )
@@ -313,7 +328,55 @@ def _has_available_component(source: SourceSubjectMaskRun, component_name: str) 
 def _resolve_subject_keypoint_group(
     root: zarr.Group,
     source: SourceSubjectMaskRun,
-) -> tuple[zarr.Group, str, str]:
+    *,
+    assignment_keypoint_group: Optional[str] = None,
+    assignment_keypoints_run: Optional[str] = None,
+) -> tuple[zarr.Group, str, str, str]:
+    if bool(assignment_keypoint_group) != bool(assignment_keypoints_run):
+        raise ValueError(
+            "Pass both assignment_keypoint_group and assignment_keypoints_run, or neither."
+        )
+    if assignment_keypoint_group and assignment_keypoints_run:
+        parent = root.get(str(assignment_keypoint_group))
+        if parent is None or str(assignment_keypoints_run) not in parent:
+            raise ValueError(
+                f"Explicit assignment keypoint source missing: "
+                f"{assignment_keypoint_group}/{assignment_keypoints_run}."
+            )
+        return (
+            parent[str(assignment_keypoints_run)],
+            str(assignment_keypoints_run),
+            str(assignment_keypoint_group),
+            "cli_assignment_keypoint_override",
+        )
+
+    assignment_keypoint_run = source.assignment_keypoints_run
+    assignment_keypoint_group = source.assignment_keypoint_group
+    if assignment_keypoint_group and assignment_keypoint_run:
+        parent = root.get(str(assignment_keypoint_group))
+        if parent is None or str(assignment_keypoint_run) not in parent:
+            raise ValueError(
+                f"subject_mask_runs/{source.run_name} references missing assignment keypoint source "
+                f"{assignment_keypoint_group}/{assignment_keypoint_run}; cannot assign eyes_union to eye_left/eye_right."
+            )
+        return (
+            parent[str(assignment_keypoint_run)],
+            str(assignment_keypoint_run),
+            str(assignment_keypoint_group),
+            "assignment_keypoint_attrs",
+        )
+
+    if assignment_keypoint_group and not assignment_keypoint_run:
+        raise ValueError(
+            f"subject_mask_runs/{source.run_name} has assignment_keypoint_group but no assignment_keypoints_run; "
+            "cannot assign eyes_union to eye_left/eye_right."
+        )
+    if assignment_keypoint_run and not assignment_keypoint_group:
+        raise ValueError(
+            f"subject_mask_runs/{source.run_name} has assignment_keypoints_run but no assignment_keypoint_group; "
+            "cannot assign eyes_union to eye_left/eye_right."
+        )
+
     source_keypoint_run = source.source_keypoints_run
     source_keypoint_group = source.source_keypoint_group
     if source_keypoint_group and source_keypoint_run:
@@ -323,7 +386,7 @@ def _resolve_subject_keypoint_group(
                 f"subject_mask_runs/{source.run_name} references missing keypoint source "
                 f"{source_keypoint_group}/{source_keypoint_run}; cannot assign eyes_union to eye_left/eye_right."
             )
-        return parent[str(source_keypoint_run)], str(source_keypoint_run), str(source_keypoint_group)
+        return parent[str(source_keypoint_run)], str(source_keypoint_run), str(source_keypoint_group), "source_keypoint_lineage"
 
     if source_keypoint_group and not source_keypoint_run:
         raise ValueError(
@@ -338,7 +401,8 @@ def _resolve_subject_keypoint_group(
             if parent is not None and str(source_keypoint_run) in parent:
                 matches.append((parent[str(source_keypoint_run)], str(source_keypoint_run), parent_name))
         if len(matches) == 1:
-            return matches[0]
+            keypoint_group, keypoint_run, group_name = matches[0]
+            return keypoint_group, keypoint_run, group_name, "source_keypoint_lineage"
         if len(matches) > 1:
             raise ValueError(
                 f"subject_mask_runs/{source.run_name} references keypoint run {source_keypoint_run!r} "
@@ -394,6 +458,7 @@ def _component_seed_from_eyes_union_assignment(
     keypoint_run_name: str,
     keypoint_group_name: str,
     keypoint_success_dataset: str,
+    keypoint_source_kind: str,
 ) -> RefinedSubjectComponentSeed:
     source_payload: dict[str, object] = {
         "source_stage": "subject_mask_runs",
@@ -408,6 +473,7 @@ def _component_seed_from_eyes_union_assignment(
         "assignment_keypoint_run": str(keypoint_run_name),
         "assignment_keypoint_group": str(keypoint_group_name),
         "assignment_keypoint_success_dataset": str(keypoint_success_dataset),
+        "assignment_keypoint_source_kind": str(keypoint_source_kind),
         **source.source_crop_snapshot,
     }
     label_schema_id = source.group.attrs.get("label_schema_id")
@@ -428,9 +494,17 @@ def _component_seed_from_eyes_union_assignment(
 def _assign_eyes_union_component_seeds(
     root: zarr.Group,
     source: SourceSubjectMaskRun,
+    *,
+    assignment_keypoint_group: Optional[str] = None,
+    assignment_keypoints_run: Optional[str] = None,
 ) -> tuple[dict[str, RefinedSubjectComponentSeed], dict[str, object]]:
     comp_idx = _require_available_component(source, _RAW_EYE_UNION_COMPONENT, "subject_mask_runs")
-    kp_group, keypoint_run_name, keypoint_group_name = _resolve_subject_keypoint_group(root, source)
+    kp_group, keypoint_run_name, keypoint_group_name, keypoint_source_kind = _resolve_subject_keypoint_group(
+        root,
+        source,
+        assignment_keypoint_group=assignment_keypoint_group,
+        assignment_keypoints_run=assignment_keypoints_run,
+    )
     keypoints_roi = kp_group.get("keypoints_roi")
     if keypoints_roi is None:
         raise ValueError(f"Keypoint run {keypoint_run_name!r} missing keypoints_roi; cannot assign eyes_union.")
@@ -454,6 +528,8 @@ def _assign_eyes_union_component_seeds(
     summary["keypoint_run"] = str(keypoint_run_name)
     summary["keypoint_group"] = str(keypoint_group_name)
     summary["keypoint_success_dataset"] = str(success_dataset)
+    summary["keypoint_source_kind"] = str(keypoint_source_kind)
+    summary["assignment_keypoint_contract"] = ASSIGNMENT_KEYPOINT_CONTRACT_VALUE
     seeds = {
         component_name: _component_seed_from_eyes_union_assignment(
             source,
@@ -464,6 +540,7 @@ def _assign_eyes_union_component_seeds(
             keypoint_run_name=keypoint_run_name,
             keypoint_group_name=keypoint_group_name,
             keypoint_success_dataset=success_dataset,
+            keypoint_source_kind=keypoint_source_kind,
         )
         for component_name in _EYE_COMPONENTS
     }
@@ -630,6 +707,8 @@ def _collect_component_seeds(
     refined_component_sources: Mapping[str, SourceSubjectMaskRun],
     allow_unapproved_components: bool = False,
     promote_source_review: bool = False,
+    assignment_keypoint_group: Optional[str] = None,
+    assignment_keypoints_run: Optional[str] = None,
 ) -> tuple[dict[str, RefinedSubjectComponentSeed], list[str], dict[str, dict[str, object]], Optional[dict[str, object]]]:
     seeds: dict[str, RefinedSubjectComponentSeed] = {}
     review_overrides: dict[str, dict[str, object]] = {}
@@ -758,7 +837,12 @@ def _collect_component_seeds(
     if subject_source is not None and _has_available_component(subject_source, _RAW_EYE_UNION_COMPONENT):
         existing_eye_components = set(seeds).intersection(_EYE_COMPONENTS)
         if not existing_eye_components:
-            assignment_seeds, eyes_union_assignment_summary = _assign_eyes_union_component_seeds(root, subject_source)
+            assignment_seeds, eyes_union_assignment_summary = _assign_eyes_union_component_seeds(
+                root,
+                subject_source,
+                assignment_keypoint_group=assignment_keypoint_group,
+                assignment_keypoints_run=assignment_keypoints_run,
+            )
             for component_name in _EYE_COMPONENTS:
                 _add_component_seed(
                     seeds,
@@ -849,7 +933,16 @@ def assemble_refined_subject_run(
     dry_run: bool = False,
     allow_unapproved_components: bool = False,
     promote_source_review: bool = False,
+    assignment_keypoint_group: Optional[str] = None,
+    assignment_keypoints_run: Optional[str] = None,
 ) -> dict[str, object]:
+    if bool(assignment_keypoint_group) != bool(assignment_keypoints_run):
+        raise ValueError("Pass both assignment_keypoint_group and assignment_keypoints_run, or neither.")
+    if assignment_keypoint_group and assignment_keypoint_group not in _KEYPOINT_GROUP_CHOICES:
+        raise ValueError(
+            f"Unsupported assignment_keypoint_group {assignment_keypoint_group!r}; "
+            f"expected one of {_KEYPOINT_GROUP_CHOICES}."
+        )
     if eye_run and refined_eye_run:
         raise ValueError("Pass only one of eye_run or refined_eye_run.")
     if eye_refined_run and (eye_run or refined_eye_run):
@@ -913,6 +1006,8 @@ def assemble_refined_subject_run(
         refined_component_sources=refined_component_sources,
         allow_unapproved_components=allow_unapproved_components,
         promote_source_review=promote_source_review,
+        assignment_keypoint_group=assignment_keypoint_group,
+        assignment_keypoints_run=assignment_keypoints_run,
     )
     coarse_subject_source = subject_source or body_source or eye_source or swim_source
     coarse_source_subject_mask_run = (
@@ -977,6 +1072,17 @@ def assemble_refined_subject_run(
         "roi_count": int(reference_source.masks_roi.shape[0]),
         "label_schema_id": _infer_refined_label_schema_id(component_names),
     }
+    assignment_keypoint_attrs: dict[str, object] = {}
+    if eyes_union_assignment_summary is not None:
+        assignment_keypoint_attrs = build_assignment_keypoint_attrs(
+            eyes_union_assignment_summary["keypoint_run"],
+            assignment_keypoint_group=eyes_union_assignment_summary["keypoint_group"],
+            selection=str(eyes_union_assignment_summary.get("keypoint_source_kind") or "unknown"),
+        )
+        assignment_keypoint_attrs["assignment_keypoint_success_dataset"] = str(
+            eyes_union_assignment_summary["keypoint_success_dataset"]
+        )
+        summary.update(assignment_keypoint_attrs)
     if dry_run:
         return summary
 
@@ -1011,6 +1117,7 @@ def assemble_refined_subject_run(
         extra_attrs["source_input_subject_mask_run"] = subject_source.run_name
     if eyes_union_assignment_summary is not None:
         extra_attrs["eyes_union_assignment_summary"] = dict(_json_safe(eyes_union_assignment_summary))
+        extra_attrs.update(assignment_keypoint_attrs)
     if body_source is not None:
         extra_attrs["source_body_subject_mask_run"] = body_source.run_name
     if body_refined_source is not None:
@@ -1040,6 +1147,7 @@ def assemble_refined_subject_run(
         provenance_inputs["source_input_subject_mask_run"] = subject_source.run_name
     if eyes_union_assignment_summary is not None:
         provenance_inputs["eyes_union_assignment_summary"] = dict(_json_safe(eyes_union_assignment_summary))
+        provenance_inputs.update(assignment_keypoint_attrs)
     if body_source is not None:
         provenance_inputs["source_body_subject_mask_run"] = body_source.run_name
     if body_refined_source is not None:
@@ -1097,6 +1205,8 @@ def assemble_refined_subject_masks(
     dry_run: bool = False,
     allow_unapproved_components: bool = False,
     promote_source_review: bool = False,
+    assignment_keypoint_group: Optional[str] = None,
+    assignment_keypoints_run: Optional[str] = None,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="r" if dry_run else "a")
     summary = assemble_refined_subject_run(
@@ -1115,6 +1225,8 @@ def assemble_refined_subject_masks(
         dry_run=dry_run,
         allow_unapproved_components=allow_unapproved_components,
         promote_source_review=promote_source_review,
+        assignment_keypoint_group=assignment_keypoint_group,
+        assignment_keypoints_run=assignment_keypoints_run,
     )
     summary["zarr_path"] = str(Path(zarr_path))
     if not dry_run:
@@ -1178,6 +1290,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "By default assembly finalizes metrics/QC but leaves target component reviews pending."
         ),
     )
+    parser.add_argument(
+        "--assignment-keypoint-group",
+        choices=_KEYPOINT_GROUP_CHOICES,
+        help="Explicit keypoint group to use for eyes_union -> eye_left/eye_right assignment.",
+    )
+    parser.add_argument(
+        "--assignment-keypoint-run",
+        help="Explicit keypoint run to use for eyes_union -> eye_left/eye_right assignment.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit the result summary as JSON.")
     return parser
 
@@ -1205,6 +1326,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         dry_run=bool(args.dry_run),
         allow_unapproved_components=bool(args.allow_unapproved_components),
         promote_source_review=bool(args.promote_source_review),
+        assignment_keypoint_group=args.assignment_keypoint_group,
+        assignment_keypoints_run=args.assignment_keypoint_run,
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

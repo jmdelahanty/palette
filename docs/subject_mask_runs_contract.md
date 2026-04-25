@@ -196,6 +196,11 @@ Optional attrs:
 - `source_keypoints_run`
 - `source_keypoint_run`
 - `source_keypoint_group`
+- `assignment_keypoints_run`
+- `assignment_keypoint_group`
+- `assignment_keypoint_contract = "subject_eyes_union_assignment_keypoints_v1"`
+- `assignment_keypoint_role = "eyes_union_lr_assignment"`
+- `assignment_keypoint_selection`
 - `source_eye_masks_run`
 - `source_refined_eye_masks_run`
 - `source_subject_mask_run`
@@ -215,6 +220,19 @@ Crop-snapshot semantics:
   re-deriving it ad hoc from the latest crop run.
 - Current `refined_subject_masks_runs/<run>` writers carry the same crop
   snapshot fields forward from their `subject_mask_runs/<run>` source.
+
+Assignment-keypoint semantics:
+
+- `source_keypoints_run` / `source_keypoint_group` mean the raw
+  `subject_mask_runs/<run>` producer consumed that keypoint run as an input.
+- `assignment_keypoints_run` / `assignment_keypoint_group` mean the run has a
+  declared keypoint source for later deterministic post-segmentation
+  assignment, currently `eyes_union` -> `eye_left` / `eye_right`.
+- raw U-Net subject-mask inference does not need keypoints to segment masks, so
+  it should record `assignment_*` attrs rather than pretending keypoints were a
+  raw segmentation input.
+- `assignment_keypoint_group` and `assignment_keypoints_run` must be written as
+  a pair and must row-align with the source crop run.
 
 ## Component Provenance
 

@@ -95,6 +95,22 @@ def _build_fake_root() -> _FakeGroup:
     crop.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
     crop.create_array("detection_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
     crop.create_array("detection_source", data=np.array([0, 0], dtype=np.int8), overwrite=True)
+    keypoint_parent = root.create_group("refined_keypoints_runs")
+    keypoint_parent.attrs["latest"] = "refined_kp_001"
+    keypoint = keypoint_parent.create_group("refined_kp_001")
+    keypoint.attrs["keypoint_labels"] = ["eye_left", "eye_right", "swim_bladder"]
+    keypoint.create_array(
+        "keypoints_roi",
+        data=np.array(
+            [
+                [[1.0, 1.0], [3.0, 1.0], [2.0, 2.0]],
+                [[1.0, 2.0], [3.0, 2.0], [2.0, 3.0]],
+            ],
+            dtype=np.float32,
+        ),
+        overwrite=True,
+    )
+    keypoint.create_array("refined_success", data=np.array([True, True], dtype=bool), overwrite=True)
     return root
 
 
@@ -240,6 +256,10 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
             "11",
             "--mask-probs-chunk-rois",
             "2",
+            "--assignment-keypoint-group",
+            "refined_keypoints_runs",
+            "--assignment-keypoint-run",
+            "refined_kp_001",
             "--profile-timings",
         ]
     )
@@ -270,6 +290,13 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert run_group.attrs["source_roi_live_gpu_chunk_frames"] == 11
     assert run_group.attrs["label_schema_id"] == "subject_v1_union"
     assert list(run_group.attrs["mask_labels"]) == ["subject_body", "eyes_union", "swim_bladder"]
+    assert run_group.attrs["assignment_keypoint_group"] == "refined_keypoints_runs"
+    assert run_group.attrs["assignment_keypoints_run"] == "refined_kp_001"
+    assert run_group.attrs["assignment_keypoint_contract"] == "subject_eyes_union_assignment_keypoints_v1"
+    assert run_group.attrs["assignment_keypoint_role"] == "eyes_union_lr_assignment"
+    assert run_group.attrs["assignment_keypoint_selection"] == "cli_explicit"
+    assert run_group.attrs["assignment_keypoint_success_dataset"] == "refined_success"
+    assert run_group.attrs["assignment_keypoint_eye_indices"] == {"eye_left": 0, "eye_right": 1}
     assert run_group.attrs["method"] == "unet_subject_mask_segmenter"
     assert run_group.attrs["run_semantics"] == "unet_subject_mask_inference"
     assert run_group.attrs["profile_timings_enabled"] is True
@@ -277,6 +304,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert provenance_inputs["source_crop_signature"] == "sig-001"
     assert provenance_inputs["source_crop_revision"] == 4
     assert provenance_inputs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
+    assert provenance_inputs["assignment_keypoint_group"] == "refined_keypoints_runs"
+    assert provenance_inputs["assignment_keypoints_run"] == "refined_kp_001"
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
     assert run_group["masks_roi"].shape == (2, 3, 4, 4)
 

@@ -16,9 +16,11 @@ import zarr
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
+from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
-from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.provenance_attrs import build_assignment_keypoint_attrs, build_source_crop_snapshot_attrs
+from ..shared.row_alignment import assert_row_alignment
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -34,6 +36,9 @@ SUBJECT_MASK_SCHEMAS: dict[str, tuple[str, ...]] = {
 SUBJECT_MASK_LABEL_SCHEMA = "subject_v1_union"
 SUBJECT_MASK_LABELS: tuple[str, ...] = SUBJECT_MASK_SCHEMAS[SUBJECT_MASK_LABEL_SCHEMA]
 _SUBJECT_MASKS_STATUS_SOURCE = "runtime_infer_unet_subject_masks"
+KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
+KEYPOINT_SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
+EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -183,6 +188,68 @@ def _resolve_checkpoint_schema(checkpoint: Dict[str, object]) -> Tuple[str, Tupl
             f"{label_schema_id!r}: {expected_labels!r}."
         )
     return label_schema_id, mask_labels
+
+
+def _resolve_assignment_keypoint_attrs(
+    root: zarr.Group,
+    *,
+    assignment_keypoint_group: Optional[str],
+    assignment_keypoints_run: Optional[str],
+    total_rois: int,
+    mask_labels: Sequence[str],
+) -> dict[str, object]:
+    has_group = bool(assignment_keypoint_group)
+    has_run = bool(assignment_keypoints_run)
+    if has_group != has_run:
+        raise ValueError(
+            "Pass both --assignment-keypoint-group and --assignment-keypoint-run, or neither."
+        )
+    if not has_group or not has_run:
+        return {}
+    if "eyes_union" not in {str(label) for label in mask_labels}:
+        raise ValueError(
+            "Assignment keypoints are only valid for subject-mask schemas that expose eyes_union."
+        )
+
+    group_name = str(assignment_keypoint_group)
+    parent = root.get(group_name)
+    run_name = str(assignment_keypoints_run)
+    if parent is None or run_name not in parent:
+        raise ValueError(f"Assignment keypoint source not found: {group_name}/{run_name}.")
+    kp_group = parent[run_name]
+    keypoints_roi = kp_group.get("keypoints_roi")
+    if keypoints_roi is None:
+        raise ValueError(f"Assignment keypoint source {group_name}/{run_name} missing keypoints_roi.")
+    success_name = next((name for name in KEYPOINT_SUCCESS_DATASET_CANDIDATES if name in kp_group), None)
+    if success_name is None:
+        raise ValueError(
+            f"Assignment keypoint source {group_name}/{run_name} missing success dataset "
+            f"({', '.join(KEYPOINT_SUCCESS_DATASET_CANDIDATES)})."
+        )
+    success_arr = kp_group.get(success_name)
+    assert_row_alignment(
+        int(total_rois),
+        (
+            (f"{group_name}/{run_name}/keypoints_roi", keypoints_roi),
+            (f"{group_name}/{run_name}/{success_name}", success_arr),
+        ),
+        stage="subject-mask assignment keypoint source",
+    )
+    keypoint_shape = getattr(keypoints_roi, "shape", ())
+    keypoint_count = int(keypoint_shape[1]) if len(keypoint_shape) >= 2 else None
+    eye_indices = resolve_required_keypoint_indices_from_attrs(
+        kp_group.attrs,
+        EYE_KEYPOINT_LABELS,
+        keypoint_count=keypoint_count,
+    )
+    payload = build_assignment_keypoint_attrs(
+        run_name,
+        assignment_keypoint_group=group_name,
+        selection="cli_explicit",
+    )
+    payload["assignment_keypoint_success_dataset"] = str(success_name)
+    payload["assignment_keypoint_eye_indices"] = {key: int(value) for key, value in eye_indices.items()}
+    return payload
 
 
 def _prepare_run_group(
@@ -421,6 +488,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="uint8",
         help="Storage dtype for mask_probs_roi (default: uint8 for analysis runs).",
     )
+    parser.add_argument(
+        "--assignment-keypoint-group",
+        choices=KEYPOINT_GROUP_CHOICES,
+        help="Keypoint group to use later when splitting eyes_union into anatomical LR eyes.",
+    )
+    parser.add_argument(
+        "--assignment-keypoint-run",
+        help="Keypoint run to use later when splitting eyes_union into anatomical LR eyes.",
+    )
     parser.add_argument("--profile-timings", action="store_true", help="Collect per-stage timing diagnostics.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the requested output run if it exists.")
     return parser
@@ -461,6 +537,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if total_rois == 0:
         crop_source.close()
         raise ValueError("ROI image array is empty; nothing to segment.")
+    try:
+        assignment_keypoint_attrs = _resolve_assignment_keypoint_attrs(
+            root,
+            assignment_keypoint_group=args.assignment_keypoint_group,
+            assignment_keypoints_run=args.assignment_keypoint_run,
+            total_rois=total_rois,
+            mask_labels=mask_labels,
+        )
+    except Exception:
+        crop_source.close()
+        raise
 
     env_info = get_environment_info(
         include_all_packages=False,
@@ -534,6 +621,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "created_at_utc": created_at,
         }
     )
+    if assignment_keypoint_attrs:
+        run_group.attrs.update(assignment_keypoint_attrs)
     if crop_source.roi_cache_key is not None:
         run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
     if crop_source.roi_cache_path is not None:
@@ -595,6 +684,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "frame_source": crop_source.frame_source_kind,
         "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
     }
+    provenance_inputs.update(assignment_keypoint_attrs)
     if crop_source.roi_cache_path is not None:
         provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
     provenance = build_stage_provenance(

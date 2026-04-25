@@ -25,7 +25,11 @@ from fisheye.refinement.subject_eye_assignment import assign_eyes_union_to_lr
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
-from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
+from fisheye.shared.provenance_attrs import (
+    resolve_assignment_keypoint_group,
+    resolve_assignment_keypoints_run,
+    resolve_source_keypoints_run,
+)
 from fisheye.shared.row_alignment import assert_row_alignment
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.utils.zarr_io import open_zarr_root
@@ -327,6 +331,19 @@ def _resolve_keypoint_run(
         if in_raw:
             return "keypoints_runs", str(explicit_run), raw[str(explicit_run)], notes
         raise ValueError(f"Keypoint run '{explicit_run}' not found in refined/raw keypoint groups.")
+
+    assignment_group = _normalize_attr(resolve_assignment_keypoint_group(subject_group.attrs))
+    assignment_run = _normalize_attr(resolve_assignment_keypoints_run(subject_group.attrs))
+    if assignment_group and assignment_run:
+        assignment_parent = root.get(assignment_group)
+        if _is_group(assignment_parent) and assignment_run in assignment_parent:
+            notes.append(f"using_assignment_keypoint_lineage:{assignment_group}/{assignment_run}")
+            return assignment_group, assignment_run, assignment_parent[assignment_run], notes
+        raise ValueError(f"Assignment keypoint run missing: {assignment_group}/{assignment_run}")
+    if assignment_group and not assignment_run:
+        raise ValueError("Subject-mask run has assignment_keypoint_group but no assignment_keypoints_run.")
+    if assignment_run and not assignment_group:
+        raise ValueError("Subject-mask run has assignment_keypoints_run but no assignment_keypoint_group.")
 
     source_group = _normalize_attr(subject_group.attrs.get("source_keypoint_group"))
     source_run = _normalize_attr(resolve_source_keypoints_run(subject_group.attrs))

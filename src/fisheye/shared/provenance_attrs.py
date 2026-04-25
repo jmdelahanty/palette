@@ -8,6 +8,13 @@ from .type_conversions import as_int, normalize_attr
 
 CANONICAL_SOURCE_KEYPOINTS_RUN_ATTR = "source_keypoints_run"
 LEGACY_SOURCE_KEYPOINT_RUN_ATTR = "source_keypoint_run"
+ASSIGNMENT_KEYPOINTS_RUN_ATTR = "assignment_keypoints_run"
+ASSIGNMENT_KEYPOINT_GROUP_ATTR = "assignment_keypoint_group"
+ASSIGNMENT_KEYPOINT_CONTRACT_ATTR = "assignment_keypoint_contract"
+ASSIGNMENT_KEYPOINT_ROLE_ATTR = "assignment_keypoint_role"
+ASSIGNMENT_KEYPOINT_SELECTION_ATTR = "assignment_keypoint_selection"
+ASSIGNMENT_KEYPOINT_CONTRACT_VALUE = "subject_eyes_union_assignment_keypoints_v1"
+EYES_UNION_LR_ASSIGNMENT_KEYPOINT_ROLE = "eyes_union_lr_assignment"
 CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR = "source_detect_review_status_ref"
 SOURCE_CROP_STORAGE_MODE_ATTR = "source_crop_storage_mode"
 SOURCE_CROP_SIGNATURE_ATTR = "source_crop_signature"
@@ -30,6 +37,20 @@ def resolve_source_keypoints_run(attrs: Optional[Mapping[str, Any]]) -> Any:
     return value
 
 
+def resolve_assignment_keypoints_run(attrs: Optional[Mapping[str, Any]]) -> Any:
+    """Return the keypoint run selected for post-segmentation mask assignment."""
+    if attrs is None:
+        return None
+    return attrs.get(ASSIGNMENT_KEYPOINTS_RUN_ATTR)
+
+
+def resolve_assignment_keypoint_group(attrs: Optional[Mapping[str, Any]]) -> Any:
+    """Return the keypoint group selected for post-segmentation mask assignment."""
+    if attrs is None:
+        return None
+    return attrs.get(ASSIGNMENT_KEYPOINT_GROUP_ATTR)
+
+
 def build_source_keypoints_attrs(
     source_keypoints_run: Any,
     *,
@@ -42,6 +63,22 @@ def build_source_keypoints_attrs(
     if include_legacy_alias:
         payload[LEGACY_SOURCE_KEYPOINT_RUN_ATTR] = source_keypoints_run
     return payload
+
+
+def build_assignment_keypoint_attrs(
+    assignment_keypoints_run: Any,
+    *,
+    assignment_keypoint_group: Any,
+    selection: str,
+) -> Dict[str, Any]:
+    """Build attrs for keypoints used by deterministic post-segmentation assignment."""
+    return {
+        ASSIGNMENT_KEYPOINTS_RUN_ATTR: assignment_keypoints_run,
+        ASSIGNMENT_KEYPOINT_GROUP_ATTR: assignment_keypoint_group,
+        ASSIGNMENT_KEYPOINT_CONTRACT_ATTR: ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
+        ASSIGNMENT_KEYPOINT_ROLE_ATTR: EYES_UNION_LR_ASSIGNMENT_KEYPOINT_ROLE,
+        ASSIGNMENT_KEYPOINT_SELECTION_ATTR: str(selection),
+    }
 
 
 def build_source_crop_snapshot_attrs(

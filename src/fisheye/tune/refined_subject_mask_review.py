@@ -27,6 +27,8 @@ from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
     build_source_keypoints_attrs,
     extract_source_crop_snapshot_attrs,
+    resolve_assignment_keypoint_group,
+    resolve_assignment_keypoints_run,
     resolve_source_keypoints_run,
 )
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
@@ -129,6 +131,8 @@ class SourceSubjectMaskRun:
     source_method: Optional[str]
     source_keypoints_run: Optional[str]
     source_keypoint_group: Optional[str]
+    assignment_keypoints_run: Optional[str] = None
+    assignment_keypoint_group: Optional[str] = None
     source_refined_row_ids: Any | None = None
     source_detect_row_index: Any | None = None
 
@@ -1084,6 +1088,16 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         source_keypoint_group=(
             str(group.attrs.get("source_keypoint_group")) if group.attrs.get("source_keypoint_group") is not None else None
         ),
+        assignment_keypoints_run=(
+            str(resolve_assignment_keypoints_run(group.attrs))
+            if resolve_assignment_keypoints_run(group.attrs) is not None
+            else None
+        ),
+        assignment_keypoint_group=(
+            str(resolve_assignment_keypoint_group(group.attrs))
+            if resolve_assignment_keypoint_group(group.attrs) is not None
+            else None
+        ),
         source_refined_row_ids=_lineage_array("source_refined_row_ids"),
         source_detect_row_index=_lineage_array("source_detect_row_index"),
     )
@@ -1194,6 +1208,16 @@ def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[st
         source_keypoints_run=resolve_source_keypoints_run(group.attrs),
         source_keypoint_group=(
             str(group.attrs.get("source_keypoint_group")) if group.attrs.get("source_keypoint_group") is not None else None
+        ),
+        assignment_keypoints_run=(
+            str(resolve_assignment_keypoints_run(group.attrs))
+            if resolve_assignment_keypoints_run(group.attrs) is not None
+            else None
+        ),
+        assignment_keypoint_group=(
+            str(resolve_assignment_keypoint_group(group.attrs))
+            if resolve_assignment_keypoint_group(group.attrs) is not None
+            else None
         ),
         source_refined_row_ids=_resolve_source_lineage_array(
             root,
