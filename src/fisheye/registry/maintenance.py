@@ -28,6 +28,7 @@ from .db import (
     _extract_subject_mask_component_quality_rows,
     _extract_subject_mask_performance_rows,
     _import_zarr,
+    _open_zarr_group_non_consolidated,
 )
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
@@ -3080,7 +3081,6 @@ def _backfill_eye_mask_profiles(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
-    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,
@@ -3121,10 +3121,7 @@ def _backfill_eye_mask_profiles(
             continue
 
         try:
-            try:
-                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-            except TypeError:
-                root = zarr.open_group(str(zarr_path), mode="r")
+            root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
             extracted_rows = _extract_eye_mask_profile_rows_for_maintenance(
                 root,
                 zarr_path=zarr_path,
@@ -3226,7 +3223,6 @@ def _backfill_keypoint_profiles(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
-    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,
@@ -3264,10 +3260,7 @@ def _backfill_keypoint_profiles(
             continue
 
         try:
-            try:
-                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-            except TypeError:
-                root = zarr.open_group(str(zarr_path), mode="r")
+            root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
             extracted_rows = _extract_keypoint_profile_rows(
                 root,
                 zarr_path=zarr_path,
@@ -3377,7 +3370,6 @@ def _backfill_keypoint_quality(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
-    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,
@@ -4590,10 +4582,7 @@ def _backfill_subject_mask_performance(
             continue
 
         try:
-            try:
-                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-            except TypeError:
-                root = zarr.open_group(str(zarr_path), mode="r")
+            root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
             extracted_rows = _extract_subject_mask_performance_rows(
                 root,
                 zarr_path=zarr_path,
@@ -4712,7 +4701,6 @@ def _backfill_subject_mask_component_quality(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
-    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,
@@ -4747,10 +4735,7 @@ def _backfill_subject_mask_component_quality(
             continue
 
         try:
-            try:
-                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-            except TypeError:
-                root = zarr.open_group(str(zarr_path), mode="r")
+            root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
             extracted_rows = _extract_subject_mask_component_quality_rows(
                 root,
                 zarr_path=zarr_path,

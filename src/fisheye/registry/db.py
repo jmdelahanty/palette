@@ -66,6 +66,18 @@ def _import_zarr():
     return zarr
 
 
+def _open_zarr_group_non_consolidated(zarr_path: Path, *, mode: str = "r"):
+    """Open a zarr root without trusting possibly stale consolidated metadata."""
+    zarr = _import_zarr()
+    try:
+        return zarr.open_group(str(zarr_path), mode=mode, use_consolidated=False)
+    except TypeError:
+        try:
+            return zarr.open_group(str(zarr_path), mode=mode, consolidated=False)
+        except TypeError:
+            return zarr.open_group(str(zarr_path), mode=mode)
+
+
 _utc_now = utc_now
 
 
@@ -11642,11 +11654,7 @@ class Registry:
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_detect_performance_rows(
             root,
             zarr_path=zarr_path,
@@ -11664,11 +11672,7 @@ class Registry:
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_keypoint_performance_rows(
             root,
             zarr_path=zarr_path,
@@ -11686,11 +11690,7 @@ class Registry:
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_eye_mask_performance_rows(
             root,
             zarr_path=zarr_path,
@@ -11708,11 +11708,7 @@ class Registry:
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_eye_mask_quality_rows(
             root,
             zarr_path=zarr_path,
@@ -11730,11 +11726,7 @@ class Registry:
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_subject_mask_performance_rows(
             root,
             zarr_path=zarr_path,
@@ -11752,11 +11744,7 @@ class Registry:
         recording_id: Optional[str],
         zarr_use: Optional[str],
     ) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_subject_mask_component_quality_rows(
             root,
             zarr_path=zarr_path,
@@ -11833,11 +11821,7 @@ class Registry:
                 )
 
     def refresh_detect_quality_for_dataset(self, dataset_id: str, *, zarr_path: Path) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
         self.replace_detect_quality(dataset_id, rows)
         return len(rows)
@@ -11886,11 +11870,7 @@ class Registry:
                 )
 
     def refresh_keypoint_quality_for_dataset(self, dataset_id: str, *, zarr_path: Path) -> int:
-        zarr = _import_zarr()
-        try:
-            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-        except TypeError:
-            root = zarr.open_group(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
         self.replace_keypoint_quality(dataset_id, rows)
         return len(rows)
@@ -13447,8 +13427,7 @@ class Registry:
     def scan_zarr(self, zarr_path: Path) -> Optional[str]:
         if not zarr_path.exists():
             return None
-        zarr = _import_zarr()
-        root = zarr.open(str(zarr_path), mode="r")
+        root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         return self.register_from_root(root, zarr_path)
 
     def reconcile_missing_datasets(self, *, scope_paths: Optional[Iterable[Path]] = None) -> Dict[str, int]:
