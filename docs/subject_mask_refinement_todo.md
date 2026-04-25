@@ -306,17 +306,19 @@ Current gap:
 - `assemble_refined_subject_masks --subject-run` now supports the preferred
   single-source raw subject-mask path by copying all available canonical
   components from one `subject_mask_runs/<run>` into a finalized refined run
+- `eyes_union` assignment now has an initial keypoint-based path that generates
+  canonical `eye_left` / `eye_right` refined seeds when source keypoint lineage
+  is available
 - existing eye geometry paths compute ellipses/separation from already-labeled
   LR components
-- we do not yet have a robust helper that converts `eyes_union` or unordered
-  eye instances into canonical `eye_left` / `eye_right`
+- remaining work is to harden assignment confidence/status semantics for
+  ambiguous rows and unordered eye instances
 
 Recommended next design slice:
 
-- implement a geometry-aware LR assignment helper inside subject-mask
-  refinement/finalization
-- use keypoints, heading/body axis, eye centroids, and separation checks as the
-  assignment evidence
+- extend LR assignment confidence beyond nearest-keypoint splitting by using
+  heading/body axis, eye centroids, separation checks, and ellipse fit quality
+  as explicit assignment evidence
 - write assignment confidence/status and reason labels per row
 - mark ambiguous rows for review rather than silently guessing
 - keep component provenance explicit, including the source eye mask and the

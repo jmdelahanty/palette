@@ -123,6 +123,24 @@ def _create_refined_eye_run(root: zarr.Group, *, run_name: str = "refined_eye_ma
     return run
 
 
+def _create_keypoint_run(root: zarr.Group, *, run_name: str = "refined_kp_001") -> zarr.Group:
+    parent = root.require_group("refined_keypoints_runs")
+    parent.attrs["latest"] = run_name
+    run = parent.create_group(run_name)
+    run.attrs["keypoint_labels"] = ["swim_bladder", "eye_left", "eye_right"]
+    keypoints_roi = np.asarray(
+        [
+            [[4.5, 5.0], [2.0, 2.0], [5.0, 2.0]],
+            [[4.0, 4.0], [2.0, 4.0], [5.0, 4.0]],
+        ],
+        dtype=np.float32,
+    )
+    run.create_array("keypoints_roi", data=keypoints_roi, overwrite=True)
+    run.create_array("heading", data=np.asarray([0.0, 0.0], dtype=np.float32), overwrite=True)
+    run.create_array("detection_success", data=np.asarray([True, True], dtype=bool), overwrite=True)
+    return run
+
+
 def _build_assembly_root() -> zarr.Group:
     root = zarr.group()
     crop_parent = root.create_group("crop_runs")
@@ -477,7 +495,7 @@ def test_assemble_refined_subject_run_copies_all_canonical_components_from_subje
         assert provenance["source_channels"] == [component_name]
 
 
-def test_assemble_refined_subject_run_rejects_subject_run_eye_union_without_lr_seed(monkeypatch) -> None:
+def test_assemble_refined_subject_run_rejects_subject_run_eye_union_without_keypoints(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()
     masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
@@ -493,12 +511,97 @@ def test_assemble_refined_subject_run_rejects_subject_run_eye_union_without_lr_s
         masks=masks,
     )
 
-    with pytest.raises(ValueError, match="eyes_union-to-left/right assignment is not implemented"):
+    with pytest.raises(ValueError, match="references missing keypoint source"):
         assemble_mod.assemble_refined_subject_run(
             root,
             subject_run="subject_body_eye_union_swim_001",
             refined_run="refined_subject_masks_eye_union_rejected_001",
         )
+
+
+def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoints(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    _create_keypoint_run(root)
+    masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
+    masks[0, 0, 1:7, 1:7] = 1
+    masks[1, 0, 2:6, 2:6] = 1
+    masks[0, 1, 1:4, 1:4] = 1
+    masks[0, 1, 1:4, 4:7] = 1
+    masks[1, 1, 3:6, 1:4] = 1
+    masks[1, 1, 3:6, 4:7] = 1
+    masks[0, 2, 4:6, 4:6] = 1
+    masks[1, 2, 3:5, 3:5] = 1
+    _create_subject_run(
+        root,
+        run_name="subject_body_eye_union_swim_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, True, True], dtype=bool),
+        masks=masks,
+    )
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        subject_run="subject_body_eye_union_swim_001",
+        refined_run="refined_subject_masks_assigned_eye_union_001",
+    )
+
+    assert summary["component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    assignment_summary = summary["eyes_union_assignment_summary"]
+    assert assignment_summary["assignment_method"] == "subject_eyes_union_keypoint_assignment_v1"
+    assert assignment_summary["assigned_rows"] == 2
+    assert assignment_summary["failed_rows"] == 0
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_assigned_eye_union_001"]
+    assert run.attrs["assembly_semantics"] == "single_source_subject_run_seed"
+    assert run.attrs["eyes_union_assignment_summary"]["assigned_rows"] == 2
+    expected_left = np.zeros((2, 8, 8), dtype=np.uint8)
+    expected_left[0, 1:4, 1:4] = 1
+    expected_left[1, 3:6, 1:4] = 1
+    expected_right = np.zeros((2, 8, 8), dtype=np.uint8)
+    expected_right[0, 1:4, 4:7] = 1
+    expected_right[1, 3:6, 4:7] = 1
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][:, 1], dtype=np.uint8), expected_left)
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][:, 2], dtype=np.uint8), expected_right)
+    np.testing.assert_array_equal(
+        np.asarray(run["components/eye_left/source_seed_masks_roi"][:], dtype=np.uint8),
+        expected_left,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["components/eye_right/source_seed_masks_roi"][:], dtype=np.uint8),
+        expected_right,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["components/eye_left/manual_override"][:], dtype=bool),
+        np.zeros((2,), dtype=bool),
+    )
+
+    eye_left_provenance = run["components/eye_left/provenance"].attrs
+    eye_right_provenance = run["components/eye_right/provenance"].attrs
+    assert eye_left_provenance["source_channels"] == ["eyes_union"]
+    assert eye_right_provenance["source_channels"] == ["eyes_union"]
+    assert eye_left_provenance["assignment_method"] == "subject_eyes_union_keypoint_assignment_v1"
+    assert eye_right_provenance["assignment_keypoint_group"] == "refined_keypoints_runs"
+
+    eye_left_reasons = read_reason_labels(run["components/eye_left"])
+    eye_right_reasons = read_reason_labels(run["components/eye_right"])
+    assert eye_left_reasons is not None
+    assert eye_right_reasons is not None
+    assert eye_left_reasons.tolist() == [
+        "assigned_from_eyes_union|split_by_keypoint",
+        "assigned_from_eyes_union|split_by_keypoint",
+    ]
+    assert eye_right_reasons.tolist() == eye_left_reasons.tolist()
+
+    left_geometry = run["components/eye_left/geometry"]
+    right_geometry = run["components/eye_right/geometry"]
+    np.testing.assert_array_equal(np.asarray(left_geometry["ellipse_success"][:], dtype=bool), np.ones((2,), dtype=bool))
+    np.testing.assert_array_equal(np.asarray(right_geometry["ellipse_success"][:], dtype=bool), np.ones((2,), dtype=bool))
+    np.testing.assert_array_equal(
+        np.asarray(run["relations/eye_pair/metrics/separation_valid"][:], dtype=bool),
+        np.ones((2,), dtype=bool),
+    )
 
 
 def test_assemble_refined_subject_run_can_pair_subject_run_with_refined_eye_source(monkeypatch) -> None:

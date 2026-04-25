@@ -166,10 +166,14 @@ Current implementation note:
 - it also accepts direct `refined_eye_masks_runs` sources for canonical
   `eye_left` / `eye_right` component seeding
 - raw `eyes_union` is treated as refinement input/provenance, not as a
-  canonical refined component; until geometry-aware left/right assignment is
-  implemented, a `--subject-run` exposing available `eyes_union` must also be
-  paired with complete `eye_left` / `eye_right` seeds from `--refined-eye-run`,
-  `--eye-run`, or `--eye-refined-run`
+  canonical refined component; a `--subject-run` exposing available
+  `eyes_union` can be assigned into `eye_left` / `eye_right` when source
+  keypoint lineage resolves to usable anatomical eye keypoints
+- generated LR eye components record `eyes_union` as the source channel plus
+  assignment method/keypoint provenance; the refined-subject finalizer then
+  writes the standard eye geometry/QC surface from the generated LR masks
+- if keypoint lineage is missing or the assignment produces no usable LR rows,
+  assembly fails closed instead of creating a misleading refined eye surface
 - it now accepts `refined_subject_masks_runs/<run>` as an explicit component
   source for split-run consolidation; the new component provenance points to
   the immediate refined source and carries the upstream component provenance

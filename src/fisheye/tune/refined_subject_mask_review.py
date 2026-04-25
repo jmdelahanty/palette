@@ -147,6 +147,8 @@ class RefinedSubjectComponentSeed:
     component_name: str
     masks: np.ndarray
     source_payload: Mapping[str, object]
+    reason_labels: Optional[np.ndarray] = None
+    source_masks: Optional[np.ndarray] = None
 
 
 @dataclass(frozen=True)
@@ -877,6 +879,20 @@ def _source_mask_for_resolved_component(
     return _source_mask_for_component(component_sources[component_name], component_name, roi_idx)
 
 
+def _source_seed_mask_for_component(
+    refined: RefinedSubjectMaskRun,
+    component_name: str,
+    roi_idx: int,
+) -> np.ndarray | None:
+    component_group = _get_component_group(refined.group, component_name)
+    if component_group is None:
+        return None
+    seed_masks = component_group.get("source_seed_masks_roi")
+    if seed_masks is None:
+        return None
+    return np.asarray(seed_masks[int(roi_idx)], dtype=np.uint8)
+
+
 def _default_reason_label(source_mask: np.ndarray, current_mask: np.ndarray, edit_applied: bool) -> str:
     if edit_applied:
         return "manual_correction"
@@ -937,6 +953,7 @@ def _ensure_component_group(
     component_metrics: Optional[Mapping[str, np.ndarray]] = None,
     source_masks: Optional[np.ndarray] = None,
     current_masks: Optional[np.ndarray] = None,
+    source_seed_masks: Optional[np.ndarray] = None,
 ) -> zarr.Group:
     components_parent = refined.require_group("components")
     component_group = components_parent.require_group(component_name)
@@ -992,6 +1009,21 @@ def _ensure_component_group(
             source_masks=np.asarray(source_masks, dtype=np.uint8),
             current_masks=np.asarray(current_masks, dtype=np.uint8),
         )
+    if source_seed_masks is not None:
+        source_seed_arr = np.asarray(source_seed_masks, dtype=np.uint8)
+        if source_seed_arr.ndim != 3 or int(source_seed_arr.shape[0]) != int(total_rois):
+            raise ValueError(
+                f"source_seed_masks for {component_name!r} must have shape (N,H,W), "
+                f"got {tuple(source_seed_arr.shape)}."
+            )
+        chunk_rows = refined_subject_mask_metric_row_chunk(total_rois)
+        component_group.create_array(
+            "source_seed_masks_roi",
+            data=source_seed_arr,
+            chunks=(chunk_rows, int(source_seed_arr.shape[1]), int(source_seed_arr.shape[2])),
+            overwrite=True,
+        )
+        component_group.attrs["source_seed_masks_schema_id"] = "refined_subject_component_source_seed_masks_v1"
     return component_group
 
 
@@ -1350,6 +1382,11 @@ def _create_refined_subject_run_from_component_seeds(
     for comp_idx, component_name in enumerate(component_names):
         seed = component_seeds[component_name]
         component_masks = np.asarray(seed.masks, dtype=np.uint8)
+        component_source_masks = (
+            np.asarray(seed.source_masks, dtype=np.uint8)
+            if seed.source_masks is not None
+            else component_masks
+        )
         component_metrics = _compute_component_topology_metrics(component_masks)
         component_metrics.update(_compute_component_sigma_noise_metrics(component_masks))
         component_metrics.update(_compute_component_curvature_var_metrics(component_masks))
@@ -1362,13 +1399,31 @@ def _create_refined_subject_run_from_component_seeds(
             area_px[:, comp_idx],
             edit_applied[:, comp_idx],
             component_metrics=component_metrics,
-            source_masks=component_masks,
+            source_masks=component_source_masks,
             current_masks=np.asarray(masks[:, comp_idx], dtype=np.uint8),
+            source_seed_masks=(
+                np.asarray(seed.source_masks, dtype=np.uint8)
+                if seed.source_masks is not None
+                else None
+            ),
         )
         reason_labels = _load_or_init_reason_labels(component_group, total_rois)
-        for row_idx in range(total_rois):
-            source_mask = np.asarray(component_masks[row_idx], dtype=np.uint8)
-            reason_labels[row_idx] = _default_reason_label(source_mask, masks[row_idx, comp_idx], edit_applied=False)
+        if seed.reason_labels is not None:
+            seed_reason_labels = np.asarray(seed.reason_labels, dtype=object).reshape(-1)
+            if int(seed_reason_labels.shape[0]) != int(total_rois):
+                raise ValueError(
+                    f"Reason-label row count mismatch for {component_name!r}: "
+                    f"expected {total_rois}, got {int(seed_reason_labels.shape[0])}."
+                )
+            reason_labels[:] = seed_reason_labels
+        else:
+            for row_idx in range(total_rois):
+                source_mask = np.asarray(component_source_masks[row_idx], dtype=np.uint8)
+                reason_labels[row_idx] = _default_reason_label(
+                    source_mask,
+                    masks[row_idx, comp_idx],
+                    edit_applied=False,
+                )
         write_reason_columns(
             component_group,
             reason_labels,
@@ -1809,7 +1864,9 @@ def _compute_refined_subject_component_apply_rows(
 
     for row_offset, roi_idx in enumerate(roi_indices):
         current_mask = np.asarray(edited_masks_batch[row_offset, comp_idx], dtype=np.uint8)
-        source_mask = _source_mask_for_resolved_component(component_sources, component_name, int(roi_idx))
+        source_mask = _source_seed_mask_for_component(refined, component_name, int(roi_idx))
+        if source_mask is None:
+            source_mask = _source_mask_for_resolved_component(component_sources, component_name, int(roi_idx))
         area = float(np.count_nonzero(current_mask))
         present = bool(area > 0.0)
         edited = not np.array_equal(current_mask, source_mask)
@@ -2340,7 +2397,14 @@ def check_refined_subject_source_updates(
     component_group = run_group.require_group("components").require_group(normalized_component)
 
     current_component_masks = np.asarray(run_group["masks_roi"][:, comp_idx], dtype=np.uint8)
-    source_component_masks = _component_masks_from_source(component_sources[normalized_component], normalized_component)
+    source_seed_masks = component_group.get("source_seed_masks_roi")
+    if source_seed_masks is not None:
+        source_component_masks = np.asarray(source_seed_masks[:], dtype=np.uint8)
+    else:
+        source_component_masks = _component_masks_from_source(
+            component_sources[normalized_component],
+            normalized_component,
+        )
     _ensure_component_source_sync_arrays(
         component_group,
         total_rois=total_rois,
