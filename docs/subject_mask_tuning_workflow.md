@@ -541,9 +541,10 @@ Current implementation note:
   can seed `swim_bladder` directly when that component is approved
 - if eye content starts in raw `eye_masks_runs`, project/backfill it into a
   compatibility subject-mask or refined-eye source before unified assembly
-- approved legacy `refined_eye_masks_runs/<run>.attrs["eye_mask_review_status"]`
-  is promoted onto both unified eye components when the review state is
-  `approved` and the intended use is `training`
+- source review state is recorded as component provenance, but assembled target
+  component reviews stay `pending` by default
+- pass `--promote-source-review` only when the operator explicitly wants approved
+  upstream review payloads copied onto the assembled target run
 
 Canary validation on 2026-04-01:
 

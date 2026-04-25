@@ -613,8 +613,9 @@ assemble a new coherent approved refined run with
 silently combine split refined sources.
 For historical refined-eye plus refined swim-bladder consolidation, follow the
 additive unified eye/swim migration procedure in
-`refined_subject_masks_runs_contract.md` so legacy refined-eye approval is
-promoted only when `eye_mask_review_status` is approved for training.
+`refined_subject_masks_runs_contract.md`. Assembly now records source review
+state as provenance but only promotes approved source review onto the target
+when `--promote-source-review` is passed explicitly.
 
 ## Related Contracts
 

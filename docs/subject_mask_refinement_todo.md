@@ -108,7 +108,11 @@ breaking the current eye tools before the unified model is ready.
   [eye_subject_mask_unification_design.md](eye_subject_mask_unification_design.md):
   raw models should favor visually identifiable eye masks (`eyes_union` or
   unordered instances), while biological LR identity should be assigned by a
-  downstream geometry/refinement step when orientation evidence is available.
+  geometry-aware subject-mask refinement/finalization step when orientation
+  evidence is available. Eye-capable refined subject-mask runs should expose
+  canonical eye identity as `eye_left` / `eye_right`; `eyes_union` should remain
+  raw/model input, seed/provenance context, or review/debug evidence rather than
+  the refined eye authority.
 
 ## Immediate Remaining Work
 
@@ -306,7 +310,8 @@ Current gap:
 
 Recommended next design slice:
 
-- implement a geometry-aware LR assignment helper for subject-mask refinement
+- implement a geometry-aware LR assignment helper inside subject-mask
+  refinement/finalization
 - use keypoints, heading/body axis, eye centroids, and separation checks as the
   assignment evidence
 - write assignment confidence/status and reason labels per row
@@ -370,6 +375,14 @@ Optional later:
 - `eyes_union`
 - `eye_left`
 - `eye_right`
+
+Policy note:
+
+- `eyes_union` is useful as raw/model output and as refinement input, but an
+  eye-capable refined subject-mask run should canonicalize reviewed eye content
+  into `eye_left` and `eye_right`
+- if refinement cannot assign anatomical side safely, the run should record
+  ambiguity/review state rather than claiming complete refined eye availability
 
 ## Recommended Refinement Model
 

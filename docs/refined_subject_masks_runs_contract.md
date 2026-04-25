@@ -74,7 +74,7 @@ Recommended minimum currently implemented component scope:
 - `subject_body`
 - `swim_bladder`
 
-Optional/compatibility labels:
+Optional/compatibility seed labels:
 
 - `eyes_union`
 - `eye_left`
@@ -90,6 +90,19 @@ Compatibility/raw model-output schema:
 - `subject_v1_union` remains valid for raw compatibility and export use
 - `subject_v1_union` is not the preferred long-term refined eye authoring
   schema because it loses anatomical eye identity
+
+Refined eye-authoring policy:
+
+- `eyes_union` is allowed as raw/model output, import, provenance, or
+  transitional seed input, but it is not the canonical refined eye authority.
+- when eye content is promoted into `refined_subject_masks_runs`, subject-mask
+  refinement/finalization should materialize `eye_left` and `eye_right`
+  components when anatomical side can be assigned
+- if a union or unordered eye source cannot be assigned safely, the refined run
+  should record ambiguity/review state instead of claiming complete refined
+  left/right eye availability
+- operator, geometry, and training consumers that require refined eye identity
+  should consume `eye_left` / `eye_right`, not `eyes_union`
 
 Writers must always persist:
 
@@ -126,6 +139,10 @@ Required behavior:
 - finalization is responsible for canonical run/component metrics, reasons,
   review scaffolding, provenance updates, and any refinement-time geometry
   derived by this stage family
+- for eye-capable runs, finalization is also responsible for promoting
+  `eyes_union` or unordered eye seeds into canonical `eye_left` / `eye_right`
+  components when the assignment is safe, or marking the affected rows/components
+  ambiguous for review when it is not
 
 Initial allowed seed sources for unified assembly:
 
@@ -148,6 +165,10 @@ Current implementation note:
   existing `refined_subject_masks_runs/<run>` requires the requested component
   to have `component_review_statuses[component].state == "approved"`, with
   `--allow-unapproved-components` reserved for draft/QA assembly
+- source review state is recorded as component provenance, but target component
+  approval is not inherited by default; pass `--promote-source-review` only when
+  the operator explicitly wants approved source review payloads copied onto the
+  assembled/finalized target run
 - for legacy raw eye-stage data, the compatibility bridge remains:
   `refined_eye_masks_runs` or `eye_masks_runs`
   -> projected/backfilled `subject_mask_runs/<run>`
@@ -181,9 +202,9 @@ Principles:
 - seed `swim_bladder` from the existing approved refined-subject component run
 - keep immediate component provenance pointing to the true source stage/run
 - use approved-only assembly by default
-- promote legacy refined-eye review only when
-  `eye_mask_review_status.state == "approved"` and
-  `eye_mask_review_status.intended_use == "training"`
+- do not promote source approval onto the assembled target by default; add
+  `--promote-source-review` only after deciding the assembled/finalized target
+  should inherit approved source review payloads
 
 Recommended sequence:
 
@@ -238,21 +259,33 @@ Recommended sequence:
 
 6. Verify review state.
 
-   Expected review behavior:
+   Expected default review behavior:
 
-   - approved legacy refined-eye review is promoted onto both eye components
-   - approved swim-bladder review is copied from the refined-subject component
-     source
-   - the assembled run becomes `approved` only when all available components
-     are approved
-   - pending legacy eye review or pending swim-bladder review keeps the
-     assembled run pending
+   - source review payloads are preserved under component provenance
+   - target component review states remain `pending`
+   - the assembled run remains `pending` until the operator reviews it or reruns
+     assembly with explicit source-review promotion
+
+   To opt into source-review promotion:
+
+   ```bash
+   scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
+     <archive>.zarr \
+     --refined-eye-run <refined_eye_run> \
+     --swim-refined-run <refined_subject_swim_run> \
+     --run-name refined_subject_masks_unified_eye_swim_<stamp> \
+     --promote-source-review
+   ```
+
+   Promotion only copies approved source payloads. Pending or missing source
+   review still leaves the target component pending.
 
 Example batch result from the 2026-04-25 recording migration:
 
 - 52 recording training zarrs scanned
 - 51 approved-compatible unified eye/swim runs written
-- 50 runs became fully approved after legacy refined-eye review promotion
+- 50 runs became fully approved after explicit legacy refined-eye review
+  promotion
 - 1 run remained pending because the legacy refined-eye source review was
   pending
 

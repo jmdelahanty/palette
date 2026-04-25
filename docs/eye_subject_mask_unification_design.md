@@ -106,7 +106,7 @@ Preferred model/refinement boundary:
   keypoint-conditioned inputs, or a loss/architecture that explicitly enforces
   instance separation and side assignment
 
-Required future helper/stage:
+Required refinement substep/helper:
 
 - input:
   - `eyes_union` probability/mask, or unordered eye-instance masks
@@ -117,6 +117,12 @@ Required future helper/stage:
   - assignment confidence/status per row
   - review reasons for ambiguous, missing, overlapping, or low-confidence rows
   - component provenance that records the source eye mask and assignment method
+
+This should be implemented as part of subject-mask refinement/finalization, not
+as a second operator-visible canonical stage. The refined subject-mask artifact
+should expose eye identity through `eye_left` / `eye_right`; `eyes_union` may be
+preserved as source/provenance/debug context, but it should not be the refined
+authority for eye-capable runs.
 
 This keeps raw segmentation visual and local, while making LR identity a
 geometry/refinement responsibility.
@@ -139,6 +145,9 @@ Reason:
   it is too lossy as the refined canonical authoring surface
 - refined workflows can legitimately promote a union/raw source into LR
   semantics using keypoints or other eye-specific refinement logic
+- if that promotion cannot be made safely for a row, the refined run should mark
+  the eye assignment ambiguous or unavailable rather than treating
+  `eyes_union` as complete refined eye identity
 
 Implementation status:
 
@@ -499,7 +508,7 @@ This design does not yet decide:
 - the exact registry projection rows for `relations/eye_pair/`
 - whether a compatibility `refined_eye_masks_runs` artifact is materialized by
   default or only on request during the later transition phases
-- the exact implementation seam for converting union/raw eye sources into
+- the exact assignment algorithm for converting union/raw eye sources into
   canonical refined LR eye components
 - the exact CLI/API that seeds a new assembled unified run before
   finalization
@@ -508,13 +517,14 @@ This design does not yet decide:
 
 ## Recommended Follow-On Changes
 
-1. Update [refined_subject_masks_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_masks_runs_contract.md) to include:
-   - `components/eye_left|eye_right/geometry/ellipse_*`
-   - `components/eye_left|eye_right/contours/`
-   - `relations/eye_pair/metrics/separation_*`
-2. Update [subject_mask_stage_unification_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_stage_unification_todo.md) and [subject_mask_refinement_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_refinement_todo.md) to mark the eye-target design questions as settled.
-3. When swim-bladder canary work is ready, validate the first multi-component
-   refined run before starting implementation of unified eye writes.
+1. Implement the geometry-aware LR assignment helper as a subject-mask
+   refinement/finalization substep.
+2. Persist assignment confidence/status, review reasons, and component
+   provenance when union/raw eye sources are promoted to `eye_left` /
+   `eye_right`.
+3. Confirm registry, operator, and training/export consumers treat refined eye
+   availability as split `eye_left` / `eye_right` component availability, not
+   as `eyes_union` availability.
 
 ## Related Docs
 

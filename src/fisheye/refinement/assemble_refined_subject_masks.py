@@ -315,6 +315,9 @@ def _component_seed_from_refined_subject_source(
     label_schema_id = source.group.attrs.get("label_schema_id")
     if label_schema_id is not None:
         source_payload["source_label_schema_id"] = str(label_schema_id)
+    source_review = _component_review_from_refined_source(source, component_name)
+    if source_review is not None:
+        source_payload["source_review_status"] = source_review
     source_created_at = source.group.attrs.get("created_at_utc") or source.group.attrs.get("created_utc")
     if source_created_at is not None:
         source_payload["source_created_at_utc"] = str(source_created_at)
@@ -348,6 +351,9 @@ def _component_seed_from_refined_eye_source(
     raw_eye_run = source.group.attrs.get("source_eye_masks_run")
     if raw_eye_run is not None:
         source_payload["source_eye_masks_run"] = str(raw_eye_run)
+    source_review = source.group.attrs.get("eye_mask_review_status")
+    if isinstance(source_review, Mapping):
+        source_payload["source_review_status"] = dict(_json_safe(source_review))
     source_created_at = source.group.attrs.get("created_at_utc") or source.group.attrs.get("created_utc")
     if source_created_at is not None:
         source_payload["source_created_at_utc"] = str(source_created_at)
@@ -371,7 +377,13 @@ def _component_review_from_refined_source(
     return dict(_json_safe(payload))
 
 
-def _approved_eye_review_from_refined_eye_source(source: SourceSubjectMaskRun) -> dict[str, object] | None:
+def _approved_eye_review_from_refined_eye_source(
+    source: SourceSubjectMaskRun,
+    *,
+    promote_source_review: bool,
+) -> dict[str, object] | None:
+    if not promote_source_review:
+        return None
     payload = source.group.attrs.get("eye_mask_review_status")
     if not isinstance(payload, Mapping):
         return None
@@ -391,13 +403,14 @@ def _approved_component_review_from_refined_source(
     component_name: str,
     *,
     allow_unapproved_components: bool,
+    promote_source_review: bool,
 ) -> dict[str, object] | None:
     review_payload = _component_review_from_refined_source(source, component_name)
-    if allow_unapproved_components:
-        return review_payload
     state = ""
     if review_payload is not None:
         state = str(review_payload.get("state") or "").strip().lower()
+    if allow_unapproved_components:
+        return review_payload if promote_source_review and state == "approved" else None
     if state != "approved":
         run_name = source.run_name
         display_state = state or "missing"
@@ -406,7 +419,7 @@ def _approved_component_review_from_refined_source(
             f"(review state: {display_state}). Pass allow_unapproved_components=True "
             "or --allow-unapproved-components for draft/QA assembly."
         )
-    return review_payload
+    return review_payload if promote_source_review else None
 
 
 def _add_component_seed(
@@ -443,6 +456,7 @@ def _collect_component_seeds(
     swim_refined_source: Optional[SourceSubjectMaskRun],
     refined_component_sources: Mapping[str, SourceSubjectMaskRun],
     allow_unapproved_components: bool = False,
+    promote_source_review: bool = False,
 ) -> tuple[dict[str, RefinedSubjectComponentSeed], list[str], dict[str, dict[str, object]]]:
     seeds: dict[str, RefinedSubjectComponentSeed] = {}
     review_overrides: dict[str, dict[str, object]] = {}
@@ -466,6 +480,7 @@ def _collect_component_seeds(
                 body_refined_source,
                 "subject_body",
                 allow_unapproved_components=allow_unapproved_components,
+                promote_source_review=promote_source_review,
             ),
         )
 
@@ -490,7 +505,10 @@ def _collect_component_seeds(
             )
 
     if refined_eye_source is not None:
-        review_payload = _approved_eye_review_from_refined_eye_source(refined_eye_source)
+        review_payload = _approved_eye_review_from_refined_eye_source(
+            refined_eye_source,
+            promote_source_review=promote_source_review,
+        )
         for component_name in _EYE_COMPONENTS:
             _add_component_seed(
                 seeds,
@@ -511,6 +529,7 @@ def _collect_component_seeds(
                     eye_refined_source,
                     component_name,
                     allow_unapproved_components=allow_unapproved_components,
+                    promote_source_review=promote_source_review,
                 ),
             )
 
@@ -533,6 +552,7 @@ def _collect_component_seeds(
                 swim_refined_source,
                 "swim_bladder",
                 allow_unapproved_components=allow_unapproved_components,
+                promote_source_review=promote_source_review,
             ),
         )
 
@@ -546,6 +566,7 @@ def _collect_component_seeds(
                 source,
                 component_name,
                 allow_unapproved_components=allow_unapproved_components,
+                promote_source_review=promote_source_review,
             ),
         )
 
@@ -611,6 +632,7 @@ def assemble_refined_subject_run(
     overwrite: bool = False,
     dry_run: bool = False,
     allow_unapproved_components: bool = False,
+    promote_source_review: bool = False,
 ) -> dict[str, object]:
     if eye_run and refined_eye_run:
         raise ValueError("Pass only one of eye_run or refined_eye_run.")
@@ -670,6 +692,7 @@ def assemble_refined_subject_run(
         swim_refined_source=swim_refined_source,
         refined_component_sources=refined_component_sources,
         allow_unapproved_components=allow_unapproved_components,
+        promote_source_review=promote_source_review,
     )
     coarse_subject_source = body_source or eye_source or swim_source
     coarse_source_subject_mask_run = (
@@ -727,6 +750,7 @@ def assemble_refined_subject_run(
         "source_subject_mask_runs": source_component_runs,
         "source_component_sources": source_component_sources,
         "source_crop_run": reference_source.crop_run,
+        "promote_source_review": bool(promote_source_review),
         **reference_source.source_crop_snapshot,
         "roi_count": int(reference_source.masks_roi.shape[0]),
         "label_schema_id": _infer_refined_label_schema_id(component_names),
@@ -834,6 +858,7 @@ def assemble_refined_subject_masks(
     overwrite: bool = False,
     dry_run: bool = False,
     allow_unapproved_components: bool = False,
+    promote_source_review: bool = False,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="r" if dry_run else "a")
     summary = assemble_refined_subject_run(
@@ -850,6 +875,7 @@ def assemble_refined_subject_masks(
         overwrite=overwrite,
         dry_run=dry_run,
         allow_unapproved_components=allow_unapproved_components,
+        promote_source_review=promote_source_review,
     )
     summary["zarr_path"] = str(Path(zarr_path))
     if not dry_run:
@@ -898,6 +924,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow draft/QA assembly from pending or missing refined_subject_masks_runs component approvals.",
     )
+    parser.add_argument(
+        "--promote-source-review",
+        action="store_true",
+        help=(
+            "Explicitly copy approved upstream review payloads onto the assembled refined run. "
+            "By default assembly finalizes metrics/QC but leaves target component reviews pending."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Emit the result summary as JSON.")
     return parser
 
@@ -923,6 +957,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overwrite=bool(args.overwrite),
         dry_run=bool(args.dry_run),
         allow_unapproved_components=bool(args.allow_unapproved_components),
+        promote_source_review=bool(args.promote_source_review),
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

@@ -487,7 +487,41 @@ def test_assemble_refined_subject_run_can_seed_eyes_directly_from_refined_eye_ma
     )
 
 
-def test_assemble_refined_subject_run_promotes_approved_refined_eye_review_status(monkeypatch) -> None:
+def test_assemble_refined_subject_run_records_but_does_not_promote_approved_refined_eye_review_by_default(
+    monkeypatch,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    refined_eye = _create_refined_eye_run(root)
+    refined_eye.attrs["eye_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-04-04T00:00:00+00:00",
+        "notes": "legacy_eye_review_passed",
+    }
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        refined_eye_run="refined_eye_masks_001",
+        refined_run="refined_subject_masks_no_promoted_eye_review_001",
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["promote_source_review"] is False
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_no_promoted_eye_review_001"]
+    reviews = run.attrs["component_review_statuses"]
+    assert reviews["eye_left"]["state"] == "pending"
+    assert reviews["eye_right"]["state"] == "pending"
+    assert "promoted_from" not in reviews["eye_left"]
+    assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
+    assert run["components/eye_left/provenance"].attrs["source_review_status"]["state"] == "approved"
+
+
+def test_assemble_refined_subject_run_promotes_approved_refined_eye_review_status_when_requested(
+    monkeypatch,
+) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()
     refined_eye = _create_refined_eye_run(root)
@@ -504,9 +538,11 @@ def test_assemble_refined_subject_run_promotes_approved_refined_eye_review_statu
         root,
         refined_eye_run="refined_eye_masks_001",
         refined_run="refined_subject_masks_promoted_eye_review_001",
+        promote_source_review=True,
     )
 
     assert summary["status"] == "updated"
+    assert summary["promote_source_review"] is True
     run = root["refined_subject_masks_runs"]["refined_subject_masks_promoted_eye_review_001"]
     reviews = run.attrs["component_review_statuses"]
     assert reviews["eye_left"]["state"] == "approved"
@@ -707,10 +743,48 @@ def test_assemble_refined_subject_run_can_import_components_from_refined_subject
     assert swim_provenance["upstream_component_provenance"]["source_run"] == "swim_run_001"
 
     reviews = run.attrs["component_review_statuses"]
+    assert reviews["subject_body"]["state"] == "pending"
+    assert reviews["swim_bladder"]["state"] == "pending"
+    assert reviews["eye_left"]["state"] == "pending"
+    assert reviews["eye_right"]["state"] == "pending"
+    assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
+    assert body_provenance["source_review_status"]["state"] == "approved"
+    assert swim_provenance["source_review_status"]["state"] == "approved"
+
+
+def test_assemble_refined_subject_run_promotes_refined_component_reviews_when_requested(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        body_run="body_run_001",
+        refined_run="refined_subject_body_001",
+    )
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        swim_run="swim_run_001",
+        refined_run="refined_subject_swim_001",
+    )
+    body_refined = root["refined_subject_masks_runs"]["refined_subject_body_001"]
+    swim_refined = root["refined_subject_masks_runs"]["refined_subject_swim_001"]
+    _mark_refined_component_review(body_refined, "subject_body")
+    _mark_refined_component_review(swim_refined, "swim_bladder")
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        body_refined_run="refined_subject_body_001",
+        swim_refined_run="refined_subject_swim_001",
+        refined_run="refined_subject_assembled_promoted_from_refined_001",
+        promote_source_review=True,
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["promote_source_review"] is True
+    run = root["refined_subject_masks_runs"]["refined_subject_assembled_promoted_from_refined_001"]
+    reviews = run.attrs["component_review_statuses"]
     assert reviews["subject_body"]["state"] == "approved"
     assert reviews["swim_bladder"]["state"] == "approved"
-    assert reviews["eye_left"]["state"] == "approved"
-    assert reviews["eye_right"]["state"] == "approved"
     assert run.attrs["refined_subject_mask_review_status"]["state"] == "approved"
 
 
