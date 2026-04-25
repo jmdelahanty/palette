@@ -188,6 +188,8 @@ def test_validate_source_alignment_rejects_crop_snapshot_mismatch_without_zarr()
         frame_indices=np.asarray([10, 11], dtype=np.int32),
         frame_counts=np.asarray([1, 1], dtype=np.int32),
         detection_indices=np.asarray([0, 1], dtype=np.int32),
+        source_refined_row_ids=np.asarray([100, 101], dtype=np.int64),
+        source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
     )
     other = SimpleNamespace(
         crop_run="crop_001",
@@ -202,6 +204,113 @@ def test_validate_source_alignment_rejects_crop_snapshot_mismatch_without_zarr()
         frame_indices=np.asarray([10, 11], dtype=np.int32),
         frame_counts=np.asarray([1, 1], dtype=np.int32),
         detection_indices=np.asarray([0, 1], dtype=np.int32),
+        source_refined_row_ids=np.asarray([100, 101], dtype=np.int64),
+        source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+    )
+
+    with pytest.raises(ValueError, match="Alignment mismatch for crop snapshot fields"):
+        assemble_mod._validate_source_alignment(reference, other)  # noqa: SLF001
+
+
+def test_validate_source_alignment_allows_metadata_only_refined_source_view_mismatch_without_zarr() -> None:
+    signature_base = {
+        "signature_version": 1,
+        "source_detect_run": "detect_001",
+        "source_refined_run": "refined_detect_001",
+        "roi_size": [512, 512],
+        "parameter_source": "config_default",
+        "parameters_hash": "abc123",
+    }
+    reference = SimpleNamespace(
+        crop_run="crop_001",
+        source_crop_snapshot={
+            "source_crop_storage_mode": "materialized",
+            "source_crop_signature": str(
+                {
+                    **signature_base,
+                    "detection_source_path": "refined_detect_runs/refined_detect_001/instances",
+                    "detection_source_type": "refined",
+                }
+            ),
+            "source_crop_revision": 4,
+            "source_detect_review_status_ref": "refined_detect_runs/refined_detect_001/review_status",
+        },
+        masks_roi=np.zeros((2, 2, 8, 8), dtype=np.uint8),
+        detection_source=np.zeros((2,), dtype=np.int8),
+        frame_indices=np.asarray([10, 11], dtype=np.int32),
+        frame_counts=np.asarray([1, 1], dtype=np.int32),
+        detection_indices=np.asarray([0, 1], dtype=np.int32),
+        source_refined_row_ids=np.asarray([100, 101], dtype=np.int64),
+        source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+    )
+    other = SimpleNamespace(
+        crop_run="crop_001",
+        source_crop_snapshot={
+            "source_crop_storage_mode": "materialized",
+            "source_crop_signature": str(
+                {
+                    **signature_base,
+                    "detection_source_path": "refined_detect_runs/refined_detect_001/manual",
+                    "detection_source_type": "manual",
+                }
+            ),
+            "source_crop_revision": 4,
+            "source_detect_review_status_ref": "refined_detect_runs/refined_detect_001/review_status",
+        },
+        masks_roi=np.zeros((2, 1, 8, 8), dtype=np.uint8),
+        detection_source=np.zeros((2,), dtype=np.int8),
+        frame_indices=np.asarray([10, 11], dtype=np.int32),
+        frame_counts=np.asarray([1, 1], dtype=np.int32),
+        detection_indices=np.asarray([0, 1], dtype=np.int32),
+        source_refined_row_ids=np.asarray([100, 101], dtype=np.int64),
+        source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+    )
+
+    assemble_mod._validate_source_alignment(reference, other)  # noqa: SLF001
+
+
+def test_validate_source_alignment_rejects_source_view_mismatch_with_real_signature_drift_without_zarr() -> None:
+    reference = SimpleNamespace(
+        crop_run="crop_001",
+        source_crop_snapshot={
+            "source_crop_storage_mode": "materialized",
+            "source_crop_signature": {
+                "signature_version": 1,
+                "detection_source_path": "refined_detect_runs/refined_detect_001/instances",
+                "detection_source_type": "refined",
+                "source_detect_run": "detect_001",
+                "source_refined_run": "refined_detect_001",
+            },
+            "source_crop_revision": 4,
+        },
+        masks_roi=np.zeros((2, 2, 8, 8), dtype=np.uint8),
+        detection_source=np.zeros((2,), dtype=np.int8),
+        frame_indices=np.asarray([10, 11], dtype=np.int32),
+        frame_counts=np.asarray([1, 1], dtype=np.int32),
+        detection_indices=np.asarray([0, 1], dtype=np.int32),
+        source_refined_row_ids=np.asarray([100, 101], dtype=np.int64),
+        source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+    )
+    other = SimpleNamespace(
+        crop_run="crop_001",
+        source_crop_snapshot={
+            "source_crop_storage_mode": "materialized",
+            "source_crop_signature": {
+                "signature_version": 1,
+                "detection_source_path": "refined_detect_runs/refined_detect_001/manual",
+                "detection_source_type": "manual",
+                "source_detect_run": "detect_002",
+                "source_refined_run": "refined_detect_001",
+            },
+            "source_crop_revision": 4,
+        },
+        masks_roi=np.zeros((2, 1, 8, 8), dtype=np.uint8),
+        detection_source=np.zeros((2,), dtype=np.int8),
+        frame_indices=np.asarray([10, 11], dtype=np.int32),
+        frame_counts=np.asarray([1, 1], dtype=np.int32),
+        detection_indices=np.asarray([0, 1], dtype=np.int32),
+        source_refined_row_ids=np.asarray([100, 101], dtype=np.int64),
+        source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
     )
 
     with pytest.raises(ValueError, match="Alignment mismatch for crop snapshot fields"):

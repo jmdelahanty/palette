@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import sys
 from pathlib import Path
@@ -40,6 +41,12 @@ ASSEMBLE_REFINED_SUBJECT_METHOD = "assemble_refined_subject_masks_v1"
 CANONICAL_COMPONENT_ORDER = ("subject_body", "eye_left", "eye_right", "swim_bladder")
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_assemble_refined_subject_masks"
 _EYE_COMPONENTS = ("eye_left", "eye_right")
+_SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS = frozenset(
+    {
+        "source_crop_signature.detection_source_path",
+        "source_crop_signature.detection_source_type",
+    }
+)
 
 
 def _json_safe(value: object) -> object:
@@ -82,6 +89,66 @@ def _required_array_equal(name: str, left: Any, right: Any) -> None:
         raise ValueError(f"Alignment mismatch for {name}.")
 
 
+def _parse_crop_signature(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _json_safe(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return text
+        try:
+            parsed = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return text
+        return _json_safe(parsed)
+    return _json_safe(value)
+
+
+def _normalized_crop_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for key, value in snapshot.items():
+        if key == "source_crop_signature":
+            normalized[key] = _parse_crop_signature(value)
+        else:
+            normalized[key] = _json_safe(value)
+    return normalized
+
+
+def _crop_snapshot_diff_paths(left: object, right: object, *, prefix: str = "") -> set[str]:
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        paths: set[str] = set()
+        for key in sorted(set(left) | set(right)):
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            if key not in left or key not in right:
+                paths.add(child_prefix)
+            else:
+                paths.update(_crop_snapshot_diff_paths(left[key], right[key], prefix=child_prefix))
+        return paths
+    return set() if left == right else {prefix}
+
+
+def _is_allowed_source_view_crop_snapshot_mismatch(
+    reference: SourceSubjectMaskRun,
+    other: SourceSubjectMaskRun,
+) -> bool:
+    """Allow old refined views that differ only by refined/manual/interpolated labels.
+
+    Some historical refined subject-mask components recorded the crop signature
+    against a refined-detect subview such as ``manual`` or ``interpolated`` while
+    still sharing the same crop run, row lineage, and ROI geometry as the
+    canonical ``instances`` view. In that case the run-level assembled surface can
+    use the reference crop surface while component provenance preserves the old
+    source view.
+    """
+
+    reference_snapshot = _normalized_crop_snapshot(reference.source_crop_snapshot)
+    other_snapshot = _normalized_crop_snapshot(other.source_crop_snapshot)
+    diff_paths = _crop_snapshot_diff_paths(reference_snapshot, other_snapshot)
+    if not diff_paths:
+        return True
+    return diff_paths <= _SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS
+
+
 def _source_lineage_arrays(source: SourceSubjectMaskRun) -> dict[str, object | None]:
     return {
         "frame_indices": source.frame_indices,
@@ -105,12 +172,6 @@ def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSub
             crop_snapshot_mismatches.append(
                 f"{field_name}: {reference_value!r} != {other_value!r}"
             )
-    if crop_snapshot_mismatches:
-        raise ValueError(
-            "Alignment mismatch for crop snapshot fields: "
-            + "; ".join(crop_snapshot_mismatches)
-            + "."
-        )
     if int(reference.masks_roi.shape[0]) != int(other.masks_roi.shape[0]):
         raise ValueError(
             f"Row-count mismatch: {reference.masks_roi.shape[0]} != {other.masks_roi.shape[0]}."
@@ -121,6 +182,12 @@ def _validate_source_alignment(reference: SourceSubjectMaskRun, other: SourceSub
         )
     _required_array_equal("detection_source", reference.detection_source, other.detection_source)
     assert_row_lineage_sources_equal(_source_lineage_arrays(reference), _source_lineage_arrays(other))
+    if crop_snapshot_mismatches and not _is_allowed_source_view_crop_snapshot_mismatch(reference, other):
+        raise ValueError(
+            "Alignment mismatch for crop snapshot fields: "
+            + "; ".join(crop_snapshot_mismatches)
+            + "."
+        )
 
 
 def _shared_value(sources: Sequence[SourceSubjectMaskRun], attr_name: str) -> Optional[str]:
