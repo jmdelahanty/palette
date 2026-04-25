@@ -233,6 +233,139 @@ def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _coerce_text_list(value: Any) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        return None
+    items = [str(item) for item in value if item is not None]
+    return items
+
+
+def _subject_mask_component_groups_from_labels(labels: Sequence[str]) -> List[str]:
+    groups: List[str] = []
+    for label in labels:
+        if label == "subject_body":
+            group = "body"
+        elif label in {"eyes_union", "eye_left", "eye_right"}:
+            group = "eyes"
+        elif label == "swim_bladder":
+            group = "swim_bladder"
+        else:
+            continue
+        if group not in groups:
+            groups.append(group)
+    preferred_order = {"body": 0, "eyes": 1, "swim_bladder": 2}
+    return sorted(groups, key=lambda item: preferred_order.get(item, len(preferred_order)))
+
+
+def _subject_mask_coverage_class_from_groups(groups: Sequence[str]) -> Optional[str]:
+    group_set = set(groups)
+    if not group_set:
+        return None
+    if group_set == {"eyes"}:
+        return "eyes_only"
+    if {"body", "eyes", "swim_bladder"}.issubset(group_set):
+        return "dense_all_components"
+    return "partial_subject_masks"
+
+
+def _training_model_discovery_metadata(
+    *,
+    task_type: Optional[str],
+    final_metrics: Optional[Mapping[str, Any]],
+    metadata: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Build stable model-discovery metadata for training_models rows."""
+
+    payload: Dict[str, Any] = dict(metadata or {})
+    payload.setdefault("source", "training_runs")
+
+    final = dict(final_metrics or {})
+    summary = _coerce_mapping(final.get("subject_mask_model_summary")) or {}
+    resolved_task_type = (
+        _normalize_task_type(payload.get("task_type"))
+        or _normalize_task_type(task_type)
+        or ("subject_masks" if summary else None)
+    )
+    if resolved_task_type:
+        payload["task_type"] = resolved_task_type
+
+    for key in ("best_val_dice", "best_epoch", "epochs", "train_samples", "val_samples"):
+        if key in final and final[key] is not None:
+            payload[key] = final[key]
+
+    if resolved_task_type == "subject_masks" or summary:
+        source = summary or final
+        for key in (
+            "label_schema_id",
+            "mask_labels",
+            "coverage_class",
+            "component_groups",
+            "component_coverage_key",
+            "contains_only_eye_masks",
+            "available_labels",
+            "missing_labels",
+            "supervised_row_counts",
+            "positive_row_counts",
+            "negative_row_counts",
+            "unsupervised_row_counts",
+            "source_artifact_count",
+            "summarized_artifact_count",
+        ):
+            value = source.get(key)
+            if value is not None:
+                payload[key] = value
+        if summary:
+            payload["subject_mask_model_summary"] = dict(summary)
+        labels = _coerce_text_list(payload.get("mask_labels")) or []
+        if labels:
+            payload.setdefault("available_labels", labels)
+            payload.setdefault("missing_labels", [])
+            groups = _coerce_text_list(payload.get("component_groups"))
+            if not groups:
+                groups = _subject_mask_component_groups_from_labels(labels)
+                if groups:
+                    payload["component_groups"] = groups
+            if groups:
+                payload.setdefault("component_coverage_key", "+".join(groups))
+                coverage_class = _subject_mask_coverage_class_from_groups(groups)
+                if coverage_class is not None:
+                    payload.setdefault("coverage_class", coverage_class)
+
+    return payload
+
+
+def _training_model_discovery_index_fields(
+    *,
+    task_type: Optional[str],
+    final_metrics: Optional[Mapping[str, Any]],
+    metadata: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    payload = _training_model_discovery_metadata(
+        task_type=task_type,
+        final_metrics=final_metrics,
+        metadata=metadata,
+    )
+    resolved_task_type = _normalize_task_type(payload.get("task_type")) or _normalize_task_type(task_type)
+    mask_labels = _coerce_text_list(payload.get("mask_labels"))
+    component_groups = _coerce_text_list(payload.get("component_groups"))
+    best_val_dice = _as_float(payload.get("best_val_dice"))
+    return {
+        "task_type": resolved_task_type,
+        "label_schema_id": _decode_attr(payload.get("label_schema_id")),
+        "coverage_class": _decode_attr(payload.get("coverage_class")),
+        "component_coverage_key": _decode_attr(payload.get("component_coverage_key")),
+        "mask_labels_json": _json_dumps(mask_labels),
+        "component_groups_json": _json_dumps(component_groups),
+        "best_metric_name": "best_val_dice" if best_val_dice is not None else None,
+        "best_metric_value": best_val_dice,
+        "best_epoch": _as_int(payload.get("best_epoch")),
+    }
+
+
 def _open_child_group(parent: Any, key: str) -> Any:
     store = getattr(parent, "store", None)
     if store is None:
@@ -2539,6 +2672,11 @@ class Registry:
                 "subject_mask_component_source_stale_views",
                 self._migration_039_subject_mask_component_source_stale_views,
             ),
+            (
+                40,
+                "subject_mask_training_model_discovery",
+                self._migration_040_subject_mask_training_model_discovery,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -3033,6 +3171,15 @@ class Registry:
                 metrics_path TEXT,
                 metrics_sha256 TEXT,
                 status TEXT,
+                task_type TEXT,
+                label_schema_id TEXT,
+                coverage_class TEXT,
+                component_coverage_key TEXT,
+                mask_labels_json TEXT,
+                component_groups_json TEXT,
+                best_metric_name TEXT,
+                best_metric_value REAL,
+                best_epoch INTEGER,
                 final_metrics_json TEXT,
                 metadata_json TEXT,
                 created_utc TEXT,
@@ -3115,6 +3262,15 @@ class Registry:
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_training_models_set_id ON training_models(set_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_models_task_status ON training_models(task_type, status);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_models_label_schema ON training_models(label_schema_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_models_component_coverage ON training_models(component_coverage_key);"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_training_sets_skeleton_id ON training_sets(skeleton_id);"
@@ -9036,6 +9192,134 @@ class Registry:
         """Expose refined-source stale metadata through component registry views."""
         self._migration_038_subject_mask_component_partial_run_preference()
 
+    def _migration_040_subject_mask_training_model_discovery(self) -> None:
+        """Index subject-mask model discovery metadata and expose a focused view."""
+
+        self._ensure_training_model_discovery_columns()
+        self._backfill_training_model_discovery_metadata()
+        self._refresh_subject_mask_training_models_view()
+
+    def _ensure_training_model_discovery_columns(self) -> None:
+        self._ensure_columns(
+            "training_models",
+            {
+                "task_type": "TEXT",
+                "label_schema_id": "TEXT",
+                "coverage_class": "TEXT",
+                "component_coverage_key": "TEXT",
+                "mask_labels_json": "TEXT",
+                "component_groups_json": "TEXT",
+                "best_metric_name": "TEXT",
+                "best_metric_value": "REAL",
+                "best_epoch": "INTEGER",
+            },
+        )
+        cur = self.conn.cursor()
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_models_task_status ON training_models(task_type, status);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_models_label_schema ON training_models(label_schema_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_models_component_coverage ON training_models(component_coverage_key);"
+        )
+
+    def _backfill_training_model_discovery_metadata(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT
+                tm.run_id,
+                tm.metadata_json,
+                tm.final_metrics_json,
+                tm.task_type AS model_task_type,
+                tr.task_type AS run_task_type
+            FROM training_models tm
+            LEFT JOIN training_runs tr ON tr.run_id = tm.run_id;
+            """
+        ).fetchall()
+        for row in rows:
+            final_metrics = _json_loads(row["final_metrics_json"]) or {}
+            existing_metadata = _json_loads(row["metadata_json"]) or {}
+            task_type = (
+                _normalize_task_type(row["model_task_type"])
+                or _normalize_task_type(existing_metadata.get("task_type"))
+                or _normalize_task_type(row["run_task_type"])
+                or ("subject_masks" if _coerce_mapping(final_metrics.get("subject_mask_model_summary")) else None)
+            )
+            metadata = _training_model_discovery_metadata(
+                task_type=task_type,
+                final_metrics=final_metrics,
+                metadata=existing_metadata,
+            )
+            fields = _training_model_discovery_index_fields(
+                task_type=task_type,
+                final_metrics=final_metrics,
+                metadata=metadata,
+            )
+            self.conn.execute(
+                """
+                UPDATE training_models
+                SET task_type = ?,
+                    label_schema_id = ?,
+                    coverage_class = ?,
+                    component_coverage_key = ?,
+                    mask_labels_json = ?,
+                    component_groups_json = ?,
+                    best_metric_name = ?,
+                    best_metric_value = ?,
+                    best_epoch = ?,
+                    metadata_json = ?
+                WHERE run_id = ?;
+                """,
+                (
+                    fields["task_type"],
+                    fields["label_schema_id"],
+                    fields["coverage_class"],
+                    fields["component_coverage_key"],
+                    fields["mask_labels_json"],
+                    fields["component_groups_json"],
+                    fields["best_metric_name"],
+                    fields["best_metric_value"],
+                    fields["best_epoch"],
+                    _json_dumps(metadata),
+                    str(row["run_id"]),
+                ),
+            )
+
+    def _refresh_subject_mask_training_models_view(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS subject_mask_training_models;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_training_models AS
+            SELECT
+                tm.run_id,
+                tm.set_id,
+                tm.status,
+                COALESCE(tm.task_type, tr.task_type) AS task_type,
+                tm.model_path,
+                tm.model_sha256,
+                tm.metrics_path,
+                tm.metrics_sha256,
+                tm.label_schema_id,
+                tm.coverage_class,
+                tm.component_coverage_key,
+                tm.mask_labels_json,
+                tm.component_groups_json,
+                tm.best_metric_name,
+                tm.best_metric_value,
+                tm.best_epoch,
+                tm.created_utc,
+                tm.final_metrics_json,
+                tm.metadata_json
+            FROM training_models tm
+            LEFT JOIN training_runs tr ON tr.run_id = tm.run_id
+            WHERE COALESCE(tm.task_type, tr.task_type) = 'subject_masks'
+               OR json_type(tm.final_metrics_json, '$.subject_mask_model_summary') IS NOT NULL;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -12487,13 +12771,18 @@ class Registry:
         self.record_training_model(
             run_id=run_id,
             set_id=set_id,
+            task_type=inferred_task_type,
             model_path=model_path,
             model_sha256=model_sha256,
             metrics_path=metrics_path,
             metrics_sha256=metrics_sha256,
             status=status,
             final_metrics=final_metrics,
-            metadata={"source": "training_runs"},
+            metadata=_training_model_discovery_metadata(
+                task_type=inferred_task_type,
+                final_metrics=final_metrics,
+                metadata={"source": "training_runs"},
+            ),
         )
 
     def upsert_training_set(
@@ -13108,8 +13397,28 @@ class Registry:
         metrics_sha256: Optional[str],
         status: Optional[str],
         final_metrics: Optional[Dict[str, Any]],
+        task_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        resolved_task_type = (
+            _normalize_task_type(task_type)
+            or _normalize_task_type(metadata.get("task_type") if isinstance(metadata, Mapping) else None)
+            or _infer_task_type(
+                set_id=set_id,
+                run_id=run_id,
+                model_path=model_path,
+            )
+        )
+        metadata_payload = _training_model_discovery_metadata(
+            task_type=resolved_task_type,
+            final_metrics=final_metrics,
+            metadata=metadata,
+        )
+        fields = _training_model_discovery_index_fields(
+            task_type=resolved_task_type,
+            final_metrics=final_metrics,
+            metadata=metadata_payload,
+        )
         payload = {
             "run_id": str(run_id),
             "set_id": str(set_id) if set_id else None,
@@ -13118,19 +13427,32 @@ class Registry:
             "metrics_path": str(metrics_path) if metrics_path else None,
             "metrics_sha256": metrics_sha256,
             "status": status,
+            "task_type": fields["task_type"],
+            "label_schema_id": fields["label_schema_id"],
+            "coverage_class": fields["coverage_class"],
+            "component_coverage_key": fields["component_coverage_key"],
+            "mask_labels_json": fields["mask_labels_json"],
+            "component_groups_json": fields["component_groups_json"],
+            "best_metric_name": fields["best_metric_name"],
+            "best_metric_value": fields["best_metric_value"],
+            "best_epoch": fields["best_epoch"],
             "final_metrics_json": _json_dumps(final_metrics),
-            "metadata_json": _json_dumps(metadata),
+            "metadata_json": _json_dumps(metadata_payload),
             "created_utc": _utc_now(),
         }
         self.conn.execute(
             """
             INSERT INTO training_models (
                 run_id, set_id, model_path, model_sha256, metrics_path, metrics_sha256,
-                status, final_metrics_json, metadata_json, created_utc
+                status, task_type, label_schema_id, coverage_class, component_coverage_key,
+                mask_labels_json, component_groups_json, best_metric_name, best_metric_value,
+                best_epoch, final_metrics_json, metadata_json, created_utc
             )
             VALUES (
                 :run_id, :set_id, :model_path, :model_sha256, :metrics_path, :metrics_sha256,
-                :status, :final_metrics_json, :metadata_json, :created_utc
+                :status, :task_type, :label_schema_id, :coverage_class, :component_coverage_key,
+                :mask_labels_json, :component_groups_json, :best_metric_name, :best_metric_value,
+                :best_epoch, :final_metrics_json, :metadata_json, :created_utc
             )
             ON CONFLICT(run_id) DO UPDATE SET
                 set_id=excluded.set_id,
@@ -13139,6 +13461,15 @@ class Registry:
                 metrics_path=excluded.metrics_path,
                 metrics_sha256=excluded.metrics_sha256,
                 status=excluded.status,
+                task_type=excluded.task_type,
+                label_schema_id=excluded.label_schema_id,
+                coverage_class=excluded.coverage_class,
+                component_coverage_key=excluded.component_coverage_key,
+                mask_labels_json=excluded.mask_labels_json,
+                component_groups_json=excluded.component_groups_json,
+                best_metric_name=excluded.best_metric_name,
+                best_metric_value=excluded.best_metric_value,
+                best_epoch=excluded.best_epoch,
                 final_metrics_json=excluded.final_metrics_json,
                 metadata_json=excluded.metadata_json,
                 created_utc=excluded.created_utc;
@@ -13164,6 +13495,7 @@ class Registry:
         self.record_training_model(
             run_id=run_id,
             set_id=set_id,
+            task_type="detect",
             model_path=model_path,
             model_sha256=model_sha256,
             metrics_path=metrics_path,

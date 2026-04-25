@@ -153,6 +153,10 @@ def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
     assert calls[1]["run_id"] == "subject_mask_unet_registry_test"
     assert calls[1]["final_metrics"]["stage"] == "completed"
     assert calls[1]["final_metrics"]["status_detail"] == "training_complete"
+    assert calls[1]["final_metrics"]["best_epoch"] == 1
+    assert calls[1]["final_metrics"]["epochs"] == 1
+    assert calls[1]["final_metrics"]["train_samples"] == 2
+    assert calls[1]["final_metrics"]["val_samples"] == 2
     assert calls[1]["final_metrics"]["label_schema_id"] == "subject_v1_union"
     assert calls[1]["final_metrics"]["mask_labels"] == [
         "subject_body",
