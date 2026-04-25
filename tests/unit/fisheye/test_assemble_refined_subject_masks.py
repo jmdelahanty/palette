@@ -487,6 +487,63 @@ def test_assemble_refined_subject_run_can_seed_eyes_directly_from_refined_eye_ma
     )
 
 
+def test_assemble_refined_subject_run_promotes_approved_refined_eye_review_status(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    refined_eye = _create_refined_eye_run(root)
+    refined_eye.attrs["eye_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-04-04T00:00:00+00:00",
+        "notes": "legacy_eye_review_passed",
+    }
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        refined_eye_run="refined_eye_masks_001",
+        refined_run="refined_subject_masks_promoted_eye_review_001",
+    )
+
+    assert summary["status"] == "updated"
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_promoted_eye_review_001"]
+    reviews = run.attrs["component_review_statuses"]
+    assert reviews["eye_left"]["state"] == "approved"
+    assert reviews["eye_left"]["method"] == "manual"
+    assert reviews["eye_left"]["intended_use"] == "training"
+    assert reviews["eye_left"]["source_stage"] == "refined_eye_masks_runs"
+    assert reviews["eye_left"]["source_run"] == "refined_eye_masks_001"
+    assert reviews["eye_left"]["promoted_from"] == "eye_mask_review_status"
+    assert reviews["eye_right"]["state"] == "approved"
+    assert run.attrs["refined_subject_mask_review_status"]["state"] == "approved"
+
+
+def test_assemble_refined_subject_run_does_not_promote_pending_refined_eye_review_status(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    refined_eye = _create_refined_eye_run(root)
+    refined_eye.attrs["eye_mask_review_status"] = {
+        "state": "pending",
+        "method": "manual",
+        "intended_use": "training",
+        "timestamp_utc": "2026-04-04T00:00:00+00:00",
+    }
+
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        refined_eye_run="refined_eye_masks_001",
+        refined_run="refined_subject_masks_pending_eye_review_001",
+    )
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_pending_eye_review_001"]
+    reviews = run.attrs["component_review_statuses"]
+    assert reviews["eye_left"]["state"] == "pending"
+    assert reviews["eye_right"]["state"] == "pending"
+    assert "promoted_from" not in reviews["eye_left"]
+    assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
+
+
 def test_refine_subject_masks_uses_component_provenance_for_assembled_run(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()

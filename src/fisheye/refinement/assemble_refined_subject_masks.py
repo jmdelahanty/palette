@@ -371,6 +371,21 @@ def _component_review_from_refined_source(
     return dict(_json_safe(payload))
 
 
+def _approved_eye_review_from_refined_eye_source(source: SourceSubjectMaskRun) -> dict[str, object] | None:
+    payload = source.group.attrs.get("eye_mask_review_status")
+    if not isinstance(payload, Mapping):
+        return None
+    state = str(payload.get("state") or "").strip().lower()
+    intended_use = str(payload.get("intended_use") or "").strip().lower()
+    if state != "approved" or intended_use != "training":
+        return None
+    promoted = dict(_json_safe(payload))
+    promoted["source_stage"] = "refined_eye_masks_runs"
+    promoted["source_run"] = source.run_name
+    promoted["promoted_from"] = "eye_mask_review_status"
+    return promoted
+
+
 def _approved_component_review_from_refined_source(
     source: SourceSubjectMaskRun,
     component_name: str,
@@ -475,12 +490,14 @@ def _collect_component_seeds(
             )
 
     if refined_eye_source is not None:
+        review_payload = _approved_eye_review_from_refined_eye_source(refined_eye_source)
         for component_name in _EYE_COMPONENTS:
             _add_component_seed(
                 seeds,
                 review_overrides,
                 component_name,
                 _component_seed_from_refined_eye_source(refined_eye_source, component_name),
+                review_payload=review_payload,
             )
 
     if eye_refined_source is not None:
