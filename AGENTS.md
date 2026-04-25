@@ -16,6 +16,9 @@
 
 ## Sandbox Zarr Test Policy
 
+- Run pytest-based validation outside the Codex sandbox by default for this repository; tests run normally there and sandbox execution can hang on zarr paths.
+- Use `scripts/py -m pytest ...` with an outside-sandbox/escalated command when running focused or full test suites.
+- Keep in-sandbox validation to static/non-zarr checks such as `scripts/py -m py_compile`, `git diff --check`, or explicitly safe in-memory tests.
 - In Codex sandbox, prefer in-memory or fake-group test harnesses (with monkeypatch) for zarr-related unit tests.
 - Do not rely on sync real-zarr integration tests in sandbox when equivalent logic can be validated with in-memory tests.
 - If a real-zarr test hangs or is known to hang in sandbox:
