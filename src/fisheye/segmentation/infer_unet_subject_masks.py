@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime, timezone
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -26,6 +27,11 @@ from ..shared.subject_mask_registry_status import emit_subject_mask_stage_comple
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
+from ..registry.db import Registry, RegistryPaths
+from ..utils.resolve_subject_mask_model import (
+    build_resolution_payload,
+    resolve_best_subject_mask_model,
+)
 from ..utils.system import get_environment_info, get_git_info
 from .unet import UNetSmall
 
@@ -453,6 +459,46 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", help="Path to Palette Zarr archive.")
     parser.add_argument("checkpoint", nargs="?", help="Path to trained U-Net checkpoint (.pt).")
     parser.add_argument("--checkpoint", dest="checkpoint_option", help="Path to trained U-Net checkpoint (.pt).")
+    parser.add_argument(
+        "--resolve-model-from-registry",
+        action="store_true",
+        help="Resolve the checkpoint from subject_mask_training_models instead of passing a path.",
+    )
+    parser.add_argument("--registry", type=Path, help="Registry SQLite path for --resolve-model-from-registry.")
+    parser.add_argument(
+        "--model-coverage-class",
+        default="dense_all_components",
+        help="Required subject-mask model coverage_class when resolving from registry.",
+    )
+    parser.add_argument(
+        "--model-component-coverage-key",
+        help="Optional component_coverage_key filter when resolving from registry.",
+    )
+    parser.add_argument(
+        "--model-label-schema-id",
+        help="Optional label_schema_id filter when resolving from registry.",
+    )
+    parser.add_argument(
+        "--model-include-non-success",
+        action="store_true",
+        help="Allow non-success registry model rows during model resolution.",
+    )
+    parser.add_argument(
+        "--model-allow-missing-path",
+        action="store_true",
+        help="Do not filter resolved registry candidates whose model_path is missing on disk.",
+    )
+    parser.add_argument(
+        "--model-require-unique",
+        action="store_true",
+        help="Fail registry model resolution when the top metric is tied.",
+    )
+    parser.add_argument(
+        "--model-top-k",
+        type=int,
+        default=5,
+        help="Number of registry candidates to retain in model-resolution provenance.",
+    )
     parser.add_argument("--crop-run", help="Explicit crop run providing ROI images (default: latest/auto).")
     parser.add_argument("--run-name", help="Optional name for the output run.")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size used during inference (default: 256).")
@@ -502,6 +548,42 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_registry_checkpoint(
+    args: argparse.Namespace,
+) -> tuple[Path, dict[str, Any]]:
+    registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
+    registry = Registry(registry_path)
+    try:
+        selected, candidates = resolve_best_subject_mask_model(
+            registry,
+            coverage_class=args.model_coverage_class,
+            component_coverage_key=args.model_component_coverage_key,
+            label_schema_id=args.model_label_schema_id,
+            include_non_success=bool(args.model_include_non_success),
+            require_existing_path=not bool(args.model_allow_missing_path),
+            require_unique=bool(args.model_require_unique),
+        )
+    finally:
+        registry.close()
+
+    payload = build_resolution_payload(
+        registry_path=registry_path,
+        selected=selected,
+        candidates=candidates,
+        top_k=int(args.model_top_k),
+        parameters={
+            "coverage_class": args.model_coverage_class,
+            "component_coverage_key": args.model_component_coverage_key,
+            "label_schema_id": args.model_label_schema_id,
+            "include_non_success": bool(args.model_include_non_success),
+            "require_existing_path": not bool(args.model_allow_missing_path),
+            "require_unique": bool(args.model_require_unique),
+            "top_k": int(args.model_top_k),
+        },
+    )
+    return Path(selected.model_path).expanduser().resolve(), payload
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
@@ -510,9 +592,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     console.print("[bold cyan]Running U-Net subject-mask inference[/bold cyan]\n")
 
     checkpoint_value = args.checkpoint_option or args.checkpoint
-    if not checkpoint_value:
-        raise ValueError("U-Net subject-mask inference requires a checkpoint path.")
-    checkpoint_path = Path(checkpoint_value).expanduser().resolve()
+    if checkpoint_value and args.resolve_model_from_registry:
+        raise ValueError("Pass either a checkpoint path or --resolve-model-from-registry, not both.")
+    model_resolution_payload: Optional[dict[str, Any]] = None
+    if checkpoint_value:
+        checkpoint_path = Path(checkpoint_value).expanduser().resolve()
+    elif args.resolve_model_from_registry:
+        checkpoint_path, model_resolution_payload = _resolve_registry_checkpoint(args)
+        selected = model_resolution_payload.get("selected", {})
+        console.print(
+            "[dim]Resolved subject-mask model from registry: "
+            f"{selected.get('run_id')} -> {checkpoint_path}[/dim]"
+        )
+    else:
+        raise ValueError(
+            "U-Net subject-mask inference requires a checkpoint path or --resolve-model-from-registry."
+        )
     device = _resolve_device(args.device)
     model, checkpoint = _load_checkpoint(checkpoint_path, device)
 
@@ -629,6 +724,25 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
     if args.mask_probs_chunk_rois is not None:
         run_group.attrs["mask_probs_chunk_rois"] = int(args.mask_probs_chunk_rois)
+    if model_resolution_payload is not None:
+        selected = model_resolution_payload.get("selected", {})
+        if not isinstance(selected, dict):
+            selected = {}
+        run_group.attrs["model_resolution_mode"] = "registry"
+        run_group.attrs["model_resolution_task"] = "subject_masks"
+        run_group.attrs["model_resolution_registry_path"] = model_resolution_payload.get("registry_path")
+        run_group.attrs["model_resolution_resolved_at_utc"] = model_resolution_payload.get("resolved_at_utc")
+        run_group.attrs["model_resolution_selected_run_id"] = selected.get("run_id")
+        run_group.attrs["model_resolution_selected_set_id"] = selected.get("set_id")
+        run_group.attrs["model_resolution_selected_model_path"] = selected.get("model_path")
+        run_group.attrs["model_resolution_selected_coverage_class"] = selected.get("coverage_class")
+        run_group.attrs["model_resolution_selected_component_coverage_key"] = selected.get("component_coverage_key")
+        run_group.attrs["model_resolution_selected_metric_name"] = selected.get("best_metric_name")
+        run_group.attrs["model_resolution_selected_metric_value"] = selected.get("best_metric_value")
+        run_group.attrs["model_resolution_candidates_json"] = json.dumps(
+            model_resolution_payload.get("candidates", []),
+            sort_keys=True,
+        )
 
     masks_array = np.asarray(run_group["masks_roi"][:], dtype=np.uint8)
     nonempty_rows = np.any(masks_array > 0, axis=(1, 2, 3))
@@ -685,6 +799,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
     }
     provenance_inputs.update(assignment_keypoint_attrs)
+    if model_resolution_payload is not None:
+        provenance_inputs["model_resolution"] = model_resolution_payload
     if crop_source.roi_cache_path is not None:
         provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
     provenance = build_stage_provenance(
@@ -723,6 +839,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "checkpoint_path": str(checkpoint_path),
             "segmenter": "unet",
             "label_schema_id": label_schema_id,
+            "model_resolution": model_resolution_payload,
         },
     )
     write_stage_provenance(run_group, provenance)
