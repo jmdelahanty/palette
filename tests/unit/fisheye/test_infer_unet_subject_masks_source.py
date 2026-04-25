@@ -279,3 +279,142 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert provenance_inputs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
     assert run_group["masks_roi"].shape == (2, 3, 4, 4)
+
+
+def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    checkpoint_path = tmp_path / "subject_unet_lr.pt"
+    checkpoint_path.write_text("", encoding="utf-8")
+
+    seen: dict[str, object] = {}
+    fake_root = _build_fake_root()
+
+    class _FakeCropSource:
+        def __init__(self, crop_group) -> None:
+            self.crop_group = crop_group
+            self.crop_run_name = "crop_geometry"
+            self.total_rois = 2
+            self.roi_shape = (4, 4)
+            self.roi_array = None
+            self.storage_mode = "geometry_only"
+            self.roi_read_mode = "live"
+            self.roi_cache_policy = "never"
+            self.roi_cache_used = False
+            self.roi_cache_key = None
+            self.roi_cache_path = None
+            self.roi_live_acceleration_requested = "cpu"
+            self.roi_live_acceleration_effective = "cpu"
+            self.roi_live_acceleration_fallback_reason = None
+            self.roi_live_gpu_chunk_frames = 32
+            self.frame_source_kind = "raw_video/images_full"
+            self.frame_source_path = None
+
+        def read_slice(self, start: int, stop: int) -> np.ndarray:
+            return np.zeros((stop - start, 4, 4), dtype=np.uint8)
+
+        def close(self) -> None:
+            return None
+
+    def _fake_load_checkpoint(_path: Path, _device) -> tuple[object, dict[str, object]]:
+        return object(), {
+            "label_schema_id": "subject_v1_lr",
+            "mask_labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+            "best_val_dice": 0.91,
+        }
+
+    def _fake_write_subject_mask_outputs(
+        run_group,
+        model,
+        roi_source,
+        *,
+        batch_size,
+        device,
+        mask_labels,
+        mask_probs_chunk_rois,
+        mask_probs_dtype,
+        console,
+        timing_profiler,
+    ) -> float:
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, console, timing_profiler
+        seen["mask_labels"] = tuple(mask_labels)
+        channel_count = len(mask_labels)
+        run_group.create_array(
+            "masks_roi",
+            data=np.zeros(
+                (roi_source.total_rois, channel_count, roi_source.roi_shape[0], roi_source.roi_shape[1]),
+                dtype=np.uint8,
+            ),
+            overwrite=True,
+        )
+        run_group.create_array(
+            "mask_probs_roi",
+            data=np.zeros(
+                (roi_source.total_rois, channel_count, roi_source.roi_shape[0], roi_source.roi_shape[1]),
+                dtype=np.float16,
+            ),
+            overwrite=True,
+        )
+        run_group.create_array(
+            "available_channels",
+            data=np.ones((channel_count,), dtype=np.bool_),
+            overwrite=True,
+        )
+        return 0.25
+
+    monkeypatch.setattr(mod, "_load_checkpoint", _fake_load_checkpoint)
+    monkeypatch.setattr(mod, "_write_subject_mask_outputs", _fake_write_subject_mask_outputs)
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(
+        mod.CropImageSource,
+        "open",
+        lambda root, **_kwargs: _FakeCropSource(root["crop_runs"]["crop_geometry"]),
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_environment_info",
+        lambda **_kwargs: {
+            "platform": {
+                "hostname": "test-host",
+                "system": "Linux",
+                "release": "6.0",
+                "python_version": "3.11",
+                "machine": "x86_64",
+            },
+            "environment": {"name": "test-env"},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_git_info",
+        lambda: {
+            "commit_hash": "abc123",
+            "short_hash": "abc123",
+            "branch": "main",
+            "is_dirty": False,
+            "remote_url": "git@example.com:palette.git",
+        },
+    )
+
+    mod.main([str(zarr_path), "--checkpoint", str(checkpoint_path), "--crop-run", "crop_geometry"])
+
+    subject_parent = fake_root["subject_mask_runs"]
+    latest = str(subject_parent.attrs["latest"])
+    run_group = subject_parent[latest]
+
+    assert seen["mask_labels"] == ("subject_body", "eye_left", "eye_right", "swim_bladder")
+    assert run_group.attrs["label_schema_id"] == "subject_v1_lr"
+    assert list(run_group.attrs["mask_labels"]) == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    assert run_group["mask_probs_roi"].shape == (2, 4, 4, 4)
+    assert run_group["masks_roi"].shape == (2, 4, 4, 4)
+    for label in ("subject_body", "eye_left", "eye_right", "swim_bladder"):
+        provenance = run_group["components"][label]["provenance"].attrs
+        assert provenance["source_label_schema_id"] == "subject_v1_lr"
+        assert provenance["source_channels"] == [label]

@@ -53,7 +53,10 @@ class _FakeGroup:
         return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
 
 
-def _build_training_root() -> _FakeGroup:
+def _build_training_root(
+    *,
+    label_schema_id: str = "subject_v1_union",
+) -> _FakeGroup:
     root = _FakeGroup()
     root.attrs["zarr_purpose"] = "training"
     root.attrs["training_task"] = "subject_masks"
@@ -76,22 +79,40 @@ def _build_training_root() -> _FakeGroup:
     mask_parent = root.create_group("subject_mask_runs")
     mask_parent.attrs["latest"] = "training_export_001"
     mask = mask_parent.create_group("training_export_001")
-    mask.attrs["label_schema_id"] = "subject_v1_union"
-    mask.attrs["mask_labels"] = ["subject_body", "eyes_union", "swim_bladder"]
-    masks = np.zeros((4, 3, 8, 8), dtype=np.uint8)
-    masks[:, 0, 1:4, 1:4] = 1
-    masks[:, 1, 2:5, 3:6] = 1
-    valid = np.array(
-        [
-            [True, True, False],
-            [True, True, False],
-            [True, False, True],
-            [True, False, True],
-        ],
-        dtype=np.bool_,
-    )
-    mask.create_array("masks_roi", data=masks, chunks=(2, 3, 8, 8))
-    mask.create_array("target_valid_channels", data=valid, chunks=(4, 3))
+    mask.attrs["label_schema_id"] = label_schema_id
+    if label_schema_id == "subject_v1_lr":
+        mask_labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+        masks = np.zeros((4, 4, 8, 8), dtype=np.uint8)
+        masks[:, 0, 1:4, 1:4] = 1
+        masks[:, 1, 2:5, 2:4] = 1
+        masks[:, 2, 2:5, 4:6] = 1
+        masks[:, 3, 3:6, 3:5] = 1
+        valid = np.array(
+            [
+                [True, True, True, False],
+                [True, True, True, False],
+                [True, False, False, True],
+                [True, False, False, True],
+            ],
+            dtype=np.bool_,
+        )
+    else:
+        mask_labels = ["subject_body", "eyes_union", "swim_bladder"]
+        masks = np.zeros((4, 3, 8, 8), dtype=np.uint8)
+        masks[:, 0, 1:4, 1:4] = 1
+        masks[:, 1, 2:5, 3:6] = 1
+        valid = np.array(
+            [
+                [True, True, False],
+                [True, True, False],
+                [True, False, True],
+                [True, False, True],
+            ],
+            dtype=np.bool_,
+        )
+    mask.attrs["mask_labels"] = mask_labels
+    mask.create_array("masks_roi", data=masks, chunks=(2, len(mask_labels), 8, 8))
+    mask.create_array("target_valid_channels", data=valid, chunks=(4, len(mask_labels)))
 
     splits = root.create_group("splits")
     splits.create_array("train_indices", data=np.array([0, 1, 2], dtype=np.int64), chunks=(3,))
@@ -252,3 +273,50 @@ def test_build_subject_mask_training_datasets_returns_valid_channel_batches(
     assert sample["img"].shape == (1, 8, 8)
     assert sample["masks"].shape == (3, 8, 8)
     assert sample["valid_channels"].shape == (3,)
+
+
+def test_build_subject_mask_training_datasets_accepts_lr_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "subject_training_lr.zarr"
+    artifact.mkdir()
+    (artifact / "zarr.json").write_text("{}", encoding="utf-8")
+    fake_root = _build_training_root(label_schema_id="subject_v1_lr")
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(mod.zarr, "Group", _FakeGroup)
+
+    cfg_path = tmp_path / "subject_mask_training_lr.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "datasets:",
+                "  ds1:",
+                f"    zarr_path: {artifact}",
+                "training_params:",
+                "  model: unet_small",
+                "  epochs: 1",
+                "  batch: 2",
+                "  batch_size: 2",
+                "  imgsz: 8",
+                "  lr0: 0.001",
+                "  momentum: 0.9",
+                "  weight_decay: 0.0",
+                "  patience: 3",
+                "  device: cpu",
+                "  label_schema_id: auto",
+                "random_seed: 0",
+                "num_workers: 0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = SubjectMaskTrainingConfig.from_yaml(cfg_path)
+    bundle = mod.build_subject_mask_training_datasets(config)
+    sample = bundle.train_dataset[0]
+
+    assert bundle.label_schema_id == "subject_v1_lr"
+    assert bundle.mask_labels == ("subject_body", "eye_left", "eye_right", "swim_bladder")
+    assert sample["masks"].shape == (4, 8, 8)
+    assert sample["valid_channels"].shape == (4,)

@@ -302,7 +302,7 @@ def _resolve_source_spec(
     allow_unapproved_refined: bool = False,
 ) -> SubjectResolvedSource:
     source_path = Path(spec.source_zarr).expanduser().resolve()
-    root = zarr.open_group(str(source_path), mode="r")
+    root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
     stage_group = _normalize_subject_stage_group(spec.stage_group)
     subject_run, subject_group = _resolve_source_run(
         root,
@@ -637,7 +637,11 @@ def export_merged_subject_mask_training_zarr_from_sources(
 
     source_roots: List[Tuple[Path, zarr.Group, str, List[str], np.ndarray]] = []
     for spec in source_specs:
-        root = zarr.open_group(str(Path(spec.source_zarr).expanduser().resolve()), mode="r")
+        root = zarr.open_group(
+            str(Path(spec.source_zarr).expanduser().resolve()),
+            mode="r",
+            use_consolidated=False,
+        )
         stage_group = _normalize_subject_stage_group(spec.stage_group)
         _subject_run, subject_group = _resolve_source_run(
             root,
@@ -697,7 +701,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
         seed=split_seed,
     )
 
-    root = zarr.open_group(str(out_path), mode="w")
+    root = zarr.open_group(str(out_path), mode="w", use_consolidated=False)
     root.attrs.update(
         {
             "zarr_purpose": "training",
@@ -1042,7 +1046,7 @@ def validate_merged_subject_mask_training_zarr(
     expected_total_samples: Optional[int] = None,
     expected_label_schema_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
+    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r", use_consolidated=False)
     errors: List[str] = []
 
     if str(root.attrs.get("zarr_purpose", "")).strip().lower() != "training":

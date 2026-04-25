@@ -101,6 +101,14 @@ breaking the current eye tools before the unified model is ready.
 - The main short-term blocker is no longer storage or registry design.
   The blocker is that we still do not have real body-mask and swim-bladder-mask
   data to curate, review, and export at scale.
+- U-Net subject-mask training can now emit validation preview PNGs, and a
+  full-size short smoke run showed that direct `eye_left` / `eye_right`
+  prediction can collapse into "both eyes in both channels" even when the
+  exported target channels are distinct. This reinforces the design boundary in
+  [eye_subject_mask_unification_design.md](eye_subject_mask_unification_design.md):
+  raw models should favor visually identifiable eye masks (`eyes_union` or
+  unordered instances), while biological LR identity should be assigned by a
+  downstream geometry/refinement step when orientation evidence is available.
 
 ## Immediate Remaining Work
 
@@ -285,6 +293,26 @@ derived outputs that are not shared by other components, such as:
 
 This is a good reason to defer the migration rather than forcing eye refinement
 into a generic component mask stage too early.
+
+Current gap:
+
+- the refined subject-mask storage and registry surfaces are ready to hold
+  `eye_left` and `eye_right`
+- existing assembly/merge paths mostly preserve upstream LR labels
+- existing eye geometry paths compute ellipses/separation from already-labeled
+  LR components
+- we do not yet have a robust helper that converts `eyes_union` or unordered
+  eye instances into canonical `eye_left` / `eye_right`
+
+Recommended next design slice:
+
+- implement a geometry-aware LR assignment helper for subject-mask refinement
+- use keypoints, heading/body axis, eye centroids, and separation checks as the
+  assignment evidence
+- write assignment confidence/status and reason labels per row
+- mark ambiguous rows for review rather than silently guessing
+- keep component provenance explicit, including the source eye mask and the
+  assignment method
 
 ## Proposed Stage Relationship
 

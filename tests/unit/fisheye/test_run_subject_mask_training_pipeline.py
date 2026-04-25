@@ -240,10 +240,65 @@ def test_export_merged_invokes_exporter_and_rewrites_outputs(tmp_path: Path, mon
     assert dataset_cfg["subject_mask_run"] == "merged_subject_masks_test"
     assert config_payload["training_params"]["crop_run"] == "merged_subject_masks_test"
     assert config_payload["training_params"]["subject_masks_run"] == "merged_subject_masks_test"
-    assert config_payload["training_params"]["label_schema_id"] == "subject_v1_union"
+    assert config_payload["training_params"]["label_schema_id"] == "auto"
+    assert "names" not in config_payload
+    assert "nc" not in config_payload
 
     original_config = pipeline.yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert original_config["datasets"]["subject_merged"]["zarr_path"] == "/tmp/old_subject_masks.zarr"
+
+
+def test_export_merged_uses_artifact_derived_config_for_lr_schema(tmp_path: Path, monkeypatch) -> None:
+    source_zarr = tmp_path / "dataset_1.zarr"
+    config_path = tmp_path / "prep" / "subject_mask.yaml"
+    manifest_path = tmp_path / "prep" / "subject_mask.manifest.json"
+    out_config = tmp_path / "merged" / "subject_mask.yaml"
+    out_manifest = tmp_path / "merged" / "subject_mask.manifest.json"
+    merged_out = tmp_path / "merged" / "subject_masks.zarr"
+    _write_config(config_path)
+    _write_manifest(manifest_path, source_zarr)
+
+    def fake_export(*, source_specs, out_zarr, **kwargs):
+        del source_specs
+        return {
+            "run_name": kwargs["run_name"],
+            "zarr_path": str(out_zarr),
+            "total_samples": 42,
+            "label_schema_id": "subject_v1_lr",
+            "source_count": 1,
+        }
+
+    monkeypatch.setattr(
+        pipeline.export_zarr,
+        "export_merged_subject_mask_training_zarr_from_sources",
+        fake_export,
+    )
+
+    rc = pipeline.main(
+        [
+            "--config",
+            str(config_path),
+            "--manifest",
+            str(manifest_path),
+            "--out-config",
+            str(out_config),
+            "--out-manifest",
+            str(out_manifest),
+            "--export-merged",
+            "--merge-out-zarr",
+            str(merged_out),
+            "--merge-run-name",
+            "merged_subject_masks_lr",
+            "--subject-label-schema",
+            "subject_v1_lr",
+        ]
+    )
+    assert rc == 0
+
+    config_payload = pipeline.yaml.safe_load(out_config.read_text(encoding="utf-8"))
+    assert config_payload["training_params"]["label_schema_id"] == "auto"
+    assert "names" not in config_payload
+    assert "nc" not in config_payload
 
 
 def test_train_after_export_uses_rewritten_outputs(tmp_path: Path, monkeypatch) -> None:

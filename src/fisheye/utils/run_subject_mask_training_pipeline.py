@@ -262,9 +262,9 @@ def _write_merged_outputs(
         if isinstance(training_params, dict):
             training_params["crop_run"] = merged_run_name
             training_params["subject_masks_run"] = merged_run_name
-            label_schema_id = _as_text(merge_summary.get("label_schema_id"))
-            if label_schema_id:
-                training_params["label_schema_id"] = label_schema_id
+            training_params["label_schema_id"] = "auto"
+            config_payload.pop("names", None)
+            config_payload.pop("nc", None)
 
         effective_config_path = _resolve_output_path(input_path=config_path, output_path=out_config)
         manifest_payload["output_config_path"] = str(effective_config_path)

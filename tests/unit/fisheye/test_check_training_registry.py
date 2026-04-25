@@ -112,6 +112,11 @@ def test_metrics_summary_from_json_supports_alt_keys() -> None:
     assert _metrics_summary_from_json(payload) == "mAP50=0.900, mAP50-95=0.600"
 
 
+def test_metrics_summary_from_json_supports_subject_mask_components() -> None:
+    payload = '{"best_val_dice": 0.81234, "component_coverage_key": "body+eyes+swim_bladder"}'
+    assert _metrics_summary_from_json(payload) == "Dice=0.812, components=body+eyes+swim_bladder"
+
+
 def test_status_with_details_appends_suffix_only_for_ok() -> None:
     assert _status_with_details(True, "mAP50=0.900", rich=False) == "OK (mAP50=0.900)"
     assert _status_with_details(False, "mAP50=0.900", rich=False) == "MISS"

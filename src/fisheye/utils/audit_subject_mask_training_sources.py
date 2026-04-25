@@ -66,7 +66,7 @@ def _normalize_str_list(value: Any) -> list[str]:
 
 
 def _open_group(path: Path) -> zarr.Group:
-    return zarr.open_group(str(path.expanduser().resolve()), mode="r")
+    return zarr.open_group(str(path.expanduser().resolve()), mode="r", use_consolidated=False)
 
 
 def _is_group(value: Any) -> bool:

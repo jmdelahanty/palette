@@ -2,7 +2,7 @@
 
 <!-- design-meta
 status: active
-last_verified: 2026-04-02
+last_verified: 2026-04-25
 -->
 
 Purpose: define the target runtime/refined model for moving eye refinement under
@@ -77,6 +77,50 @@ That means `subject_v1_union` remains valid for:
 - raw union-eye models
 - unlabeled pair-eye producers that are not yet trustworthy LR writers
 
+### Model output versus eye identity assignment
+
+Direct `eye_left` / `eye_right` prediction is not the preferred default for
+new U-Net subject-mask models unless the producer has an explicit way to
+resolve anatomical side.
+
+The fish is close to bilaterally symmetric in ROI crops. A plain image-only
+segmentation model can learn eye objectness while failing to assign biological
+left/right identity. In practice this can produce two high-quality looking eye
+channels that both segment both eyes. That failure should be treated as an
+expected ambiguity of the model contract, not as evidence that the refined
+subject-mask storage contract is wrong.
+
+Preferred model/refinement boundary:
+
+- model-native outputs should prioritize visually identifiable masks:
+  - `subject_body`
+  - `eyes_union` or unordered eye instances
+  - `swim_bladder`
+- anatomical `eye_left` / `eye_right` should be assigned downstream by a
+  geometry-aware refinement step using keypoints, heading, eye centroids, body
+  axis context, or equivalent orientation evidence
+- ambiguous rows should be marked for review rather than silently guessed
+- direct `subject_v1_lr` model outputs are acceptable only when the training
+  and inference path includes enough orientation information to make LR
+  identity reliable, such as canonicalized crops, heading/coordinate channels,
+  keypoint-conditioned inputs, or a loss/architecture that explicitly enforces
+  instance separation and side assignment
+
+Required future helper/stage:
+
+- input:
+  - `eyes_union` probability/mask, or unordered eye-instance masks
+  - optional `subject_body` and `swim_bladder`
+  - keypoint/heading/geometry context when available
+- output:
+  - canonical `eye_left` and `eye_right` refined subject components
+  - assignment confidence/status per row
+  - review reasons for ambiguous, missing, overlapping, or low-confidence rows
+  - component provenance that records the source eye mask and assignment method
+
+This keeps raw segmentation visual and local, while making LR identity a
+geometry/refinement responsibility.
+
 ### Refined target
 
 The canonical refined target for new eye-capable work should be:
@@ -95,6 +139,14 @@ Reason:
   it is too lossy as the refined canonical authoring surface
 - refined workflows can legitimately promote a union/raw source into LR
   semantics using keypoints or other eye-specific refinement logic
+
+Implementation status:
+
+- current assembly/merge helpers mostly preserve existing `eye_left` /
+  `eye_right` source channels
+- current canonical eye geometry is computed from already-labeled LR refined
+  subject components
+- a robust union/unordered-eyes to LR assignment helper is still open work
 
 ## Assembly And Finalization Policy
 

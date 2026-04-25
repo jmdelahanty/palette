@@ -579,6 +579,7 @@ def _metrics_summary_from_json(payload: Optional[str]) -> Optional[str]:
     map50_95 = _format_metric(_metric_value(data, ["mAP50_95", "mAP50-95", "map50_95", "map50-95"]))
     precision = _format_metric(_metric_value(data, ["precision", "metrics/precision(B)"]))
     recall = _format_metric(_metric_value(data, ["recall", "metrics/recall(B)"]))
+    dice = _format_metric(_metric_value(data, ["best_val_dice", "val_dice", "dice"]))
     if map50 is not None:
         parts.append(f"mAP50={map50}")
     if map50_95 is not None:
@@ -587,6 +588,14 @@ def _metrics_summary_from_json(payload: Optional[str]) -> Optional[str]:
         parts.append(f"P={precision}")
     if recall is not None:
         parts.append(f"R={recall}")
+    if dice is not None:
+        parts.append(f"Dice={dice}")
+    component_key = data.get("component_coverage_key")
+    model_summary = data.get("subject_mask_model_summary")
+    if not component_key and isinstance(model_summary, dict):
+        component_key = model_summary.get("component_coverage_key")
+    if isinstance(component_key, str) and component_key.strip() and component_key.strip() != "unknown":
+        parts.append(f"components={component_key.strip()}")
     if not parts:
         return None
     return ", ".join(parts)

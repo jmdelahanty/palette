@@ -27,8 +27,12 @@ from ..shared.subject_mask_component_provenance import write_subject_mask_compon
 from ..utils.system import get_environment_info, get_git_info
 from .unet import UNetSmall
 
+SUBJECT_MASK_SCHEMAS: dict[str, tuple[str, ...]] = {
+    "subject_v1_union": ("subject_body", "eyes_union", "swim_bladder"),
+    "subject_v1_lr": ("subject_body", "eye_left", "eye_right", "swim_bladder"),
+}
 SUBJECT_MASK_LABEL_SCHEMA = "subject_v1_union"
-SUBJECT_MASK_LABELS: tuple[str, ...] = ("subject_body", "eyes_union", "swim_bladder")
+SUBJECT_MASK_LABELS: tuple[str, ...] = SUBJECT_MASK_SCHEMAS[SUBJECT_MASK_LABEL_SCHEMA]
 _SUBJECT_MASKS_STATUS_SOURCE = "runtime_infer_unet_subject_masks"
 
 
@@ -157,6 +161,28 @@ def _load_checkpoint(path: Path, device: torch.device) -> Tuple[UNetSmall, Dict[
     model.to(device)
     model.eval()
     return model, checkpoint
+
+
+def _resolve_checkpoint_schema(checkpoint: Dict[str, object]) -> Tuple[str, Tuple[str, ...]]:
+    label_schema_id = str(checkpoint.get("label_schema_id") or "").strip() or SUBJECT_MASK_LABEL_SCHEMA
+    expected_labels = SUBJECT_MASK_SCHEMAS.get(label_schema_id)
+    if expected_labels is None:
+        raise ValueError(
+            f"Unsupported subject-mask checkpoint label_schema_id {label_schema_id!r}. "
+            f"Expected one of {sorted(SUBJECT_MASK_SCHEMAS)}."
+        )
+
+    mask_labels_raw = checkpoint.get("mask_labels")
+    if isinstance(mask_labels_raw, (list, tuple)) and mask_labels_raw:
+        mask_labels = tuple(str(item) for item in mask_labels_raw)
+    else:
+        mask_labels = expected_labels
+    if mask_labels != expected_labels:
+        raise ValueError(
+            f"Checkpoint mask_labels {mask_labels!r} do not match schema "
+            f"{label_schema_id!r}: {expected_labels!r}."
+        )
+    return label_schema_id, mask_labels
 
 
 def _prepare_run_group(
@@ -414,24 +440,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     device = _resolve_device(args.device)
     model, checkpoint = _load_checkpoint(checkpoint_path, device)
 
-    label_schema_id = str(checkpoint.get("label_schema_id") or "").strip() or SUBJECT_MASK_LABEL_SCHEMA
-    if label_schema_id != SUBJECT_MASK_LABEL_SCHEMA:
-        raise ValueError(
-            f"Only {SUBJECT_MASK_LABEL_SCHEMA!r} checkpoints are supported in this first implementation; "
-            f"got {label_schema_id!r}."
-        )
-    mask_labels_raw = checkpoint.get("mask_labels")
-    if isinstance(mask_labels_raw, (list, tuple)) and mask_labels_raw:
-        mask_labels = tuple(str(item) for item in mask_labels_raw)
-    else:
-        mask_labels = SUBJECT_MASK_LABELS
-    if mask_labels != SUBJECT_MASK_LABELS:
-        raise ValueError(
-            f"Checkpoint mask_labels {mask_labels!r} do not match the supported schema {SUBJECT_MASK_LABELS!r}."
-        )
+    label_schema_id, mask_labels = _resolve_checkpoint_schema(checkpoint)
 
     zarr_path = Path(args.zarr_path).expanduser().resolve()
-    root = zarr.open(str(zarr_path), mode="a")
+    root = zarr.open(str(zarr_path), mode="a", use_consolidated=False)
 
     crop_source = CropImageSource.open(
         root,

@@ -11,7 +11,7 @@ import re
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -97,6 +97,158 @@ def _summarize_source_run(meta: Dict[str, object], *, source_key: str, local_key
     if source_value:
         return source_value
     return str(meta.get(local_key, "unknown"))
+
+
+_COMPONENT_COLORS: Dict[str, Tuple[float, float, float]] = {
+    "subject_body": (0.10, 0.68, 0.36),
+    "eyes_union": (1.00, 0.62, 0.05),
+    "eye_left": (0.05, 0.70, 1.00),
+    "eye_right": (1.00, 0.35, 0.05),
+    "swim_bladder": (0.95, 0.10, 0.78),
+}
+_COMPONENT_DRAW_ORDER = ("subject_body", "eyes_union", "eye_left", "eye_right", "swim_bladder")
+
+
+def _to_display_image(image_chw: np.ndarray) -> np.ndarray:
+    image = np.asarray(image_chw, dtype=np.float32)
+    if image.ndim == 3 and image.shape[0] == 1:
+        image_hw = image[0]
+        return np.dstack([image_hw, image_hw, image_hw]).clip(0.0, 1.0)
+    if image.ndim == 3 and image.shape[0] == 3:
+        return np.transpose(image, (1, 2, 0)).clip(0.0, 1.0)
+    if image.ndim == 2:
+        return np.dstack([image, image, image]).clip(0.0, 1.0)
+    raise ValueError(f"Unexpected validation preview image shape: {image.shape}")
+
+
+def _compose_subject_mask_overlay(
+    image_chw: np.ndarray,
+    masks_chw: np.ndarray,
+    *,
+    mask_labels: Sequence[str],
+    threshold: Optional[float],
+    alpha: float = 0.48,
+) -> np.ndarray:
+    overlay = _to_display_image(image_chw)
+    masks = np.asarray(masks_chw, dtype=np.float32)
+    label_to_index = {str(label): idx for idx, label in enumerate(mask_labels)}
+    for label in _COMPONENT_DRAW_ORDER:
+        idx = label_to_index.get(label)
+        if idx is None or idx >= masks.shape[0]:
+            continue
+        values = masks[idx]
+        mask = values > float(threshold) if threshold is not None else values > 0.0
+        if not np.any(mask):
+            continue
+        color = np.asarray(_COMPONENT_COLORS[label], dtype=np.float32)
+        if threshold is None:
+            strength_map = np.clip(values, 0.0, 1.0)[..., None] * alpha
+            overlay = np.where(mask[..., None], overlay * (1.0 - strength_map) + color * strength_map, overlay)
+        else:
+            overlay[mask] = overlay[mask] * (1.0 - alpha) + color * alpha
+    return np.clip(overlay, 0.0, 1.0)
+
+
+def _save_validation_preview(
+    *,
+    output_path: Path,
+    image_chw: np.ndarray,
+    target_masks_chw: np.ndarray,
+    pred_probs_chw: np.ndarray,
+    valid_channels: np.ndarray,
+    mask_labels: Sequence[str],
+    epoch: int,
+    sample_index: int,
+    threshold: float,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    labels = [str(label) for label in mask_labels]
+    ncols = max(3, len(labels))
+    fig, axes = plt.subplots(3, ncols, figsize=(3.2 * ncols, 8.8), squeeze=False)
+    fig.suptitle(f"Validation epoch {epoch} sample {sample_index}", fontsize=14)
+
+    target_overlay = _compose_subject_mask_overlay(
+        image_chw,
+        target_masks_chw,
+        mask_labels=labels,
+        threshold=None,
+    )
+    pred_overlay = _compose_subject_mask_overlay(
+        image_chw,
+        pred_probs_chw,
+        mask_labels=labels,
+        threshold=threshold,
+    )
+
+    panels = (
+        (0, "ROI", _to_display_image(image_chw), None),
+        (1, "Target composite", target_overlay, None),
+        (2, f"Pred composite >= {threshold:.2f}", pred_overlay, None),
+    )
+    for col, title, image, cmap in panels:
+        axes[0, col].imshow(image, cmap=cmap, vmin=0.0, vmax=1.0)
+        axes[0, col].set_title(title)
+
+    for col in range(3, ncols):
+        axes[0, col].axis("off")
+
+    valid = np.asarray(valid_channels, dtype=np.bool_)
+    for idx, label in enumerate(labels):
+        target_title = f"Target {label}"
+        if idx < valid.shape[0] and not bool(valid[idx]):
+            target_title += " (unsup)"
+        axes[1, idx].imshow(target_masks_chw[idx], cmap="gray", vmin=0.0, vmax=1.0)
+        axes[1, idx].set_title(target_title)
+        axes[2, idx].imshow(pred_probs_chw[idx], cmap="magma", vmin=0.0, vmax=1.0)
+        axes[2, idx].set_title(f"Pred {label}")
+
+    for row in (1, 2):
+        for col in range(len(labels), ncols):
+            axes[row, col].axis("off")
+
+    for ax in axes.reshape(-1):
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+
+
+def _write_validation_previews(
+    *,
+    output_dir: Path,
+    images: Sequence[np.ndarray],
+    targets: Sequence[np.ndarray],
+    pred_probs: Sequence[np.ndarray],
+    valid_channels: Sequence[np.ndarray],
+    mask_labels: Sequence[str],
+    epoch: int,
+    threshold: float,
+) -> List[Path]:
+    written: List[Path] = []
+    epoch_dir = output_dir / f"epoch_{epoch:03d}"
+    for sample_idx, (image, target, pred, valid) in enumerate(
+        zip(images, targets, pred_probs, valid_channels)
+    ):
+        out_path = epoch_dir / f"sample_{sample_idx:03d}.png"
+        _save_validation_preview(
+            output_path=out_path,
+            image_chw=image,
+            target_masks_chw=target,
+            pred_probs_chw=pred,
+            valid_channels=valid,
+            mask_labels=mask_labels,
+            epoch=epoch,
+            sample_index=sample_idx,
+            threshold=threshold,
+        )
+        written.append(out_path)
+    return written
 
 
 def _collate_triplets(batch: Sequence[Dict[str, np.ndarray]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -217,18 +369,120 @@ def _save_checkpoint(
     meta_list: List[Dict[str, object]],
     best_dice: float,
     mask_labels: Sequence[str],
+    subject_mask_model_summary: Mapping[str, object],
 ) -> None:
     checkpoint = {
         "model_state": model.state_dict(),
         "model_config": asdict(model.config),
         "label_schema_id": config.training_params.label_schema_id,
         "mask_labels": list(mask_labels),
+        "subject_mask_model_summary": dict(subject_mask_model_summary),
         "config": config.model_dump(mode="json"),
         "dataset_meta": meta_list,
         "training_history": history,
         "best_val_dice": float(best_dice),
     }
     torch.save(checkpoint, path)
+
+
+def _int_count(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _sum_label_counts(
+    merged: Dict[str, int],
+    summary: Mapping[str, object],
+    key: str,
+    mask_labels: Sequence[str],
+) -> None:
+    counts = summary.get(key)
+    if not isinstance(counts, Mapping):
+        return
+    for label in mask_labels:
+        merged[label] = int(merged.get(label, 0) + _int_count(counts.get(label)))
+
+
+def _subject_mask_component_groups(available_labels: Sequence[str]) -> List[str]:
+    available = {str(label) for label in available_labels}
+    groups: List[str] = []
+    if "subject_body" in available:
+        groups.append("body")
+    if {"eyes_union", "eye_left", "eye_right"} & available:
+        groups.append("eyes")
+    if "swim_bladder" in available:
+        groups.append("swim_bladder")
+    return groups
+
+
+def _coverage_class(mask_labels: Sequence[str], supervised_row_counts: Mapping[str, int]) -> str:
+    eye_labels = {"eyes_union", "eye_left", "eye_right"}
+    eye_supervised = any(_int_count(supervised_row_counts.get(label)) > 0 for label in eye_labels)
+    body_supervised = _int_count(supervised_row_counts.get("subject_body")) > 0
+    bladder_supervised = _int_count(supervised_row_counts.get("swim_bladder")) > 0
+    if eye_supervised and not body_supervised and not bladder_supervised:
+        return "eyes_only"
+    if mask_labels and all(_int_count(supervised_row_counts.get(label)) > 0 for label in mask_labels):
+        return "dense_all_components"
+    return "partial_subject_masks"
+
+
+def _build_subject_mask_model_summary(
+    *,
+    meta_list: Sequence[Mapping[str, object]],
+    label_schema_id: str,
+    mask_labels: Sequence[str],
+) -> Dict[str, object]:
+    labels = [str(label) for label in mask_labels]
+    count_keys = (
+        "supervised_row_counts",
+        "positive_row_counts",
+        "negative_row_counts",
+        "unsupervised_row_counts",
+    )
+    merged_counts: Dict[str, Dict[str, int]] = {
+        key: {label: 0 for label in labels} for key in count_keys
+    }
+    summarized_artifact_count = 0
+
+    for meta in meta_list:
+        summary = meta.get("channel_supervision_summary")
+        if not isinstance(summary, Mapping):
+            continue
+        summarized_artifact_count += 1
+        for key in count_keys:
+            _sum_label_counts(merged_counts[key], summary, key, labels)
+
+    if summarized_artifact_count:
+        supervised = merged_counts["supervised_row_counts"]
+        available_labels = [label for label in labels if _int_count(supervised.get(label)) > 0]
+        missing_labels = [label for label in labels if _int_count(supervised.get(label)) <= 0]
+        coverage_class = _coverage_class(labels, supervised)
+    else:
+        available_labels = []
+        missing_labels = list(labels)
+        coverage_class = "unknown"
+
+    component_groups = _subject_mask_component_groups(available_labels)
+    component_coverage_key = "+".join(component_groups) if component_groups else "unknown"
+    return {
+        "label_schema_id": str(label_schema_id),
+        "mask_labels": labels,
+        "coverage_class": coverage_class,
+        "component_groups": component_groups,
+        "component_coverage_key": component_coverage_key,
+        "contains_only_eye_masks": bool(coverage_class == "eyes_only"),
+        "available_labels": available_labels,
+        "missing_labels": missing_labels,
+        "supervised_row_counts": merged_counts["supervised_row_counts"],
+        "positive_row_counts": merged_counts["positive_row_counts"],
+        "negative_row_counts": merged_counts["negative_row_counts"],
+        "unsupervised_row_counts": merged_counts["unsupervised_row_counts"],
+        "source_artifact_count": int(len(meta_list)),
+        "summarized_artifact_count": int(summarized_artifact_count),
+    }
 
 
 def _read_manifest_set_id(manifest_path: Optional[Path]) -> Optional[str]:
@@ -301,6 +555,26 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", help="Override training_params.project for saving checkpoints and logs.")
     parser.add_argument("--device", help="Override training_params.device (e.g. 'cuda:0', 'cpu').")
     parser.add_argument("--epochs", type=int, help="Optional epoch override (defaults to config value).")
+    parser.add_argument(
+        "--val-preview-samples",
+        type=int,
+        help="Override number of validation samples rendered as preview PNGs per preview epoch.",
+    )
+    parser.add_argument(
+        "--val-preview-every",
+        type=int,
+        help="Override validation preview PNG frequency in epochs.",
+    )
+    parser.add_argument(
+        "--val-preview-threshold",
+        type=float,
+        help="Override probability threshold used for validation prediction composite overlays.",
+    )
+    parser.add_argument(
+        "--no-val-previews",
+        action="store_true",
+        help="Disable validation preview PNG generation.",
+    )
     parser.add_argument("--no-progress", action="store_true", help="Disable rich progress bars.")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile even if available.")
     return parser
@@ -350,6 +624,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     try:
         bundle = build_subject_mask_training_datasets(config, console)
+        config.training_params.label_schema_id = bundle.label_schema_id  # type: ignore[assignment]
+        config.names = list(bundle.mask_labels)
+        config.nc = int(len(bundle.mask_labels))
+        subject_mask_model_summary = _build_subject_mask_model_summary(
+            meta_list=bundle.meta_list,
+            label_schema_id=bundle.label_schema_id,
+            mask_labels=bundle.mask_labels,
+        )
     except Exception as exc:
         if args.log_registry:
             _record_registry_training_run(
@@ -396,6 +678,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     batch_size = int(train_params.batch_size)
     num_workers = int(config.num_workers)
     rng_seed = int(config.random_seed)
+    val_preview_samples = int(
+        0
+        if args.no_val_previews
+        else (
+            args.val_preview_samples
+            if args.val_preview_samples is not None
+            else train_params.val_preview_samples
+        )
+    )
+    val_preview_every = int(
+        args.val_preview_every if args.val_preview_every is not None else train_params.val_preview_every
+    )
+    val_preview_threshold = float(
+        args.val_preview_threshold
+        if args.val_preview_threshold is not None
+        else train_params.val_preview_threshold
+    )
+    if val_preview_samples < 0:
+        parser.error("--val-preview-samples must be >= 0")
+    if val_preview_every < 1:
+        parser.error("--val-preview-every must be >= 1")
+    if not (0.0 <= val_preview_threshold <= 1.0):
+        parser.error("--val-preview-threshold must be between 0 and 1")
 
     default_run_name = f"unet_{bundle.label_schema_id}"
     project_base_dir = _resolve_output_base_dir(
@@ -409,6 +714,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     run_dir = _create_run_directory(project_base_dir, args.run_name or default_run_name)
     registry_run_id = run_dir.name
     console.print(f"[green]Output directory:[/green] {run_dir}\n")
+    preview_dir = run_dir / "validation_previews"
+    if val_preview_samples > 0:
+        console.print(
+            f"[cyan]Validation previews:[/cyan] {val_preview_samples} sample(s) every "
+            f"{val_preview_every} epoch(s) -> {preview_dir}\n"
+        )
 
     if args.log_registry:
         _record_registry_training_run(
@@ -429,6 +740,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     best_epoch = -1
     history: List[Dict[str, float]] = []
     success_summary: Optional[Dict[str, object]] = None
+    validation_preview_paths: List[str] = []
+    preview_warning_emitted = False
 
     try:
         torch.manual_seed(rng_seed)
@@ -577,6 +890,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             val_samples = 0
             dice_accum: List[float] = []
             dice_per_channel_accum: List[List[float]] = []
+            preview_enabled = val_preview_samples > 0 and (epoch + 1) % val_preview_every == 0
+            preview_images: List[np.ndarray] = []
+            preview_targets: List[np.ndarray] = []
+            preview_probs: List[np.ndarray] = []
+            preview_valid: List[np.ndarray] = []
 
             val_progress = None
             if use_progress:
@@ -609,6 +927,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         logits = model(imgs)
                         loss = criterion(logits, masks, valid_channels)
 
+                    if preview_enabled and len(preview_images) < val_preview_samples:
+                        take = min(val_preview_samples - len(preview_images), int(imgs.size(0)))
+                        preview_images.extend(imgs[:take].detach().float().cpu().numpy())
+                        preview_targets.extend(masks[:take].detach().float().cpu().numpy())
+                        preview_probs.extend(torch.sigmoid(logits[:take]).detach().float().cpu().numpy())
+                        preview_valid.extend(valid_channels[:take].detach().float().cpu().numpy())
+
                     batch_size_eff = imgs.size(0)
                     val_loss_total += float(loss.item()) * batch_size_eff
                     val_samples += batch_size_eff
@@ -628,6 +953,32 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
             if val_progress is not None:
                 val_progress.__exit__(None, None, None)
+
+            if preview_enabled and preview_images:
+                try:
+                    written = _write_validation_previews(
+                        output_dir=preview_dir,
+                        images=preview_images,
+                        targets=preview_targets,
+                        pred_probs=preview_probs,
+                        valid_channels=preview_valid,
+                        mask_labels=bundle.mask_labels,
+                        epoch=epoch + 1,
+                        threshold=val_preview_threshold,
+                    )
+                    validation_preview_paths.extend(str(path) for path in written)
+                    if written:
+                        console.print(
+                            f"[cyan]Validation previews written:[/cyan] "
+                            f"{written[0].parent}"
+                        )
+                except Exception as exc:
+                    if not preview_warning_emitted:
+                        console.print(
+                            f"[yellow]Validation preview rendering skipped:[/yellow] "
+                            f"{exc.__class__.__name__}: {exc}"
+                        )
+                        preview_warning_emitted = True
 
             val_loss = val_loss_total / max(1, val_samples)
             val_dice = float(np.mean(dice_accum)) if dice_accum else float("nan")
@@ -668,6 +1019,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     bundle.meta_list,
                     best_dice,
                     bundle.mask_labels,
+                    subject_mask_model_summary,
                 )
 
         _save_checkpoint(
@@ -678,6 +1030,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             bundle.meta_list,
             best_dice,
             bundle.mask_labels,
+            subject_mask_model_summary,
         )
 
         git_info = get_git_info()
@@ -691,6 +1044,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "val_samples": int(len(bundle.val_dataset)),
             "label_schema_id": bundle.label_schema_id,
             "mask_labels": list(bundle.mask_labels),
+            "subject_mask_model_summary": subject_mask_model_summary,
+            "validation_preview_dir": str(preview_dir) if val_preview_samples > 0 else None,
+            "validation_preview_paths": validation_preview_paths,
+            "validation_preview_samples": int(val_preview_samples),
+            "validation_preview_every": int(val_preview_every),
+            "validation_preview_threshold": float(val_preview_threshold),
             "device": str(device),
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
@@ -746,6 +1105,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "status_detail": "training_complete",
                 "best_val_dice": success_summary.get("best_val_dice") if success_summary else None,
                 "label_schema_id": bundle.label_schema_id,
+                "mask_labels": list(bundle.mask_labels),
+                "coverage_class": subject_mask_model_summary["coverage_class"],
+                "component_groups": subject_mask_model_summary["component_groups"],
+                "component_coverage_key": subject_mask_model_summary["component_coverage_key"],
+                "available_labels": subject_mask_model_summary["available_labels"],
+                "missing_labels": subject_mask_model_summary["missing_labels"],
+                "supervised_row_counts": subject_mask_model_summary["supervised_row_counts"],
+                "positive_row_counts": subject_mask_model_summary["positive_row_counts"],
+                "subject_mask_model_summary": subject_mask_model_summary,
             },
         )
 

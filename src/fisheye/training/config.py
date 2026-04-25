@@ -1,5 +1,5 @@
 # src/fisheye/training/config.py
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional, Tuple, Dict, Any, Literal, Union
 from enum import Enum
 from pathlib import Path
@@ -179,6 +179,12 @@ class EyeMaskTrainingParams(TrainingParams):
     )
 
 
+SUBJECT_MASK_LABEL_SCHEMAS: Dict[str, Tuple[str, ...]] = {
+    "subject_v1_union": ("subject_body", "eyes_union", "swim_bladder"),
+    "subject_v1_lr": ("subject_body", "eye_left", "eye_right", "swim_bladder"),
+}
+
+
 class SubjectMaskTrainingParams(TrainingParams):
     """Training parameters for unified subject-mask segmentation pipelines."""
 
@@ -191,9 +197,25 @@ class SubjectMaskTrainingParams(TrainingParams):
         gt=0,
         description="Training batch size for subject-mask segmentation.",
     )
-    label_schema_id: Literal["subject_v1_union"] = "subject_v1_union"
+    label_schema_id: Literal["auto", "subject_v1_union", "subject_v1_lr"] = "auto"
     subject_masks_run: Optional[str] = None
     crop_run: Optional[str] = None
+    val_preview_samples: int = Field(
+        4,
+        ge=0,
+        description="Number of validation samples to render as PNG previews per preview epoch.",
+    )
+    val_preview_every: int = Field(
+        1,
+        ge=1,
+        description="Render validation preview PNGs every N epochs.",
+    )
+    val_preview_threshold: float = Field(
+        0.5,
+        ge=0.0,
+        le=1.0,
+        description="Probability threshold used for validation prediction composite overlays.",
+    )
 
 
 class DetectConfig(BaseModel):
@@ -363,8 +385,8 @@ class SubjectMaskTrainingConfig(BaseModel):
     """Configuration for training unified subject-mask segmentation models."""
 
     datasets: Dict[str, SubjectMaskDatasetConfig]
-    names: List[str] = Field(default_factory=lambda: ["subject_body", "eyes_union", "swim_bladder"])
-    nc: int = Field(3, gt=0)
+    names: Optional[List[str]] = None
+    nc: Optional[int] = Field(None, gt=0)
     random_seed: int = 42
     training_params: SubjectMaskTrainingParams
     num_workers: int = Field(8, ge=0)
@@ -378,11 +400,36 @@ class SubjectMaskTrainingConfig(BaseModel):
 
     @field_validator('names')
     @classmethod
-    def validate_names(cls, v: List[str], info) -> List[str]:
-        nc = info.data.get('nc', 3)
-        if len(v) != nc:
-            raise ValueError(f"Length of 'names' ({len(v)}) must match 'nc' ({nc})")
+    def validate_names(cls, v: Optional[List[str]], info) -> Optional[List[str]]:
+        del info
+        if v is not None and not v:
+            raise ValueError("'names' cannot be empty")
         return v
+
+    @model_validator(mode="after")
+    def validate_subject_mask_schema(self) -> "SubjectMaskTrainingConfig":
+        schema_id = str(self.training_params.label_schema_id)
+        if schema_id == "auto":
+            if self.names is not None and self.nc is not None and int(self.nc) != len(self.names):
+                raise ValueError(f"Length of 'names' ({len(self.names)}) must match 'nc' ({self.nc}).")
+            return self
+
+        expected = SUBJECT_MASK_LABEL_SCHEMAS[schema_id]
+        if self.nc is None:
+            self.nc = int(len(expected))
+        elif int(self.nc) != len(expected):
+            raise ValueError(
+                f"nc ({self.nc}) must match label_schema_id={self.training_params.label_schema_id!r} "
+                f"channel count ({len(expected)})."
+            )
+        if self.names is None:
+            self.names = list(expected)
+        elif tuple(str(name) for name in self.names) != expected:
+            raise ValueError(
+                f"names must match label_schema_id={self.training_params.label_schema_id!r}: "
+                f"{list(expected)!r}."
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, path: Path) -> "SubjectMaskTrainingConfig":

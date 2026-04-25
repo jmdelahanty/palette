@@ -156,12 +156,12 @@ def load_subject_mask_training_artifact(
     *,
     subject_mask_run: Optional[str],
     crop_run: Optional[str],
-    expected_label_schema_id: str,
+    expected_label_schema_id: Optional[str],
 ) -> SubjectMaskTargetStore:
     """Resolve arrays for a merged subject-mask training artifact."""
 
     source_path = Path(zarr_path).expanduser().resolve()
-    root = zarr.open_group(str(source_path), mode="r")
+    root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
 
     training_task = str(root.attrs.get("training_task") or "").strip().lower()
     if training_task and training_task != "subject_masks":
@@ -186,7 +186,7 @@ def load_subject_mask_training_artifact(
         )
 
     label_schema_id = str(mask_group.attrs.get("label_schema_id") or "").strip()
-    if label_schema_id != expected_label_schema_id:
+    if expected_label_schema_id not in (None, "", "auto") and label_schema_id != expected_label_schema_id:
         raise ValueError(
             f"{source_path}: expected label_schema_id={expected_label_schema_id!r}, got {label_schema_id!r}."
         )
@@ -398,18 +398,20 @@ def build_subject_mask_training_datasets(
 ) -> SubjectMaskDatasetBundle:
     """Create train/val datasets from merged subject-mask training artifacts."""
 
-    expected_schema = str(config.training_params.label_schema_id)
+    requested_schema = str(config.training_params.label_schema_id)
+    expected_schema: Optional[str] = None if requested_schema == "auto" else requested_schema
     train_entries: List[Tuple[SubjectMaskTargetStore, np.ndarray]] = []
     val_entries: List[Tuple[SubjectMaskTargetStore, np.ndarray]] = []
     meta_list: List[Dict[str, object]] = []
     expected_labels: Optional[Tuple[str, ...]] = None
+    resolved_schema: Optional[str] = expected_schema
 
     for ds_idx, (name, ds_cfg) in enumerate(config.datasets.items()):
         store = load_subject_mask_training_artifact(
             ds_cfg.zarr_path,
             subject_mask_run=config.training_params.subject_masks_run or ds_cfg.subject_mask_run,
             crop_run=config.training_params.crop_run or ds_cfg.crop_run,
-            expected_label_schema_id=expected_schema,
+            expected_label_schema_id=resolved_schema,
         )
         meta = dict(store.meta)
         meta["dataset_name"] = name
@@ -418,6 +420,13 @@ def build_subject_mask_training_datasets(
         meta_list.append(meta)
 
         labels = tuple(str(item) for item in store.meta["mask_labels"])
+        store_schema = str(store.meta["label_schema_id"])
+        if resolved_schema is None:
+            resolved_schema = store_schema
+        elif store_schema != resolved_schema:
+            raise ValueError(
+                f"Dataset '{name}' label_schema_id mismatch: {store_schema!r} != {resolved_schema!r}."
+            )
         if expected_labels is None:
             expected_labels = labels
         elif labels != expected_labels:
@@ -436,11 +445,21 @@ def build_subject_mask_training_datasets(
         if console is not None:
             console.log(
                 f"[yellow]{name}[/yellow] • train={store.train_indices.shape[0]:,} "
-                f"val={store.val_indices.shape[0]:,} • schema={expected_schema}"
+                f"val={store.val_indices.shape[0]:,} • schema={resolved_schema}"
             )
 
     if expected_labels is None:
         raise ValueError("No datasets produced subject-mask training samples.")
+    if resolved_schema is None:
+        raise ValueError("No datasets produced a subject-mask label schema.")
+    if config.names is not None and tuple(str(name) for name in config.names) != expected_labels:
+        raise ValueError(
+            f"Config names {tuple(config.names)!r} do not match artifact mask_labels {expected_labels!r}."
+        )
+    if config.nc is not None and int(config.nc) != len(expected_labels):
+        raise ValueError(
+            f"Config nc ({config.nc}) does not match artifact channel count ({len(expected_labels)})."
+        )
 
     seed = int(config.random_seed)
     train_dataset = SubjectMaskChunkedDataset(train_entries, shuffle_chunks=True, seed=seed)
@@ -449,6 +468,6 @@ def build_subject_mask_training_datasets(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         meta_list=meta_list,
-        label_schema_id=expected_schema,
+        label_schema_id=resolved_schema,
         mask_labels=expected_labels,
     )

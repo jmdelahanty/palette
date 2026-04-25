@@ -61,6 +61,29 @@ def _write_minimal_config(path: Path, zarr_path: Path) -> None:
     )
 
 
+def _channel_summary(
+    *,
+    labels: list[str],
+    supervised: dict[str, int],
+    positive: dict[str, int] | None = None,
+) -> dict[str, object]:
+    positive = positive or {label: 0 for label in labels}
+    return {
+        "label_schema_id": "subject_v1_union",
+        "mask_labels": labels,
+        "coverage_class": "partial_subject_masks",
+        "contains_only_eye_masks": False,
+        "available_labels": [label for label in labels if supervised.get(label, 0) > 0],
+        "missing_labels": [label for label in labels if supervised.get(label, 0) <= 0],
+        "supervised_row_counts": {label: supervised.get(label, 0) for label in labels},
+        "positive_row_counts": {label: positive.get(label, 0) for label in labels},
+        "negative_row_counts": {
+            label: max(0, supervised.get(label, 0) - positive.get(label, 0)) for label in labels
+        },
+        "unsupervised_row_counts": {label: 0 for label in labels},
+    }
+
+
 def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -74,7 +97,17 @@ def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
     bundle = SubjectMaskDatasetBundle(
         train_dataset=_TinySubjectDataset(rows=2),
         val_dataset=_TinySubjectDataset(rows=2),
-        meta_list=[{"dataset_name": "tiny", "length": 2}],
+        meta_list=[
+            {
+                "dataset_name": "tiny",
+                "length": 2,
+                "channel_supervision_summary": _channel_summary(
+                    labels=["subject_body", "eyes_union", "swim_bladder"],
+                    supervised={"subject_body": 2, "eyes_union": 2, "swim_bladder": 0},
+                    positive={"subject_body": 2, "eyes_union": 2, "swim_bladder": 0},
+                ),
+            }
+        ],
         label_schema_id="subject_v1_union",
         mask_labels=("subject_body", "eyes_union", "swim_bladder"),
     )
@@ -120,5 +153,93 @@ def test_train_unet_subject_masks_logs_registry_in_progress_then_success(
     assert calls[1]["final_metrics"]["stage"] == "completed"
     assert calls[1]["final_metrics"]["status_detail"] == "training_complete"
     assert calls[1]["final_metrics"]["label_schema_id"] == "subject_v1_union"
+    assert calls[1]["final_metrics"]["mask_labels"] == [
+        "subject_body",
+        "eyes_union",
+        "swim_bladder",
+    ]
+    assert calls[1]["final_metrics"]["coverage_class"] == "partial_subject_masks"
+    assert calls[1]["final_metrics"]["component_groups"] == ["body", "eyes"]
+    assert calls[1]["final_metrics"]["component_coverage_key"] == "body+eyes"
+    assert calls[1]["final_metrics"]["available_labels"] == ["subject_body", "eyes_union"]
+    assert calls[1]["final_metrics"]["missing_labels"] == ["swim_bladder"]
+    assert calls[1]["final_metrics"]["supervised_row_counts"] == {
+        "subject_body": 2,
+        "eyes_union": 2,
+        "swim_bladder": 0,
+    }
+    model_summary = calls[1]["final_metrics"]["subject_mask_model_summary"]
+    assert model_summary["summarized_artifact_count"] == 1
+    assert model_summary["component_coverage_key"] == "body+eyes"
     assert Path(calls[1]["model_path"]).name == "best_model.pt"
     assert Path(calls[1]["metrics_path"]).name == "training_history.json"
+
+
+def test_subject_mask_model_summary_tracks_component_combinations() -> None:
+    summary = mod._build_subject_mask_model_summary(
+        meta_list=[
+            {
+                "channel_supervision_summary": {
+                    "supervised_row_counts": {
+                        "subject_body": 0,
+                        "eye_left": 5,
+                        "eye_right": 5,
+                        "swim_bladder": 5,
+                    },
+                    "positive_row_counts": {
+                        "subject_body": 0,
+                        "eye_left": 4,
+                        "eye_right": 4,
+                        "swim_bladder": 3,
+                    },
+                    "negative_row_counts": {
+                        "subject_body": 0,
+                        "eye_left": 1,
+                        "eye_right": 1,
+                        "swim_bladder": 2,
+                    },
+                    "unsupervised_row_counts": {
+                        "subject_body": 5,
+                        "eye_left": 0,
+                        "eye_right": 0,
+                        "swim_bladder": 0,
+                    },
+                }
+            }
+        ],
+        label_schema_id="subject_v1_lr",
+        mask_labels=("subject_body", "eye_left", "eye_right", "swim_bladder"),
+    )
+
+    assert summary["label_schema_id"] == "subject_v1_lr"
+    assert summary["coverage_class"] == "partial_subject_masks"
+    assert summary["component_groups"] == ["eyes", "swim_bladder"]
+    assert summary["component_coverage_key"] == "eyes+swim_bladder"
+    assert summary["available_labels"] == ["eye_left", "eye_right", "swim_bladder"]
+    assert summary["missing_labels"] == ["subject_body"]
+
+
+def test_validation_preview_writer_outputs_composite_png(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    image = np.zeros((1, 24, 24), dtype=np.float32)
+    image[0, 4:20, 4:20] = 0.35
+    target = np.zeros((3, 24, 24), dtype=np.float32)
+    target[0, 5:19, 5:19] = 1.0
+    target[1, 8:12, 8:16] = 1.0
+    target[2, 14:17, 10:14] = 1.0
+    pred = target * 0.8
+
+    written = mod._write_validation_previews(
+        output_dir=tmp_path / "validation_previews",
+        images=[image],
+        targets=[target],
+        pred_probs=[pred],
+        valid_channels=[np.array([1.0, 1.0, 1.0], dtype=np.float32)],
+        mask_labels=("subject_body", "eyes_union", "swim_bladder"),
+        epoch=1,
+        threshold=0.5,
+    )
+
+    assert written == [tmp_path / "validation_previews" / "epoch_001" / "sample_000.png"]
+    assert written[0].exists()
+    assert written[0].stat().st_size > 0

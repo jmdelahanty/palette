@@ -5,6 +5,7 @@
 - Use `scripts/py` for all Python commands in this repository.
 - Do not run `conda activate` in this repository.
 - Prefer `scripts/py -m <module>` over bare `python -m <module>`.
+- `scripts/py` is expected to resolve to the `palette-py311` conda environment; verify with `scripts/py -c 'import sys; print(sys.executable)'` when needed.
 - Do not run install or dependency mutation commands unless the user explicitly approves in chat first.
 - Blocked without approval: `pip install`, `conda install`, `mamba install`, `poetry add`, `uv pip install`.
 
@@ -24,6 +25,15 @@
   - if outside-sandbox execution is unavailable or still fails, report the skipped test as deferred local validation.
 - For deferred local validation, provide exact commands for the user to run in their terminal.
 - For new zarr-heavy tests, default to deterministic in-memory coverage first; add real-zarr integration checks only when required and mark them for local execution if sandbox stability is an issue.
+
+## Outside-Sandbox Validation Notes
+
+- CUDA/GPU visibility may be unavailable in Codex sandbox even when available outside it.
+- For CUDA checks, run outside the sandbox with `scripts/py` rather than `conda activate`, for example:
+  `scripts/py -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'`
+- Real-zarr training/export/inference smokes should run outside the sandbox with escalation, especially when they use CUDA or touch `/nvme1`.
+- For U-Net subject-mask smoke validation, prefer the CUDA-capable outside-sandbox path over CPU sandbox execution. If the sandbox prints the startup banner but does not reach the artifact summary promptly, stop it and rerun outside the sandbox.
+- When newly written zarr groups are hidden by stale consolidated metadata, open mutable Palette zarrs with `use_consolidated=False`.
 
 ## Examples
 
