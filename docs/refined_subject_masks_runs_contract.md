@@ -132,8 +132,12 @@ materialized the canonical QA surface.
 
 Required behavior:
 
+- the preferred future seed path is a single raw
+  `subject_mask_runs/<run>` containing all model-predicted subject-mask
+  components
 - sparse multi-source assembly may seed a new
-  `refined_subject_masks_runs/<run>` directly
+  `refined_subject_masks_runs/<run>` directly, but this is a compatibility and
+  repair path rather than the steady-state model-output path
 - the seed/assembly step must be followed by subject-mask finalization before
   the run is treated as a valid refined artifact
 - finalization is responsible for canonical run/component metrics, reasons,
@@ -153,10 +157,19 @@ Initial allowed seed sources for unified assembly:
 
 Current implementation note:
 
-- the shipped assembler/finalizer accepts raw `subject_mask_runs` component
-  sources for body/eyes/swim bladder
+- the shipped assembler/finalizer accepts a single raw
+  `subject_mask_runs/<run>` via `--subject-run`; all available canonical
+  components in that source are copied as refined seeds and finalized into one
+  coherent `refined_subject_masks_runs/<run>`
+- it also accepts raw `subject_mask_runs` component sources for
+  body/eyes/swim bladder when repairing or combining split sources
 - it also accepts direct `refined_eye_masks_runs` sources for canonical
   `eye_left` / `eye_right` component seeding
+- raw `eyes_union` is treated as refinement input/provenance, not as a
+  canonical refined component; until geometry-aware left/right assignment is
+  implemented, a `--subject-run` exposing available `eyes_union` must also be
+  paired with complete `eye_left` / `eye_right` seeds from `--refined-eye-run`,
+  `--eye-run`, or `--eye-refined-run`
 - it now accepts `refined_subject_masks_runs/<run>` as an explicit component
   source for split-run consolidation; the new component provenance points to
   the immediate refined source and carries the upstream component provenance

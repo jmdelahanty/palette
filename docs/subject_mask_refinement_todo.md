@@ -303,6 +303,9 @@ Current gap:
 - the refined subject-mask storage and registry surfaces are ready to hold
   `eye_left` and `eye_right`
 - existing assembly/merge paths mostly preserve upstream LR labels
+- `assemble_refined_subject_masks --subject-run` now supports the preferred
+  single-source raw subject-mask path by copying all available canonical
+  components from one `subject_mask_runs/<run>` into a finalized refined run
 - existing eye geometry paths compute ellipses/separation from already-labeled
   LR components
 - we do not yet have a robust helper that converts `eyes_union` or unordered
@@ -325,12 +328,20 @@ Near-term:
 
 ```text
 crop_runs/<run>
-  -> subject_mask_runs/<run>            # dense/raw or component source snapshots
+  -> subject_mask_runs/<run>            # raw model output; future multi-component source
   -> refined_subject_masks_runs/<run>   # body-only refined path now exists
   -> refined_eye_masks_runs/<run>      # eye-specialized path remains
 ```
 
-Current sparse-source assembly path:
+Preferred future all-component assembly path:
+
+```text
+crop_runs/<run>
+  -> subject_mask_runs/<unet run>       # subject_body, eyes_union, swim_bladder, later LR seeds if available
+  -> refined_subject_masks_runs/<run>   # canonical subject_body, eye_left, eye_right, swim_bladder
+```
+
+Current sparse-source assembly and repair path:
 
 ```text
 component/raw sources

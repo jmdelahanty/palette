@@ -426,6 +426,116 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     assert provenance["inputs"]["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
 
 
+def test_assemble_refined_subject_run_copies_all_canonical_components_from_subject_run(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    masks = np.zeros((2, 4, 8, 8), dtype=np.uint8)
+    masks[0, 0, 1:7, 1:7] = 1
+    masks[1, 0, 2:6, 2:6] = 1
+    masks[0, 1, 1:4, 1:4] = 1
+    masks[1, 1, 3:6, 1:4] = 1
+    masks[0, 2, 1:4, 4:7] = 1
+    masks[1, 2, 3:6, 4:7] = 1
+    masks[0, 3, 4:6, 4:6] = 1
+    masks[1, 3, 3:5, 3:5] = 1
+    _create_subject_run(
+        root,
+        run_name="subject_all_components_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body", "eye_left", "eye_right", "swim_bladder"],
+        available_channels=np.asarray([True, True, True, True], dtype=bool),
+        masks=masks,
+    )
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        subject_run="subject_all_components_001",
+        refined_run="refined_subject_masks_from_single_subject_001",
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    assert summary["source_subject_mask_run"] == "subject_all_components_001"
+    assert summary["source_input_subject_mask_run"] == "subject_all_components_001"
+    assert summary["source_subject_mask_runs"] == {
+        "subject_body": "subject_all_components_001",
+        "eye_left": "subject_all_components_001",
+        "eye_right": "subject_all_components_001",
+        "swim_bladder": "subject_all_components_001",
+    }
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_from_single_subject_001"]
+    assert run.attrs["assembly_semantics"] == "single_source_subject_run_seed"
+    assert run.attrs["source_subject_mask_run"] == "subject_all_components_001"
+    assert run.attrs["source_input_subject_mask_run"] == "subject_all_components_001"
+    assert run.attrs["label_schema_id"] == "subject_v1_lr"
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][:], dtype=np.uint8), masks)
+    for component_name in ("subject_body", "eye_left", "eye_right", "swim_bladder"):
+        provenance = run[f"components/{component_name}/provenance"].attrs
+        assert provenance["source_stage"] == "subject_mask_runs"
+        assert provenance["source_run"] == "subject_all_components_001"
+        assert provenance["source_channels"] == [component_name]
+
+
+def test_assemble_refined_subject_run_rejects_subject_run_eye_union_without_lr_seed(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
+    masks[:, 0, 1:7, 1:7] = 1
+    masks[:, 1, 1:4, 1:7] = 1
+    masks[:, 2, 4:6, 4:6] = 1
+    _create_subject_run(
+        root,
+        run_name="subject_body_eye_union_swim_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, True, True], dtype=bool),
+        masks=masks,
+    )
+
+    with pytest.raises(ValueError, match="eyes_union-to-left/right assignment is not implemented"):
+        assemble_mod.assemble_refined_subject_run(
+            root,
+            subject_run="subject_body_eye_union_swim_001",
+            refined_run="refined_subject_masks_eye_union_rejected_001",
+        )
+
+
+def test_assemble_refined_subject_run_can_pair_subject_run_with_refined_eye_source(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    _create_refined_eye_run(root)
+    masks = np.zeros((2, 3, 8, 8), dtype=np.uint8)
+    masks[0, 0, 1:7, 1:7] = 1
+    masks[1, 0, 2:6, 2:6] = 1
+    masks[:, 1, 1:4, 1:7] = 1
+    masks[0, 2, 4:6, 4:6] = 1
+    masks[1, 2, 3:5, 3:5] = 1
+    _create_subject_run(
+        root,
+        run_name="subject_body_eye_union_swim_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, True, True], dtype=bool),
+        masks=masks,
+    )
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        subject_run="subject_body_eye_union_swim_001",
+        refined_eye_run="refined_eye_masks_001",
+        refined_run="refined_subject_masks_subject_plus_eye_001",
+    )
+
+    assert summary["component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_subject_plus_eye_001"]
+    assert run.attrs["assembly_semantics"] == "subject_run_plus_component_seed"
+    assert run["components/subject_body/provenance"].attrs["source_run"] == "subject_body_eye_union_swim_001"
+    assert run["components/swim_bladder/provenance"].attrs["source_run"] == "subject_body_eye_union_swim_001"
+    assert run["components/eye_left/provenance"].attrs["source_stage"] == "refined_eye_masks_runs"
+    assert run["components/eye_right/provenance"].attrs["source_stage"] == "refined_eye_masks_runs"
+
+
 def test_assemble_refined_subject_run_can_seed_eyes_directly_from_refined_eye_masks(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()

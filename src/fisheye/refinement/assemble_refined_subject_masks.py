@@ -41,6 +41,7 @@ ASSEMBLE_REFINED_SUBJECT_METHOD = "assemble_refined_subject_masks_v1"
 CANONICAL_COMPONENT_ORDER = ("subject_body", "eye_left", "eye_right", "swim_bladder")
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_assemble_refined_subject_masks"
 _EYE_COMPONENTS = ("eye_left", "eye_right")
+_RAW_EYE_UNION_COMPONENT = "eyes_union"
 _SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS = frozenset(
     {
         "source_crop_signature.detection_source_path",
@@ -299,6 +300,13 @@ def _require_available_component(source: SourceSubjectMaskRun, component_name: s
     return int(comp_idx)
 
 
+def _has_available_component(source: SourceSubjectMaskRun, component_name: str) -> bool:
+    if component_name not in source.mask_labels:
+        return False
+    comp_idx = source.mask_labels.index(component_name)
+    return comp_idx < int(source.available_channels.shape[0]) and bool(source.available_channels[comp_idx])
+
+
 def _component_seed_from_refined_subject_source(
     source: SourceSubjectMaskRun,
     component_name: str,
@@ -447,6 +455,7 @@ def _add_component_seed(
 
 def _collect_component_seeds(
     *,
+    subject_source: Optional[SourceSubjectMaskRun],
     body_source: Optional[SourceSubjectMaskRun],
     body_refined_source: Optional[SourceSubjectMaskRun],
     eye_source: Optional[SourceSubjectMaskRun],
@@ -460,6 +469,17 @@ def _collect_component_seeds(
 ) -> tuple[dict[str, RefinedSubjectComponentSeed], list[str], dict[str, dict[str, object]]]:
     seeds: dict[str, RefinedSubjectComponentSeed] = {}
     review_overrides: dict[str, dict[str, object]] = {}
+
+    if subject_source is not None:
+        for component_name in CANONICAL_COMPONENT_ORDER:
+            if not _has_available_component(subject_source, component_name):
+                continue
+            _add_component_seed(
+                seeds,
+                review_overrides,
+                component_name,
+                _component_seed_from_source(subject_source, component_name),
+            )
 
     if body_source is not None:
         _require_available_component(body_source, "subject_body", "subject_mask_runs")
@@ -570,6 +590,18 @@ def _collect_component_seeds(
             ),
         )
 
+    if (
+        subject_source is not None
+        and _has_available_component(subject_source, _RAW_EYE_UNION_COMPONENT)
+        and not set(_EYE_COMPONENTS).issubset(seeds)
+    ):
+        raise ValueError(
+            f"subject_mask_runs/{subject_source.run_name} exposes available eyes_union but no complete "
+            "eye_left/eye_right refined seed. eyes_union-to-left/right assignment is not implemented "
+            "in assemble_refined_subject_masks yet; provide eye_left/eye_right via --refined-eye-run, "
+            "--eye-run, or --eye-refined-run until the subject-eye identity helper is available."
+        )
+
     component_names = [name for name in CANONICAL_COMPONENT_ORDER if name in seeds]
     if not component_names:
         raise ValueError("At least one source run is required to assemble refined subject masks.")
@@ -620,6 +652,7 @@ def _parse_refined_component_runs(values: Optional[Sequence[str]]) -> dict[str, 
 def assemble_refined_subject_run(
     root: zarr.Group,
     *,
+    subject_run: Optional[str] = None,
     body_run: Optional[str] = None,
     body_refined_run: Optional[str] = None,
     eye_run: Optional[str] = None,
@@ -638,6 +671,7 @@ def assemble_refined_subject_run(
         raise ValueError("Pass only one of eye_run or refined_eye_run.")
     if eye_refined_run and (eye_run or refined_eye_run):
         raise ValueError("Pass only one of eye_run, refined_eye_run, or eye_refined_run.")
+    subject_source = _load_source_subject_mask_run(root, subject_run) if subject_run else None
     body_source = _load_source_subject_mask_run(root, body_run) if body_run else None
     body_refined_source = _load_refined_subject_mask_source(root, body_refined_run) if body_refined_run else None
     eye_source = _load_source_subject_mask_run(root, eye_run) if eye_run else None
@@ -654,6 +688,7 @@ def assemble_refined_subject_run(
     provided_sources = [
         source
         for source in (
+            subject_source,
             body_source,
             body_refined_source,
             eye_source,
@@ -667,11 +702,11 @@ def assemble_refined_subject_run(
     ]
     if not provided_sources:
         raise ValueError(
-            "At least one of body_run, body_refined_run, eye_run, refined_eye_run, "
+            "At least one of subject_run, body_run, body_refined_run, eye_run, refined_eye_run, "
             "eye_refined_run, swim_run, swim_refined_run, or refined_component_runs is required."
         )
 
-    reference_source = body_source or eye_source or refined_eye_source or swim_source
+    reference_source = subject_source or body_source or eye_source or refined_eye_source or swim_source
     if reference_source is None:
         reference_source = body_refined_source or eye_refined_source or swim_refined_source
     if reference_source is None and refined_component_sources:
@@ -683,6 +718,7 @@ def assemble_refined_subject_run(
         _validate_source_alignment(reference_source, source)
 
     component_seeds, component_names, review_overrides = _collect_component_seeds(
+        subject_source=subject_source,
         body_source=body_source,
         body_refined_source=body_refined_source,
         eye_source=eye_source,
@@ -694,7 +730,7 @@ def assemble_refined_subject_run(
         allow_unapproved_components=allow_unapproved_components,
         promote_source_review=promote_source_review,
     )
-    coarse_subject_source = body_source or eye_source or swim_source
+    coarse_subject_source = subject_source or body_source or eye_source or swim_source
     coarse_source_subject_mask_run = (
         coarse_subject_source.run_name
         if coarse_subject_source is not None
@@ -751,6 +787,7 @@ def assemble_refined_subject_run(
         "source_component_sources": source_component_sources,
         "source_crop_run": reference_source.crop_run,
         "promote_source_review": bool(promote_source_review),
+        "source_input_subject_mask_run": subject_source.run_name if subject_source is not None else None,
         **reference_source.source_crop_snapshot,
         "roi_count": int(reference_source.masks_roi.shape[0]),
         "label_schema_id": _infer_refined_label_schema_id(component_names),
@@ -771,13 +808,22 @@ def assemble_refined_subject_run(
         if "subject_body" in component_names
         else ("eye_left" if "eye_left" in component_names else "swim_bladder")
     )
+    if subject_source is not None and len(provided_sources) == 1 and not refined_component_runs:
+        assembly_semantics = "single_source_subject_run_seed"
+    elif subject_source is not None:
+        assembly_semantics = "subject_run_plus_component_seed"
+    else:
+        assembly_semantics = "multi_source_component_seed"
+
     extra_attrs = {
-        "assembly_semantics": "multi_source_component_seed",
+        "assembly_semantics": assembly_semantics,
         "assembly_primary_source_component": primary_component,
         "source_component_runs": source_component_runs,
         "source_subject_mask_runs": source_component_runs,
         "source_component_sources": source_component_sources,
     }
+    if subject_source is not None:
+        extra_attrs["source_input_subject_mask_run"] = subject_source.run_name
     if body_source is not None:
         extra_attrs["source_body_subject_mask_run"] = body_source.run_name
     if body_refined_source is not None:
@@ -798,11 +844,13 @@ def assemble_refined_subject_run(
     shared_keypoints_run = _shared_value(provided_sources, "source_keypoints_run")
     shared_keypoint_group = _shared_value(provided_sources, "source_keypoint_group")
     provenance_inputs = {
-        "assembly_semantics": "multi_source_component_seed",
+        "assembly_semantics": assembly_semantics,
         "source_component_runs": source_component_runs,
         "source_subject_mask_runs": source_component_runs,
         "source_component_sources": source_component_sources,
     }
+    if subject_source is not None:
+        provenance_inputs["source_input_subject_mask_run"] = subject_source.run_name
     if body_source is not None:
         provenance_inputs["source_body_subject_mask_run"] = body_source.run_name
     if body_refined_source is not None:
@@ -846,6 +894,7 @@ def assemble_refined_subject_run(
 def assemble_refined_subject_masks(
     zarr_path: str | Path,
     *,
+    subject_run: Optional[str] = None,
     body_run: Optional[str] = None,
     body_refined_run: Optional[str] = None,
     eye_run: Optional[str] = None,
@@ -863,6 +912,7 @@ def assemble_refined_subject_masks(
     root = open_zarr_root(zarr_path, mode="r" if dry_run else "a")
     summary = assemble_refined_subject_run(
         root,
+        subject_run=subject_run,
         body_run=body_run,
         body_refined_run=body_refined_run,
         eye_run=eye_run,
@@ -897,6 +947,13 @@ def assemble_refined_subject_masks(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", help="Path to the Palette zarr archive.")
+    parser.add_argument(
+        "--subject-run",
+        help=(
+            "subject_mask_runs/<run> providing one raw multi-component source. "
+            "All available canonical components are copied as refined seeds."
+        ),
+    )
     parser.add_argument("--body-run", help="subject_mask_runs/<run> providing subject_body.")
     parser.add_argument("--body-refined-run", help="refined_subject_masks_runs/<run> providing subject_body.")
     parser.add_argument("--eye-run", help="subject_mask_runs/<run> providing eye_left/eye_right.")
@@ -945,6 +1002,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error(str(exc))
     summary = assemble_refined_subject_masks(
         args.zarr_path,
+        subject_run=args.subject_run,
         body_run=args.body_run,
         body_refined_run=args.body_refined_run,
         eye_run=args.eye_run,
