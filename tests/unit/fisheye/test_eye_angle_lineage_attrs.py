@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import fisheye.analysis.eye_angle_analysis as eye_angle_analysis
 from fisheye.analysis.eye_angle_analysis import _eye_angle_definition_attrs, _process_chunk
@@ -40,6 +41,40 @@ def test_eye_angle_definition_attrs_match_nasal_positive_binocular_math() -> Non
     assert attrs["minor_vergence_definition"] == "abs(vergence_minor_signed_deg)"
     assert attrs["minor_vergence_signed_definition"] == "-(left_minor_signed_deg + right_minor_signed_deg)"
     assert attrs["minor_version_definition"] == "0.5*(-left_minor_signed_deg + right_minor_signed_deg)"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("serial", "serial_driver"),
+        ("driver", "serial_driver"),
+        ("dask", "dask_worker_chunks"),
+        ("dask-chunks", "dask_worker_chunks"),
+    ],
+)
+def test_eye_angle_execution_backend_aliases(raw: str, expected: str) -> None:
+    assert eye_angle_analysis._normalize_execution_backend(raw) == expected
+
+
+def test_eye_angle_frame_projection_flags_missing_and_multi_detection_frames() -> None:
+    frame_arrays, frame_valid, frame_reason = eye_angle_analysis._project_detection_arrays_to_frames(
+        np.asarray([0, 2, 2, 4], dtype=np.int64),
+        num_frames=5,
+        valid_frame=np.asarray([True, True, True, False], dtype=bool),
+        reason_codes=np.asarray([0, 4, 8, 2], dtype=np.uint16),
+        arrays={"left": np.asarray([10.0, 20.0, 30.0, 40.0], dtype=np.float32)},
+    )
+
+    assert frame_arrays["left"][0] == 10.0
+    assert np.isnan(frame_arrays["left"][1])
+    assert np.isnan(frame_arrays["left"][2])
+    assert np.isnan(frame_arrays["left"][3])
+    assert frame_arrays["left"][4] == 40.0
+    assert frame_valid.tolist() == [True, False, False, False, False]
+    assert int(frame_reason[1]) & int(eye_angle_analysis.REASON_NO_DETECTION)
+    assert int(frame_reason[2]) & int(eye_angle_analysis.REASON_MULTI_DETECTION)
+    assert int(frame_reason[3]) & int(eye_angle_analysis.REASON_NO_DETECTION)
+    assert int(frame_reason[4]) & int(eye_angle_analysis.REASON_HEADING_INVALID)
 
 
 def test_eye_angle_keypoint_resolution_prefers_explicit() -> None:

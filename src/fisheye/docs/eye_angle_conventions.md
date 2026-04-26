@@ -47,6 +47,20 @@ should add an explicit source-subject-shape attribute at that point.
 
 The raw ROIs sampled by the viewer live under `keypoints_runs/<run>/roi_images`.
 
+## Execution model
+
+`fisheye.analysis.eye_angle_analysis` writes base ROI outputs directly into the
+target zarr run in row chunks. The default `serial_driver` backend processes
+those chunks in the driver process. `--execution-backend dask_worker_chunks`
+lets Dask workers reopen the archive and write disjoint ROI row chunks; use
+`--scheduler threads`, `--scheduler processes`, or `--scheduler distributed`
+depending on the workload.
+
+Smoothing, deltas, speed, acceleration, and frame-level projection are computed
+after the base ROI pass. Those second-pass products are intentionally
+driver-side for now because smoothing and derivatives need adjacent rows across
+chunk boundaries.
+
 ## Angle conventions
 
 Angles are generated inside `fisheye.analysis.eye_angle_analysis._process_chunk`, which receives:

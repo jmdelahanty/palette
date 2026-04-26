@@ -13,14 +13,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import dask
+from dask import delayed
 import numpy as np
 import zarr
 from rich.console import Console
+
+try:
+    from dask.distributed import Client, LocalCluster
+
+    HAVE_DISTRIBUTED = True
+except ImportError:  # pragma: no cover - depends on optional dependency
+    Client = None  # type: ignore
+    LocalCluster = None  # type: ignore
+    HAVE_DISTRIBUTED = False
 
 from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
@@ -54,6 +66,41 @@ ELLIPSE_CIRCULARITY_THRESHOLD = 0.95  # reject nearly circular fits that lack a 
 DERIVATIVE_MAX_DT = 0.25  # seconds; ignore large gaps when computing discrete derivatives
 ANGLE_SMOOTHING_WINDOW = 7  # frames; moving-average window for smoothed angle outputs
 _HEAD_KEYPOINT_LABELS = ("swim_bladder", "eye_left", "eye_right")
+SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
+EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
+SERIAL_EXECUTION_BACKEND = "serial_driver"
+DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
+
+_BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("left_deg", "left_deg"),
+    ("right_deg", "right_deg"),
+    ("left_signed_deg", "left_signed_deg"),
+    ("right_signed_deg", "right_signed_deg"),
+    ("vergence_deg", "vergence_deg"),
+    ("vergence_signed_deg", "vergence_signed_deg"),
+    ("version_deg", "version_deg"),
+    ("left_minor_signed_deg", "left_minor_signed_deg"),
+    ("right_minor_signed_deg", "right_minor_signed_deg"),
+    ("vergence_minor_signed_deg", "vergence_minor_signed_deg"),
+    ("version_minor_deg", "version_minor_deg"),
+    ("heading_deg", "heading_deg"),
+    ("left_centroid_deg", "left_centroid_deg"),
+    ("right_centroid_deg", "right_centroid_deg"),
+    ("vergence_centroid_deg", "vergence_centroid_deg"),
+)
+
+_BASE_QA_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("valid_left", "valid_left"),
+    ("valid_right", "valid_right"),
+    ("valid_frame", "valid_frame"),
+    ("reason_codes", "reason_codes"),
+)
+
+_BASE_SUPPORT_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("ellipse_major", "ellipse_major"),
+    ("ellipse_minor", "ellipse_minor"),
+    ("ellipse_ratio", "ellipse_ratio"),
+)
 
 
 def _eye_angle_definition_attrs() -> Dict[str, object]:
@@ -99,6 +146,57 @@ class EyeAngleResults:
     left_centroid_deg: np.ndarray
     right_centroid_deg: np.ndarray
     vergence_centroid_deg: np.ndarray
+
+
+@dataclass
+class EyeAngleInputContext:
+    """Resolved zarr inputs for one eye-angle run."""
+
+    eye_geometry: Any
+    kp_group: zarr.Group
+    detection_success_source: zarr.Group
+    detection_success_key: str
+    frame_indices_source: zarr.Group
+    keypoint_run_name: str
+    keypoint_indices: Dict[str, int]
+
+
+def _normalize_scheduler(value: str) -> str:
+    scheduler = str(value).strip().lower().replace("_", "-")
+    aliases = {
+        "single": "single-threaded",
+        "single_threaded": "single-threaded",
+        "thread": "threads",
+        "process": "processes",
+        "local-cluster": "distributed",
+        "local_cluster": "distributed",
+    }
+    scheduler = aliases.get(scheduler, scheduler)
+    if scheduler not in SUPPORTED_SCHEDULERS:
+        raise argparse.ArgumentTypeError(
+            f"scheduler must be one of {', '.join(SUPPORTED_SCHEDULERS)}; got {value!r}."
+        )
+    return scheduler
+
+
+def _normalize_execution_backend(value: str) -> str:
+    backend = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "serial": SERIAL_EXECUTION_BACKEND,
+        "driver": SERIAL_EXECUTION_BACKEND,
+        "dask": DASK_WORKER_EXECUTION_BACKEND,
+        "dask_chunks": DASK_WORKER_EXECUTION_BACKEND,
+    }
+    backend = aliases.get(backend, backend)
+    if backend not in EXECUTION_BACKENDS:
+        raise argparse.ArgumentTypeError(f"execution_backend must be one of {EXECUTION_BACKENDS}; got {value!r}.")
+    return backend
+
+
+def _row_chunks(total_rows: int, chunk_size: int) -> list[tuple[int, int]]:
+    total = max(0, int(total_rows))
+    chunk = max(1, int(chunk_size))
+    return [(start, min(total, start + chunk)) for start in range(0, total, chunk)]
 
 
 def _to_half_turn(angle_rad: np.ndarray) -> np.ndarray:
@@ -453,6 +551,9 @@ def _prepare_output_arrays(
     """Create (or overwrite) output arrays according to specs."""
     for name, shape, chunks, dtype in dataset_specs:
         if name in group:
+            existing = group[name]
+            if tuple(existing.shape) == tuple(shape) and np.dtype(existing.dtype) == np.dtype(dtype):
+                continue
             del group[name]
         kwargs = {"dtype": dtype, "chunks": chunks, "overwrite": True}
         if fill_value is not None:
@@ -496,6 +597,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8192,
         help="Number of detections to process per chunk (default: 8192).",
+    )
+    parser.add_argument(
+        "--execution-backend",
+        type=_normalize_execution_backend,
+        choices=EXECUTION_BACKENDS,
+        default=SERIAL_EXECUTION_BACKEND,
+        help="Use dask_worker_chunks to process and write independent ROI chunks from workers.",
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=_normalize_scheduler,
+        choices=SUPPORTED_SCHEDULERS,
+        default="single-threaded",
+        help="Dask scheduler used when --execution-backend=dask_worker_chunks.",
+    )
+    parser.add_argument("--num-workers", type=int, help="Dask worker count for --execution-backend=dask_worker_chunks.")
+    parser.add_argument(
+        "--include-chunk-timings",
+        action="store_true",
+        help="Store per-chunk timing metadata and include detailed timings in run attributes.",
     )
     parser.add_argument(
         "--fps",
@@ -550,23 +671,23 @@ def _resolve_head_keypoint_indices(kp_group: zarr.Group) -> Dict[str, int]:
         ) from exc
 
 
-def run(args: argparse.Namespace) -> None:
-    console = Console()
-    root = _open_archive_for_eye_angle(args.zarr_path)
-
-    analysis_group = root.require_group("analysis")
-    parent_group = analysis_group.require_group("eye_angle_runs")
-
+def _resolve_eye_angle_inputs(
+    root: zarr.Group,
+    *,
+    refined_subject_run: Optional[str],
+    refined_eye_run: Optional[str],
+    keypoint_run: Optional[str],
+) -> EyeAngleInputContext:
     eye_geometry = resolve_eye_geometry_source(
         root,
-        refined_subject_run=args.refined_subject_run,
-        refined_eye_run=args.refined_eye_run,
+        refined_subject_run=refined_subject_run,
+        refined_eye_run=refined_eye_run,
         prefer_subject=True,
     )
 
     kp_parent = root.require_group("refined_keypoints_runs")
     keypoint_run_name = _resolve_keypoint_run_name(
-        explicit_keypoint_run=args.keypoint_run,
+        explicit_keypoint_run=keypoint_run,
         refined_attrs=dict(eye_geometry.lineage_attrs),
         parent_latest=kp_parent.attrs.get("latest"),
     )
@@ -574,7 +695,6 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
     kp_group = kp_parent[keypoint_run_name]
 
-    # Refined keypoints runs may not have all datasets; fall back to source keypoints run
     source_kp_run_name = resolve_source_keypoints_run(kp_group.attrs)
     source_kp_group = None
     if source_kp_run_name:
@@ -587,8 +707,6 @@ def run(args: argparse.Namespace) -> None:
         if dataset not in kp_group:
             raise ValueError(f"Keypoint run '{keypoint_run_name}' missing dataset '{dataset}'.")
 
-    # detection_success: prefer refined_success from refined keypoints run, fall back to
-    # detection_success in refined run, then source keypoints run
     if "refined_success" in kp_group:
         detection_success_key = "refined_success"
         detection_success_source = kp_group
@@ -599,17 +717,12 @@ def run(args: argparse.Namespace) -> None:
         detection_success_key = "detection_success"
         detection_success_source = source_kp_group
     else:
-        detection_success_key = None
-        detection_success_source = None
-
-    # frame_indices may be in refined or source keypoints run
-    frame_indices_source = kp_group if "frame_indices" in kp_group else source_kp_group
-
-    if detection_success_source is None:
         raise ValueError(
             f"Keypoint run '{keypoint_run_name}' missing detection success data "
             "(no 'refined_success' or 'detection_success' in refined or source keypoints run)."
         )
+
+    frame_indices_source = kp_group if "frame_indices" in kp_group else source_kp_group
     if frame_indices_source is None or "frame_indices" not in frame_indices_source:
         raise ValueError(
             f"Keypoint run '{keypoint_run_name}' missing 'frame_indices' "
@@ -619,89 +732,352 @@ def run(args: argparse.Namespace) -> None:
     total_detections = eye_geometry.ellipse_params.shape[0]
     if kp_group["keypoints_roi"].shape[0] != total_detections:
         raise ValueError("Mismatch between eye geometry source and keypoint detections.")
-    keypoint_indices = _resolve_head_keypoint_indices(kp_group)
 
+    return EyeAngleInputContext(
+        eye_geometry=eye_geometry,
+        kp_group=kp_group,
+        detection_success_source=detection_success_source,
+        detection_success_key=detection_success_key,
+        frame_indices_source=frame_indices_source,
+        keypoint_run_name=keypoint_run_name,
+        keypoint_indices=_resolve_head_keypoint_indices(kp_group),
+    )
+
+
+def _prepare_base_output_arrays(
+    run_group: zarr.Group,
+    *,
+    total_detections: int,
+    chunk_len: int,
+) -> None:
+    angles_group = run_group.require_group("angles")
+    roi_group = angles_group.require_group("roi")
+    qa_group = run_group.require_group("qa")
+    qa_roi = qa_group.require_group("roi")
+    support_group = run_group.require_group("support")
+
+    _prepare_output_arrays(
+        roi_group,
+        [(name, (total_detections,), (chunk_len,), "f4") for name, _field in _BASE_ROI_RESULT_FIELDS],
+    )
+    _prepare_output_arrays(
+        qa_roi,
+        [
+            ("valid_left", (total_detections,), (chunk_len,), "bool"),
+            ("valid_right", (total_detections,), (chunk_len,), "bool"),
+            ("valid_frame", (total_detections,), (chunk_len,), "bool"),
+            ("reason_codes", (total_detections,), (chunk_len,), "u2"),
+        ],
+    )
+    _prepare_output_arrays(
+        support_group,
+        [
+            ("frame_indices", (total_detections,), (chunk_len,), "i8"),
+            ("time_seconds", (total_detections,), (chunk_len,), "f4"),
+            ("ellipse_major", (total_detections,), (chunk_len,), "f4"),
+            ("ellipse_minor", (total_detections,), (chunk_len,), "f4"),
+            ("ellipse_ratio", (total_detections,), (chunk_len,), "f4"),
+        ],
+    )
+
+
+def _write_base_eye_angle_result(
+    run_group: zarr.Group,
+    row_slice: slice,
+    result: EyeAngleResults,
+    *,
+    frame_indices: np.ndarray,
+    time_seconds: np.ndarray,
+) -> None:
+    roi_group = run_group["angles"]["roi"]
+    qa_roi = run_group["qa"]["roi"]
+    support_group = run_group["support"]
+
+    for dataset_name, field_name in _BASE_ROI_RESULT_FIELDS:
+        roi_group[dataset_name][row_slice] = getattr(result, field_name)
+    for dataset_name, field_name in _BASE_QA_RESULT_FIELDS:
+        qa_roi[dataset_name][row_slice] = getattr(result, field_name)
+    support_group["frame_indices"][row_slice] = frame_indices
+    support_group["time_seconds"][row_slice] = time_seconds
+    for dataset_name, field_name in _BASE_SUPPORT_RESULT_FIELDS:
+        support_group[dataset_name][row_slice] = getattr(result, field_name)
+
+
+def _process_and_write_eye_angle_chunk_groups(
+    context: EyeAngleInputContext,
+    run_group: zarr.Group,
+    *,
+    start_row: int,
+    stop_row: int,
+    chunk_index: int,
+    fps: Optional[float],
+    execution_backend: str,
+) -> dict[str, object]:
+    chunk_start = time.perf_counter()
+    row_slice = slice(int(start_row), int(stop_row))
+    timing: dict[str, object] = {
+        "chunk_index": int(chunk_index),
+        "start_row": int(start_row),
+        "stop_row": int(stop_row),
+        "row_count": int(stop_row - start_row),
+        "execution_backend": execution_backend,
+    }
+
+    phase_start = time.perf_counter()
+    ellipse_params = context.eye_geometry.ellipse_params[row_slice]
+    ellipse_success = context.eye_geometry.ellipse_success[row_slice]
+    keypoints_roi = context.kp_group["keypoints_roi"][row_slice]
+    heading_deg = context.kp_group["heading"][row_slice]
+    detection_success = context.detection_success_source[context.detection_success_key][row_slice].astype(bool, copy=False)
+    frame_indices = context.frame_indices_source["frame_indices"][row_slice].astype(np.int64, copy=False)
+    timing["read_seconds"] = float(time.perf_counter() - phase_start)
+
+    phase_start = time.perf_counter()
+    chunk_result = _process_chunk(
+        ellipse_params=ellipse_params,
+        ellipse_success=ellipse_success,
+        keypoints_roi=keypoints_roi,
+        heading_deg=heading_deg,
+        detection_success=detection_success,
+        keypoint_indices=context.keypoint_indices,
+    )
+    timing["compute_seconds"] = float(time.perf_counter() - phase_start)
+
+    if fps:
+        chunk_time_seconds = (frame_indices.astype(np.float64) / float(fps)).astype(np.float32, copy=False)
+    else:
+        chunk_time_seconds = np.full(frame_indices.shape, np.nan, dtype=np.float32)
+
+    phase_start = time.perf_counter()
+    _write_base_eye_angle_result(
+        run_group,
+        row_slice,
+        chunk_result,
+        frame_indices=frame_indices,
+        time_seconds=chunk_time_seconds,
+    )
+    timing["write_seconds"] = float(time.perf_counter() - phase_start)
+    timing["valid_frame_count"] = int(chunk_result.valid_frame.sum())
+    timing["total_seconds"] = float(time.perf_counter() - chunk_start)
+    return {"chunk_timing": timing, "valid_frame_count": int(chunk_result.valid_frame.sum())}
+
+
+def _process_and_write_eye_angle_chunk(
+    zarr_path: str,
+    *,
+    refined_subject_run: Optional[str],
+    refined_eye_run: Optional[str],
+    keypoint_run: Optional[str],
+    eye_angle_run: str,
+    start_row: int,
+    stop_row: int,
+    chunk_index: int,
+    fps: Optional[float],
+) -> dict[str, object]:
+    root = open_zarr_root(zarr_path, mode="a")
+    context = _resolve_eye_angle_inputs(
+        root,
+        refined_subject_run=refined_subject_run,
+        refined_eye_run=refined_eye_run,
+        keypoint_run=keypoint_run,
+    )
+    run_group = root["analysis"]["eye_angle_runs"][eye_angle_run]
+    return _process_and_write_eye_angle_chunk_groups(
+        context,
+        run_group,
+        start_row=start_row,
+        stop_row=stop_row,
+        chunk_index=chunk_index,
+        fps=fps,
+        execution_backend=DASK_WORKER_EXECUTION_BACKEND,
+    )
+
+
+def _compute_dask_tasks(
+    tasks: Sequence[object],
+    *,
+    scheduler_key: str,
+    num_workers: Optional[int],
+) -> list[dict[str, object]]:
+    if not tasks:
+        return []
+    cluster = None
+    client = None
+    try:
+        if scheduler_key == "distributed":
+            if not HAVE_DISTRIBUTED:
+                raise RuntimeError(
+                    "Dask distributed is not available. Install dask[distributed] or choose a different scheduler."
+                )
+            cluster_kwargs: dict[str, object] = {}
+            if num_workers is not None:
+                cluster_kwargs["n_workers"] = int(num_workers)
+            cluster = LocalCluster(**cluster_kwargs)
+            client = Client(cluster)
+            results = list(client.gather(client.compute(list(tasks))))
+        else:
+            compute_kwargs: dict[str, object] = {"scheduler": scheduler_key}
+            if num_workers is not None and scheduler_key != "single-threaded":
+                compute_kwargs["num_workers"] = int(num_workers)
+            results = list(dask.compute(*tasks, **compute_kwargs))
+    finally:
+        if client is not None:
+            client.close()
+        if cluster is not None:
+            cluster.close()
+    return [dict(result) for result in results]
+
+
+def _project_detection_arrays_to_frames(
+    frame_indices: np.ndarray,
+    *,
+    num_frames: int,
+    valid_frame: np.ndarray,
+    reason_codes: np.ndarray,
+    arrays: Dict[str, np.ndarray],
+) -> tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    frame_arrays = {name: np.full(num_frames, np.nan, dtype=np.float32) for name in arrays}
+    frame_valid = np.zeros(num_frames, dtype=bool)
+    frame_reason = np.zeros(num_frames, dtype=np.uint16)
+    if num_frames <= 0:
+        return frame_arrays, frame_valid, frame_reason
+
+    valid_index_mask = (frame_indices >= 0) & (frame_indices < num_frames)
+    valid_indices = frame_indices[valid_index_mask]
+    counts = np.bincount(valid_indices, minlength=num_frames) if valid_indices.size else np.zeros(num_frames, dtype=np.int64)
+    frame_reason[counts == 0] |= REASON_NO_DETECTION
+    frame_reason[counts > 1] |= REASON_MULTI_DETECTION
+
+    detection_indices = np.nonzero(valid_index_mask)[0]
+    unique_detection_indices = detection_indices[counts[frame_indices[detection_indices]] == 1]
+    unique_frames = frame_indices[unique_detection_indices]
+    if unique_detection_indices.size:
+        for name, values in arrays.items():
+            frame_arrays[name][unique_frames] = values[unique_detection_indices]
+        frame_valid[unique_frames] = valid_frame[unique_detection_indices]
+        frame_reason[unique_frames] |= reason_codes[unique_detection_indices]
+    return frame_arrays, frame_valid, frame_reason
+
+
+def run(args: argparse.Namespace) -> None:
+    console = Console()
+    root = _open_archive_for_eye_angle(args.zarr_path)
+
+    analysis_group = root.require_group("analysis")
+    parent_group = analysis_group.require_group("eye_angle_runs")
+
+    backend = _normalize_execution_backend(args.execution_backend)
+    scheduler_key = _normalize_scheduler(args.scheduler)
+    context = _resolve_eye_angle_inputs(
+        root,
+        refined_subject_run=args.refined_subject_run,
+        refined_eye_run=args.refined_eye_run,
+        keypoint_run=args.keypoint_run,
+    )
+    eye_geometry = context.eye_geometry
+    keypoint_run_name = context.keypoint_run_name
+    total_detections = int(eye_geometry.ellipse_params.shape[0])
     chunk_size = max(1, int(args.chunk_size))
-    if chunk_size > total_detections:
+    if total_detections and chunk_size > total_detections:
         chunk_size = total_detections
 
-    left_angles = np.full(total_detections, np.nan, dtype=np.float32)
-    right_angles = np.full(total_detections, np.nan, dtype=np.float32)
-    left_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    right_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    left_minor_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    right_minor_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    vergence = np.full(total_detections, np.nan, dtype=np.float32)
-    vergence_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    vergence_minor_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    version = np.full(total_detections, np.nan, dtype=np.float32)
-    version_minor = np.full(total_detections, np.nan, dtype=np.float32)
-    ellipse_major = np.full(total_detections, np.nan, dtype=np.float32)
-    ellipse_minor = np.full(total_detections, np.nan, dtype=np.float32)
-    ellipse_ratio = np.full(total_detections, np.nan, dtype=np.float32)
-    valid_left = np.zeros(total_detections, dtype=bool)
-    valid_right = np.zeros(total_detections, dtype=bool)
-    valid_frame = np.zeros(total_detections, dtype=bool)
-    reason_codes = np.zeros(total_detections, dtype=np.uint16)
-    heading_deg_out = np.full(total_detections, np.nan, dtype=np.float32)
-    # Centroid-based arrays
-    left_centroid = np.full(total_detections, np.nan, dtype=np.float32)
-    right_centroid = np.full(total_detections, np.nan, dtype=np.float32)
-    vergence_centroid = np.full(total_detections, np.nan, dtype=np.float32)
-
-    for start in range(0, total_detections, chunk_size):
-        stop = min(start + chunk_size, total_detections)
-        ellipse_params = eye_geometry.ellipse_params[start:stop]
-        ellipse_success = eye_geometry.ellipse_success[start:stop]
-        keypoints_roi = kp_group["keypoints_roi"][start:stop]
-        heading_deg = kp_group["heading"][start:stop]
-        detection_success = detection_success_source[detection_success_key][start:stop].astype(bool, copy=False)
-
-        chunk_result = _process_chunk(
-            ellipse_params=ellipse_params,
-            ellipse_success=ellipse_success,
-            keypoints_roi=keypoints_roi,
-            heading_deg=heading_deg,
-            detection_success=detection_success,
-            keypoint_indices=keypoint_indices,
-        )
-
-        left_angles[start:stop] = chunk_result.left_deg
-        right_angles[start:stop] = chunk_result.right_deg
-        left_signed[start:stop] = chunk_result.left_signed_deg
-        right_signed[start:stop] = chunk_result.right_signed_deg
-        left_minor_signed[start:stop] = chunk_result.left_minor_signed_deg
-        right_minor_signed[start:stop] = chunk_result.right_minor_signed_deg
-        vergence[start:stop] = chunk_result.vergence_deg
-        vergence_signed[start:stop] = chunk_result.vergence_signed_deg
-        vergence_minor_signed[start:stop] = chunk_result.vergence_minor_signed_deg
-        version[start:stop] = chunk_result.version_deg
-        version_minor[start:stop] = chunk_result.version_minor_deg
-        ellipse_major[start:stop] = chunk_result.ellipse_major
-        ellipse_minor[start:stop] = chunk_result.ellipse_minor
-        ellipse_ratio[start:stop] = chunk_result.ellipse_ratio
-        valid_left[start:stop] = chunk_result.valid_left
-        valid_right[start:stop] = chunk_result.valid_right
-        valid_frame[start:stop] = chunk_result.valid_frame
-        reason_codes[start:stop] |= chunk_result.reason_codes
-        heading_deg_out[start:stop] = chunk_result.heading_deg
-        left_centroid[start:stop] = chunk_result.left_centroid_deg
-        right_centroid[start:stop] = chunk_result.right_centroid_deg
-        vergence_centroid[start:stop] = chunk_result.vergence_centroid_deg
-
-    frame_indices = frame_indices_source["frame_indices"][:].astype(np.int64, copy=False)
+    frame_indices = context.frame_indices_source["frame_indices"][:].astype(np.int64, copy=False)
     if frame_indices.shape[0] != total_detections:
         raise ValueError("Mismatch between frame_indices and detection count.")
 
     fps = args.fps or get_fps(root)
     if fps is None or fps <= 0:
         fps = None
-    time_seconds = np.full(total_detections, np.nan, dtype=np.float32)
     smoothing_window_param = args.smoothing_window
+    valid_frame_index_mask = frame_indices >= 0
+    num_frames = int(frame_indices[valid_frame_index_mask].max() + 1) if np.any(valid_frame_index_mask) else 0
+    chunk_len = min(chunk_size, total_detections) if total_detections else 1
+    frame_chunk = min(chunk_size, num_frames) if num_frames else 1
 
-    if fps:
-        time_seconds = frame_indices.astype(np.float64) / float(fps)
-        time_seconds = time_seconds.astype(np.float32, copy=False)
+    if args.run_name:
+        resolved_run_name = args.run_name
+    else:
+        resolved_run_name = datetime.now(timezone.utc).strftime("eye_angle_%Y%m%d_%H%M%S")
+
+    if resolved_run_name in parent_group:
+        raise ValueError(f"Run '{resolved_run_name}' already exists in analysis/eye_angle_runs.")
+
+    run_group = parent_group.create_group(resolved_run_name)
+    run_group.attrs["status"] = "running"
+    run_group.attrs["execution_backend"] = backend
+    run_group.attrs["dask_scheduler"] = scheduler_key
+    run_group.attrs["dask_num_workers"] = int(args.num_workers) if args.num_workers is not None else None
+    if not args.quiet:
+        console.print(f"Created run group: [cyan]analysis/eye_angle_runs/{resolved_run_name}[/cyan]")
+
+    _prepare_base_output_arrays(run_group, total_detections=total_detections, chunk_len=chunk_len)
+    chunks = _row_chunks(total_detections, chunk_size)
+    chunk_timings: list[dict[str, object]] = []
+    stage_start = time.perf_counter()
+
+    if backend == DASK_WORKER_EXECUTION_BACKEND:
+        worker_zarr_path = str(args.zarr_path.expanduser().resolve())
+        worker_refined_subject_run = (
+            eye_geometry.run_name if eye_geometry.stage_group == "refined_subject_masks_runs" else None
+        )
+        worker_refined_eye_run = eye_geometry.run_name if eye_geometry.stage_group == "refined_eye_masks_runs" else None
+        tasks = [
+            delayed(_process_and_write_eye_angle_chunk)(
+                worker_zarr_path,
+                refined_subject_run=worker_refined_subject_run,
+                refined_eye_run=worker_refined_eye_run,
+                keypoint_run=keypoint_run_name,
+                eye_angle_run=resolved_run_name,
+                start_row=start_row,
+                stop_row=stop_row,
+                chunk_index=chunk_index,
+                fps=fps,
+            )
+            for chunk_index, (start_row, stop_row) in enumerate(chunks)
+        ]
+        results = _compute_dask_tasks(tasks, scheduler_key=scheduler_key, num_workers=args.num_workers)
+    else:
+        results = [
+            _process_and_write_eye_angle_chunk_groups(
+                context,
+                run_group,
+                start_row=start_row,
+                stop_row=stop_row,
+                chunk_index=chunk_index,
+                fps=fps,
+                execution_backend=SERIAL_EXECUTION_BACKEND,
+            )
+            for chunk_index, (start_row, stop_row) in enumerate(chunks)
+        ]
+    for result in sorted(results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
+        chunk_timings.append(dict(result["chunk_timing"]))
+
+    roi_group = run_group["angles"]["roi"]
+    qa_roi = run_group["qa"]["roi"]
+    support_group = run_group["support"]
+    left_angles = roi_group["left_deg"][:]
+    right_angles = roi_group["right_deg"][:]
+    left_signed = roi_group["left_signed_deg"][:]
+    right_signed = roi_group["right_signed_deg"][:]
+    left_minor_signed = roi_group["left_minor_signed_deg"][:]
+    right_minor_signed = roi_group["right_minor_signed_deg"][:]
+    vergence = roi_group["vergence_deg"][:]
+    vergence_signed = roi_group["vergence_signed_deg"][:]
+    vergence_minor_signed = roi_group["vergence_minor_signed_deg"][:]
+    version = roi_group["version_deg"][:]
+    version_minor = roi_group["version_minor_deg"][:]
+    heading_deg_out = roi_group["heading_deg"][:]
+    left_centroid = roi_group["left_centroid_deg"][:]
+    right_centroid = roi_group["right_centroid_deg"][:]
+    vergence_centroid = roi_group["vergence_centroid_deg"][:]
+    valid_left = qa_roi["valid_left"][:]
+    valid_right = qa_roi["valid_right"][:]
+    valid_frame = qa_roi["valid_frame"][:]
+    reason_codes = qa_roi["reason_codes"][:]
+    time_seconds = support_group["time_seconds"][:]
+    ellipse_major = support_group["ellipse_major"][:]
+    ellipse_minor = support_group["ellipse_minor"][:]
+    ellipse_ratio = support_group["ellipse_ratio"][:]
 
     left_speed = (
         _compute_derivative(left_angles, time_seconds, valid_left, max_dt=DERIVATIVE_MAX_DT)
@@ -818,43 +1194,34 @@ def run(args: argparse.Namespace) -> None:
     right_centroid_delta_smoothed = _compute_delta(right_centroid_smoothed)
     vergence_centroid_delta_smoothed = _compute_delta(vergence_centroid_smoothed)
 
-    num_frames = int(frame_indices.max() + 1) if frame_indices.size else 0
-    frame_left = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_right = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_vergence = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_vergence_signed = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_vergence_signed_minor = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_version = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_version_minor = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_valid = np.zeros(num_frames, dtype=bool)
-    frame_reason = np.zeros(num_frames, dtype=np.uint16)
-    # Centroid frame-level arrays
-    frame_left_centroid = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_right_centroid = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_vergence_centroid = np.full(num_frames, np.nan, dtype=np.float32)
-
-    if num_frames > 0:
-        for frame in range(num_frames):
-            frame_mask = np.where(frame_indices == frame)[0]
-            if frame_mask.size == 0:
-                frame_reason[frame] |= REASON_NO_DETECTION
-                continue
-            if frame_mask.size > 1:
-                frame_reason[frame] |= REASON_MULTI_DETECTION
-                continue
-            idx = frame_mask[0]
-            frame_left[frame] = left_angles[idx]
-            frame_right[frame] = right_angles[idx]
-            frame_vergence[frame] = vergence[idx]
-            frame_vergence_signed[frame] = vergence_signed[idx]
-            frame_vergence_signed_minor[frame] = vergence_minor_signed[idx]
-            frame_version[frame] = version[idx]
-            frame_version_minor[frame] = version_minor[idx]
-            frame_valid[frame] = valid_frame[idx]
-            frame_reason[frame] |= reason_codes[idx]
-            frame_left_centroid[frame] = left_centroid[idx]
-            frame_right_centroid[frame] = right_centroid[idx]
-            frame_vergence_centroid[frame] = vergence_centroid[idx]
+    frame_arrays, frame_valid, frame_reason = _project_detection_arrays_to_frames(
+        frame_indices,
+        num_frames=num_frames,
+        valid_frame=valid_frame,
+        reason_codes=reason_codes,
+        arrays={
+            "left": left_angles,
+            "right": right_angles,
+            "vergence": vergence,
+            "vergence_signed": vergence_signed,
+            "vergence_signed_minor": vergence_minor_signed,
+            "version": version,
+            "version_minor": version_minor,
+            "left_centroid": left_centroid,
+            "right_centroid": right_centroid,
+            "vergence_centroid": vergence_centroid,
+        },
+    )
+    frame_left = frame_arrays["left"]
+    frame_right = frame_arrays["right"]
+    frame_vergence = frame_arrays["vergence"]
+    frame_vergence_signed = frame_arrays["vergence_signed"]
+    frame_vergence_signed_minor = frame_arrays["vergence_signed_minor"]
+    frame_version = frame_arrays["version"]
+    frame_version_minor = frame_arrays["version_minor"]
+    frame_left_centroid = frame_arrays["left_centroid"]
+    frame_right_centroid = frame_arrays["right_centroid"]
+    frame_vergence_centroid = frame_arrays["vergence_centroid"]
 
     frame_smooth_window = _resolve_smoothing_window(num_frames, window_setting)
     if frame_smooth_window:
@@ -901,22 +1268,6 @@ def run(args: argparse.Namespace) -> None:
     frame_left_centroid_delta_smoothed = _compute_delta(frame_left_centroid_smoothed)
     frame_right_centroid_delta_smoothed = _compute_delta(frame_right_centroid_smoothed)
     frame_vergence_centroid_delta_smoothed = _compute_delta(frame_vergence_centroid_smoothed)
-
-    if args.run_name:
-        resolved_run_name = args.run_name
-    else:
-        resolved_run_name = datetime.now(timezone.utc).strftime("eye_angle_%Y%m%d_%H%M%S")
-
-    if resolved_run_name in parent_group:
-        raise ValueError(f"Run '{resolved_run_name}' already exists in analysis/eye_angle_runs.")
-
-    run_group = parent_group.create_group(resolved_run_name)
-    parent_group.attrs["latest"] = resolved_run_name
-    if not args.quiet:
-        console.print(f"Created run group: [cyan]analysis/eye_angle_runs/{resolved_run_name}[/cyan]")
-
-    chunk_len = min(chunk_size, total_detections) if total_detections else 1
-    frame_chunk = min(chunk_size, num_frames) if num_frames else 1
 
     angles_group = run_group.require_group("angles")
     roi_group = angles_group.require_group("roi")
@@ -995,47 +1346,36 @@ def run(args: argparse.Namespace) -> None:
             ("vergence_centroid_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
         ],
     )
-    roi_group["left_deg"][:] = left_angles
     roi_group["left_deg_smoothed"][:] = left_smoothed
     roi_group["left_delta_deg"][:] = left_delta
     roi_group["left_delta_deg_smoothed"][:] = left_delta_smoothed
-    roi_group["right_deg"][:] = right_angles
     roi_group["right_deg_smoothed"][:] = right_smoothed
     roi_group["right_delta_deg"][:] = right_delta
     roi_group["right_delta_deg_smoothed"][:] = right_delta_smoothed
-    roi_group["vergence_deg"][:] = vergence
     roi_group["vergence_deg_smoothed"][:] = vergence_smoothed
     roi_group["vergence_delta_deg"][:] = vergence_delta
     roi_group["vergence_delta_deg_smoothed"][:] = vergence_delta_smoothed
-    roi_group["left_signed_deg"][:] = left_signed
     roi_group["left_signed_deg_smoothed"][:] = left_signed_smoothed
     roi_group["left_signed_delta_deg"][:] = left_signed_delta
     roi_group["left_signed_delta_deg_smoothed"][:] = left_signed_delta_smoothed
-    roi_group["right_signed_deg"][:] = right_signed
     roi_group["right_signed_deg_smoothed"][:] = right_signed_smoothed
     roi_group["right_signed_delta_deg"][:] = right_signed_delta
     roi_group["right_signed_delta_deg_smoothed"][:] = right_signed_delta_smoothed
-    roi_group["vergence_signed_deg"][:] = vergence_signed
     roi_group["vergence_signed_deg_smoothed"][:] = vergence_signed_smoothed
     roi_group["vergence_signed_delta_deg"][:] = vergence_signed_delta
     roi_group["vergence_signed_delta_deg_smoothed"][:] = vergence_signed_delta_smoothed
-    roi_group["version_deg"][:] = version
     roi_group["version_deg_smoothed"][:] = version_smoothed
     roi_group["version_delta_deg"][:] = version_delta
     roi_group["version_delta_deg_smoothed"][:] = version_delta_smoothed
-    roi_group["left_minor_signed_deg"][:] = left_minor_signed
     roi_group["left_minor_signed_deg_smoothed"][:] = left_minor_signed_smoothed
     roi_group["left_minor_signed_delta_deg"][:] = left_minor_delta
     roi_group["left_minor_signed_delta_deg_smoothed"][:] = left_minor_delta_smoothed
-    roi_group["right_minor_signed_deg"][:] = right_minor_signed
     roi_group["right_minor_signed_deg_smoothed"][:] = right_minor_signed_smoothed
     roi_group["right_minor_signed_delta_deg"][:] = right_minor_delta
     roi_group["right_minor_signed_delta_deg_smoothed"][:] = right_minor_delta_smoothed
-    roi_group["vergence_minor_signed_deg"][:] = vergence_minor_signed
     roi_group["vergence_minor_signed_deg_smoothed"][:] = vergence_minor_signed_smoothed
     roi_group["vergence_minor_signed_delta_deg"][:] = vergence_minor_delta
     roi_group["vergence_minor_signed_delta_deg_smoothed"][:] = vergence_minor_delta_smoothed
-    roi_group["version_minor_deg"][:] = version_minor
     roi_group["version_minor_deg_smoothed"][:] = version_minor_smoothed
     roi_group["version_minor_delta_deg"][:] = version_minor_delta
     roi_group["version_minor_delta_deg_smoothed"][:] = version_minor_delta_smoothed
@@ -1049,17 +1389,13 @@ def run(args: argparse.Namespace) -> None:
     roi_group["vergence_accel_deg_s2"][:] = vergence_accel
     roi_group["vergence_signed_accel_deg_s2"][:] = vergence_signed_accel
     roi_group["version_accel_deg_s2"][:] = version_accel
-    roi_group["heading_deg"][:] = heading_deg_out
     # Centroid-based angles
-    roi_group["left_centroid_deg"][:] = left_centroid
     roi_group["left_centroid_deg_smoothed"][:] = left_centroid_smoothed
     roi_group["left_centroid_delta_deg"][:] = left_centroid_delta
     roi_group["left_centroid_delta_deg_smoothed"][:] = left_centroid_delta_smoothed
-    roi_group["right_centroid_deg"][:] = right_centroid
     roi_group["right_centroid_deg_smoothed"][:] = right_centroid_smoothed
     roi_group["right_centroid_delta_deg"][:] = right_centroid_delta
     roi_group["right_centroid_delta_deg_smoothed"][:] = right_centroid_delta_smoothed
-    roi_group["vergence_centroid_deg"][:] = vergence_centroid
     roi_group["vergence_centroid_deg_smoothed"][:] = vergence_centroid_smoothed
     roi_group["vergence_centroid_delta_deg"][:] = vergence_centroid_delta
     roi_group["vergence_centroid_delta_deg_smoothed"][:] = vergence_centroid_delta_smoothed
@@ -1166,10 +1502,6 @@ def run(args: argparse.Namespace) -> None:
             ("reason_codes", (total_detections,), (chunk_len,), "u2"),
         ],
     )
-    qa_roi["valid_left"][:] = valid_left
-    qa_roi["valid_right"][:] = valid_right
-    qa_roi["valid_frame"][:] = valid_frame
-    qa_roi["reason_codes"][:] = reason_codes
 
     _prepare_output_arrays(
         qa_frame,
@@ -1193,11 +1525,6 @@ def run(args: argparse.Namespace) -> None:
             ("ellipse_ratio", (total_detections,), (chunk_len,), "f4"),
         ],
     )
-    support_group["frame_indices"][:] = frame_indices
-    support_group["time_seconds"][:] = time_seconds
-    support_group["ellipse_major"][:] = ellipse_major
-    support_group["ellipse_minor"][:] = ellipse_minor
-    support_group["ellipse_ratio"][:] = ellipse_ratio
 
     if num_frames > 0 and fps:
         frame_time = np.arange(num_frames, dtype=np.float32) / float(fps)
@@ -1210,8 +1537,23 @@ def run(args: argparse.Namespace) -> None:
             overwrite=True,
         )
 
+    duration_seconds = float(time.perf_counter() - stage_start)
+    rows_per_second = float(total_detections / duration_seconds) if duration_seconds > 0.0 else float("inf")
+    timing_summary = {
+        "total_detections": int(total_detections),
+        "duration_seconds": duration_seconds,
+        "rows_per_second": rows_per_second,
+        "execution_backend": backend,
+        "dask_scheduler": scheduler_key,
+        "dask_num_workers": int(args.num_workers) if args.num_workers is not None else None,
+        "dask_chunk_size": int(chunk_size),
+        "dask_version": getattr(dask, "__version__", "unknown"),
+        "chunk_count": len(chunks),
+        "chunk_timing_count": len(chunk_timings),
+    }
     run_group.attrs.update(
         {
+            "status": "complete",
             "report_version": "1.4",
             "reason_code_map": REASON_CODE_MAP,
             "source_eye_geometry_stage": eye_geometry.stage_group,
@@ -1222,6 +1564,14 @@ def run(args: argparse.Namespace) -> None:
             "fps": float(fps) if fps else None,
             "num_detections": int(total_detections),
             "num_frames": int(num_frames),
+            "duration_seconds": duration_seconds,
+            "rows_per_second": rows_per_second,
+            "execution_backend": backend,
+            "dask_scheduler": scheduler_key,
+            "dask_num_workers": int(args.num_workers) if args.num_workers is not None else None,
+            "dask_chunk_size": int(chunk_size),
+            "dask_version": getattr(dask, "__version__", "unknown"),
+            "eye_angle_timing_summary": json.loads(json.dumps(timing_summary, default=_to_serializable)),
             "valid_detection_fraction": float(valid_frame.sum() / total_detections) if total_detections else 0.0,
             "valid_frame_fraction": float(frame_valid.sum() / num_frames) if num_frames else 0.0,
             "circularity_reject_ratio": float(ELLIPSE_CIRCULARITY_THRESHOLD),
@@ -1236,6 +1586,9 @@ def run(args: argparse.Namespace) -> None:
             "centroid_vergence_definition": "abs(left_centroid_deg) + abs(right_centroid_deg)",
         }
     )
+    if args.include_chunk_timings:
+        run_group.attrs["eye_angle_chunk_timings"] = json.loads(json.dumps(chunk_timings, default=_to_serializable))
+    parent_group.attrs["latest"] = resolved_run_name
 
     provenance = {
         "script": "fisheye.analysis.eye_angle_analysis",
@@ -1250,6 +1603,9 @@ def run(args: argparse.Namespace) -> None:
             "keypoint_run": keypoint_run_name,
             "run_name": args.run_name,
             "chunk_size": chunk_size,
+            "execution_backend": backend,
+            "dask_scheduler": scheduler_key,
+            "dask_num_workers": int(args.num_workers) if args.num_workers is not None else None,
             "fps_override": args.fps,
             "smoothing_window": smoothing_window_param,
         },
