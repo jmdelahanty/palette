@@ -192,6 +192,8 @@ scripts/py -m fisheye.analysis.detect_bouts_multi_level <archive.zarr> \
   --run-name bouts_tk_hyst8_low4_s010_filtered \
   --threshold-mm 2.0 \
   --default-level filtered \
+  --boundary-mode local_minimum \
+  --boundary-window-s 0.25 \
   --overwrite
 ```
 
@@ -220,6 +222,18 @@ selecting a track run, it lists only swim-bout runs whose metadata says they
 were derived from the same `source_track_kinematics_run` and `track_id`. That
 keeps candidate comparisons aligned with the actual dependency graph instead of
 requiring operators to manually pair run names.
+
+`detect_bouts_multi_level` stores two boundary concepts when
+`--boundary-mode local_minimum` is enabled:
+
+- `core_start_*` / `core_end_*`: the threshold-crossing or peak-width bout core
+- `start_*` / `end_*`: the expanded onset/offset found by searching for nearby
+  local speed minima within `--boundary-window-s`
+
+The explorer overlays `start_time_s` to `end_time_s`, so local-minimum mode
+should visually capture the full rise and decay around the core threshold
+segment while still preserving the core fields for stricter quantitative
+analyses.
 
 For the current 2026-01-28 arena 2 canary review, `tk_hyst4_low2_s005` is the
 preferred default candidate when it exists. This is a review default for the

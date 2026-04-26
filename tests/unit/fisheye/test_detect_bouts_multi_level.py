@@ -7,6 +7,7 @@ import pytest
 import zarr
 
 from fisheye.analysis.detect_bouts_multi_level import (
+    _detect_bouts_from_speed,
     detect_and_save_bouts,
     normalize_speed_level,
 )
@@ -76,8 +77,10 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     bout_run = root["analysis"]["swim_bout_runs"][run_name]
 
     assert bout_run.attrs["default_level"] == "speed_filtered"
+    assert bout_run.attrs["boundary_mode"] == "threshold"
     assert bout_run["speed_filtered"]["bouts"].attrs["is_default_level"] is True
     assert bout_run["speed_smoothed"]["bouts"].attrs["is_default_level"] is False
+    assert "core_start_frame" in bout_run["speed_filtered"]["bouts"]
     intervals = bout_run["speed_filtered"]["inter_bout_intervals"]
     assert intervals.attrs["field_names"] == [
         "prev_bout_id",
@@ -90,6 +93,29 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
         "interval_s",
     ]
     assert intervals["interval_s"].shape == (0,)
+
+
+def test_threshold_bouts_can_expand_to_local_minimum_boundaries() -> None:
+    frames = np.arange(10, dtype=np.int64)
+    speed = np.asarray([0, 0, 1, 3, 5, 3, 1, 0, 0, 0], dtype=np.float32)
+
+    bouts = _detect_bouts_from_speed(
+        speed,
+        frames,
+        fps=10.0,
+        threshold=2.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.01,
+        boundary_mode="local_minimum",
+        boundary_window_s=0.3,
+    )
+
+    assert len(bouts) == 1
+    assert bouts["core_start_frame"][0] == 3
+    assert bouts["core_end_frame"][0] == 5
+    assert bouts["start_frame"][0] == 1
+    assert bouts["end_frame"][0] == 7
+    assert bouts["duration_frames"][0] > bouts["core_duration_frames"][0]
 
 
 def test_detect_and_save_bouts_requires_overwrite_for_existing_run(tmp_path: Path) -> None:

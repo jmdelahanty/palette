@@ -35,6 +35,7 @@ Usage (with options):
         --track-kinematics-run latest \\
         --threshold-mm 5.0 \\
         --default-level filtered \\
+        --boundary-mode local_minimum \\
         --overwrite
 """
 
@@ -62,6 +63,7 @@ SPEED_LEVEL_ALIASES = {
     "averaged": "speed_averaged",
 }
 SPEED_LEVEL_CHOICES = tuple(SPEED_LEVEL_ALIASES) + SPEED_LEVELS
+BOUNDARY_MODES = ("threshold", "local_minimum")
 
 
 def normalize_speed_level(value: str) -> str:
@@ -73,6 +75,169 @@ def normalize_speed_level(value: str) -> str:
         expected = ", ".join(SPEED_LEVEL_CHOICES)
         raise ValueError(f"Unsupported speed level {value!r}; expected one of: {expected}")
     return normalized
+
+
+def _bout_dtype() -> np.dtype:
+    return np.dtype([
+        ('bout_id', 'i4'),
+        ('start_frame', 'i8'),
+        ('end_frame', 'i8'),
+        ('core_start_frame', 'i8'),
+        ('core_end_frame', 'i8'),
+        ('duration_frames', 'i8'),
+        ('duration_s', 'f8'),
+        ('core_duration_frames', 'i8'),
+        ('core_duration_s', 'f8'),
+        ('distance', 'f8'),
+        ('mean_speed', 'f8'),
+        ('peak_speed', 'f8'),
+        ('start_time_s', 'f8'),
+        ('end_time_s', 'f8'),
+        ('core_start_time_s', 'f8'),
+        ('core_end_time_s', 'f8'),
+    ])
+
+
+def _empty_bouts() -> np.ndarray:
+    return np.zeros(0, dtype=_bout_dtype())
+
+
+def _nearest_global_minimum_index(values: np.ndarray, *, prefer_last: bool) -> int:
+    """Return index of a finite global minimum, tie-broken toward the core."""
+
+    finite = np.isfinite(values)
+    if not finite.any():
+        return values.size - 1 if prefer_last else 0
+    minimum = np.nanmin(values[finite])
+    candidate_indices = np.flatnonzero(finite & (values == minimum))
+    if candidate_indices.size == 0:
+        return values.size - 1 if prefer_last else 0
+    return int(candidate_indices[-1] if prefer_last else candidate_indices[0])
+
+
+def _expand_core_boundaries_to_local_minima(
+    speed: np.ndarray,
+    core_starts: np.ndarray,
+    core_ends_exclusive: np.ndarray,
+    *,
+    window_frames: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Expand threshold/peak cores to nearby low-speed local minima.
+
+    Cores remain the authoritative threshold-crossing segments. Expanded
+    boundaries are bounded by adjacent cores and previously expanded bouts so
+    they cannot overlap.
+    """
+
+    if core_starts.size == 0:
+        return core_starts.copy(), core_ends_exclusive.copy()
+    if window_frames <= 0:
+        return core_starts.copy(), core_ends_exclusive.copy()
+
+    speed_for_min = np.asarray(speed, dtype=np.float64)
+    n_samples = int(speed_for_min.size)
+    expanded_starts = np.zeros_like(core_starts)
+    expanded_ends_exclusive = np.zeros_like(core_ends_exclusive)
+    previous_expanded_end = 0
+
+    for idx, (core_start, core_end_exclusive) in enumerate(zip(core_starts, core_ends_exclusive)):
+        core_start = int(core_start)
+        core_end_exclusive = int(core_end_exclusive)
+        next_core_start = int(core_starts[idx + 1]) if idx + 1 < core_starts.size else n_samples
+
+        left_start = max(0, core_start - window_frames, previous_expanded_end)
+        left_stop = min(core_start + 1, n_samples)
+        if left_start < left_stop:
+            local_offset = _nearest_global_minimum_index(
+                speed_for_min[left_start:left_stop],
+                prefer_last=True,
+            )
+            expanded_start = left_start + local_offset
+        else:
+            expanded_start = core_start
+
+        right_start = max(0, min(core_end_exclusive - 1, n_samples - 1))
+        right_stop = min(n_samples, core_end_exclusive + window_frames, next_core_start)
+        if right_start < right_stop:
+            local_offset = _nearest_global_minimum_index(
+                speed_for_min[right_start:right_stop],
+                prefer_last=False,
+            )
+            expanded_end_exclusive = right_start + local_offset + 1
+        else:
+            expanded_end_exclusive = core_end_exclusive
+
+        expanded_end_exclusive = max(expanded_end_exclusive, core_end_exclusive)
+        expanded_start = min(expanded_start, core_start)
+
+        expanded_starts[idx] = expanded_start
+        expanded_ends_exclusive[idx] = expanded_end_exclusive
+        previous_expanded_end = int(expanded_end_exclusive)
+
+    return expanded_starts, expanded_ends_exclusive
+
+
+def _build_bout_array(
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+    core_starts: np.ndarray,
+    core_ends_exclusive: np.ndarray,
+    starts: np.ndarray,
+    ends_exclusive: np.ndarray,
+) -> np.ndarray:
+    """Build the structured bout table from core and expanded boundaries."""
+
+    n_bouts = len(starts)
+    bouts = np.zeros(n_bouts, dtype=_bout_dtype())
+
+    for i, (start_idx, end_exclusive, core_start_idx, core_end_exclusive) in enumerate(
+        zip(starts, ends_exclusive, core_starts, core_ends_exclusive)
+    ):
+        start_idx = int(start_idx)
+        end_exclusive = int(end_exclusive)
+        core_start_idx = int(core_start_idx)
+        core_end_exclusive = int(core_end_exclusive)
+
+        bout_speeds = speed[start_idx:end_exclusive]
+        valid_speeds = bout_speeds[np.isfinite(bout_speeds)]
+
+        duration_frames = end_exclusive - start_idx
+        duration_s = duration_frames / fps if fps > 0 else 0.0
+        core_duration_frames = core_end_exclusive - core_start_idx
+        core_duration_s = core_duration_frames / fps if fps > 0 else 0.0
+
+        if len(valid_speeds) > 0:
+            mean_speed = np.mean(valid_speeds)
+            peak_speed = np.max(valid_speeds)
+            distance = mean_speed * duration_s
+        else:
+            mean_speed = 0.0
+            peak_speed = 0.0
+            distance = 0.0
+
+        end_idx = end_exclusive - 1
+        core_end_idx = core_end_exclusive - 1
+        bouts[i] = (
+            i + 1,
+            int(frames[start_idx]),
+            int(frames[end_idx]),
+            int(frames[core_start_idx]),
+            int(frames[core_end_idx]),
+            duration_frames,
+            duration_s,
+            core_duration_frames,
+            core_duration_s,
+            distance,
+            mean_speed,
+            peak_speed,
+            frames[start_idx] / fps if fps > 0 else float('nan'),
+            frames[end_idx] / fps if fps > 0 else float('nan'),
+            frames[core_start_idx] / fps if fps > 0 else float('nan'),
+            frames[core_end_idx] / fps if fps > 0 else float('nan'),
+        )
+
+    return bouts
 
 
 def _compute_inter_bout_intervals(bouts: np.ndarray, fps: float) -> Tuple[np.ndarray, Dict[str, float], np.ndarray]:
@@ -323,6 +488,8 @@ def _detect_bouts_from_speed(
     threshold: float,
     min_bout_duration_s: float = 0.05,
     min_gap_duration_s: float = 0.1,
+    boundary_mode: str = "threshold",
+    boundary_window_s: float = 0.25,
 ) -> np.ndarray:
     """
     Detect swim bouts from speed trace using threshold-based detection.
@@ -334,6 +501,11 @@ def _detect_bouts_from_speed(
         threshold: Speed threshold for bout detection
         min_bout_duration_s: Minimum duration to count as bout
         min_gap_duration_s: Minimum gap between bouts
+        boundary_mode: "threshold" keeps threshold-crossing boundaries;
+            "local_minimum" expands start/end to nearby local minima while
+            preserving core_* threshold boundaries.
+        boundary_window_s: Maximum search window on each side for local-minimum
+            boundary expansion.
 
     Returns:
         Structured array with bout data
@@ -341,6 +513,7 @@ def _detect_bouts_from_speed(
     # Convert duration thresholds to frames
     min_bout_frames = int(min_bout_duration_s * fps)
     min_gap_frames = int(min_gap_duration_s * fps)
+    boundary_window_frames = max(0, int(round(boundary_window_s * fps)))
 
     # Find frames above threshold
     above_threshold = speed > threshold
@@ -373,63 +546,37 @@ def _detect_bouts_from_speed(
         starts = np.array(merged_starts)
         ends = np.array(merged_ends)
 
-    # Filter by minimum duration
-    durations = ends - starts
+    core_starts = starts
+    core_ends_exclusive = ends
+
+    # Filter by minimum core duration
+    durations = core_ends_exclusive - core_starts
     valid_bouts = durations >= min_bout_frames
-    starts = starts[valid_bouts]
-    ends = ends[valid_bouts]
+    core_starts = core_starts[valid_bouts]
+    core_ends_exclusive = core_ends_exclusive[valid_bouts]
 
-    # Build structured array
-    n_bouts = len(starts)
-
-    bout_dtype = np.dtype([
-        ('bout_id', 'i4'),
-        ('start_frame', 'i8'),
-        ('end_frame', 'i8'),
-        ('duration_frames', 'i8'),
-        ('duration_s', 'f8'),
-        ('distance', 'f8'),
-        ('mean_speed', 'f8'),
-        ('peak_speed', 'f8'),
-        ('start_time_s', 'f8'),
-        ('end_time_s', 'f8'),
-    ])
-
-    bouts = np.zeros(n_bouts, dtype=bout_dtype)
-
-    for i, (start_idx, end_idx) in enumerate(zip(starts, ends)):
-        # Get bout speed slice (inclusive of start, exclusive of end)
-        bout_speeds = speed[start_idx:end_idx]
-        valid_speeds = bout_speeds[np.isfinite(bout_speeds)]
-
-        # Calculate statistics
-        duration_frames = end_idx - start_idx
-        duration_s = duration_frames / fps
-
-        if len(valid_speeds) > 0:
-            mean_speed = np.mean(valid_speeds)
-            peak_speed = np.max(valid_speeds)
-            # Estimate distance as mean speed * duration
-            distance = mean_speed * duration_s
-        else:
-            mean_speed = 0.0
-            peak_speed = 0.0
-            distance = 0.0
-
-        bouts[i] = (
-            i + 1,  # bout_id
-            int(frames[start_idx]),  # start_frame
-            int(frames[end_idx - 1]),  # end_frame (inclusive)
-            duration_frames,
-            duration_s,
-            distance,
-            mean_speed,
-            peak_speed,
-            frames[start_idx] / fps,  # start_time_s
-            frames[end_idx - 1] / fps,  # end_time_s
+    if boundary_mode == "local_minimum":
+        starts, ends_exclusive = _expand_core_boundaries_to_local_minima(
+            speed,
+            core_starts,
+            core_ends_exclusive,
+            window_frames=boundary_window_frames,
         )
+    elif boundary_mode == "threshold":
+        starts = core_starts.copy()
+        ends_exclusive = core_ends_exclusive.copy()
+    else:
+        raise ValueError(f"Unsupported boundary_mode: {boundary_mode!r}")
 
-    return bouts
+    return _build_bout_array(
+        speed,
+        frames,
+        fps,
+        core_starts,
+        core_ends_exclusive,
+        starts,
+        ends_exclusive,
+    )
 
 
 def _detect_bouts_from_peaks(
@@ -441,6 +588,8 @@ def _detect_bouts_from_peaks(
     rel_height: float = 0.9,
     min_bout_duration_s: float = 0.05,
     min_gap_duration_s: float = 0.1,
+    boundary_mode: str = "threshold",
+    boundary_window_s: float = 0.25,
 ) -> np.ndarray:
     """
     Detect swim bouts from speed trace using peak-based detection.
@@ -456,6 +605,10 @@ def _detect_bouts_from_peaks(
             well for asymmetric speed peaks with gradual tails.
         min_bout_duration_s: Minimum duration to count as bout
         min_gap_duration_s: Minimum gap between bouts
+        boundary_mode: "threshold" keeps peak-width boundaries; "local_minimum"
+            expands start/end to nearby local minima.
+        boundary_window_s: Maximum search window on each side for local-minimum
+            boundary expansion.
 
     Returns:
         Structured array with bout data
@@ -463,6 +616,7 @@ def _detect_bouts_from_peaks(
     # Convert duration thresholds to frames
     min_bout_frames = int(min_bout_duration_s * fps)
     min_gap_frames = int(min_gap_duration_s * fps)
+    boundary_window_frames = max(0, int(round(boundary_window_s * fps)))
 
     # Handle NaN values - replace with 0 for peak detection
     speed_clean = np.where(np.isnan(speed), 0.0, speed)
@@ -476,19 +630,7 @@ def _detect_bouts_from_peaks(
 
     # If no peaks found, return empty array
     if len(peaks) == 0:
-        bout_dtype = np.dtype([
-            ('bout_id', 'i4'),
-            ('start_frame', 'i8'),
-            ('end_frame', 'i8'),
-            ('duration_frames', 'i8'),
-            ('duration_s', 'f8'),
-            ('distance', 'f8'),
-            ('mean_speed', 'f8'),
-            ('peak_speed', 'f8'),
-            ('start_time_s', 'f8'),
-            ('end_time_s', 'f8'),
-        ])
-        return np.zeros(0, dtype=bout_dtype)
+        return _empty_bouts()
 
     # Get bout boundaries using peak widths at relative height
     widths, width_heights, left_ips, right_ips = signal.peak_widths(
@@ -500,11 +642,11 @@ def _detect_bouts_from_peaks(
     # Convert interpolated positions to integer indices
     # Round down for start, round up for end to be inclusive
     starts = np.floor(left_ips).astype(int)
-    ends = np.ceil(right_ips).astype(int)
+    ends_exclusive = np.ceil(right_ips).astype(int) + 1
 
     # Ensure indices are within bounds
     starts = np.clip(starts, 0, len(speed) - 1)
-    ends = np.clip(ends, 0, len(speed) - 1)
+    ends_exclusive = np.clip(ends_exclusive, 1, len(speed))
 
     # Merge bouts separated by small gaps
     if len(starts) > 1:
@@ -512,75 +654,49 @@ def _detect_bouts_from_peaks(
         merged_ends = []
 
         for i in range(1, len(starts)):
-            gap = starts[i] - ends[i-1]
+            gap = starts[i] - ends_exclusive[i-1]
             if gap < min_gap_frames:
                 # Merge with previous bout (extend end)
                 continue
             else:
-                merged_ends.append(ends[i-1])
+                merged_ends.append(ends_exclusive[i-1])
                 merged_starts.append(starts[i])
 
-        merged_ends.append(ends[-1])
+        merged_ends.append(ends_exclusive[-1])
         starts = np.array(merged_starts)
-        ends = np.array(merged_ends)
+        ends_exclusive = np.array(merged_ends)
 
-    # Filter by minimum duration
-    durations = ends - starts
+    core_starts = starts
+    core_ends_exclusive = ends_exclusive
+
+    # Filter by minimum core duration
+    durations = core_ends_exclusive - core_starts
     valid_bouts = durations >= min_bout_frames
-    starts = starts[valid_bouts]
-    ends = ends[valid_bouts]
+    core_starts = core_starts[valid_bouts]
+    core_ends_exclusive = core_ends_exclusive[valid_bouts]
 
-    # Build structured array
-    n_bouts = len(starts)
-
-    bout_dtype = np.dtype([
-        ('bout_id', 'i4'),
-        ('start_frame', 'i8'),
-        ('end_frame', 'i8'),
-        ('duration_frames', 'i8'),
-        ('duration_s', 'f8'),
-        ('distance', 'f8'),
-        ('mean_speed', 'f8'),
-        ('peak_speed', 'f8'),
-        ('start_time_s', 'f8'),
-        ('end_time_s', 'f8'),
-    ])
-
-    bouts = np.zeros(n_bouts, dtype=bout_dtype)
-
-    for i, (start_idx, end_idx) in enumerate(zip(starts, ends)):
-        # Get bout speed slice (inclusive of start, exclusive of end+1)
-        bout_speeds = speed[start_idx:end_idx+1]
-        valid_speeds = bout_speeds[np.isfinite(bout_speeds)]
-
-        # Calculate statistics
-        duration_frames = end_idx - start_idx + 1
-        duration_s = duration_frames / fps
-
-        if len(valid_speeds) > 0:
-            mean_speed = np.mean(valid_speeds)
-            peak_speed = np.max(valid_speeds)
-            # Estimate distance as mean speed * duration
-            distance = mean_speed * duration_s
-        else:
-            mean_speed = 0.0
-            peak_speed = 0.0
-            distance = 0.0
-
-        bouts[i] = (
-            i + 1,  # bout_id
-            int(frames[start_idx]),  # start_frame
-            int(frames[end_idx]),  # end_frame
-            duration_frames,
-            duration_s,
-            distance,
-            mean_speed,
-            peak_speed,
-            frames[start_idx] / fps,  # start_time_s
-            frames[end_idx] / fps,  # end_time_s
+    if boundary_mode == "local_minimum":
+        starts, ends_exclusive = _expand_core_boundaries_to_local_minima(
+            speed,
+            core_starts,
+            core_ends_exclusive,
+            window_frames=boundary_window_frames,
         )
+    elif boundary_mode == "threshold":
+        starts = core_starts.copy()
+        ends_exclusive = core_ends_exclusive.copy()
+    else:
+        raise ValueError(f"Unsupported boundary_mode: {boundary_mode!r}")
 
-    return bouts
+    return _build_bout_array(
+        speed,
+        frames,
+        fps,
+        core_starts,
+        core_ends_exclusive,
+        starts,
+        ends_exclusive,
+    )
 
 
 def _load_track_kinematics_track_speeds(
@@ -684,6 +800,8 @@ def detect_and_save_bouts(
     min_gap_duration_s: float = 0.1,
     default_level: str = "speed_smoothed",
     overwrite: bool = False,
+    boundary_mode: str = "threshold",
+    boundary_window_s: float = 0.25,
 ) -> str:
     """
     Detect bouts from all 4 speed levels and save hierarchically.
@@ -704,11 +822,19 @@ def detect_and_save_bouts(
         default_level: Speed subgroup that downstream consumers should use by
             default. Accepts raw/filtered/smoothed/averaged aliases.
         overwrite: Delete and recreate an existing run with the same name.
+        boundary_mode: Boundary mode for stored start/end. "threshold" stores
+            threshold/peak-width boundaries; "local_minimum" expands to nearby
+            low-speed minima and preserves threshold/peak boundaries in core_*.
+        boundary_window_s: Local-minimum search window on each side of each
+            threshold/peak core.
 
     Returns:
         The run name used (either provided or auto-generated)
     """
     default_level_key = normalize_speed_level(default_level)
+    if boundary_mode not in BOUNDARY_MODES:
+        expected = ", ".join(BOUNDARY_MODES)
+        raise ValueError(f"Unsupported boundary_mode {boundary_mode!r}; expected one of: {expected}")
 
     print(f"\n{'='*60}")
     print(f"MULTI-LEVEL SWIM BOUT DETECTION")
@@ -717,6 +843,9 @@ def detect_and_save_bouts(
     print(f"Track kinematics run: {track_kinematics_run}")
     print(f"Track ID: {track_id}")
     print(f"Method: {method}")
+    print(f"Boundary mode: {boundary_mode}")
+    if boundary_mode == "local_minimum":
+        print(f"Boundary window: {boundary_window_s} s")
     if method == "threshold":
         print(f"Threshold: {threshold_mm} mm/s")
     elif method == "peak":
@@ -753,18 +882,7 @@ def detect_and_save_bouts(
         # Skip if all NaN
         if np.all(np.isnan(speed)):
             print(f"  {level}: SKIPPED (all NaN)")
-            bout_results[level] = np.array([], dtype=np.dtype([
-                ('bout_id', 'i4'),
-                ('start_frame', 'i8'),
-                ('end_frame', 'i8'),
-                ('duration_frames', 'i8'),
-                ('duration_s', 'f8'),
-                ('distance', 'f8'),
-                ('mean_speed', 'f8'),
-                ('peak_speed', 'f8'),
-                ('start_time_s', 'f8'),
-                ('end_time_s', 'f8'),
-            ]))
+            bout_results[level] = _empty_bouts()
             continue
 
         if method == "threshold":
@@ -775,6 +893,8 @@ def detect_and_save_bouts(
                 threshold_mm,
                 min_bout_duration_s,
                 min_gap_duration_s,
+                boundary_mode,
+                boundary_window_s,
             )
         elif method == "peak":
             bouts = _detect_bouts_from_peaks(
@@ -786,6 +906,8 @@ def detect_and_save_bouts(
                 rel_height,
                 min_bout_duration_s,
                 min_gap_duration_s,
+                boundary_mode,
+                boundary_window_s,
             )
         else:
             raise ValueError(f"Unknown detection method: {method}. Must be 'threshold' or 'peak'.")
@@ -833,6 +955,8 @@ def detect_and_save_bouts(
     run_group.attrs['detection_method'] = method
     run_group.attrs['min_bout_duration_s'] = min_bout_duration_s
     run_group.attrs['min_gap_duration_s'] = min_gap_duration_s
+    run_group.attrs['boundary_mode'] = boundary_mode
+    run_group.attrs['boundary_window_s'] = float(boundary_window_s)
 
     # Method-specific parameters
     if method == "threshold":
@@ -978,6 +1102,26 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        '--boundary-mode',
+        type=str,
+        choices=BOUNDARY_MODES,
+        default='threshold',
+        help=(
+            'How to write bout start/end boundaries. "threshold" keeps the '
+            'threshold/peak-width core. "local_minimum" expands start/end to '
+            'nearby low-speed minima and stores threshold/peak boundaries in '
+            'core_* fields. Default: threshold.'
+        ),
+    )
+
+    parser.add_argument(
+        '--boundary-window-s',
+        type=float,
+        default=0.25,
+        help='Search window in seconds on each side for --boundary-mode local_minimum (default: 0.25).',
+    )
+
     # Peak method parameters
     parser.add_argument(
         '--prominence',
@@ -1036,6 +1180,8 @@ def main():
         min_gap_duration_s=args.min_gap_duration,
         default_level=args.default_level,
         overwrite=args.overwrite,
+        boundary_mode=args.boundary_mode,
+        boundary_window_s=args.boundary_window_s,
     )
 
     return 0
