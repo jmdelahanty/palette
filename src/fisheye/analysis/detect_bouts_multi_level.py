@@ -25,16 +25,17 @@ Storage structure:
     └── run_metadata (attrs: threshold, source_track_kinematics_run, etc.)
 
 Usage (basic):
-    python -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr
+    scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr
 
     Auto-generates run name like: swim_bout_detect_20250905_143022
 
 Usage (with options):
-    python -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
+    scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
         --run-name custom_run \\
         --track-kinematics-run latest \\
         --threshold-mm 5.0 \\
-        --default-level filtered
+        --default-level filtered \\
+        --overwrite
 """
 
 from __future__ import annotations
@@ -682,6 +683,7 @@ def detect_and_save_bouts(
     min_bout_duration_s: float = 0.05,
     min_gap_duration_s: float = 0.1,
     default_level: str = "speed_smoothed",
+    overwrite: bool = False,
 ) -> str:
     """
     Detect bouts from all 4 speed levels and save hierarchically.
@@ -701,6 +703,7 @@ def detect_and_save_bouts(
         min_gap_duration_s: Minimum gap between bouts
         default_level: Speed subgroup that downstream consumers should use by
             default. Accepts raw/filtered/smoothed/averaged aliases.
+        overwrite: Delete and recreate an existing run with the same name.
 
     Returns:
         The run name used (either provided or auto-generated)
@@ -813,7 +816,13 @@ def detect_and_save_bouts(
         run_name = f"swim_bout_detect_{timestamp}"
         print(f"  Auto-generated run name: {run_name}")
     elif run_name in swim_bout_runs:
-        raise ValueError(f"Swim bout run '{run_name}' already exists. Use a different name or delete the existing run.")
+        if not overwrite:
+            raise ValueError(
+                f"Swim bout run '{run_name}' already exists. Use --overwrite, "
+                "a different name, or delete the existing run."
+            )
+        print(f"  Overwriting existing run: {run_name}")
+        del swim_bout_runs[run_name]
 
     # Create run group
     run_group = swim_bout_runs.create_group(run_name)
@@ -921,6 +930,12 @@ def main():
     )
 
     parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Delete and recreate --run-name if it already exists. Ignored for auto-generated run names.',
+    )
+
+    parser.add_argument(
         '--track-kinematics-run',
         dest='track_kinematics_run',
         type=str,
@@ -1020,6 +1035,7 @@ def main():
         min_bout_duration_s=args.min_bout_duration,
         min_gap_duration_s=args.min_gap_duration,
         default_level=args.default_level,
+        overwrite=args.overwrite,
     )
 
     return 0

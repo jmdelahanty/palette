@@ -90,3 +90,49 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
         "interval_s",
     ]
     assert intervals["interval_s"].shape == (0,)
+
+
+def test_detect_and_save_bouts_requires_overwrite_for_existing_run(tmp_path: Path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+
+    detect_and_save_bouts(
+        zarr_path=zarr_path,
+        run_name="candidate",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        threshold_mm=2.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.01,
+        default_level="filtered",
+    )
+
+    with pytest.raises(ValueError, match="Use --overwrite"):
+        detect_and_save_bouts(
+            zarr_path=zarr_path,
+            run_name="candidate",
+            track_kinematics_run="tk_1",
+            track_id=0,
+            threshold_mm=4.0,
+            min_bout_duration_s=0.01,
+            min_gap_duration_s=0.01,
+            default_level="filtered",
+        )
+
+    detect_and_save_bouts(
+        zarr_path=zarr_path,
+        run_name="candidate",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        threshold_mm=4.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.01,
+        default_level="smoothed",
+        overwrite=True,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    parent = root["analysis"]["swim_bout_runs"]
+    bout_run = parent["candidate"]
+    assert parent.attrs["latest"] == "candidate"
+    assert bout_run.attrs["threshold_mm"] == 4.0
+    assert bout_run.attrs["default_level"] == "speed_smoothed"

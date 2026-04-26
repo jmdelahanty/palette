@@ -191,11 +191,15 @@ scripts/py -m fisheye.analysis.detect_bouts_multi_level <archive.zarr> \
   --track-kinematics-run tk_hyst8_low4_s010 \
   --run-name bouts_tk_hyst8_low4_s010_filtered \
   --threshold-mm 2.0 \
-  --default-level filtered
+  --default-level filtered \
+  --overwrite
 ```
 
 For iterative tuning, create one named pair of runs per candidate rather than
-rewriting one run in place. A practical first sweep is:
+rewriting one generic run in place. When regenerating the same candidate after a
+schema or implementation change, reuse the candidate name with
+`detect_bouts_multi_level --overwrite` so the explorer stays clean and does not
+mix stale and current derived bout runs. A practical first sweep is:
 
 ```text
 hysteresis_high_px=4, hysteresis_low_px=2, smooth_seconds=0.05
