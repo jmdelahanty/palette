@@ -24,8 +24,8 @@ From `analysis/track_kinematics_runs/<run>/tracks/id_<track_id>/`:
 | `smoothed_heading_degrees` | Temporally smoothed heading |
 | `speed_smoothed_mm` | Smoothed swimming speed (mm/s) |
 | `speed_filtered_mm` | Hysteresis-filtered speed (mm/s) |
-| `displacement_smoothed_mm` | Frame-to-frame displacement |
-| `cumulative_distance_mm` | Total distance traveled |
+| `frame_path_distance_smoothed_mm` | Gap-aware frame-to-frame path-distance increment |
+| `cumulative_path_distance_mm` | Total gap-aware path distance traveled |
 
 ### Swim bout data (per fish)
 

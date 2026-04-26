@@ -92,7 +92,7 @@ def load_track_kinematics_run(
 
 
 def identify_stationary_periods(
-    instantaneous_speed_mm: np.ndarray,
+    raw_speed_mm: np.ndarray,
     frames: np.ndarray,
     max_stationary_speed: float = 0.5,
     min_period_frames: int = 30,
@@ -100,7 +100,7 @@ def identify_stationary_periods(
     """Identify periods where the fish appears stationary.
 
     Args:
-        instantaneous_speed_mm: Instantaneous speed array (mm/s)
+        raw_speed_mm: Raw speed array (mm/s)
         frames: Frame indices
         max_stationary_speed: Maximum speed to consider stationary (mm/s)
         min_period_frames: Minimum number of consecutive frames
@@ -109,7 +109,7 @@ def identify_stationary_periods(
         List of (start_idx, end_idx) tuples for stationary periods
     """
     # Find frames below threshold
-    is_stationary = instantaneous_speed_mm < max_stationary_speed
+    is_stationary = raw_speed_mm < max_stationary_speed
 
     # Find consecutive runs
     periods = []
@@ -152,23 +152,23 @@ def compute_noise_statistics(
         console = Console()
 
     all_stationary_speeds = []
-    all_stationary_displacements = []
+    all_stationary_path_distances = []
     track_stats = []
 
     for track_id, track_group in tracks_dict.items():
         # Load data
-        instantaneous_speed_mm = track_group["instantaneous_speed_mm"][:]
-        distance_per_frame_mm = track_group["distance_per_frame_mm"][:]
+        raw_speed_mm = track_group["speed_raw_mm"][:]
+        frame_path_distance_mm = track_group["frame_path_distance_raw_mm"][:]
         frame_indices = track_group["frame_indices"][:]
 
         # Skip if no valid data
-        valid_mask = np.isfinite(instantaneous_speed_mm)
+        valid_mask = np.isfinite(raw_speed_mm)
         if not valid_mask.any():
             continue
 
         # Identify stationary periods
         periods = identify_stationary_periods(
-            instantaneous_speed_mm,
+            raw_speed_mm,
             frame_indices,
             max_stationary_speed,
             min_period_frames,
@@ -179,25 +179,25 @@ def compute_noise_statistics(
 
         # Collect statistics for this track
         track_stationary_speeds = []
-        track_stationary_displacements = []
+        track_stationary_path_distances = []
 
         for start_idx, end_idx in periods:
-            period_speeds = instantaneous_speed_mm[start_idx:end_idx]
-            period_displacements = distance_per_frame_mm[start_idx:end_idx]
+            period_speeds = raw_speed_mm[start_idx:end_idx]
+            period_path_distances = frame_path_distance_mm[start_idx:end_idx]
 
             # Remove any NaN/inf values
             valid_speeds = period_speeds[np.isfinite(period_speeds)]
-            valid_displacements = period_displacements[np.isfinite(period_displacements)]
+            valid_path_distances = period_path_distances[np.isfinite(period_path_distances)]
 
             track_stationary_speeds.extend(valid_speeds)
-            track_stationary_displacements.extend(valid_displacements)
+            track_stationary_path_distances.extend(valid_path_distances)
 
         if track_stationary_speeds:
             track_stationary_speeds = np.array(track_stationary_speeds)
-            track_stationary_displacements = np.array(track_stationary_displacements)
+            track_stationary_path_distances = np.array(track_stationary_path_distances)
 
             all_stationary_speeds.extend(track_stationary_speeds)
-            all_stationary_displacements.extend(track_stationary_displacements)
+            all_stationary_path_distances.extend(track_stationary_path_distances)
 
             track_stats.append({
                 "track_id": track_id,
@@ -207,10 +207,10 @@ def compute_noise_statistics(
                 "median_speed": np.median(track_stationary_speeds),
                 "p95_speed": np.percentile(track_stationary_speeds, 95),
                 "max_speed": np.max(track_stationary_speeds),
-                "mean_displacement": np.mean(track_stationary_displacements),
-                "median_displacement": np.median(track_stationary_displacements),
-                "p95_displacement": np.percentile(track_stationary_displacements, 95),
-                "max_displacement": np.max(track_stationary_displacements),
+                "mean_path_distance": np.mean(track_stationary_path_distances),
+                "median_path_distance": np.median(track_stationary_path_distances),
+                "p95_path_distance": np.percentile(track_stationary_path_distances, 95),
+                "max_path_distance": np.max(track_stationary_path_distances),
             })
 
     # Compute aggregate statistics
@@ -218,7 +218,7 @@ def compute_noise_statistics(
         raise ValueError("No stationary periods found with current thresholds")
 
     all_stationary_speeds = np.array(all_stationary_speeds)
-    all_stationary_displacements = np.array(all_stationary_displacements)
+    all_stationary_path_distances = np.array(all_stationary_path_distances)
 
     statistics = {
         "n_tracks": len(track_stats),
@@ -232,11 +232,11 @@ def compute_noise_statistics(
         "speed_p95": np.percentile(all_stationary_speeds, 95),
         "speed_p99": np.percentile(all_stationary_speeds, 99),
         "speed_max": np.max(all_stationary_speeds),
-        "displacement_mean": np.mean(all_stationary_displacements),
-        "displacement_median": np.median(all_stationary_displacements),
-        "displacement_std": np.std(all_stationary_displacements),
-        "displacement_p95": np.percentile(all_stationary_displacements, 95),
-        "displacement_max": np.max(all_stationary_displacements),
+        "path_distance_mean": np.mean(all_stationary_path_distances),
+        "path_distance_median": np.median(all_stationary_path_distances),
+        "path_distance_std": np.std(all_stationary_path_distances),
+        "path_distance_p95": np.percentile(all_stationary_path_distances, 95),
+        "path_distance_max": np.max(all_stationary_path_distances),
         "track_stats": track_stats,
     }
 
@@ -277,16 +277,16 @@ def print_statistics(
 
     console.print(speed_table)
 
-    # Displacement statistics table
-    disp_table = Table(title="Frame-to-Frame Displacement Statistics (mm)")
+    # Path-distance statistics table
+    disp_table = Table(title="Frame Path-Distance Statistics (mm)")
     disp_table.add_column("Metric", style="cyan")
     disp_table.add_column("Value", justify="right", style="yellow")
 
-    disp_table.add_row("Mean", f"{statistics['displacement_mean']:.4f}")
-    disp_table.add_row("Median", f"{statistics['displacement_median']:.4f}")
-    disp_table.add_row("Std Dev", f"{statistics['displacement_std']:.4f}")
-    disp_table.add_row("95th percentile", f"{statistics['displacement_p95']:.4f}")
-    disp_table.add_row("Maximum", f"{statistics['displacement_max']:.4f}")
+    disp_table.add_row("Mean", f"{statistics['path_distance_mean']:.4f}")
+    disp_table.add_row("Median", f"{statistics['path_distance_median']:.4f}")
+    disp_table.add_row("Std Dev", f"{statistics['path_distance_std']:.4f}")
+    disp_table.add_row("95th percentile", f"{statistics['path_distance_p95']:.4f}")
+    disp_table.add_row("Maximum", f"{statistics['path_distance_max']:.4f}")
 
     console.print(disp_table)
 

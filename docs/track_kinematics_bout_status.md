@@ -39,7 +39,7 @@ But the implementation is not yet fully coherent:
   without proving that the bout data is actually track-specific
 - `stimulus_response` expands sparse track data to dense arrays, but distance
   summaries must preserve `track_kinematics` gap semantics rather than
-  recomputing displacement across missing-frame gaps
+  recomputing path distance across missing-frame gaps
 
 So the stack is usable for current single-track use, but it should not be
 considered settled.
@@ -67,9 +67,9 @@ The current design direction is sound:
 
 The highest-priority correctness issue is now downstream gap handling, not basic
 track materialization. `track_kinematics` deliberately treats non-consecutive
-frames conservatively when computing displacement and cumulative distance. Any
-consumer that expands sparse tracks to dense frame arrays must either consume
-those source displacement/cumulative-distance arrays or reproduce the same
+frames conservatively when computing frame path distance and cumulative path
+distance. Any consumer that expands sparse tracks to dense frame arrays must
+either consume those source path-distance arrays or reproduce the same
 consecutive-frame rules. It should not compute distance by taking `np.diff(...)`
 across only the valid positions in a time window, because that can invent
 movement across gaps.
@@ -125,25 +125,31 @@ For each track, the current implementation computes four speed series:
 - `speed_smoothed_*`
 - `speed_averaged_*`
 
-It also computes three displacement series:
+It also computes three frame path-distance series:
 
-- `displacement_raw_*`
-- `displacement_filtered_*`
-- `displacement_smoothed_*`
+- `frame_path_distance_raw_*`
+- `frame_path_distance_filtered_*`
+- `frame_path_distance_smoothed_*`
 
-And one cumulative distance series:
+And one cumulative path-distance series:
 
-- `cumulative_distance_*`
+- `cumulative_path_distance_*`
 
 These are stored in both pixel and millimeter space when calibration is
 available.
 
+This schema is intentionally strict after the path-distance cleanup: current
+consumers expect `frame_path_distance_*` and `cumulative_path_distance_*`, not
+the earlier `displacement_*` or `cumulative_distance_*` names. Existing canary
+runs written with the old names should be regenerated from `track_kinematics`
+rather than silently read through compatibility fallbacks.
+
 Important behavior in
 [`compute_track_speed(...)`](../src/fisheye/analysis/compute_speed.py):
 
-- only consecutive frames contribute to displacement and speed
+- only consecutive frames contribute to frame path distance and speed
 - non-consecutive frame jumps are treated as zero movement
-- displacements larger than `500 px` are treated as suspicious and excluded
+- frame path-distance increments larger than `500 px` are treated as suspicious and excluded
 - optional hysteresis removes micro-jitter before smoothing
 - temporal smoothing can be moving-average or Savitzky-Golay
 
@@ -211,6 +217,12 @@ were derived from the same `source_track_kinematics_run` and `track_id`. That
 keeps candidate comparisons aligned with the actual dependency graph instead of
 requiring operators to manually pair run names.
 
+For the current 2026-01-28 arena 2 canary review, `tk_hyst4_low2_s005` is the
+preferred default candidate when it exists. This is a review default for the
+current tuning pass, not a repository-wide conclusion that those thresholds are
+optimal for all recordings. Pass `--run-path <run>` to open a different
+candidate explicitly.
+
 The explorer writes performance events to
 `/tmp/palette_track_kinematics_explorer_perf.jsonl` by default. Use
 `--performance-log <path>` to choose another JSONL file or
@@ -219,10 +231,12 @@ The explorer writes performance events to
 On the 2026-01-28 arena 2 canary, the first performance log showed that
 candidate switching is dominated by time-series figure construction, not Zarr
 IO. A 517-bout overlay spent about `49 s` in `build_timeseries_figure`, while
-Zarr loading took about `0.2 s`. The next performance fix should therefore
-batch the swim-bout overlay into one Plotly trace instead of drawing one
-`vrect` layout shape per bout. WebGPU-style renderers should remain a future
-viewer-backend evaluation, not the first fix for the current Plotly app.
+Zarr loading took about `0.2 s`. The explorer now batches swim-bout overlays
+into one translucent Plotly bar trace instead of drawing one `vrect` layout shape
+per bout; the same 517-bout candidate measured about `0.01 s` for
+`build_timeseries_figure` after that change. WebGPU-style renderers should
+remain a future viewer-backend evaluation, not the first fix for the current
+Plotly app.
 
 ### 2. Future skeleton-derived metrics need a separate home
 
@@ -232,7 +246,7 @@ The current module already covers generic per-track motion well enough for:
 - heading
 - turning
 - speed
-- displacement
+- frame path distance
 - acceleration
 
 It should not become the first-class home for:
@@ -287,9 +301,9 @@ position trace.
 
 The current stack already distinguishes:
 
-- raw displacement
-- hysteresis-filtered displacement
-- smoothed displacement
+- raw frame path distance
+- hysteresis-filtered frame path distance
+- smoothed frame path distance
 
 But downstream consumers can still easily confuse:
 

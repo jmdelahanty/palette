@@ -218,18 +218,21 @@ The current slow path is the one-`add_vrect(...)`-per-bout overlay. That creates
 hundreds of Plotly layout shapes, which is expensive before the browser even
 renders the result.
 
-Recommended next implementation:
+Current implementation:
 
-1. Replace per-bout `fig.add_vrect(...)` calls with one batched overlay trace,
-   preferably a single translucent `go.Bar` trace using bout midpoints and bout
-   durations as bar widths on a hidden overlay y-axis.
-2. Keep the existing JSONL timing records and compare before/after on the same
-   candidate runs.
-3. If trace rendering still dominates after batching, add optional decimated
-   interactive arrays under the run-local visualization artifact. Decimation is a
-   cache layer only; canonical analysis arrays remain the source of truth.
-4. Consider a non-Plotly renderer only if the app needs millions of points,
-   dense high-frequency overlays, or custom GPU primitives.
+1. Swim-bout overlays are rendered as one translucent `go.Bar` trace using bout
+   midpoints and bout durations as bar widths on a hidden overlay y-axis.
+2. The JSONL timing record reports `swim_bout_overlay_renderer`,
+   `n_rendered_traces`, and `n_layout_shapes` so regressions are visible.
+3. On the same 517-bout candidate, `build_timeseries_figure` dropped from about
+   `49 s` with per-bout `vrect` layout shapes to about `0.01 s` with one batched
+   bar trace.
+
+If trace rendering becomes the bottleneck again, add optional decimated
+interactive arrays under the run-local visualization artifact. Decimation is a
+cache layer only; canonical analysis arrays remain the source of truth. Consider
+a non-Plotly renderer only if the app needs millions of points, dense
+high-frequency overlays, or custom GPU primitives.
 
 WebGPU is not the first optimization for this Plotly/Marimo viewer. Plotly's
 documented high-performance path is WebGL-enabled trace types, and its WebGL

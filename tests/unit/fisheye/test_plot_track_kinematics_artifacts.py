@@ -57,8 +57,8 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_track_array(track, "smoothed_heading_degrees", np.linspace(0.0, 5.0, n, dtype=np.float32))
     _write_track_array(track, "smoothed_acceleration_px", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "smoothed_acceleration_mm", np.zeros(n, dtype=np.float32))
-    _write_track_array(track, "cumulative_distance_px", np.cumsum(speed_px).astype(np.float32))
-    _write_track_array(track, "cumulative_distance_mm", np.cumsum(speed_mm).astype(np.float32))
+    _write_track_array(track, "cumulative_path_distance_px", np.cumsum(speed_px).astype(np.float32))
+    _write_track_array(track, "cumulative_path_distance_mm", np.cumsum(speed_mm).astype(np.float32))
     return zarr_path
 
 

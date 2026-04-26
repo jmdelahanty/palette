@@ -574,10 +574,10 @@ def build_track_datasets(
         speed_filtered_px = speeds.speed_filtered
         speed_smoothed_px = speeds.speed_smoothed
         speed_averaged_px = speeds.speed_averaged
-        displacement_raw_px = speeds.displacement_raw
-        displacement_filtered_px = speeds.displacement_filtered
-        displacement_smoothed_px = speeds.displacement_smoothed
-        cumulative_px = speeds.cumulative_distance
+        frame_path_distance_raw_px = speeds.frame_path_distance_raw
+        frame_path_distance_filtered_px = speeds.frame_path_distance_filtered
+        frame_path_distance_smoothed_px = speeds.frame_path_distance_smoothed
+        cumulative_path_px = speeds.cumulative_path_distance
         seconds = speeds.seconds
         speed_per_second_px = speeds.speed_per_second
 
@@ -587,10 +587,10 @@ def build_track_datasets(
             speed_filtered_mm = speed_filtered_px * pixel_to_mm_val
             speed_smoothed_mm = speed_smoothed_px * pixel_to_mm_val
             speed_averaged_mm = speed_averaged_px * pixel_to_mm_val
-            displacement_raw_mm = displacement_raw_px * pixel_to_mm_val
-            displacement_filtered_mm = displacement_filtered_px * pixel_to_mm_val
-            displacement_smoothed_mm = displacement_smoothed_px * pixel_to_mm_val
-            cumulative_mm = cumulative_px * pixel_to_mm_val
+            frame_path_distance_raw_mm = frame_path_distance_raw_px * pixel_to_mm_val
+            frame_path_distance_filtered_mm = frame_path_distance_filtered_px * pixel_to_mm_val
+            frame_path_distance_smoothed_mm = frame_path_distance_smoothed_px * pixel_to_mm_val
+            cumulative_path_mm = cumulative_path_px * pixel_to_mm_val
             speed_per_second_mm = speed_per_second_px * pixel_to_mm_val
         else:
             coords_mm = _nan_array(coords_px.shape)
@@ -598,10 +598,10 @@ def build_track_datasets(
             speed_filtered_mm = _nan_array(speed_filtered_px.shape)
             speed_smoothed_mm = _nan_array(speed_smoothed_px.shape)
             speed_averaged_mm = _nan_array(speed_averaged_px.shape)
-            displacement_raw_mm = _nan_array(displacement_raw_px.shape)
-            displacement_filtered_mm = _nan_array(displacement_filtered_px.shape)
-            displacement_smoothed_mm = _nan_array(displacement_smoothed_px.shape)
-            cumulative_mm = _nan_array(cumulative_px.shape)
+            frame_path_distance_raw_mm = _nan_array(frame_path_distance_raw_px.shape)
+            frame_path_distance_filtered_mm = _nan_array(frame_path_distance_filtered_px.shape)
+            frame_path_distance_smoothed_mm = _nan_array(frame_path_distance_smoothed_px.shape)
+            cumulative_path_mm = _nan_array(cumulative_path_px.shape)
             speed_per_second_mm = _nan_array(speed_per_second_px.shape)
 
         heading_rad = np.deg2rad(headings_track)
@@ -724,14 +724,14 @@ def build_track_datasets(
             "acceleration_mm": _float32(accel_mm),
             "smoothed_acceleration_px": _float32(smoothed_accel_px),
             "smoothed_acceleration_mm": _float32(smoothed_accel_mm),
-            "displacement_raw_px": _float32(displacement_raw_px),
-            "displacement_raw_mm": _float32(displacement_raw_mm),
-            "displacement_filtered_px": _float32(displacement_filtered_px),
-            "displacement_filtered_mm": _float32(displacement_filtered_mm),
-            "displacement_smoothed_px": _float32(displacement_smoothed_px),
-            "displacement_smoothed_mm": _float32(displacement_smoothed_mm),
-            "cumulative_distance_px": _float32(cumulative_px),
-            "cumulative_distance_mm": _float32(cumulative_mm),
+            "frame_path_distance_raw_px": _float32(frame_path_distance_raw_px),
+            "frame_path_distance_raw_mm": _float32(frame_path_distance_raw_mm),
+            "frame_path_distance_filtered_px": _float32(frame_path_distance_filtered_px),
+            "frame_path_distance_filtered_mm": _float32(frame_path_distance_filtered_mm),
+            "frame_path_distance_smoothed_px": _float32(frame_path_distance_smoothed_px),
+            "frame_path_distance_smoothed_mm": _float32(frame_path_distance_smoothed_mm),
+            "cumulative_path_distance_px": _float32(cumulative_path_px),
+            "cumulative_path_distance_mm": _float32(cumulative_path_mm),
             "second_indices": seconds_per_frame,
             "speed_per_second_px": _float32(speed_per_second_px),
             "speed_per_second_mm": _float32(speed_per_second_mm),
@@ -776,20 +776,38 @@ def build_track_datasets(
         median_speed_averaged_mm = median_speed_averaged_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(median_speed_averaged_px) else float("nan")
         max_speed_averaged_mm = max_speed_averaged_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(max_speed_averaged_px) else float("nan")
 
-        # Displacement totals for each processing level
-        total_displacement_raw_px = float(np.sum(displacement_raw_px)) if displacement_raw_px.size else 0.0
-        total_displacement_raw_mm = total_displacement_raw_px * pixel_to_mm_val if pixel_to_mm_val is not None else float("nan")
+        # Frame path-distance totals for each processing level.
+        total_path_distance_raw_px = (
+            float(np.sum(frame_path_distance_raw_px)) if frame_path_distance_raw_px.size else 0.0
+        )
+        total_path_distance_raw_mm = (
+            total_path_distance_raw_px * pixel_to_mm_val
+            if pixel_to_mm_val is not None
+            else float("nan")
+        )
 
-        total_displacement_filtered_px = float(np.sum(displacement_filtered_px)) if displacement_filtered_px.size else 0.0
-        total_displacement_filtered_mm = total_displacement_filtered_px * pixel_to_mm_val if pixel_to_mm_val is not None else float("nan")
+        total_path_distance_filtered_px = (
+            float(np.sum(frame_path_distance_filtered_px)) if frame_path_distance_filtered_px.size else 0.0
+        )
+        total_path_distance_filtered_mm = (
+            total_path_distance_filtered_px * pixel_to_mm_val
+            if pixel_to_mm_val is not None
+            else float("nan")
+        )
 
-        total_displacement_smoothed_px = float(np.sum(displacement_smoothed_px)) if displacement_smoothed_px.size else 0.0
-        total_displacement_smoothed_mm = total_displacement_smoothed_px * pixel_to_mm_val if pixel_to_mm_val is not None else float("nan")
+        total_path_distance_smoothed_px = (
+            float(np.sum(frame_path_distance_smoothed_px)) if frame_path_distance_smoothed_px.size else 0.0
+        )
+        total_path_distance_smoothed_mm = (
+            total_path_distance_smoothed_px * pixel_to_mm_val
+            if pixel_to_mm_val is not None
+            else float("nan")
+        )
 
-        # Cumulative distance (from smoothed displacement)
-        total_distance_px = float(cumulative_px[-1]) if cumulative_px.size else 0.0
+        # Cumulative path distance (from smoothed frame path-distance).
+        total_distance_px = float(cumulative_path_px[-1]) if cumulative_path_px.size else 0.0
         total_distance_mm = (
-            float(cumulative_mm[-1]) if cumulative_mm.size and pixel_to_mm_val is not None else float("nan")
+            float(cumulative_path_mm[-1]) if cumulative_path_mm.size and pixel_to_mm_val is not None else float("nan")
         )
 
         mean_speed_per_second_px = float(np.nanmean(speed_per_second_px)) if speed_per_second_px.size else float("nan")
@@ -848,14 +866,14 @@ def build_track_datasets(
             # Speed per second
             "mean_speed_per_second_px": mean_speed_per_second_px,
             "mean_speed_per_second_mm": mean_speed_per_second_mm,
-            # Displacement totals
-            "total_displacement_raw_px": total_displacement_raw_px,
-            "total_displacement_raw_mm": total_displacement_raw_mm,
-            "total_displacement_filtered_px": total_displacement_filtered_px,
-            "total_displacement_filtered_mm": total_displacement_filtered_mm,
-            "total_displacement_smoothed_px": total_displacement_smoothed_px,
-            "total_displacement_smoothed_mm": total_displacement_smoothed_mm,
-            # Cumulative distance
+            # Path-distance totals
+            "total_path_distance_raw_px": total_path_distance_raw_px,
+            "total_path_distance_raw_mm": total_path_distance_raw_mm,
+            "total_path_distance_filtered_px": total_path_distance_filtered_px,
+            "total_path_distance_filtered_mm": total_path_distance_filtered_mm,
+            "total_path_distance_smoothed_px": total_path_distance_smoothed_px,
+            "total_path_distance_smoothed_mm": total_path_distance_smoothed_mm,
+            # Cumulative path distance
             "total_distance_px": total_distance_px,
             "total_distance_mm": total_distance_mm,
             # Heading
@@ -934,14 +952,54 @@ def save_track_kinematics_tracks(
         subgroup.create_array("acceleration_mm", data=data["acceleration_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_acceleration_px", data=data["smoothed_acceleration_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_acceleration_mm", data=data["smoothed_acceleration_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("displacement_raw_px", data=data["displacement_raw_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("displacement_raw_mm", data=data["displacement_raw_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("displacement_filtered_px", data=data["displacement_filtered_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("displacement_filtered_mm", data=data["displacement_filtered_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("displacement_smoothed_px", data=data["displacement_smoothed_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("displacement_smoothed_mm", data=data["displacement_smoothed_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("cumulative_distance_px", data=data["cumulative_distance_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("cumulative_distance_mm", data=data["cumulative_distance_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array(
+            "frame_path_distance_raw_px",
+            data=data["frame_path_distance_raw_px"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "frame_path_distance_raw_mm",
+            data=data["frame_path_distance_raw_mm"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "frame_path_distance_filtered_px",
+            data=data["frame_path_distance_filtered_px"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "frame_path_distance_filtered_mm",
+            data=data["frame_path_distance_filtered_mm"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "frame_path_distance_smoothed_px",
+            data=data["frame_path_distance_smoothed_px"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "frame_path_distance_smoothed_mm",
+            data=data["frame_path_distance_smoothed_mm"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "cumulative_path_distance_px",
+            data=data["cumulative_path_distance_px"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "cumulative_path_distance_mm",
+            data=data["cumulative_path_distance_mm"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
 
         seconds = data["second_indices"]
         sec_chunk = (min(512, seconds.size),) if seconds.size else (1,)
@@ -1392,11 +1450,11 @@ def summarize_to_table(
     table.add_column("Mean filt mm/s", justify="right")
     table.add_column("Mean smooth mm/s", justify="right")
     table.add_column("Mean avg mm/s", justify="right")
-    # Displacement totals (mm)
-    table.add_column("Disp raw mm", justify="right")
-    table.add_column("Disp filt mm", justify="right")
-    table.add_column("Disp smooth mm", justify="right")
-    table.add_column("Cumul dist mm", justify="right")
+    # Path-distance totals (mm)
+    table.add_column("Path raw mm", justify="right")
+    table.add_column("Path filt mm", justify="right")
+    table.add_column("Path smooth mm", justify="right")
+    table.add_column("Cumul path mm", justify="right")
     # Other metrics
     table.add_column("Heading (deg)", justify="right")
     table.add_column("Head result", justify="right")
@@ -1404,9 +1462,9 @@ def summarize_to_table(
 
     total_px = 0.0
     total_mm = 0.0
-    total_disp_raw_mm = 0.0
-    total_disp_filt_mm = 0.0
-    total_disp_smooth_mm = 0.0
+    total_path_raw_mm = 0.0
+    total_path_filt_mm = 0.0
+    total_path_smooth_mm = 0.0
 
     for row in summaries:
         total_px += float(row.get("total_distance_px", 0.0))
@@ -1414,18 +1472,20 @@ def summarize_to_table(
         if not math.isnan(dist_mm):
             total_mm += float(dist_mm)
 
-        # Track displacement totals
-        for key, var in [("total_displacement_raw_mm", "total_disp_raw_mm"),
-                         ("total_displacement_filtered_mm", "total_disp_filt_mm"),
-                         ("total_displacement_smoothed_mm", "total_disp_smooth_mm")]:
+        # Track path-distance totals
+        for key, var in [
+            ("total_path_distance_raw_mm", "total_path_raw_mm"),
+            ("total_path_distance_filtered_mm", "total_path_filt_mm"),
+            ("total_path_distance_smoothed_mm", "total_path_smooth_mm"),
+        ]:
             val = row.get(key, float("nan"))
             if not math.isnan(val):
-                if var == "total_disp_raw_mm":
-                    total_disp_raw_mm += float(val)
-                elif var == "total_disp_filt_mm":
-                    total_disp_filt_mm += float(val)
-                elif var == "total_disp_smooth_mm":
-                    total_disp_smooth_mm += float(val)
+                if var == "total_path_raw_mm":
+                    total_path_raw_mm += float(val)
+                elif var == "total_path_filt_mm":
+                    total_path_filt_mm += float(val)
+                elif var == "total_path_smooth_mm":
+                    total_path_smooth_mm += float(val)
 
         table.add_row(
             str(int(row["track_id"])),
@@ -1434,9 +1494,9 @@ def summarize_to_table(
             f"{row['mean_speed_filtered_mm']:.2f}" if np.isfinite(row["mean_speed_filtered_mm"]) else "nan",
             f"{row['mean_speed_smoothed_mm']:.2f}" if np.isfinite(row["mean_speed_smoothed_mm"]) else "nan",
             f"{row['mean_speed_averaged_mm']:.2f}" if np.isfinite(row["mean_speed_averaged_mm"]) else "nan",
-            f"{row['total_displacement_raw_mm']:.2f}" if np.isfinite(row["total_displacement_raw_mm"]) else "nan",
-            f"{row['total_displacement_filtered_mm']:.2f}" if np.isfinite(row["total_displacement_filtered_mm"]) else "nan",
-            f"{row['total_displacement_smoothed_mm']:.2f}" if np.isfinite(row["total_displacement_smoothed_mm"]) else "nan",
+            f"{row['total_path_distance_raw_mm']:.2f}" if np.isfinite(row["total_path_distance_raw_mm"]) else "nan",
+            f"{row['total_path_distance_filtered_mm']:.2f}" if np.isfinite(row["total_path_distance_filtered_mm"]) else "nan",
+            f"{row['total_path_distance_smoothed_mm']:.2f}" if np.isfinite(row["total_path_distance_smoothed_mm"]) else "nan",
             f"{row['total_distance_mm']:.2f}" if np.isfinite(row["total_distance_mm"]) else "nan",
             f"{row['heading_mean_deg']:.2f}" if np.isfinite(row["heading_mean_deg"]) else "nan",
             f"{row['heading_resultant']:.2f}" if np.isfinite(row["heading_resultant"]) else "nan",
@@ -1446,9 +1506,9 @@ def summarize_to_table(
     console.print(table)
     if pixel_to_mm is not None:
         console.print(f"Total cumulative distance: {total_px:.2f} px ({total_mm:.2f} mm)")
-        console.print(f"Total displacement (raw): {total_disp_raw_mm:.2f} mm")
-        console.print(f"Total displacement (filtered): {total_disp_filt_mm:.2f} mm")
-        console.print(f"Total displacement (smoothed): {total_disp_smooth_mm:.2f} mm")
+        console.print(f"Total path distance (raw): {total_path_raw_mm:.2f} mm")
+        console.print(f"Total path distance (filtered): {total_path_filt_mm:.2f} mm")
+        console.print(f"Total path distance (smoothed): {total_path_smooth_mm:.2f} mm")
     else:
         console.print(f"Total cumulative distance: {total_px:.2f} px")
     return total_px, total_mm if pixel_to_mm is not None else float("nan")
@@ -1537,14 +1597,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--no-hysteresis",
         action="store_true",
-        help="Disable hysteresis filter in offline analysis (allow all sub-pixel displacements).",
+        help="Disable hysteresis filter in offline analysis (allow all sub-pixel frame path-distance increments).",
     )
     parser.add_argument(
         "--smoothing-method",
         type=str,
         choices=["moving_average", "savitzky_golay"],
         default="moving_average",
-        help="Smoothing method for displacement in offline analysis: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
+        help="Smoothing method for frame path-distance in offline analysis: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
     )
     parser.add_argument(
         "--savgol-polyorder",

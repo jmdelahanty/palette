@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report NaNs in smoothed_speed_mm for track kinematics runs."""
+"""Report NaNs in speed_smoothed_mm for track kinematics runs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import zarr
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check track kinematics run tracks for NaNs in smoothed_speed_mm."
+        description="Check track kinematics run tracks for NaNs in speed_smoothed_mm."
     )
     parser.add_argument("store", type=Path, help="Path to Palette Zarr store")
     parser.add_argument(
@@ -72,10 +72,10 @@ def inspect_run(group: zarr.Group) -> None:
         if not track_name.startswith("id_"):
             continue
         track = tracks[track_name]
-        if "smoothed_speed_mm" not in track:
-            print(f"{track_name}: smoothed_speed_mm missing")
+        if "speed_smoothed_mm" not in track:
+            print(f"{track_name}: speed_smoothed_mm missing")
             continue
-        values = np.asarray(track["smoothed_speed_mm"], dtype=np.float32)
+        values = np.asarray(track["speed_smoothed_mm"], dtype=np.float32)
         nan_mask = np.isnan(values)
         nan_count = int(nan_mask.sum())
         total = int(values.size)

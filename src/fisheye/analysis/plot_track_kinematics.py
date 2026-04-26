@@ -692,13 +692,8 @@ def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.
         "smoothed_heading_degrees",
         "smoothed_acceleration_px",
         "smoothed_acceleration_mm",
-        "cumulative_distance_px",
-        "cumulative_distance_mm",
-        # Legacy speed field names
-        "instantaneous_speed_px",
-        "instantaneous_speed_mm",
-        "smoothed_speed_px",
-        "smoothed_speed_mm",
+        "cumulative_path_distance_px",
+        "cumulative_path_distance_mm",
     )
     for name in track_arrays:
         if name in track_group:
@@ -747,7 +742,7 @@ def _build_track_interactive_spec(
     unit_label, _pos_x, _pos_y = pick_units(run_group, track_group)
     speed_unit_suffix = "_mm" if unit_label == "mm" else "_px"
     accel_path = "smoothed_acceleration_mm" if unit_label == "mm" else "smoothed_acceleration_px"
-    cumulative_path = "cumulative_distance_mm" if unit_label == "mm" else "cumulative_distance_px"
+    cumulative_path = "cumulative_path_distance_mm" if unit_label == "mm" else "cumulative_path_distance_px"
     position_path = "positions_mm" if unit_label == "mm" else "positions_px"
 
     speed_series = _compact_series(
@@ -756,8 +751,6 @@ def _build_track_interactive_spec(
             _series_spec("Filtered", f"speed_filtered{speed_unit_suffix}", source_paths, color="tab:green"),
             _series_spec("Smoothed", f"speed_smoothed{speed_unit_suffix}", source_paths, color="tab:blue"),
             _series_spec("Averaged", f"speed_averaged{speed_unit_suffix}", source_paths, color="tab:purple"),
-            _series_spec("Legacy raw", f"instantaneous_speed{speed_unit_suffix}", source_paths, color="tab:gray"),
-            _series_spec("Legacy smoothed", f"smoothed_speed{speed_unit_suffix}", source_paths, color="tab:blue"),
         ]
     )
     panels: list[dict[str, Any]] = [
@@ -788,12 +781,12 @@ def _build_track_interactive_spec(
             ),
         },
         {
-            "id": "cumulative_distance",
+            "id": "cumulative_path_distance",
             "kind": "timeseries",
             "x_path_key": "time_seconds",
-            "y_label": f"Cumulative distance ({unit_label})",
+            "y_label": f"Cumulative path distance ({unit_label})",
             "series": _compact_series(
-                [_series_spec("Cumulative distance", cumulative_path, source_paths, color="tab:green")]
+                [_series_spec("Cumulative path distance", cumulative_path, source_paths, color="tab:green")]
             ),
         },
         {
@@ -964,27 +957,14 @@ def plot_track(
 ) -> Optional[bytes]:
     time_seconds = track_group["time_seconds"][:]
 
-    # Load all speed levels (use new field names if available, fallback to old names for backward compatibility)
-    if "speed_raw_px" in track_group:
-        speed_raw_px = track_group["speed_raw_px"][:]
-        speed_raw_mm = track_group["speed_raw_mm"][:]
-        speed_filtered_px = track_group["speed_filtered_px"][:]
-        speed_filtered_mm = track_group["speed_filtered_mm"][:]
-        speed_smoothed_px = track_group["speed_smoothed_px"][:]
-        speed_smoothed_mm = track_group["speed_smoothed_mm"][:]
-        speed_averaged_px = track_group["speed_averaged_px"][:]
-        speed_averaged_mm = track_group["speed_averaged_mm"][:]
-    else:
-        # Fallback to old field names for backward compatibility
-        speed_raw_px = track_group["instantaneous_speed_px"][:]
-        speed_raw_mm = track_group["instantaneous_speed_mm"][:]
-        speed_smoothed_px = track_group["smoothed_speed_px"][:]
-        speed_smoothed_mm = track_group["smoothed_speed_mm"][:]
-        # Old archives don't have filtered/averaged
-        speed_filtered_px = None
-        speed_filtered_mm = None
-        speed_averaged_px = None
-        speed_averaged_mm = None
+    speed_raw_px = track_group["speed_raw_px"][:]
+    speed_raw_mm = track_group["speed_raw_mm"][:]
+    speed_filtered_px = track_group["speed_filtered_px"][:]
+    speed_filtered_mm = track_group["speed_filtered_mm"][:]
+    speed_smoothed_px = track_group["speed_smoothed_px"][:]
+    speed_smoothed_mm = track_group["speed_smoothed_mm"][:]
+    speed_averaged_px = track_group["speed_averaged_px"][:]
+    speed_averaged_mm = track_group["speed_averaged_mm"][:]
 
     smoothed_heading_deg = track_group["smoothed_heading_degrees"][:]
     smoothed_accel_px = track_group["smoothed_acceleration_px"][:]
@@ -994,15 +974,8 @@ def plot_track(
     speed_smoothed = speed_smoothed_mm if unit_label == "mm" and np.isfinite(speed_smoothed_mm).any() else speed_smoothed_px
     speed_raw = speed_raw_mm if unit_label == "mm" and np.isfinite(speed_raw_mm).any() else speed_raw_px
 
-    # Select filtered and averaged speeds if available
-    if speed_filtered_px is not None:
-        speed_filtered = speed_filtered_mm if unit_label == "mm" and np.isfinite(speed_filtered_mm).any() else speed_filtered_px
-    else:
-        speed_filtered = None
-    if speed_averaged_px is not None:
-        speed_averaged = speed_averaged_mm if unit_label == "mm" and np.isfinite(speed_averaged_mm).any() else speed_averaged_px
-    else:
-        speed_averaged = None
+    speed_filtered = speed_filtered_mm if unit_label == "mm" and np.isfinite(speed_filtered_mm).any() else speed_filtered_px
+    speed_averaged = speed_averaged_mm if unit_label == "mm" and np.isfinite(speed_averaged_mm).any() else speed_averaged_px
     speed_label = f"Speed ({unit_label}/s)" if unit_label in {"mm", "px"} else "Speed"
     accel = (
         smoothed_accel_mm
@@ -1110,18 +1083,18 @@ def plot_track(
     heading_ax.set_title("Heading over time (smoothed)")
     heading_ax.grid(alpha=0.3)
 
-    cumulative = track_group["cumulative_distance_mm"][:]
+    cumulative = track_group["cumulative_path_distance_mm"][:]
     if not (np.isfinite(cumulative).any() and unit_label == "mm"):
-        cumulative = track_group["cumulative_distance_px"][:]
-        cumulative_label = "Cumulative distance (px)"
+        cumulative = track_group["cumulative_path_distance_px"][:]
+        cumulative_label = "Cumulative path distance (px)"
     else:
-        cumulative_label = "Cumulative distance (mm)"
+        cumulative_label = "Cumulative path distance (mm)"
     cumulative_ax = axes[ax_idx]
     ax_idx += 1
     cumulative_ax.plot(time_seconds, cumulative, color="tab:green", linewidth=1.2)
     cumulative_ax.set_xlabel("Time (s)")
     cumulative_ax.set_ylabel(cumulative_label)
-    cumulative_ax.set_title("Cumulative distance over time")
+    cumulative_ax.set_title("Cumulative path distance over time")
     cumulative_ax.grid(alpha=0.3)
 
     # Filter out NaN positions for histogram

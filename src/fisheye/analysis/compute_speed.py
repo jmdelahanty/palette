@@ -15,13 +15,14 @@ Hysteresis Filtering
 By default, a hysteresis filter removes sub-pixel micro-jitter (detection noise) while
 preserving real swims. The filter uses a two-level threshold:
 
-- High threshold (default 2.0 px): displacement must exceed this to enter "moving" state
-- Low threshold (default 1.0 px): displacement must stay below this for N consecutive
+- High threshold (default 2.0 px): frame path-distance must exceed this to enter "moving" state
+- Low threshold (default 1.0 px): frame path-distance must stay below this for N consecutive
   frames to exit "moving" state
 - Min frames (default 3): consecutive frames below low threshold required to exit
 
-When not in "moving" state, displacements are zeroed and do not contribute to distance
-or speed metrics. This prevents noise accumulation without clipping real swims.
+When not in "moving" state, frame path-distance increments are zeroed and do not
+contribute to path-distance or speed metrics. This prevents noise accumulation
+without clipping real swims.
 
 To disable the filter, use ``--no-hysteresis``.
 """
@@ -44,14 +45,14 @@ from scipy.signal import savgol_filter
 @dataclass
 class TrackSpeeds:
     frames: np.ndarray
-    speed_raw: np.ndarray  # Instantaneous speed from raw displacement
-    speed_filtered: np.ndarray  # Instantaneous speed from hysteresis-filtered displacement
-    speed_smoothed: np.ndarray  # Instantaneous speed from temporally smoothed displacement
+    speed_raw: np.ndarray  # Speed from raw frame path-distance
+    speed_filtered: np.ndarray  # Speed from hysteresis-filtered frame path-distance
+    speed_smoothed: np.ndarray  # Speed from temporally smoothed frame path-distance
     speed_averaged: np.ndarray  # Further temporal averaging of speed
-    displacement_raw: np.ndarray  # Frame-to-frame displacement: validity filtering only
-    displacement_filtered: np.ndarray  # Frame-to-frame displacement: hysteresis applied
-    displacement_smoothed: np.ndarray  # Frame-to-frame displacement: temporal smoothing applied
-    cumulative_distance: np.ndarray
+    frame_path_distance_raw: np.ndarray  # Frame-to-frame path increment: validity filtering only
+    frame_path_distance_filtered: np.ndarray  # Frame-to-frame path increment: hysteresis applied
+    frame_path_distance_smoothed: np.ndarray  # Frame-to-frame path increment: temporal smoothing applied
+    cumulative_path_distance: np.ndarray
     seconds: np.ndarray
     speed_per_second: np.ndarray
 
@@ -323,9 +324,9 @@ def compute_track_speed(
     speed_raw = np.full(frames.shape[0], np.nan, dtype=np.float64)
     speed_filtered = np.full(frames.shape[0], np.nan, dtype=np.float64)
     speed_smoothed = np.full(frames.shape[0], np.nan, dtype=np.float64)
-    displacement_raw = np.zeros(frames.shape[0], dtype=np.float64)
-    displacement_filtered_data = np.zeros(frames.shape[0], dtype=np.float64)
-    displacement_smoothed = np.zeros(frames.shape[0], dtype=np.float64)
+    frame_path_distance_raw = np.zeros(frames.shape[0], dtype=np.float64)
+    frame_path_distance_filtered_data = np.zeros(frames.shape[0], dtype=np.float64)
+    frame_path_distance_smoothed = np.zeros(frames.shape[0], dtype=np.float64)
 
     distance_window_seconds = (
         distance_smooth_seconds if distance_smooth_seconds is not None else smooth_seconds
@@ -356,7 +357,7 @@ def compute_track_speed(
         displacement_pre_hysteresis = np.zeros_like(displacement)
         displacement_pre_hysteresis[valid] = displacement[valid]
 
-        # Save pre-hysteresis displacement as displacement_raw
+        # Save pre-hysteresis movement as frame_path_distance_raw
         displacement_post_hysteresis = displacement_pre_hysteresis.copy()
 
         # Apply hysteresis filter to remove micro-jitter (sub-pixel noise) while preserving real movement.
@@ -447,9 +448,9 @@ def compute_track_speed(
         speed_smoothed[1:] = smoothed_slice
 
         # Store displacement arrays
-        displacement_raw[1:] = displacement_pre_hysteresis
-        displacement_filtered_data[1:] = displacement_post_hysteresis
-        displacement_smoothed[1:] = displacement_post_smoothing
+        frame_path_distance_raw[1:] = displacement_pre_hysteresis
+        frame_path_distance_filtered_data[1:] = displacement_post_hysteresis
+        frame_path_distance_smoothed[1:] = displacement_post_smoothing
 
     if speed_window <= 1:
         speed_averaged = speed_smoothed.copy()
@@ -463,8 +464,8 @@ def compute_track_speed(
         valid_avg = count_values > 0
         speed_averaged[valid_avg] = sum_values[valid_avg] / count_values[valid_avg]
 
-    # Cumulative sum with NaN values already replaced with 0 in displacement_smoothed
-    cumulative_distance = np.cumsum(displacement_smoothed)
+    # Cumulative path distance with NaN values already replaced with 0.
+    cumulative_path_distance = np.cumsum(frame_path_distance_smoothed)
 
     delta_seconds_full = np.zeros(frames.shape[0], dtype=np.float64)
     if frames.size >= 2:
@@ -477,7 +478,7 @@ def compute_track_speed(
     for idx, second_value in enumerate(unique_seconds):
         mask = seconds == second_value
         time_sum = delta_seconds_full[mask].sum()
-        distance_sum = displacement_smoothed[mask].sum()
+        distance_sum = frame_path_distance_smoothed[mask].sum()
         if time_sum > 0:
             speed_per_second[idx] = distance_sum / time_sum
         else:
@@ -489,10 +490,10 @@ def compute_track_speed(
         speed_filtered=speed_filtered.astype(np.float32),
         speed_smoothed=speed_smoothed.astype(np.float32),
         speed_averaged=speed_averaged.astype(np.float32),
-        displacement_raw=displacement_raw.astype(np.float32),
-        displacement_filtered=displacement_filtered_data.astype(np.float32),
-        displacement_smoothed=displacement_smoothed.astype(np.float32),
-        cumulative_distance=cumulative_distance.astype(np.float32),
+        frame_path_distance_raw=frame_path_distance_raw.astype(np.float32),
+        frame_path_distance_filtered=frame_path_distance_filtered_data.astype(np.float32),
+        frame_path_distance_smoothed=frame_path_distance_smoothed.astype(np.float32),
+        cumulative_path_distance=cumulative_path_distance.astype(np.float32),
         seconds=unique_seconds.astype(np.int64),
         speed_per_second=speed_per_second.astype(np.float32),
     )
@@ -504,7 +505,11 @@ def summarize_tracks(tracks: Dict[int, TrackSpeeds]) -> List[Dict[str, float]]:
     for track_id, data in tracks.items():
         inst = data.speed_raw
         finite = inst[np.isfinite(inst)]
-        total_distance = float(data.cumulative_distance[-1]) if data.cumulative_distance.size else 0.0
+        total_distance = (
+            float(data.cumulative_path_distance[-1])
+            if data.cumulative_path_distance.size
+            else 0.0
+        )
         per_second = data.speed_per_second
         mean_speed_per_second = float(np.nanmean(per_second)) if per_second.size else float("nan")
         if finite.size == 0:
@@ -576,11 +581,26 @@ def save_tracks(
         sub.create_array("speed_filtered", data=data.speed_filtered, chunks=chunks, overwrite=True)
         sub.create_array("speed_smoothed", data=data.speed_smoothed, chunks=chunks, overwrite=True)
         sub.create_array("speed_averaged", data=data.speed_averaged, chunks=chunks, overwrite=True)
-        sub.create_array("displacement_raw", data=data.displacement_raw, chunks=chunks, overwrite=True)
-        sub.create_array("displacement_filtered", data=data.displacement_filtered, chunks=chunks, overwrite=True)
-        sub.create_array("displacement_smoothed", data=data.displacement_smoothed, chunks=chunks, overwrite=True)
         sub.create_array(
-            "cumulative_distance", data=data.cumulative_distance, chunks=chunks, overwrite=True
+            "frame_path_distance_raw",
+            data=data.frame_path_distance_raw,
+            chunks=chunks,
+            overwrite=True,
+        )
+        sub.create_array(
+            "frame_path_distance_filtered",
+            data=data.frame_path_distance_filtered,
+            chunks=chunks,
+            overwrite=True,
+        )
+        sub.create_array(
+            "frame_path_distance_smoothed",
+            data=data.frame_path_distance_smoothed,
+            chunks=chunks,
+            overwrite=True,
+        )
+        sub.create_array(
+            "cumulative_path_distance", data=data.cumulative_path_distance, chunks=chunks, overwrite=True
         )
         if data.seconds.size:
             seconds_chunks = (min(512, data.seconds.size),)
@@ -604,7 +624,11 @@ def save_tracks(
                 "mean_speed": float(finite.mean()) if finite.size else float("nan"),
                 "median_speed": float(np.median(finite)) if finite.size else float("nan"),
                 "max_speed": float(finite.max()) if finite.size else float("nan"),
-                "total_distance": float(data.cumulative_distance[-1]) if data.cumulative_distance.size else 0.0,
+                "total_distance": (
+                    float(data.cumulative_path_distance[-1])
+                    if data.cumulative_path_distance.size
+                    else 0.0
+                ),
                 "mean_speed_per_second": float(np.nanmean(data.speed_per_second)) if data.speed_per_second.size else float("nan"),
             }
 
@@ -672,14 +696,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--no-hysteresis",
         action="store_true",
-        help="Disable hysteresis filter (allow all sub-pixel displacements).",
+        help="Disable hysteresis filter (allow all sub-pixel frame path-distance increments).",
     )
     parser.add_argument(
         "--smoothing-method",
         type=str,
         choices=["moving_average", "savitzky_golay"],
         default="moving_average",
-        help="Smoothing method for displacement: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
+        help="Smoothing method for frame path-distance: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
     )
     parser.add_argument(
         "--savgol-polyorder",

@@ -47,6 +47,7 @@ def _():
         json,
         load_track_kinematics_interactive_data,
         mo,
+        np,
         px,
         time,
         to_position_dataframe,
@@ -153,6 +154,8 @@ def _(
 
 @app.cell
 def _(initial_run_path, mo, track_options):
+    preferred_default_run_name = "tk_hyst4_low2_s005"
+
     def _matches_initial_run(option):
         if initial_run_path is None:
             return False
@@ -162,7 +165,14 @@ def _(initial_run_path, mo, track_options):
     track_label_to_option = {option.label: option for option in track_options}
     _selected_default = next(
         (option.label for option in track_options if _matches_initial_run(option)),
-        track_options[0].label,
+        next(
+            (
+                option.label
+                for option in track_options
+                if option.run_name == preferred_default_run_name
+            ),
+            track_options[0].label,
+        ),
     )
     track_picker = mo.ui.dropdown(
         options=list(track_label_to_option),
@@ -335,20 +345,20 @@ def _(
 
 @app.cell
 def _(data, mo, timeseries_df):
-    numeric_columns = [
+    speed_columns = [
         column
         for column in timeseries_df.columns
-        if column not in {"time_s", "frame_index"} and timeseries_df[column].notna().any()
+        if "speed" in column.lower() and timeseries_df[column].notna().any()
     ]
-    default_columns = [
+    default_speed_columns = [
         column
-        for column in ("speed_smoothed_mm", "speed_smoothed_px", "smoothed_heading_degrees")
-        if column in numeric_columns
+        for column in ("speed_smoothed_mm", "speed_filtered_mm", "speed_raw_mm")
+        if column in speed_columns
     ]
-    series_picker = mo.ui.multiselect(
-        options=numeric_columns,
-        value=default_columns[:2] if default_columns else numeric_columns[:1],
-        label="Time-series traces",
+    speed_series_picker = mo.ui.multiselect(
+        options=speed_columns,
+        value=default_speed_columns[:2] if default_speed_columns else speed_columns[:1],
+        label="Speed traces",
     )
     max_time = float(timeseries_df["time_s"].max()) if len(timeseries_df) else 0.0
     time_window = mo.ui.range_slider(
@@ -362,8 +372,8 @@ def _(data, mo, timeseries_df):
         value=bool(data.swim_bout_label),
         label="Overlay swim bouts",
     )
-    mo.vstack([series_picker, time_window, show_swim_bouts])
-    return series_picker, show_swim_bouts, time_window
+    mo.vstack([speed_series_picker, time_window, show_swim_bouts])
+    return show_swim_bouts, speed_series_picker, time_window
 
 
 @app.cell
@@ -397,14 +407,39 @@ def _(
     filtered_swim_bout_df,
     filtered_timeseries_df,
     go,
-    series_picker,
+    np,
     show_swim_bouts,
+    speed_series_picker,
     time,
     write_perf_event,
 ):
     _figure_t0 = time.perf_counter()
     fig = go.Figure()
-    for column in series_picker.value:
+    swim_bout_overlay_renderer = "none"
+    if show_swim_bouts.value and len(filtered_swim_bout_df):
+        _starts = filtered_swim_bout_df["start_s"].to_numpy(dtype=float)
+        _ends = filtered_swim_bout_df["end_s"].to_numpy(dtype=float)
+        _widths = _ends - _starts
+        _valid = _widths > 0
+        if _valid.any():
+            _starts = _starts[_valid]
+            _widths = _widths[_valid]
+            _centers = _starts + (_widths / 2.0)
+            fig.add_trace(
+                go.Bar(
+                    x=_centers,
+                    y=np.ones_like(_centers),
+                    width=_widths,
+                    base=np.zeros_like(_centers),
+                    yaxis="y2",
+                    marker=dict(color="orange", line=dict(width=0)),
+                    opacity=0.18,
+                    hoverinfo="skip",
+                    name=f"Swim bouts: {data.swim_bout_label}",
+                )
+            )
+            swim_bout_overlay_renderer = "bar_trace"
+    for column in speed_series_picker.value:
         if column not in filtered_timeseries_df:
             continue
         fig.add_trace(
@@ -415,40 +450,31 @@ def _(
                 name=column,
             )
         )
-    if show_swim_bouts.value and len(filtered_swim_bout_df):
-        for bout in filtered_swim_bout_df.itertuples(index=False):
-            fig.add_vrect(
-                x0=float(bout.start_s),
-                x1=float(bout.end_s),
-                fillcolor="orange",
-                opacity=0.18,
-                layer="below",
-                line_width=0,
-            )
-        fig.add_trace(
-            go.Scatter(
-                x=[None],
-                y=[None],
-                mode="markers",
-                marker=dict(color="orange", opacity=0.35),
-                name=f"Swim bouts: {data.swim_bout_label}",
-            )
-        )
     fig.update_layout(
-        title="Selected Time-Series",
+        title="Speed Metrics with Swim Bout Overlay",
         xaxis_title="Time (s)",
-        yaxis_title="Value",
+        yaxis_title="Speed",
         hovermode="x unified",
         height=420,
         margin=dict(l=40, r=20, t=50, b=40),
+        barmode="overlay",
+        yaxis2=dict(
+            overlaying="y",
+            range=[0, 1],
+            visible=False,
+            fixedrange=True,
+        ),
     )
     write_perf_event(
         "build_timeseries_figure",
         time.perf_counter() - _figure_t0,
         run_path=data.run_path,
         n_rows=len(filtered_timeseries_df),
-        n_traces=len(series_picker.value),
+        n_traces=len(speed_series_picker.value),
+        n_rendered_traces=len(fig.data),
+        n_layout_shapes=len(fig.layout.shapes or []),
         n_visible_bouts=len(filtered_swim_bout_df),
+        swim_bout_overlay_renderer=swim_bout_overlay_renderer,
         show_swim_bouts=bool(show_swim_bouts.value),
     )
     fig

@@ -1188,12 +1188,16 @@ Consumers map from track-level `frame_indices` into these arrays using `camera_f
 Each track stores the ordered samples for that ID:
 - `frame_indices` (`int64`), `time_seconds` (`float32`), `detection_indices` (`int64`)
 - `positions_px`, `positions_mm` (`float32`, `[N, 2]`)
-- `instantaneous_speed_px`, `instantaneous_speed_mm`, `smoothed_speed_px`, `smoothed_speed_mm`
-- `instantaneous_speed_filtered_px`, `instantaneous_speed_filtered_mm` *(optional)*: Speeds using displacement pre-smoothing (saved in speed/movement runs)
+- `speed_raw_px`, `speed_raw_mm`: Gap-aware raw speed from validity-filtered frame path-distance increments
+- `speed_filtered_px`, `speed_filtered_mm`: Speed after hysteresis filtering
+- `speed_smoothed_px`, `speed_smoothed_mm`: Speed after temporal smoothing
+- `speed_averaged_px`, `speed_averaged_mm`: Optional longer-window averaged speed
 - `heading_degrees`, `heading_radians`, `delta_heading_degrees`, `angular_velocity_deg_s`, `smoothed_heading_degrees`, `smoothed_heading_radians`
 - `acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`, `smoothed_acceleration_mm`
-- `distance_per_frame_px`, `distance_per_frame_mm`, `cumulative_distance_px`, `cumulative_distance_mm`
-- `distance_per_frame_raw_px`, `distance_per_frame_raw_mm`: Pre-smoothing frame-to-frame displacement (pixels / converted millimeters)
+- `frame_path_distance_raw_px`, `frame_path_distance_raw_mm`: Gap-aware pre-hysteresis frame path-distance increments
+- `frame_path_distance_filtered_px`, `frame_path_distance_filtered_mm`: Gap-aware hysteresis-filtered frame path-distance increments
+- `frame_path_distance_smoothed_px`, `frame_path_distance_smoothed_mm`: Gap-aware temporally smoothed frame path-distance increments
+- `cumulative_path_distance_px`, `cumulative_path_distance_mm`: Cumulative gap-aware path distance
 - `second_indices`, `speed_per_second_px`, `speed_per_second_mm`, `heading_per_second_degrees`, `heading_per_second_resultant`
 - `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
 - `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `distance_px`, `distance_mm`, `mean_speed_mm_s`, `peak_speed_mm_s`, `start_x_px`, `end_x_px`, …) with subgroup attrs recording the source swim-bout run.

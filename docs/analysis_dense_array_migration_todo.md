@@ -43,8 +43,8 @@ Important caveat:
   valid positions inside a window, because that can count movement across
   missing-frame gaps
 - downstream distance summaries should consume dense versions of
-  `displacement_*` or `cumulative_distance_*`, or apply the same consecutive
-  frame rule as the source producer
+  `frame_path_distance_*` or `cumulative_path_distance_*`, or apply the same
+  consecutive frame rule as the source producer
 
 ## Proposed Change
 

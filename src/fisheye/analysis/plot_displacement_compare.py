@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Plot raw vs smoothed per-frame displacement (pixels & millimeters), plus the
-corresponding instantaneous speeds (raw vs displacement-smoothed and moving
-average) for a selected track.
+Plot raw vs smoothed per-frame path distance (pixels & millimeters), plus the
+corresponding speeds (raw, hysteresis-filtered, and smoothed) for a selected
+track.
 
 Usage:
-    python -m fisheye.analysis.plot_displacement_compare <archive.zarr> [--speed-run RUN] [--track-id ID]
+    scripts/py -m fisheye.analysis.plot_displacement_compare <archive.zarr> [--speed-run RUN] [--track-id ID]
 """
 
 from __future__ import annotations
@@ -169,15 +169,15 @@ def _resolve_track(run_group: zarr.Group, requested: Optional[int]) -> Tuple[zar
     return run_group[group_path], track_id
 
 
-def plot_displacement_and_speed(
+def plot_path_distance_and_speed(
     frame_indices: np.ndarray,
-    raw_displacement_px: np.ndarray,
-    smoothed_displacement_px: np.ndarray,
+    raw_path_distance_px: np.ndarray,
+    smoothed_path_distance_px: np.ndarray,
     speed_raw_px: np.ndarray,
     speed_filtered_px: Optional[np.ndarray],
     speed_smoothed_px: Optional[np.ndarray],
-    raw_displacement_mm: Optional[np.ndarray],
-    smoothed_displacement_mm: Optional[np.ndarray],
+    raw_path_distance_mm: Optional[np.ndarray],
+    smoothed_path_distance_mm: Optional[np.ndarray],
     speed_raw_mm: Optional[np.ndarray],
     speed_filtered_mm: Optional[np.ndarray],
     speed_smoothed_mm: Optional[np.ndarray],
@@ -194,8 +194,8 @@ def plot_displacement_and_speed(
         if end_frame is not None:
             mask &= frame_indices <= end_frame
         frame_indices = frame_indices[mask]
-        raw_displacement_px = raw_displacement_px[mask]
-        smoothed_displacement_px = smoothed_displacement_px[mask]
+        raw_path_distance_px = raw_path_distance_px[mask]
+        smoothed_path_distance_px = smoothed_path_distance_px[mask]
         speed_raw_px = speed_raw_px[mask]
         if speed_filtered_px is not None:
             speed_filtered_px = speed_filtered_px[mask]
@@ -207,15 +207,15 @@ def plot_displacement_and_speed(
                 return None
             return array[mask]
 
-        raw_displacement_mm = _mask_optional(raw_displacement_mm)
-        smoothed_displacement_mm = _mask_optional(smoothed_displacement_mm)
+        raw_path_distance_mm = _mask_optional(raw_path_distance_mm)
+        smoothed_path_distance_mm = _mask_optional(smoothed_path_distance_mm)
         speed_raw_mm = _mask_optional(speed_raw_mm)
         speed_filtered_mm = _mask_optional(speed_filtered_mm)
         speed_smoothed_mm = _mask_optional(speed_smoothed_mm)
 
     has_mm = (
-        raw_displacement_mm is not None
-        and smoothed_displacement_mm is not None
+        raw_path_distance_mm is not None
+        and smoothed_path_distance_mm is not None
         and speed_raw_mm is not None
     )
 
@@ -227,15 +227,15 @@ def plot_displacement_and_speed(
         fig, (ax_disp_px, ax_speed_px) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
         ax_disp_mm = ax_speed_mm = None
 
-    ax_disp_px.plot(frame_indices, raw_displacement_px, label="Raw displacement", color="tab:orange", alpha=0.7)
+    ax_disp_px.plot(frame_indices, raw_path_distance_px, label="Raw path distance", color="tab:orange", alpha=0.7)
     ax_disp_px.plot(
         frame_indices,
-        smoothed_displacement_px,
-        label="Smoothed displacement",
+        smoothed_path_distance_px,
+        label="Smoothed path distance",
         color="tab:blue",
         linewidth=1.3,
     )
-    ax_disp_px.set_ylabel("Displacement (px)")
+    ax_disp_px.set_ylabel("Path distance (px)")
     if has_mm:
         ax_disp_px.set_title(f"{title}\nPixel space")
     else:
@@ -246,7 +246,7 @@ def plot_displacement_and_speed(
     ax_speed_px.plot(
         frame_indices,
         speed_raw_px,
-        label="Instantaneous speed (raw)",
+        label="Raw speed",
         color="tab:red",
         alpha=0.6,
     )
@@ -254,7 +254,7 @@ def plot_displacement_and_speed(
         ax_speed_px.plot(
             frame_indices,
             speed_filtered_px,
-            label="Instantaneous speed (displacement-smoothed)",
+            label="Hysteresis-filtered speed",
             color="tab:green",
             linewidth=1.1,
         )
@@ -262,7 +262,7 @@ def plot_displacement_and_speed(
         ax_speed_px.plot(
             frame_indices,
             speed_smoothed_px,
-            label="Moving-average speed",
+            label="Smoothed speed",
             color="tab:purple",
             linewidth=1.2,
         )
@@ -274,19 +274,19 @@ def plot_displacement_and_speed(
     if has_mm and ax_disp_mm is not None and ax_speed_mm is not None:
         ax_disp_mm.plot(
             frame_indices,
-            raw_displacement_mm,
-            label="Raw displacement",
+            raw_path_distance_mm,
+            label="Raw path distance",
             color="tab:orange",
             alpha=0.7,
         )
         ax_disp_mm.plot(
             frame_indices,
-            smoothed_displacement_mm,
-            label="Smoothed displacement",
+            smoothed_path_distance_mm,
+            label="Smoothed path distance",
             color="tab:blue",
             linewidth=1.3,
         )
-        ax_disp_mm.set_ylabel("Displacement (mm)")
+        ax_disp_mm.set_ylabel("Path distance (mm)")
         ax_disp_mm.set_title("Millimeter space")
         ax_disp_mm.legend(loc="upper right")
         ax_disp_mm.grid(True, alpha=0.25)
@@ -294,7 +294,7 @@ def plot_displacement_and_speed(
         ax_speed_mm.plot(
             frame_indices,
             speed_raw_mm,
-            label="Instantaneous speed (raw)",
+            label="Raw speed",
             color="tab:red",
             alpha=0.6,
         )
@@ -302,7 +302,7 @@ def plot_displacement_and_speed(
             ax_speed_mm.plot(
                 frame_indices,
                 speed_filtered_mm,
-                label="Instantaneous speed (displacement-smoothed)",
+                label="Hysteresis-filtered speed",
                 color="tab:green",
                 linewidth=1.1,
             )
@@ -310,7 +310,7 @@ def plot_displacement_and_speed(
             ax_speed_mm.plot(
                 frame_indices,
                 speed_smoothed_mm,
-                label="Moving-average speed",
+                label="Smoothed speed",
                 color="tab:purple",
                 linewidth=1.2,
             )
@@ -330,7 +330,7 @@ def plot_displacement_and_speed(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot per-frame displacement before and after smoothing.")
+    parser = argparse.ArgumentParser(description="Plot per-frame path distance before and after smoothing.")
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
     parser.add_argument("--speed-run", help="Speed run name (defaults to latest).")
     parser.add_argument("--track-id", type=int, help="Track ID to plot (defaults to first in run).")
@@ -360,50 +360,50 @@ def main() -> None:
     track_group, track_id = _resolve_track(run_group, args.track_id)
 
     frame_indices = np.asarray(track_group["frame_indices"][:], dtype=np.int64)
-    smoothed = np.asarray(track_group["distance_per_frame"][:], dtype=np.float64)
-    if "distance_per_frame_raw" in track_group:
-        raw = np.asarray(track_group["distance_per_frame_raw"][:], dtype=np.float64)
+    smoothed = np.asarray(track_group["frame_path_distance_smoothed"][:], dtype=np.float64)
+    if "frame_path_distance_raw" in track_group:
+        raw = np.asarray(track_group["frame_path_distance_raw"][:], dtype=np.float64)
     else:
-        print("Warning: distance_per_frame_raw missing; falling back to smoothed values.")
+        print("Warning: frame_path_distance_raw missing; falling back to smoothed values.")
         raw = smoothed.copy()
 
     smoothed_mm = (
-        np.asarray(track_group["distance_per_frame_mm"][:], dtype=np.float64)
-        if "distance_per_frame_mm" in track_group
+        np.asarray(track_group["frame_path_distance_smoothed_mm"][:], dtype=np.float64)
+        if "frame_path_distance_smoothed_mm" in track_group
         else None
     )
     raw_mm = (
-        np.asarray(track_group["distance_per_frame_raw_mm"][:], dtype=np.float64)
-        if "distance_per_frame_raw_mm" in track_group
+        np.asarray(track_group["frame_path_distance_raw_mm"][:], dtype=np.float64)
+        if "frame_path_distance_raw_mm" in track_group
         else None
     )
     if smoothed_mm is not None and raw_mm is None:
         raw_mm = smoothed_mm.copy()
 
-    speed_raw = np.asarray(track_group["instantaneous_speed"][:], dtype=np.float64)
+    speed_raw = np.asarray(track_group["speed_raw"][:], dtype=np.float64)
     speed_filtered = (
-        np.asarray(track_group["instantaneous_speed_filtered"][:], dtype=np.float64)
-        if "instantaneous_speed_filtered" in track_group
+        np.asarray(track_group["speed_filtered"][:], dtype=np.float64)
+        if "speed_filtered" in track_group
         else None
     )
     speed_smoothed = (
-        np.asarray(track_group["smoothed_speed"][:], dtype=np.float64)
-        if "smoothed_speed" in track_group
+        np.asarray(track_group["speed_smoothed"][:], dtype=np.float64)
+        if "speed_smoothed" in track_group
         else None
     )
     speed_raw_mm = (
-        np.asarray(track_group["instantaneous_speed_mm"][:], dtype=np.float64)
-        if "instantaneous_speed_mm" in track_group
+        np.asarray(track_group["speed_raw_mm"][:], dtype=np.float64)
+        if "speed_raw_mm" in track_group
         else None
     )
     speed_filtered_mm = (
-        np.asarray(track_group["instantaneous_speed_filtered_mm"][:], dtype=np.float64)
-        if "instantaneous_speed_filtered_mm" in track_group
+        np.asarray(track_group["speed_filtered_mm"][:], dtype=np.float64)
+        if "speed_filtered_mm" in track_group
         else None
     )
     speed_smoothed_mm = (
-        np.asarray(track_group["smoothed_speed_mm"][:], dtype=np.float64)
-        if "smoothed_speed_mm" in track_group
+        np.asarray(track_group["speed_smoothed_mm"][:], dtype=np.float64)
+        if "speed_smoothed_mm" in track_group
         else None
     )
 
@@ -428,8 +428,8 @@ def main() -> None:
                 print("Info: Could not determine pixel-to-mm calibration; showing pixel plots only.")
             smoothed_mm = raw_mm = speed_raw_mm = speed_filtered_mm = speed_smoothed_mm = None
 
-    title = f"Displacement comparison — run {run_name}, track {track_id}"
-    plot_displacement_and_speed(
+    title = f"Path-distance comparison - run {run_name}, track {track_id}"
+    plot_path_distance_and_speed(
         frame_indices,
         raw,
         smoothed,
