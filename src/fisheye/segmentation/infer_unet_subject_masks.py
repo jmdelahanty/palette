@@ -370,6 +370,7 @@ def _write_subject_mask_outputs(
     mask_probs_chunk_rois: Optional[int],
     mask_probs_dtype: str,
     write_masks_roi: bool,
+    show_progress: bool,
     console: Console,
     timing_profiler: Optional[InferenceTimingProfiler],
 ) -> float:
@@ -425,6 +426,7 @@ def _write_subject_mask_outputs(
         BarColumn(),
         TimeRemainingColumn(),
         console=console,
+        disable=not show_progress,
     )
     task = progress.add_task("[cyan]Running inference[/cyan]", total=total_rois)
 
@@ -612,6 +614,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show the Rich progress bar during inference (default: true; use --no-progress for log-friendly runs).",
+    )
+    parser.add_argument(
         "--assignment-keypoint-group",
         choices=KEYPOINT_GROUP_CHOICES,
         help="Keypoint group to use later when splitting eyes_union into anatomical LR eyes.",
@@ -751,6 +759,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             mask_probs_chunk_rois=args.mask_probs_chunk_rois,
             mask_probs_dtype=str(args.mask_probs_dtype),
             write_masks_roi=bool(args.write_masks_roi),
+            show_progress=bool(args.progress),
             console=console,
             timing_profiler=timing_profiler,
         )
@@ -923,6 +932,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),
             "mask_probs_dtype": str(args.mask_probs_dtype),
             "write_masks_roi": bool(args.write_masks_roi),
+            "progress": bool(args.progress),
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),

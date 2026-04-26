@@ -182,6 +182,7 @@ def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:
         mask_probs_chunk_rois=1,
         mask_probs_dtype="uint8",
         write_masks_roi=False,
+        show_progress=False,
         console=mod.Console(),
         timing_profiler=None,
     )
@@ -262,6 +263,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         mask_probs_chunk_rois,
         mask_probs_dtype,
         write_masks_roi,
+        show_progress,
         console,
         timing_profiler,
     ) -> float:
@@ -270,6 +272,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         seen["mask_probs_chunk_rois"] = mask_probs_chunk_rois
         seen["mask_probs_dtype"] = mask_probs_dtype
         seen["write_masks_roi"] = write_masks_roi
+        seen["show_progress"] = show_progress
         batch = roi_source.read_slice(0, roi_source.total_rois)
         seen["batch_shape"] = batch.shape
         seen["roi_read_mode"] = roi_source.roi_read_mode
@@ -369,6 +372,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert seen["mask_probs_chunk_rois"] == 2
     assert seen["mask_probs_dtype"] == "uint8"
     assert seen["write_masks_roi"] is True
+    assert seen["show_progress"] is True
 
     assert run_group.attrs["source_crop_run"] == "crop_geometry"
     assert run_group.attrs["source_crop_storage_mode"] == "geometry_only"
@@ -459,10 +463,11 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         mask_probs_chunk_rois,
         mask_probs_dtype,
         write_masks_roi,
+        show_progress,
         console,
         timing_profiler,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, show_progress, console, timing_profiler
         seen["mask_labels"] = tuple(mask_labels)
         channel_count = len(mask_labels)
         run_group.create_array(
@@ -620,10 +625,12 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         mask_probs_chunk_rois,
         mask_probs_dtype,
         write_masks_roi,
+        show_progress,
         console,
         timing_profiler,
     ) -> float:
         del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, console, timing_profiler
+        seen["show_progress"] = show_progress
         channel_count = len(mask_labels)
         run_group.create_array(
             "masks_roi",
@@ -691,6 +698,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
             "dense_all_components",
             "--crop-run",
             "crop_geometry",
+            "--no-progress",
         ]
     )
 
@@ -699,6 +707,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
 
     assert seen["coverage_class"] == "dense_all_components"
     assert seen["checkpoint_path"] == checkpoint_path
+    assert seen["show_progress"] is False
     assert run_group.attrs["source_checkpoint"] == str(checkpoint_path)
     assert run_group.attrs["model_resolution_mode"] == "registry"
     assert run_group.attrs["model_resolution_task"] == "subject_masks"
