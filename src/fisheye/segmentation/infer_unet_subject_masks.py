@@ -734,22 +734,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--write-masks-roi",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "Materialize thresholded binary masks_roi alongside mask_probs_roi "
-            "(default: true; use --no-write-masks-roi for probability-only raw runs)."
+            "(default: false for probability-first raw runs; use --write-masks-roi for compatibility output)."
         ),
     )
     parser.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Show the Rich progress bar during inference (default: true; use --no-progress for log-friendly runs).",
+        default=False,
+        help="Show the Rich progress bar during inference (default: false for log-friendly runs).",
     )
     parser.add_argument(
         "--async-output",
-        action="store_true",
-        help="Overlap model inference with a bounded background writer for Zarr output and spatial metrics.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Overlap model inference with a bounded background writer for Zarr output and spatial metrics (default: true).",
     )
     parser.add_argument(
         "--output-queue-size",

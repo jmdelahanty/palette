@@ -341,8 +341,18 @@ for body, eyes, and swim bladder) or SAM (Segment Anything Model).
 # U-Net subject masks
 scripts/py -m fisheye.segmentation.infer_unet_subject_masks \
   path/to/zarr/..._analysis.zarr \
-  /path/to/subject_mask_checkpoint.pt \
-  --batch-size 256
+  --resolve-model-from-registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-coverage-class dense_all_components \
+  --model-component-coverage-key body+eyes+swim_bladder \
+  --model-label-schema-id subject_v1_union \
+  --crop-run <crop_run> \
+  --assignment-keypoint-group refined_keypoints_runs \
+  --assignment-keypoint-run <refined_keypoints_run> \
+  --device 0 \
+  --batch-size 128 \
+  --mask-probs-dtype uint8 \
+  --mask-probs-chunk-rois 32
 
 # SAM subject masks (batch)
 scripts/py -m fisheye.utils.run_sam_subject_masks_batch \
@@ -351,8 +361,15 @@ scripts/py -m fisheye.utils.run_sam_subject_masks_batch \
   --apply
 ```
 
-**What it writes:** `subject_mask_runs/{run_name}/` with multi-channel masks
-and per-frame metrics.
+**Recommended U-Net mode:** probability-first raw output. By default the U-Net
+path writes `mask_probs_roi`, component/row metadata, and metrics; it does not
+materialize the dense thresholded `masks_roi` cache. It also uses async output
+and no Rich progress repaint by default. Use `--write-masks-roi` for dense
+binary compatibility output, `--no-async-output` for serial writer debugging,
+and `--progress` for interactive terminal progress.
+
+**What it writes:** `subject_mask_runs/{run_name}/` with multi-channel
+probabilities and per-frame metrics.
 
 #### Swim bladder segmentation
 

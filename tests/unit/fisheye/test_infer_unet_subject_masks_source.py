@@ -347,11 +347,12 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         seen["roi_read_mode"] = roi_source.roi_read_mode
         seen["roi_cache_used"] = roi_source.roi_cache_used
         seen["roi_cache_path"] = roi_source.roi_cache_path
-        run_group.create_array(
-            "masks_roi",
-            data=np.zeros((roi_source.total_rois, 3, roi_source.roi_shape[0], roi_source.roi_shape[1]), dtype=np.uint8),
-            overwrite=True,
-        )
+        if write_masks_roi:
+            run_group.create_array(
+                "masks_roi",
+                data=np.zeros((roi_source.total_rois, 3, roi_source.roi_shape[0], roi_source.roi_shape[1]), dtype=np.uint8),
+                overwrite=True,
+            )
         run_group.create_array(
             "mask_probs_roi",
             data=np.zeros((roi_source.total_rois, 3, roi_source.roi_shape[0], roi_source.roi_shape[1]), dtype=np.float16),
@@ -440,10 +441,10 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert Path(str(seen["roi_cache_path"])).exists()
     assert seen["mask_probs_chunk_rois"] == 2
     assert seen["mask_probs_dtype"] == "uint8"
-    assert seen["write_masks_roi"] is True
-    assert seen["async_output"] is False
+    assert seen["write_masks_roi"] is False
+    assert seen["async_output"] is True
     assert seen["output_queue_size"] == 2
-    assert seen["show_progress"] is True
+    assert seen["show_progress"] is False
 
     assert run_group.attrs["source_crop_run"] == "crop_geometry"
     assert run_group.attrs["source_crop_storage_mode"] == "geometry_only"
@@ -476,7 +477,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert provenance_inputs["assignment_keypoint_group"] == "refined_keypoints_runs"
     assert provenance_inputs["assignment_keypoints_run"] == "refined_kp_001"
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)
-    assert run_group["masks_roi"].shape == (2, 3, 4, 4)
+    assert "masks_roi" not in run_group
 
 
 def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
@@ -600,7 +601,14 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         },
     )
 
-    mod.main([str(zarr_path), "--checkpoint", str(checkpoint_path), "--crop-run", "crop_geometry"])
+    mod.main([
+        str(zarr_path),
+        "--checkpoint",
+        str(checkpoint_path),
+        "--crop-run",
+        "crop_geometry",
+        "--write-masks-roi",
+    ])
 
     subject_parent = fake_root["subject_mask_runs"]
     latest = str(subject_parent.attrs["latest"])
