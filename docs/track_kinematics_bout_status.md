@@ -2,6 +2,8 @@
 
 Date anchored: 2026-03-06
 
+Last reviewed: 2026-04-26
+
 Purpose: document the current implementation status of track-level kinematics,
 distance/speed summaries, heading handling, and downstream swim-bout analysis so
 we can decide what to stabilize next.
@@ -30,11 +32,14 @@ But the implementation is not yet fully coherent:
 - speed and distance outputs are more standardized than downstream turning
   summaries
 - there are two parallel swim-bout paths with overlapping responsibilities
-- `track_kinematics` now materializes multiple tracks correctly, but downstream
-  consumers are still mostly oriented around the current single-subject-per-
-  arena workflow
+- `track_kinematics` now materializes multiple tracks correctly, but many
+  downstream consumers are still mostly oriented around the current
+  single-subject-per-arena workflow
 - swim-bout mirroring currently copies one bout run into every track subgroup
   without proving that the bout data is actually track-specific
+- `stimulus_response` expands sparse track data to dense arrays, but distance
+  summaries must preserve `track_kinematics` gap semantics rather than
+  recomputing displacement across missing-frame gaps
 
 So the stack is usable for current single-track use, but it should not be
 considered settled.
@@ -47,6 +52,37 @@ refactor:
 See:
 
 - [`pose_kinematics_run_design.md`](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)
+
+## 2026-04-26 Review Update
+
+The current design direction is sound:
+
+- `track_kinematics` should remain the canonical generic movement producer.
+- `detect_bouts_multi_level` should become the canonical per-track bout
+  segmentation producer.
+- `swim_bout_statistics` should become a downstream summary or aggregation
+  layer, not a second competing bout source of truth.
+- `stimulus_response` should consume movement, stimulus, bouts, and optional eye
+  angle or pose-derived metrics without redoing identity resolution.
+
+The highest-priority correctness issue is now downstream gap handling, not basic
+track materialization. `track_kinematics` deliberately treats non-consecutive
+frames conservatively when computing displacement and cumulative distance. Any
+consumer that expands sparse tracks to dense frame arrays must either consume
+those source displacement/cumulative-distance arrays or reproduce the same
+consecutive-frame rules. It should not compute distance by taking `np.diff(...)`
+across only the valid positions in a time window, because that can invent
+movement across gaps.
+
+The second-priority correctness issue remains swim-bout mirroring. Mirrored
+`swim_bouts/` groups inside a `track_kinematics` run should not be treated as
+authoritative unless the mirrored bout run proves both:
+
+- the same source `track_kinematics` run
+- the same destination `track_id`
+
+Until that is enforced, `analysis/swim_bout_runs/<run>/` should be treated as
+the canonical bout artifact.
 
 That proposal keeps `track_kinematics` as the generic motion producer and makes
 room for tail / fin / richer body geometry in a separate analysis layer.
@@ -324,24 +360,28 @@ important unresolved seams.
 
 The main unresolved issues are:
 
-1. `track_kinematics` has a real multi-track implementation bug.
+1. Stimulus-response distance summaries must preserve the gap-aware movement
+   semantics produced by `track_kinematics`.
 2. Bout analysis still exists in two partially overlapping paths.
 3. Mirrored bout data inside `track_kinematics` is not currently track-safe.
-4. The contract does not yet clearly separate:
+4. Downstream consumers are not yet fully standardized for multi-track use.
+5. The contract does not yet clearly separate:
    - canonical kinematic outputs
    - QC/debug variants
    - preferred downstream inputs for bout and stimulus-response analysis
 
 ## Recommended Fix Order
 
-### 1. Fix `build_track_datasets(...)`
+### 1. Preserve gap-aware distance in downstream consumers
 
-This is the highest-priority runtime fix.
+This is now the highest-priority runtime fix.
 
 Reason:
 
-- it is a correctness bug, not just a design preference
-- it affects any archive with more than one resolved track
+- `track_kinematics` already defines conservative distance semantics
+- downstream consumers should not invent distance through missing-frame gaps
+- stimulus-response summaries will otherwise disagree with the canonical
+  movement artifact
 
 ### 2. Stop treating mirrored swim-bout data as authoritative
 
@@ -388,10 +428,12 @@ But it is not yet stable enough to treat as finished architecture.
 
 The next work should not start by redesigning everything. It should:
 
-1. fix the multi-track bug in `track_kinematics`
+1. fix downstream distance handling so consumers preserve gap-aware movement
 2. stop or redesign unsafe bout mirroring
-3. add first-class turning metrics
+3. add first-class turning summaries for stimulus-response use
 4. collapse the two bout paths into a clearer producer/consumer split
+5. move future skeleton/body-specific metrics to `pose_kinematics_runs` or
+   shape-specific analysis layers rather than expanding `track_kinematics`
 
 ## Related Docs
 

@@ -2,6 +2,8 @@
 
 Date anchored: 2026-03-06
 
+Last reviewed: 2026-04-26
+
 Purpose: summarize the current state of Palette's analysis and post-detection
 workflows, identify which repository docs are current versus aspirational or
 stale, and recommend whether to overhaul `track_kinematics` or build a new
@@ -17,8 +19,9 @@ not yet a single unified workflow. The current state is:
 - `track_kinematics` is no longer the main architectural gap; it already
   supports separate `online` and `offline` outputs under
   `analysis/track_kinematics_runs/`.
-- The main missing piece is a canonical downstream consumer that unifies
-  stimulus-aware analyses across multiple stimulus types.
+- A canonical downstream consumer now exists in `stimulus_response`; the main
+  remaining work is hardening its movement-distance semantics, bout inputs, and
+  stimulus-specific adapters.
 
 Recommendation:
 
@@ -28,9 +31,9 @@ Recommendation:
 - Add a future skeleton-derived `pose_kinematics` layer for tail / fin / richer
   body geometry rather than expanding `track_kinematics` into a catch-all
   analysis stage.
-- Build a unified downstream analysis run on top of track kinematics +
-  optional pose kinematics + stimulus + bouts + optional eye angles, following
-  the `stimulus_response` design direction.
+- Continue hardening the unified `stimulus_response` analysis run on top of
+  track kinematics, optional pose kinematics, stimulus, bouts, and optional eye
+  angles.
 
 ## What Exists Today
 
@@ -79,6 +82,7 @@ Implemented downstream modules include:
 - [compute_chaser_fish_metrics.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/compute_chaser_fish_metrics.py)
 - [swim_bout_statistics.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/swim_bout_statistics.py)
 - [detect_bouts_multi_level.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/detect_bouts_multi_level.py)
+- [stimulus_response.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/stimulus_response.py)
 - [eye_angle_analysis.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/eye_angle_analysis.py)
 - [chaser_phase_analysis.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/chaser_phase_analysis.py)
 - [plot_track_kinematics.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/analysis/plot_track_kinematics.py)
@@ -245,18 +249,23 @@ The repository has the ingredients for multi-stimulus analysis:
 - a general stimulus-response storage design:
   [stimulus_response_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/stimulus_response_run_design.md)
 - a stimulus ingest path that writes `analysis/stimulus_runs`
+- an implemented `stimulus_response` module that consumes movement, stimulus,
+  optional bout runs, and stimulus-specific adapters
 
 ### What is missing
 
 The following gaps still block real multi-stimulus analysis:
 
-1. No implemented `stimulus_response` analysis module.
-2. No canonical loader that extracts protocol steps and step parameters once
+1. Stimulus-response distance summaries still need to preserve the gap-aware
+   distance semantics from `track_kinematics`.
+2. Bout inputs need a single canonical producer/consumer split, with
+   `detect_bouts_multi_level` preferred for per-track bout segmentation.
+3. No canonical loader that extracts protocol steps and step parameters once
    for all downstream consumers.
-3. No registry-backed protocol parameter tables yet.
-4. Reactive stimulus parameter logging is incomplete for future dynamic
+4. No registry-backed protocol parameter tables yet.
+5. Reactive stimulus parameter logging is incomplete for future dynamic
    analyses.
-5. Grating orientation / projector-camera transform semantics are not settled
+6. Grating orientation / projector-camera transform semantics are not settled
    enough for confident grating-response production analysis.
 
 ### Grating-specific blockers
@@ -303,13 +312,15 @@ Overhauling it now would likely mix three separate concerns:
 
 That is high churn for limited architectural payoff.
 
-### Better target: build the unified consumer layer
+### Better target: harden the unified consumer layer
 
 The stronger architectural move is:
 
 - keep `track_kinematics` producing identity-resolved tracks
-- keep `swim_bout_statistics` and `eye_angle_analysis` as specialized producers
-- add a new `stimulus_response` layer that consumes:
+- keep `eye_angle_analysis` as a specialized producer
+- make `detect_bouts_multi_level` the canonical per-track bout segmentation
+  producer and keep `swim_bout_statistics` as a summary/aggregation layer
+- harden the `stimulus_response` layer that consumes:
   - movement
   - stimulus
   - bouts
@@ -347,8 +358,8 @@ Lowest-risk options:
 3. Decide the first production stimulus-response target:
    - CHASER first for lowest implementation risk
    - MOVING_GRATING first only if acquisition semantics are closed
-4. Implement `stimulus_response` for one stimulus family plus base metrics for
-   all steps.
+4. Fix `stimulus_response` distance semantics so it consumes gap-aware
+   displacement/cumulative-distance data from `track_kinematics`.
 5. Expand with stimulus-specific adapters rather than rewriting the entire
    track kinematics stack.
 
@@ -366,8 +377,9 @@ Lowest-risk options:
 ## Bottom Line
 
 The repository is no longer missing "analysis workflows" in general. It already
-has a real analysis substrate. The missing piece is a unified, stimulus-aware
-consumer framework above that substrate.
+has a real analysis substrate and an implemented stimulus-aware consumer. The
+missing piece is now hardening that consumer so movement, bout, and
+stimulus-specific metrics all consume the same canonical source artifacts.
 
-The best next architectural move is to build that consumer layer, not to
+The best next architectural move is to fix those consumer contracts, not to
 rebuild `track_kinematics` from scratch.

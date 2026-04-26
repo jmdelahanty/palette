@@ -96,6 +96,18 @@ This makes step slicing positional (`array[start:end]`) and gap semantics
 explicit.  The upstream data is **not duplicated** into the stimulus_response
 zarr output.
 
+Implementation note, 2026-04-26:
+
+- dense movement arrays may use zeros or sentinel values for missing frames, but
+  distance summaries must not be recomputed by taking position differences
+  across only valid frames
+- `track_kinematics` is the source of truth for gap-aware displacement and
+  cumulative distance semantics
+- stimulus-response distance metrics should consume those displacement or
+  cumulative-distance arrays, or reproduce the same consecutive-frame rule
+- this avoids inventing movement across frame gaps when a sparse track has valid
+  samples before and after a missing interval
+
 ## Outputs
 
 ### Recording-wide

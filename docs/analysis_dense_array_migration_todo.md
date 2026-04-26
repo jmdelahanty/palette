@@ -1,5 +1,7 @@
 # Analysis Dense Array Migration TODO
 
+Last reviewed: 2026-04-26
+
 ## Problem
 
 Track kinematics (`src/fisheye/analysis/track_kinematics.py`) stores
@@ -32,6 +34,17 @@ valid[frame_indices] = True
 
 This is local to stimulus_response and works, but if additional consumers
 need dense frame-aligned data, the expansion will be duplicated.
+
+Important caveat:
+
+- dense expansion must preserve the gap-aware distance semantics produced by
+  `track_kinematics`
+- consumers should not compute distance by taking `np.diff(...)` across only
+  valid positions inside a window, because that can count movement across
+  missing-frame gaps
+- downstream distance summaries should consume dense versions of
+  `displacement_*` or `cumulative_distance_*`, or apply the same consecutive
+  frame rule as the source producer
 
 ## Proposed Change
 
@@ -71,7 +84,9 @@ This is acceptable for the recording sizes in this pipeline.
 ## When to Do This
 
 After stimulus_response Pass 1 is working and producing results. This is
-a quality-of-life improvement, not a blocker.
+primarily a source-of-truth cleanup rather than a blocker, but it becomes a
+correctness issue if more consumers independently expand sparse tracks and
+recompute distance.
 
 Trigger: when a second consumer needs dense frame-aligned data from
 track_kinematics, the duplication justifies fixing the source.
