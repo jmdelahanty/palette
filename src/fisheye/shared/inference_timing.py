@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
+from threading import Lock
 from typing import Any, Iterator, Sequence
 
 
@@ -20,19 +21,21 @@ class InferenceTimingProfiler:
         self._seconds: dict[str, float] = {}
         self._calls: dict[str, int] = {}
         self._items: dict[str, int] = {}
+        self._lock = Lock()
 
     def record(self, stage: str, seconds: float, *, items: int = 0) -> None:
         if not self.enabled:
             return
         name = str(stage)
-        if name not in self._seconds:
-            self._order.append(name)
-            self._seconds[name] = 0.0
-            self._calls[name] = 0
-            self._items[name] = 0
-        self._seconds[name] += float(max(0.0, seconds))
-        self._calls[name] += 1
-        self._items[name] += int(max(0, items))
+        with self._lock:
+            if name not in self._seconds:
+                self._order.append(name)
+                self._seconds[name] = 0.0
+                self._calls[name] = 0
+                self._items[name] = 0
+            self._seconds[name] += float(max(0.0, seconds))
+            self._calls[name] += 1
+            self._items[name] += int(max(0, items))
 
     @contextmanager
     def time(self, stage: str, *, items: int = 0) -> Iterator[None]:

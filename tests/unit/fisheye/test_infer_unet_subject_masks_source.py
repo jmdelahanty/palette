@@ -182,6 +182,8 @@ def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:
         mask_probs_chunk_rois=1,
         mask_probs_dtype="uint8",
         write_masks_roi=False,
+        async_output=False,
+        output_queue_size=2,
         show_progress=False,
         console=mod.Console(),
         timing_profiler=None,
@@ -204,6 +206,69 @@ def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:
         np.asarray(run_group["metrics"]["area_px"][:], dtype=np.float32),
         np.full((2, 3), 4.0, dtype=np.float32),
     )
+
+
+def test_write_subject_mask_outputs_async_matches_serial_outputs() -> None:
+    class _FakeCropSource:
+        total_rois = 3
+        roi_shape = (2, 2)
+        roi_array = _FakeArray(np.zeros((3, 2, 2), dtype=np.uint8), chunks=(1, 2, 2))
+
+        def read_slice(self, start: int, stop: int) -> np.ndarray:
+            return np.zeros((stop - start, 2, 2), dtype=np.uint8)
+
+    class _FakeModel(torch.nn.Module):
+        def forward(self, imgs: torch.Tensor) -> torch.Tensor:
+            batch, _channels, height, width = imgs.shape
+            return torch.full((batch, 3, height, width), 2.0, device=imgs.device, dtype=torch.float32)
+
+    serial_group = _FakeGroup()
+    async_group = _FakeGroup()
+    kwargs = {
+        "model": _FakeModel(),
+        "roi_source": _FakeCropSource(),
+        "batch_size": 1,
+        "device": torch.device("cpu"),
+        "mask_labels": ("subject_body", "eyes_union", "swim_bladder"),
+        "mask_probs_chunk_rois": 1,
+        "mask_probs_dtype": "uint8",
+        "write_masks_roi": False,
+        "show_progress": False,
+        "console": mod.Console(),
+        "timing_profiler": None,
+    }
+
+    mod._write_subject_mask_outputs(
+        serial_group,
+        async_output=False,
+        output_queue_size=2,
+        **kwargs,
+    )
+    mod._write_subject_mask_outputs(
+        async_group,
+        async_output=True,
+        output_queue_size=1,
+        **kwargs,
+    )
+
+    np.testing.assert_array_equal(
+        np.asarray(async_group["mask_probs_roi"][:]),
+        np.asarray(serial_group["mask_probs_roi"][:]),
+    )
+    for name in (
+        "prob_max",
+        "mask_present",
+        "area_px",
+        "centroid_xy",
+        "centroid_valid",
+        "bbox_xyxy",
+        "bbox_valid",
+    ):
+        np.testing.assert_array_equal(
+            np.asarray(async_group["metrics"][name][:]),
+            np.asarray(serial_group["metrics"][name][:]),
+        )
+    assert "masks_roi" not in async_group
 
 
 def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporary_cache(
@@ -263,6 +328,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         mask_probs_chunk_rois,
         mask_probs_dtype,
         write_masks_roi,
+        async_output,
+        output_queue_size,
         show_progress,
         console,
         timing_profiler,
@@ -272,6 +339,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         seen["mask_probs_chunk_rois"] = mask_probs_chunk_rois
         seen["mask_probs_dtype"] = mask_probs_dtype
         seen["write_masks_roi"] = write_masks_roi
+        seen["async_output"] = async_output
+        seen["output_queue_size"] = output_queue_size
         seen["show_progress"] = show_progress
         batch = roi_source.read_slice(0, roi_source.total_rois)
         seen["batch_shape"] = batch.shape
@@ -372,6 +441,8 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert seen["mask_probs_chunk_rois"] == 2
     assert seen["mask_probs_dtype"] == "uint8"
     assert seen["write_masks_roi"] is True
+    assert seen["async_output"] is False
+    assert seen["output_queue_size"] == 2
     assert seen["show_progress"] is True
 
     assert run_group.attrs["source_crop_run"] == "crop_geometry"
@@ -463,11 +534,13 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         mask_probs_chunk_rois,
         mask_probs_dtype,
         write_masks_roi,
+        async_output,
+        output_queue_size,
         show_progress,
         console,
         timing_profiler,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, show_progress, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, async_output, output_queue_size, show_progress, console, timing_profiler
         seen["mask_labels"] = tuple(mask_labels)
         channel_count = len(mask_labels)
         run_group.create_array(
@@ -625,11 +698,14 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         mask_probs_chunk_rois,
         mask_probs_dtype,
         write_masks_roi,
+        async_output,
+        output_queue_size,
         show_progress,
         console,
         timing_profiler,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, output_queue_size, console, timing_profiler
+        seen["async_output"] = async_output
         seen["show_progress"] = show_progress
         channel_count = len(mask_labels)
         run_group.create_array(
@@ -698,6 +774,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
             "dense_all_components",
             "--crop-run",
             "crop_geometry",
+            "--async-output",
             "--no-progress",
         ]
     )
@@ -707,6 +784,7 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
 
     assert seen["coverage_class"] == "dense_all_components"
     assert seen["checkpoint_path"] == checkpoint_path
+    assert seen["async_output"] is True
     assert seen["show_progress"] is False
     assert run_group.attrs["source_checkpoint"] == str(checkpoint_path)
     assert run_group.attrs["model_resolution_mode"] == "registry"

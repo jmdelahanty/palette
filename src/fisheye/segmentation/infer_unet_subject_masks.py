@@ -7,8 +7,11 @@ import json
 import sys
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from contextlib import nullcontext
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -45,6 +48,15 @@ _SUBJECT_MASKS_STATUS_SOURCE = "runtime_infer_unet_subject_masks"
 KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
 KEYPOINT_SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
 EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
+
+
+@dataclass(frozen=True)
+class _SubjectMaskOutputBatch:
+    start: int
+    stop: int
+    probs_out: np.ndarray
+    binary: np.ndarray
+    compact_metrics: dict[str, np.ndarray]
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -359,6 +371,53 @@ def _copy_detection_source_array(run_group: zarr.Group, crop_group: zarr.Group) 
     run_group.create_array(array_name, data=data, chunks=chunks, overwrite=True)
 
 
+def _write_subject_mask_output_batch(
+    batch: _SubjectMaskOutputBatch,
+    *,
+    probs_arr: zarr.Array,
+    masks_arr: Optional[zarr.Array],
+    prob_max: np.ndarray,
+    mask_present: np.ndarray,
+    area_px: np.ndarray,
+    centroid_xy: np.ndarray,
+    centroid_valid: np.ndarray,
+    bbox_xyxy: np.ndarray,
+    bbox_valid: np.ndarray,
+    n_channels: int,
+    progress: Progress,
+    task: int,
+    profiler: InferenceTimingProfiler,
+) -> None:
+    start = int(batch.start)
+    stop = int(batch.stop)
+    batch_count = max(0, stop - start)
+
+    with profiler.time("output_write_probs", items=batch_count):
+        probs_arr[start:stop] = batch.probs_out
+    if masks_arr is not None:
+        with profiler.time("output_write_binary", items=batch_count):
+            masks_arr[start:stop] = batch.binary
+
+    with profiler.time("metric_compute", items=batch_count):
+        prob_max[start:stop, :] = batch.compact_metrics["prob_max"]
+        mask_present[start:stop, :] = batch.compact_metrics["mask_present"]
+        area_px[start:stop, :] = batch.compact_metrics["area_px"]
+        for channel_idx in range(n_channels):
+            channel_metrics = _compute_channel_spatial_metrics(batch.binary[:, channel_idx])
+            centroid_xy[start:stop, channel_idx, :] = channel_metrics["centroid_xy"]
+            centroid_valid[start:stop, channel_idx] = channel_metrics["centroid_valid"]
+            bbox_xyxy[start:stop, channel_idx, :] = channel_metrics["bbox_xyxy"]
+            bbox_valid[start:stop, channel_idx] = channel_metrics["bbox_valid"]
+
+    with profiler.time("progress_update", items=batch_count):
+        progress.advance(task, batch_count)
+
+
+def _raise_async_writer_error(errors: Sequence[BaseException]) -> None:
+    if errors:
+        raise RuntimeError("Async subject-mask output writer failed.") from errors[0]
+
+
 def _write_subject_mask_outputs(
     run_group: zarr.Group,
     model: UNetSmall,
@@ -370,6 +429,8 @@ def _write_subject_mask_outputs(
     mask_probs_chunk_rois: Optional[int],
     mask_probs_dtype: str,
     write_masks_roi: bool,
+    async_output: bool,
+    output_queue_size: int,
     show_progress: bool,
     console: Console,
     timing_profiler: Optional[InferenceTimingProfiler],
@@ -436,81 +497,147 @@ def _write_subject_mask_outputs(
             with profiler.time(stage, items=items):
                 torch.cuda.synchronize(device)
 
+    output_queue: Optional[Queue[object]] = None
+    output_worker: Optional[Thread] = None
+    output_sentinel = object()
+    output_errors: list[BaseException] = []
+    if async_output:
+        output_queue = Queue(maxsize=max(1, int(output_queue_size)))
+
+        def _output_worker() -> None:
+            failed = False
+            while True:
+                item = output_queue.get()
+                try:
+                    if item is output_sentinel:
+                        return
+                    if failed:
+                        continue
+                    assert isinstance(item, _SubjectMaskOutputBatch)
+                    _write_subject_mask_output_batch(
+                        item,
+                        probs_arr=probs_arr,
+                        masks_arr=masks_arr,
+                        prob_max=prob_max,
+                        mask_present=mask_present,
+                        area_px=area_px,
+                        centroid_xy=centroid_xy,
+                        centroid_valid=centroid_valid,
+                        bbox_xyxy=bbox_xyxy,
+                        bbox_valid=bbox_valid,
+                        n_channels=n_channels,
+                        progress=progress,
+                        task=task,
+                        profiler=profiler,
+                    )
+                except BaseException as exc:  # pragma: no cover - exercised through caller failure
+                    output_errors.append(exc)
+                    failed = True
+                finally:
+                    output_queue.task_done()
+
+        output_worker = Thread(
+            target=_output_worker,
+            name="subject-mask-output-writer",
+            daemon=True,
+        )
+
     stage_start = time.perf_counter()
     profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
     with progress, torch.no_grad():
-        for start in range(0, total_rois, batch_size):
-            stop = min(start + batch_size, total_rois)
-            batch_count = stop - start
+        if output_worker is not None:
+            output_worker.start()
+        try:
+            for start in range(0, total_rois, batch_size):
+                stop = min(start + batch_size, total_rois)
+                batch_count = stop - start
 
-            with profiler.time("roi_read", items=batch_count):
-                roi_np = roi_source.read_slice(start, stop)
+                _raise_async_writer_error(output_errors)
+                with profiler.time("roi_read", items=batch_count):
+                    roi_np = roi_source.read_slice(start, stop)
 
-            _sync_cuda("sync_before_h2d", items=batch_count)
-            with profiler.time("h2d_copy", items=batch_count):
-                imgs = torch.from_numpy(roi_np).to(device, non_blocking=True)
-            _sync_cuda("sync_after_h2d", items=batch_count)
-            with profiler.time("input_normalize", items=batch_count):
-                imgs = _normalise_roi_tensor(imgs)
-            _sync_cuda("sync_after_normalize", items=batch_count)
+                _sync_cuda("sync_before_h2d", items=batch_count)
+                with profiler.time("h2d_copy", items=batch_count):
+                    imgs = torch.from_numpy(roi_np).to(device, non_blocking=True)
+                _sync_cuda("sync_after_h2d", items=batch_count)
+                with profiler.time("input_normalize", items=batch_count):
+                    imgs = _normalise_roi_tensor(imgs)
+                _sync_cuda("sync_after_normalize", items=batch_count)
 
-            amp_module = getattr(torch, "amp", None)
-            if device.type == "cuda" and amp_module is not None and hasattr(amp_module, "autocast"):
-                autocast_cm = amp_module.autocast("cuda")
-            elif device.type == "cuda" and hasattr(torch.cuda, "amp"):
-                autocast_cm = torch.cuda.amp.autocast()
-            else:
-                autocast_cm = nullcontext()
-
-            _sync_cuda("sync_before_forward", items=batch_count)
-            with profiler.time("model_forward", items=batch_count):
-                with autocast_cm:
-                    logits = model(imgs)
-            _sync_cuda("sync_after_forward", items=batch_count)
-
-            _sync_cuda("sync_before_d2h", items=batch_count)
-            with profiler.time("d2h_copy", items=batch_count):
-                probs_out, binary, compact_metrics = _postprocess_logits_on_device(
-                    logits,
-                    mask_probs_dtype=mask_probs_dtype,
-                )
-            _sync_cuda("sync_after_d2h", items=batch_count)
-
-            if probs_out.ndim == 3:
-                probs_out = probs_out[:, None, :, :]
-            if binary.ndim == 3:
-                binary = binary[:, None, :, :]
-            if probs_out.shape[1] != n_channels:
-                raise ValueError(
-                    f"Checkpoint/model produced {probs_out.shape[1]} channels but expected {n_channels}."
-                )
-
-            with profiler.time("output_postprocess", items=batch_count):
-                if mask_probs_dtype == "uint8":
-                    probs_out = probs_out.astype(np.uint8, copy=False)
+                amp_module = getattr(torch, "amp", None)
+                if device.type == "cuda" and amp_module is not None and hasattr(amp_module, "autocast"):
+                    autocast_cm = amp_module.autocast("cuda")
+                elif device.type == "cuda" and hasattr(torch.cuda, "amp"):
+                    autocast_cm = torch.cuda.amp.autocast()
                 else:
-                    probs_out = probs_out.astype(np.float16, copy=False)
-                binary = binary.astype(np.uint8, copy=False)
+                    autocast_cm = nullcontext()
 
-            with profiler.time("output_write_probs", items=batch_count):
-                probs_arr[start:stop] = probs_out
-            if masks_arr is not None:
-                with profiler.time("output_write_binary", items=batch_count):
-                    masks_arr[start:stop] = binary
+                _sync_cuda("sync_before_forward", items=batch_count)
+                with profiler.time("model_forward", items=batch_count):
+                    with autocast_cm:
+                        logits = model(imgs)
+                _sync_cuda("sync_after_forward", items=batch_count)
 
-            with profiler.time("metric_compute", items=batch_count):
-                prob_max[start:stop, :] = compact_metrics["prob_max"]
-                mask_present[start:stop, :] = compact_metrics["mask_present"]
-                area_px[start:stop, :] = compact_metrics["area_px"]
-                for channel_idx in range(n_channels):
-                    channel_metrics = _compute_channel_spatial_metrics(binary[:, channel_idx])
-                    centroid_xy[start:stop, channel_idx, :] = channel_metrics["centroid_xy"]
-                    centroid_valid[start:stop, channel_idx] = channel_metrics["centroid_valid"]
-                    bbox_xyxy[start:stop, channel_idx, :] = channel_metrics["bbox_xyxy"]
-                    bbox_valid[start:stop, channel_idx] = channel_metrics["bbox_valid"]
+                _sync_cuda("sync_before_d2h", items=batch_count)
+                with profiler.time("d2h_copy", items=batch_count):
+                    probs_out, binary, compact_metrics = _postprocess_logits_on_device(
+                        logits,
+                        mask_probs_dtype=mask_probs_dtype,
+                    )
+                _sync_cuda("sync_after_d2h", items=batch_count)
 
-            with profiler.time("progress_update", items=batch_count):
-                progress.advance(task, batch_count)
+                if probs_out.ndim == 3:
+                    probs_out = probs_out[:, None, :, :]
+                if binary.ndim == 3:
+                    binary = binary[:, None, :, :]
+                if probs_out.shape[1] != n_channels:
+                    raise ValueError(
+                        f"Checkpoint/model produced {probs_out.shape[1]} channels but expected {n_channels}."
+                    )
+
+                with profiler.time("output_postprocess", items=batch_count):
+                    if mask_probs_dtype == "uint8":
+                        probs_out = probs_out.astype(np.uint8, copy=False)
+                    else:
+                        probs_out = probs_out.astype(np.float16, copy=False)
+                    binary = binary.astype(np.uint8, copy=False)
+
+                output_batch = _SubjectMaskOutputBatch(
+                    start=start,
+                    stop=stop,
+                    probs_out=probs_out,
+                    binary=binary,
+                    compact_metrics=compact_metrics,
+                )
+                if output_queue is None:
+                    _write_subject_mask_output_batch(
+                        output_batch,
+                        probs_arr=probs_arr,
+                        masks_arr=masks_arr,
+                        prob_max=prob_max,
+                        mask_present=mask_present,
+                        area_px=area_px,
+                        centroid_xy=centroid_xy,
+                        centroid_valid=centroid_valid,
+                        bbox_xyxy=bbox_xyxy,
+                        bbox_valid=bbox_valid,
+                        n_channels=n_channels,
+                        progress=progress,
+                        task=task,
+                        profiler=profiler,
+                    )
+                else:
+                    _raise_async_writer_error(output_errors)
+                    with profiler.time("output_queue_put", items=batch_count):
+                        output_queue.put(output_batch)
+        finally:
+            if output_queue is not None:
+                with profiler.time("output_queue_drain", items=total_rois):
+                    output_queue.put(output_sentinel)
+                    output_queue.join()
+            if output_worker is not None:
+                output_worker.join()
+        _raise_async_writer_error(output_errors)
 
     metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, n_channels), overwrite=True)
     metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, n_channels), overwrite=True)
@@ -618,6 +745,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Show the Rich progress bar during inference (default: true; use --no-progress for log-friendly runs).",
+    )
+    parser.add_argument(
+        "--async-output",
+        action="store_true",
+        help="Overlap model inference with a bounded background writer for Zarr output and spatial metrics.",
+    )
+    parser.add_argument(
+        "--output-queue-size",
+        type=int,
+        default=2,
+        help="Maximum number of dense output batches buffered by --async-output (default: 2).",
     )
     parser.add_argument(
         "--assignment-keypoint-group",
@@ -759,6 +897,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             mask_probs_chunk_rois=args.mask_probs_chunk_rois,
             mask_probs_dtype=str(args.mask_probs_dtype),
             write_masks_roi=bool(args.write_masks_roi),
+            async_output=bool(args.async_output),
+            output_queue_size=int(args.output_queue_size),
             show_progress=bool(args.progress),
             console=console,
             timing_profiler=timing_profiler,
@@ -802,6 +942,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
             "inference_device": str(device),
             "inference_batch_size": int(args.batch_size),
+            "async_output": bool(args.async_output),
+            "output_queue_size": int(args.output_queue_size),
             "duration_seconds": float(duration),
             "inference_duration_seconds": float(duration),
             "profile_timings_enabled": bool(args.profile_timings),
@@ -881,6 +1023,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "d2h_copy includes sigmoid + clamp + dtype conversion + transfer back to CPU/NumPy.",
                 "output_write_probs measures dense probability Zarr writes; output_write_binary is present only when masks_roi is materialized.",
                 "metric_compute covers per-channel metric derivation before metric-array writes.",
+                "output_queue_put and output_queue_drain appear when --async-output overlaps inference with background output writes.",
             ],
         )
 
@@ -932,6 +1075,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),
             "mask_probs_dtype": str(args.mask_probs_dtype),
             "write_masks_roi": bool(args.write_masks_roi),
+            "async_output": bool(args.async_output),
+            "output_queue_size": int(args.output_queue_size),
             "progress": bool(args.progress),
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
