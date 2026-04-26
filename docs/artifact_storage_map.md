@@ -9,6 +9,8 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - **Profile/refinement visual artifacts** are written **inside zarr** under
   `visualizations/<artifact_name>`.
 - Some tools export zarr-stored PNG artifacts back out to filesystem paths for viewing.
+- Static plot snapshots and future interactive plot specs should follow
+  `docs/plot_visualization_artifact_contract.md`.
 
 ## Storage Matrix
 
@@ -26,6 +28,8 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 | Eye-mask profile overview PNG | `analysis/eye_mask_profile_runs/<run>/visualizations/eye_mask_profile_overview_png` | yes | `fisheye.utils.finalize_eye_mask_profile_artifacts` |
 | Refined detect quality PNGs | `refined_detect_runs/<run>/visualizations/{detect_quality_overview_png,refinement_pipeline_overview_png}` | yes | `fisheye.utils.finalize_refinement_artifacts` |
 | Refined keypoint quality PNGs | `refined_keypoints_runs/<run>/visualizations/{keypoint_quality_overview_png,keypoint_refinement_pipeline_overview_png}` | yes | `fisheye.utils.finalize_keypoint_refinement_artifacts` |
+| Analysis plot PNG snapshots | `analysis/<stage>_runs/<run>/visualizations/<artifact>_png` | yes | stage-specific plot/finalize helpers using `fisheye.shared.plot_artifacts` |
+| Interactive plot specs | `analysis/<stage>_runs/<run>/visualizations/<artifact>/spec_json` | yes | stage-specific plot/finalize helpers using `fisheye.shared.plot_artifacts` |
 | Source-profile HTML thumbnail cache | `<output_html_stem>.artifacts/*.png` | no | `fisheye.utils.index_source_recording_profiles --include-artifacts` |
 | Training-card HTML index | `<datasets_root>/_index/training_data_cards_index.html` | no | `fisheye.utils.index_training_data_cards` |
 
@@ -53,10 +57,14 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - For eye-mask profile finalize flow, the same `--apply` rule applies, and review-state /
   intended-use filters may also exclude a run from artifact generation.
 - Export/view helpers for zarr-stored artifacts:
+  - generic visualization artifact viewer: `fisheye.utils.view_zarr_visualization`
   - detect: `fisheye.utils.export_detect_quality_overview`
   - keypoint: `fisheye.utils.export_keypoint_quality_overview`
   - eye-mask profile: `fisheye.utils.export_eye_mask_quality_overview`
 - Training card plots can be disabled via `--no-plots` (`--data-card-no-plots` in pipeline wrappers).
+- Rendered PNGs are review snapshots. Interactive plots should be represented by
+  lightweight specs pointing back to source arrays, not by full HTML documents
+  or decoded RGB image arrays in zarr.
 
 ## Why A Profile May Have No Visible PNG Artifacts
 

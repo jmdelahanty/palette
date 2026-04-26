@@ -70,12 +70,12 @@ def _resolve_field(names: Sequence[str], candidates: Sequence[str], *, required:
 
 
 def _pick_chunks(shape: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
-    """Choose a reasonable chunk layout for storing data; returns None for empty arrays."""
+    """Choose a reasonable chunk layout for storing data."""
 
     if len(shape) == 0:
         return None
     if shape[0] == 0:
-        return None
+        return (1,) + shape[1:]
     if len(shape) == 1:
         return (min(4096, shape[0]),)
     first_dim = min(1024, shape[0])

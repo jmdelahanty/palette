@@ -3,6 +3,7 @@ import zarr
 
 from fisheye.analysis.chaser_state_interpolator import (
     load_structured_dataset,
+    pick_chunks,
     write_columnar_dataset,
 )
 
@@ -36,3 +37,30 @@ def test_write_columnar_dataset_roundtrip(tmp_path):
     np.testing.assert_array_equal(loaded["timestamp_ns"], data["timestamp_ns"])
     assert loaded_attrs["original_records"] == 4
     assert loaded_attrs["total_records"] == 4
+
+
+def test_pick_chunks_returns_positive_chunks_for_empty_arrays():
+    assert pick_chunks(()) is None
+    assert pick_chunks((0,)) == (1,)
+    assert pick_chunks((0, 2)) == (1, 2)
+
+
+def test_write_columnar_dataset_empty_roundtrip(tmp_path):
+    zarr_path = tmp_path / "empty_roundtrip.zarr"
+    root = zarr.open(str(zarr_path), mode="w")
+    group = root.create_group("analysis")
+    dtype = np.dtype(
+        [
+            ("bout_id", np.int32),
+            ("start_time_s", np.float64),
+            ("point_type", "S5"),
+        ]
+    )
+    data = np.zeros(0, dtype=dtype)
+
+    write_columnar_dataset(group, "empty_bouts", data, {"n_bouts": 0})
+    loaded, loaded_attrs = load_structured_dataset(group, "empty_bouts")
+
+    assert loaded.shape == (0,)
+    assert loaded.dtype == dtype
+    assert loaded_attrs["n_bouts"] == 0

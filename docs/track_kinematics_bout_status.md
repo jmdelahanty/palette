@@ -157,6 +157,73 @@ But it also means:
 - the stack is not modeling missing-frame motion
 - gap-heavy tracks will systematically undercount movement
 
+### Tuning Hysteresis and Bout Segmentation
+
+For bout tuning, treat `track_kinematics` parameters and swim-bout segmentation
+parameters as separate candidate runs:
+
+- `track_kinematics` controls the source speed traces, including hysteresis
+  thresholds and smoothing window.
+- `detect_bouts_multi_level` consumes those traces and writes bout intervals for
+  `speed_raw`, `speed_filtered`, `speed_smoothed`, and `speed_averaged`.
+- the swim-bout run's `default_level` declares which speed subgroup downstream
+  consumers should use when they do not explicitly request a level.
+
+For recordings where the smoothed trace over-broadens bouts, prefer detecting
+and displaying bouts from `speed_filtered`:
+
+```bash
+scripts/py -m fisheye.analysis.track_kinematics <archive.zarr> \
+  --offline-only \
+  --hysteresis-high-px 8 \
+  --hysteresis-low-px 4 \
+  --hysteresis-min-frames 3 \
+  --smooth-seconds 0.10 \
+  --offline-run-name tk_hyst8_low4_s010
+
+scripts/py -m fisheye.analysis.detect_bouts_multi_level <archive.zarr> \
+  --track-kinematics-run tk_hyst8_low4_s010 \
+  --run-name bouts_tk_hyst8_low4_s010_filtered \
+  --threshold-mm 2.0 \
+  --default-level filtered
+```
+
+For iterative tuning, create one named pair of runs per candidate rather than
+rewriting one run in place. A practical first sweep is:
+
+```text
+hysteresis_high_px=4, hysteresis_low_px=2, smooth_seconds=0.05
+hysteresis_high_px=6, hysteresis_low_px=3, smooth_seconds=0.05
+hysteresis_high_px=8, hysteresis_low_px=4, smooth_seconds=0.05
+hysteresis_high_px=8, hysteresis_low_px=2, smooth_seconds=0.05
+```
+
+Then compare candidates in the Marimo track explorer with:
+
+```bash
+scripts/py -m marimo run apps/marimo/track_kinematics_explorer.py -- \
+  --zarr-path <archive.zarr>
+```
+
+The explorer treats the `track_kinematics` run as the top-level selection. After
+selecting a track run, it lists only swim-bout runs whose metadata says they
+were derived from the same `source_track_kinematics_run` and `track_id`. That
+keeps candidate comparisons aligned with the actual dependency graph instead of
+requiring operators to manually pair run names.
+
+The explorer writes performance events to
+`/tmp/palette_track_kinematics_explorer_perf.jsonl` by default. Use
+`--performance-log <path>` to choose another JSONL file or
+`--performance-log none` to disable logging.
+
+On the 2026-01-28 arena 2 canary, the first performance log showed that
+candidate switching is dominated by time-series figure construction, not Zarr
+IO. A 517-bout overlay spent about `49 s` in `build_timeseries_figure`, while
+Zarr loading took about `0.2 s`. The next performance fix should therefore
+batch the swim-bout overlay into one Plotly trace instead of drawing one
+`vrect` layout shape per bout. WebGPU-style renderers should remain a future
+viewer-backend evaluation, not the first fix for the current Plotly app.
+
 ### 2. Future skeleton-derived metrics need a separate home
 
 The current module already covers generic per-track motion well enough for:

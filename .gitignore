@@ -2,6 +2,7 @@ crop_review_list.txt
 
 # Python artifacts
 __pycache__/
+__marimo__/
 *.py[cod]
 *.pyd
 *.egg-info/

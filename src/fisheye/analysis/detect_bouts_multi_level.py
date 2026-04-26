@@ -21,7 +21,7 @@ Storage structure:
     ├── speed_averaged/
     │   ├── bouts
     │   └── metadata
-    ├── default_level = "speed_smoothed" (attr)
+    ├── default_level = "speed_smoothed" or "speed_filtered" (attr)
     └── run_metadata (attrs: threshold, source_track_kinematics_run, etc.)
 
 Usage (basic):
@@ -33,7 +33,8 @@ Usage (with options):
     python -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
         --run-name custom_run \\
         --track-kinematics-run latest \\
-        --threshold-mm 5.0
+        --threshold-mm 5.0 \\
+        --default-level filtered
 """
 
 from __future__ import annotations
@@ -50,6 +51,27 @@ from scipy import signal
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.utils.system import get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
+
+
+SPEED_LEVELS = ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged")
+SPEED_LEVEL_ALIASES = {
+    "raw": "speed_raw",
+    "filtered": "speed_filtered",
+    "smoothed": "speed_smoothed",
+    "averaged": "speed_averaged",
+}
+SPEED_LEVEL_CHOICES = tuple(SPEED_LEVEL_ALIASES) + SPEED_LEVELS
+
+
+def normalize_speed_level(value: str) -> str:
+    """Normalize user-facing speed-level names to stored subgroup names."""
+
+    level = str(value).strip()
+    normalized = SPEED_LEVEL_ALIASES.get(level, level)
+    if normalized not in SPEED_LEVELS:
+        expected = ", ".join(SPEED_LEVEL_CHOICES)
+        raise ValueError(f"Unsupported speed level {value!r}; expected one of: {expected}")
+    return normalized
 
 
 def _compute_inter_bout_intervals(bouts: np.ndarray, fps: float) -> Tuple[np.ndarray, Dict[str, float], np.ndarray]:
@@ -659,6 +681,7 @@ def detect_and_save_bouts(
     rel_height: float = 0.9,
     min_bout_duration_s: float = 0.05,
     min_gap_duration_s: float = 0.1,
+    default_level: str = "speed_smoothed",
 ) -> str:
     """
     Detect bouts from all 4 speed levels and save hierarchically.
@@ -676,10 +699,14 @@ def detect_and_save_bouts(
             (0.7-1.0) capture more of the bout tail (default: 0.9)
         min_bout_duration_s: Minimum bout duration
         min_gap_duration_s: Minimum gap between bouts
+        default_level: Speed subgroup that downstream consumers should use by
+            default. Accepts raw/filtered/smoothed/averaged aliases.
 
     Returns:
         The run name used (either provided or auto-generated)
     """
+    default_level_key = normalize_speed_level(default_level)
+
     print(f"\n{'='*60}")
     print(f"MULTI-LEVEL SWIM BOUT DETECTION")
     print(f"{'='*60}")
@@ -694,6 +721,7 @@ def detect_and_save_bouts(
         if min_peak_height is not None:
             print(f"Min peak height: {min_peak_height} mm/s")
         print(f"Relative height: {rel_height}")
+    print(f"Default level: {default_level_key}")
     print()
 
     # Load speed data
@@ -711,7 +739,7 @@ def detect_and_save_bouts(
     print()
 
     # Detect bouts for each speed level
-    speed_levels = ['speed_raw', 'speed_filtered', 'speed_smoothed', 'speed_averaged']
+    speed_levels = list(SPEED_LEVELS)
     bout_results = {}
 
     print("Detecting bouts for each speed level:")
@@ -809,7 +837,7 @@ def detect_and_save_bouts(
     run_group.attrs['track_id'] = track_id
     run_group.attrs['fps'] = fps
     run_group.attrs['pixel_to_mm'] = metadata.get('pixel_to_mm', float('nan'))
-    run_group.attrs['default_level'] = 'speed_smoothed'
+    run_group.attrs['default_level'] = default_level_key
     run_group.attrs['git_commit'] = git_info['commit_hash']
     run_group.attrs['git_branch'] = git_info['branch']
     run_group.attrs['git_dirty'] = git_info['is_dirty']
@@ -837,6 +865,7 @@ def detect_and_save_bouts(
         level_specific_attrs = {
             'n_bouts': len(bouts),
             'speed_level': level,
+            'is_default_level': level == default_level_key,
         }
 
         if len(bouts) > 0:
@@ -865,7 +894,7 @@ def detect_and_save_bouts(
     print(f"  speed_filtered: {len(bout_results['speed_filtered'])} bouts")
     print(f"  speed_smoothed: {len(bout_results['speed_smoothed'])} bouts")
     print(f"  speed_averaged: {len(bout_results['speed_averaged'])} bouts")
-    print(f"Default level: speed_smoothed")
+    print(f"Default level: {default_level_key}")
     print()
 
     return run_name
@@ -920,6 +949,18 @@ def main():
         type=float,
         default=2.0,
         help='Speed threshold in mm/s for threshold method (default: 2.0)',
+    )
+
+    parser.add_argument(
+        '--default-level',
+        type=str,
+        choices=SPEED_LEVEL_CHOICES,
+        default='speed_smoothed',
+        help=(
+            'Speed level downstream consumers should use by default. '
+            'Accepts raw/filtered/smoothed/averaged aliases or stored subgroup '
+            'names. Default: speed_smoothed.'
+        ),
     )
 
     # Peak method parameters
@@ -978,6 +1019,7 @@ def main():
         rel_height=args.rel_height,
         min_bout_duration_s=args.min_bout_duration,
         min_gap_duration_s=args.min_gap_duration,
+        default_level=args.default_level,
     )
 
     return 0

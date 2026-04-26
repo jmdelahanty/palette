@@ -7,16 +7,30 @@ selected track within an analysis/track_kinematics_runs entry.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
-from typing import Iterable, Optional, Tuple, List
+from typing import Any, Iterable, Optional, Tuple, List
 
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from rich.console import Console
 
+from fisheye.shared.plot_artifacts import (
+    write_interactive_plot_spec_artifact,
+    write_png_visualization_artifact,
+)
+from fisheye.utils.zarr_io import open_zarr_root
+
 from .chaser_metrics_loader import load_chaser_metrics
+
+
+TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.track_kinematics_summary.v1"
+TRACK_KINEMATICS_PLOT_RENDERER = "palette-track-kinematics-summary-v1"
+TRACK_KINEMATICS_PNG_PREFIX = "track_kinematics_summary"
 
 
 @dataclass
@@ -636,6 +650,303 @@ def _format_processing_metadata(run_group: zarr.Group) -> str:
     return " | ".join(lines)
 
 
+def _artifact_signature(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _track_artifact_names(track_id: int) -> tuple[str, str]:
+    suffix = f"track_{int(track_id)}"
+    return (
+        f"{TRACK_KINEMATICS_PNG_PREFIX}_{suffix}_png",
+        f"{TRACK_KINEMATICS_PNG_PREFIX}_{suffix}_interactive",
+    )
+
+
+def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.Group, track_id: int) -> dict[str, str]:
+    run_path = f"analysis/track_kinematics_runs/{run_name}"
+    track_path = f"{run_path}/tracks/id_{int(track_id)}"
+    source_paths: dict[str, str] = {
+        "run": run_path,
+        "track": track_path,
+    }
+    track_arrays = (
+        "time_seconds",
+        "frame_indices",
+        "positions_px",
+        "positions_mm",
+        "speed_raw_px",
+        "speed_raw_mm",
+        "speed_filtered_px",
+        "speed_filtered_mm",
+        "speed_smoothed_px",
+        "speed_smoothed_mm",
+        "speed_averaged_px",
+        "speed_averaged_mm",
+        "smoothed_heading_degrees",
+        "smoothed_acceleration_px",
+        "smoothed_acceleration_mm",
+        "cumulative_distance_px",
+        "cumulative_distance_mm",
+        # Legacy speed field names
+        "instantaneous_speed_px",
+        "instantaneous_speed_mm",
+        "smoothed_speed_px",
+        "smoothed_speed_mm",
+    )
+    for name in track_arrays:
+        if name in track_group:
+            source_paths[name] = f"{track_path}/{name}"
+
+    run_arrays = (
+        "distance_to_target_px",
+        "distance_to_target_mm",
+        "distance_to_target_smoothed_px",
+        "distance_to_target_smoothed_mm",
+        "distance_to_target_interpolated_px",
+        "distance_to_target_interpolated_mm",
+        "camera_frame_ids",
+        "has_offline",
+    )
+    for name in run_arrays:
+        if name in run_group:
+            source_paths[name] = f"{run_path}/{name}"
+    return source_paths
+
+
+def _series_spec(label: str, path_key: str, source_paths: dict[str, str], *, color: str) -> Optional[dict[str, str]]:
+    if path_key not in source_paths:
+        return None
+    return {"label": label, "path_key": path_key, "color": color}
+
+
+def _compact_series(items: Iterable[Optional[dict[str, str]]]) -> list[dict[str, str]]:
+    return [item for item in items if item is not None]
+
+
+def _build_track_interactive_spec(
+    *,
+    run_name: str,
+    run_group: zarr.Group,
+    track_group: zarr.Group,
+    track_id: int,
+    source_paths: dict[str, str],
+    bins: int,
+    swim_bout_label: Optional[str],
+    swim_bout_requested: Optional[str],
+    speed_level: str,
+    distance_series_present: bool,
+    stimulus_run: Optional[str],
+) -> dict[str, Any]:
+    unit_label, _pos_x, _pos_y = pick_units(run_group, track_group)
+    speed_unit_suffix = "_mm" if unit_label == "mm" else "_px"
+    accel_path = "smoothed_acceleration_mm" if unit_label == "mm" else "smoothed_acceleration_px"
+    cumulative_path = "cumulative_distance_mm" if unit_label == "mm" else "cumulative_distance_px"
+    position_path = "positions_mm" if unit_label == "mm" else "positions_px"
+
+    speed_series = _compact_series(
+        [
+            _series_spec("Raw", f"speed_raw{speed_unit_suffix}", source_paths, color="tab:gray"),
+            _series_spec("Filtered", f"speed_filtered{speed_unit_suffix}", source_paths, color="tab:green"),
+            _series_spec("Smoothed", f"speed_smoothed{speed_unit_suffix}", source_paths, color="tab:blue"),
+            _series_spec("Averaged", f"speed_averaged{speed_unit_suffix}", source_paths, color="tab:purple"),
+            _series_spec("Legacy raw", f"instantaneous_speed{speed_unit_suffix}", source_paths, color="tab:gray"),
+            _series_spec("Legacy smoothed", f"smoothed_speed{speed_unit_suffix}", source_paths, color="tab:blue"),
+        ]
+    )
+    panels: list[dict[str, Any]] = [
+        {
+            "id": "speed",
+            "kind": "timeseries",
+            "x_path_key": "time_seconds",
+            "y_label": f"Speed ({unit_label}/s)",
+            "series": speed_series,
+            "interval_overlay": "swim_bouts" if swim_bout_label else None,
+        },
+        {
+            "id": "acceleration",
+            "kind": "timeseries",
+            "x_path_key": "time_seconds",
+            "y_label": f"Acceleration ({unit_label}/s^2)",
+            "series": _compact_series(
+                [_series_spec("Smoothed acceleration", accel_path, source_paths, color="tab:red")]
+            ),
+        },
+        {
+            "id": "heading",
+            "kind": "timeseries",
+            "x_path_key": "time_seconds",
+            "y_label": "Heading (deg)",
+            "series": _compact_series(
+                [_series_spec("Smoothed heading", "smoothed_heading_degrees", source_paths, color="tab:orange")]
+            ),
+        },
+        {
+            "id": "cumulative_distance",
+            "kind": "timeseries",
+            "x_path_key": "time_seconds",
+            "y_label": f"Cumulative distance ({unit_label})",
+            "series": _compact_series(
+                [_series_spec("Cumulative distance", cumulative_path, source_paths, color="tab:green")]
+            ),
+        },
+        {
+            "id": "position_density",
+            "kind": "hist2d",
+            "position_path_key": position_path,
+            "unit": unit_label,
+            "bins": int(bins),
+        },
+    ]
+    if distance_series_present:
+        distance_series = _compact_series(
+            [
+                _series_spec("Distance to target", f"distance_to_target{speed_unit_suffix}", source_paths, color="tab:purple"),
+                _series_spec(
+                    "Smoothed distance to target",
+                    f"distance_to_target_smoothed{speed_unit_suffix}",
+                    source_paths,
+                    color="tab:pink",
+                ),
+                _series_spec(
+                    "Interpolated distance to target",
+                    f"distance_to_target_interpolated{speed_unit_suffix}",
+                    source_paths,
+                    color="tab:pink",
+                ),
+            ]
+        )
+        panels.insert(
+            2,
+            {
+                "id": "distance_to_target",
+                "kind": "timeseries",
+                "x_path_key": "time_seconds",
+                "y_label": f"Distance to target ({unit_label})",
+                "series": distance_series,
+            },
+        )
+
+    return {
+        "schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+        "title": f"Movement summary - track {int(track_id)}",
+        "run_name": run_name,
+        "track_id": int(track_id),
+        "renderer": TRACK_KINEMATICS_PLOT_RENDERER,
+        "source_paths": source_paths,
+        "panels": panels,
+        "overlays": {
+            "swim_bouts": {
+                "enabled": bool(swim_bout_label),
+                "requested_run": swim_bout_requested,
+                "resolved_label": swim_bout_label,
+                "speed_level": speed_level,
+            }
+        },
+        "stimulus_run": stimulus_run,
+    }
+
+
+def write_track_kinematics_plot_artifacts(
+    *,
+    run_group: zarr.Group,
+    run_name: str,
+    track_group: zarr.Group,
+    track_id: int,
+    png_bytes: bytes,
+    bins: int,
+    artifact_dpi: int,
+    swim_bout_label: Optional[str],
+    swim_bout_requested: Optional[str],
+    speed_level: str,
+    distance_series_present: bool,
+    stimulus_run: Optional[str],
+    console: Console,
+) -> None:
+    png_artifact_name, spec_artifact_name = _track_artifact_names(track_id)
+    source_paths = _track_source_paths(run_name, track_group, run_group, track_id)
+    source_runs: dict[str, Any] = {"track_kinematics": run_name}
+    if stimulus_run:
+        source_runs["stimulus"] = stimulus_run
+    if swim_bout_label:
+        source_runs["swim_bout"] = swim_bout_label
+    parameters = {
+        "bins": int(bins),
+        "artifact_dpi": int(artifact_dpi),
+        "swim_bout_run": swim_bout_requested,
+        "speed_level": speed_level,
+        "distance_overlay": bool(distance_series_present),
+    }
+    signature = _artifact_signature(
+        {
+            "schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "run_name": run_name,
+            "track_id": int(track_id),
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+            "parameters": parameters,
+        }
+    )
+
+    write_png_visualization_artifact(
+        run_group,
+        png_artifact_name,
+        png_bytes,
+        description="Track kinematics summary PNG",
+        created_by="fisheye.analysis.plot_track_kinematics",
+        artifact_signature=signature,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=parameters,
+        extra_attrs={
+            "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "track_id": int(track_id),
+            "run_name": run_name,
+        },
+    )
+    spec = _build_track_interactive_spec(
+        run_name=run_name,
+        run_group=run_group,
+        track_group=track_group,
+        track_id=track_id,
+        source_paths=source_paths,
+        bins=bins,
+        swim_bout_label=swim_bout_label,
+        swim_bout_requested=swim_bout_requested,
+        speed_level=speed_level,
+        distance_series_present=distance_series_present,
+        stimulus_run=stimulus_run,
+    )
+    write_interactive_plot_spec_artifact(
+        run_group,
+        spec_artifact_name,
+        spec,
+        description="Track kinematics interactive plot spec",
+        created_by="fisheye.analysis.plot_track_kinematics",
+        renderer=TRACK_KINEMATICS_PLOT_RENDERER,
+        artifact_signature=signature,
+        snapshot_artifact=png_artifact_name,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=parameters,
+        extra_attrs={
+            "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "track_id": int(track_id),
+            "run_name": run_name,
+        },
+    )
+    console.print(
+        "[green]Wrote zarr visualization artifacts:[/green] "
+        f"visualizations/{png_artifact_name}, visualizations/{spec_artifact_name}"
+    )
+
+
 def plot_track(
     run_group: zarr.Group,
     track_group: zarr.Group,
@@ -647,7 +958,10 @@ def plot_track(
     swim_bouts: Optional[List[Tuple[float, float]]] = None,
     swim_bout_label: Optional[str] = None,
     distance_series: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], str]] = None,
-) -> None:
+    render_png: bool = False,
+    artifact_dpi: int = 150,
+    show: bool = True,
+) -> Optional[bytes]:
     time_seconds = track_group["time_seconds"][:]
 
     # Load all speed levels (use new field names if available, fallback to old names for backward compatibility)
@@ -859,10 +1173,19 @@ def plot_track(
     if save_path:
         fig.savefig(save_path)
         console.print(f"[green]Saved plot to {save_path}[/green]")
-    else:
+
+    png_bytes: Optional[bytes] = None
+    if render_png:
+        buffer = BytesIO()
+        fig.savefig(buffer, format="png", dpi=int(artifact_dpi), bbox_inches="tight")
+        buffer.seek(0)
+        png_bytes = buffer.getvalue()
+
+    if show:
         plt.show()
 
     plt.close(fig)
+    return png_bytes
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
@@ -897,12 +1220,31 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         default="smoothed",
         help="Speed level to use for swim bout overlay in hierarchical runs (default: smoothed).",
     )
+    parser.add_argument(
+        "--write-zarr-artifacts",
+        action="store_true",
+        help=(
+            "Persist a PNG snapshot and interactive plot spec under the selected "
+            "track_kinematics run's visualizations group."
+        ),
+    )
+    parser.add_argument(
+        "--artifact-dpi",
+        type=int,
+        default=150,
+        help="DPI for PNG artifacts written with --write-zarr-artifacts (default: 150).",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display interactively even when --save or --write-zarr-artifacts is used.",
+    )
 
     args = parser.parse_args(argv)
 
     console = Console()
     zarr_path = Path(args.zarr_path)
-    root = zarr.open(str(zarr_path), mode="r")
+    root = open_zarr_root(zarr_path, mode="a" if args.write_zarr_artifacts else "r")
 
     include_online = not args.offline_only
     include_offline = not args.online_only
@@ -982,7 +1324,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 "[yellow]Warning:[/yellow] Unable to resolve stimulus run for distance overlay."
             )
 
-        plot_track(
+        show_plot = bool(args.show or (not dest and not args.write_zarr_artifacts))
+        png_bytes = plot_track(
             run_group,
             track_group,
             track_id,
@@ -993,7 +1336,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             swim_bouts=swim_spans,
             swim_bout_label=swim_label,
             distance_series=distance_series,
+            render_png=bool(args.write_zarr_artifacts),
+            artifact_dpi=int(args.artifact_dpi),
+            show=show_plot,
         )
+        if args.write_zarr_artifacts:
+            if png_bytes is None:
+                console.print("[yellow]Warning:[/yellow] No PNG bytes were rendered; skipping zarr artifacts.")
+                continue
+            write_track_kinematics_plot_artifacts(
+                run_group=run_group,
+                run_name=run_name,
+                track_group=track_group,
+                track_id=track_id,
+                png_bytes=png_bytes,
+                bins=int(args.bins),
+                artifact_dpi=int(args.artifact_dpi),
+                swim_bout_label=swim_label,
+                swim_bout_requested=args.swim_bout_run,
+                speed_level=str(args.speed_level),
+                distance_series_present=distance_series is not None,
+                stimulus_run=stim_run_name,
+                console=console,
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover
