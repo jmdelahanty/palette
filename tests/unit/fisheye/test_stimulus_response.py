@@ -82,9 +82,17 @@ def _make_kinematics_zarr(
         # Position: fish moves 1mm per frame in x.
         pos = np.zeros((n_samples, 2), dtype=np.float32)
         pos[:, 0] = frame_indices.astype(np.float32) * 1.0
+        displacement = np.zeros(n_samples, dtype=np.float32)
+        if n_samples >= 2:
+            consecutive = np.diff(frame_indices) == 1
+            step_distance = np.linalg.norm(np.diff(pos, axis=0), axis=1).astype(np.float32)
+            displacement[1:][consecutive] = step_distance[consecutive]
+        cumulative_distance = np.cumsum(displacement).astype(np.float32)
         tg.create_array("positions_mm", data=pos)
         tg.create_array("heading_degrees", data=np.full(n_samples, 90.0, dtype=np.float32))
         tg.create_array("speed_smoothed_mm", data=np.full(n_samples, 30.0, dtype=np.float32))
+        tg.create_array("displacement_smoothed_mm", data=displacement)
+        tg.create_array("cumulative_distance_mm", data=cumulative_distance)
         tg.create_array("angular_velocity_deg_s", data=np.zeros(n_samples, dtype=np.float32))
         tg.create_array("detection_source", data=np.zeros(n_samples, dtype=np.int8))
 
@@ -226,6 +234,15 @@ class TestLoadTrackData:
         # Non-gap frames should be valid.
         assert t.valid[0]
         assert t.valid[6]
+        # The first valid frame after a missing frame must not inherit the
+        # across-gap position jump as distance.
+        assert t.displacement_smoothed_mm is not None
+        assert t.displacement_smoothed_mm[4] == 1.0
+        assert t.displacement_smoothed_mm[5] == 0.0
+        assert t.displacement_smoothed_mm[6] == 0.0
+        assert t.displacement_smoothed_mm[7] == 1.0
+        assert t.cumulative_distance_mm is not None
+        assert t.cumulative_distance_mm[5] == t.cumulative_distance_mm[4]
 
     def test_multiple_fish(self) -> None:
         root = _make_kinematics_zarr(n_frames=30, fish_ids=(0, 1, 2))
@@ -287,6 +304,27 @@ class TestComputeGlobalMetrics:
         assert result["fraction_moving"][0] == 0.0
         assert result["mean_speed_mm_s"][0] == 0.0
 
+    def test_global_distance_uses_gap_aware_source_displacement(self) -> None:
+        n = 12
+        valid = np.zeros(n, dtype=bool)
+        valid[[0, 10]] = True
+        positions = np.zeros((n, 2), dtype=np.float32)
+        positions[10, 0] = 100.0
+        tracks = [DenseTrack(
+            fish_id=0,
+            speed_mm=np.zeros(n, dtype=np.float32),
+            heading_deg=np.zeros(n, dtype=np.float32),
+            positions_mm=positions,
+            angular_velocity=np.zeros(n, dtype=np.float32),
+            time_seconds=np.arange(n, dtype=np.float32) / 30.0,
+            valid=valid,
+            detection_source=np.where(valid, np.int8(0), np.int8(-1)),
+            displacement_smoothed_mm=np.zeros(n, dtype=np.float32),
+            cumulative_distance_mm=np.zeros(n, dtype=np.float32),
+        )]
+        result = compute_global_metrics(tracks, fps=30.0, moving_threshold=2.0)
+        assert result["total_distance_mm"][0] == 0.0
+
 
 class TestComputeStepBaseMetrics:
 
@@ -313,6 +351,32 @@ class TestComputeStepBaseMetrics:
         result = compute_step_base_metrics(tracks, step, fps=30.0, moving_threshold=2.0)
         # 3 gaps out of 20 step frames.
         assert abs(result["coverage"][0] - 17.0 / 20.0) < 0.01
+
+    def test_step_distance_uses_gap_aware_source_displacement(self) -> None:
+        n = 12
+        valid = np.zeros(n, dtype=bool)
+        valid[[0, 10]] = True
+        positions = np.zeros((n, 2), dtype=np.float32)
+        positions[10, 0] = 100.0
+        tracks = [DenseTrack(
+            fish_id=0,
+            speed_mm=np.zeros(n, dtype=np.float32),
+            heading_deg=np.zeros(n, dtype=np.float32),
+            positions_mm=positions,
+            angular_velocity=np.zeros(n, dtype=np.float32),
+            time_seconds=np.arange(n, dtype=np.float32) / 30.0,
+            valid=valid,
+            detection_source=np.where(valid, np.int8(0), np.int8(-1)),
+            displacement_smoothed_mm=np.zeros(n, dtype=np.float32),
+            cumulative_distance_mm=np.zeros(n, dtype=np.float32),
+        )]
+        step = ProtocolStep(
+            index=0, name="gap", stimulus_mode="SOLID_BLACK",
+            stimulus_mode_id=4, start_frame=0, end_frame=n,
+            duration_s=n / 30.0,
+        )
+        result = compute_step_base_metrics(tracks, step, fps=30.0, moving_threshold=2.0)
+        assert result["total_distance_mm"][0] == 0.0
 
     def test_empty_step(self) -> None:
         tracks = _make_dense_tracks(n_frames=100, n_fish=1, speed=10.0, gap_frames=tuple(range(50, 60)))

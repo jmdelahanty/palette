@@ -45,6 +45,7 @@ from fisheye.shared.stage_provenance import (
 from fisheye.shared.zarr.analysis_stage_arrays import validate_track_inputs
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_git_info
+from fisheye.utils.zarr_io import open_zarr_root
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,8 @@ class DenseTrack:
     time_seconds: np.ndarray          # float32[n_frames]
     valid: np.ndarray                 # bool[n_frames] — True where detection exists
     detection_source: np.ndarray      # int8[n_frames] — 0=real, 1=interpolated, -1=gap
+    displacement_smoothed_mm: Optional[np.ndarray] = None  # float32[n_frames], movement from previous frame
+    cumulative_distance_mm: Optional[np.ndarray] = None     # float32[n_frames], forward-filled through gaps
 
 
 @dataclass
@@ -207,6 +210,8 @@ def load_track_data(
         time_s = np.zeros(n_frames, dtype=np.float32)
         valid = np.zeros(n_frames, dtype=bool)
         det_src = np.full(n_frames, -1, dtype=np.int8)  # -1 = no detection
+        displacement_mm: Optional[np.ndarray] = None
+        cumulative_mm: Optional[np.ndarray] = None
 
         if n_samples > 0:
             speed_mm[frame_indices] = tg["speed_smoothed_mm"][:].astype(np.float32)
@@ -216,6 +221,15 @@ def load_track_data(
             time_s[frame_indices] = tg["time_seconds"][:].astype(np.float32)
             valid[frame_indices] = True
             det_src[frame_indices] = tg["detection_source"][:].astype(np.int8)
+            if "displacement_smoothed_mm" in tg:
+                displacement_mm = np.zeros(n_frames, dtype=np.float32)
+                displacement_mm[frame_indices] = tg["displacement_smoothed_mm"][:].astype(np.float32)
+            if "cumulative_distance_mm" in tg:
+                sparse_cumulative = tg["cumulative_distance_mm"][:].astype(np.float32)
+                cumulative_mm = np.zeros(n_frames, dtype=np.float32)
+                fill_positions = np.searchsorted(frame_indices, np.arange(n_frames), side="right") - 1
+                has_previous = fill_positions >= 0
+                cumulative_mm[has_previous] = sparse_cumulative[fill_positions[has_previous]]
 
         tracks.append(DenseTrack(
             fish_id=fish_id,
@@ -226,6 +240,8 @@ def load_track_data(
             time_seconds=time_s,
             valid=valid,
             detection_source=det_src,
+            displacement_smoothed_mm=displacement_mm,
+            cumulative_distance_mm=cumulative_mm,
         ))
 
     upstream_lineage = _snapshot_upstream_lineage(kin_group)
@@ -366,6 +382,43 @@ def parse_protocol_steps(
 # ---------------------------------------------------------------------------
 
 
+def _distance_for_window(track: DenseTrack, start_frame: int, end_frame: int) -> float:
+    """Return gap-aware distance for the half-open frame interval [start, end).
+
+    ``track_kinematics`` stores displacement at the destination frame: sample
+    ``f`` represents movement from ``f - 1`` to ``f``.  For a step starting at
+    frame ``s``, the first in-step displacement is therefore at ``s + 1``.
+    """
+    n_frames = int(track.valid.shape[0])
+    start = max(0, min(int(start_frame), n_frames))
+    end = max(start, min(int(end_frame), n_frames))
+    if end - start <= 1:
+        return 0.0
+
+    first_displacement_frame = start + 1
+
+    if track.displacement_smoothed_mm is not None:
+        values = track.displacement_smoothed_mm[first_displacement_frame:end]
+        return float(np.nansum(values))
+
+    if track.cumulative_distance_mm is not None:
+        cumulative = track.cumulative_distance_mm
+        delta = float(cumulative[end - 1] - cumulative[start])
+        return max(0.0, delta) if np.isfinite(delta) else 0.0
+
+    # Backward-compatible fallback for tests or older track_kinematics runs:
+    # only count adjacent valid dense frames, never jumps across missing frames.
+    current_frames = np.arange(first_displacement_frame, end, dtype=np.int64)
+    if current_frames.size == 0:
+        return 0.0
+    adjacent_valid = track.valid[current_frames] & track.valid[current_frames - 1]
+    if not np.any(adjacent_valid):
+        return 0.0
+    frames = current_frames[adjacent_valid]
+    deltas = track.positions_mm[frames] - track.positions_mm[frames - 1]
+    return float(np.sum(np.linalg.norm(deltas, axis=1)))
+
+
 def compute_global_metrics(
     tracks: Sequence[DenseTrack],
     fps: float,
@@ -385,8 +438,7 @@ def compute_global_metrics(
         if n_valid == 0:
             continue
         speeds = t.speed_mm[v]
-        displacements = np.diff(t.positions_mm[v], axis=0)
-        total_distance[i] = float(np.sum(np.linalg.norm(displacements, axis=1)))
+        total_distance[i] = _distance_for_window(t, 0, t.valid.shape[0])
         mean_speed[i] = float(np.mean(speeds))
         moving_mask = speeds > moving_threshold
         fraction_moving[i] = float(moving_mask.sum()) / n_valid
@@ -430,10 +482,7 @@ def compute_step_base_metrics(
             continue
 
         speeds = t.speed_mm[sf:ef][v]
-        positions = t.positions_mm[sf:ef][v]
-
-        displacements = np.diff(positions, axis=0)
-        total_distance[i] = float(np.sum(np.linalg.norm(displacements, axis=1)))
+        total_distance[i] = _distance_for_window(t, sf, ef)
         mean_speed[i] = float(np.mean(speeds))
         median_speed[i] = float(np.median(speeds))
         max_speed[i] = float(np.max(speeds))
@@ -1889,7 +1938,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     console.print(f"\n[bold]Stimulus Response Analysis[/bold]")
     console.print(f"  Archive: {args.zarr_path}")
 
-    root = zarr.open_group(args.zarr_path, mode="a")
+    root = open_zarr_root(args.zarr_path, mode="a")
 
     # Load inputs.
     tracks, kin_run, n_frames, upstream_lineage = load_track_data(

@@ -45,11 +45,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import zarr
 from scipy import signal
 
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.utils.system import get_git_info
+from fisheye.utils.zarr_io import open_zarr_root
 
 
 def _compute_inter_bout_intervals(bouts: np.ndarray, fps: float) -> Tuple[np.ndarray, Dict[str, float], np.ndarray]:
@@ -578,7 +578,7 @@ def _load_track_kinematics_track_speeds(
         speed_dict keys: speed_raw_mm, speed_filtered_mm, speed_smoothed_mm, speed_averaged_mm, frames
         metadata_dict keys: fps, pixel_to_mm, n_frames, etc.
     """
-    root = zarr.open(str(zarr_path), mode='r')
+    root = open_zarr_root(zarr_path, mode='r')
 
     # Navigate to track_kinematics_runs
     if 'analysis' not in root or 'track_kinematics_runs' not in root['analysis']:
@@ -766,7 +766,7 @@ def detect_and_save_bouts(
 
     # Save to zarr
     print("Saving to zarr...")
-    root = zarr.open(str(zarr_path), mode='r+')
+    root = open_zarr_root(zarr_path, mode='r+')
 
     # Create analysis/swim_bout_runs if needed
     if 'analysis' not in root:

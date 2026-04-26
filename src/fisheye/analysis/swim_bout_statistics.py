@@ -41,6 +41,7 @@ from chaser_analysis.swimming_bout_analysis import (
     CalibrationData,
 )
 from fisheye.utils.system import get_git_info
+from fisheye.utils.zarr_io import open_zarr_root
 
 try:
     from zarr.errors import ZarrFutureWarning, UnstableSpecificationWarning  # type: ignore
@@ -881,7 +882,7 @@ def _save_report_to_zarr(
     verbose: bool,
 ) -> str:
     """Persist swim bout analysis results under analysis/swim_bout_runs."""
-    root = zarr.open(str(zarr_path), mode="a")
+    root = open_zarr_root(zarr_path, mode="a")
     analysis = root.require_group("analysis")
     runs_parent = analysis.require_group("swim_bout_runs")
 

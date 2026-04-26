@@ -37,6 +37,7 @@ from fisheye.shared.stage_provenance import (
 )
 from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.utils.system import get_git_info, get_environment_info
+from fisheye.utils.zarr_io import open_zarr_root
 from .chaser_state_interpolator import load_structured_dataset
 
 
@@ -1199,6 +1200,8 @@ def _mirror_swim_bouts_to_tracks(
     track_ids: Iterable[int],
     swim_bout_run: Optional[str],
     console: Console,
+    *,
+    expected_track_kinematics_run: Optional[str] = None,
 ) -> Optional[str]:
     analysis = root.get("analysis")
     if analysis is None or "swim_bout_runs" not in analysis:
@@ -1222,6 +1225,44 @@ def _mirror_swim_bouts_to_tracks(
         return None
 
     bout_group = bouts_parent[run_name]
+    ordered_track_ids = [int(track_id) for track_id in track_ids]
+    source_track_kinematics_run = bout_group.attrs.get("source_track_kinematics_run")
+    if (
+        expected_track_kinematics_run
+        and source_track_kinematics_run
+        and str(source_track_kinematics_run) != str(expected_track_kinematics_run)
+    ):
+        console.print(
+            "[yellow]Warning:[/yellow] Swim bout run "
+            f"'{run_name}' comes from track_kinematics run "
+            f"'{source_track_kinematics_run}', not '{expected_track_kinematics_run}'; "
+            "skipping mirror."
+        )
+        return None
+
+    source_track_id = bout_group.attrs.get("track_id")
+    mirror_scope = "single_track_legacy"
+    if source_track_id is not None:
+        source_track_id = int(source_track_id)
+        if source_track_id not in ordered_track_ids:
+            console.print(
+                "[yellow]Warning:[/yellow] Swim bout run "
+                f"'{run_name}' is for track_id={source_track_id}, which is not present "
+                "in this track_kinematics run; skipping mirror."
+            )
+            return None
+        mirror_track_ids = [source_track_id]
+        mirror_scope = "matched_track_id"
+    elif len(ordered_track_ids) == 1:
+        mirror_track_ids = ordered_track_ids
+    else:
+        console.print(
+            "[yellow]Warning:[/yellow] Swim bout run "
+            f"'{run_name}' has no track_id metadata and this track_kinematics run has "
+            f"{len(ordered_track_ids)} tracks; skipping mirror to avoid copying one "
+            "bout artifact into multiple identities."
+        )
+        return None
 
     # Detect hierarchical structure (multi-level bouts)
     speed_levels = ['speed_raw', 'speed_filtered', 'speed_smoothed', 'speed_averaged']
@@ -1232,12 +1273,15 @@ def _mirror_swim_bouts_to_tracks(
         tracks_parent = run_group["tracks"]
         default_level = bout_group.attrs.get('default_level', 'speed_smoothed')
 
-        for track_id in track_ids:
+        for track_id in mirror_track_ids:
             track_subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
 
             # Store metadata at track's swim_bouts level
             track_subgroup.attrs.update({
                 "source_swim_bout_run": run_name,
+                "source_track_kinematics_run": source_track_kinematics_run,
+                "source_swim_bout_track_id": source_track_id,
+                "mirror_scope": mirror_scope,
                 "default_level": default_level,
                 "is_hierarchical": True,
             })
@@ -1281,7 +1325,8 @@ def _mirror_swim_bouts_to_tracks(
                 })
 
         console.print(
-            f"[dim]Mirrored hierarchical swim bouts (4 levels) from swim_bout_runs/{run_name} into track kinematics tracks.[/dim]"
+            f"[dim]Mirrored hierarchical swim bouts (4 levels) from swim_bout_runs/{run_name} "
+            f"into {len(mirror_track_ids)} track kinematics track(s).[/dim]"
         )
         return run_name
 
@@ -1302,7 +1347,7 @@ def _mirror_swim_bouts_to_tracks(
             return None
 
         tracks_parent = run_group["tracks"]
-        for track_id in track_ids:
+        for track_id in mirror_track_ids:
             subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
             # Clear existing arrays
             for name in list(subgroup.array_keys()):
@@ -1317,13 +1362,17 @@ def _mirror_swim_bouts_to_tracks(
             subgroup.attrs.update(
                 {
                     "source_swim_bout_run": run_name,
+                    "source_track_kinematics_run": source_track_kinematics_run,
+                    "source_swim_bout_track_id": source_track_id,
+                    "mirror_scope": mirror_scope,
                     "mirrored_fields": list(columns.keys()),
                     "is_hierarchical": False,
                 }
             )
 
         console.print(
-            f"[dim]Mirrored swim bouts from swim_bout_runs/{run_name} into track kinematics tracks.[/dim]"
+            f"[dim]Mirrored swim bouts from swim_bout_runs/{run_name} into "
+            f"{len(mirror_track_ids)} track kinematics track(s).[/dim]"
         )
         return run_name
 
@@ -1508,7 +1557,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     console = Console()
     mode = "r" if args.no_write else "a"
-    root = zarr.open(args.zarr_path, mode=mode)
+    root = open_zarr_root(args.zarr_path, mode=mode)
 
     render_online = not args.offline_only
     render_offline = not args.online_only
@@ -1963,6 +2012,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 ordered_ids_offline,
                                 args.swim_bout_run,
                                 console,
+                                expected_track_kinematics_run=offline_run_name,
                             )
                         except Exception as exc:
                             console.print(

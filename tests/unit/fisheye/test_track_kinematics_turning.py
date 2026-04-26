@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import io
+
 import numpy as np
+import zarr
+from rich.console import Console
 
 from fisheye.analysis import track_kinematics as mod
 
@@ -125,3 +129,98 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
         np.array([np.nan, 20.0], dtype=np.float32),
         equal_nan=True,
     )
+
+
+def _quiet_console() -> Console:
+    return Console(file=io.StringIO(), force_terminal=False, width=120)
+
+
+def _make_run_group_with_tracks(root: zarr.Group, track_ids: tuple[int, ...]) -> zarr.Group:
+    run_group = root.create_group("track_kinematics_run")
+    tracks = run_group.create_group("tracks")
+    for track_id in track_ids:
+        tracks.create_group(f"id_{track_id}")
+    return run_group
+
+
+def _add_hierarchical_swim_bout_run(
+    root: zarr.Group,
+    *,
+    run_name: str = "bout_run",
+    track_id: int | None = 1,
+    source_track_kinematics_run: str = "kin_run",
+) -> None:
+    swim_parent = root.require_group("analysis").require_group("swim_bout_runs")
+    bout_run = swim_parent.create_group(run_name)
+    swim_parent.attrs["latest"] = run_name
+    bout_run.attrs["source_track_kinematics_run"] = source_track_kinematics_run
+    if track_id is not None:
+        bout_run.attrs["track_id"] = track_id
+    bout_run.attrs["default_level"] = "speed_smoothed"
+    dtype = np.dtype([
+        ("start_frame", "<i4"),
+        ("end_frame", "<i4"),
+        ("duration_s", "<f4"),
+    ])
+    bouts = np.array([(10, 20, 1.0)], dtype=dtype)
+    for level in ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged"):
+        level_group = bout_run.create_group(level)
+        level_group.create_array("bouts", data=bouts)
+
+
+def _add_flat_swim_bout_run_without_track_id(root: zarr.Group, *, run_name: str = "legacy_bout") -> None:
+    swim_parent = root.require_group("analysis").require_group("swim_bout_runs")
+    bout_run = swim_parent.create_group(run_name)
+    swim_parent.attrs["latest"] = run_name
+    dtype = np.dtype([
+        ("start_frame", "<i4"),
+        ("end_frame", "<i4"),
+        ("duration_s", "<f4"),
+    ])
+    bout_run.create_array("bouts", data=np.array([(10, 20, 1.0)], dtype=dtype))
+
+
+def test_swim_bout_mirror_only_writes_matching_track_id() -> None:
+    root = zarr.group()
+    run_group = _make_run_group_with_tracks(root, (0, 1))
+    _add_hierarchical_swim_bout_run(root, track_id=1, source_track_kinematics_run="kin_run")
+
+    result = mod._mirror_swim_bouts_to_tracks(
+        root,
+        run_group,
+        [0, 1],
+        "bout_run",
+        _quiet_console(),
+        expected_track_kinematics_run="kin_run",
+    )
+
+    assert result == "bout_run"
+    tracks = run_group["tracks"]
+    assert "swim_bouts" not in tracks["id_0"]
+    mirrored = tracks["id_1"]["swim_bouts"]
+    assert mirrored.attrs["source_swim_bout_track_id"] == 1
+    assert mirrored.attrs["mirror_scope"] == "matched_track_id"
+    np.testing.assert_array_equal(
+        mirrored["speed_smoothed"]["start_frame"][:],
+        np.array([10], dtype=np.int32),
+    )
+
+
+def test_swim_bout_mirror_skips_unscoped_legacy_run_with_multiple_tracks() -> None:
+    root = zarr.group()
+    run_group = _make_run_group_with_tracks(root, (0, 1))
+    _add_flat_swim_bout_run_without_track_id(root)
+
+    result = mod._mirror_swim_bouts_to_tracks(
+        root,
+        run_group,
+        [0, 1],
+        "legacy_bout",
+        _quiet_console(),
+        expected_track_kinematics_run="kin_run",
+    )
+
+    assert result is None
+    tracks = run_group["tracks"]
+    assert "swim_bouts" not in tracks["id_0"]
+    assert "swim_bouts" not in tracks["id_1"]
