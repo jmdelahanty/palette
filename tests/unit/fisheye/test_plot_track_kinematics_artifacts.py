@@ -89,6 +89,13 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
     assert png.attrs["track_id"] == 0
     assert png.attrs["source_paths"]["time_seconds"].endswith("/tracks/id_0/time_seconds")
     assert png.attrs["parameters"]["bins"] == 8
+    png_provenance = png.attrs["provenance"]
+    assert png_provenance["contract"]["name"] == "palette_stage_provenance"
+    assert png_provenance["stage"] == "track_kinematics_visualization"
+    assert png_provenance["parameters"]["bins"] == 8
+    assert png_provenance["parameters"]["renderer"] == mod.TRACK_KINEMATICS_PLOT_RENDERER
+    assert png_provenance["inputs"]["source_runs"]["track_kinematics"] == "offline/track_kinematics_1"
+    assert png_provenance["artifacts"]["png_artifact"].endswith("track_kinematics_summary_track_0_png")
 
     spec_group = visualizations["track_kinematics_summary_track_0_interactive"]
     assert spec_group.attrs["artifact_schema_id"] == INTERACTIVE_SPEC_SCHEMA_ID
@@ -99,6 +106,11 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
     assert spec["track_id"] == 0
     assert spec["source_paths"]["positions_mm"].endswith("/tracks/id_0/positions_mm")
     assert any(panel["id"] == "position_density" for panel in spec["panels"])
+    spec_provenance = spec_group.attrs["provenance"]
+    assert spec_provenance["stage"] == "track_kinematics_visualization"
+    assert spec_provenance["artifacts"]["interactive_artifact"].endswith(
+        "track_kinematics_summary_track_0_interactive"
+    )
 
     manifest = run.attrs["visualizations"]
     assert manifest["track_kinematics_summary_track_0_png"]["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID

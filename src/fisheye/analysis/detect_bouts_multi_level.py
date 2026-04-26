@@ -43,15 +43,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import signal
 
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
-from fisheye.utils.system import get_git_info
+from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 
@@ -703,7 +705,7 @@ def _load_track_kinematics_track_speeds(
     zarr_path: Path,
     track_kinematics_run: str,
     track_id: int = 0,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, any]]:
+) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
     """
     Load all 4 speed levels from a track kinematics track.
 
@@ -772,12 +774,24 @@ def _load_track_kinematics_track_speeds(
     if 'positions_px' in track_group:
         positions_px = track_group['positions_px'][:]
 
+    source_provenance = run_group.attrs.get('provenance')
+    if not isinstance(source_provenance, dict):
+        source_provenance = {}
+    source_git = source_provenance.get('git')
+    if not isinstance(source_git, dict):
+        source_git = {}
+
     # Load metadata
     metadata = {
         'fps': run_group.attrs.get('fps', 60.0),
         'pixel_to_mm': run_group.attrs.get('pixel_to_mm'),
         'n_frames': len(speeds['frames']),
         'track_kinematics_run': track_kinematics_run,
+        'track_kinematics_created_at_utc': run_group.attrs.get('created_at_utc'),
+        'track_kinematics_stage': source_provenance.get('stage'),
+        'track_kinematics_version': source_provenance.get('version'),
+        'track_kinematics_git_commit': run_group.attrs.get('git_commit') or source_git.get('commit'),
+        'track_kinematics_git_dirty': run_group.attrs.get('git_dirty', source_git.get('is_dirty')),
         'track_id': track_id,
         'positions_mm': positions_mm,
         'positions_px': positions_px,
@@ -802,6 +816,7 @@ def detect_and_save_bouts(
     overwrite: bool = False,
     boundary_mode: str = "threshold",
     boundary_window_s: float = 0.25,
+    command: Optional[str] = None,
 ) -> str:
     """
     Detect bouts from all 4 speed levels and save hierarchically.
@@ -827,6 +842,7 @@ def detect_and_save_bouts(
             low-speed minima and preserves threshold/peak boundaries in core_*.
         boundary_window_s: Local-minimum search window on each side of each
             threshold/peak core.
+        command: Optional command string to record in stage provenance.
 
     Returns:
         The run name used (either provided or auto-generated)
@@ -951,7 +967,12 @@ def detect_and_save_bouts(
 
     # Save metadata at run level
     git_info = get_git_info()
-    run_group.attrs['created_at_utc'] = datetime.now(timezone.utc).isoformat()
+    env_info = get_environment_info(
+        disk_path=str(zarr_path),
+        capture_env_vars=False,
+    )
+    created_at_utc = datetime.now(timezone.utc).isoformat()
+    run_group.attrs['created_at_utc'] = created_at_utc
     run_group.attrs['detection_method'] = method
     run_group.attrs['min_bout_duration_s'] = min_bout_duration_s
     run_group.attrs['min_gap_duration_s'] = min_gap_duration_s
@@ -974,6 +995,56 @@ def detect_and_save_bouts(
     run_group.attrs['git_commit'] = git_info['commit_hash']
     run_group.attrs['git_branch'] = git_info['branch']
     run_group.attrs['git_dirty'] = git_info['is_dirty']
+
+    parameters = {
+        'method': method,
+        'threshold_mm': float(threshold_mm) if method == "threshold" else None,
+        'prominence': float(prominence) if method == "peak" else None,
+        'min_peak_height': float(min_peak_height) if min_peak_height is not None else None,
+        'rel_height': float(rel_height) if method == "peak" else None,
+        'min_bout_duration_s': float(min_bout_duration_s),
+        'min_gap_duration_s': float(min_gap_duration_s),
+        'default_level': default_level_key,
+        'boundary_mode': boundary_mode,
+        'boundary_window_s': float(boundary_window_s),
+        'speed_levels': list(speed_levels),
+        'overwrite': bool(overwrite),
+    }
+    inputs = {
+        'zarr_path': str(zarr_path),
+        'source_track_kinematics_run': metadata['track_kinematics_run'],
+        'source_track_kinematics_stage': metadata.get('track_kinematics_stage'),
+        'source_track_kinematics_version': metadata.get('track_kinematics_version'),
+        'source_track_path': (
+            f"analysis/track_kinematics_runs/offline/"
+            f"{metadata['track_kinematics_run']}/tracks/id_{int(track_id)}"
+        ),
+        'source_track_kinematics_created_at_utc': metadata.get(
+            'track_kinematics_created_at_utc'
+        ),
+        'source_track_kinematics_git_commit': metadata.get('track_kinematics_git_commit'),
+        'source_track_kinematics_git_dirty': metadata.get('track_kinematics_git_dirty'),
+        'track_id': int(track_id),
+        'fps': float(fps),
+        'pixel_to_mm': metadata.get('pixel_to_mm'),
+        'n_frames': int(metadata['n_frames']),
+    }
+    provenance = build_stage_provenance(
+        stage="detect_bouts_multi_level",
+        created_at_utc=created_at_utc,
+        parameters=parameters,
+        inputs=inputs,
+        command=command,
+        version="detect_bouts_multi_level.v1",
+        git=git_info,
+        environment=env_info.get("environment"),
+        platform=env_info.get("platform"),
+        artifacts={
+            'run_path': f"analysis/swim_bout_runs/{run_name}",
+            'default_level': default_level_key,
+        },
+    )
+    write_stage_provenance(run_group, provenance)
 
     # Save each speed level's bouts and statistics in subgroups
     for level in speed_levels:
@@ -1182,6 +1253,7 @@ def main():
         overwrite=args.overwrite,
         boundary_mode=args.boundary_mode,
         boundary_window_s=args.boundary_window_s,
+        command=" ".join(sys.argv),
     )
 
     return 0

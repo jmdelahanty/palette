@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable, Optional, Tuple, List
@@ -23,6 +25,8 @@ from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
 )
+from fisheye.shared.stage_provenance import build_stage_provenance
+from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 from .chaser_metrics_loader import load_chaser_metrics
@@ -848,6 +852,7 @@ def _build_track_interactive_spec(
 
 def write_track_kinematics_plot_artifacts(
     *,
+    zarr_path: Optional[Path],
     run_group: zarr.Group,
     run_name: str,
     track_group: zarr.Group,
@@ -861,6 +866,7 @@ def write_track_kinematics_plot_artifacts(
     distance_series_present: bool,
     stimulus_run: Optional[str],
     console: Console,
+    command: Optional[str] = None,
 ) -> None:
     png_artifact_name, spec_artifact_name = _track_artifact_names(track_id)
     source_paths = _track_source_paths(run_name, track_group, run_group, track_id)
@@ -886,6 +892,37 @@ def write_track_kinematics_plot_artifacts(
             "parameters": parameters,
         }
     )
+    created_at_utc = datetime.now(timezone.utc).isoformat()
+    env_info = get_environment_info(
+        disk_path=str(zarr_path) if zarr_path is not None else None,
+        capture_env_vars=False,
+    )
+    provenance = build_stage_provenance(
+        stage="track_kinematics_visualization",
+        created_at_utc=created_at_utc,
+        parameters={
+            **parameters,
+            "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "renderer": TRACK_KINEMATICS_PLOT_RENDERER,
+        },
+        inputs={
+            "zarr_path": str(zarr_path) if zarr_path is not None else None,
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+            "track_id": int(track_id),
+            "run_name": run_name,
+        },
+        command=command,
+        version=TRACK_KINEMATICS_PLOT_RENDERER,
+        git=get_git_info(),
+        environment=env_info.get("environment"),
+        platform=env_info.get("platform"),
+        artifacts={
+            "png_artifact": f"visualizations/{png_artifact_name}",
+            "interactive_artifact": f"visualizations/{spec_artifact_name}",
+            "artifact_signature": signature,
+        },
+    )
 
     write_png_visualization_artifact(
         run_group,
@@ -894,6 +931,7 @@ def write_track_kinematics_plot_artifacts(
         description="Track kinematics summary PNG",
         created_by="fisheye.analysis.plot_track_kinematics",
         artifact_signature=signature,
+        created_at_utc=created_at_utc,
         source_paths=source_paths,
         source_runs=source_runs,
         parameters=parameters,
@@ -901,6 +939,7 @@ def write_track_kinematics_plot_artifacts(
             "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
             "track_id": int(track_id),
             "run_name": run_name,
+            "provenance": provenance,
         },
     )
     spec = _build_track_interactive_spec(
@@ -924,6 +963,7 @@ def write_track_kinematics_plot_artifacts(
         created_by="fisheye.analysis.plot_track_kinematics",
         renderer=TRACK_KINEMATICS_PLOT_RENDERER,
         artifact_signature=signature,
+        created_at_utc=created_at_utc,
         snapshot_artifact=png_artifact_name,
         source_paths=source_paths,
         source_runs=source_runs,
@@ -932,6 +972,7 @@ def write_track_kinematics_plot_artifacts(
             "plot_schema_id": TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
             "track_id": int(track_id),
             "run_name": run_name,
+            "provenance": provenance,
         },
     )
     console.print(
@@ -1162,6 +1203,7 @@ def plot_track(
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
+    argv_list = list(argv) if argv is not None else None
     parser = argparse.ArgumentParser(description="Plot track kinematics run metrics.")
     parser.add_argument("zarr_path", help="Path to the Palette Zarr archive.")
     parser.add_argument(
@@ -1213,7 +1255,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Display interactively even when --save or --write-zarr-artifacts is used.",
     )
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argv_list)
+    command = (
+        " ".join(sys.argv)
+        if argv_list is None
+        else " ".join(["fisheye.analysis.plot_track_kinematics", *map(str, argv_list)])
+    )
 
     console = Console()
     zarr_path = Path(args.zarr_path)
@@ -1318,6 +1365,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 console.print("[yellow]Warning:[/yellow] No PNG bytes were rendered; skipping zarr artifacts.")
                 continue
             write_track_kinematics_plot_artifacts(
+                zarr_path=zarr_path,
                 run_group=run_group,
                 run_name=run_name,
                 track_group=track_group,
@@ -1331,6 +1379,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 distance_series_present=distance_series is not None,
                 stimulus_run=stim_run_name,
                 console=console,
+                command=command,
             )
 
 

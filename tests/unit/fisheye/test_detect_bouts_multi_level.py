@@ -78,6 +78,16 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
 
     assert bout_run.attrs["default_level"] == "speed_filtered"
     assert bout_run.attrs["boundary_mode"] == "threshold"
+    provenance = bout_run.attrs["provenance"]
+    assert provenance["contract"]["name"] == "palette_stage_provenance"
+    assert provenance["stage"] == "detect_bouts_multi_level"
+    assert provenance["version"] == "detect_bouts_multi_level.v1"
+    assert provenance["parameters"]["threshold_mm"] == 2.0
+    assert provenance["parameters"]["default_level"] == "speed_filtered"
+    assert provenance["parameters"]["boundary_mode"] == "threshold"
+    assert provenance["inputs"]["source_track_kinematics_run"] == "tk_1"
+    assert provenance["inputs"]["source_track_path"].endswith("/tk_1/tracks/id_0")
+    assert provenance["artifacts"]["run_path"] == "analysis/swim_bout_runs/bouts_filtered_default"
     assert bout_run["speed_filtered"]["bouts"].attrs["is_default_level"] is True
     assert bout_run["speed_smoothed"]["bouts"].attrs["is_default_level"] is False
     assert "core_start_frame" in bout_run["speed_filtered"]["bouts"]
