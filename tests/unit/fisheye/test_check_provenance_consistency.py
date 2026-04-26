@@ -196,6 +196,61 @@ def test_collect_provenance_reports_crop_snapshot_drift_from_upstream_refined_so
     assert any("bbox_norm_coords differ for 1 row(s) across 1 frame(s)." in issue for issue in record.issues)
 
 
+def test_collect_provenance_ignores_subpixel_bbox_roundoff_when_dimensions_known() -> None:
+    root = _build_root_with_detect()
+
+    refined_runs = root.create_group("refined_detect_runs")
+    refined = refined_runs.create_group("refined_detect_001")
+    refined.attrs["source_detect_run"] = "detect_001"
+    refined.attrs["detect_review_status"] = {"resolved_group": "refined"}
+    instances = refined.create_group("instances")
+    instances.attrs["width"] = 4512
+    instances.attrs["height"] = 4512
+    instances.create_array("refined_row_ids", data=np.asarray([10, 11], dtype=np.int64))
+    instances.create_array("frame_indices", data=np.asarray([100, 101], dtype=np.int32))
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.asarray(
+            [
+                [0.6382812261581421, 0.3119140565395355, 0.03281249850988388, 0.03281249850988388],
+                [0.637890636920929, 0.3119140565395355, 0.03359375149011612, 0.033203125],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    instances.create_array("bbox_img_xyxy", shape=(2, 4))
+    instances.create_array("frame_offsets", shape=(102,))
+    instances.create_array("source_kind_codes", shape=(2,))
+    instances.create_array("manual_edit_flags", shape=(2,))
+    instances.create_array("source_detect_row_index", shape=(2,))
+    instances.create_array("frame_counts", shape=(102,))
+    refined_runs.attrs["latest"] = "refined_detect_001"
+
+    crop_runs = root.create_group("crop_runs")
+    crop = crop_runs.create_group("crop_001")
+    crop.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_001/instances"
+    crop.attrs["width"] = 4512
+    crop.attrs["height"] = 4512
+    crop.create_array("roi_images", shape=(2, 4, 4))
+    crop.create_array("frame_indices", data=np.asarray([100, 101], dtype=np.int32))
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.asarray(
+            [
+                [0.6382812067126551, 0.3119140516781638, 0.03281245671265514, 0.03281251082183621],
+                [0.6378906466436725, 0.3119140516781638, 0.03359379328734486, 0.033203125],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    crop_runs.attrs["latest"] = "crop_001"
+
+    record = mod.collect_provenance(root)  # type: ignore[arg-type]
+
+    assert record.crop_source_drift_issues == []
+    assert not any("bbox_norm_coords differ" in issue for issue in record.issues)
+
+
 def test_collect_provenance_reports_stale_downstream_crop_snapshots() -> None:
     root = _build_root_with_detect()
 

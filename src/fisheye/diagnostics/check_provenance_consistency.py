@@ -20,6 +20,8 @@ from ..shared.refined_detect_curation import (
 )
 from ..shared.type_conversions import as_int, normalize_attr
 
+_BBOX_DRIFT_PIXEL_ATOL = 0.25
+
 
 @dataclass
 class ProvenanceRecord:
@@ -219,6 +221,73 @@ def _format_drift_issue(
     return f"{run_label} snapshot drifted from {source_label}: {detail}."
 
 
+def _shape_from_resolution_attr(value: object) -> Optional[tuple[int, int]]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    height = as_int(value[0])
+    width = as_int(value[1])
+    if height is None or width is None or height <= 0 or width <= 0:
+        return None
+    return int(height), int(width)
+
+
+def _frame_shape_from_attrs(*groups: zarr.Group) -> Optional[tuple[int, int]]:
+    for group in groups:
+        attrs = getattr(group, "attrs", {})
+        height = (
+            as_int(attrs.get("height"))
+            or as_int(attrs.get("video_height"))
+            or as_int(attrs.get("source_video_height"))
+            or as_int(attrs.get("source_full_height"))
+        )
+        width = (
+            as_int(attrs.get("width"))
+            or as_int(attrs.get("video_width"))
+            or as_int(attrs.get("source_video_width"))
+            or as_int(attrs.get("source_full_width"))
+        )
+        if height is not None and width is not None and height > 0 and width > 0:
+            return int(height), int(width)
+
+        for key in (
+            "source_video_resolution",
+            "source_full_resolution",
+            "palette_original_resolution",
+            "original_resolution",
+        ):
+            shape = _shape_from_resolution_attr(attrs.get(key))
+            if shape is not None:
+                return shape
+    return None
+
+
+def _bbox_norm_drift_mask(
+    crop_bbox: np.ndarray,
+    source_bbox: np.ndarray,
+    *,
+    crop_group: zarr.Group,
+    source_group: zarr.Group,
+) -> np.ndarray:
+    crop_values = np.asarray(crop_bbox, dtype=np.float64)
+    source_values = np.asarray(source_bbox, dtype=np.float64)
+    frame_shape = _frame_shape_from_attrs(crop_group, source_group)
+    if frame_shape is None:
+        return ~np.isclose(
+            crop_values,
+            source_values,
+            rtol=1e-6,
+            atol=1e-8,
+            equal_nan=True,
+        )
+
+    height, width = frame_shape
+    pixel_scale = np.asarray([width, height, width, height], dtype=np.float64)
+    both_nan = np.isnan(crop_values) & np.isnan(source_values)
+    one_nan = np.isnan(crop_values) ^ np.isnan(source_values)
+    pixel_delta = np.abs(crop_values - source_values) * pixel_scale
+    return (~both_nan) & (one_nan | (pixel_delta > _BBOX_DRIFT_PIXEL_ATOL))
+
+
 def _collect_crop_source_drift_issues(
     *,
     crop_run: Optional[str],
@@ -276,12 +345,11 @@ def _collect_crop_source_drift_issues(
                 f"bbox_norm_coords shape {tuple(crop_bbox.shape)} != {tuple(source_bbox.shape)}."
             )
         else:
-            bbox_drift_mask = ~np.isclose(
-                np.asarray(crop_bbox, dtype=np.float64),
-                np.asarray(source_bbox, dtype=np.float64),
-                rtol=1e-6,
-                atol=1e-8,
-                equal_nan=True,
+            bbox_drift_mask = _bbox_norm_drift_mask(
+                crop_bbox,
+                source_bbox,
+                crop_group=crop_group,
+                source_group=source_group,
             )
             changed_bbox_rows = np.where(np.any(bbox_drift_mask, axis=1))[0]
             if changed_bbox_rows.size:
