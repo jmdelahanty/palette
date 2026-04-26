@@ -482,6 +482,19 @@ def _component_seed_from_eyes_union_assignment(
     created_at = source.group.attrs.get("created_at_utc") or source.group.attrs.get("created_utc")
     if created_at is not None:
         source_payload["source_created_at_utc"] = str(created_at)
+    if source.mask_surface_kind == "thresholded_probability":
+        comp_idx = source.mask_labels.index(_RAW_EYE_UNION_COMPONENT)
+        threshold = (
+            float(source.probability_thresholds[comp_idx])
+            if comp_idx < len(source.probability_thresholds)
+            else 0.5
+        )
+        source_payload["source_probability_path"] = (
+            f"subject_mask_runs/{source.run_name}/{source.mask_surface_path}"
+        )
+        source_payload["source_probability_encoding"] = str(source.probability_encoding or "")
+        source_payload["source_binary_derivation"] = "threshold(mask_probs_roi)"
+        source_payload["source_probability_threshold"] = float(threshold)
     return RefinedSubjectComponentSeed(
         component_name=str(component_name),
         masks=np.asarray(masks, dtype=np.uint8),

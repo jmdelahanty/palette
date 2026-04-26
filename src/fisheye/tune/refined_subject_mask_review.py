@@ -135,6 +135,56 @@ class SourceSubjectMaskRun:
     assignment_keypoint_group: Optional[str] = None
     source_refined_row_ids: Any | None = None
     source_detect_row_index: Any | None = None
+    mask_surface_kind: str = "binary"
+    mask_surface_path: str = "masks_roi"
+    probability_thresholds: tuple[float, ...] = ()
+    probability_encoding: Optional[str] = None
+
+
+class _ThresholdedProbabilityMaskArray:
+    """Array-like binary view over subject-mask probability surfaces."""
+
+    dtype = np.dtype(np.uint8)
+
+    def __init__(
+        self,
+        probabilities: Any,
+        *,
+        thresholds: Sequence[float],
+        encoding: Optional[str],
+    ) -> None:
+        self._probabilities = probabilities
+        self._thresholds = np.asarray(thresholds, dtype=np.float32)
+        self._encoding = str(encoding or "").strip().lower()
+        self.shape = tuple(int(dim) for dim in probabilities.shape)
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        raw = np.asarray(self._probabilities[key])
+        probabilities = self._decode(raw)
+        thresholds = self._thresholds_for_key(key, probabilities.ndim)
+        return (probabilities >= thresholds).astype(np.uint8, copy=False)
+
+    def _decode(self, values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values)
+        if arr.dtype == np.uint8 and self._encoding in {"", "linear_uint8_0_255"}:
+            return arr.astype(np.float32) / np.float32(255.0)
+        return arr.astype(np.float32, copy=False)
+
+    def _thresholds_for_key(self, key: object, ndim: int) -> np.ndarray | np.float32:
+        if self._thresholds.size <= 0:
+            return np.float32(0.5)
+
+        channel_key: object = slice(None)
+        if isinstance(key, tuple) and len(key) > 1:
+            channel_key = key[1]
+        channel_thresholds = np.asarray(self._thresholds[channel_key], dtype=np.float32)
+        if channel_thresholds.ndim == 0:
+            return np.float32(channel_thresholds)
+        if ndim == 4:
+            return channel_thresholds.reshape((1, -1, 1, 1))
+        if ndim == 3:
+            return channel_thresholds.reshape((-1, 1, 1))
+        return channel_thresholds
 
 
 @dataclass(frozen=True)
@@ -232,6 +282,42 @@ def _normalize_component_list(
             return _default_components_for_source(default_source)
         return tuple(DEFAULT_COMPONENTS)
     return tuple(result)
+
+
+def _coerce_probability_threshold(value: object, *, default: float = 0.5) -> float:
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        threshold = float(default)
+    return float(np.clip(threshold, 0.0, 1.0))
+
+
+def _probability_thresholds_for_labels(group: zarr.Group, labels: Sequence[str]) -> tuple[float, ...]:
+    default_threshold = _coerce_probability_threshold(group.attrs.get("mask_probability_threshold"), default=0.5)
+    thresholds = [default_threshold for _ in labels]
+    raw = (
+        group.attrs.get("thresholds_by_label")
+        or group.attrs.get("threshold_by_component")
+        or group.attrs.get("threshold_by_label")
+    )
+    if isinstance(raw, Mapping):
+        for idx, raw_label in enumerate(labels):
+            label = str(raw_label)
+            normalized = _normalize_component_name(label) or label
+            value = raw.get(label, raw.get(normalized))
+            if value is not None:
+                thresholds[idx] = _coerce_probability_threshold(value, default=default_threshold)
+    elif isinstance(raw, (list, tuple)) and len(raw) == len(labels):
+        thresholds = [
+            _coerce_probability_threshold(value, default=default_threshold)
+            for value in raw
+        ]
+    return tuple(float(value) for value in thresholds)
+
+
+def _probability_encoding_for_group(group: zarr.Group) -> Optional[str]:
+    value = group.attrs.get("probabilities_encoding") or group.attrs.get("probability_encoding")
+    return str(value) if value is not None else None
 
 
 def _require_gui_display() -> None:
@@ -398,6 +484,19 @@ def _source_component_provenance_payload(
         projection_mode_value = legacy_component_payload.get("projection_mode", projection_mode)
     if projection_mode_value is not None:
         payload["projection_mode"] = str(projection_mode_value)
+    if source.mask_surface_kind == "thresholded_probability":
+        source_idx = source.mask_labels.index(component_name) if component_name in source.mask_labels else None
+        threshold = (
+            float(source.probability_thresholds[source_idx])
+            if source_idx is not None and source_idx < len(source.probability_thresholds)
+            else 0.5
+        )
+        payload["source_probability_path"] = (
+            f"subject_mask_runs/{source.run_name}/{source.mask_surface_path}"
+        )
+        payload["source_probability_encoding"] = str(source.probability_encoding or "")
+        payload["source_binary_derivation"] = "threshold(mask_probs_roi)"
+        payload["source_probability_threshold"] = float(threshold)
     return payload
 
 
@@ -1039,8 +1138,6 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     if run_name not in parent:
         raise RuntimeError(f"subject_mask_runs/{run_name} not found.")
     group = parent[run_name]
-    if "masks_roi" not in group:
-        raise RuntimeError(f"subject_mask_runs/{run_name} missing masks_roi.")
     crop_run = str(group.attrs.get("source_crop_run") or "")
     if not crop_run:
         crop_parent = root.get("crop_runs")
@@ -1061,9 +1158,33 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     labels_raw = group.attrs.get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"subject_mask_runs/{run_name} missing usable mask_labels attr.")
+    mask_labels = tuple(str(item) for item in labels_raw)
     available = group.get("available_channels")
     if available is None:
         raise RuntimeError(f"subject_mask_runs/{run_name} missing available_channels.")
+    masks_roi = group.get("masks_roi")
+    mask_surface_kind = "binary"
+    mask_surface_path = "masks_roi"
+    probability_thresholds: tuple[float, ...] = ()
+    probability_encoding: Optional[str] = None
+    if masks_roi is None:
+        probabilities = group.get("mask_probs_roi")
+        if probabilities is None:
+            raise RuntimeError(f"subject_mask_runs/{run_name} missing masks_roi or mask_probs_roi.")
+        if len(probabilities.shape) != 4:
+            raise RuntimeError(
+                f"subject_mask_runs/{run_name}/mask_probs_roi must have shape (N, C, H, W), "
+                f"got {probabilities.shape}."
+            )
+        probability_thresholds = _probability_thresholds_for_labels(group, mask_labels)
+        probability_encoding = _probability_encoding_for_group(group)
+        masks_roi = _ThresholdedProbabilityMaskArray(
+            probabilities,
+            thresholds=probability_thresholds,
+            encoding=probability_encoding,
+        )
+        mask_surface_kind = "thresholded_probability"
+        mask_surface_path = "mask_probs_roi"
     def _lineage_array(name: str) -> Any | None:
         if name in group:
             return group[name]
@@ -1076,9 +1197,9 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         group=group,
         crop_run=crop_run,
         source_crop_snapshot=source_crop_snapshot,
-        masks_roi=group["masks_roi"],
+        masks_roi=masks_roi,
         detection_source=group["detection_source"],
-        mask_labels=tuple(str(item) for item in labels_raw),
+        mask_labels=mask_labels,
         available_channels=np.asarray(available[:], dtype=bool),
         frame_indices=_lineage_array("frame_indices"),
         frame_counts=_lineage_array("frame_counts"),
@@ -1100,6 +1221,10 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         ),
         source_refined_row_ids=_lineage_array("source_refined_row_ids"),
         source_detect_row_index=_lineage_array("source_detect_row_index"),
+        mask_surface_kind=mask_surface_kind,
+        mask_surface_path=mask_surface_path,
+        probability_thresholds=probability_thresholds,
+        probability_encoding=probability_encoding,
     )
 
 

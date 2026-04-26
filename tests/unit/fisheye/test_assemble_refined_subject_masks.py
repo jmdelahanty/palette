@@ -519,6 +519,45 @@ def test_assemble_refined_subject_run_rejects_subject_run_eye_union_without_keyp
         )
 
 
+def test_assemble_refined_subject_run_accepts_probability_only_subject_run(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+    masks = np.zeros((2, 1, 8, 8), dtype=np.uint8)
+    masks[0, 0, 1:7, 1:7] = 1
+    masks[1, 0, 2:6, 2:6] = 1
+    run = _create_subject_run(
+        root,
+        run_name="subject_body_probability_only_001",
+        method="unet_subject_mask_segmenter",
+        mask_labels=["subject_body"],
+        available_channels=np.asarray([True], dtype=bool),
+        masks=masks,
+    )
+    del run["masks_roi"]
+    probabilities = masks * np.uint8(255)
+    probabilities[0, 0, 0, 0] = np.uint8(127)
+    run.create_array("mask_probs_roi", data=probabilities, overwrite=True)
+    run.attrs["probabilities_encoding"] = "linear_uint8_0_255"
+    run.attrs["mask_probability_threshold"] = 0.5
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        subject_run="subject_body_probability_only_001",
+        refined_run="refined_subject_masks_from_probability_only_001",
+    )
+
+    assert summary["component_names"] == ["subject_body"]
+    refined = root["refined_subject_masks_runs"]["refined_subject_masks_from_probability_only_001"]
+    np.testing.assert_array_equal(np.asarray(refined["masks_roi"][:], dtype=np.uint8), masks)
+    provenance = refined["components/subject_body/provenance"].attrs
+    assert provenance["source_probability_path"] == (
+        "subject_mask_runs/subject_body_probability_only_001/mask_probs_roi"
+    )
+    assert provenance["source_probability_encoding"] == "linear_uint8_0_255"
+    assert provenance["source_binary_derivation"] == "threshold(mask_probs_roi)"
+    assert float(provenance["source_probability_threshold"]) == pytest.approx(0.5)
+
+
 def test_assemble_refined_subject_run_assigns_subject_run_eye_union_with_keypoints(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()
