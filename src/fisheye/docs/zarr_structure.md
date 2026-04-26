@@ -1285,9 +1285,10 @@ Expected component groups:
   B-spline, body length, axis, curvature, and body-shape validity.
 - `components/swim_bladder/`: swim-bladder centroid/blob/ellipse summaries and
   component-specific validity.
-- `components/eye_left/` and `components/eye_right/`: optional interpreted
-  eye-shape mirrors or component-specific validity consumed by subject-shape
-  analysis.
+- `components/eye_left/` and `components/eye_right/`: first-class
+  analysis-facing eye component geometry, ellipse/axis summaries, and
+  component-specific validity consumed by coherent body/eyes/swim
+  subject-shape analysis.
 
 Expected relation groups:
 
@@ -1300,6 +1301,13 @@ Expected relation groups:
 Component groups in `analysis/subject_shape_runs` are derived geometry groups,
 not approval surfaces. Source mask approval remains owned by
 `refined_subject_masks_runs/components/<component>`.
+
+Eye geometry in `analysis/subject_shape_runs` is the analysis-facing coherent
+subject-shape surface. Eye contours, ellipse fits, and eye-pair checks may also
+live in `refined_subject_masks_runs` when they are mask-local QC/source
+primitives. `analysis/eye_angle_runs` remains a specialized downstream
+time-series or behavior-facing analysis and should consume subject-shape eye
+geometry when available.
 
 Examples that belong here instead of in `refined_subject_masks_runs` as
 canonical outputs:

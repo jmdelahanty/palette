@@ -267,7 +267,7 @@ Current implementation note:
 - remaining work is consumer cleanup and deciding when compatibility
   materialization becomes opt-in
 
-### 3. Keep eye geometry migration deferred even though review authority is unified
+### 3. Keep legacy eye-geometry compatibility during migration
 
 Do not remove `refined_eye_masks_runs` yet, but also do not treat it as a
 second canonical refined family for new operator-facing review status.
@@ -288,16 +288,16 @@ For now:
   eye geometry with refined-eye fallback for historical archives
 - registry/query/operator surfaces should prefer unified subject-mask component
   rows for eye visibility, projecting legacy eye-stage data when necessary
-- contract target: unified assembly may later allow eye components to seed
-  directly from `refined_eye_masks_runs`
-- current implementation: the first assembled refined canary still goes
-  through a projected compatibility `subject_mask_runs` eye source:
-  `subject_masks_from_refined_eye_masks_2026-02-12_19-51-24`
+- contract target: unified assembly and finalization produce canonical
+  `eye_left` / `eye_right` components in `refined_subject_masks_runs`
+- current implementation: legacy refined-eye sources can seed unified refined
+  subject-mask components directly or through projected compatibility
+  `subject_mask_runs`
 
-### 4. Keep eye geometry specialized for now
+### 4. Preserve eye-local QC while shape analysis becomes unified
 
 Even after raw masks are unified, eye refinement currently carries specialized
-derived outputs that are not shared by other components, such as:
+mask-local outputs that are not shared by every component, such as:
 
 - left/right assignment
 - contours
@@ -305,8 +305,10 @@ derived outputs that are not shared by other components, such as:
 - eye separation
 - eye-specific reason/status handling
 
-This is a good reason to defer the migration rather than forcing eye refinement
-into a generic component mask stage too early.
+These outputs are a good reason to keep eye-local QC primitives with
+`refined_subject_masks_runs`, while analysis-facing eye geometry is written to
+`analysis/subject_shape_runs` as part of coherent body/eyes/swim shape
+analysis.
 
 Current gap:
 
@@ -810,42 +812,40 @@ Skeleton-branching metrics are likely less central here than for body masks.
 
 ### Eyes
 
-Keep current specialized refined path for now.
+Current canonical review policy:
 
-Recommended near-term policy:
-
-- continue to use `refined_eye_masks_runs` as the current specialized
-  eye-editing surface
-- do not force eye editing into `refined_subject_masks_runs` until body/swim
-  workflows are stable
+- use `refined_subject_masks_runs/components/eye_left|eye_right` as the
+  canonical reviewed eye-mask authority for modern unified workflows.
+- keep `refined_eye_masks_runs` readable as a historical/compatibility layout,
+  and materialize it only as a derived bridge when an old consumer requires it.
 - prefer unified subject-mask component rows in registry/query/operator
-  surfaces when asking whether a dataset has reviewed eye components
-- keep eye-specific derived outputs specialized for now:
-  - left/right assignment
-  - contours
-  - ellipse parameters
-  - ellipse success
-  - eye separation
+  surfaces when asking whether a dataset has reviewed eye components.
 
-Longer-term target:
+Mask-local eye outputs may remain in `refined_subject_masks_runs`:
 
-- eye masks may eventually live under
-  `refined_subject_masks_runs/components/eye_left|eye_right`
-- but only once the unified component model can preserve the current eye
-  geometry/review affordances without regression
+- left/right assignment provenance
+- contours
+- ellipse parameters
+- ellipse success
+- eye separation
+- eye-specific reason/status handling
 
-Current-state note:
+Analysis-facing eye geometry belongs in `analysis/subject_shape_runs` when it
+is part of a coherent body/eyes/swim shape run. Specialized outputs such as
+`analysis/eye_angle_runs` may remain separate during migration, but new
+eye-angle writers should consume subject-shape eye geometry when that surface is
+available.
 
-- `refined_eye_masks_runs` does not yet follow the exact refined-subject layout
-  proposed here
+Current-state note for `refined_eye_masks_runs`:
+
 - it is an older specialized stage that mixes top-level eye geometry arrays with
   a `metrics/` subgroup
 - it should be treated as a strong precedent for the kinds of derived outputs we
   want, but not as the final structural template for generic component
   refinement
 
-Eye-specific QC should remain specialized for now; body-mask topology or
-skeleton metrics should not be copied over mechanically.
+Eye-local QC should remain component-specific; body-mask topology or skeleton
+metrics should not be copied over mechanically.
 
 ## Review And Saveback Model
 
@@ -869,14 +869,15 @@ This keeps refinement aligned with the broader subject-mask design:
 - no assumption that every component shares the same derived formulas
 
 Future unification should make eyes a subject-mask component conceptually, but
-the current refined eye artifact is richer than a plain component mask.
+legacy refined-eye artifacts are richer than a plain component mask.
 
 The unification target is therefore:
 
-- common component model at the raw-mask level
+- common component model at the raw and refined subject-mask levels
 - shared review/state semantics where possible
-- eye-specific derived geometry retained until a general refinement framework
-  can express it cleanly
+- eye-local QC primitives retained with refined subject masks
+- analysis-facing body, swim-bladder, and eye geometry expressed together in
+  `analysis/subject_shape_runs`
 
 ## Review / Editing Model
 
@@ -1131,7 +1132,8 @@ Remaining work is no longer open-ended architecture. It is operational hardening
 - visual inspection and component approval of smart-finalized candidates
 - temporal QC as a second pass that flags suspicious rows without changing masks
 - faster/chunked eye-geometry backfill if this becomes a frequent full-run task
-- body/swim shape-stage design and downstream subject-shape consumers
+- body/eyes/swim subject-shape-stage implementation and downstream
+  subject-shape consumers
 - complete subject/refined-subject stale repair parity with the eye-mask
   precedent
 - top-level segmentation orchestration in `core/pipeline.py` so operators do not
@@ -1146,13 +1148,13 @@ Remaining work is no longer open-ended architecture. It is operational hardening
 - [x] `refined_eye_masks_runs` remains supported during transition.
 - [x] The unification path for eyes is explicit enough to avoid another
       schema reset later.
-- [x] Downstream body/swim shape work is clearly anchored to refined subject
-      masks and separated from mask-local geometry.
+- [x] Downstream body/eyes/swim shape work is clearly anchored to refined
+      subject masks and separated from mask-local geometry.
 
 ## Risks
 
-- Trying to force eye refinement into a generic mask stage too early could
-  discard important eye-specific geometry semantics.
+- Trying to force eye-local QC into a generic derived-analysis stage too early
+  could discard important eye-specific review semantics.
 - Splitting body/swim-bladder refinement into too many independent stage
   families could fragment reviewer workflows.
 - If registry design is too coarse, future recording summaries will hide the

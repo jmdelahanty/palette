@@ -127,8 +127,10 @@ Existing analysis outputs already follow this direction:
 - `analysis/stimulus_runs/<run>` imports stimulus and alignment metadata.
 - `analysis/track_kinematics_runs/<online|offline>/<run>` stores
   identity-resolved movement outputs.
-- `analysis/eye_angle_runs/<run>` stores eye geometry interpreted relative to
-  heading/keypoint context.
+- `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
+  interpreted relative to heading/keypoint context. New unified mask-derived
+  eye geometry should be available from `analysis/subject_shape_runs/<run>`
+  when a coherent body/eyes/swim shape run exists.
 - `analysis/stimulus_response_runs/<run>` is the planned stimulus-aware
   downstream consumer.
 
@@ -161,8 +163,13 @@ Subject-shape runs should be component-organized where possible:
 
 - `components/<component>` stores derived geometry whose primary subject is one
   semantic refined-mask component.
+- expected first-class components are `subject_body`, `swim_bladder`,
+  `eye_left`, and `eye_right` when those refined mask components are available.
 - `relations/<relationship>` stores derived geometry whose meaning depends on
   multiple components or an external coordinate frame.
+- expected first-class relations include `eye_pair`, `eyes_to_body`, and
+  `swim_bladder_to_body` when the required components and coordinate frame are
+  available.
 - component groups in `analysis/subject_shape_runs` are not review or approval
   surfaces; source mask approval remains in `refined_subject_masks_runs`.
 

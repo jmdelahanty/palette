@@ -48,6 +48,10 @@ Use `analysis/subject_shape_runs/<run>` for interpreted biology:
 - body curvature, bend, width profile, or body-shape summaries
 - swim-bladder position relative to the body axis or centerline
 - swim-bladder distance to body centroid, eye pair, or anatomical landmarks
+- analysis-facing eye component geometry when it is part of the same coherent
+  body/eyes/swim subject-shape run
+- eye-pair metrics that are consumed as biological geometry rather than
+  immediate mask-local QC
 - eye angles relative to body/head heading
 - temporally smoothed or track-aligned shape metrics
 
@@ -190,9 +194,9 @@ Use component groups for values whose primary subject is one semantic component:
   curvature, and body-shape validity.
 - `components/swim_bladder` for swim-bladder centroid/blob/ellipse summaries
   and component-specific validity.
-- `components/eye_left` and `components/eye_right` for optional interpreted
-  eye-shape mirrors or component-specific eye validity consumed by shape
-  analysis.
+- `components/eye_left` and `components/eye_right` for analysis-facing eye
+  component geometry, ellipse/axis summaries, and component-specific eye
+  validity consumed by coherent subject-shape analysis.
 
 Use `relations/` for values whose meaning depends on more than one component or
 an external coordinate frame:
@@ -274,7 +278,8 @@ Required semantics:
 
 `analysis/eye_angle_runs` already computes interpreted eye angles from eye
 geometry plus heading/keypoint context. That remains a valid specialized
-analysis run.
+analysis run, but it should not be the first authority for mask-derived eye
+shape geometry in new unified body/eyes/swim workflows.
 
 `analysis/subject_shape_runs` should not force every specialized metric to move
 immediately. It defines the mask-derived shape layer that can later feed or
@@ -282,16 +287,22 @@ replace specialized analyses when that migration is justified.
 
 Recommended near-term approach:
 
-- keep eye ellipse fits in `refined_subject_masks_runs`
-- keep current eye-angle outputs in `analysis/eye_angle_runs`
-- use `analysis/subject_shape_runs` first for body/swim shape features that do not
-  already have a stable analysis home
+- keep refined-subject eye contours, ellipse fits, and eye-pair checks in
+  `refined_subject_masks_runs` when they are mask-local QC/source primitives.
+- include `eye_left` and `eye_right` component geometry in
+  `analysis/subject_shape_runs` when producing a coherent body/eyes/swim shape
+  run.
+- keep current eye-angle outputs in `analysis/eye_angle_runs` during migration;
+  future eye-angle writers should consume `analysis/subject_shape_runs` when
+  mask-derived eye geometry is available there.
+- do not create a separate eye-analysis authority for mask-derived eye geometry
+  unless it is a downstream temporal, behavioral, or task-specific analysis.
 
 ## Open Questions
 
 - Which body centerline method is the first supported implementation?
-- Should body/swim shape outputs be track-aligned from the start, or remain
-  row-aligned with refined masks until tracking is explicitly requested?
+- Should body/eyes/swim shape outputs be track-aligned from the start, or
+  remain row-aligned with refined masks until tracking is explicitly requested?
 
 ## Related Documents
 

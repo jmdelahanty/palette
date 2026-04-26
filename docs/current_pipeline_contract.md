@@ -52,7 +52,7 @@ The default rule is:
 | Refined subject masks | `subject_mask_runs/<run>` sources plus component provenance | `refined_subject_masks_runs/<run>` | none; this is the canonical refined component surface | component availability, review state, and lifecycle from refined subject-mask component rows |
 | Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
-| Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | future `analysis/subject_shape_runs/<run>` or specialized analysis runs | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
+| Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -84,9 +84,11 @@ Current rules:
   `refined_subject_masks_runs`.
 - Interpreted biological geometry such as body centerlines/splines, canonical
   body B-spline fits, canonical body length from centerline/B-spline arc length,
-  head/tail axes, swim-bladder position relative to body axis, and eye angles
-  relative to heading belong in `analysis/subject_shape_runs` or a specialized
-  downstream analysis run with explicit source/provenance.
+  head/tail axes, swim-bladder position relative to body axis, analysis-facing
+  eye component geometry, eye-pair relationships, and eye angles relative to
+  heading belong in `analysis/subject_shape_runs` when they are part of coherent
+  mask-derived body/eyes/swim geometry. Specialized downstream analysis runs
+  should consume that surface when possible.
 - Production assembly/export from `refined_subject_masks_runs` is
   approved-only by default; pending or missing component reviews require an
   explicit draft/QA override.
@@ -179,7 +181,8 @@ desired design:
 - Temporal QC for abrupt area/centroid/component-count changes is planned as a
   second pass that flags rows without overwriting spatial masks.
 - `analysis/subject_shape_runs` is defined as a draft contract, but
-  implementation and the first body centerline/B-spline method are still open.
+  implementation and the first coherent body/eyes/swim shape writer, including
+  the body centerline/B-spline method, are still open.
 
 ## Review Checklist
 
