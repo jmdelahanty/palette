@@ -3,9 +3,10 @@
 Frame-wise eye angle computation for Palette archives.
 
 This module derives head-relative eye angles, per-eye kinematics, and quality
-flags from refined eye mask runs and their source keypoint headings. The
-results are stored under ``analysis/eye_angle_runs/<run>`` with full provenance
-metadata so downstream tools can consume clean, frame-aligned measurements.
+flags from canonical refined-subject eye geometry, legacy refined-eye geometry
+fallbacks, and their source keypoint headings. The results are stored under
+``analysis/eye_angle_runs/<run>`` with full provenance metadata so downstream
+tools can consume clean, frame-aligned measurements.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.utils.metadata import get_fps
 from fisheye.utils.system import get_git_info
+from fisheye.utils.zarr_io import open_zarr_root
 
 # Reason-code bitmask values (shared across detection- and frame-level QA)
 REASON_NONE = np.uint16(0)
@@ -52,6 +54,22 @@ ELLIPSE_CIRCULARITY_THRESHOLD = 0.95  # reject nearly circular fits that lack a 
 DERIVATIVE_MAX_DT = 0.25  # seconds; ignore large gaps when computing discrete derivatives
 ANGLE_SMOOTHING_WINDOW = 7  # frames; moving-average window for smoothed angle outputs
 _HEAD_KEYPOINT_LABELS = ("swim_bladder", "eye_left", "eye_right")
+
+
+def _eye_angle_definition_attrs() -> Dict[str, object]:
+    """Return stable metadata definitions for eye-angle output arrays."""
+    return {
+        "signed_angles": True,
+        "signed_angle_convention": "per-eye signed angles are temporal-positive",
+        "vergence_definition": "abs(vergence_signed_deg)",
+        "vergence_signed_definition": "-(left_signed_deg + right_signed_deg)",
+        "version_definition": "0.5*(-left_signed_deg + right_signed_deg)",
+        "minor_signed_angles": True,
+        "minor_signed_angle_convention": "per-eye minor signed angles are temporal-positive",
+        "minor_vergence_definition": "abs(vergence_minor_signed_deg)",
+        "minor_vergence_signed_definition": "-(left_minor_signed_deg + right_minor_signed_deg)",
+        "minor_version_definition": "0.5*(-left_minor_signed_deg + right_minor_signed_deg)",
+    }
 
 
 @dataclass
@@ -444,7 +462,10 @@ def _prepare_output_arrays(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compute head-relative eye angles and QA flags from refined eye mask runs."
+        description=(
+            "Compute head-relative eye angles and QA flags from canonical refined-subject "
+            "eye geometry, with refined-eye compatibility fallback."
+        )
     )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
     parser.add_argument(
@@ -509,6 +530,11 @@ def _resolve_keypoint_run_name(
     )
 
 
+def _open_archive_for_eye_angle(zarr_path: Path) -> zarr.Group:
+    """Open mutable Palette zarrs with the repository's non-consolidated fallback policy."""
+    return open_zarr_root(zarr_path, mode="a")
+
+
 def _resolve_head_keypoint_indices(kp_group: zarr.Group) -> Dict[str, int]:
     keypoint_count = int(kp_group["keypoints_roi"].shape[1])
     try:
@@ -526,8 +552,7 @@ def _resolve_head_keypoint_indices(kp_group: zarr.Group) -> Dict[str, int]:
 
 def run(args: argparse.Namespace) -> None:
     console = Console()
-    mode = "a"
-    root = zarr.open(str(args.zarr_path), mode=mode)
+    root = _open_archive_for_eye_angle(args.zarr_path)
 
     analysis_group = root.require_group("analysis")
     parent_group = analysis_group.require_group("eye_angle_runs")
@@ -1200,12 +1225,7 @@ def run(args: argparse.Namespace) -> None:
             "valid_detection_fraction": float(valid_frame.sum() / total_detections) if total_detections else 0.0,
             "valid_frame_fraction": float(frame_valid.sum() / num_frames) if num_frames else 0.0,
             "circularity_reject_ratio": float(ELLIPSE_CIRCULARITY_THRESHOLD),
-            "signed_angles": True,
-            "vergence_definition": "left_signed_deg + right_signed_deg",
-            "version_definition": "0.5*(left_signed_deg - right_signed_deg)",
-            "minor_signed_angles": True,
-            "minor_vergence_definition": "left_minor_signed_deg + right_minor_signed_deg",
-            "minor_version_definition": "0.5*(left_minor_signed_deg - right_minor_signed_deg)",
+            **_eye_angle_definition_attrs(),
             "angle_smoothing_method": "moving_average",
             "angle_smoothing_window_detections": int(detection_smooth_window) if detection_smooth_window else None,
             "angle_smoothing_window_frames": int(frame_smooth_window) if frame_smooth_window else None,

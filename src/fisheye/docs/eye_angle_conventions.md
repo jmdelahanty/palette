@@ -40,6 +40,11 @@ The referenced sources are captured in run attributes:
   or mapped.
 - `source_keypoint_run`: refined keypoint source.
 
+`analysis/subject_shape_runs` is not recorded as lineage by the current
+eye-angle writer because this stage does not read subject-shape data. If a
+future eye-angle stage consumes subject-shape summaries directly, that run
+should add an explicit source-subject-shape attribute at that point.
+
 The raw ROIs sampled by the viewer live under `keypoints_runs/<run>/roi_images`.
 
 ## Angle conventions
@@ -66,9 +71,9 @@ Invalid or near-circular fits are rejected early; reason bits (`REASON_*`) mark 
 Once left and right signed angles are available:
 
 - We reinterpret the temporal-positive angles as nasal rotations by negating them (`left_nasal = -left_signed`). This keeps convergence defined as *both eyes turning nasally*.
-- **Vergence (signed)** is `left_nasal + right_nasal`. The unsigned magnitude is stored separately (`vergence_deg`).
-- **Version (signed)** is `0.5 * (left_nasal - right_nasal)`.
-- Minor axis variants follow the same algebra (`left_minor_signed`, …).
+- **Vergence (signed)** is `left_nasal + right_nasal`, recorded in metadata as `-(left_signed_deg + right_signed_deg)`. The unsigned magnitude is stored separately as `abs(vergence_signed_deg)`.
+- **Version (signed)** is `0.5 * (left_nasal - right_nasal)`, recorded in metadata as `0.5*(-left_signed_deg + right_signed_deg)`.
+- Minor axis variants follow the same algebra: `vergence_minor_signed_deg = -(left_minor_signed_deg + right_minor_signed_deg)` and `version_minor_deg = 0.5*(-left_minor_signed_deg + right_minor_signed_deg)`.
 
 ### Centroid-based angles (paper-comparable)
 
