@@ -266,6 +266,72 @@ def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypa
     assert "needs_review_metric_multiple_components" in str(body_reasons[1])
 
 
+def test_refresh_refined_subject_mask_metrics_dask_worker_chunks_updates_metric_qc_reasons(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+    mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_refresh_dask_001",
+        chunk_size=1,
+    )
+    root = zarr.open_group(str(zarr_path), mode="a")
+    run = root["refined_subject_masks_runs/refined_subject_masks_smart_refresh_dask_001"]
+    labels = list(run.attrs["mask_labels"])
+    body_idx = labels.index("subject_body")
+
+    edited_body = np.zeros((10, 10), dtype=np.uint8)
+    edited_body[1, 1] = 1
+    edited_body[8, 8] = 1
+    run["masks_roi"][1, body_idx] = edited_body
+    write_reason_columns(
+        run["components/subject_body"],
+        np.asarray(["clean", "manual_correction|needs_review_metric_holes"], dtype=object),
+        chunk_size=2,
+        include_reason_text=True,
+        overwrite=True,
+    )
+
+    summary = mod.refresh_refined_subject_mask_metrics(
+        zarr_path,
+        refined_run="refined_subject_masks_smart_refresh_dask_001",
+        components=["subject_body"],
+        chunk_size=1,
+        metric_level="cheap",
+        execution_backend="dask_worker_chunks",
+        scheduler="threads",
+        num_workers=2,
+    )
+
+    assert summary["components"] == ["subject_body"]
+    assert summary["execution_backend"] == "dask_worker_chunks"
+    assert summary["dask_execution_enabled"] is True
+    assert summary["dask_scheduler"] == "threads"
+    assert summary["dask_num_workers"] == 2
+    assert summary["review_counts"]["subject_body"]["needs_review"] == 1
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_masks_smart_refresh_dask_001"]
+    assert run.attrs["component_metric_qc_execution_backend"] == "dask_worker_chunks"
+    assert run.attrs["component_metric_qc_timing_summary"]["dask_execution_enabled"] is True
+    assert "dask_compute" in run.attrs["component_metric_qc_timing_summary"]["phase_seconds"]
+    assert len(run.attrs["component_metric_qc_chunk_timings"]) == 2
+    assert float(np.asarray(run["metrics/area_px"][1, body_idx], dtype=np.float32)) == pytest.approx(2.0)
+    component_metrics = run["components/subject_body/metrics"]
+    assert int(np.asarray(component_metrics["component_count"][1], dtype=np.int32)) == 2
+
+    body_reasons = read_reason_labels(run["components/subject_body"])
+    assert body_reasons is not None
+    assert "manual_correction" in str(body_reasons[1])
+    assert "needs_review_metric_holes" not in str(body_reasons[1])
+    assert "needs_review_metric_small_area" in str(body_reasons[1])
+    assert "needs_review_metric_multiple_components" in str(body_reasons[1])
+
+
 def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypatch, tmp_path: Path) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     zarr_path = tmp_path / "analysis.zarr"

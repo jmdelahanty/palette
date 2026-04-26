@@ -850,7 +850,9 @@ temporal context, or cross-component relationship belongs in
   `qc_schema_id="refined_subject_component_metric_qc_reasons_v1"`, and a
   `qc_policy` payload. Generated metric-QC reason tags use the
   `needs_review_metric_*` prefix and can be refreshed with
-  `fisheye.utils.backfill_refined_subject_mask_metrics`.
+  `fisheye.utils.backfill_refined_subject_mask_metrics`. Refresh attrs record
+  the metric level, execution backend, timing summary, chunk timings, and
+  per-component review counts.
 - eye-pair relation metrics live under
   `relations/eye_pair/metrics/{separation_px,separation_valid}` when both
   `eye_left` and `eye_right` are present

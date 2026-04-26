@@ -241,7 +241,10 @@ scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics \
 ```
 
 Use `--metric-level full` when the expensive shape-QC metrics are needed, and
-`--no-refresh-reason-tags` when only numeric arrays should be recomputed.
+`--no-refresh-reason-tags` when only numeric arrays should be recomputed. For
+large archives, use `--execution-backend dask_worker_chunks --scheduler
+processes --num-workers <N>` so workers recompute and write disjoint row chunks
+while the driver consolidates metadata and generated reason tags.
 
 Recommended reason tags:
 

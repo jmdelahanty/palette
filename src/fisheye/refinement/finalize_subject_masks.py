@@ -1502,21 +1502,96 @@ def _existing_component_reasons(component_group: zarr.Group, total_rows: int) ->
     return arr.copy()
 
 
+def _process_and_write_metric_refresh_chunk(
+    zarr_path: str,
+    *,
+    refined_run: str,
+    component_indices: Sequence[tuple[str, int]],
+    start_row: int,
+    stop_row: int,
+    chunk_index: int,
+    metric_level: str,
+) -> dict[str, object]:
+    root = open_zarr_root(zarr_path, mode="a")
+    run_group = root["refined_subject_masks_runs"][refined_run]
+    masks = run_group["masks_roi"]
+    row_slice = slice(int(start_row), int(stop_row))
+    timing = _TimingRecorder()
+    chunk_timing: dict[str, object] = {
+        "chunk_index": int(chunk_index),
+        "start_row": int(start_row),
+        "stop_row": int(stop_row),
+        "row_count": int(stop_row) - int(start_row),
+        "execution_backend": _DASK_WORKER_EXECUTION_BACKEND,
+    }
+    chunk_start = time.perf_counter()
+    reason_labels_by_component: dict[str, list[str]] = {}
+    rows_with_component_by_component: dict[str, int] = {}
+
+    for component_name, component_idx in component_indices:
+        phase_start = time.perf_counter()
+        component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
+        write_result = _write_mask_local_metrics_chunk(
+            run_group,
+            component_name=str(component_name),
+            component_idx=int(component_idx),
+            row_slice=row_slice,
+            masks=component_masks,
+            metric_level=metric_level,
+            write_metric_attrs=False,
+        )
+        elapsed = timing.add(f"refresh_metrics_{component_name}", time.perf_counter() - phase_start)
+        chunk_timing[f"refresh_metrics_{component_name}_seconds"] = elapsed
+        reason_labels_by_component[str(component_name)] = [
+            str(value) for value in np.asarray(write_result.reason_labels, dtype=object).tolist()
+        ]
+        rows_with_component_by_component[str(component_name)] = int(np.count_nonzero(write_result.mask_present))
+
+    chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
+    return {
+        "chunk_timing": chunk_timing,
+        "phase_seconds": dict(timing.phase_seconds),
+        "phase_counts": dict(timing.phase_counts),
+        "reason_labels_by_component": reason_labels_by_component,
+        "rows_with_component_by_component": rows_with_component_by_component,
+    }
+
+
 def refresh_refined_subject_mask_metrics_run(
     root: zarr.Group,
     *,
+    zarr_path: str | Path | None = None,
     refined_run: Optional[str] = None,
     components: Optional[Sequence[str]] = None,
     metric_level: str = "cheap",
     chunk_size: int = 256,
     refresh_reason_tags: bool = True,
     write_eye_geometry: bool = False,
+    execution_backend: str = _SERIAL_EXECUTION_BACKEND,
+    scheduler: str = "single-threaded",
+    num_workers: Optional[int] = None,
 ) -> dict[str, object]:
     """Refresh mask-local metrics/QC for an existing refined-subject run."""
 
     metric_level = str(metric_level)
     if metric_level not in _METRIC_LEVELS:
         raise ValueError(f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}.")
+    execution_backend = _normalize_execution_backend(execution_backend)
+    scheduler_key = _normalize_scheduler(scheduler)
+    normalized_num_workers = int(num_workers) if num_workers is not None else None
+    if execution_backend == _DASK_WORKER_EXECUTION_BACKEND and zarr_path is None:
+        raise ValueError("execution_backend='dask_worker_chunks' requires a filesystem zarr_path.")
+    dask_metadata: dict[str, object] = {
+        "execution_backend": execution_backend,
+        "dask_execution_enabled": execution_backend == _DASK_WORKER_EXECUTION_BACKEND,
+        "dask_scheduler": scheduler_key,
+        "dask_num_workers": normalized_num_workers,
+        "dask_chunk_size": max(1, int(chunk_size)),
+        "dask_version": getattr(dask, "__version__", "unknown"),
+    }
+
+    stage_start = time.perf_counter()
+    timing = _TimingRecorder()
     run_name, run_group = _resolve_refined_subject_run_group(root, refined_run)
     masks = run_group.get("masks_roi")
     if masks is None:
@@ -1531,6 +1606,8 @@ def refresh_refined_subject_mask_metrics_run(
     chunk_ranges = _row_chunks(total_rows, max(1, int(chunk_size)))
     review_counts: dict[str, dict[str, int]] = {}
     refreshed_components: list[str] = []
+    reason_labels_by_component: dict[str, np.ndarray] = {}
+    rows_with_component_by_component: dict[str, int] = {}
 
     for component_name, component_idx in component_indices:
         component_group = _ensure_refined_component_metric_shell(
@@ -1538,38 +1615,96 @@ def refresh_refined_subject_mask_metrics_run(
             component_name=component_name,
             total_rows=total_rows,
         )
-        reason_labels = _existing_component_reasons(component_group, total_rows)
-        rows_with_component = 0
-        for start_row, stop_row in chunk_ranges:
-            row_slice = slice(int(start_row), int(stop_row))
-            component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
-            write_result = _write_mask_local_metrics_chunk(
-                run_group,
-                component_name=component_name,
-                component_idx=int(component_idx),
-                row_slice=row_slice,
-                masks=component_masks,
+        reason_labels_by_component[component_name] = _existing_component_reasons(component_group, total_rows)
+        rows_with_component_by_component[component_name] = 0
+
+    if execution_backend == _DASK_WORKER_EXECUTION_BACKEND:
+        assert zarr_path is not None
+        tasks = [
+            delayed(_process_and_write_metric_refresh_chunk)(
+                str(zarr_path),
+                refined_run=run_name,
+                component_indices=tuple(component_indices),
+                start_row=start_row,
+                stop_row=stop_row,
+                chunk_index=chunk_index,
                 metric_level=metric_level,
-                write_metric_attrs=False,
             )
-            rows_with_component += int(np.count_nonzero(write_result.mask_present))
+            for chunk_index, (start_row, stop_row) in enumerate(chunk_ranges)
+        ]
+        with timing.phase("dask_compute"):
+            dask_results = _compute_finalizer_dask_tasks(
+                tasks,
+                scheduler_key=scheduler_key,
+                num_workers=normalized_num_workers,
+            )
+        for result in sorted(dask_results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
+            chunk_timing = dict(result["chunk_timing"])
+            timing.chunk_timings.append(chunk_timing)
+            row_slice = slice(int(chunk_timing["start_row"]), int(chunk_timing["stop_row"]))
+            for phase, seconds in dict(result.get("phase_seconds") or {}).items():
+                timing.add(str(phase), float(seconds))
+            for component_name, count in dict(result.get("rows_with_component_by_component") or {}).items():
+                rows_with_component_by_component[str(component_name)] = int(
+                    rows_with_component_by_component.get(str(component_name), 0)
+                ) + int(count)
             if refresh_reason_tags:
-                reason_labels[row_slice] = _replace_metric_qc_reason_labels(
-                    reason_labels[row_slice],
-                    write_result.reason_labels,
+                for component_name, labels in dict(result.get("reason_labels_by_component") or {}).items():
+                    component = str(component_name)
+                    reason_labels_by_component[component][row_slice] = _replace_metric_qc_reason_labels(
+                        reason_labels_by_component[component][row_slice],
+                        np.asarray(labels, dtype=object),
+                    )
+    else:
+        for start_row, stop_row in chunk_ranges:
+            chunk_timing: dict[str, object] = {
+                "chunk_index": int(len(timing.chunk_timings)),
+                "start_row": int(start_row),
+                "stop_row": int(stop_row),
+                "row_count": int(stop_row) - int(start_row),
+                "execution_backend": _SERIAL_EXECUTION_BACKEND,
+            }
+            chunk_start = time.perf_counter()
+            row_slice = slice(int(start_row), int(stop_row))
+            for component_name, component_idx in component_indices:
+                phase_start = time.perf_counter()
+                component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
+                write_result = _write_mask_local_metrics_chunk(
+                    run_group,
+                    component_name=component_name,
+                    component_idx=int(component_idx),
+                    row_slice=row_slice,
+                    masks=component_masks,
+                    metric_level=metric_level,
+                    write_metric_attrs=False,
                 )
+                elapsed = timing.add(f"refresh_metrics_{component_name}", time.perf_counter() - phase_start)
+                chunk_timing[f"refresh_metrics_{component_name}_seconds"] = elapsed
+                rows_with_component_by_component[component_name] += int(np.count_nonzero(write_result.mask_present))
+                if refresh_reason_tags:
+                    reason_labels_by_component[component_name][row_slice] = _replace_metric_qc_reason_labels(
+                        reason_labels_by_component[component_name][row_slice],
+                        write_result.reason_labels,
+                    )
+            chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
+            timing.chunk_timings.append(chunk_timing)
+
+    for component_name, _component_idx in component_indices:
+        component_group = run_group["components"][component_name]
         _set_component_metric_attrs(component_group, metric_level=metric_level)
         component_group.attrs["metric_qc_refreshed_at_utc"] = _utc_now()
-        component_group.attrs["metric_qc_rows_with_component"] = int(rows_with_component)
+        component_group.attrs["metric_qc_rows_with_component"] = int(
+            rows_with_component_by_component.get(component_name, 0)
+        )
         if refresh_reason_tags:
             write_reason_columns(
                 component_group,
-                reason_labels,
+                reason_labels_by_component[component_name],
                 chunk_size=max(1, min(256, total_rows)),
                 include_reason_text=True,
                 overwrite=True,
             )
-        _add_review_counts(review_counts, component_name, reason_labels)
+        _add_review_counts(review_counts, component_name, reason_labels_by_component[component_name])
         refreshed_components.append(component_name)
 
     if write_eye_geometry and set(_EYE_COMPONENTS).issubset({name for name, _idx in component_indices}):
@@ -1577,15 +1712,23 @@ def refresh_refined_subject_mask_metrics_run(
         run_group.attrs["eye_geometry_status"] = "computed"
 
     refreshed_at = _utc_now()
+    duration_seconds = float(time.perf_counter() - stage_start)
+    timing_summary = timing.summary(total_rows=total_rows, duration_seconds=duration_seconds)
+    timing_summary.update(dask_metadata)
     run_group.attrs["component_metric_level"] = metric_level
     run_group.attrs["component_metrics_schema_id"] = _COMPONENT_METRICS_SCHEMA_ID
     run_group.attrs["metric_qc_schema_id"] = _COMPONENT_METRIC_QC_SCHEMA_ID
     run_group.attrs["component_metric_qc_refreshed_at_utc"] = refreshed_at
     run_group.attrs["component_metric_qc_review_counts"] = review_counts
+    run_group.attrs["component_metric_qc_execution_backend"] = execution_backend
+    run_group.attrs["component_metric_qc_timing_summary"] = dict(_json_safe(timing_summary))
+    run_group.attrs["component_metric_qc_chunk_timings"] = list(_json_safe(timing.chunk_timings))
     summary_stats = dict(run_group.attrs.get("summary_statistics") or {})
     summary_stats["rows_total"] = int(total_rows)
     summary_stats["component_metric_level"] = metric_level
     summary_stats["component_metric_qc_refreshed_at_utc"] = refreshed_at
+    summary_stats["component_metric_qc_duration_seconds"] = duration_seconds
+    summary_stats["component_metric_qc_execution_backend"] = execution_backend
     run_group.attrs["summary_statistics"] = summary_stats
 
     return {
@@ -1598,6 +1741,9 @@ def refresh_refined_subject_mask_metrics_run(
         "refresh_reason_tags": bool(refresh_reason_tags),
         "write_eye_geometry": bool(write_eye_geometry),
         "review_counts": review_counts,
+        "duration_seconds": duration_seconds,
+        "timing_summary": dict(_json_safe(timing_summary)),
+        **dask_metadata,
     }
 
 
@@ -1610,16 +1756,23 @@ def refresh_refined_subject_mask_metrics(
     chunk_size: int = 256,
     refresh_reason_tags: bool = True,
     write_eye_geometry: bool = False,
+    execution_backend: str = _SERIAL_EXECUTION_BACKEND,
+    scheduler: str = "single-threaded",
+    num_workers: Optional[int] = None,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
     return refresh_refined_subject_mask_metrics_run(
         root,
+        zarr_path=zarr_path,
         refined_run=refined_run,
         components=components,
         metric_level=metric_level,
         chunk_size=chunk_size,
         refresh_reason_tags=refresh_reason_tags,
         write_eye_geometry=write_eye_geometry,
+        execution_backend=execution_backend,
+        scheduler=scheduler,
+        num_workers=num_workers,
     )
 
 

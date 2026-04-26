@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from fisheye.refinement.finalize_subject_masks import (
+    _EXECUTION_BACKENDS,
     _METRIC_LEVELS,
+    _SERIAL_EXECUTION_BACKEND,
+    _SUPPORTED_SCHEDULERS,
+    _normalize_scheduler,
     refresh_refined_subject_mask_metrics,
 )
 
@@ -59,6 +63,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Also refresh refined-subject eye ellipse/eye-pair geometry when both eye components are selected.",
     )
+    parser.add_argument(
+        "--execution-backend",
+        choices=_EXECUTION_BACKENDS,
+        default=_SERIAL_EXECUTION_BACKEND,
+        help="Execution backend. Use dask_worker_chunks to let Dask workers write disjoint metric chunks.",
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=_normalize_scheduler,
+        choices=_SUPPORTED_SCHEDULERS,
+        default="single-threaded",
+        help=(
+            "Dask scheduler used when --execution-backend=dask_worker_chunks; recorded as instrumentation "
+            "for serial_driver."
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        help="Worker-count setting for Dask-backed metric refresh.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     args = parser.parse_args(argv)
 
@@ -70,6 +95,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         chunk_size=int(args.chunk_size),
         refresh_reason_tags=not bool(args.no_refresh_reason_tags),
         write_eye_geometry=bool(args.write_eye_geometry),
+        execution_backend=args.execution_backend,
+        scheduler=args.scheduler,
+        num_workers=args.num_workers,
     )
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0
