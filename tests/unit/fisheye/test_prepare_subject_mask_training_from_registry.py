@@ -15,7 +15,13 @@ from fisheye.registry.db import Registry
 from fisheye.utils import prepare_subject_mask_training_from_registry as wrapper
 
 
-def _seed_dataset(db: Registry, *, dataset_id: str, zarr_path: Path) -> None:
+def _seed_dataset(
+    db: Registry,
+    *,
+    dataset_id: str,
+    zarr_path: Path,
+    has_images_ds: bool = True,
+) -> None:
     zarr_path.mkdir(parents=True, exist_ok=True)
     db.upsert_dataset(
         dataset_id,
@@ -33,9 +39,9 @@ def _seed_dataset(db: Registry, *, dataset_id: str, zarr_path: Path) -> None:
         protocol_hash=None,
         acquisition={
             "dish_design": "cedar",
-            "has_images_ds": True,
+            "has_images_ds": bool(has_images_ds),
             "has_images_ds_rgb": False,
-            "downsample_formats_json": '["gray"]',
+            "downsample_formats_json": '["gray"]' if has_images_ds else "[]",
         },
         zarr_purpose=None,
     )
@@ -53,6 +59,8 @@ def _seed_subject_run(
     available_components: tuple[str, ...] = ("subject_body", "eyes_union"),
     label_schema_id: str = "subject_v1_union",
     created_utc: str = "2026-04-01T00:00:00+00:00",
+    run_semantics: str = "subject_mask_training_source",
+    probability_semantics: str | None = None,
 ) -> None:
     all_components = ("subject_body", "eyes_union", "swim_bladder")
     db.upsert_subject_mask_performance(
@@ -69,8 +77,8 @@ def _seed_subject_run(
         source_keypoints_run="refined_keypoints_001",
         source_subject_mask_run=source_subject_mask_run,
         source_subject_mask_method=None,
-        run_semantics="subject_mask_training_source",
-        probability_semantics=None,
+        run_semantics=run_semantics,
+        probability_semantics=probability_semantics,
         source_background_run=None,
         source_background_array=None,
         source_dish_mask_array=None,
@@ -278,6 +286,37 @@ def test_prepare_subject_mask_filters_by_component_review_state(tmp_path: Path) 
     assert out_config.exists()
 
 
+def test_prepare_subject_mask_does_not_require_downsample_metadata_by_default(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    base_config_path = _write_base_config(tmp_path / "subject_base.yaml")
+    source_path = tmp_path / "source_no_ds.zarr"
+    manifest_path = tmp_path / "prepared.manifest.json"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_no_ds", zarr_path=source_path, has_images_ds=False)
+    _seed_subject_run(db, dataset_id="dataset_no_ds")
+    db.close()
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--out-manifest",
+            str(manifest_path),
+            "--path-contains",
+            "source_no_ds",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert len(payload["selected_sources"]) == 1
+    assert payload["selected_sources"][0]["dataset_id"] == "dataset_no_ds"
+    assert payload["query_filter"]["model_input"] is None
+
+
 def test_prepare_subject_mask_selects_coherent_refined_latest_source(
     tmp_path: Path,
 ) -> None:
@@ -331,6 +370,184 @@ def test_prepare_subject_mask_selects_coherent_refined_latest_source(
     assert {row["stage_group"] for row in selected_latest} == {"refined_subject_masks_runs"}
     assert {row["run_name"] for row in selected_latest} == {"refined_subject_masks_001"}
     assert source["canonical_latest_requires_assembly"] is False
+
+
+def test_prepare_subject_mask_skips_pending_refined_source_by_default(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    base_config_path = _write_base_config(tmp_path / "subject_base.yaml")
+    source_path = tmp_path / "source_a.zarr"
+    manifest_path = tmp_path / "prepared.manifest.json"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", zarr_path=source_path)
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_001",
+        created_utc="2026-04-01T00:00:00+00:00",
+    )
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_masks_pending_001",
+        source_subject_mask_run="subject_masks_001",
+        review_state="pending",
+        available_components=("subject_body", "eyes_union", "swim_bladder"),
+        created_utc="2026-04-02T00:00:00+00:00",
+    )
+    db.close()
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--out-manifest",
+            str(manifest_path),
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source = payload["selected_sources"][0]
+
+    assert source["source_stage_group"] == "subject_mask_runs"
+    assert source["source_subject_mask_run"] == "subject_masks_001"
+    assert source["allow_unapproved_refined"] is False
+    assert {
+        (row["stage_group"], row["run_name"], row["reason"])
+        for row in payload["quality_exclusions"]
+    } == {
+        (
+            "refined_subject_masks_runs",
+            "refined_subject_masks_pending_001",
+            "refined_review_state_not_approved",
+        )
+    }
+
+
+def test_prepare_subject_mask_allows_pending_refined_source_for_qa(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    base_config_path = _write_base_config(tmp_path / "subject_base.yaml")
+    source_path = tmp_path / "source_a.zarr"
+    manifest_path = tmp_path / "prepared.manifest.json"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", zarr_path=source_path)
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_001",
+        created_utc="2026-04-01T00:00:00+00:00",
+    )
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_masks_pending_001",
+        source_subject_mask_run="subject_masks_001",
+        review_state="pending",
+        available_components=("subject_body", "eyes_union", "swim_bladder"),
+        created_utc="2026-04-02T00:00:00+00:00",
+    )
+    db.close()
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--out-manifest",
+            str(manifest_path),
+            "--allow-unapproved-refined",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source = payload["selected_sources"][0]
+
+    assert source["source_stage_group"] == "refined_subject_masks_runs"
+    assert source["source_subject_mask_run"] == "refined_subject_masks_pending_001"
+    assert source["allow_unapproved_refined"] is True
+    assert source["canonical_latest_requires_assembly"] is False
+    assert "--allow-unapproved-refined" in payload["datasets"][0]["export_command"]
+    assert payload["query_filter"]["allow_unapproved_refined"] is True
+    assert payload["quality_exclusions"] == []
+
+
+def test_prepare_subject_mask_excludes_probability_only_raw_runs(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    base_config_path = _write_base_config(tmp_path / "subject_base.yaml")
+    source_path = tmp_path / "source_a.zarr"
+    manifest_path = tmp_path / "prepared.manifest.json"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", zarr_path=source_path)
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_probability_001",
+        available_components=("subject_body", "eyes_union", "swim_bladder"),
+        run_semantics="unet_subject_mask_inference",
+        probability_semantics="sigmoid_multilabel_logits",
+        created_utc="2026-04-01T00:00:00+00:00",
+    )
+    _seed_subject_run(
+        db,
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_masks_pending_001",
+        source_subject_mask_run="subject_masks_probability_001",
+        review_state="pending",
+        available_components=("subject_body", "eyes_union", "swim_bladder"),
+        created_utc="2026-04-02T00:00:00+00:00",
+    )
+    db.close()
+
+    with pytest.raises(SystemExit, match="No exportable subject-mask sources"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--out-manifest",
+                str(manifest_path),
+            ]
+        )
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--out-manifest",
+            str(manifest_path),
+            "--allow-unapproved-refined",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source = payload["selected_sources"][0]
+
+    assert source["source_stage_group"] == "refined_subject_masks_runs"
+    assert source["source_subject_mask_run"] == "refined_subject_masks_pending_001"
+    assert {
+        (row["stage_group"], row["run_name"], row["reason"])
+        for row in payload["quality_exclusions"]
+    } == {
+        (
+            "subject_mask_runs",
+            "subject_masks_probability_001",
+            "probability_subject_mask_run_not_exportable",
+        )
+    }
 
 
 def test_prepare_subject_mask_flags_split_refined_latest_for_assembly(tmp_path: Path) -> None:

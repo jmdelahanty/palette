@@ -173,7 +173,7 @@ def _parse_required_components(values: Optional[Sequence[str]]) -> List[str]:
     return components
 
 
-def _build_query_signature(args: argparse.Namespace, *, model_input: str) -> Dict[str, Any]:
+def _build_query_signature(args: argparse.Namespace, *, model_input: Optional[str]) -> Dict[str, Any]:
     return {
         "dish_design": args.dish_design,
         "dish_design_like": args.dish_design_like,
@@ -214,10 +214,11 @@ def _build_query_signature(args: argparse.Namespace, *, model_input: str) -> Dic
         "require_review_state": args.require_review_state,
         "require_review_intended_use": args.require_review_intended_use,
         "min_component_mask_rate": args.min_component_mask_rate,
+        "allow_unapproved_refined": bool(args.allow_unapproved_refined),
     }
 
 
-def _query_hash(args: argparse.Namespace, *, model_input: str) -> str:
+def _query_hash(args: argparse.Namespace, *, model_input: Optional[str]) -> str:
     signature = _build_query_signature(args, model_input=model_input)
     canonical = json.dumps(signature, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:8]
@@ -227,7 +228,7 @@ def _default_set_name(
     args: argparse.Namespace,
     rows: Sequence[Mapping[str, Any]],
     *,
-    model_input: str,
+    model_input: Optional[str],
 ) -> str:
     if args.dish_design:
         dish_raw = args.dish_design
@@ -352,12 +353,15 @@ class SubjectSourceSelection:
 
 def _source_exclusion_reason(
     *,
+    stage_group: str,
     component_rows: Sequence[Mapping[str, Any]],
+    performance_row: Mapping[str, Any],
     required_components: Sequence[str],
     require_review_state: Optional[str],
     require_review_intended_use: Optional[str],
     min_component_mask_rate: Optional[float],
     source_label_schema: Optional[str],
+    allow_unapproved_refined: bool,
 ) -> Optional[str]:
     if not component_rows:
         return "missing_subject_mask_component_rows"
@@ -366,6 +370,10 @@ def _source_exclusion_reason(
         return "source_label_schema_mismatch"
     if label_schema not in {"subject_v1_union", "subject_v1_lr"}:
         return "unsupported_source_label_schema"
+    if stage_group == "subject_mask_runs":
+        probability_semantics = _as_text(performance_row.get("probability_semantics"))
+        if probability_semantics:
+            return "probability_subject_mask_run_not_exportable"
 
     by_component = {str(row.get("component_name")): row for row in component_rows}
     available_rows = [
@@ -373,6 +381,9 @@ def _source_exclusion_reason(
     ]
     if not available_rows:
         return "no_available_subject_mask_components"
+    if stage_group == "refined_subject_masks_runs" and not bool(allow_unapproved_refined):
+        if any(_as_text(row.get("review_state")) != "approved" for row in available_rows):
+            return "refined_review_state_not_approved"
     for component in required_components:
         row = by_component.get(component)
         if row is None or int(row.get("available") or 0) != 1:
@@ -433,13 +444,17 @@ def _select_subject_sources(
     exclusions: List[Dict[str, str]] = []
     excluded_dataset_ids: set[str] = set()
     for (dataset_id, stage_group, run_name), rows_for_run in by_dataset_run.items():
+        performance = performance_by_key.get((dataset_id, stage_group, run_name), {})
         reason = _source_exclusion_reason(
+            stage_group=stage_group,
             component_rows=rows_for_run,
+            performance_row=performance,
             required_components=required_components,
             require_review_state=args.require_review_state,
             require_review_intended_use=args.require_review_intended_use,
             min_component_mask_rate=args.min_component_mask_rate,
             source_label_schema=args.source_label_schema,
+            allow_unapproved_refined=bool(args.allow_unapproved_refined),
         )
         if reason is not None:
             source_row = rows_by_dataset.get(dataset_id, {})
@@ -457,7 +472,6 @@ def _select_subject_sources(
         available_rows = [row for row in rows_for_run if int(row.get("available") or 0) == 1]
         available_components = sorted(str(row["component_name"]) for row in available_rows)
         first = rows_for_run[0]
-        performance = performance_by_key.get((dataset_id, stage_group, run_name), {})
         selection = SubjectSourceSelection(
             stage_group=stage_group,
             run_name=run_name,
@@ -552,17 +566,14 @@ def _select_subject_sources(
             for item in latest_summary
             if item.get("stage_group") == selected.stage_group and item.get("run_name") == selected.run_name
         ]
-        latest_exportable_runs = sorted(
+        latest_refined_runs = sorted(
             {
-                (str(item.get("stage_group")), str(item.get("run_name")))
+                str(item.get("run_name"))
                 for item in latest_summary
-                if item.get("stage_group") in EXPORTABLE_STAGE_GROUPS and item.get("available") == 1
+                if item.get("stage_group") == "refined_subject_masks_runs" and item.get("available") == 1
             }
         )
-        canonical_latest_requires_assembly = (
-            len(latest_exportable_runs) > 1
-            and any(stage_group == "refined_subject_masks_runs" for stage_group, _run_name in latest_exportable_runs)
-        )
+        canonical_latest_requires_assembly = len(latest_refined_runs) > 1
         selected_payload.append(
             {
                 "name": _choose_dataset_name(seen_names, source_zarr, ordinal),
@@ -588,6 +599,10 @@ def _select_subject_sources(
                     }
                     for component in selected.component_rows
                 ],
+                "allow_unapproved_refined": bool(
+                    args.allow_unapproved_refined
+                    and selected.stage_group == "refined_subject_masks_runs"
+                ),
                 "canonical_latest_components": latest_summary,
                 "canonical_latest_selected_components": selected_latest_components,
                 "canonical_latest_non_exportable_components": non_exportable_latest,
@@ -603,7 +618,7 @@ def _select_subject_sources(
 def _build_query_filter_payload(
     args: argparse.Namespace,
     *,
-    model_input: str,
+    model_input: Optional[str],
     set_name: Optional[str],
     set_version: Optional[int],
     set_id: Optional[str],
@@ -625,6 +640,7 @@ def _build_query_filter_payload(
         "require_review_state": args.require_review_state,
         "require_review_intended_use": args.require_review_intended_use,
         "min_component_mask_rate": args.min_component_mask_rate,
+        "allow_unapproved_refined": bool(args.allow_unapproved_refined),
         "split_train": float(args.split_train),
         "split_val": float(args.split_val),
         "split_test": float(args.split_test),
@@ -787,6 +803,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         help="Require every available component mask-present rate to meet this threshold.",
     )
     parser.add_argument(
+        "--allow-unapproved-refined",
+        action="store_true",
+        help="Allow draft/QA selection from refined_subject_masks_runs components without approved review state.",
+    )
+    parser.add_argument(
         "--base-config",
         type=Path,
         default=Path("configs/fisheye/subject_mask_union_canary_20260406.yaml"),
@@ -811,7 +832,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if (float(args.split_train) + float(args.split_val) + float(args.split_test)) <= 0.0:
         raise ValueError("At least one split ratio must be greater than zero.")
 
-    model_input = args.model_input or args.input_format
+    query_model_input = args.model_input
+    model_input_for_outputs = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
         raise SystemExit("--model-input must match --input-format for subject-mask training selection.")
 
@@ -845,7 +867,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         rig_id=args.rig_id,
         arena_id=args.arena_id,
         zarr_use=args.zarr_use,
-        model_input=model_input,
+        model_input=query_model_input,
         path_contains=args.path_contains,
         limit=args.limit,
     )
@@ -913,7 +935,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if args.set_name:
             resolved_set_name = _sanitize_name(args.set_name)
         else:
-            resolved_set_name = _default_set_name(args, rows, model_input=model_input)
+            resolved_set_name = _default_set_name(args, rows, model_input=model_input_for_outputs)
             print(f"Auto set-name: {resolved_set_name}")
         dataset_root = _resolve_dataset_root("subject_masks")
         if args.set_version is not None:
@@ -1007,6 +1029,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     _add_arg(command, "--training-set-id", set_id)
     if resolved_set_name is not None and set_id is not None:
         _add_arg(command, "--training-set-name", resolved_set_name)
+    if args.allow_unapproved_refined:
+        command.append("--allow-unapproved-refined")
     command_lines = [" ".join(command)]
 
     total_selected_samples = sum(int(source.get("total_samples") or 0) for source in selected_sources_payload)
@@ -1045,7 +1069,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     )
     query_filter_payload = _build_query_filter_payload(
         args,
-        model_input=model_input,
+        model_input=query_model_input,
         set_name=resolved_set_name,
         set_version=set_version,
         set_id=set_id,
