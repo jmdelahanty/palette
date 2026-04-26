@@ -43,6 +43,7 @@ class ComponentFinalizationResult:
     """Finalized component mask plus machine-readable review routing data."""
 
     mask: np.ndarray
+    source_mask: np.ndarray
     metrics: Dict[str, float]
     reason_tags: tuple[str, ...]
     review_recommendation: str
@@ -147,6 +148,7 @@ def finalize_component_mask(
     quality_code, quality_score, review_recommendation = _review_routing(reason_tags, metrics)
     return ComponentFinalizationResult(
         mask=final_mask.astype(np.uint8, copy=False),
+        source_mask=initial_mask.astype(np.uint8, copy=False),
         metrics=metrics,
         reason_tags=tuple(reason_tags),
         review_recommendation=review_recommendation,

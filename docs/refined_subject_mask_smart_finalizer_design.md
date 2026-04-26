@@ -430,8 +430,7 @@ Recommended temporal reason tags:
 
 ## CLI Shape
 
-The final CLI can be either a new entrypoint or a mode of the existing
-assembler. A dedicated entrypoint is clearer for V1:
+The current V1 CLI is a dedicated entrypoint:
 
 ```bash
 scripts/py -m fisheye.refinement.finalize_subject_masks \
@@ -439,43 +438,71 @@ scripts/py -m fisheye.refinement.finalize_subject_masks \
   --source-run subject_masks_unet_... \
   --refined-run refined_subject_masks_unet_finalized_... \
   --components subject_body eyes_union swim_bladder \
-  --scheduler threads \
-  --chunk-size 256 \
   --dry-run
 ```
 
-Then run a small subset:
+Then create the candidate run:
 
 ```bash
 scripts/py -m fisheye.refinement.finalize_subject_masks \
   /path/to/analysis.zarr \
   --source-run subject_masks_unet_... \
-  --refined-run refined_subject_masks_unet_finalized_preview \
-  --roi-indices 0-255 \
-  --scheduler single-threaded
+  --refined-run refined_subject_masks_unet_finalized_...
 ```
 
-Then run the full canary after visual inspection.
+V1 supports explicit `--overwrite`, but does not support ROI-subset writes yet
+because a refined subject-mask run is row-aligned with the full source run.
+
+## Implementation Status
+
+Implemented:
+
+- `src/fisheye/refinement/subject_mask_finalization.py`
+  - pure component finalization for `subject_body`, `swim_bladder`, and
+    `eyes_union`
+  - probability thresholding, spatial cleanup, source-seed mask retention,
+    quality codes, quality scores, metrics, and reason tags
+- `src/fisheye/refinement/finalize_subject_masks.py`
+  - creates a new canonical `refined_subject_masks_runs/<run>` from one
+    `subject_mask_runs/<run>`
+  - reuses the existing refined-subject run schema and provenance writer
+  - writes `subject_body`, `eye_left`, `eye_right`, and `swim_bladder` when the
+    raw run exposes `subject_body`, `eyes_union`, and `swim_bladder`
+  - assigns `eyes_union -> eye_left/eye_right` using canonical keypoints
+  - writes component reason labels and body/swim finalization metrics
+  - leaves component and run approval states `pending`
+  - emits refined-subject registry status when run through the path-based CLI
+
+Still open:
+
+- direct chunk-range zarr writes instead of building full component arrays in
+  memory before creating the run
+- scheduler-backed production writer mode
+- ROI-subset preview runs or an explicit preview artifact type
+- finalization metrics for the intermediate `eyes_union` source surface without
+  pretending it is a canonical refined component
+- full real-zarr canary creation and visual inspection
 
 ## Implementation Plan
 
-1. Add pure chunk finalization helpers.
+1. Add pure chunk finalization helpers. In progress.
    - input: probability chunk, labels, policies, keypoints
    - output: finalized masks, metrics, reasons, review recommendations
 
-2. Extend `subject_mask_finalization.py`.
+2. Extend `subject_mask_finalization.py`. Done for V1.
    - keep body policy
    - add swim-bladder policy
    - add eyes-union cleanup policy
    - avoid left/right assignment in this module; assignment stays separate
 
-3. Add a batch driver.
+3. Add a batch driver. Initial full-array writer is in place; chunked writer is
+   still open.
    - creates target refined run
    - submits Dask chunk tasks
    - writes deterministic chunks
    - runs eye geometry after LR masks exist
 
-4. Add tests.
+4. Add tests. In progress.
    - in-memory unit tests for each component policy
    - chunk driver tests with fake/in-memory zarr groups
    - real-zarr focused validation outside the Codex sandbox
