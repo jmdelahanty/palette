@@ -185,6 +185,19 @@ written by the default fast path:
 - `metrics/bbox_valid`
 - component topology metrics such as component count and hole fraction
 
+Component metric groups should advertise their schema explicitly:
+
+- `components/<component>/metrics.attrs["schema_id"] =
+  "refined_subject_component_mask_metrics_v1"`
+- `components/<component>/metrics.attrs["qc_schema_id"] =
+  "refined_subject_component_metric_qc_reasons_v1"`
+- `components/<component>/metrics.attrs["qc_policy"]` records the
+  component-specific gates used to derive generated metric-QC reason tags
+
+Generated metric-QC reason tags use the `needs_review_metric_*` prefix. This
+lets refresh/backfill tools replace generated metric-QC tags without removing
+manual/operator tags such as `manual_correction`.
+
 Recommended cleanup metrics are written as finalization metrics in the default
 path where available:
 
@@ -216,6 +229,19 @@ Refined eye geometry/ellipse relations are also optional during finalization:
 
 - default behavior records `eye_geometry_status=deferred`
 - `--write-eye-geometry` computes the relation surfaces immediately
+
+Existing refined-subject runs can refresh mask-local metrics and generated
+metric-QC reason tags without recreating the masks:
+
+```bash
+scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics \
+  /path/to/archive_analysis.zarr \
+  --refined-run <run> \
+  --metric-level cheap
+```
+
+Use `--metric-level full` when the expensive shape-QC metrics are needed, and
+`--no-refresh-reason-tags` when only numeric arrays should be recomputed.
 
 Recommended reason tags:
 

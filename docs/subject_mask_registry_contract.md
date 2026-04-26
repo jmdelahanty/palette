@@ -31,7 +31,7 @@ In scope:
 
 Out of scope:
 
-- `subject_shape_runs` registry design
+- `analysis/subject_shape_runs` registry design
 - removal of `refined_eye_masks_runs` compatibility support
 - model-training registry surfaces
 - UI layout details beyond the required state model
@@ -86,7 +86,7 @@ Canonical stage relationship:
 crop_runs/<run>
   -> subject_mask_runs/<run>
   -> refined_subject_masks_runs/<run>
-  -> subject_shape_runs/<run>
+  -> analysis/subject_shape_runs/<run>
 ```
 
 Historical and compatibility eye-mask relationship:

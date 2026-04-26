@@ -35,7 +35,7 @@ without overloading the existing eye-specific stages.
 crop_runs/<run>
   -> subject_mask_runs/<run>
   -> refined_subject_masks_runs/<run>  # canonical refined component masks
-  -> subject_shape_runs/<run>          # future deterministic geometry stage
+  -> analysis/subject_shape_runs/<run> # future derived analysis geometry
 ```
 
 Legacy compatibility path:

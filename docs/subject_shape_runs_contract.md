@@ -5,14 +5,14 @@ status: draft
 last_verified: 2026-04-26
 -->
 
-Purpose: define the downstream deterministic geometry stage for biological
+Purpose: define the downstream deterministic analysis layer for biological
 shape, pose, and cross-component relationships derived from canonical refined
 subject masks.
 
 ## Scope
 
-`subject_shape_runs/<run>` is the planned home for interpreted shape outputs
-that should not be stored as mask-review metadata.
+`analysis/subject_shape_runs/<run>` is the planned home for interpreted shape
+outputs that should not be stored as mask-review metadata.
 
 It should consume:
 
@@ -37,7 +37,7 @@ Use `refined_subject_masks_runs/<run>` for mask-local primitives:
 - eye ellipse parameters and eye-pair separation when used as immediate
   refined-eye geometry/QC
 
-Use `subject_shape_runs/<run>` for interpreted biology:
+Use `analysis/subject_shape_runs/<run>` for interpreted biology:
 
 - body centerline or spline used as an anatomical coordinate frame
 - body B-spline fit, including centerline or outline models with method-specific
@@ -57,7 +57,7 @@ Practical test:
   anatomical frame, keep it with `refined_subject_masks_runs`.
 - If the value needs a coordinate convention, anatomical polarity, component
   relationship, track identity, temporal context, or smoothing policy, write it
-  to `subject_shape_runs` or a more specific downstream analysis run.
+  to `analysis/subject_shape_runs` or a more specific downstream analysis run.
 
 ## Non-Goals
 
@@ -73,7 +73,7 @@ Practical test:
 ```text
 subject_mask_runs/<run>               # raw probability evidence
   -> refined_subject_masks_runs/<run> # canonical refined masks + mask-local geometry
-  -> subject_shape_runs/<run>         # interpreted biological shape geometry
+  -> analysis/subject_shape_runs/<run> # interpreted biological shape geometry
 ```
 
 Optional inputs:
@@ -86,8 +86,11 @@ tracking_runs/<run>
 
 ## Required Provenance
 
-A `subject_shape_runs/<run>` writer should record:
+An `analysis/subject_shape_runs/<run>` writer should record:
 
+- `schema_id = "analysis.subject_shape_runs"`
+- `schema_version`
+- `row_axis = "refined_subject_mask_rows"` for the first row-aligned writer
 - `source_refined_subject_masks_run`
 - `source_refined_subject_masks_stage = "refined_subject_masks_runs"`
 - `source_mask_labels`
@@ -109,40 +112,55 @@ Required when used:
 ## Proposed Layout
 
 ```text
-subject_shape_runs/
+analysis/subject_shape_runs/
   attrs:
     latest                         "<run_id>"
   <run_id>/
     attrs:
+      schema_id                    "analysis.subject_shape_runs"
+      schema_version               1
       source_refined_subject_masks_run
       source_mask_labels
       source_mask_label_schema_id
       method
       method_version
       created_at_utc
-    frame_indices                  (N,)
-    detection_indices              (N,)
-    source_refined_row_ids          (N,) optional
-    body/
-      centroid_xy                  (N, 2) optional mirror/cache
-      contour_ref                  optional references into refined mask contours
-      centerline_xy                (N, P, 2) optional
-      centerline_valid             (N,) optional
-      bspline_control_points_xy    (N, K, 2) optional
-      bspline_knots                optional
-      bspline_degree               scalar attr or dataset
-      bspline_valid                (N,) optional
-      centerline_arc_length_px     (N,) optional
-      bspline_arc_length_px        (N,) optional
-      axis_xy                      (N, 2) optional
-      heading_rad                  (N,) optional
-      curvature                    (N, P) optional
-      validity/
-    swim_bladder/
-      centroid_xy                  (N, 2) optional mirror/cache
-      ellipse_params               (N, 5) optional
-      validity/
+      row_axis                     "refined_subject_mask_rows"
+      source_refs                  dict of exact input runs/paths
+    row_index/
+      frame_indices                (N,)
+      detection_indices            (N,) optional
+      source_refined_row_ids        (N,) optional
+    components/
+      subject_body/
+        centroid_xy                (N, 2) optional mirror/cache
+        contour_ref                optional references into refined mask contours
+        centerline_xy              (N, P, 2) optional
+        centerline_valid           (N,) optional
+        bspline_control_points_xy  (N, K, 2) optional
+        bspline_knots              optional
+        bspline_degree             scalar attr or dataset
+        bspline_valid              (N,) optional
+        centerline_arc_length_px   (N,) optional
+        bspline_arc_length_px      (N,) optional
+        axis_xy                    (N, 2) optional
+        heading_rad                (N,) optional
+        curvature                  (N, P) optional
+        validity/
+      swim_bladder/
+        centroid_xy                (N, 2) optional mirror/cache
+        ellipse_params             (N, 5) optional
+        validity/
+      eye_left/
+        ellipse_params             (N, 5) optional mirror/cache
+        validity/
+      eye_right/
+        ellipse_params             (N, 5) optional mirror/cache
+        validity/
     relations/
+      eye_pair/
+        separation_px              (N,) optional mirror/cache
+        separation_valid           (N,) optional
       swim_bladder_to_body/
         longitudinal_position      (N,) optional
         lateral_offset_px          (N,) optional
@@ -155,10 +173,44 @@ subject_shape_runs/
 This layout is intentionally permissive. The first implementation should write
 only the arrays it can validate.
 
+## Component And Relation Organization
+
+`analysis/subject_shape_runs` should preserve the same semantic component names
+used by `refined_subject_masks_runs`, but the meaning is different:
+
+- `refined_subject_masks_runs/components/<component>` owns reviewed mask pixels,
+  mask-local QC, and component-local geometry that is directly recomputable from
+  one mask channel.
+- `analysis/subject_shape_runs/components/<component>` owns interpreted
+  biological geometry derived from those component masks.
+
+Use component groups for values whose primary subject is one semantic component:
+
+- `components/subject_body` for centerlines, B-splines, body length, body axis,
+  curvature, and body-shape validity.
+- `components/swim_bladder` for swim-bladder centroid/blob/ellipse summaries
+  and component-specific validity.
+- `components/eye_left` and `components/eye_right` for optional interpreted
+  eye-shape mirrors or component-specific eye validity consumed by shape
+  analysis.
+
+Use `relations/` for values whose meaning depends on more than one component or
+an external coordinate frame:
+
+- `relations/eye_pair` for cross-eye metrics such as separation.
+- `relations/swim_bladder_to_body` for swim-bladder position along or relative
+  to the body axis/centerline.
+- `relations/eyes_to_body` for eye angles or offsets relative to body/head
+  heading.
+
+Component groups in `analysis/subject_shape_runs` are not approval surfaces. A
+shape run may mark a component-derived value invalid or failed without changing
+the source component's review state in `refined_subject_masks_runs`.
+
 ## Body B-Spline Policy
 
-The canonical body B-spline fit belongs in `subject_shape_runs`, not in
-`refined_subject_masks_runs`.
+The canonical body B-spline fit belongs in
+`analysis/subject_shape_runs`, not in `refined_subject_masks_runs`.
 
 Reasoning:
 
@@ -167,8 +219,8 @@ Reasoning:
   failure policy
 - if the spline is used as a body coordinate frame, it also depends on anatomical
   polarity or heading source
-- recomputing or improving the fit should create or update a derived shape run
-  without mutating the reviewed mask-pixel authority
+- recomputing or improving the fit should create or update a derived analysis
+  shape run without mutating the reviewed mask-pixel authority
 
 Allowed refined-mask-side exception:
 
@@ -202,7 +254,7 @@ Those values are useful for QC, triage, and rough size filtering, but they are
 not the canonical biological body length because they are sensitive to contour
 noise, fins, posture, and the chosen approximation.
 
-Canonical body length should live in `subject_shape_runs`:
+Canonical body length should live in `analysis/subject_shape_runs`:
 
 - `centerline_arc_length_px` when derived from a validated centerline
 - `bspline_arc_length_px` when derived from a validated body B-spline
@@ -224,7 +276,7 @@ Required semantics:
 geometry plus heading/keypoint context. That remains a valid specialized
 analysis run.
 
-`subject_shape_runs` should not force every specialized metric to move
+`analysis/subject_shape_runs` should not force every specialized metric to move
 immediately. It defines the mask-derived shape layer that can later feed or
 replace specialized analyses when that migration is justified.
 
@@ -232,13 +284,11 @@ Recommended near-term approach:
 
 - keep eye ellipse fits in `refined_subject_masks_runs`
 - keep current eye-angle outputs in `analysis/eye_angle_runs`
-- use `subject_shape_runs` first for body/swim shape features that do not
+- use `analysis/subject_shape_runs` first for body/swim shape features that do not
   already have a stable analysis home
 
 ## Open Questions
 
-- Should `subject_shape_runs` live at the zarr root, like mask stage families, or
-  under `analysis/subject_shape_runs` with other derived analyses?
 - Which body centerline method is the first supported implementation?
 - Should body/swim shape outputs be track-aligned from the start, or remain
   row-aligned with refined masks until tracking is explicitly requested?
@@ -246,6 +296,7 @@ Recommended near-term approach:
 ## Related Documents
 
 - [current_pipeline_contract.md](current_pipeline_contract.md)
+- [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
 - [refined_subject_masks_runs_contract.md](refined_subject_masks_runs_contract.md)
 - [subject_mask_refinement_todo.md](subject_mask_refinement_todo.md)
 - [pose_kinematics_run_design.md](pose_kinematics_run_design.md)

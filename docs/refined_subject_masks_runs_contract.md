@@ -30,7 +30,7 @@ bladder, and modern left/right eye refinement under the same component model.
 
 - Removing read support for historical `refined_eye_masks_runs`.
 - Defining the final exact geometry array schema for body contours or splines.
-- Defining `subject_shape_runs`.
+- Defining `analysis/subject_shape_runs`.
 - Defining merged training artifact layout.
 
 ## Relationship To Existing Stages
@@ -41,7 +41,7 @@ Near-term canonical relationship:
 crop_runs/<run>
   -> subject_mask_runs/<run>
   -> refined_subject_masks_runs/<run>
-  -> subject_shape_runs/<run>          # future
+  -> analysis/subject_shape_runs/<run> # future derived analysis geometry
 ```
 
 Legacy eye-specialized compatibility path during transition:
@@ -804,12 +804,27 @@ Geometry policy:
 - geometry derived from those masks should carry its own validity flags
 - geometry primitives stored here should be recomputable from
   `masks_roi` plus the documented method/policy attrs
-- downstream `subject_shape_runs` should consume refined masks and/or these
+- downstream `analysis/subject_shape_runs` should consume refined masks and/or these
   mask-local primitives, not raw `subject_mask_runs`
 
-## Boundary With `subject_shape_runs`
+Metric-QC policy:
 
-`subject_shape_runs/<run>` is the planned home for interpreted biological
+- `components/<component>/metrics.attrs["schema_id"]` should be
+  `refined_subject_component_mask_metrics_v1`.
+- `components/<component>/metrics.attrs["qc_schema_id"]` should be
+  `refined_subject_component_metric_qc_reasons_v1`.
+- `components/<component>/metrics.attrs["qc_policy"]` records the conservative
+  component-specific gates used to derive generated metric-QC reason tags.
+- Generated metric-QC reason tags use the `needs_review_metric_*` prefix so
+  refresh/backfill tools can replace generated tags without deleting manual
+  review tags.
+- `scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics` refreshes
+  mask-local metrics and generated metric-QC reason tags for existing refined
+  subject-mask runs without recreating mask pixels.
+
+## Boundary With `analysis/subject_shape_runs`
+
+`analysis/subject_shape_runs/<run>` is the planned home for interpreted biological
 geometry that requires a coordinate convention, anatomical polarity, temporal
 context, track identity, or relationships between components.
 
@@ -830,7 +845,7 @@ Keep these out of `refined_subject_masks_runs` as canonical outputs:
 Reasoning:
 
 - `refined_subject_masks_runs` is the curated mask-pixel authority.
-- `subject_shape_runs` is a deterministic derived-analysis layer.
+- `analysis/subject_shape_runs` is a deterministic derived-analysis layer.
 - Recomputing interpreted shape metrics should not mutate or re-author the
   refined masks.
 - The shape stage can carry its own method version, source refined-mask run,
@@ -842,20 +857,20 @@ Practical rule:
 - If the value answers "what geometry did this one refined component mask have?",
   store it with `refined_subject_masks_runs`.
 - If the value answers "what biological pose/shape/relationship does this
-  animal have?", store it in `subject_shape_runs` or a more specific downstream
-  analysis run.
+  animal have?", store it in `analysis/subject_shape_runs` or a more specific
+  downstream analysis run.
 
 Body B-spline rule:
 
 - refined body components may store contours and non-canonical debug seeds
 - refined body components may store approximate long-axis QC descriptors such as
   Feret diameter or PCA/ellipse major-axis length
-- the canonical B-spline fit belongs in `subject_shape_runs` because it depends
+- the canonical B-spline fit belongs in `analysis/subject_shape_runs` because it depends
   on fit method, knot/parameterization policy, smoothing, validity criteria, and
   usually anatomical polarity
 - the canonical biological body length should be derived from the validated
-  centerline/B-spline arc length in `subject_shape_runs`, not from raw mask area
-  or an unqualified contour diameter
+  centerline/B-spline arc length in `analysis/subject_shape_runs`, not from raw
+  mask area or an unqualified contour diameter
 
 Current implementation note:
 
@@ -1000,6 +1015,7 @@ This contract is intentionally non-destructive.
 - [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md)
 - [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md)
 - [subject_mask_refinement_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_refinement_todo.md)
+- [derived_analysis_run_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/derived_analysis_run_contract.md)
 - [subject_shape_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_shape_runs_contract.md)
 - [review_status_schema_unification_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/review_status_schema_unification_contract.md)
 - [pose_kinematics_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)

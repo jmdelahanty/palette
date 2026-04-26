@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - depends on optional dependency
     LocalCluster = None  # type: ignore
     HAVE_DISTRIBUTED = False
 
-from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.provenance_attrs import (
     ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
     build_assignment_keypoint_attrs,
@@ -96,6 +96,19 @@ _SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed
 _EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 _SERIAL_EXECUTION_BACKEND = "serial_driver"
 _DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
+_COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
+_COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
+_COMPONENT_QC_REASON_PREFIX = "needs_review_metric_"
+_COMPONENT_METRIC_NAMES = (
+    "component_count",
+    "largest_component_fraction",
+    "hole_count",
+    "hole_area_fraction",
+    "sigma_noise",
+    "curvature_var",
+    "ipr",
+    "solidity",
+)
 _FINALIZATION_METRIC_NAMES = (
     "added_area_px",
     "area_px_after",
@@ -134,6 +147,22 @@ class _FinalizedComponentBatch:
     source_surface_kind: str
     source_probability_encoding: Optional[str]
     source_probability_threshold: float
+
+
+@dataclass(frozen=True)
+class _ComponentMetricQcPolicy:
+    component_name: str
+    min_area_px: float = 1.0
+    max_component_count: int = 1
+    max_hole_count: int = 0
+    min_largest_component_fraction: float = 0.90
+    min_solidity: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class _ComponentMetricWriteResult:
+    mask_present: np.ndarray
+    reason_labels: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -285,6 +314,132 @@ def _combine_reason_labels(*labels: object) -> str:
 
 def _policy_payload(policy: ComponentFinalizationPolicy) -> dict[str, object]:
     return {str(key): _json_safe(value) for key, value in asdict(policy).items()}
+
+
+def _component_metric_qc_policy(component_name: str) -> _ComponentMetricQcPolicy:
+    """Return conservative mask-local QC gates for one refined component."""
+
+    if component_name == "subject_body":
+        return _ComponentMetricQcPolicy(
+            component_name=component_name,
+            min_area_px=8.0,
+            max_component_count=1,
+            max_hole_count=0,
+            min_largest_component_fraction=0.90,
+            min_solidity=0.20,
+        )
+    if component_name == "swim_bladder":
+        return _ComponentMetricQcPolicy(
+            component_name=component_name,
+            min_area_px=4.0,
+            max_component_count=1,
+            max_hole_count=0,
+            min_largest_component_fraction=0.95,
+            min_solidity=0.20,
+        )
+    if component_name in _EYE_COMPONENTS:
+        return _ComponentMetricQcPolicy(
+            component_name=component_name,
+            min_area_px=4.0,
+            max_component_count=1,
+            max_hole_count=0,
+            min_largest_component_fraction=0.90,
+            min_solidity=0.20,
+        )
+    return _ComponentMetricQcPolicy(component_name=component_name)
+
+
+def _component_metric_qc_policy_payload(component_name: str) -> dict[str, object]:
+    return _json_safe(asdict(_component_metric_qc_policy(component_name)))  # type: ignore[return-value]
+
+
+def _split_reason_tags(label: object) -> list[str]:
+    tags: list[str] = []
+    for raw_tag in str(label or "").split("|"):
+        tag = raw_tag.strip()
+        if not tag or tag == "clean":
+            continue
+        if tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _merge_reason_label_arrays(base_labels: np.ndarray, extra_labels: np.ndarray) -> np.ndarray:
+    base = np.asarray(base_labels, dtype=object).reshape(-1)
+    extra = np.asarray(extra_labels, dtype=object).reshape(-1)
+    if base.shape[0] != extra.shape[0]:
+        raise ValueError("base_labels and extra_labels must have the same row count.")
+    merged = np.empty(base.shape, dtype=object)
+    for row_idx, (base_label, extra_label) in enumerate(zip(base, extra)):
+        merged[row_idx] = _combine_reason_labels(base_label, extra_label)
+    return merged
+
+
+def _replace_metric_qc_reason_labels(base_labels: np.ndarray, qc_labels: np.ndarray) -> np.ndarray:
+    """Refresh generated metric-QC tags while preserving manual/operator tags."""
+
+    base = np.asarray(base_labels, dtype=object).reshape(-1)
+    qc = np.asarray(qc_labels, dtype=object).reshape(-1)
+    if base.shape[0] != qc.shape[0]:
+        raise ValueError("base_labels and qc_labels must have the same row count.")
+    refreshed = np.empty(base.shape, dtype=object)
+    for row_idx, (base_label, qc_label) in enumerate(zip(base, qc)):
+        tags = [
+            tag
+            for tag in _split_reason_tags(base_label)
+            if not str(tag).startswith(_COMPONENT_QC_REASON_PREFIX)
+        ]
+        for tag in _split_reason_tags(qc_label):
+            if tag not in tags:
+                tags.append(tag)
+        refreshed[row_idx] = "|".join(tags) if tags else "clean"
+    return refreshed
+
+
+def _compute_component_metric_qc_reason_labels(
+    component_name: str,
+    *,
+    mask_present: np.ndarray,
+    area_px: np.ndarray,
+    component_metrics: Mapping[str, np.ndarray],
+) -> np.ndarray:
+    policy = _component_metric_qc_policy(component_name)
+    present = np.asarray(mask_present, dtype=bool).reshape(-1)
+    area = np.asarray(area_px, dtype=np.float32).reshape(-1)
+    component_count = np.asarray(
+        component_metrics.get("component_count", np.zeros_like(area, dtype=np.int32)),
+        dtype=np.int32,
+    ).reshape(-1)
+    largest_fraction = np.asarray(
+        component_metrics.get("largest_component_fraction", np.ones_like(area, dtype=np.float32)),
+        dtype=np.float32,
+    ).reshape(-1)
+    hole_count = np.asarray(
+        component_metrics.get("hole_count", np.zeros_like(area, dtype=np.int32)),
+        dtype=np.int32,
+    ).reshape(-1)
+    solidity_raw = component_metrics.get("solidity")
+    solidity = np.asarray(solidity_raw, dtype=np.float32).reshape(-1) if solidity_raw is not None else None
+
+    labels = np.full((int(area.shape[0]),), "clean", dtype=object)
+    for row_idx in range(int(area.shape[0])):
+        tags: list[str] = []
+        if not bool(present[row_idx]) or float(area[row_idx]) <= 0.0:
+            tags.append("needs_review_metric_empty_mask")
+        elif float(area[row_idx]) < float(policy.min_area_px):
+            tags.append("needs_review_metric_small_area")
+        if int(component_count[row_idx]) > int(policy.max_component_count):
+            tags.append("needs_review_metric_multiple_components")
+        if bool(present[row_idx]) and float(largest_fraction[row_idx]) < float(policy.min_largest_component_fraction):
+            tags.append("needs_review_metric_fragmented_component")
+        if int(hole_count[row_idx]) > int(policy.max_hole_count):
+            tags.append("needs_review_metric_holes")
+        if solidity is not None and policy.min_solidity is not None:
+            value = float(solidity[row_idx])
+            if np.isfinite(value) and value < float(policy.min_solidity):
+                tags.append("needs_review_metric_low_solidity")
+        labels[row_idx] = "|".join(tags) if tags else "clean"
+    return labels
 
 
 def _component_threshold(source: SourceSubjectMaskRun, component_name: str, component_idx: int) -> float:
@@ -1034,7 +1189,7 @@ def _write_component_metrics_chunk(
     masks: np.ndarray,
     metric_level: str,
     write_attrs: bool = True,
-) -> None:
+) -> dict[str, np.ndarray]:
     if metric_level not in _METRIC_LEVELS:
         raise ValueError(f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}.")
     component_metrics = _compute_component_topology_metrics(masks)
@@ -1046,14 +1201,34 @@ def _write_component_metrics_chunk(
     for metric_name, values in component_metrics.items():
         metrics_group[str(metric_name)][row_slice] = np.asarray(values)
     if not write_attrs:
-        return
+        return component_metrics
     _set_component_metric_attrs(component_group, metric_level=metric_level)
+    return component_metrics
 
 
 def _set_component_metric_attrs(component_group: zarr.Group, *, metric_level: str) -> None:
     metrics_group = component_group["metrics"]
+    component_name = str(component_group.name).rstrip("/").split("/")[-1]
+    metrics_group.attrs["schema_id"] = _COMPONENT_METRICS_SCHEMA_ID
+    metrics_group.attrs["schema_version"] = 1
+    metrics_group.attrs["component_name"] = component_name
     metrics_group.attrs["metric_level"] = metric_level
+    metrics_group.attrs["metric_names"] = list(_COMPONENT_METRIC_NAMES)
+    metrics_group.attrs["computed_metric_names"] = (
+        list(_COMPONENT_METRIC_NAMES)
+        if metric_level == "full"
+        else ["component_count", "largest_component_fraction", "hole_count", "hole_area_fraction"]
+    )
+    metrics_group.attrs["deferred_metric_names"] = (
+        []
+        if metric_level == "full"
+        else ["sigma_noise", "curvature_var", "ipr", "solidity"]
+    )
+    metrics_group.attrs["qc_schema_id"] = _COMPONENT_METRIC_QC_SCHEMA_ID
+    metrics_group.attrs["qc_policy"] = _component_metric_qc_policy_payload(component_name)
     component_group.attrs["component_metric_level"] = metric_level
+    component_group.attrs["component_metrics_schema_id"] = _COMPONENT_METRICS_SCHEMA_ID
+    component_group.attrs["metric_qc_schema_id"] = _COMPONENT_METRIC_QC_SCHEMA_ID
     if metric_level == "full":
         component_group.attrs["shape_qc_metrics_status"] = "computed"
         component_group.attrs.pop("shape_qc_metrics_deferred_reason", None)
@@ -1062,20 +1237,17 @@ def _set_component_metric_attrs(component_group: zarr.Group, *, metric_level: st
         component_group.attrs["shape_qc_metrics_deferred_reason"] = "metric_level=cheap"
 
 
-def _write_canonical_component_chunk(
+def _write_mask_local_metrics_chunk(
     run_group: zarr.Group,
     *,
     component_name: str,
     component_idx: int,
     row_slice: slice,
     masks: np.ndarray,
-    source_masks: np.ndarray,
     metric_level: str,
     write_metric_attrs: bool = True,
-) -> np.ndarray:
+) -> _ComponentMetricWriteResult:
     masks_u8 = np.asarray(masks, dtype=np.uint8)
-    source_u8 = np.asarray(source_masks, dtype=np.uint8)
-    run_group["masks_roi"][row_slice, int(component_idx)] = masks_u8
     mask_present, area_px = _compute_mask_metrics(masks_u8[:, None, :, :])
     run_group["metrics/mask_present"][row_slice, int(component_idx)] = mask_present[:, 0]
     run_group["metrics/area_px"][row_slice, int(component_idx)] = area_px[:, 0]
@@ -1088,16 +1260,367 @@ def _write_canonical_component_chunk(
     component_group = run_group["components"][component_name]
     component_group["mask_present"][row_slice] = mask_present[:, 0]
     component_group["area_px"][row_slice] = area_px[:, 0]
-    component_group["source_seed_masks_roi"][row_slice] = source_u8
-    component_group["source_row_fingerprint"][row_slice] = _compute_mask_row_fingerprints(source_u8)
-    _write_component_metrics_chunk(
+    component_metrics = _write_component_metrics_chunk(
         component_group,
         row_slice=row_slice,
         masks=masks_u8,
         metric_level=metric_level,
         write_attrs=write_metric_attrs,
     )
-    return np.asarray(mask_present[:, 0], dtype=bool)
+    qc_reason_labels = _compute_component_metric_qc_reason_labels(
+        component_name,
+        mask_present=mask_present[:, 0],
+        area_px=area_px[:, 0],
+        component_metrics=component_metrics,
+    )
+    return _ComponentMetricWriteResult(
+        mask_present=np.asarray(mask_present[:, 0], dtype=bool),
+        reason_labels=np.asarray(qc_reason_labels, dtype=object),
+    )
+
+
+def _write_canonical_component_chunk(
+    run_group: zarr.Group,
+    *,
+    component_name: str,
+    component_idx: int,
+    row_slice: slice,
+    masks: np.ndarray,
+    source_masks: np.ndarray,
+    metric_level: str,
+    write_metric_attrs: bool = True,
+) -> _ComponentMetricWriteResult:
+    masks_u8 = np.asarray(masks, dtype=np.uint8)
+    source_u8 = np.asarray(source_masks, dtype=np.uint8)
+    run_group["masks_roi"][row_slice, int(component_idx)] = masks_u8
+    component_group = run_group["components"][component_name]
+    component_group["source_seed_masks_roi"][row_slice] = source_u8
+    component_group["source_row_fingerprint"][row_slice] = _compute_mask_row_fingerprints(source_u8)
+    return _write_mask_local_metrics_chunk(
+        run_group,
+        component_name=component_name,
+        component_idx=component_idx,
+        row_slice=row_slice,
+        masks=masks_u8,
+        metric_level=metric_level,
+        write_metric_attrs=write_metric_attrs,
+    )
+
+
+def _array_shape(group: zarr.Group, name: str) -> tuple[int, ...] | None:
+    arr = group.get(name)
+    if arr is None:
+        return None
+    try:
+        return tuple(int(dim) for dim in arr.shape)
+    except Exception:
+        return None
+
+
+def _ensure_metric_array(
+    group: zarr.Group,
+    name: str,
+    *,
+    shape: Sequence[int],
+    dtype: object,
+    chunks: Sequence[int],
+    fill_value: object = 0,
+) -> None:
+    expected_shape = tuple(int(dim) for dim in shape)
+    if _array_shape(group, name) == expected_shape:
+        return
+    _create_filled_array(
+        group,
+        name,
+        shape=expected_shape,
+        dtype=dtype,
+        chunks=chunks,
+        fill_value=fill_value,
+    )
+
+
+def _ensure_refined_run_metric_shell(run_group: zarr.Group, *, total_rows: int, component_count: int) -> None:
+    metrics_group = run_group.require_group("metrics")
+    _ensure_metric_array(
+        metrics_group,
+        "mask_present",
+        shape=(total_rows, component_count),
+        dtype=bool,
+        chunks=_metric_chunks_2d(total_rows),
+    )
+    _ensure_metric_array(
+        metrics_group,
+        "area_px",
+        shape=(total_rows, component_count),
+        dtype=np.float32,
+        chunks=_metric_chunks_2d(total_rows),
+    )
+    _ensure_metric_array(
+        metrics_group,
+        "centroid_xy",
+        shape=(total_rows, component_count, 2),
+        dtype=np.float32,
+        chunks=_metric_chunks_lastdim(total_rows, 2),
+        fill_value=np.nan,
+    )
+    _ensure_metric_array(
+        metrics_group,
+        "centroid_valid",
+        shape=(total_rows, component_count),
+        dtype=bool,
+        chunks=_metric_chunks_2d(total_rows),
+    )
+    _ensure_metric_array(
+        metrics_group,
+        "bbox_xyxy",
+        shape=(total_rows, component_count, 4),
+        dtype=np.float32,
+        chunks=_metric_chunks_lastdim(total_rows, 4),
+    )
+    _ensure_metric_array(
+        metrics_group,
+        "bbox_valid",
+        shape=(total_rows, component_count),
+        dtype=bool,
+        chunks=_metric_chunks_2d(total_rows),
+    )
+
+
+def _ensure_refined_component_metric_shell(
+    run_group: zarr.Group,
+    *,
+    component_name: str,
+    total_rows: int,
+) -> zarr.Group:
+    component_group = run_group.require_group("components").require_group(component_name)
+    metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
+    _ensure_metric_array(
+        component_group,
+        "mask_present",
+        shape=(total_rows,),
+        dtype=bool,
+        chunks=metric_chunks,
+    )
+    _ensure_metric_array(
+        component_group,
+        "area_px",
+        shape=(total_rows,),
+        dtype=np.float32,
+        chunks=metric_chunks,
+    )
+    if "edit_applied" not in component_group:
+        _create_filled_array(
+            component_group,
+            "edit_applied",
+            shape=(total_rows,),
+            dtype=bool,
+            chunks=metric_chunks,
+        )
+    metrics_group = component_group.require_group("metrics")
+    for metric_name, dtype in (
+        ("component_count", np.int32),
+        ("largest_component_fraction", np.float32),
+        ("hole_count", np.int32),
+        ("hole_area_fraction", np.float32),
+    ):
+        _ensure_metric_array(
+            metrics_group,
+            metric_name,
+            shape=(total_rows,),
+            dtype=dtype,
+            chunks=metric_chunks,
+        )
+    for metric_name, dtype, fill_value in (
+        ("sigma_noise", np.float32, np.nan),
+        ("curvature_var", np.float32, np.nan),
+        ("ipr", np.float32, np.nan),
+        ("solidity", np.float32, np.nan),
+    ):
+        _ensure_metric_array(
+            metrics_group,
+            metric_name,
+            shape=(total_rows,),
+            dtype=dtype,
+            chunks=metric_chunks,
+            fill_value=fill_value,
+        )
+    return component_group
+
+
+def _resolve_refined_subject_run_group(
+    root: zarr.Group,
+    refined_run: Optional[str],
+) -> tuple[str, zarr.Group]:
+    parent = root.get("refined_subject_masks_runs")
+    if parent is None:
+        raise ValueError("Archive has no refined_subject_masks_runs group.")
+    if refined_run:
+        run_name = str(refined_run)
+    else:
+        latest = parent.attrs.get("latest")
+        if latest is None:
+            keys = sorted(str(key) for key in parent.keys())
+            if not keys:
+                raise ValueError("refined_subject_masks_runs has no runs.")
+            run_name = keys[-1]
+        else:
+            run_name = str(latest)
+    if run_name not in parent:
+        raise ValueError(f"refined_subject_masks_runs/{run_name} not found.")
+    return run_name, parent[run_name]
+
+
+def _component_indices_for_refined_run(
+    run_group: zarr.Group,
+    components: Optional[Sequence[str]],
+) -> tuple[tuple[str, int], ...]:
+    labels_raw = run_group.attrs.get("mask_labels")
+    if not isinstance(labels_raw, (list, tuple)):
+        raise ValueError("refined subject-mask run is missing mask_labels attrs.")
+    label_map = {str(label): int(idx) for idx, label in enumerate(labels_raw)}
+    requested = [str(value) for value in components] if components else list(label_map)
+    resolved: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for raw_component in requested:
+        component = _normalize_component_name(raw_component)
+        if component is None or component in seen:
+            continue
+        if component not in label_map:
+            raise ValueError(f"Component {component!r} not present in refined run mask_labels.")
+        seen.add(component)
+        resolved.append((component, int(label_map[component])))
+    return tuple(resolved)
+
+
+def _existing_component_reasons(component_group: zarr.Group, total_rows: int) -> np.ndarray:
+    labels = read_reason_labels(component_group)
+    if labels is None:
+        return np.full((total_rows,), "clean", dtype=object)
+    arr = np.asarray(labels, dtype=object).reshape(-1)
+    if int(arr.shape[0]) != int(total_rows):
+        return np.full((total_rows,), "clean", dtype=object)
+    return arr.copy()
+
+
+def refresh_refined_subject_mask_metrics_run(
+    root: zarr.Group,
+    *,
+    refined_run: Optional[str] = None,
+    components: Optional[Sequence[str]] = None,
+    metric_level: str = "cheap",
+    chunk_size: int = 256,
+    refresh_reason_tags: bool = True,
+    write_eye_geometry: bool = False,
+) -> dict[str, object]:
+    """Refresh mask-local metrics/QC for an existing refined-subject run."""
+
+    metric_level = str(metric_level)
+    if metric_level not in _METRIC_LEVELS:
+        raise ValueError(f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}.")
+    run_name, run_group = _resolve_refined_subject_run_group(root, refined_run)
+    masks = run_group.get("masks_roi")
+    if masks is None:
+        raise ValueError(f"refined_subject_masks_runs/{run_name} missing masks_roi.")
+    if len(tuple(masks.shape)) != 4:
+        raise ValueError(f"refined_subject_masks_runs/{run_name}/masks_roi must be 4D, got {tuple(masks.shape)}.")
+
+    total_rows = int(masks.shape[0])
+    component_count = int(masks.shape[1])
+    _ensure_refined_run_metric_shell(run_group, total_rows=total_rows, component_count=component_count)
+    component_indices = _component_indices_for_refined_run(run_group, components)
+    chunk_ranges = _row_chunks(total_rows, max(1, int(chunk_size)))
+    review_counts: dict[str, dict[str, int]] = {}
+    refreshed_components: list[str] = []
+
+    for component_name, component_idx in component_indices:
+        component_group = _ensure_refined_component_metric_shell(
+            run_group,
+            component_name=component_name,
+            total_rows=total_rows,
+        )
+        reason_labels = _existing_component_reasons(component_group, total_rows)
+        rows_with_component = 0
+        for start_row, stop_row in chunk_ranges:
+            row_slice = slice(int(start_row), int(stop_row))
+            component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
+            write_result = _write_mask_local_metrics_chunk(
+                run_group,
+                component_name=component_name,
+                component_idx=int(component_idx),
+                row_slice=row_slice,
+                masks=component_masks,
+                metric_level=metric_level,
+                write_metric_attrs=False,
+            )
+            rows_with_component += int(np.count_nonzero(write_result.mask_present))
+            if refresh_reason_tags:
+                reason_labels[row_slice] = _replace_metric_qc_reason_labels(
+                    reason_labels[row_slice],
+                    write_result.reason_labels,
+                )
+        _set_component_metric_attrs(component_group, metric_level=metric_level)
+        component_group.attrs["metric_qc_refreshed_at_utc"] = _utc_now()
+        component_group.attrs["metric_qc_rows_with_component"] = int(rows_with_component)
+        if refresh_reason_tags:
+            write_reason_columns(
+                component_group,
+                reason_labels,
+                chunk_size=max(1, min(256, total_rows)),
+                include_reason_text=True,
+                overwrite=True,
+            )
+        _add_review_counts(review_counts, component_name, reason_labels)
+        refreshed_components.append(component_name)
+
+    if write_eye_geometry and set(_EYE_COMPONENTS).issubset({name for name, _idx in component_indices}):
+        write_refined_subject_eye_geometry(run_group)
+        run_group.attrs["eye_geometry_status"] = "computed"
+
+    refreshed_at = _utc_now()
+    run_group.attrs["component_metric_level"] = metric_level
+    run_group.attrs["component_metrics_schema_id"] = _COMPONENT_METRICS_SCHEMA_ID
+    run_group.attrs["metric_qc_schema_id"] = _COMPONENT_METRIC_QC_SCHEMA_ID
+    run_group.attrs["component_metric_qc_refreshed_at_utc"] = refreshed_at
+    run_group.attrs["component_metric_qc_review_counts"] = review_counts
+    summary_stats = dict(run_group.attrs.get("summary_statistics") or {})
+    summary_stats["rows_total"] = int(total_rows)
+    summary_stats["component_metric_level"] = metric_level
+    summary_stats["component_metric_qc_refreshed_at_utc"] = refreshed_at
+    run_group.attrs["summary_statistics"] = summary_stats
+
+    return {
+        "status": "updated",
+        "refined_run": run_name,
+        "components": refreshed_components,
+        "metric_level": metric_level,
+        "chunk_size": max(1, int(chunk_size)),
+        "chunk_count": len(chunk_ranges),
+        "refresh_reason_tags": bool(refresh_reason_tags),
+        "write_eye_geometry": bool(write_eye_geometry),
+        "review_counts": review_counts,
+    }
+
+
+def refresh_refined_subject_mask_metrics(
+    zarr_path: str | Path,
+    *,
+    refined_run: Optional[str] = None,
+    components: Optional[Sequence[str]] = None,
+    metric_level: str = "cheap",
+    chunk_size: int = 256,
+    refresh_reason_tags: bool = True,
+    write_eye_geometry: bool = False,
+) -> dict[str, object]:
+    root = open_zarr_root(zarr_path, mode="a")
+    return refresh_refined_subject_mask_metrics_run(
+        root,
+        refined_run=refined_run,
+        components=components,
+        metric_level=metric_level,
+        chunk_size=chunk_size,
+        refresh_reason_tags=refresh_reason_tags,
+        write_eye_geometry=write_eye_geometry,
+    )
 
 
 def _write_finalization_metrics_chunk(
@@ -1181,7 +1704,7 @@ def _process_and_write_finalizer_chunk(
 
         component_idx = int(component_to_index[raw_component])
         phase_start = time.perf_counter()
-        present = _write_canonical_component_chunk(
+        write_result = _write_canonical_component_chunk(
             run_group,
             component_name=raw_component,
             component_idx=component_idx,
@@ -1201,8 +1724,8 @@ def _process_and_write_finalizer_chunk(
         )
         elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
         chunk_timing[f"write_{raw_component}_seconds"] = elapsed
-        chunk_any |= present
-        labels = np.asarray(batch.reason_labels, dtype=object)
+        chunk_any |= write_result.mask_present
+        labels = _merge_reason_label_arrays(batch.reason_labels, write_result.reason_labels)
         reason_labels_by_component[raw_component] = [str(value) for value in labels.tolist()]
         _add_review_counts(review_counts, raw_component, labels)
 
@@ -1223,7 +1746,7 @@ def _process_and_write_finalizer_chunk(
             component_idx = int(component_to_index[component_name])
             masks = np.asarray(assignment_chunk.masks[component_name], dtype=np.uint8)
             phase_start = time.perf_counter()
-            present = _write_canonical_component_chunk(
+            write_result = _write_canonical_component_chunk(
                 run_group,
                 component_name=component_name,
                 component_idx=component_idx,
@@ -1235,8 +1758,11 @@ def _process_and_write_finalizer_chunk(
             )
             elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
             chunk_timing[f"write_{component_name}_seconds"] = elapsed
-            chunk_any |= present
-            labels = np.asarray(assignment_chunk.reason_labels[component_name], dtype=object)
+            chunk_any |= write_result.mask_present
+            labels = _merge_reason_label_arrays(
+                assignment_chunk.reason_labels[component_name],
+                write_result.reason_labels,
+            )
             reason_labels_by_component[component_name] = [str(value) for value in labels.tolist()]
             _add_review_counts(review_counts, component_name, labels)
 
@@ -1553,7 +2079,7 @@ def finalize_subject_mask_run(
                     continue
                 component_idx = int(component_to_index[raw_component])
                 phase_start = time.perf_counter()
-                present = _write_canonical_component_chunk(
+                write_result = _write_canonical_component_chunk(
                     run_group,
                     component_name=raw_component,
                     component_idx=component_idx,
@@ -1562,7 +2088,7 @@ def finalize_subject_mask_run(
                     source_masks=batch.source_masks,
                     metric_level=metric_level,
                 )
-                chunk_any |= present
+                chunk_any |= write_result.mask_present
                 _write_finalization_metrics_chunk(
                     run_group,
                     component_name=raw_component,
@@ -1572,8 +2098,9 @@ def finalize_subject_mask_run(
                 )
                 elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
                 chunk_timing[f"write_{raw_component}_seconds"] = elapsed
-                reason_labels_by_component[raw_component][row_slice] = np.asarray(batch.reason_labels, dtype=object)
-                _add_review_counts(review_counts, raw_component, batch.reason_labels)
+                labels = _merge_reason_label_arrays(batch.reason_labels, write_result.reason_labels)
+                reason_labels_by_component[raw_component][row_slice] = labels
+                _add_review_counts(review_counts, raw_component, labels)
                 source_payloads.setdefault(raw_component, _source_payload_for_finalized_component(source, batch))
 
             if eye_assignment_context is not None:
@@ -1593,7 +2120,7 @@ def finalize_subject_mask_run(
                     component_idx = int(component_to_index[component_name])
                     masks = np.asarray(assignment_chunk.masks[component_name], dtype=np.uint8)
                     phase_start = time.perf_counter()
-                    present = _write_canonical_component_chunk(
+                    write_result = _write_canonical_component_chunk(
                         run_group,
                         component_name=component_name,
                         component_idx=component_idx,
@@ -1604,8 +2131,11 @@ def finalize_subject_mask_run(
                     )
                     elapsed = timing.add(f"write_{component_name}", time.perf_counter() - phase_start)
                     chunk_timing[f"write_{component_name}_seconds"] = elapsed
-                    chunk_any |= present
-                    labels = np.asarray(assignment_chunk.reason_labels[component_name], dtype=object)
+                    chunk_any |= write_result.mask_present
+                    labels = _merge_reason_label_arrays(
+                        assignment_chunk.reason_labels[component_name],
+                        write_result.reason_labels,
+                    )
                     reason_labels_by_component[component_name][row_slice] = labels
                     _add_review_counts(review_counts, component_name, labels)
 

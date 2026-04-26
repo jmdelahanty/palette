@@ -168,10 +168,10 @@ This is the near-term rollout order that should happen before more schema work.
     `subject_mask_runs/traditional_swim_bladder_masks_canary_001` was
     materialized successfully on 2026-04-01
 
-### 3. Delay downstream geometry until labels exist
+### 3. Delay downstream analysis geometry until labels exist
 
-- [ ] Do not start `subject_shape_runs` implementation until we have at least a
-      small curated refined body-mask set.
+- [ ] Do not start `analysis/subject_shape_runs` implementation until we have at
+      least a small curated refined body-mask set.
 - [ ] Do not design body/spline contour arrays beyond the current contract until
       we see what the first curated masks actually look like.
 
@@ -380,7 +380,7 @@ Current sparse-source assembly and repair path:
 component/raw sources
   -> refined_subject_masks_runs/<run>  # direct assembly + subject-mask finalization
   -> refined_eye_masks_runs/<run>      # still specialized during transition
-  -> subject_shape_runs/<run>          # downstream interpreted shape geometry
+  -> analysis/subject_shape_runs/<run> # downstream interpreted shape geometry
 ```
 
 ## Scope
@@ -659,7 +659,7 @@ Likely refined/derived outputs:
 
 This component is expected to feed later:
 
-- `subject_shape_runs`
+- `analysis/subject_shape_runs`
 - tail segmentation / centerline workflows
 - body-axis calculations
 
@@ -1049,15 +1049,19 @@ This means the registry should eventually answer questions like:
   `refined_subject_masks_runs`; body centerlines/splines, anatomical axes,
   canonical body B-spline fits, canonical centerline/B-spline body length,
   swim-bladder-to-body relationships, and eye angles relative to heading belong
-  in `subject_shape_runs` or a specialized downstream analysis run.
-- [x] Define `subject_shape_runs` to consume refined body/swim/eye masks, not raw
-      `subject_mask_runs`.
+  in `analysis/subject_shape_runs` or a specialized downstream analysis run.
+- [x] Define `analysis/subject_shape_runs` to consume refined body/swim/eye
+      masks, not raw `subject_mask_runs`.
   See [subject_shape_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_shape_runs_contract.md).
-- [ ] Implement the first `subject_shape_runs` writer.
+- [x] Decide that subject shape lives under `analysis/subject_shape_runs`, not at
+      the zarr root.
+  See [derived_analysis_run_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/derived_analysis_run_contract.md).
+- [x] Add a refinement-side refresh path for mask-local body/swim/eye metrics and
+      generated `needs_review_metric_*` reason tags.
+  See `scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics`.
+- [ ] Implement the first `analysis/subject_shape_runs` writer.
 - [ ] Include body B-spline fit support in the first body-shape writer or define
       it as the first follow-up slice.
-- [ ] Decide whether `subject_shape_runs` should live at zarr root or under
-      `analysis/subject_shape_runs` before first implementation.
 
 ## Phase 5: Eye Unification Path
 

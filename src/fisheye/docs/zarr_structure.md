@@ -819,7 +819,7 @@ contours, centroids, areas, bboxes, validity flags, and simple component shape
 descriptors that are recomputable from one refined mask channel. Interpreted
 biological geometry that requires a coordinate convention, anatomical polarity,
 temporal context, or cross-component relationship belongs in
-`subject_shape_runs/<run>` or a specialized downstream analysis run.
+`analysis/subject_shape_runs/<run>` or a specialized downstream analysis run.
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
@@ -845,6 +845,12 @@ temporal context, or cross-component relationship belongs in
   `solidity`. Fast smart-finalizer runs may set expensive shape metrics such as
   `sigma_noise`, `curvature_var`, `ipr`, and `solidity` to deferred/NaN values
   when `metric_level="cheap"` is recorded.
+- component metric attrs should include
+  `schema_id="refined_subject_component_mask_metrics_v1"`,
+  `qc_schema_id="refined_subject_component_metric_qc_reasons_v1"`, and a
+  `qc_policy` payload. Generated metric-QC reason tags use the
+  `needs_review_metric_*` prefix and can be refreshed with
+  `fisheye.utils.backfill_refined_subject_mask_metrics`.
 - eye-pair relation metrics live under
   `relations/eye_pair/metrics/{separation_px,separation_valid}` when both
   `eye_left` and `eye_right` are present
@@ -884,36 +890,6 @@ Eye geometry arrays used by current eye-angle analysis and eye-mask training
 export are read through `fisheye.shared.eye_geometry_source`, which exposes
 `eye_left`/`eye_right` component data as legacy-compatible `(N, 2, ...)`
 array-like views for callers that have not moved to component-native reads yet.
-
----
-
-## `subject_shape_runs/`
-
-Draft deterministic derived stage for biological shape outputs computed from
-canonical refined subject masks.
-
-Expected source:
-
-- exact `refined_subject_masks_runs/<run>` source
-- optional refined-subject mask-local geometry primitives
-- optional keypoint, heading, tracking, or temporal context inputs
-
-Examples that belong here instead of in `refined_subject_masks_runs` as
-canonical outputs:
-
-- body centerline/spline used as an anatomical coordinate frame
-- canonical body B-spline fits with smoothing/knot/parameterization policy
-- canonical body length from centerline/B-spline arc length
-- head/tail-polarized body axis or mask-derived heading
-- body curvature, bend, or width profile
-- swim-bladder position relative to body axis or centerline
-- swim-bladder distance to eye pair, body centroid, or anatomical landmarks
-- eye angles relative to body/head heading
-- temporally smoothed or track-aligned shape metrics
-
-The stage is not implemented yet. The draft storage and provenance contract is
-documented in
-`docs/subject_shape_runs_contract.md`.
 
 ---
 
@@ -1271,6 +1247,75 @@ Eye angle analysis results:
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
 
+### `analysis/subject_shape_runs/`
+
+Draft deterministic derived analysis stage for biological shape outputs
+computed from canonical refined subject masks.
+
+**Structure**: `analysis/subject_shape_runs/<run_name>/`
+
+Expected source:
+
+- exact `refined_subject_masks_runs/<run>` source
+- optional refined-subject mask-local geometry primitives
+- optional keypoint, heading, tracking, or temporal context inputs
+
+Expected run attrs:
+
+- `schema_id`: `"analysis.subject_shape_runs"`
+- `schema_version`
+- `method`
+- `method_version`
+- `created_at_utc`
+- `row_axis`: initially `"refined_subject_mask_rows"`
+- `source_refs`: exact input runs and paths
+- `source_refined_subject_masks_run`
+
+Expected row-aligned index group:
+
+- `row_index/frame_indices`
+- `row_index/detection_indices` when available
+- `row_index/source_refined_row_ids` when available
+
+Expected component groups:
+
+- `components/subject_body/`: interpreted body geometry such as centerline,
+  B-spline, body length, axis, curvature, and body-shape validity.
+- `components/swim_bladder/`: swim-bladder centroid/blob/ellipse summaries and
+  component-specific validity.
+- `components/eye_left/` and `components/eye_right/`: optional interpreted
+  eye-shape mirrors or component-specific validity consumed by subject-shape
+  analysis.
+
+Expected relation groups:
+
+- `relations/eye_pair/`: cross-eye metrics such as separation.
+- `relations/swim_bladder_to_body/`: swim-bladder position relative to body
+  axis or centerline.
+- `relations/eyes_to_body/`: eye angles or offsets relative to body/head
+  heading.
+
+Component groups in `analysis/subject_shape_runs` are derived geometry groups,
+not approval surfaces. Source mask approval remains owned by
+`refined_subject_masks_runs/components/<component>`.
+
+Examples that belong here instead of in `refined_subject_masks_runs` as
+canonical outputs:
+
+- body centerline/spline used as an anatomical coordinate frame
+- canonical body B-spline fits with smoothing/knot/parameterization policy
+- canonical body length from centerline/B-spline arc length
+- head/tail-polarized body axis or mask-derived heading
+- body curvature, bend, or width profile
+- swim-bladder position relative to body axis or centerline
+- swim-bladder distance to eye pair, body centroid, or anatomical landmarks
+- eye angles relative to body/head heading
+- temporally smoothed or track-aligned shape metrics
+
+The stage is not implemented yet. The draft storage and provenance contract is
+documented in `docs/subject_shape_runs_contract.md`; the shared derived-run
+contract is documented in `docs/derived_analysis_run_contract.md`.
+
 ### `analysis/stimulus_response_runs/`
 
 Per-step behavioral metrics across stimulus types. Consumes identity-resolved
@@ -1373,7 +1418,9 @@ This group only exists when `stimulus_mode == "MOVING_GRATING"`.
 ### Additional Analysis Groups
 
 Other analyzers follow the same `analysis/<analysis_type>_runs/<run_name>/` pattern with
-analyzer-specific arrays and provenance attributes.
+analyzer-specific arrays and provenance attributes. New derived analysis run
+families should follow `docs/derived_analysis_run_contract.md` for source refs,
+row-axis semantics, and validity/failure state.
 
 ---
 

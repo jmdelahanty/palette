@@ -7,7 +7,7 @@ import pytest
 import zarr
 
 from fisheye.refinement import finalize_subject_masks as mod
-from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.tune import refined_subject_mask_review as review_mod
 
 
@@ -186,6 +186,9 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert metrics.attrs["schema_id"] == "refined_subject_component_finalization_metrics_v1"
     assert np.asarray(metrics["quality_code"][:], dtype=np.int16).shape == (2,)
     component_metrics = run["components/subject_body/metrics"]
+    assert component_metrics.attrs["schema_id"] == "refined_subject_component_mask_metrics_v1"
+    assert component_metrics.attrs["qc_schema_id"] == "refined_subject_component_metric_qc_reasons_v1"
+    assert component_metrics.attrs["qc_policy"]["component_name"] == "subject_body"
     assert component_metrics.attrs["metric_level"] == "cheap"
     assert np.isnan(np.asarray(component_metrics["sigma_noise"][:], dtype=np.float32)[0])
     assert "relations" not in run
@@ -211,6 +214,56 @@ def test_finalize_subject_mask_run_can_write_full_metrics_and_eye_geometry(monke
     assert "relations" in run
     assert run["components/subject_body"].attrs["shape_qc_metrics_status"] == "computed"
     assert run["components/subject_body/metrics"].attrs["metric_level"] == "full"
+
+
+def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_001",
+        chunk_size=1,
+    )
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
+    labels = list(run.attrs["mask_labels"])
+    body_idx = labels.index("subject_body")
+
+    edited_body = np.zeros((10, 10), dtype=np.uint8)
+    edited_body[1, 1] = 1
+    edited_body[8, 8] = 1
+    run["masks_roi"][1, body_idx] = edited_body
+    write_reason_columns(
+        run["components/subject_body"],
+        np.asarray(["clean", "manual_correction|needs_review_metric_holes"], dtype=object),
+        chunk_size=2,
+        include_reason_text=True,
+        overwrite=True,
+    )
+
+    summary = mod.refresh_refined_subject_mask_metrics_run(
+        root,
+        refined_run="refined_subject_masks_smart_001",
+        components=["subject_body"],
+        chunk_size=1,
+        metric_level="cheap",
+    )
+
+    assert summary["components"] == ["subject_body"]
+    assert summary["review_counts"]["subject_body"]["needs_review"] == 1
+    assert float(np.asarray(run["metrics/area_px"][1, body_idx], dtype=np.float32)) == pytest.approx(2.0)
+    component_metrics = run["components/subject_body/metrics"]
+    assert int(np.asarray(component_metrics["component_count"][1], dtype=np.int32)) == 2
+    assert component_metrics.attrs["schema_id"] == "refined_subject_component_mask_metrics_v1"
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
+    assert run.attrs["component_metric_qc_review_counts"]["subject_body"]["needs_review"] == 1
+
+    body_reasons = read_reason_labels(run["components/subject_body"])
+    assert body_reasons is not None
+    assert "manual_correction" in str(body_reasons[1])
+    assert "needs_review_metric_holes" not in str(body_reasons[1])
+    assert "needs_review_metric_small_area" in str(body_reasons[1])
+    assert "needs_review_metric_multiple_components" in str(body_reasons[1])
 
 
 def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypatch, tmp_path: Path) -> None:
