@@ -1060,7 +1060,8 @@ This means the registry should eventually answer questions like:
 - [x] Add a refinement-side refresh path for mask-local body/swim/eye metrics and
       generated `needs_review_metric_*` reason tags.
   See `scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics`.
-- [ ] Implement the first `analysis/subject_shape_runs` writer.
+- [x] Implement the first `analysis/subject_shape_runs` writer.
+  See `scripts/py -m fisheye.analysis.subject_shape_runs`.
 - [ ] Include body B-spline fit support in the first body-shape writer or define
       it as the first follow-up slice.
 
@@ -1126,14 +1127,21 @@ Real canary evidence:
   `["subject_body", "eye_left", "eye_right", "swim_bladder"]`
 - eye geometry status:
   `computed`, with valid eye-pair separation on `19233 / 19235` rows
+- first subject-shape run:
+  `analysis/subject_shape_runs/subject_shape_smart_finalizer_canary_2026-04-26`
+- subject-shape execution:
+  `dask_worker_chunks`, `scheduler=processes`, `num_workers=12`,
+  `chunk_size=256`, `19235` rows in `19.7` seconds
+- subject-shape component coverage:
+  `subject_body=19235`, `swim_bladder=19235`, `eye_left=19234`,
+  `eye_right=19234`
 
 Remaining work is no longer open-ended architecture. It is operational hardening:
 
 - visual inspection and component approval of smart-finalized candidates
 - temporal QC as a second pass that flags suspicious rows without changing masks
 - faster/chunked eye-geometry backfill if this becomes a frequent full-run task
-- body/eyes/swim subject-shape-stage implementation and downstream
-  subject-shape consumers
+- body B-spline/centerline support and downstream subject-shape consumers
 - complete subject/refined-subject stale repair parity with the eye-mask
   precedent
 - top-level segmentation orchestration in `core/pipeline.py` so operators do not

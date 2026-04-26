@@ -11,7 +11,7 @@ subject masks.
 
 ## Scope
 
-`analysis/subject_shape_runs/<run>` is the planned home for interpreted shape
+`analysis/subject_shape_runs/<run>` is the home for interpreted shape
 outputs that should not be stored as mask-review metadata.
 
 It should consume:
@@ -23,6 +23,12 @@ It should consume:
 
 It should produce deterministic derived geometry and analysis-ready shape
 features.
+
+The first implementation is `fisheye.analysis.subject_shape_runs`. It writes
+row-aligned component summaries, body principal-axis estimates, eye/swim ellipse
+summaries, eye-pair relations, and swim/eye-to-body relations with optional
+Dask worker-chunk execution. Body centerline and B-spline methods remain
+follow-up shape methods under this same run family.
 
 ## Boundary Rule
 

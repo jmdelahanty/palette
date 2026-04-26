@@ -1322,9 +1322,13 @@ canonical outputs:
 - eye angles relative to body/head heading
 - temporally smoothed or track-aligned shape metrics
 
-The stage is not implemented yet. The draft storage and provenance contract is
-documented in `docs/subject_shape_runs_contract.md`; the shared derived-run
-contract is documented in `docs/derived_analysis_run_contract.md`.
+The first writer is `fisheye.analysis.subject_shape_runs`. It writes
+row-aligned body/eyes/swim component summaries, body principal-axis estimates,
+eye/swim ellipse summaries, eye-pair relations, and swim/eye-to-body relations
+using serial or Dask worker-chunk execution. Body centerline and B-spline
+support remain follow-up derived-shape methods. The storage and provenance
+contract is documented in `docs/subject_shape_runs_contract.md`; the shared
+derived-run contract is documented in `docs/derived_analysis_run_contract.md`.
 
 ### `analysis/stimulus_response_runs/`
 

@@ -180,9 +180,8 @@ desired design:
   triage state, not training approval.
 - Temporal QC for abrupt area/centroid/component-count changes is planned as a
   second pass that flags rows without overwriting spatial masks.
-- `analysis/subject_shape_runs` is defined as a draft contract, but
-  implementation and the first coherent body/eyes/swim shape writer, including
-  the body centerline/B-spline method, are still open.
+- `analysis/subject_shape_runs` has a first coherent body/eyes/swim writer, but
+  body centerline/B-spline support and downstream consumers are still open.
 
 ## Review Checklist
 
