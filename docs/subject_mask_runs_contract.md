@@ -436,6 +436,14 @@ Treat these numbers as local workstation/storage guidance, not a contract.
 The contract is the artifact behavior: probability-first raw runs may omit
 `masks_roi`, and async output must not change array contents or row alignment.
 
+KvikIO / GPUDirect Storage note:
+
+- KvikIO/GDS is experimental for this stage and is not an operator backend yet.
+- Use `scripts/py -m fisheye.diagnostics.benchmark_kvikio_gds` outside the
+  Codex sandbox before considering a GDS-backed writer on a workstation.
+- Current local findings and backend criteria are tracked in
+  `docs/kvikio_gds_subject_mask_experiment.md`.
+
 ## `available_channels` semantics
 
 `available_channels` is a runtime/source-stage availability declaration, not a
