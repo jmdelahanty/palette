@@ -1,9 +1,39 @@
-# Citrus Agent Handoff: Runtime Dish Mask Creation
+# Citrus/Orange Agent Handoff: Runtime Dish Mask Creation
 
-This document is a prompt/reference for the Citrus data acquisition agent. It
-describes how Palette currently creates and consumes dish masks, and what
-Citrus would need to write into its H5 output so Palette can skip the manual
+This document is a prompt/reference for Citrus and Orange data acquisition
+agents. It describes how Palette currently creates and consumes dish masks, and
+what acquisition should write into H5 output so Palette can skip the manual
 tuning cycle entirely.
+
+## Action Request for Citrus/Orange Agents
+
+Goal: write acquisition-time dish-mask metadata into every H5 recording when a
+valid dish boundary is known, so Palette can import it into
+`analysis_metadata.attrs["dish_mask"]` and run arena assignment/tracking without
+manual mask tuning.
+
+Producer requirements:
+
+- Prefer a single `dish_mask_json` H5 root attribute containing the full Palette
+  payload; scalar `dish_mask_*` H5 root attributes are acceptable if JSON is not
+  practical.
+- Record coordinates in the native camera frame coordinate space and include
+  `dish_mask_image_width` and `dish_mask_image_height`.
+- Include a method/source string such as `citrus_runtime_hough`,
+  `orange_runtime_hough`, or `citrus_arena_config`.
+- Do not block acquisition if the mask cannot be determined. Omit the payload
+  or mark it invalid rather than writing guessed coordinates.
+
+Palette import acceptance criteria:
+
+- H5 import copies the acquisition-side payload into
+  `analysis_metadata.attrs["dish_mask"]` using the schema below.
+- `scripts/py -m fisheye.tracking.arena_assignment <analysis.zarr>` succeeds
+  for a single-dish recording without running `mask_tuner` first.
+- `check_recording_steps` reports `dish_mask` as present for imported
+  recordings with valid acquisition-side payloads.
+- The stored method/source makes acquisition-provided masks distinguishable from
+  manual or batch-propagated masks.
 
 ---
 

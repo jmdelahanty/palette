@@ -41,7 +41,8 @@ the dish.
 during acquisition, embedding it directly in the recording. When that lands,
 the organize step will carry the mask into the recording automatically and
 this entire tune/propagate/review cycle goes away. Until then, the workflow
-below is how dish masks get created.
+below is how dish masks get created. The acquisition-side contract is tracked in
+`docs/operator_guide/citrus_dish_mask_handoff.md`.
 
 ### Tune one recording
 
@@ -61,6 +62,11 @@ Options:
 The tuning is saved to `analysis_metadata.attrs["dish_mask"]` — metadata only,
 no arrays. It stores the circle center/radius and the Hough parameters used to
 find it.
+
+For production Zarrs that keep only `raw_video` metadata, the tuner falls back
+to the recorded `source_video_path` and tunes in the analysis/inference
+coordinate space by default. Use `--full` only when you intentionally want to
+save full-resolution coordinates.
 
 ### Propagate to other recordings
 

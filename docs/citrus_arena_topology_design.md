@@ -551,6 +551,11 @@ Instead:
 - keep legacy `arena_id` stable as the current smallest independent unit until
   downstream consumers migrate
 
+For the narrower single-dish tracking unblock, acquisition should also emit
+dish-mask metadata at recording time. The concrete Citrus/Orange agent request
+and Palette acceptance criteria live in
+`docs/operator_guide/citrus_dish_mask_handoff.md`.
+
 ## Appendix: Current Palette Consumer Assumptions
 
 This appendix captures the current-state assumptions that motivated the design
