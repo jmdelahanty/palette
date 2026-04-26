@@ -119,6 +119,36 @@ def _probabilities_from_logits(logits: torch.Tensor, *, mask_probs_dtype: str) -
     return probs.cpu().numpy()
 
 
+def _postprocess_logits_on_device(
+    logits: torch.Tensor,
+    *,
+    mask_probs_dtype: str,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    probs = torch.sigmoid(logits)
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+    probs = torch.clamp(probs, 0.0, 1.0)
+    if probs.ndim == 3:
+        probs = probs.unsqueeze(1)
+
+    if mask_probs_dtype == "uint8":
+        probs_out = torch.round(probs * 255.0).to(dtype=torch.uint8)
+        binary = (probs_out >= 128).to(dtype=torch.uint8)
+        probs_for_metrics = probs_out.to(dtype=torch.float32) / 255.0
+    else:
+        probs_out = probs.to(dtype=torch.float16)
+        binary = (probs_out >= 0.5).to(dtype=torch.uint8)
+        probs_for_metrics = probs_out.to(dtype=torch.float32)
+
+    area_px = binary.sum(dim=(2, 3), dtype=torch.float32)
+    prob_max = probs_for_metrics.amax(dim=(2, 3))
+    metrics = {
+        "prob_max": prob_max.cpu().numpy().astype(np.float32, copy=False),
+        "mask_present": (area_px > 0.0).cpu().numpy().astype(bool, copy=False),
+        "area_px": area_px.cpu().numpy().astype(np.float32, copy=False),
+    }
+    return probs_out.cpu().numpy(), binary.cpu().numpy(), metrics
+
+
 def _compute_channel_metrics(binary_masks: np.ndarray, probs: np.ndarray) -> dict[str, np.ndarray]:
     binary = np.asarray(binary_masks, dtype=np.uint8)
     prob_arr = np.asarray(probs, dtype=np.float32)
@@ -129,6 +159,22 @@ def _compute_channel_metrics(binary_masks: np.ndarray, probs: np.ndarray) -> dic
     area_px = binary.sum(axis=(1, 2), dtype=np.int64).astype(np.float32)
     mask_present = area_px > 0.0
     prob_max = prob_arr.max(axis=(1, 2)).astype(np.float32, copy=False) if row_count else np.zeros((0,), dtype=np.float32)
+    spatial_metrics = _compute_channel_spatial_metrics(binary)
+
+    return {
+        "prob_max": prob_max,
+        "mask_present": mask_present.astype(bool, copy=False),
+        "area_px": area_px,
+        **spatial_metrics,
+    }
+
+
+def _compute_channel_spatial_metrics(binary_masks: np.ndarray) -> dict[str, np.ndarray]:
+    binary = np.asarray(binary_masks, dtype=np.uint8)
+    if binary.ndim != 3:
+        raise ValueError("binary_masks must have shape (N,H,W).")
+
+    row_count = int(binary.shape[0])
 
     centroid_xy = np.zeros((row_count, 2), dtype=np.float32)
     centroid_valid = np.zeros((row_count,), dtype=bool)
@@ -149,9 +195,6 @@ def _compute_channel_metrics(binary_masks: np.ndarray, probs: np.ndarray) -> dic
         bbox_valid[row_idx] = True
 
     return {
-        "prob_max": prob_max,
-        "mask_present": mask_present.astype(bool, copy=False),
-        "area_px": area_px,
         "centroid_xy": centroid_xy,
         "centroid_valid": centroid_valid,
         "bbox_xyxy": bbox_xyxy,
@@ -168,10 +211,29 @@ def _load_checkpoint(path: Path, device: torch.device) -> Tuple[UNetSmall, Dict[
     state_dict = checkpoint.get("model_state")
     if state_dict is None:
         raise ValueError("Checkpoint missing 'model_state'.")
+    state_dict = _normalize_checkpoint_state_dict(state_dict)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     return model, checkpoint
+
+
+def _normalize_checkpoint_state_dict(state_dict: object) -> object:
+    """Normalize checkpoint keys saved from torch.compile-wrapped modules."""
+
+    if not isinstance(state_dict, dict):
+        return state_dict
+    prefix = "_orig_mod."
+    if not any(str(key).startswith(prefix) for key in state_dict):
+        return state_dict
+    normalized: dict[object, object] = {}
+    for key, value in state_dict.items():
+        key_text = str(key)
+        normalized_key = key_text[len(prefix) :] if key_text.startswith(prefix) else key
+        if normalized_key in normalized:
+            raise ValueError(f"Checkpoint state_dict key collision after removing {prefix!r}.")
+        normalized[normalized_key] = value
+    return normalized
 
 
 def _resolve_checkpoint_schema(checkpoint: Dict[str, object]) -> Tuple[str, Tuple[str, ...]]:
@@ -307,6 +369,7 @@ def _write_subject_mask_outputs(
     mask_labels: Sequence[str],
     mask_probs_chunk_rois: Optional[int],
     mask_probs_dtype: str,
+    write_masks_roi: bool,
     console: Console,
     timing_profiler: Optional[InferenceTimingProfiler],
 ) -> float:
@@ -322,15 +385,17 @@ def _write_subject_mask_outputs(
     compression_kwargs = _compression_kwargs(roi_array) if roi_array is not None else {}
     stored_prob_dtype = np.dtype(np.uint8 if mask_probs_dtype == "uint8" else np.float16)
 
-    masks_arr = run_group.create_array(
-        "masks_roi",
-        shape=(total_rois, n_channels, height, width),
-        dtype=np.uint8,
-        chunks=storage_chunks,
-        fill_value=0,
-        overwrite=True,
-        **compression_kwargs,
-    )
+    masks_arr: Optional[zarr.Array] = None
+    if write_masks_roi:
+        masks_arr = run_group.create_array(
+            "masks_roi",
+            shape=(total_rois, n_channels, height, width),
+            dtype=np.uint8,
+            chunks=storage_chunks,
+            fill_value=0,
+            overwrite=True,
+            **compression_kwargs,
+        )
     probs_arr = run_group.create_array(
         "mask_probs_roi",
         shape=(total_rois, n_channels, height, width),
@@ -403,37 +468,40 @@ def _write_subject_mask_outputs(
 
             _sync_cuda("sync_before_d2h", items=batch_count)
             with profiler.time("d2h_copy", items=batch_count):
-                probs = _probabilities_from_logits(logits, mask_probs_dtype=mask_probs_dtype)
+                probs_out, binary, compact_metrics = _postprocess_logits_on_device(
+                    logits,
+                    mask_probs_dtype=mask_probs_dtype,
+                )
             _sync_cuda("sync_after_d2h", items=batch_count)
 
-            if probs.ndim == 3:
-                probs = probs[:, None, :, :]
-            if probs.shape[1] != n_channels:
+            if probs_out.ndim == 3:
+                probs_out = probs_out[:, None, :, :]
+            if binary.ndim == 3:
+                binary = binary[:, None, :, :]
+            if probs_out.shape[1] != n_channels:
                 raise ValueError(
-                    f"Checkpoint/model produced {probs.shape[1]} channels but expected {n_channels}."
+                    f"Checkpoint/model produced {probs_out.shape[1]} channels but expected {n_channels}."
                 )
 
             with profiler.time("output_postprocess", items=batch_count):
                 if mask_probs_dtype == "uint8":
-                    probs_out = probs.astype(np.uint8, copy=False)
-                    probs_float = probs_out.astype(np.float32) / 255.0
-                    binary = (probs_out >= 128).astype(np.uint8, copy=False)
+                    probs_out = probs_out.astype(np.uint8, copy=False)
                 else:
-                    probs_float = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32, copy=False)
-                    probs_out = probs_float.astype(np.float16, copy=False)
-                    binary = (probs_float >= 0.5).astype(np.uint8, copy=False)
+                    probs_out = probs_out.astype(np.float16, copy=False)
+                binary = binary.astype(np.uint8, copy=False)
 
             with profiler.time("output_write_probs", items=batch_count):
                 probs_arr[start:stop] = probs_out
-            with profiler.time("output_write_binary", items=batch_count):
-                masks_arr[start:stop] = binary
+            if masks_arr is not None:
+                with profiler.time("output_write_binary", items=batch_count):
+                    masks_arr[start:stop] = binary
 
             with profiler.time("metric_compute", items=batch_count):
+                prob_max[start:stop, :] = compact_metrics["prob_max"]
+                mask_present[start:stop, :] = compact_metrics["mask_present"]
+                area_px[start:stop, :] = compact_metrics["area_px"]
                 for channel_idx in range(n_channels):
-                    channel_metrics = _compute_channel_metrics(binary[:, channel_idx], probs_float[:, channel_idx])
-                    prob_max[start:stop, channel_idx] = channel_metrics["prob_max"]
-                    mask_present[start:stop, channel_idx] = channel_metrics["mask_present"]
-                    area_px[start:stop, channel_idx] = channel_metrics["area_px"]
+                    channel_metrics = _compute_channel_spatial_metrics(binary[:, channel_idx])
                     centroid_xy[start:stop, channel_idx, :] = channel_metrics["centroid_xy"]
                     centroid_valid[start:stop, channel_idx] = channel_metrics["centroid_valid"]
                     bbox_xyxy[start:stop, channel_idx, :] = channel_metrics["bbox_xyxy"]
@@ -533,6 +601,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=("float16", "uint8"),
         default="uint8",
         help="Storage dtype for mask_probs_roi (default: uint8 for analysis runs).",
+    )
+    parser.add_argument(
+        "--write-masks-roi",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Materialize thresholded binary masks_roi alongside mask_probs_roi "
+            "(default: true; use --no-write-masks-roi for probability-only raw runs)."
+        ),
     )
     parser.add_argument(
         "--assignment-keypoint-group",
@@ -673,6 +750,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             mask_labels=mask_labels,
             mask_probs_chunk_rois=args.mask_probs_chunk_rois,
             mask_probs_dtype=str(args.mask_probs_dtype),
+            write_masks_roi=bool(args.write_masks_roi),
             console=console,
             timing_profiler=timing_profiler,
         )
@@ -705,6 +783,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "probabilities_dtype": str(args.mask_probs_dtype),
             "probabilities_encoding": "linear_uint8_0_255" if args.mask_probs_dtype == "uint8" else "unit_float",
             "mask_probability_threshold": 0.5,
+            "masks_roi_materialized": bool(args.write_masks_roi),
+            "binary_masks_materialized": bool(args.write_masks_roi),
+            "binary_masks_source": (
+                "threshold(mask_probs_roi, threshold=0.5)" if args.write_masks_roi else "not_materialized"
+            ),
             "input_format": "gray",
             "source_checkpoint": str(checkpoint_path),
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
@@ -744,8 +827,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             sort_keys=True,
         )
 
-    masks_array = np.asarray(run_group["masks_roi"][:], dtype=np.uint8)
-    nonempty_rows = np.any(masks_array > 0, axis=(1, 2, 3))
+    metrics_group = run_group.get("metrics")
+    mask_present_array = metrics_group.get("mask_present") if metrics_group is not None else None
+    if mask_present_array is not None:
+        mask_present_values = np.asarray(mask_present_array[:], dtype=bool)
+        nonempty_rows = np.any(mask_present_values, axis=1) if mask_present_values.ndim == 2 else np.zeros((total_rois,), dtype=bool)
+    elif "masks_roi" in run_group:
+        masks_array = np.asarray(run_group["masks_roi"][:], dtype=np.uint8)
+        nonempty_rows = np.any(masks_array > 0, axis=(1, 2, 3))
+    else:
+        nonempty_rows = np.zeros((total_rois,), dtype=bool)
     run_group.attrs["summary_statistics"] = {
         "rows_total": int(total_rois),
         "rows_with_nonempty_masks": int(np.sum(nonempty_rows)),
@@ -754,6 +845,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "crop_run": str(crop_run_name),
         "duration_seconds": float(duration),
         "created_at_utc": created_at,
+        "masks_roi_materialized": bool(args.write_masks_roi),
     }
 
     for label in mask_labels:
@@ -778,7 +870,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "input_normalize runs after the device transfer so dtype conversion, scaling, and clipping can execute on GPU.",
                 "h2d_copy and model_forward are measured separately for the U-Net loop.",
                 "d2h_copy includes sigmoid + clamp + dtype conversion + transfer back to CPU/NumPy.",
-                "output_write_probs and output_write_binary measure Zarr writes for dense subject-mask outputs.",
+                "output_write_probs measures dense probability Zarr writes; output_write_binary is present only when masks_roi is materialized.",
                 "metric_compute covers per-channel metric derivation before metric-array writes.",
             ],
         )
@@ -830,6 +922,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "mask_labels": list(mask_labels),
             "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),
             "mask_probs_dtype": str(args.mask_probs_dtype),
+            "write_masks_roi": bool(args.write_masks_roi),
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
@@ -839,6 +932,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "checkpoint_path": str(checkpoint_path),
             "segmenter": "unet",
             "label_schema_id": label_schema_id,
+            "masks_roi_materialized": bool(args.write_masks_roi),
             "model_resolution": model_resolution_payload,
         },
     )

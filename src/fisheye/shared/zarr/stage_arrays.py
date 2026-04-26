@@ -645,7 +645,7 @@ SUBJECT_MASKS_SPEC = StageSpec(
         ArraySpec("source_refined_row_ids", "int64", ("n_rois",), required=False),
         ArraySpec("source_detect_row_index", "int32", ("n_rois",), required=False),
         ArraySpec("detection_source", "int8", ("n_rois",)),
-        ArraySpec("masks_roi", "uint8", ("n_rois", "n_channels", "H", "W")),
+        ArraySpec("masks_roi", "uint8", ("n_rois", "n_channels", "H", "W"), required=False),
         ArraySpec("mask_probs_roi", "float16/float32/uint8", ("n_rois", "n_channels", "H", "W")),
         ArraySpec("available_channels", "bool", ("n_channels",)),
     ),

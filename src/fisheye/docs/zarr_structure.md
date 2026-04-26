@@ -767,8 +767,8 @@ SAM/SAM2/SAM3 write-back, and swim-bladder refresh flows.
 | `source_refined_row_ids` *(recommended)* | `(n_rois,)` | `int64` | Copied from the source crop run when available |
 | `source_detect_row_index` *(recommended)* | `(n_rois,)` | `int32` | Copied from the source crop run when available |
 | `detection_source` | `(n_rois,)` | `int8` | Expected to align with the source crop run |
-| `masks_roi` | `(n_rois, C, H, W)` | `uint8` | Canonical binary multilabel masks |
-| `mask_probs_roi` | `(n_rois, C, H, W)` | `float16/float32/uint8` | Decoded or quantized semantic probabilities in `[0,1]` |
+| `masks_roi` *(optional)* | `(n_rois, C, H, W)` | `uint8` | Thresholded binary multilabel masks. Raw probability-first U-Net runs may omit this dense convenience copy and set `masks_roi_materialized=false`. |
+| `mask_probs_roi` | `(n_rois, C, H, W)` | `float16/float32/uint8` | Decoded or quantized semantic probabilities in `[0,1]`; probability-first raw runs treat this as the canonical model output. |
 | `available_channels` | `(C,)` | `bool` | Run-level declaration of which channels are semantically valid |
 
 `metrics/` subgroup:

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -22,6 +23,9 @@ class _FakeArray:
 
     def __getitem__(self, item):
         return self._data[item]
+
+    def __setitem__(self, item, value) -> None:
+        self._data[item] = value
 
 
 class _FakeGroup:
@@ -114,6 +118,93 @@ def _build_fake_root() -> _FakeGroup:
     return root
 
 
+def test_normalize_checkpoint_state_dict_strips_torch_compile_prefix() -> None:
+    state = {
+        "_orig_mod.inc.block.0.weight": object(),
+        "_orig_mod.out.bias": object(),
+    }
+
+    normalized = mod._normalize_checkpoint_state_dict(state)
+
+    assert set(normalized) == {"inc.block.0.weight", "out.bias"}
+    assert normalized["inc.block.0.weight"] is state["_orig_mod.inc.block.0.weight"]
+
+
+def test_postprocess_logits_on_device_returns_storage_outputs_and_compact_metrics() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [[0.0, 2.0], [-2.0, 4.0]],
+                [[-4.0, -2.0], [-1.0, -0.25]],
+            ],
+            [
+                [[-10.0, -10.0], [-10.0, -10.0]],
+                [[0.5, 0.75], [1.0, 1.25]],
+            ],
+        ],
+        dtype=torch.float32,
+    )
+
+    probs, binary, metrics = mod._postprocess_logits_on_device(logits, mask_probs_dtype="uint8")
+
+    expected_probs = np.round(torch.sigmoid(logits).numpy() * 255.0).astype(np.uint8)
+    expected_binary = (expected_probs >= 128).astype(np.uint8)
+    np.testing.assert_array_equal(probs, expected_probs)
+    np.testing.assert_array_equal(binary, expected_binary)
+    np.testing.assert_allclose(metrics["prob_max"], expected_probs.max(axis=(2, 3)).astype(np.float32) / 255.0)
+    np.testing.assert_array_equal(metrics["mask_present"], expected_binary.sum(axis=(2, 3)) > 0)
+    np.testing.assert_allclose(metrics["area_px"], expected_binary.sum(axis=(2, 3)).astype(np.float32))
+
+
+def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:
+    class _FakeCropSource:
+        total_rois = 2
+        roi_shape = (2, 2)
+        roi_array = _FakeArray(np.zeros((2, 2, 2), dtype=np.uint8), chunks=(1, 2, 2))
+
+        def read_slice(self, start: int, stop: int) -> np.ndarray:
+            return np.zeros((stop - start, 2, 2), dtype=np.uint8)
+
+    class _FakeModel(torch.nn.Module):
+        def forward(self, imgs: torch.Tensor) -> torch.Tensor:
+            batch, _channels, height, width = imgs.shape
+            return torch.zeros((batch, 3, height, width), device=imgs.device, dtype=torch.float32)
+
+    run_group = _FakeGroup()
+
+    duration = mod._write_subject_mask_outputs(
+        run_group,
+        _FakeModel(),
+        _FakeCropSource(),
+        batch_size=1,
+        device=torch.device("cpu"),
+        mask_labels=("subject_body", "eyes_union", "swim_bladder"),
+        mask_probs_chunk_rois=1,
+        mask_probs_dtype="uint8",
+        write_masks_roi=False,
+        console=mod.Console(),
+        timing_profiler=None,
+    )
+
+    assert duration >= 0.0
+    assert "mask_probs_roi" in run_group
+    assert "masks_roi" not in run_group
+    np.testing.assert_array_equal(
+        np.asarray(run_group["available_channels"][:], dtype=bool),
+        np.asarray([True, True, True], dtype=bool),
+    )
+    assert run_group["mask_probs_roi"].shape == (2, 3, 2, 2)
+    assert run_group["mask_probs_roi"].dtype == np.dtype(np.uint8)
+    np.testing.assert_array_equal(
+        np.asarray(run_group["metrics"]["mask_present"][:], dtype=bool),
+        np.ones((2, 3), dtype=bool),
+    )
+    np.testing.assert_allclose(
+        np.asarray(run_group["metrics"]["area_px"][:], dtype=np.float32),
+        np.full((2, 3), 4.0, dtype=np.float32),
+    )
+
+
 def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporary_cache(
     monkeypatch,
     tmp_path: Path,
@@ -170,6 +261,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         mask_labels,
         mask_probs_chunk_rois,
         mask_probs_dtype,
+        write_masks_roi,
         console,
         timing_profiler,
     ) -> float:
@@ -177,6 +269,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         seen["mask_labels"] = tuple(mask_labels)
         seen["mask_probs_chunk_rois"] = mask_probs_chunk_rois
         seen["mask_probs_dtype"] = mask_probs_dtype
+        seen["write_masks_roi"] = write_masks_roi
         batch = roi_source.read_slice(0, roi_source.total_rois)
         seen["batch_shape"] = batch.shape
         seen["roi_read_mode"] = roi_source.roi_read_mode
@@ -275,6 +368,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert Path(str(seen["roi_cache_path"])).exists()
     assert seen["mask_probs_chunk_rois"] == 2
     assert seen["mask_probs_dtype"] == "uint8"
+    assert seen["write_masks_roi"] is True
 
     assert run_group.attrs["source_crop_run"] == "crop_geometry"
     assert run_group.attrs["source_crop_storage_mode"] == "geometry_only"
@@ -364,10 +458,11 @@ def test_infer_unet_subject_masks_writes_lr_checkpoint_schema(
         mask_labels,
         mask_probs_chunk_rois,
         mask_probs_dtype,
+        write_masks_roi,
         console,
         timing_profiler,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, console, timing_profiler
         seen["mask_labels"] = tuple(mask_labels)
         channel_count = len(mask_labels)
         run_group.create_array(
@@ -524,10 +619,11 @@ def test_infer_unet_subject_masks_can_resolve_checkpoint_from_registry(
         mask_labels,
         mask_probs_chunk_rois,
         mask_probs_dtype,
+        write_masks_roi,
         console,
         timing_profiler,
     ) -> float:
-        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, console, timing_profiler
+        del model, batch_size, device, mask_probs_chunk_rois, mask_probs_dtype, write_masks_roi, console, timing_profiler
         channel_count = len(mask_labels)
         run_group.create_array(
             "masks_roi",
