@@ -6,6 +6,11 @@ interactive editor into a Dask-bound UI loop.
 
 Date anchored: 2026-03-30.
 
+Related design:
+[refined_subject_mask_smart_finalizer_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_mask_smart_finalizer_design.md)
+defines the probability-to-refined candidate finalization boundary, component
+cleanup policies, and Dask chunk execution model.
+
 ## Rollout Status
 
 - Phase 1 is in place:

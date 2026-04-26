@@ -8,12 +8,12 @@ result.
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
+from scipy.ndimage import binary_fill_holes
 
 
 QUALITY_CLEAN = 0
@@ -33,6 +33,7 @@ class ComponentFinalizationPolicy:
     fill_holes: bool = False
     min_component_area_px: int = 0
     keep_largest_component: bool = False
+    max_component_count: Optional[int] = 1
     max_removed_high_prob_mass_fraction: float = 0.01
     max_changed_area_fraction: float = 0.20
 
@@ -60,8 +61,43 @@ def default_subject_body_policy() -> ComponentFinalizationPolicy:
         fill_holes=True,
         min_component_area_px=8,
         keep_largest_component=True,
+        max_component_count=1,
         max_removed_high_prob_mass_fraction=0.01,
         max_changed_area_fraction=0.20,
+    )
+
+
+def default_swim_bladder_policy() -> ComponentFinalizationPolicy:
+    """Return conservative defaults for swim-bladder candidate finalization."""
+
+    return ComponentFinalizationPolicy(
+        component_name="swim_bladder",
+        threshold=0.5,
+        high_threshold=0.8,
+        closing_radius=0,
+        fill_holes=True,
+        min_component_area_px=4,
+        keep_largest_component=True,
+        max_component_count=1,
+        max_removed_high_prob_mass_fraction=0.02,
+        max_changed_area_fraction=0.25,
+    )
+
+
+def default_eyes_union_policy() -> ComponentFinalizationPolicy:
+    """Return defaults that preserve up to two plausible eye components."""
+
+    return ComponentFinalizationPolicy(
+        component_name="eyes_union",
+        threshold=0.5,
+        high_threshold=0.8,
+        closing_radius=0,
+        fill_holes=False,
+        min_component_area_px=4,
+        keep_largest_component=False,
+        max_component_count=2,
+        max_removed_high_prob_mass_fraction=0.02,
+        max_changed_area_fraction=0.25,
     )
 
 
@@ -74,9 +110,9 @@ def finalize_component_mask(
 ) -> ComponentFinalizationResult:
     """Finalize one ROI-local component surface.
 
-    Currently the implemented policy is intentionally narrow: `subject_body`
-    cleanup. Additional component policies should be added here behind
-    component-specific tests rather than sharing this body's topology rules.
+    The policy is component-specific. Body and swim-bladder finalization keep one
+    dominant component; eyes-union finalization can preserve two components so
+    left/right assignment can happen downstream.
     """
 
     resolved_policy = policy or _default_policy_for_component(component_name)
@@ -84,19 +120,13 @@ def finalize_component_mask(
         raise ValueError(
             f"Policy component {resolved_policy.component_name!r} does not match {component_name!r}"
         )
-    if component_name != "subject_body":
-        raise NotImplementedError(f"Finalization policy is not implemented for {component_name!r}")
-
     probabilities = _coerce_probability_surface(surface, surface_is_probability=surface_is_probability)
     initial_mask = _threshold_surface(probabilities, resolved_policy)
     closed_mask = _binary_close(initial_mask, resolved_policy.closing_radius)
     filled_mask = _fill_holes(closed_mask) if resolved_policy.fill_holes else closed_mask
     min_area_mask = _remove_small_components(filled_mask, resolved_policy.min_component_area_px)
-    final_mask = (
-        _keep_largest_component(min_area_mask)
-        if resolved_policy.keep_largest_component
-        else min_area_mask
-    )
+    selected_mask = _select_components(min_area_mask, resolved_policy)
+    final_mask = selected_mask
 
     metrics = _build_metrics(
         initial_mask=initial_mask,
@@ -109,6 +139,7 @@ def finalize_component_mask(
         closed_mask=closed_mask,
         filled_mask=filled_mask,
         min_area_mask=min_area_mask,
+        selected_mask=selected_mask,
         final_mask=final_mask,
         metrics=metrics,
         policy=resolved_policy,
@@ -127,6 +158,10 @@ def finalize_component_mask(
 def _default_policy_for_component(component_name: str) -> ComponentFinalizationPolicy:
     if component_name == "subject_body":
         return default_subject_body_policy()
+    if component_name == "swim_bladder":
+        return default_swim_bladder_policy()
+    if component_name == "eyes_union":
+        return default_eyes_union_policy()
     raise NotImplementedError(f"No default finalization policy for {component_name!r}")
 
 
@@ -170,32 +205,7 @@ def _fill_holes(mask: np.ndarray) -> np.ndarray:
     mask_bool = mask.astype(bool, copy=False)
     if not np.any(mask_bool):
         return mask_bool.copy()
-
-    h, w = mask_bool.shape
-    outside = np.zeros((h, w), dtype=bool)
-    queue: deque[tuple[int, int]] = deque()
-
-    def _enqueue(y: int, x: int) -> None:
-        if 0 <= y < h and 0 <= x < w and not mask_bool[y, x] and not outside[y, x]:
-            outside[y, x] = True
-            queue.append((y, x))
-
-    for x in range(w):
-        _enqueue(0, x)
-        _enqueue(h - 1, x)
-    for y in range(h):
-        _enqueue(y, 0)
-        _enqueue(y, w - 1)
-
-    while queue:
-        y, x = queue.popleft()
-        _enqueue(y - 1, x)
-        _enqueue(y + 1, x)
-        _enqueue(y, x - 1)
-        _enqueue(y, x + 1)
-
-    holes = ~mask_bool & ~outside
-    return mask_bool | holes
+    return np.asarray(binary_fill_holes(mask_bool), dtype=bool)
 
 
 def _connected_component_labels(mask: np.ndarray) -> tuple[np.ndarray, int]:
@@ -231,6 +241,29 @@ def _keep_largest_component(mask: np.ndarray) -> np.ndarray:
     areas = [(int(np.count_nonzero(labeled == label_idx)), label_idx) for label_idx in range(1, count + 1)]
     _area, keep_label = max(areas)
     return labeled == keep_label
+
+
+def _keep_largest_components(mask: np.ndarray, count: int) -> np.ndarray:
+    mask_bool = mask.astype(bool, copy=False)
+    if count <= 0 or not np.any(mask_bool):
+        return np.zeros_like(mask_bool, dtype=bool)
+    labeled, component_count = _connected_component_labels(mask_bool)
+    if component_count <= int(count):
+        return mask_bool.copy()
+    areas = [
+        (int(np.count_nonzero(labeled == label_idx)), label_idx)
+        for label_idx in range(1, component_count + 1)
+    ]
+    keep_labels = {label for _area, label in sorted(areas, reverse=True)[: int(count)]}
+    return np.isin(labeled, list(keep_labels))
+
+
+def _select_components(mask: np.ndarray, policy: ComponentFinalizationPolicy) -> np.ndarray:
+    if policy.keep_largest_component:
+        return _keep_largest_component(mask)
+    if policy.max_component_count is not None:
+        return _keep_largest_components(mask, int(policy.max_component_count))
+    return mask.astype(bool, copy=True)
 
 
 def _largest_component_fraction(mask: np.ndarray) -> float:
@@ -306,6 +339,7 @@ def _build_reason_tags(
     closed_mask: np.ndarray,
     filled_mask: np.ndarray,
     min_area_mask: np.ndarray,
+    selected_mask: np.ndarray,
     final_mask: np.ndarray,
     metrics: Dict[str, float],
     policy: ComponentFinalizationPolicy,
@@ -317,7 +351,7 @@ def _build_reason_tags(
         tags.append("cleanup_filled_holes")
     if not np.array_equal(filled_mask, min_area_mask):
         tags.append("cleanup_removed_small_islands")
-    if not np.array_equal(min_area_mask, final_mask):
+    if not np.array_equal(min_area_mask, selected_mask):
         tags.append("cleanup_kept_largest_component")
     if metrics["area_px_after"] <= 0:
         tags.append("needs_review_empty_mask")
@@ -327,7 +361,15 @@ def _build_reason_tags(
         tags.append("needs_review_removed_high_prob_island")
     if metrics["changed_area_fraction"] > float(policy.max_changed_area_fraction):
         tags.append("needs_review_large_cleanup_delta")
-    if metrics["component_count_after"] != 1 and metrics["area_px_after"] > 0:
+    max_component_count = policy.max_component_count
+    post_filter_component_count = float(len(_component_areas(min_area_mask)))
+    if max_component_count is not None and post_filter_component_count > float(max_component_count):
+        tags.append("needs_review_multiple_components")
+    if (
+        max_component_count is not None
+        and metrics["component_count_after"] > float(max_component_count)
+        and metrics["area_px_after"] > 0
+    ):
         tags.append("needs_review_multiple_components")
     if not tags:
         tags.append("clean")
