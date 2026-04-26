@@ -7,13 +7,14 @@ Zarrs with detections, keypoints, and/or masks.
 
 ## Overview
 
-There are three model types you can train:
+There are four model types you can train:
 
 | Model | What it learns | Input data needed |
 |-------|----------------|-------------------|
 | **Detection** (YOLO) | Fish bounding boxes | Downsampled frames + detection labels |
 | **Pose** (YOLO) | Anatomical keypoints | Cropped ROIs + keypoint annotations |
 | **Eye masks** (U-Net) | Eye segmentation | Cropped ROIs + eye mask labels |
+| **Subject masks** (U-Net) | Body, eyes union, swim bladder | Cropped ROIs + subject-mask component labels |
 
 Each follows the same pattern:
 
@@ -207,6 +208,44 @@ components are available. It falls back to `refined_eye_masks_runs` and then
 - `lr`: separate left/right eye channels
 - `union`: single combined channel
 
+### Subject mask merge
+
+For the unified subject-mask model, prepare source selection from the registry
+and then export one merged training zarr:
+
+```bash
+scripts/py -m fisheye.utils.prepare_subject_mask_training_from_registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --require-component subject_body \
+  --require-component eyes_union \
+  --require-component swim_bladder \
+  --out-config /path/to/subject_mask_training.yaml \
+  --out-manifest /path/to/subject_mask_training.manifest.json \
+  --set-name subject_masks_dense_all_components
+
+scripts/py -m fisheye.utils.run_subject_mask_training_pipeline \
+  --config /path/to/subject_mask_training.yaml \
+  --manifest /path/to/subject_mask_training.manifest.json \
+  --registry /nvme1/palette_registry.sqlite \
+  --export-merged \
+  --merge-out-zarr /path/to/subject_mask_merged.zarr \
+  --subject-label-schema subject_v1_union
+```
+
+Subject-mask training artifacts use `training_task="subject_masks"` and store
+supervision in `subject_mask_runs/<run>/masks_roi` plus
+`target_valid_channels`. The target schema is encoded in the artifact attrs, so
+the loader/trainer should derive `names` and `nc` from the artifact instead of
+requiring hand-edited config defaults.
+
+Use the source audit when checking that registry-selected sources still match
+on-disk masks:
+
+```bash
+scripts/py -m fisheye.utils.audit_subject_mask_training_sources \
+  /path/to/subject_mask_training.manifest.json
+```
+
 ---
 
 ## Step 4: Train
@@ -239,9 +278,26 @@ scripts/py -m fisheye.training.train_eye_masks \
   --run-name my_eye_masks_v1
 ```
 
+### Subject masks
+
+```bash
+scripts/py -m fisheye.segmentation.train_unet_subject_masks \
+  /path/to/subject_mask_training.yaml \
+  --manifest /path/to/subject_mask_training.manifest.json \
+  --set-id subject_masks_dense_all_components_v001 \
+  --registry /nvme1/palette_registry.sqlite \
+  --run-name my_subject_masks_v1 \
+  --device cuda:0 \
+  --val-preview-thresholds 0.5,0.25,0.1
+```
+
+The pipeline wrapper can run the same trainer after export with `--train`. It
+also forwards useful operator options such as `--epochs`, `--device`,
+`--tb-logdir`, and `--no-progress`.
+
 All trainers:
 - Use Ultralytics YOLO under the hood (detection and pose) or a custom U-Net
-  (eye masks)
+  (eye masks and subject masks)
 - Write weights, training reports, and metrics to the project/run directory
 - Support `--export-onnx` and `--export-trt` to export immediately after
   training

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import zarr
@@ -37,8 +39,8 @@ def _patch_refined_subject_provenance(monkeypatch) -> None:
     )
 
 
-def _build_probability_root() -> zarr.Group:
-    root = zarr.group()
+def _build_probability_root(store_path: Path | None = None) -> zarr.Group:
+    root = zarr.open_group(str(store_path), mode="w") if store_path is not None else zarr.group()
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_001"
     crop = crop_parent.create_group("crop_001")
@@ -114,15 +116,39 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
         root,
         subject_run="subject_probs_001",
         refined_run="refined_subject_masks_smart_001",
+        chunk_size=1,
+        scheduler="threads",
+        num_workers=2,
     )
 
     assert summary["status"] == "updated"
     assert summary["component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    assert summary["chunk_count"] == 2
+    assert summary["chunk_size"] == 1
+    assert summary["metric_level"] == "cheap"
+    assert summary["write_eye_geometry"] is False
+    assert summary["execution_backend"] == "serial_driver"
+    assert summary["dask_execution_enabled"] is False
+    assert summary["dask_scheduler"] == "threads"
+    assert summary["dask_num_workers"] == 2
+    assert summary["timing_summary"]["chunk_count"] == 2
+    assert summary["timing_summary"]["dask_scheduler"] == "threads"
+    assert "finalize_subject_body" in summary["timing_summary"]["phase_seconds"]
     assert summary["review_counts"]["subject_body"]["needs_review"] >= 1
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
     assert run.attrs["method"] == "smart_finalize_subject_masks_v1"
     assert run.attrs["finalization_semantics"] == "smart_probability_to_refined_candidate"
+    assert run.attrs["smart_finalizer_chunk_count"] == 2
+    assert run.attrs["smart_finalizer_chunk_size"] == 1
+    assert run.attrs["smart_finalizer_metric_level"] == "cheap"
+    assert run.attrs["smart_finalizer_execution_backend"] == "serial_driver"
+    assert run.attrs["dask_execution_enabled"] is False
+    assert run.attrs["dask_scheduler"] == "threads"
+    assert run.attrs["dask_num_workers"] == 2
+    assert run.attrs["smart_finalizer_timing_summary"]["chunk_count"] == 2
+    assert len(run.attrs["smart_finalizer_chunk_timings"]) == 2
+    assert run.attrs["eye_geometry_status"] == "deferred"
     assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
     assert run.attrs["component_review_statuses"]["subject_body"]["state"] == "pending"
     assert run.attrs["summary_statistics"]["rows_total"] == 2
@@ -159,7 +185,66 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     metrics = run["components/subject_body/finalization_metrics"]
     assert metrics.attrs["schema_id"] == "refined_subject_component_finalization_metrics_v1"
     assert np.asarray(metrics["quality_code"][:], dtype=np.int16).shape == (2,)
+    component_metrics = run["components/subject_body/metrics"]
+    assert component_metrics.attrs["metric_level"] == "cheap"
+    assert np.isnan(np.asarray(component_metrics["sigma_noise"][:], dtype=np.float32)[0])
+    assert "relations" not in run
+
+
+def test_finalize_subject_mask_run_can_write_full_metrics_and_eye_geometry(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_full_001",
+        chunk_size=1,
+        metric_level="full",
+        write_eye_geometry=True,
+    )
+
+    assert summary["metric_level"] == "full"
+    assert summary["write_eye_geometry"] is True
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_full_001"]
+    assert run.attrs["eye_geometry_status"] == "computed"
     assert "relations" in run
+    assert run["components/subject_body"].attrs["shape_qc_metrics_status"] == "computed"
+    assert run["components/subject_body/metrics"].attrs["metric_level"] == "full"
+
+
+def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypatch, tmp_path: Path) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+
+    summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_dask_001",
+        chunk_size=1,
+        execution_backend="dask_worker_chunks",
+        scheduler="threads",
+        num_workers=2,
+    )
+
+    assert summary["execution_backend"] == "dask_worker_chunks"
+    assert summary["dask_execution_enabled"] is True
+    assert summary["dask_scheduler"] == "threads"
+    assert summary["timing_summary"]["dask_execution_enabled"] is True
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_masks_smart_dask_001"]
+    assert run.attrs["smart_finalizer_execution_backend"] == "dask_worker_chunks"
+    assert run.attrs["dask_execution_enabled"] is True
+    assert run.attrs["dask_scheduler"] == "threads"
+    assert len(run.attrs["smart_finalizer_chunk_timings"]) == 2
+    labels = list(run.attrs["mask_labels"])
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    assert np.count_nonzero(masks[:, labels.index("subject_body")]) > 0
+    assert np.count_nonzero(masks[:, labels.index("eye_left")]) > 0
+    assert np.count_nonzero(masks[:, labels.index("eye_right")]) > 0
+    assert np.count_nonzero(masks[:, labels.index("swim_bladder")]) > 0
+    assert "dask_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
 
 
 def test_finalize_subject_mask_run_dry_run_and_overwrite_guard(monkeypatch) -> None:
@@ -170,21 +255,29 @@ def test_finalize_subject_mask_run_dry_run_and_overwrite_guard(monkeypatch) -> N
         root,
         subject_run="subject_probs_001",
         refined_run="refined_subject_masks_smart_001",
+        chunk_size=1,
+        scheduler="single-thread",
         dry_run=True,
     )
 
     assert dry["status"] == "planned"
     assert dry["mutates_archive"] is False
+    assert dry["metric_level"] == "cheap"
+    assert dry["write_eye_geometry"] is False
+    assert dry["dask_scheduler"] == "single-threaded"
+    assert dry["dask_execution_enabled"] is False
     assert "refined_subject_masks_runs" not in root
 
     mod.finalize_subject_mask_run(
         root,
         subject_run="subject_probs_001",
         refined_run="refined_subject_masks_smart_001",
+        chunk_size=1,
     )
     with pytest.raises(ValueError, match="already exists"):
         mod.finalize_subject_mask_run(
             root,
             subject_run="subject_probs_001",
             refined_run="refined_subject_masks_smart_001",
+            chunk_size=1,
         )

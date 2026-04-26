@@ -168,6 +168,9 @@ def write_refined_subject_eye_geometry(
 
     refined_group.attrs["eye_geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
     refined_group.attrs["eye_geometry_updated_at_utc"] = _utc_now()
+    refined_group.attrs["eye_geometry_status"] = "computed"
+    if "eye_geometry_deferred_reason" in refined_group.attrs:
+        del refined_group.attrs["eye_geometry_deferred_reason"]
     return {
         "status": "updated",
         "roi_count": total_rois,

@@ -3,7 +3,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-04-24
+last_verified: 2026-04-26
 -->
 
 Purpose: define the current operator-facing source-of-truth contract for Palette
@@ -52,6 +52,7 @@ The default rule is:
 | Refined subject masks | `subject_mask_runs/<run>` sources plus component provenance | `refined_subject_masks_runs/<run>` | none; this is the canonical refined component surface | component availability, review state, and lifecycle from refined subject-mask component rows |
 | Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
+| Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic stage | future `subject_shape_runs/<run>` or specialized analysis runs | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -66,6 +67,26 @@ Current rules:
   provenance rather than thresholded masks.
 - `refined_subject_masks_runs` is the canonical editable/refined component mask
   family for body, eyes, and swim bladder.
+- The current implemented U-Net subject-mask path can train from merged
+  subject-mask training artifacts, resolve trained models from the registry,
+  write raw probability-first `subject_mask_runs/<run>` snapshots, and finalize
+  `subject_v1_union` outputs into `subject_v1_lr`
+  `refined_subject_masks_runs/<run>` candidates with `subject_body`,
+  `eye_left`, `eye_right`, and `swim_bladder`.
+- The smart finalizer is the canonical bridge from raw probabilities to refined
+  binary component masks. It records cleanup reasons, component metrics,
+  assignment provenance, Dask execution metadata, and review triage counts.
+- Refined-subject eye geometry is now materialized from
+  `refined_subject_masks_runs/<run>/components/eye_left|eye_right` and records
+  `eye_geometry_status=computed` when the geometry/relations arrays are present.
+- Direct mask-local primitives such as component contours, centroids, bboxes,
+  areas, validity flags, and simple component shape descriptors belong with
+  `refined_subject_masks_runs`.
+- Interpreted biological geometry such as body centerlines/splines, canonical
+  body B-spline fits, canonical body length from centerline/B-spline arc length,
+  head/tail axes, swim-bladder position relative to body axis, and eye angles
+  relative to heading belong in `subject_shape_runs` or a specialized downstream
+  analysis run with explicit source/provenance.
 - Production assembly/export from `refined_subject_masks_runs` is
   approved-only by default; pending or missing component reviews require an
   explicit draft/QA override.
@@ -82,10 +103,11 @@ Current rules:
 
 The target steady state is one segmentation orchestration surface that writes
 one coherent probability-backed `subject_mask_runs/<run>` snapshot with
-component-scoped method and provenance metadata. Thresholding, morphology,
-review, and approval happen in `refined_subject_masks_runs/<run>`. Until that
-exists, old eye-specific stages are tolerated as transition surfaces, not design
-precedent.
+component-scoped method and provenance metadata. The U-Net subject-mask CLI now
+implements that artifact shape for dense union-eye models, but the broader
+component/method orchestration layer is still open. Thresholding, morphology,
+review, and approval happen in `refined_subject_masks_runs/<run>`. Old
+eye-specific stages are tolerated as transition surfaces, not design precedent.
 
 ## Registry And Operator Surface Rules
 
@@ -137,9 +159,10 @@ desired design:
 
 - `src/fisheye/core/pipeline.py` still exposes `eye_masks` and
   `refined_eye_masks` as first-class stages.
-- There is no completed top-level `segmentation` orchestration step that writes
-  one coherent `subject_mask_runs/<run>` snapshot across body, eyes, and swim
-  bladder.
+- There is no completed top-level `segmentation` orchestration step with a
+  central method-capability table. The direct U-Net subject-mask CLI writes one
+  coherent body/eyes/swim raw snapshot, but the core pipeline still exposes
+  historical stage-specific entrypoints.
 - Some registry query and training-prep paths still expose legacy eye-mask
   filters as primary-looking options.
 - Subject/refined-subject stale repair is not yet as complete as the eye-mask
@@ -150,6 +173,13 @@ desired design:
 - Detect row-local stale repair now has a contract and validator, but downstream
   crop/keypoint/mask consumers still need a full audit for positional or legacy
   manual-subgroup assumptions.
+- Smart-finalized refined runs are candidates until visual inspection and
+  component approval are complete; generated `pending`/`needs_review` counts are
+  triage state, not training approval.
+- Temporal QC for abrupt area/centroid/component-count changes is planned as a
+  second pass that flags rows without overwriting spatial masks.
+- `subject_shape_runs` is defined as a draft contract, but implementation and
+  the exact root-vs-analysis placement are still open.
 
 ## Review Checklist
 
@@ -170,6 +200,7 @@ When reviewing new pipeline work, ask:
 - [segmentation_pipeline_step_todo.md](segmentation_pipeline_step_todo.md)
 - [subject_mask_refinement_todo.md](subject_mask_refinement_todo.md)
 - [subject_mask_stage_unification_todo.md](subject_mask_stage_unification_todo.md)
+- [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [repo_wide_staleness_checklist.md](repo_wide_staleness_checklist.md)
 - [repo_wide_staleness_gap_matrix.md](repo_wide_staleness_gap_matrix.md)
 - [refined_detect_row_identity_contract.md](refined_detect_row_identity_contract.md)

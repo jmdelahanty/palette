@@ -67,7 +67,13 @@ Target V1 behavior:
 - preserve cleanup provenance and policy details
 - write per-row/component reason tags that explain cleanup and uncertainty
 - route suspicious rows/components to `needs_review`
-- write eye geometry after `eye_left` and `eye_right` assignment
+- by default, write canonical masks, provenance, reason tags, finalization
+  metrics, and cheap topology metrics first
+- record phase and chunk timings so scheduler/write changes have a measurable
+  baseline
+- optionally use Dask worker chunks for disjoint row-range zarr writes
+- optionally write expensive shape QC metrics and eye geometry after
+  `eye_left` and `eye_right` assignment
 
 ## Component Policies
 
@@ -168,7 +174,8 @@ Review routing:
 The finalizer should write the existing refined masks metrics and add
 component-local cleanup metrics where possible.
 
-Existing refined metrics remain authoritative for the finalized mask:
+Existing refined metrics remain authoritative for the finalized mask and are
+written by the default fast path:
 
 - `metrics/mask_present`
 - `metrics/area_px`
@@ -178,7 +185,8 @@ Existing refined metrics remain authoritative for the finalized mask:
 - `metrics/bbox_valid`
 - component topology metrics such as component count and hole fraction
 
-Recommended cleanup metrics:
+Recommended cleanup metrics are written as finalization metrics in the default
+path where available:
 
 - `component_count_before`
 - `component_count_after`
@@ -196,6 +204,18 @@ Recommended cleanup metrics:
 - `hole_area_fraction_after`
 - `quality_code`
 - `quality_score`
+
+Expensive shape-QC metrics are optional during finalization:
+
+- default `--metric-level cheap` writes topology metrics and leaves slower
+  contour/shape metrics marked as deferred
+- `--metric-level full` also computes `sigma_noise`, `curvature_var`, `ipr`,
+  and `solidity`
+
+Refined eye geometry/ellipse relations are also optional during finalization:
+
+- default behavior records `eye_geometry_status=deferred`
+- `--write-eye-geometry` computes the relation surfaces immediately
 
 Recommended reason tags:
 
@@ -243,6 +263,16 @@ Driver responsibilities:
 - write aggregate attrs and provenance
 - run refined eye geometry after left/right masks exist
 - emit registry status
+
+Current implementation note:
+
+- the default `serial_driver` backend is still available and remains the
+  deterministic debug path
+- `--execution-backend dask_worker_chunks` lets Dask workers compute and write
+  disjoint fixed-shape row chunks while the driver finalizes attrs, reasons,
+  provenance, registry status, and optional eye geometry
+- `--scheduler` and `--num-workers` control the Dask compute mode when the Dask
+  backend is selected; in serial mode they are recorded as instrumentation only
 
 Task responsibilities:
 
@@ -384,6 +414,42 @@ Current interpretation:
   geometry.
 - production default selection should be revisited after the writer path exists.
 
+### Full Writer Canary Results
+
+Full real-zarr canary source:
+
+```text
+/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr
+source run: subject_masks_unet_registry_gpu_metrics_profile_2026-04-26
+rows: 19,235
+mask_probs_roi chunks: (32, 1, 512, 512)
+```
+
+Worker-chunk writer, `--chunk-size 64`, `--metric-level cheap`, deferred eye
+geometry:
+
+| Scheduler | Workers | Wall seconds | Rows/sec | Notes |
+| --- | ---: | ---: | ---: | --- |
+| `processes` | `24` | `132.21` | `145.49` | one worker per physical core |
+| `distributed` local cluster | `24` | `247.70` | `77.65` | valid, but higher overhead |
+| `processes` | `48` | `108.51` | `177.26` | fastest canary on this workstation |
+
+Current operator recommendation for this workstation:
+
+- use `--execution-backend dask_worker_chunks`
+- use `--scheduler processes`
+- use `--num-workers 48` when the machine is otherwise available
+- fall back to `--num-workers 24` if interactive responsiveness, I/O
+  contention, or worker memory pressure becomes an issue
+- keep `--scheduler distributed` as an explicit diagnostic/scaling option, not
+  the default local operator path
+
+The fastest canary was then refreshed with
+`fisheye.utils.backfill_refined_subject_eye_geometry`. The latest refined run
+contained all four canonical components with `masks_roi = (19235, 4, 512, 512)`
+and `eye_geometry_status = computed`; eye-pair separation was valid for
+`19233 / 19235` rows.
+
 ## Failure And Restart Semantics
 
 V1 should prefer whole-run creation over in-place mutation.
@@ -438,6 +504,11 @@ scripts/py -m fisheye.refinement.finalize_subject_masks \
   --source-run subject_masks_unet_... \
   --refined-run refined_subject_masks_unet_finalized_... \
   --components subject_body eyes_union swim_bladder \
+  --chunk-size 64 \
+  --metric-level cheap \
+  --execution-backend dask_worker_chunks \
+  --scheduler processes \
+  --num-workers 48 \
   --dry-run
 ```
 
@@ -447,8 +518,17 @@ Then create the candidate run:
 scripts/py -m fisheye.refinement.finalize_subject_masks \
   /path/to/analysis.zarr \
   --source-run subject_masks_unet_... \
-  --refined-run refined_subject_masks_unet_finalized_...
+  --refined-run refined_subject_masks_unet_finalized_... \
+  --chunk-size 64 \
+  --metric-level cheap \
+  --execution-backend dask_worker_chunks \
+  --scheduler processes \
+  --num-workers 48
 ```
+
+Use `--metric-level full --write-eye-geometry` when the operator explicitly
+wants the expensive shape-QC and ellipse relation pass folded into the same
+run creation command.
 
 V1 supports explicit `--overwrite`, but does not support ROI-subset writes yet
 because a refined subject-mask run is row-aligned with the full source run.
@@ -469,19 +549,33 @@ Implemented:
   - writes `subject_body`, `eye_left`, `eye_right`, and `swim_bladder` when the
     raw run exposes `subject_body`, `eyes_union`, and `swim_bladder`
   - assigns `eyes_union -> eye_left/eye_right` using canonical keypoints
+  - writes refined masks, source-seed masks, run metrics, component metrics,
+    and finalization metrics by deterministic row chunks
   - writes component reason labels and body/swim finalization metrics
+  - defaults to `--metric-level cheap`, so expensive shape metrics are marked
+    deferred instead of blocking canonical mask publication
+  - defaults to deferred eye geometry; `--write-eye-geometry` computes ellipse
+    relation surfaces during finalization
+  - supports `--execution-backend dask_worker_chunks` for Dask worker-written
+    disjoint row chunks
+  - writes `smart_finalizer_timing_summary` and
+    `smart_finalizer_chunk_timings` attrs to expose per-phase and per-chunk
+    runtime
+  - records Dask instrumentation attrs: `execution_backend`,
+    `dask_execution_enabled`, `dask_scheduler`, `dask_num_workers`,
+    `dask_chunk_size`, and `dask_version`
   - leaves component and run approval states `pending`
   - emits refined-subject registry status when run through the path-based CLI
 
 Still open:
 
-- direct chunk-range zarr writes instead of building full component arrays in
-  memory before creating the run
-- scheduler-backed production writer mode
+- visual inspection of the completed full canary before treating the generated
+  run as biologically ready for review
 - ROI-subset preview runs or an explicit preview artifact type
 - finalization metrics for the intermediate `eyes_union` source surface without
   pretending it is a canonical refined component
-- full real-zarr canary creation and visual inspection
+- a dedicated second-pass command for deferred shape-QC metrics and eye
+  geometry
 
 ## Implementation Plan
 
@@ -495,12 +589,12 @@ Still open:
    - add eyes-union cleanup policy
    - avoid left/right assignment in this module; assignment stays separate
 
-3. Add a batch driver. Initial full-array writer is in place; chunked writer is
-   still open.
+3. Add a batch driver. Sequential chunk-range writer and opt-in
+   `dask_worker_chunks` execution are in place.
    - creates target refined run
-   - submits Dask chunk tasks
-   - writes deterministic chunks
-   - runs eye geometry after LR masks exist
+   - writes deterministic chunks sequentially in the default debug path
+   - can submit equivalent Dask worker chunks for disjoint row-range writes
+   - can run eye geometry after LR masks exist when explicitly requested
 
 4. Add tests. In progress.
    - in-memory unit tests for each component policy

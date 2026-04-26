@@ -6,19 +6,20 @@ last_verified: 2026-04-25
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
-subject-mask artifacts that can hold canonical component masks for body and swim
-bladder now, while also defining the target canonical home for future
-left/right eye refinement under the same component model.
+subject-mask artifacts that hold canonical component masks for body, swim
+bladder, and modern left/right eye refinement under the same component model.
 
 ## Scope
 
 - Define `refined_subject_masks_runs/<run>` as the canonical refined/editable
   subject-mask stage.
 - Support refined body masks and refined swim-bladder masks.
+- Support canonical refined `eye_left` and `eye_right` masks when raw/model
+  sources provide assignable eye evidence.
 - Support component-scoped review and reasons.
 - Reserve space for component-specific derived geometry such as contours,
   centroids, and centerline/spline-related outputs.
-- Define the target eye-capable refined layout for:
+- Define the implemented eye-capable refined layout for:
   - `eye_left`
   - `eye_right`
   - per-eye ellipses
@@ -27,7 +28,7 @@ left/right eye refinement under the same component model.
 
 ## Non-goals
 
-- Replacing `refined_eye_masks_runs` in v1.
+- Removing read support for historical `refined_eye_masks_runs`.
 - Defining the final exact geometry array schema for body contours or splines.
 - Defining `subject_shape_runs`.
 - Defining merged training artifact layout.
@@ -117,11 +118,21 @@ Readers must never infer component meaning from channel index alone.
 This contract is intended to support:
 
 1. refined body/swim-bladder masks while eyes remain specialized elsewhere,
-2. fuller multi-component refined subject masks later, and
-3. eventual eye alignment under the subject-mask component model.
+2. fuller multi-component refined subject masks, and
+3. eye alignment under the subject-mask component model.
 
-V1 directly supports case 1 and is shaped to permit cases 2 and 3 later
-without changing the stage family name.
+V1 directly supports case 1 and now supports case 2/3 for the implemented
+subject-mask U-Net and smart-finalizer path:
+
+- raw `subject_v1_union` outputs are finalized into `subject_v1_lr`
+- `eyes_union` is assigned into `eye_left` and `eye_right` using declared
+  assignment keypoint lineage
+- refined-subject eye geometry and eye-pair relation metrics are written from
+  the generated LR masks
+
+Manual review/editor workflows and compatibility materialization are still
+transition-state surfaces, but the storage contract no longer treats LR eye
+components as future-only.
 
 ## Assembly And Finalization Semantics
 
@@ -205,6 +216,14 @@ Current implementation note:
   approval is not inherited by default; pass `--promote-source-review` only when
   the operator explicitly wants approved source review payloads copied onto the
   assembled/finalized target run
+- `fisheye.refinement.finalize_subject_masks` is the smart finalizer for raw
+  probability-first `subject_mask_runs`; it writes deterministic row chunks,
+  cleanup metrics, source-seed masks, component provenance, reason tags,
+  review-triage counts, Dask execution metadata, and optional eye geometry
+- the measured local fast path for a full 19,235-row analysis-zarr canary used
+  `--execution-backend dask_worker_chunks --scheduler processes --num-workers 48
+  --chunk-size 64 --metric-level cheap`, then refreshed eye geometry with
+  `fisheye.utils.backfill_refined_subject_eye_geometry`
 - for legacy raw eye-stage data, the compatibility bridge remains:
   `refined_eye_masks_runs` or `eye_masks_runs`
   -> projected/backfilled `subject_mask_runs/<run>`
@@ -700,7 +719,7 @@ Review queue policy:
 `relations/<relation_name>/` is the standard extension point for derived values
 that conceptually span multiple components and are not owned by one component.
 
-Canonical example for future eye-capable refined runs:
+Canonical example for eye-capable refined runs:
 
 - `relations/eye_pair/metrics/`
   - `separation_px`
@@ -714,30 +733,54 @@ Why this belongs under `relations/` rather than under one eye component:
 - this relation surface is represented in code by
   `REFINED_SUBJECT_EYE_PAIR_METRICS`
 
-## Geometry Extension Policy
+## Geometry Ownership Policy
 
-Component-specific geometry should live under:
+Refined subject-mask runs own mask-local geometry primitives: values that are
+computed directly from one refined component mask and are useful for mask QC,
+review navigation, visualization, or lossless downstream reuse. They do not own
+interpreted biological coordinate-frame metrics.
+
+Component-specific mask-local geometry should live under:
 
 - `components/<component>/geometry/`
 
-This contract keeps body/swim-bladder geometry intentionally open, but the
-target eye-capable refined layout is now explicit.
+Component-specific contour stores should live under:
 
-Expected future examples:
+- `components/<component>/contours/`
+
+Run-level common mask geometry can stay under `metrics/` when it is fixed-shape
+and naturally shared across every component:
+
+- `area_px`
+- `centroid_xy`
+- `centroid_valid`
+- `bbox_xyxy`
+- `bbox_valid`
+
+Component-local mirrors are allowed when they make component-native consumers or
+review tooling simpler, but the source of truth must remain documented by the
+writer's schema attrs.
+
+Recommended component-local primitives:
 
 ### `subject_body`
 
-- contour tables
-- centroid and axis summaries
-- centerline seeds
-- spline control points or sampled centerline points
-- body-orientation summaries
+- contour tables under `components/subject_body/contours/`
+- centroid, area, bbox, mask-present, and validity metrics
+- simple shape descriptors directly derived from the mask, such as component
+  count, hole fraction, solidity, or an unoriented ellipse/PCA summary when the
+  convention is explicitly documented
+- approximate long-axis QC descriptors directly derived from the mask, such as
+  `major_axis_length_px` or `feret_diameter_px`, when the method and sensitivity
+  to contour noise are documented
+- optional debug seeds for later shape fitting, if they are clearly marked as
+  non-canonical seeds rather than final biological body axes
 
 ### `swim_bladder`
 
-- contour tables
-- centroid
-- ellipse/blob summaries
+- contour tables under `components/swim_bladder/contours/`
+- centroid, area, bbox, mask-present, and validity metrics
+- simple blob/ellipse summaries directly derived from the swim-bladder mask
 
 ### `eye_left` / `eye_right`
 
@@ -759,8 +802,60 @@ Geometry policy:
 
 - refined component masks remain the canonical source artifact
 - geometry derived from those masks should carry its own validity flags
-- downstream `subject_shape_runs` should consume refined body masks or refined
-  body geometry, not raw `subject_mask_runs`
+- geometry primitives stored here should be recomputable from
+  `masks_roi` plus the documented method/policy attrs
+- downstream `subject_shape_runs` should consume refined masks and/or these
+  mask-local primitives, not raw `subject_mask_runs`
+
+## Boundary With `subject_shape_runs`
+
+`subject_shape_runs/<run>` is the planned home for interpreted biological
+geometry that requires a coordinate convention, anatomical polarity, temporal
+context, track identity, or relationships between components.
+
+Keep these out of `refined_subject_masks_runs` as canonical outputs:
+
+- body centerline/spline used as an anatomical coordinate frame
+- canonical body B-spline fits, including centerline or outline fits with
+  smoothing/knot parameters
+- canonical biological body length derived from a centerline or B-spline arc
+  length
+- head/tail-polarized body axis or heading inferred from masks
+- body curvature or bend metrics
+- swim-bladder position relative to body axis or centerline
+- swim-bladder distance to eye pair, body centroid, or anatomical landmarks
+- eye angles relative to body/head heading
+- temporally smoothed or track-aligned shape metrics
+
+Reasoning:
+
+- `refined_subject_masks_runs` is the curated mask-pixel authority.
+- `subject_shape_runs` is a deterministic derived-analysis layer.
+- Recomputing interpreted shape metrics should not mutate or re-author the
+  refined masks.
+- The shape stage can carry its own method version, source refined-mask run,
+  optional source keypoints/heading run, track/temporal context, and failure
+  state.
+
+Practical rule:
+
+- If the value answers "what geometry did this one refined component mask have?",
+  store it with `refined_subject_masks_runs`.
+- If the value answers "what biological pose/shape/relationship does this
+  animal have?", store it in `subject_shape_runs` or a more specific downstream
+  analysis run.
+
+Body B-spline rule:
+
+- refined body components may store contours and non-canonical debug seeds
+- refined body components may store approximate long-axis QC descriptors such as
+  Feret diameter or PCA/ellipse major-axis length
+- the canonical B-spline fit belongs in `subject_shape_runs` because it depends
+  on fit method, knot/parameterization policy, smoothing, validity criteria, and
+  usually anatomical polarity
+- the canonical biological body length should be derived from the validated
+  centerline/B-spline arc length in `subject_shape_runs`, not from raw mask area
+  or an unqualified contour diameter
 
 Current implementation note:
 
@@ -895,8 +990,6 @@ This contract is intentionally non-destructive.
 
 - Should `components/<component>/mask_present` and `area_px` remain duplicated
   from `metrics/`, or should one be derived-only?
-- Should body contour/spline geometry live directly here, or only in a later
-  `subject_shape_runs` stage with this stage remaining mask-centric?
 - At what point should compatibility materialization of `refined_eye_masks_runs`
   become opt-in rather than routine once unified refined-subject eye writes are
   available?
@@ -907,5 +1000,6 @@ This contract is intentionally non-destructive.
 - [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md)
 - [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md)
 - [subject_mask_refinement_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_refinement_todo.md)
+- [subject_shape_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_shape_runs_contract.md)
 - [review_status_schema_unification_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/review_status_schema_unification_contract.md)
 - [pose_kinematics_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)

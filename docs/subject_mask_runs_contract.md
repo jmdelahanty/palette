@@ -15,7 +15,10 @@ without overloading the existing eye-specific stages.
 - Support model-native subject-mask runs.
 - Support explicit projection/backfill from legacy `eye_masks_runs` or
   `refined_eye_masks_runs`.
-- Keep eye-specific refinement and geometry in `refined_eye_masks_runs`.
+- Keep refined geometry and review authority out of raw `subject_mask_runs`.
+  Modern refined eye geometry belongs in `refined_subject_masks_runs` when
+  `eye_left` and `eye_right` are present; `refined_eye_masks_runs` remains a
+  compatibility/historical layout.
 
 ## Non-goals
 
@@ -31,7 +34,7 @@ without overloading the existing eye-specific stages.
 ```text
 crop_runs/<run>
   -> subject_mask_runs/<run>
-  -> refined_eye_masks_runs/<run>      # eye-specific refinement
+  -> refined_subject_masks_runs/<run>  # canonical refined component masks
   -> subject_shape_runs/<run>          # future deterministic geometry stage
 ```
 
@@ -40,6 +43,7 @@ Legacy compatibility path:
 ```text
 eye_masks_runs/<run> or refined_eye_masks_runs/<run>
   -> subject_mask_runs/<run>           # explicit projection/backfill
+  -> refined_subject_masks_runs/<run>   # canonical refined target
 ```
 
 ## Canonical Label Schema
@@ -69,13 +73,15 @@ This contract is intended to support three different runtime shapes over time:
 1. Sparse compatibility runs
    Example: legacy eye-mask backfills where only `eyes_union` is available.
 2. Dense multi-component runs
-   Example: future subject-mask models that emit `subject_body`,
+   Example: current U-Net subject-mask models that emit `subject_body`,
    `eyes_union`, and `swim_bladder` together.
 3. Component-scoped runs
    Example: future workflows where an operator or model only materializes one
    subset of the canonical labels.
 
-V1 fully supports cases 1 and 2.
+V1 fully supports cases 1 and 2. The shipped U-Net subject-mask inference path
+writes probability-first dense multi-component `subject_v1_union` runs with
+`mask_probs_roi` as the canonical raw model output.
 
 Case 3 is intentionally deferred, but the contract is shaped to allow it later
 through:
@@ -553,9 +559,10 @@ Recommended migration model:
 
 1. Preserve historical `eye_masks_runs` and `refined_eye_masks_runs`.
 2. Allow explicit projection/backfill into `subject_mask_runs`.
-3. Keep `refined_eye_masks_runs` as the eye-specific derived stage.
-4. Move future eye refinement to read from `subject_mask_runs` plus keypoints
-   when that path is stable.
+3. Keep `refined_eye_masks_runs` as the eye-specific derived/compatibility
+   stage.
+4. Prefer new eye refinement through `subject_mask_runs` plus declared
+   assignment keypoint lineage, finalized into `refined_subject_masks_runs`.
 5. Only then deprecate creation of new raw `eye_masks_runs`.
 
 Current implementation note:

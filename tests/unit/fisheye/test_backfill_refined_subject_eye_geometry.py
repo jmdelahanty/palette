@@ -143,6 +143,19 @@ def test_apply_reuses_writer_and_reports_existing_refresh(monkeypatch) -> None:
     assert result.pair_success_count == 3
 
 
+def test_writer_marks_eye_geometry_computed_and_clears_deferred_status() -> None:
+    group = _run_group(available=[True, True, True, True])
+    group.attrs["eye_geometry_status"] = "deferred"
+    group.attrs["eye_geometry_deferred_reason"] = "write_eye_geometry=false"
+
+    result = mod.write_refined_subject_eye_geometry(group)
+
+    assert result["status"] == "updated"
+    assert group.attrs["eye_geometry_status"] == "computed"
+    assert "eye_geometry_deferred_reason" not in group.attrs
+    assert "relations/eye_pair/metrics/separation_valid" in group
+
+
 def test_missing_eye_labels_are_not_eligible() -> None:
     group = _run_group(labels=["subject_body", "eye", "swim_bladder"])
 
@@ -172,4 +185,3 @@ def test_latest_run_resolution_prefers_parent_latest() -> None:
     run_info = list(mod._iter_run_groups(root, all_runs=False))
 
     assert [run_path for run_path, _run_group in run_info] == ["refined_subject_masks_runs/run_b"]
-

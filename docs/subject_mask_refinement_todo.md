@@ -22,7 +22,8 @@ transition compatibility inputs rather than a second canonical mask family.
 The current direction is:
 
 - raw segmentation lives in `subject_mask_runs`
-- future models may emit body, eye, and swim-bladder channels together
+- current U-Net subject-mask models can emit body, eye, and swim-bladder
+  channels together
 - operators will still need editable/refined artifacts for training-quality
   labels and QA
 
@@ -39,10 +40,11 @@ breaking the current eye tools before the unified model is ready.
 ## Current State
 
 - `subject_mask_runs` exists as the new raw component-mask stage.
-- It can currently represent sparse eye-only compatibility runs and future dense
-  multi-component runs.
-- `subject_mask_training_artifact_contract.md` exists and the merged
-  `subject_masks` exporter has been started.
+- It can currently represent sparse eye-only compatibility runs and dense
+  multi-component U-Net runs.
+- `subject_mask_training_artifact_contract.md` exists, and the merged
+  `subject_masks` exporter, validator, loader, trainer, and registry preflight
+  path are implemented.
 - `refined_eye_masks_runs` remains a specialized and compatibility stage during
   the transition to subject-mask unification, but canonical manual eye review
   has now moved to `refined_subject_masks_runs` and derived compat refined-eye
@@ -58,7 +60,11 @@ breaking the current eye tools before the unified model is ready.
   [src/fisheye/refinement/assemble_refined_subject_masks.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/refinement/assemble_refined_subject_masks.py)
   for sparse body/eye/swim workflows that should seed
   `refined_subject_masks_runs/<run>` directly rather than creating an
-  assembled raw intermediate first.
+  intermediate raw run.
+- A smart probability-run finalizer now exists at
+  [src/fisheye/refinement/finalize_subject_masks.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/refinement/finalize_subject_masks.py)
+  for raw U-Net `subject_v1_union` outputs that should become canonical
+  `subject_v1_lr` refined subject-mask candidates.
 - Subject-mask registry tables/views now exist for:
   - run-level quality/performance
   - component-level availability/review state
@@ -374,7 +380,7 @@ Current sparse-source assembly and repair path:
 component/raw sources
   -> refined_subject_masks_runs/<run>  # direct assembly + subject-mask finalization
   -> refined_eye_masks_runs/<run>      # still specialized during transition
-  -> subject_shape_runs/<run>          # future geometry derived from refined subject/body
+  -> subject_shape_runs/<run>          # downstream interpreted shape geometry
 ```
 
 ## Scope
@@ -382,15 +388,15 @@ component/raw sources
 This TODO covers:
 
 - refined/editable runtime storage for body and swim bladder
-- future unification path for eye refinement under the subject-mask component
+- unification path for eye refinement under the subject-mask component
   model
 - registry/review implications
-- downstream geometry implications for body masks
+- downstream geometry implications for body and swim-bladder masks
 
 This TODO does not by itself define:
 
-- final `subject_shape_runs` schema
-- tail spline/curvature contracts
+- final body centerline/spline implementation
+- tail spline/curvature algorithms
 - migration timing for removing old eye-mask authoring flows
 
 ## Refined Subject-Mask Requirements
@@ -464,7 +470,7 @@ Near-term run-level metrics remain:
 - `bbox_valid`
 
 Component-aware QC should live under the component subtree so body, swim
-bladder, and future eye metrics can evolve independently.
+bladder, and eye metrics can evolve independently.
 
 The intent is:
 
@@ -853,8 +859,8 @@ Recommended saveback behavior:
 
 - editing `subject_body` updates only body mask pixels and body-derived metadata
 - editing `swim_bladder` updates only swim-bladder pixels and metadata
-- future eye editing should update only the touched eye component plus
-  eye-specific derived fields
+- eye editing should update only the touched eye component plus eye-specific
+  derived fields
 
 This keeps refinement aligned with the broader subject-mask design:
 
@@ -992,6 +998,11 @@ This means the registry should eventually answer questions like:
 - [ ] Define component-derived geometry payloads for:
   - `subject_body`
   - `swim_bladder`
+- [x] Define and implement refined eye geometry payloads for:
+  - `components/eye_left/geometry/ellipse_params`
+  - `components/eye_right/geometry/ellipse_params`
+  - `components/eye_left|eye_right/contours`
+  - `relations/eye_pair/metrics/separation_px`
 
 ## Phase 2: Review / Editor Surface
 
@@ -1017,23 +1028,36 @@ This means the registry should eventually answer questions like:
 - [x] Implement subject-mask component registry tables/views from
       [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md).
 - [x] Add coarse step projection for future `refined_subject_masks`.
-- [ ] Add component latest views that can distinguish:
+- [x] Add component latest views that can distinguish:
   - raw-only body/swim-bladder availability
   - refined body/swim-bladder availability
   - refined eye availability
-- [ ] Wire those new registry surfaces into:
+- [ ] Continue wiring those registry surfaces into every operator/query surface:
   - `check_recording_steps`
   - stale-step cascade / invalidation views
   - registry UI / TUI surfaces
+  Current status: registry ranking and `check_recording_steps` registry mode
+  now prefer unified refined-subject component rows, including partial refined
+  runs, while stale-step cascade and UI/TUI parity remain open.
 
 ## Phase 4: Geometry Integration
 
-- [ ] Define `subject_shape_runs` to consume refined body masks, not raw body
-      masks.
-- [ ] Decide whether swim-bladder refined geometry should also feed
-      `subject_shape_runs` or a sibling analysis stage.
-- [ ] Define how body contour/spline outputs should reference refinement
-      provenance.
+- [x] Define the boundary between refined-mask-local geometry and downstream
+      interpreted shape metrics.
+  Decision: component contours, centroids, bboxes, areas, validity flags, and
+  simple component shape descriptors belong with
+  `refined_subject_masks_runs`; body centerlines/splines, anatomical axes,
+  canonical body B-spline fits, canonical centerline/B-spline body length,
+  swim-bladder-to-body relationships, and eye angles relative to heading belong
+  in `subject_shape_runs` or a specialized downstream analysis run.
+- [x] Define `subject_shape_runs` to consume refined body/swim/eye masks, not raw
+      `subject_mask_runs`.
+  See [subject_shape_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_shape_runs_contract.md).
+- [ ] Implement the first `subject_shape_runs` writer.
+- [ ] Include body B-spline fit support in the first body-shape writer or define
+      it as the first follow-up slice.
+- [ ] Decide whether `subject_shape_runs` should live at zarr root or under
+      `analysis/subject_shape_runs` before first implementation.
 
 ## Phase 5: Eye Unification Path
 
@@ -1054,6 +1078,60 @@ This means the registry should eventually answer questions like:
       clear.
   See the migration phases in
   [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md).
+- [x] Implement `eyes_union -> eye_left/eye_right` assignment inside
+      refined-subject finalization using declared assignment keypoint lineage.
+- [x] Materialize eye geometry and eye-pair relation metrics from refined
+      subject-mask eye components.
+- [x] Validate the full body/eyes/swim path on a real analysis-zarr canary.
+
+## Current End-To-End Status
+
+As of 2026-04-26, the subject-mask training/inference/refinement path is
+implemented for the current U-Net design:
+
+- registry preflight can select coherent raw or approved refined subject-mask
+  training sources and write a manifest/config
+- merged subject-mask training zarr export, validation, loader, and U-Net
+  training are implemented
+- subject-mask training runs can be recorded in the model registry and resolved
+  by inference for component-coverage-aware model selection
+- U-Net inference writes probability-first `subject_mask_runs/<run>` snapshots
+  with `subject_v1_union` labels:
+  `["subject_body", "eyes_union", "swim_bladder"]`
+- `fisheye.refinement.finalize_subject_masks` thresholds and finalizes those
+  raw probabilities into canonical `subject_v1_lr`
+  `refined_subject_masks_runs/<run>` candidates with
+  `["subject_body", "eye_left", "eye_right", "swim_bladder"]`
+- the smart finalizer writes cleanup metrics, reason tags, source-seed masks,
+  component provenance, review-triage counts, and Dask execution metadata
+- refined-subject eye geometry can be written during finalization or backfilled
+  afterward with `fisheye.utils.backfill_refined_subject_eye_geometry`
+
+Real canary evidence:
+
+- source archive:
+  `/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr`
+- raw source run:
+  `subject_masks_unet_registry_gpu_metrics_profile_2026-04-26`
+- latest refined candidate:
+  `refined_subject_masks_smart_finalizer_dask_processes48_c64_canary_2026-04-26`
+- refined candidate shape:
+  `masks_roi = (19235, 4, 512, 512)`
+- refined labels:
+  `["subject_body", "eye_left", "eye_right", "swim_bladder"]`
+- eye geometry status:
+  `computed`, with valid eye-pair separation on `19233 / 19235` rows
+
+Remaining work is no longer open-ended architecture. It is operational hardening:
+
+- visual inspection and component approval of smart-finalized candidates
+- temporal QC as a second pass that flags suspicious rows without changing masks
+- faster/chunked eye-geometry backfill if this becomes a frequent full-run task
+- body/swim shape-stage design and downstream subject-shape consumers
+- complete subject/refined-subject stale repair parity with the eye-mask
+  precedent
+- top-level segmentation orchestration in `core/pipeline.py` so operators do not
+  need to call model-specific segmentation CLIs directly
 
 ## Acceptance Criteria
 
@@ -1062,9 +1140,10 @@ This means the registry should eventually answer questions like:
 - [x] Registry can represent raw presence vs refined presence vs review state by
       component.
 - [x] `refined_eye_masks_runs` remains supported during transition.
-- [x] The future unification path for eyes is explicit enough to avoid another
+- [x] The unification path for eyes is explicit enough to avoid another
       schema reset later.
-- [ ] Downstream body-shape work is clearly anchored to refined body masks.
+- [x] Downstream body/swim shape work is clearly anchored to refined subject
+      masks and separated from mask-local geometry.
 
 ## Risks
 

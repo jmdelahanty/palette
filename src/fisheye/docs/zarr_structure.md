@@ -804,14 +804,22 @@ consumed.
 ## `refined_subject_masks_runs/`
 
 Canonical refined/editable subject-mask runs produced by
-`fisheye.tune.refined_subject_mask_review` and
-`fisheye.refinement.assemble_refined_subject_masks`.
+`fisheye.tune.refined_subject_mask_review`,
+`fisheye.refinement.assemble_refined_subject_masks`, and
+`fisheye.refinement.finalize_subject_masks`.
 
 For modern archives, this is also the canonical reviewed eye-geometry surface
 when `mask_labels` includes `eye_left` and `eye_right`. Eye masks are stored in
 `masks_roi` by semantic component channel, per-eye geometry lives under
 `components/eye_left|eye_right/geometry/`, and cross-eye metrics live under
 `relations/eye_pair/metrics/`.
+
+Refined subject-mask runs own direct mask-local geometry primitives: component
+contours, centroids, areas, bboxes, validity flags, and simple component shape
+descriptors that are recomputable from one refined mask channel. Interpreted
+biological geometry that requires a coordinate convention, anatomical polarity,
+temporal context, or cross-component relationship belongs in
+`subject_shape_runs/<run>` or a specialized downstream analysis run.
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
@@ -834,10 +842,14 @@ when `mask_labels` includes `eye_left` and `eye_right`. Eye masks are stored in
 - component-local QC lives under `components/<component>/metrics/` and
   includes `component_count`, `largest_component_fraction`, `hole_count`,
   `hole_area_fraction`, `sigma_noise`, `curvature_var`, `ipr`, and
-  `solidity`
+  `solidity`. Fast smart-finalizer runs may set expensive shape metrics such as
+  `sigma_noise`, `curvature_var`, `ipr`, and `solidity` to deferred/NaN values
+  when `metric_level="cheap"` is recorded.
 - eye-pair relation metrics live under
   `relations/eye_pair/metrics/{separation_px,separation_valid}` when both
   `eye_left` and `eye_right` are present
+- finalization-specific cleanup metrics may live under
+  `components/<component>/finalization_metrics/`
 
 Important attrs:
 
@@ -856,6 +868,12 @@ Important attrs:
 - `component_review_statuses`
 - `summary_statistics`
 - `component_summary_statistics`
+- `eye_geometry_status` (`computed` when refined-subject eye geometry arrays and
+  relation metrics are present; `deferred` when intentionally skipped)
+- `smart_finalizer_timing_summary` and `smart_finalizer_chunk_timings` for runs
+  created by `fisheye.refinement.finalize_subject_masks`
+- `execution_backend`, `dask_scheduler`, `dask_num_workers`, and
+  `dask_chunk_size` for Dask-backed smart-finalizer runs
 
 Refined subject-mask runs preserve the same portable crop snapshot contract as
 their upstream `subject_mask_runs/<run>` source rather than re-deriving lineage
@@ -866,6 +884,36 @@ Eye geometry arrays used by current eye-angle analysis and eye-mask training
 export are read through `fisheye.shared.eye_geometry_source`, which exposes
 `eye_left`/`eye_right` component data as legacy-compatible `(N, 2, ...)`
 array-like views for callers that have not moved to component-native reads yet.
+
+---
+
+## `subject_shape_runs/`
+
+Draft deterministic derived stage for biological shape outputs computed from
+canonical refined subject masks.
+
+Expected source:
+
+- exact `refined_subject_masks_runs/<run>` source
+- optional refined-subject mask-local geometry primitives
+- optional keypoint, heading, tracking, or temporal context inputs
+
+Examples that belong here instead of in `refined_subject_masks_runs` as
+canonical outputs:
+
+- body centerline/spline used as an anatomical coordinate frame
+- canonical body B-spline fits with smoothing/knot/parameterization policy
+- canonical body length from centerline/B-spline arc length
+- head/tail-polarized body axis or mask-derived heading
+- body curvature, bend, or width profile
+- swim-bladder position relative to body axis or centerline
+- swim-bladder distance to eye pair, body centroid, or anatomical landmarks
+- eye angles relative to body/head heading
+- temporally smoothed or track-aligned shape metrics
+
+The stage is not implemented yet. The draft storage and provenance contract is
+documented in
+`docs/subject_shape_runs_contract.md`.
 
 ---
 

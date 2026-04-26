@@ -334,8 +334,10 @@ scripts/py -m fisheye.refinement.refine_eye_masks \
 
 ### 9. Subject masks
 
-Segments the full fish body. Two approaches: U-Net (produces a 3-channel mask
-for body, eyes, and swim bladder) or SAM (Segment Anything Model).
+Segments subject-mask components. The current recommended full-component path is
+the U-Net subject-mask model, which writes raw probability surfaces for body,
+eyes union, and swim bladder into `subject_mask_runs/<run>`. SAM/traditional
+paths remain useful for body-only or component-specific workflows.
 
 ```bash
 # U-Net subject masks
@@ -369,7 +371,47 @@ binary compatibility output, `--no-async-output` for serial writer debugging,
 and `--progress` for interactive terminal progress.
 
 **What it writes:** `subject_mask_runs/{run_name}/` with multi-channel
-probabilities and per-frame metrics.
+probabilities, per-frame metrics, model/config/provenance metadata, and
+assignment-keypoint lineage for later `eyes_union -> eye_left/eye_right`
+finalization.
+
+Finalize the raw probabilities into canonical refined component masks:
+
+```bash
+scripts/py -m fisheye.refinement.finalize_subject_masks \
+  path/to/zarr/..._analysis.zarr \
+  --source-run <subject_mask_run> \
+  --refined-run <refined_subject_mask_run> \
+  --chunk-size 64 \
+  --metric-level cheap \
+  --execution-backend dask_worker_chunks \
+  --scheduler processes \
+  --num-workers 48
+```
+
+This writes `refined_subject_masks_runs/<run>` with
+`["subject_body", "eye_left", "eye_right", "swim_bladder"]` when the raw source
+uses `subject_v1_union` and has usable assignment keypoint lineage. The fast
+default writes canonical masks, cleanup metrics, source-seed masks, reasons,
+review triage, and provenance; expensive shape-QC metrics and eye geometry can
+be added explicitly.
+
+Add or refresh refined-subject eye geometry after the fast finalizer:
+
+```bash
+scripts/py -m fisheye.utils.backfill_refined_subject_eye_geometry \
+  path/to/zarr/..._analysis.zarr \
+  --zarr-use analysis \
+  --apply
+```
+
+Use `--metric-level full --write-eye-geometry` on the finalizer only when the
+operator intentionally wants expensive shape-QC and eye-ellipse relation writing
+folded into the same run creation command.
+
+Generated refined runs are candidates until reviewed. Do not treat a
+smart-finalized run as training-approved solely because all components are
+available; check component review state and reason/triage counts first.
 
 #### Swim bladder segmentation
 

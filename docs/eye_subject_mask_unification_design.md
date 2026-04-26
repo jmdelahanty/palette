@@ -462,6 +462,12 @@ Current implementation note:
   `refined_subject_masks_runs` is supported for `eye_left` / `eye_right`
   component seeds; raw eye-stage data can still arrive through
   projected/backfilled `subject_mask_runs` sources.
+- The smart finalizer can now promote raw `eyes_union` model output from a
+  `subject_mask_runs/<run>` source into canonical `eye_left` and `eye_right`
+  refined components using declared assignment keypoint lineage.
+- A real analysis-zarr canary has produced a latest refined-subject run with
+  all four canonical components (`subject_body`, `eye_left`, `eye_right`,
+  `swim_bladder`) plus computed refined-subject eye geometry.
 
 ### Phase C: canonical unification
 
@@ -503,28 +509,31 @@ canonical refined-subject surface.
 
 ## Non-Goals For This Design
 
-This design does not yet decide:
+This design still does not decide:
 
 - the exact registry projection rows for `relations/eye_pair/`
 - whether a compatibility `refined_eye_masks_runs` artifact is materialized by
   default or only on request during the later transition phases
-- the exact assignment algorithm for converting union/raw eye sources into
-  canonical refined LR eye components
-- the exact CLI/API that seeds a new assembled unified run before
-  finalization
 - whether training/export defaults should stay `subject_v1_union` even after
   runtime/refined authoring becomes canonically `subject_v1_lr`
 
+The first implementation of the assignment/finalization path is now
+`fisheye.refinement.finalize_subject_masks`; the exact algorithm can still
+evolve, but the storage/API direction is no longer undecided.
+
 ## Recommended Follow-On Changes
 
-1. Implement the geometry-aware LR assignment helper as a subject-mask
-   refinement/finalization substep.
-2. Persist assignment confidence/status, review reasons, and component
+1. Continue validating the geometry-aware LR assignment helper on more
+   recordings and feed failures into component review/reason tags.
+2. Extend assignment confidence/status where needed; current finalization
+   persists assignment status counts, reason tags, and keypoint/source
    provenance when union/raw eye sources are promoted to `eye_left` /
    `eye_right`.
-3. Confirm registry, operator, and training/export consumers treat refined eye
+3. Confirm every registry, operator, and training/export consumer treats refined eye
    availability as split `eye_left` / `eye_right` component availability, not
    as `eyes_union` availability.
+4. Decide whether and when to materialize compatibility
+   `refined_eye_masks_runs` from canonical refined-subject eye components.
 
 ## Related Docs
 

@@ -1,13 +1,20 @@
 # Subject Mask Training Artifact Contract (Draft v1)
 <!-- contract-meta
 version: 1
-status: draft
-last_verified: 2026-03-31
+status: active
+last_verified: 2026-04-26
 -->
 
 Purpose: define the merged training artifact for a generalized ROI-local
 subject-mask task that can supervise fish body, eyes, and swim bladder without
 discarding existing eye-mask training data.
+
+Current implementation status: the registry preflight, merged export,
+validation, zarr loader, U-Net trainer, model-registry logging/discovery, and
+runtime inference path are implemented for the `subject_v1_union` dense
+body/eyes-union/swim-bladder workflow. Refined output is produced by the
+separate smart finalizer described in
+[refined_subject_mask_smart_finalizer_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_mask_smart_finalizer_design.md).
 
 ## Scope
 
@@ -594,6 +601,8 @@ Implemented:
 - `scripts/py -m fisheye.utils.export_subject_mask_training_zarr <source>.zarr <merged>.zarr`
 - `scripts/py -m fisheye.utils.prepare_subject_mask_training_from_registry --registry <registry.sqlite> --out-manifest <manifest.json>`
 - `scripts/py -m fisheye.utils.run_subject_mask_training_pipeline --manifest <manifest.json> --config <config.yaml> --export-merged --train`
+- `scripts/py -m fisheye.segmentation.train_unet_subject_masks <config.yaml> --manifest <manifest.json> --registry <registry.sqlite>`
+- `scripts/py -m fisheye.segmentation.infer_unet_subject_masks <analysis.zarr> --resolve-model-from-registry --registry <registry.sqlite>`
 
 The registry preflight is prepare-only. It selects exportable unified
 `subject_mask_runs` or coherent `refined_subject_masks_runs` sources from
@@ -602,7 +611,10 @@ The registry preflight is prepare-only. It selects exportable unified
 explicit assembly. The pipeline wrapper consumes that manifest, exports one
 merged subject-mask training zarr, rewrites the training config/manifest to the
 merged `crop_runs/<run>` and `subject_mask_runs/<run>`, and can launch
-`fisheye.segmentation.train_unet_subject_masks`. Subject-mask data-card
+`fisheye.segmentation.train_unet_subject_masks`. The trainer derives `names` and
+`nc` from the merged artifact schema, can write validation preview PNGs at
+multiple thresholds, can log TensorBoard scalars when configured, and records
+subject-mask model coverage metadata in the registry. Subject-mask data-card
 aggregation is still future parity work. Refined-source export is approved-only
 by default: every available component in a `refined_subject_masks_runs/<run>`
 must have `component_review_statuses[component].state == "approved"`, with
