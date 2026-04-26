@@ -55,8 +55,8 @@ class _SubjectMaskOutputBatch:
     start: int
     stop: int
     probs_out: np.ndarray
-    binary: np.ndarray
-    compact_metrics: dict[str, np.ndarray]
+    binary: Optional[np.ndarray]
+    metrics: dict[str, np.ndarray]
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -135,7 +135,8 @@ def _postprocess_logits_on_device(
     logits: torch.Tensor,
     *,
     mask_probs_dtype: str,
-) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    return_binary: bool,
+) -> tuple[np.ndarray, Optional[np.ndarray], dict[str, np.ndarray]]:
     probs = torch.sigmoid(logits)
     probs = torch.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
     probs = torch.clamp(probs, 0.0, 1.0)
@@ -153,12 +154,80 @@ def _postprocess_logits_on_device(
 
     area_px = binary.sum(dim=(2, 3), dtype=torch.float32)
     prob_max = probs_for_metrics.amax(dim=(2, 3))
+    spatial_metrics = _compute_spatial_metrics_from_binary_tensor(binary, area_px=area_px)
     metrics = {
         "prob_max": prob_max.cpu().numpy().astype(np.float32, copy=False),
         "mask_present": (area_px > 0.0).cpu().numpy().astype(bool, copy=False),
         "area_px": area_px.cpu().numpy().astype(np.float32, copy=False),
+        "centroid_xy": spatial_metrics["centroid_xy"].cpu().numpy().astype(np.float32, copy=False),
+        "centroid_valid": spatial_metrics["centroid_valid"].cpu().numpy().astype(bool, copy=False),
+        "bbox_xyxy": spatial_metrics["bbox_xyxy"].cpu().numpy().astype(np.float32, copy=False),
+        "bbox_valid": spatial_metrics["bbox_valid"].cpu().numpy().astype(bool, copy=False),
     }
-    return probs_out.cpu().numpy(), binary.cpu().numpy(), metrics
+    binary_out = binary.cpu().numpy() if return_binary else None
+    return probs_out.cpu().numpy(), binary_out, metrics
+
+
+def _compute_spatial_metrics_from_binary_tensor(
+    binary: torch.Tensor,
+    *,
+    area_px: Optional[torch.Tensor] = None,
+) -> dict[str, torch.Tensor]:
+    if binary.ndim != 4:
+        raise ValueError("binary must have shape (N,C,H,W).")
+
+    mask = binary > 0
+    _row_count, _channel_count, height, width = mask.shape
+    if area_px is None:
+        area_px = mask.sum(dim=(2, 3), dtype=torch.float32)
+    else:
+        area_px = area_px.to(dtype=torch.float32)
+    valid = area_px > 0.0
+    denominator = torch.clamp(area_px, min=1.0)
+
+    y_counts = mask.sum(dim=3, dtype=torch.float32)
+    x_counts = mask.sum(dim=2, dtype=torch.float32)
+    y_float = torch.arange(height, device=mask.device, dtype=torch.float32).view(1, 1, height)
+    x_float = torch.arange(width, device=mask.device, dtype=torch.float32).view(1, 1, width)
+    y_sum = (y_counts * y_float).sum(dim=2)
+    x_sum = (x_counts * x_float).sum(dim=2)
+
+    centroid_xy = torch.stack((x_sum / denominator, y_sum / denominator), dim=2)
+    centroid_xy = torch.where(valid.unsqueeze(2), centroid_xy, torch.zeros_like(centroid_xy))
+
+    row_has_mask = mask.any(dim=3)
+    col_has_mask = mask.any(dim=2)
+    y_int = torch.arange(height, device=mask.device, dtype=torch.int32).view(1, 1, height)
+    x_int = torch.arange(width, device=mask.device, dtype=torch.int32).view(1, 1, width)
+    y_min = torch.where(
+        row_has_mask,
+        y_int,
+        torch.full((1, 1, height), height, device=mask.device, dtype=torch.int32),
+    ).amin(dim=2)
+    y_max = torch.where(
+        row_has_mask,
+        y_int,
+        torch.full((1, 1, height), -1, device=mask.device, dtype=torch.int32),
+    ).amax(dim=2)
+    x_min = torch.where(
+        col_has_mask,
+        x_int,
+        torch.full((1, 1, width), width, device=mask.device, dtype=torch.int32),
+    ).amin(dim=2)
+    x_max = torch.where(
+        col_has_mask,
+        x_int,
+        torch.full((1, 1, width), -1, device=mask.device, dtype=torch.int32),
+    ).amax(dim=2)
+
+    bbox_xyxy = torch.stack((x_min, y_min, x_max, y_max), dim=2).to(dtype=torch.float32)
+    bbox_xyxy = torch.where(valid.unsqueeze(2), bbox_xyxy, torch.zeros_like(bbox_xyxy))
+    return {
+        "centroid_xy": centroid_xy,
+        "centroid_valid": valid,
+        "bbox_xyxy": bbox_xyxy,
+        "bbox_valid": valid,
+    }
 
 
 def _compute_channel_metrics(binary_masks: np.ndarray, probs: np.ndarray) -> dict[str, np.ndarray]:
@@ -383,7 +452,6 @@ def _write_subject_mask_output_batch(
     centroid_valid: np.ndarray,
     bbox_xyxy: np.ndarray,
     bbox_valid: np.ndarray,
-    n_channels: int,
     progress: Progress,
     task: int,
     profiler: InferenceTimingProfiler,
@@ -395,19 +463,19 @@ def _write_subject_mask_output_batch(
     with profiler.time("output_write_probs", items=batch_count):
         probs_arr[start:stop] = batch.probs_out
     if masks_arr is not None:
+        if batch.binary is None:
+            raise ValueError("masks_roi materialization requested but binary masks were not returned.")
         with profiler.time("output_write_binary", items=batch_count):
             masks_arr[start:stop] = batch.binary
 
     with profiler.time("metric_compute", items=batch_count):
-        prob_max[start:stop, :] = batch.compact_metrics["prob_max"]
-        mask_present[start:stop, :] = batch.compact_metrics["mask_present"]
-        area_px[start:stop, :] = batch.compact_metrics["area_px"]
-        for channel_idx in range(n_channels):
-            channel_metrics = _compute_channel_spatial_metrics(batch.binary[:, channel_idx])
-            centroid_xy[start:stop, channel_idx, :] = channel_metrics["centroid_xy"]
-            centroid_valid[start:stop, channel_idx] = channel_metrics["centroid_valid"]
-            bbox_xyxy[start:stop, channel_idx, :] = channel_metrics["bbox_xyxy"]
-            bbox_valid[start:stop, channel_idx] = channel_metrics["bbox_valid"]
+        prob_max[start:stop, :] = batch.metrics["prob_max"]
+        mask_present[start:stop, :] = batch.metrics["mask_present"]
+        area_px[start:stop, :] = batch.metrics["area_px"]
+        centroid_xy[start:stop, :, :] = batch.metrics["centroid_xy"]
+        centroid_valid[start:stop, :] = batch.metrics["centroid_valid"]
+        bbox_xyxy[start:stop, :, :] = batch.metrics["bbox_xyxy"]
+        bbox_valid[start:stop, :] = batch.metrics["bbox_valid"]
 
     with profiler.time("progress_update", items=batch_count):
         progress.advance(task, batch_count)
@@ -525,7 +593,6 @@ def _write_subject_mask_outputs(
                         centroid_valid=centroid_valid,
                         bbox_xyxy=bbox_xyxy,
                         bbox_valid=bbox_valid,
-                        n_channels=n_channels,
                         progress=progress,
                         task=task,
                         profiler=profiler,
@@ -580,15 +647,16 @@ def _write_subject_mask_outputs(
 
                 _sync_cuda("sync_before_d2h", items=batch_count)
                 with profiler.time("d2h_copy", items=batch_count):
-                    probs_out, binary, compact_metrics = _postprocess_logits_on_device(
+                    probs_out, binary, output_metrics = _postprocess_logits_on_device(
                         logits,
                         mask_probs_dtype=mask_probs_dtype,
+                        return_binary=write_masks_roi,
                     )
                 _sync_cuda("sync_after_d2h", items=batch_count)
 
                 if probs_out.ndim == 3:
                     probs_out = probs_out[:, None, :, :]
-                if binary.ndim == 3:
+                if binary is not None and binary.ndim == 3:
                     binary = binary[:, None, :, :]
                 if probs_out.shape[1] != n_channels:
                     raise ValueError(
@@ -600,14 +668,15 @@ def _write_subject_mask_outputs(
                         probs_out = probs_out.astype(np.uint8, copy=False)
                     else:
                         probs_out = probs_out.astype(np.float16, copy=False)
-                    binary = binary.astype(np.uint8, copy=False)
+                    if binary is not None:
+                        binary = binary.astype(np.uint8, copy=False)
 
                 output_batch = _SubjectMaskOutputBatch(
                     start=start,
                     stop=stop,
                     probs_out=probs_out,
                     binary=binary,
-                    compact_metrics=compact_metrics,
+                    metrics=output_metrics,
                 )
                 if output_queue is None:
                     _write_subject_mask_output_batch(
@@ -621,7 +690,6 @@ def _write_subject_mask_outputs(
                         centroid_valid=centroid_valid,
                         bbox_xyxy=bbox_xyxy,
                         bbox_valid=bbox_valid,
-                        n_channels=n_channels,
                         progress=progress,
                         task=task,
                         profiler=profiler,
@@ -1021,9 +1089,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "sync_before_* and sync_after_* measure explicit CUDA synchronize calls used to attribute queued GPU work deterministically.",
                 "input_normalize runs after the device transfer so dtype conversion, scaling, and clipping can execute on GPU.",
                 "h2d_copy and model_forward are measured separately for the U-Net loop.",
-                "d2h_copy includes sigmoid + clamp + dtype conversion + transfer back to CPU/NumPy.",
+                "d2h_copy includes sigmoid + clamp + dtype conversion, on-device spatial metrics, probability transfer, and optional binary transfer when masks_roi is materialized.",
                 "output_write_probs measures dense probability Zarr writes; output_write_binary is present only when masks_roi is materialized.",
-                "metric_compute covers per-channel metric derivation before metric-array writes.",
+                "metric_compute covers copying precomputed per-batch metrics into full-run metric arrays.",
                 "output_queue_put and output_queue_drain appear when --async-output overlaps inference with background output writes.",
             ],
         )

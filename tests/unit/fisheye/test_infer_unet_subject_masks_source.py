@@ -145,7 +145,11 @@ def test_postprocess_logits_on_device_returns_storage_outputs_and_compact_metric
         dtype=torch.float32,
     )
 
-    probs, binary, metrics = mod._postprocess_logits_on_device(logits, mask_probs_dtype="uint8")
+    probs, binary, metrics = mod._postprocess_logits_on_device(
+        logits,
+        mask_probs_dtype="uint8",
+        return_binary=True,
+    )
 
     expected_probs = np.round(torch.sigmoid(logits).numpy() * 255.0).astype(np.uint8)
     expected_binary = (expected_probs >= 128).astype(np.uint8)
@@ -154,6 +158,21 @@ def test_postprocess_logits_on_device_returns_storage_outputs_and_compact_metric
     np.testing.assert_allclose(metrics["prob_max"], expected_probs.max(axis=(2, 3)).astype(np.float32) / 255.0)
     np.testing.assert_array_equal(metrics["mask_present"], expected_binary.sum(axis=(2, 3)) > 0)
     np.testing.assert_allclose(metrics["area_px"], expected_binary.sum(axis=(2, 3)).astype(np.float32))
+    for channel_idx in range(expected_binary.shape[1]):
+        expected_spatial = mod._compute_channel_spatial_metrics(expected_binary[:, channel_idx])
+        np.testing.assert_allclose(metrics["centroid_xy"][:, channel_idx, :], expected_spatial["centroid_xy"])
+        np.testing.assert_array_equal(metrics["centroid_valid"][:, channel_idx], expected_spatial["centroid_valid"])
+        np.testing.assert_allclose(metrics["bbox_xyxy"][:, channel_idx, :], expected_spatial["bbox_xyxy"])
+        np.testing.assert_array_equal(metrics["bbox_valid"][:, channel_idx], expected_spatial["bbox_valid"])
+
+    _probs_without_binary, skipped_binary, skipped_metrics = mod._postprocess_logits_on_device(
+        logits,
+        mask_probs_dtype="uint8",
+        return_binary=False,
+    )
+    assert skipped_binary is None
+    np.testing.assert_array_equal(skipped_metrics["mask_present"], metrics["mask_present"])
+    np.testing.assert_allclose(skipped_metrics["centroid_xy"], metrics["centroid_xy"])
 
 
 def test_write_subject_mask_outputs_can_skip_binary_masks_roi() -> None:

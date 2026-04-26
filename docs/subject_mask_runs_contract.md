@@ -431,6 +431,9 @@ Observed canary timings on `2026-01-28T23-15-10Z_arena_4_Feeding`
 - dense probabilities plus dense `masks_roi`, profiled: `170.4s`
 - probability-only without async output: `135.3s`
 - probability-only async default output mode: `100.2s`
+- probability-only async with on-device spatial metrics on arena 2:
+  `89.8s`; `metric_compute` dropped from `30.1s` to `0.003s` in the
+  profiled comparison run
 
 Treat these numbers as local workstation/storage guidance, not a contract.
 The contract is the artifact behavior: probability-first raw runs may omit

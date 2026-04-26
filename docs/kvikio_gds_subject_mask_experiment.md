@@ -62,6 +62,16 @@ Interpretation:
 - metric computation is also a major remaining CPU-side cost
 - a GDS writer alone will not address the full bottleneck stack
 
+Follow-up note:
+
+- after moving raw-run spatial metrics onto the inference device, the same
+  arena 2 canary shape completed in `89.8s`
+- `metric_compute` dropped from `30.1s` to `0.003s`
+- `d2h_copy` dropped from `14.3s` to `8.4s` because probability-first runs no
+  longer copy the full binary mask tensor to CPU when `masks_roi` is omitted
+- this makes KvikIO/GDS less urgent unless probability writes become the clear
+  dominant bottleneck later
+
 ## Local KvikIO Findings
 
 Outside the Codex sandbox, the current `palette-py311` environment reports:
