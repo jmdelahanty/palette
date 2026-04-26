@@ -12,6 +12,7 @@ import zarr.core.sync as zarr_sync
 from zarr.core.dtype import VariableLengthUTF8
 from zarr.storage import MemoryStore
 
+from fisheye.utils import audit_refined_mask_metrics as audit_mod
 from fisheye.shared.zarr.stage_arrays import (
     REFINED_EYE_MASKS_SPEC,
     REFINED_SUBJECT_COMPONENT_ARRAYS,
@@ -198,3 +199,30 @@ def test_audit_refined_subject_mask_metrics_reports_missing_component_metric() -
 def test_audit_refined_mask_metrics_rejects_ambiguous_run_name() -> None:
     with pytest.raises(ValueError, match="run_name requires"):
         audit_refined_mask_metrics(_root(), stage="all", run_name="refined_subject_masks_001")
+
+
+def test_audit_refined_mask_metrics_zarr_uses_palette_zarr_opener(monkeypatch, tmp_path) -> None:
+    root = _root()
+    parent = root.create_group("refined_subject_masks_runs")
+    parent.attrs["latest"] = "refined_subject_masks_001"
+    run = parent.create_group("refined_subject_masks_001")
+    run.attrs["mask_labels"] = ["subject_body"]
+    _write_stage(run, REFINED_SUBJECT_MASKS_SPEC)
+    _write_refined_subject_component(run.require_group("components"), "subject_body")
+
+    calls = []
+
+    def _fake_open_zarr_root(path, mode="r"):
+        calls.append((path, mode))
+        return root
+
+    monkeypatch.setattr(audit_mod, "open_zarr_root", _fake_open_zarr_root)
+    summary = audit_mod.audit_refined_mask_metrics_zarr(
+        tmp_path / "analysis.zarr",
+        stage="refined_subject_masks",
+        latest_only=True,
+    )
+
+    assert summary["valid"] is True
+    assert summary["audited_runs"]["refined_subject_masks"] == ["refined_subject_masks_001"]
+    assert calls == [((tmp_path / "analysis.zarr").resolve(), "r")]

@@ -454,12 +454,14 @@ def _registry_subject_component_fields_by_stage(
     *,
     registry: Registry,
     recording_id: Optional[str],
+    zarr_path: Optional[Path] = None,
 ) -> Dict[str, Dict[str, object]]:
     if not recording_id:
         return {}
     if not _registry_view_exists(registry, "recording_subject_mask_component_quality_overview"):
         return {}
 
+    normalized_zarr_path = str(zarr_path) if zarr_path is not None else None
     try:
         rows = registry.conn.execute(
             """
@@ -475,6 +477,7 @@ def _registry_subject_component_fields_by_stage(
                 lifecycle_state
             FROM recording_subject_mask_component_quality_overview
             WHERE recording_id = ?
+              AND (? IS NULL OR zarr_path = ?)
               AND stage_group IN ('subject_mask_runs', 'refined_subject_masks_runs')
             ORDER BY
                 CASE stage_group
@@ -484,7 +487,7 @@ def _registry_subject_component_fields_by_stage(
                 END,
                 component_name;
             """,
-            (recording_id,),
+            (recording_id, normalized_zarr_path, normalized_zarr_path),
         ).fetchall()
     except Exception:
         return {}
@@ -1122,6 +1125,7 @@ def _registry_status_payload(
     registry_component_fields = _registry_subject_component_fields_by_stage(
         registry=registry,
         recording_id=recording_id,
+        zarr_path=zarr_path,
     )
     subject_registry_fields = registry_component_fields.get("subject_mask_runs")
     if subject_registry_fields:

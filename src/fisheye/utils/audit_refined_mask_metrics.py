@@ -10,6 +10,7 @@ from typing import Any, Iterable, Optional
 
 import zarr
 
+from fisheye.utils.zarr_io import open_zarr_root
 from fisheye.shared.zarr.stage_arrays import (
     REFINED_EYE_MASKS_SPEC,
     REFINED_SUBJECT_COMPONENT_ARRAYS,
@@ -293,7 +294,7 @@ def audit_refined_mask_metrics_zarr(
     run_name: Optional[str] = None,
     latest_only: bool = False,
 ) -> dict[str, Any]:
-    root = zarr.open_group(str(Path(zarr_path).expanduser().resolve()), mode="r")
+    root = open_zarr_root(Path(zarr_path).expanduser().resolve(), mode="r")
     summary = audit_refined_mask_metrics(
         root,
         stage=stage,

@@ -759,6 +759,8 @@ def test_registry_status_payload_reads_subject_mask_status_and_components(tmp_pa
 def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path) -> None:
     zarr_path = tmp_path / "subject_mask_component_overlay_analysis.zarr"
     zarr_path.mkdir()
+    training_zarr_path = tmp_path / "subject_mask_component_overlay_training.zarr"
+    training_zarr_path.mkdir()
 
     registry = Registry(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
@@ -768,6 +770,14 @@ def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path
         recording_id="recording_component_overlay",
         artifact_kind="source_recording",
         zarr_use="analysis",
+    )
+    registry.upsert_dataset(
+        "dataset_component_overlay_training",
+        session_uuid="session_component_overlay",
+        zarr_path=training_zarr_path,
+        recording_id="recording_component_overlay",
+        artifact_kind="source_recording",
+        zarr_use="training",
     )
     upsert_recording_step_status(
         registry,
@@ -851,6 +861,33 @@ def test_registry_status_payload_overlays_component_registry_rows(tmp_path: Path
         component_name="eyes_union",
         available=1,
         review_state="approved",
+    )
+    registry.upsert_subject_mask_component_quality(
+        dataset_id="dataset_component_overlay_training",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_training_legacy_eye_bridge",
+        component_name="eye_left",
+        component_family="eyes",
+        run_created_utc="2026-03-03T00:00:00+00:00",
+        recording_id="recording_component_overlay",
+        zarr_use="training",
+        subject_mask_method="fisheye.utils.backfill_subject_mask_runs",
+        label_schema_id="subject_v1_lr",
+        eye_component_mode="lr",
+        source_subject_mask_run=None,
+        available=1,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-03T00:01:00+00:00",
+        total_rois=100,
+        rows_with_component_mask=90,
+        rows_with_component_mask_rate=0.9,
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        quality_updated_utc="2026-03-03T00:01:00+00:00",
+        zarr_mtime_ns=456,
     )
     for component_name, review_state, lifecycle_state in (
         ("subject_body", "approved", "approved"),
