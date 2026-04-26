@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -18,6 +19,201 @@ rectangle_roi = None
 mask_mode = "circle"
 
 from fisheye.utils.zarr_io import open_zarr_root
+
+
+def _as_positive_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolution_from_attr(value: Any) -> Optional[tuple[int, int]]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    height = _as_positive_int(value[0])
+    width = _as_positive_int(value[1])
+    if height is None or width is None:
+        return None
+    return height, width
+
+
+def _resolve_source_video_path(zarr_root) -> Optional[Path]:
+    """Return the source video path recorded on a metadata-only production Zarr."""
+
+    candidates = [
+        zarr_root.attrs.get("source_video_path"),
+        zarr_root.attrs.get("source_path"),
+    ]
+    raw_video = zarr_root.get("raw_video") if hasattr(zarr_root, "get") else None
+    if raw_video is not None:
+        candidates.extend(
+            [
+                raw_video.attrs.get("source_path"),
+                raw_video.attrs.get("source_video_path"),
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        path = Path(str(candidate)).expanduser()
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_source_video_shape(zarr_root) -> Optional[tuple[int, int]]:
+    """Return the native source-video frame shape as (height, width)."""
+
+    for height_key, width_key in (
+        ("source_video_height", "source_video_width"),
+        ("source_full_height", "source_full_width"),
+        ("height", "width"),
+        ("video_height", "video_width"),
+    ):
+        height = _as_positive_int(zarr_root.attrs.get(height_key))
+        width = _as_positive_int(zarr_root.attrs.get(width_key))
+        if height is not None and width is not None:
+            return height, width
+
+    for key in ("source_video_resolution", "source_full_resolution"):
+        shape = _resolution_from_attr(zarr_root.attrs.get(key))
+        if shape is not None:
+            return shape
+
+    raw_video = zarr_root.get("raw_video") if hasattr(zarr_root, "get") else None
+    if raw_video is not None:
+        shape = _resolution_from_attr(raw_video.attrs.get("original_resolution"))
+        if shape is not None:
+            return shape
+    return None
+
+
+def _resolve_metadata_video_preview_shape(
+    zarr_root,
+    *,
+    use_full_res: bool,
+    source_shape: tuple[int, int],
+) -> tuple[str, tuple[int, int]]:
+    """Choose the coordinate space used when tuning from source-video fallback."""
+
+    if use_full_res:
+        return "images_full", source_shape
+
+    height = _as_positive_int(zarr_root.attrs.get("inference_height"))
+    width = _as_positive_int(zarr_root.attrs.get("inference_width"))
+    if height is not None and width is not None:
+        return "images_ds", (height, width)
+
+    for key in ("inference_resolution", "palette_downsampled_resolution"):
+        shape = _resolution_from_attr(zarr_root.attrs.get(key))
+        if shape is not None:
+            return "images_ds", shape
+
+    raw_video = zarr_root.get("raw_video") if hasattr(zarr_root, "get") else None
+    if raw_video is not None:
+        shape = _resolution_from_attr(raw_video.attrs.get("downsampled_resolution"))
+        if shape is not None:
+            return "images_ds", shape
+
+    source_h, source_w = source_shape
+    max_dim = max(source_h, source_w)
+    if max_dim > 640:
+        scale = 640.0 / float(max_dim)
+        return "images_ds", (max(1, round(source_h * scale)), max(1, round(source_w * scale)))
+    return "images_full", source_shape
+
+
+class _SourceVideoPreviewArray:
+    """Small array-like adapter that decodes source-video frames on demand."""
+
+    dtype = np.dtype("uint8")
+
+    def __init__(
+        self,
+        video_path: Path,
+        *,
+        frame_count: int,
+        source_shape: tuple[int, int],
+        preview_shape: tuple[int, int],
+    ) -> None:
+        self.video_path = video_path
+        self.shape = (int(frame_count), int(preview_shape[0]), int(preview_shape[1]))
+        self._source_shape = source_shape
+        self._preview_shape = preview_shape
+        self._capture = cv2.VideoCapture(str(video_path))
+        if not self._capture.isOpened():
+            raise ValueError(f"Could not open source video: {video_path}")
+
+    def __getitem__(self, frame_idx: int) -> np.ndarray:
+        index = int(frame_idx)
+        if index < 0 or index >= self.shape[0]:
+            raise IndexError(f"Frame index {index} out of bounds for source video with {self.shape[0]} frames.")
+        self._capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ok, frame = self._capture.read()
+        if not ok or frame is None:
+            raise RuntimeError(f"Could not decode frame {index} from {self.video_path}.")
+        if frame.ndim == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if tuple(frame.shape[:2]) != tuple(self._preview_shape):
+            frame = cv2.resize(
+                frame,
+                (int(self._preview_shape[1]), int(self._preview_shape[0])),
+                interpolation=cv2.INTER_AREA,
+            )
+        return np.asarray(frame, dtype=np.uint8)
+
+    def close(self) -> None:
+        self._capture.release()
+
+
+def _resolve_video_array(zarr_root, *, use_full_res: bool):
+    """Return `(array_like, array_name, description)` for tuning frames."""
+
+    if "raw_video" not in zarr_root:
+        available = ", ".join(sorted(zarr_root.keys()))
+        raise KeyError(f"'raw_video' group not found. Children: {available or 'none'}")
+    raw_video = zarr_root["raw_video"]
+
+    has_full = "images_full" in raw_video
+    has_ds = "images_ds" in raw_video
+    if use_full_res and has_full:
+        return raw_video["images_full"], "images_full", "raw_video/images_full"
+    if has_ds:
+        return raw_video["images_ds"], "images_ds", "raw_video/images_ds"
+    if has_full:
+        return raw_video["images_full"], "images_full", "raw_video/images_full"
+
+    source_path = _resolve_source_video_path(zarr_root)
+    source_shape = _resolve_source_video_shape(zarr_root)
+    frame_count = _as_positive_int(
+        raw_video.attrs.get("total_frames")
+        or raw_video.attrs.get("source_video_total_frames")
+        or zarr_root.attrs.get("total_frames")
+        or zarr_root.attrs.get("n_frames")
+    )
+    if source_path is None or source_shape is None or frame_count is None:
+        raise ValueError(
+            "No video arrays found in raw_video, and source-video fallback metadata is incomplete."
+        )
+
+    array_name, preview_shape = _resolve_metadata_video_preview_shape(
+        zarr_root,
+        use_full_res=use_full_res,
+        source_shape=source_shape,
+    )
+    return (
+        _SourceVideoPreviewArray(
+            source_path,
+            frame_count=frame_count,
+            source_shape=source_shape,
+            preview_shape=preview_shape,
+        ),
+        array_name,
+        f"source_video:{source_path}",
+    )
 
 
 def _normalize_mask_data(mask_data):
@@ -229,31 +425,13 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="
     
     try:
         zarr_root = open_zarr_root(zarr_path, mode='r')
-        if 'raw_video' not in zarr_root:
-            available = ", ".join(sorted(zarr_root.keys()))
-            raise KeyError(f"'raw_video' group not found. Children: {available or 'none'}")
-        raw_video = zarr_root['raw_video']
+        video_array, array_name, array_source = _resolve_video_array(
+            zarr_root,
+            use_full_res=use_full_res,
+        )
         
-        # Check what's available
-        has_full = 'images_full' in raw_video
-        has_ds = 'images_ds' in raw_video
-        
-        if not has_full and not has_ds:
-            print(" No video arrays found in raw_video group")
-            return
-        
-        # Select array based on preference and availability
-        if use_full_res and has_full:
-            video_array = raw_video['images_full']
-            array_name = "images_full"
-        elif has_ds:
-            video_array = raw_video['images_ds']
-            array_name = "images_ds"
-        else:
-            video_array = raw_video['images_full']
-            array_name = "images_full"
-        
-        print(f"\n Using array: {array_name}")
+        print(f"\n Using frame source: {array_source}")
+        print(f"   Coordinate space: {array_name}")
         print(f"   Shape: {video_array.shape}")
         
         max_frames = video_array.shape[0]
@@ -470,6 +648,8 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="
             print("  Cleared rectangle ROI")
             
     cv2.destroyAllWindows()
+    if hasattr(video_array, "close"):
+        video_array.close()
     print("\nTuner closed.")
 
 if __name__ == "__main__":

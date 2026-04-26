@@ -123,7 +123,7 @@ def test_assign_arenas_spatial_prefers_sparse_refined_instances(monkeypatch: pyt
         track_parent = root["arena_assignment_runs"]["arena_assignment_001"].create_group("tracks")
         return "tracks_001", track_parent, {"ok": True}
 
-    monkeypatch.setattr(mod.zarr, "open", fake_open)
+    monkeypatch.setattr(mod, "open_zarr_root", fake_open)
     monkeypatch.setattr(mod, "get_run_group", fake_get_run_group)
     monkeypatch.setattr(mod, "infer_experiment_setup", lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"))
     monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
@@ -182,7 +182,7 @@ def test_assign_arenas_spatial_falls_back_to_raw_when_instances_missing(monkeypa
         track_parent = root["arena_assignment_runs"]["arena_assignment_001"].create_group("tracks")
         return "tracks_001", track_parent, {"ok": True}
 
-    monkeypatch.setattr(mod.zarr, "open", fake_open)
+    monkeypatch.setattr(mod, "open_zarr_root", fake_open)
     monkeypatch.setattr(mod, "get_run_group", fake_get_run_group)
     monkeypatch.setattr(mod, "infer_experiment_setup", lambda _attrs: SimpleNamespace(setup_type="single_dish", num_dishes=1, source="experiment_setup"))
     monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", fake_get_single_dish_roi_from_mask)
@@ -214,3 +214,42 @@ def test_assign_arenas_spatial_falls_back_to_raw_when_instances_missing(monkeypa
     assert captured["source_refined_run"] is None
     assert root["arena_assignment_runs"]["arena_assignment_001"].attrs["assignment_source"] == "detect_raw"
     assert result["assigned_detections"] == 2
+
+
+def test_assign_arenas_spatial_missing_single_dish_mask_returns_standard_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _build_root()
+    emitted: list[dict[str, object]] = []
+
+    def fake_open(_path: str, mode: str = "a"):
+        assert mode == "a"
+        return root
+
+    def fake_emit_stage_completion(*_args, **kwargs):
+        emitted.append(kwargs)
+
+    monkeypatch.setattr(mod, "open_zarr_root", fake_open)
+    monkeypatch.setattr(
+        mod,
+        "infer_experiment_setup",
+        lambda _attrs: SimpleNamespace(
+            setup_type="single_dish",
+            num_dishes=1,
+            source="experiment_setup",
+        ),
+    )
+    monkeypatch.setattr(mod, "get_single_dish_roi_from_mask", lambda _root, _console: None)
+    monkeypatch.setattr(mod, "emit_stage_completion", fake_emit_stage_completion)
+
+    result = assign_arenas_spatial("/tmp/fake.zarr", config={}, console=None)
+
+    assert result["status"] == "missing"
+    assert result["reason"] == "dish_mask_missing"
+    assert result["assigned_detections"] == 0
+    assert result["unassigned_detections"] == 0
+    assert result["assignment_rate_percent"] == 0.0
+    assert result["assigned"] == 0
+    assert result["unassigned"] == 0
+    assert len(emitted) == 2
+    assert {event["step_name"] for event in emitted} == {"arena_assignment", "tracks"}

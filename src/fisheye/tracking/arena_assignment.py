@@ -21,6 +21,7 @@ from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..utils.zarr_io import open_zarr_root
 from .single_subject_per_arena import (
     TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
     write_single_subject_per_arena_tracking_run,
@@ -284,6 +285,24 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
     return None
 
 
+def _missing_assignment_result(*, setup_type: str, reason: str) -> Dict[str, Any]:
+    """Return the standard summary shape for prerequisite-missing exits."""
+
+    return {
+        "status": "missing",
+        "reason": reason,
+        "setup_type": setup_type,
+        "total_detections": 0,
+        "assigned_detections": 0,
+        "unassigned_detections": 0,
+        "assignment_rate_percent": 0.0,
+        "num_arenas": 0,
+        # Legacy aliases for callers that predate the canonical names.
+        "assigned": 0,
+        "unassigned": 0,
+    }
+
+
 def assign_arenas_spatial(
     zarr_path: str,
     config: Dict[str, Any],
@@ -328,7 +347,7 @@ def assign_arenas_spatial(
     console.rule("[bold]Stage: Spatial Arena Assignment[/bold]")
     start_time = time.perf_counter()
     
-    root = zarr.open(zarr_path, mode='a')
+    root = open_zarr_root(zarr_path, mode='a')
 
     def _resolve_tracks_status(id_status: str) -> Tuple[str, str, Optional[str], Optional[str]]:
         tracks_parent = root.get("tracking_runs")
@@ -392,7 +411,7 @@ def assign_arenas_spatial(
                 root=root,
                 zarr_path=zarr_path,
                 id_status="missing",
-                id_reason="subdish_masks_missing",
+                id_reason="dish_mask_missing",
                 id_run_name=None,
                 id_method="spatial",
                 id_coverage_pct=0.0,
@@ -404,7 +423,10 @@ def assign_arenas_spatial(
                 tracks_details={"upstream": {"arena_assignment": "missing"}},
                 console=console,
             )
-            return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
+            return _missing_assignment_result(
+                setup_type=setup_type,
+                reason="dish_mask_missing",
+            )
     
     # MULTI-DISH MODE: Require sub-dish ROI definitions
     else:
@@ -450,7 +472,10 @@ def assign_arenas_spatial(
                 tracks_details={"upstream": {"arena_assignment": "missing"}},
                 console=console,
             )
-            return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
+            return _missing_assignment_result(
+                setup_type=setup_type,
+                reason="subdish_masks_missing",
+            )
     
     # Validate expected vs actual number of ROIs
     if experiment_setup and num_dishes > 0:
@@ -907,4 +932,12 @@ if __name__ == "__main__":
         console=console
     )
     
-    console.print(f"\n[green]Assigned arenas to {results['assigned_detections']} detections[/green]")
+    if results.get("status") == "missing":
+        console.print(
+            f"\n[yellow]Arena assignment not completed:[/yellow] "
+            f"{results.get('reason', 'missing prerequisite')}"
+        )
+    else:
+        console.print(
+            f"\n[green]Assigned arenas to {results.get('assigned_detections', 0)} detections[/green]"
+        )
