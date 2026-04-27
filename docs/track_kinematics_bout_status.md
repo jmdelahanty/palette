@@ -189,7 +189,9 @@ parameters as separate candidate runs:
   consumers should use when they do not explicitly request a level.
 
 For recordings where the smoothed trace over-broadens bouts, prefer detecting
-and displaying bouts from `speed_filtered`:
+and displaying bouts from `speed_filtered`. In this mode, hysteresis has already
+zeroed non-motion, so the bout threshold should be a small epsilon rather than a
+biological speed cutoff:
 
 ```bash
 scripts/py -m fisheye.analysis.track_kinematics <archive.zarr> \
@@ -203,10 +205,9 @@ scripts/py -m fisheye.analysis.track_kinematics <archive.zarr> \
 scripts/py -m fisheye.analysis.detect_bouts_multi_level <archive.zarr> \
   --track-kinematics-run tk_hyst8_low4_s010 \
   --run-name bouts_tk_hyst8_low4_s010_filtered \
-  --threshold-mm 2.0 \
+  --threshold-mm 0.1 \
   --default-level filtered \
-  --boundary-mode local_minimum \
-  --boundary-window-s 0.25 \
+  --boundary-mode threshold \
   --overwrite
 ```
 
