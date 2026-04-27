@@ -32,6 +32,8 @@ class TrackKinematicsInteractiveData:
     positions: Optional[np.ndarray]
     position_unit: str
     swim_bouts: np.ndarray
+    swim_bout_records: np.ndarray
+    inter_bout_intervals: np.ndarray
     swim_bout_label: Optional[str]
     swim_bout_source: Optional[str]
     validity_spans: np.ndarray
@@ -63,6 +65,15 @@ class SwimBoutRunOption:
     threshold_mm: Optional[float]
     n_bouts_by_level: Mapping[str, int]
     is_latest: bool
+
+
+@dataclass(frozen=True)
+class _SwimBoutPayload:
+    spans: np.ndarray
+    records: np.ndarray
+    inter_bout_intervals: np.ndarray
+    label: Optional[str]
+    source: Optional[str]
 
 
 def _normalize_path(path: str) -> str:
@@ -176,6 +187,20 @@ def _empty_spans() -> np.ndarray:
 
 def _empty_labels() -> np.ndarray:
     return np.empty((0,), dtype=object)
+
+
+def _empty_records() -> np.ndarray:
+    return np.zeros(0, dtype=[])
+
+
+def _empty_swim_bout_payload() -> _SwimBoutPayload:
+    return _SwimBoutPayload(
+        spans=_empty_spans(),
+        records=_empty_records(),
+        inter_bout_intervals=_empty_records(),
+        label=None,
+        source=None,
+    )
 
 
 def _speed_level_key(speed_level: Optional[str], default: str = "speed_smoothed") -> str:
@@ -373,6 +398,22 @@ def _load_bout_spans_from_group(group: zarr.Group, *, fps: Optional[float] = Non
             np.asarray(group["end_frame"][:], dtype=np.float64) / float(fps),
         )
     return _empty_spans()
+
+
+def _load_structured_or_empty(group: zarr.Group, name: str) -> np.ndarray:
+    from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+
+    try:
+        records, _attrs = load_structured_dataset(group, name)
+    except Exception:
+        return _empty_records()
+    return np.asarray(records)
+
+
+def _structured_to_dataframe(records: np.ndarray) -> pd.DataFrame:
+    if records.size == 0 or records.dtype.names is None:
+        return pd.DataFrame()
+    return pd.DataFrame.from_records(records)
 
 
 def _safe_float(value: object) -> Optional[float]:
@@ -603,16 +644,16 @@ def _swim_bout_run_matches_track(run_group: zarr.Group, spec: Mapping[str, Any])
     return True
 
 
-def _load_global_swim_bout_spans(
+def _load_global_swim_bout_payload(
     root: zarr.Group,
     *,
     spec: Mapping[str, Any],
     requested_run: Optional[str],
     speed_level: Optional[str],
-) -> tuple[np.ndarray, Optional[str], Optional[str]]:
+) -> _SwimBoutPayload:
     swim_parent = root.get("analysis/swim_bout_runs")
     if swim_parent is None:
-        return _empty_spans(), None, None
+        return _empty_swim_bout_payload()
 
     run_name = requested_run
     if not run_name or run_name.lower() == "latest":
@@ -620,11 +661,11 @@ def _load_global_swim_bout_spans(
         if isinstance(latest, str) and latest:
             run_name = latest
     if not run_name or run_name.lower() == "none" or run_name not in swim_parent:
-        return _empty_spans(), None, None
+        return _empty_swim_bout_payload()
 
     run_group = swim_parent[run_name]
     if not _swim_bout_run_matches_track(run_group, spec):
-        return _empty_spans(), None, None
+        return _empty_swim_bout_payload()
 
     speed_levels = ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged")
     is_hierarchical = all(level in run_group for level in speed_levels)
@@ -636,29 +677,46 @@ def _load_global_swim_bout_spans(
         if level_key not in run_group and default_level in run_group:
             level_key = default_level
         if level_key not in run_group:
-            return _empty_spans(), None, None
+            return _empty_swim_bout_payload()
+        level_group = run_group[level_key]
+        records = _load_structured_or_empty(level_group, "bouts")
         spans = _load_bout_spans_from_group(
-            run_group[level_key],
+            level_group,
             fps=float(run_group.attrs["fps"]) if "fps" in run_group.attrs else None,
         )
+        intervals = _load_structured_or_empty(level_group, "inter_bout_intervals")
         label = f"{run_name} ({level_key}) ({method})"
-        return spans, label, "analysis_swim_bout_runs"
+        return _SwimBoutPayload(
+            spans=spans,
+            records=records,
+            inter_bout_intervals=intervals,
+            label=label,
+            source="analysis_swim_bout_runs",
+        )
 
+    records = _load_structured_or_empty(run_group, "bouts")
     spans = _load_bout_spans_from_group(
         run_group,
         fps=float(run_group.attrs["fps"]) if "fps" in run_group.attrs else None,
     )
+    intervals = _load_structured_or_empty(run_group, "inter_bout_intervals")
     label = f"{run_name} ({method})"
-    return spans, label, "analysis_swim_bout_runs"
+    return _SwimBoutPayload(
+        spans=spans,
+        records=records,
+        inter_bout_intervals=intervals,
+        label=label,
+        source="analysis_swim_bout_runs",
+    )
 
 
-def _load_swim_bout_spans(
+def _load_swim_bout_payload(
     root: zarr.Group,
     spec: Mapping[str, Any],
     *,
     requested_run: Optional[str],
     speed_level: Optional[str],
-) -> tuple[np.ndarray, Optional[str], Optional[str]]:
+) -> _SwimBoutPayload:
     overlays = spec.get("overlays")
     swim_overlay = overlays.get("swim_bouts") if isinstance(overlays, Mapping) else {}
     if not isinstance(swim_overlay, Mapping):
@@ -667,11 +725,11 @@ def _load_swim_bout_spans(
     explicit_request = requested_run is not None
     run_selector = requested_run if explicit_request else swim_overlay.get("requested_run")
     if isinstance(run_selector, str) and run_selector.lower() == "none":
-        return _empty_spans(), None, None
+        return _empty_swim_bout_payload()
 
     overlay_enabled = bool(swim_overlay.get("enabled", False))
     if not explicit_request and not overlay_enabled:
-        return _empty_spans(), None, None
+        return _empty_swim_bout_payload()
 
     level_selector = speed_level if speed_level is not None else swim_overlay.get("speed_level")
     if not isinstance(run_selector, str):
@@ -679,7 +737,7 @@ def _load_swim_bout_spans(
     if not isinstance(level_selector, str):
         level_selector = None
 
-    return _load_global_swim_bout_spans(
+    return _load_global_swim_bout_payload(
         root,
         spec=spec,
         requested_run=run_selector,
@@ -761,7 +819,7 @@ def load_track_kinematics_interactive_data(
     if positions is not None:
         positions = positions.astype(np.float64, copy=False)
 
-    swim_bouts, swim_bout_label, swim_bout_source = _load_swim_bout_spans(
+    swim_bout_payload = _load_swim_bout_payload(
         root,
         spec,
         requested_run=swim_bout_run,
@@ -787,9 +845,11 @@ def load_track_kinematics_interactive_data(
         series=_collect_series(root, source_paths),
         positions=positions,
         position_unit=position_unit,
-        swim_bouts=swim_bouts,
-        swim_bout_label=swim_bout_label,
-        swim_bout_source=swim_bout_source,
+        swim_bouts=swim_bout_payload.spans,
+        swim_bout_records=swim_bout_payload.records,
+        inter_bout_intervals=swim_bout_payload.inter_bout_intervals,
+        swim_bout_label=swim_bout_payload.label,
+        swim_bout_source=swim_bout_payload.source,
         validity_spans=validity_spans,
         validity_labels=validity_labels,
         validity_source=validity_source,
@@ -821,6 +881,15 @@ def to_position_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:
 
 
 def to_swim_bout_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:
+    if data.swim_bout_records.size and data.swim_bout_records.dtype.names is not None:
+        frame = _structured_to_dataframe(data.swim_bout_records)
+        if "start_time_s" in frame and "start_s" not in frame:
+            frame["start_s"] = frame["start_time_s"]
+        if "end_time_s" in frame and "end_s" not in frame:
+            frame["end_s"] = frame["end_time_s"]
+        if "duration_s" not in frame and {"start_s", "end_s"}.issubset(frame.columns):
+            frame["duration_s"] = frame["end_s"] - frame["start_s"]
+        return frame
     if data.swim_bouts.size == 0:
         return pd.DataFrame(columns=["start_s", "end_s", "duration_s"])
     starts = data.swim_bouts[:, 0]
@@ -832,6 +901,10 @@ def to_swim_bout_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame
             "duration_s": ends - starts,
         }
     )
+
+
+def to_inter_bout_interval_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:
+    return _structured_to_dataframe(data.inter_bout_intervals)
 
 
 def to_validity_span_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:

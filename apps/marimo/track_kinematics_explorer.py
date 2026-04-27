@@ -25,6 +25,7 @@ def _():
     import json
     import marimo as mo
     import numpy as np
+    import pandas as pd
     import plotly.express as px
     import plotly.graph_objects as go
     import time
@@ -34,6 +35,7 @@ def _():
         discover_swim_bout_run_options,
         discover_track_kinematics_run_options,
         load_track_kinematics_interactive_data,
+        to_inter_bout_interval_dataframe,
         to_position_dataframe,
         to_swim_bout_dataframe,
         to_timeseries_dataframe,
@@ -49,8 +51,10 @@ def _():
         load_track_kinematics_interactive_data,
         mo,
         np,
+        pd,
         px,
         time,
+        to_inter_bout_interval_dataframe,
         to_position_dataframe,
         to_swim_bout_dataframe,
         to_timeseries_dataframe,
@@ -214,22 +218,22 @@ def _(
 
 @app.cell
 def _(initial_swim_bout_run, mo, swim_bout_options):
-    none_label = "No swim-bout overlay"
-    swim_label_to_option = {none_label: None}
-    swim_label_to_option.update({option.label: option for option in swim_bout_options})
+    _none_label = "No swim-bout overlay"
+    swim_label_to_option = {_none_label: None}
+    swim_label_to_option.update({_option.label: _option for _option in swim_bout_options})
 
-    def _matches_initial_bout(option):
-        if option is None or initial_swim_bout_run is None:
+    def _matches_initial_bout(_option):
+        if _option is None or initial_swim_bout_run is None:
             return False
-        return option.run_name == str(initial_swim_bout_run)
+        return _option.run_name == str(initial_swim_bout_run)
 
     _selected_default = next(
         (
-            label
-            for label, option in swim_label_to_option.items()
-            if _matches_initial_bout(option)
+            _label
+            for _label, _option in swim_label_to_option.items()
+            if _matches_initial_bout(_option)
         ),
-        swim_bout_options[0].label if swim_bout_options else none_label,
+        swim_bout_options[0].label if swim_bout_options else _none_label,
     )
     swim_bout_picker = mo.ui.dropdown(
         options=list(swim_label_to_option),
@@ -241,23 +245,88 @@ def _(initial_swim_bout_run, mo, swim_bout_options):
 
 
 @app.cell
+def _(initial_speed_level, mo, swim_bout_picker, swim_label_to_option):
+    selected_swim_bout = swim_label_to_option[swim_bout_picker.value]
+    selected_speed_level_fallback = (
+        str(initial_speed_level)
+        if selected_swim_bout is None and initial_speed_level is not None
+        else selected_swim_bout.speed_level
+        if selected_swim_bout is not None
+        else None
+    )
+    swim_bout_speed_level_label_to_value = {}
+    _level_order = ("speed_filtered", "speed_smoothed", "speed_raw", "speed_averaged")
+    _level_alias = {
+        "speed_raw": "raw",
+        "speed_filtered": "filtered",
+        "speed_smoothed": "smoothed",
+        "speed_averaged": "averaged",
+    }
+    if selected_swim_bout is None:
+        swim_bout_speed_level_picker = mo.md("No swim-bout speed level selected.")
+    else:
+        swim_bout_speed_level_label_to_value = {
+            f"{_level_alias[_level]} ({selected_swim_bout.n_bouts_by_level.get(_level, 0)} bouts)": _level_alias[_level]
+            for _level in _level_order
+            if _level in selected_swim_bout.n_bouts_by_level
+        }
+        if not swim_bout_speed_level_label_to_value:
+            swim_bout_speed_level_picker = mo.md("No swim-bout speed levels found.")
+        else:
+            _preferred = str(initial_speed_level) if initial_speed_level is not None else selected_swim_bout.speed_level
+            _selected_label = next(
+                (
+                    _label
+                    for _label, _value in swim_bout_speed_level_label_to_value.items()
+                    if _value == _preferred
+                ),
+                next(
+                    (
+                        _label
+                        for _label, _value in swim_bout_speed_level_label_to_value.items()
+                        if _value == selected_swim_bout.speed_level
+                    ),
+                    next(iter(swim_bout_speed_level_label_to_value)),
+                ),
+            )
+            swim_bout_speed_level_picker = mo.ui.dropdown(
+                options=list(swim_bout_speed_level_label_to_value),
+                value=_selected_label,
+                label="Swim-bout speed level",
+            )
+    swim_bout_speed_level_picker
+    return (
+        selected_speed_level_fallback,
+        selected_swim_bout,
+        swim_bout_speed_level_label_to_value,
+        swim_bout_speed_level_picker,
+    )
+
+
+@app.cell
+def _(
+    selected_speed_level_fallback,
+    swim_bout_speed_level_label_to_value,
+    swim_bout_speed_level_picker,
+):
+    if swim_bout_speed_level_label_to_value and hasattr(swim_bout_speed_level_picker, "value"):
+        selected_speed_level = swim_bout_speed_level_label_to_value[swim_bout_speed_level_picker.value]
+    else:
+        selected_speed_level = selected_speed_level_fallback
+    return (selected_speed_level,)
+
+
+@app.cell
 def _(
     artifact,
-    initial_speed_level,
     load_track_kinematics_interactive_data,
+    selected_speed_level,
+    selected_swim_bout,
     selected_track,
-    swim_bout_picker,
-    swim_label_to_option,
     time,
     write_perf_event,
     zarr_path,
 ):
-    selected_swim_bout = swim_label_to_option[swim_bout_picker.value]
-    selected_speed_level = (
-        selected_swim_bout.speed_level
-        if selected_swim_bout is not None
-        else (str(initial_speed_level) if initial_speed_level is not None else None)
-    )
     _load_t0 = time.perf_counter()
     data = load_track_kinematics_interactive_data(
         zarr_path,
@@ -279,7 +348,7 @@ def _(
         n_position_rows=int(data.positions.shape[0]) if data.positions is not None else 0,
         n_swim_bouts=int(data.swim_bouts.shape[0]),
     )
-    return data, selected_speed_level, selected_swim_bout
+    return (data,)
 
 
 @app.cell
@@ -324,6 +393,7 @@ def _(
 def _(
     data,
     time,
+    to_inter_bout_interval_dataframe,
     to_position_dataframe,
     to_swim_bout_dataframe,
     to_timeseries_dataframe,
@@ -334,6 +404,7 @@ def _(
     timeseries_df = to_timeseries_dataframe(data)
     position_df = to_position_dataframe(data)
     swim_bout_df = to_swim_bout_dataframe(data)
+    inter_bout_interval_df = to_inter_bout_interval_dataframe(data)
     validity_df = to_validity_span_dataframe(data)
     write_perf_event(
         "build_dataframes",
@@ -343,34 +414,44 @@ def _(
         n_timeseries_columns=len(timeseries_df.columns),
         n_position_rows=len(position_df),
         n_swim_bout_rows=len(swim_bout_df),
+        n_inter_bout_interval_rows=len(inter_bout_interval_df),
         n_validity_rows=len(validity_df),
     )
-    return position_df, swim_bout_df, timeseries_df, validity_df
+    return inter_bout_interval_df, position_df, swim_bout_df, timeseries_df, validity_df
 
 
 @app.cell
-def _(data, mo, timeseries_df):
-    speed_columns = [
-        column
-        for column in timeseries_df.columns
-        if "speed" in column.lower() and timeseries_df[column].notna().any()
+def _(data, mo, selected_speed_level, timeseries_df):
+    _speed_columns = [
+        _column
+        for _column in timeseries_df.columns
+        if "speed" in _column.lower() and timeseries_df[_column].notna().any()
     ]
-    default_speed_columns = [
-        column
-        for column in ("speed_smoothed_mm", "speed_filtered_mm", "speed_raw_mm")
-        if column in speed_columns
+    _level = str(selected_speed_level or "").strip()
+    if _level.startswith("speed_"):
+        _level = _level.removeprefix("speed_")
+    _preferred_columns = [
+        _column
+        for _column in (f"speed_{_level}_mm", f"speed_{_level}_px")
+        if _level and _column in _speed_columns
     ]
+    _fallback_columns = [
+        _column
+        for _column in ("speed_smoothed_mm", "speed_filtered_mm", "speed_raw_mm")
+        if _column in _speed_columns
+    ]
+    _default_speed_columns = _preferred_columns[:1] or _fallback_columns[:1] or _speed_columns[:1]
     speed_series_picker = mo.ui.multiselect(
-        options=speed_columns,
-        value=default_speed_columns[:2] if default_speed_columns else speed_columns[:1],
+        options=_speed_columns,
+        value=_default_speed_columns,
         label="Speed traces",
     )
-    max_time = float(timeseries_df["time_s"].max()) if len(timeseries_df) else 0.0
+    _max_time = float(timeseries_df["time_s"].max()) if len(timeseries_df) else 0.0
     time_window = mo.ui.range_slider(
         start=0.0,
-        stop=max_time,
-        value=[0.0, max_time],
-        step=max(max_time / 1000.0, 0.001),
+        stop=_max_time,
+        value=[0.0, _max_time],
+        step=max(_max_time / 1000.0, 0.001),
         label="Time window (s)",
     )
     show_swim_bouts = mo.ui.checkbox(
@@ -381,12 +462,35 @@ def _(data, mo, timeseries_df):
         value=bool(data.validity_source),
         label="Overlay invalid/gap intervals",
     )
-    mo.vstack([speed_series_picker, time_window, show_swim_bouts, show_invalid_intervals])
-    return show_invalid_intervals, show_swim_bouts, speed_series_picker, time_window
+    histogram_bins = mo.ui.slider(
+        start=5,
+        stop=100,
+        value=40,
+        step=5,
+        label="Histogram bins",
+    )
+    mo.vstack(
+        [
+            speed_series_picker,
+            time_window,
+            show_swim_bouts,
+            show_invalid_intervals,
+            histogram_bins,
+        ]
+    )
+    return histogram_bins, show_invalid_intervals, show_swim_bouts, speed_series_picker, time_window
 
 
 @app.cell
-def _(swim_bout_df, time, time_window, timeseries_df, validity_df, write_perf_event):
+def _(
+    inter_bout_interval_df,
+    swim_bout_df,
+    time,
+    time_window,
+    timeseries_df,
+    validity_df,
+    write_perf_event,
+):
     _filter_t0 = time.perf_counter()
     start_s, stop_s = time_window.value
     time_mask = (timeseries_df["time_s"] >= start_s) & (timeseries_df["time_s"] <= stop_s)
@@ -397,6 +501,16 @@ def _(swim_bout_df, time, time_window, timeseries_df, validity_df, write_perf_ev
         else []
     )
     filtered_swim_bout_df = swim_bout_df.loc[bout_mask].copy() if len(swim_bout_df) else swim_bout_df
+    if len(inter_bout_interval_df) and {"prev_end_time_s", "next_start_time_s"}.issubset(
+        inter_bout_interval_df.columns
+    ):
+        interval_mask = (
+            (inter_bout_interval_df["next_start_time_s"] >= start_s)
+            & (inter_bout_interval_df["prev_end_time_s"] <= stop_s)
+        )
+        filtered_inter_bout_interval_df = inter_bout_interval_df.loc[interval_mask].copy()
+    else:
+        filtered_inter_bout_interval_df = inter_bout_interval_df
     validity_mask = (
         (validity_df["end_s"] >= start_s) & (validity_df["start_s"] <= stop_s)
         if len(validity_df)
@@ -412,10 +526,19 @@ def _(swim_bout_df, time, time_window, timeseries_df, validity_df, write_perf_ev
         n_timeseries_rows_out=len(filtered_timeseries_df),
         n_swim_bout_rows_in=len(swim_bout_df),
         n_swim_bout_rows_out=len(filtered_swim_bout_df),
+        n_inter_bout_interval_rows_in=len(inter_bout_interval_df),
+        n_inter_bout_interval_rows_out=len(filtered_inter_bout_interval_df),
         n_validity_rows_in=len(validity_df),
         n_validity_rows_out=len(filtered_validity_df),
     )
-    return filtered_swim_bout_df, filtered_timeseries_df, filtered_validity_df, start_s, stop_s
+    return (
+        filtered_inter_bout_interval_df,
+        filtered_swim_bout_df,
+        filtered_timeseries_df,
+        filtered_validity_df,
+        start_s,
+        stop_s,
+    )
 
 
 @app.cell
@@ -530,6 +653,65 @@ def _(
 
 
 @app.cell
+def _(
+    filtered_inter_bout_interval_df,
+    filtered_swim_bout_df,
+    histogram_bins,
+    np,
+    pd,
+    px,
+    time,
+    write_perf_event,
+):
+    _figure_t0 = time.perf_counter()
+
+    _metric_specs = [
+        (filtered_swim_bout_df, "duration_s", "Bout duration (s)"),
+        (filtered_swim_bout_df, "observed_duration_s", "Observed bout duration (s)"),
+        (filtered_swim_bout_df, "path_length_mm", "Bout path length (mm)"),
+        (filtered_swim_bout_df, "net_displacement_mm", "Bout net displacement (mm)"),
+        (filtered_inter_bout_interval_df, "interval_s", "Inter-bout interval (s)"),
+    ]
+    histogram_frames = []
+    for _frame, _column, _label in _metric_specs:
+        if _column not in _frame:
+            continue
+        _values = _frame[_column].to_numpy(dtype=float, copy=False)
+        _values = _values[np.isfinite(_values)]
+        if _values.size:
+            histogram_frames.append(pd.DataFrame({"metric": _label, "value": _values}))
+
+    if histogram_frames:
+        histogram_df = pd.concat(histogram_frames, ignore_index=True)
+        histogram_plot = px.histogram(
+            histogram_df,
+            x="value",
+            facet_col="metric",
+            facet_col_wrap=2,
+            nbins=int(histogram_bins.value),
+            title="Bout Metric Histograms",
+            labels={"value": "Value", "count": "Count"},
+            opacity=0.82,
+        )
+        histogram_plot.update_xaxes(matches=None)
+        histogram_plot.update_yaxes(matches=None)
+        histogram_plot.update_layout(height=620, margin=dict(l=40, r=20, t=60, b=40), showlegend=False)
+    else:
+        histogram_df = pd.DataFrame(columns=["metric", "value"])
+        histogram_plot = "No bout metric values available for the selected run/window."
+
+    write_perf_event(
+        "build_bout_histograms",
+        time.perf_counter() - _figure_t0,
+        n_histogram_rows=len(histogram_df),
+        n_histogram_metrics=int(histogram_df["metric"].nunique()) if len(histogram_df) else 0,
+        bins=int(histogram_bins.value),
+    )
+    histogram_plot
+    return (histogram_df,)
+
+
+@app.cell
 def _(position_df, px, start_s, stop_s, time, write_perf_event):
     _figure_t0 = time.perf_counter()
     filtered_position_df = position_df[
@@ -567,11 +749,13 @@ def _(position_df, px, start_s, stop_s, time, write_perf_event):
 @app.cell
 def _(
     data,
+    filtered_inter_bout_interval_df,
     filtered_position_df,
     filtered_swim_bout_df,
     filtered_timeseries_df,
     filtered_validity_df,
     mo,
+    inter_bout_interval_df,
     swim_bout_df,
     validity_df,
 ):
@@ -581,6 +765,8 @@ def _(
             mo.stat(label="Position rows", value=f"{len(filtered_position_df):,}"),
             mo.stat(label="Swim bouts", value=f"{len(swim_bout_df):,}"),
             mo.stat(label="Visible bouts", value=f"{len(filtered_swim_bout_df):,}"),
+            mo.stat(label="Inter-bout intervals", value=f"{len(inter_bout_interval_df):,}"),
+            mo.stat(label="Visible intervals", value=f"{len(filtered_inter_bout_interval_df):,}"),
             mo.stat(label="Invalid intervals", value=f"{len(validity_df):,}"),
             mo.stat(label="Visible invalid", value=f"{len(filtered_validity_df):,}"),
             mo.stat(label="Track ID", value=str(data.spec.get("track_id", "unknown"))),
@@ -591,7 +777,7 @@ def _(
 
 
 @app.cell
-def _(data, mo):
+def _(data, inter_bout_interval_df, mo, swim_bout_df):
     mo.accordion(
         {
             "Interactive spec": mo.tree(dict(data.spec)),
@@ -602,6 +788,14 @@ def _(data, mo):
                     "label": data.swim_bout_label,
                     "source": data.swim_bout_source,
                     "count": int(data.swim_bouts.shape[0]),
+                }
+            ),
+            "Bout metric tables": mo.tree(
+                {
+                    "bout_rows": int(len(swim_bout_df)),
+                    "bout_columns": list(swim_bout_df.columns),
+                    "inter_bout_interval_rows": int(len(inter_bout_interval_df)),
+                    "inter_bout_interval_columns": list(inter_bout_interval_df.columns),
                 }
             ),
             "Validity overlay": mo.tree(

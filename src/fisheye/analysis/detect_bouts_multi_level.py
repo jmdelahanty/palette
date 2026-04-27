@@ -33,7 +33,7 @@ Usage (with options):
     scripts/py -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
         --run-name custom_run \\
         --track-kinematics-run latest \\
-        --threshold-mm 5.0 \\
+        --threshold-mm 0.01 \\
         --default-level filtered \\
         --boundary-mode local_minimum \\
         --overwrite
@@ -1040,7 +1040,7 @@ def detect_and_save_bouts(
     track_kinematics_run: str = "latest",
     track_id: int = 0,
     method: str = "threshold",
-    threshold_mm: float = 2.0,
+    threshold_mm: float = 0.01,
     prominence: float = 1.0,
     min_peak_height: Optional[float] = None,
     rel_height: float = 0.9,
@@ -1404,8 +1404,8 @@ def main():
     parser.add_argument(
         '--threshold-mm',
         type=float,
-        default=2.0,
-        help='Speed threshold in mm/s for threshold method (default: 2.0)',
+        default=0.01,
+        help='Speed threshold in mm/s for threshold method (default: 0.01)',
     )
 
     parser.add_argument(

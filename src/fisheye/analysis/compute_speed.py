@@ -58,6 +58,8 @@ TRANSITION_REASON_CODES = {
     str(TRANSITION_REASON_TELEPORT): "teleport",
 }
 
+SMOOTHING_ALIGNMENTS = ("centered", "causal")
+
 
 @dataclass
 class TrackSpeeds:
@@ -95,6 +97,47 @@ def find_fps(root: zarr.Group, console: Console, fallback: float = 60.0) -> floa
         f"[yellow]Warning:[/yellow] FPS metadata not found; defaulting to {fallback}."
     )
     return fallback
+
+
+def _moving_average_ignore_mask(
+    values: np.ndarray,
+    valid: np.ndarray,
+    window: int,
+    *,
+    alignment: str,
+) -> np.ndarray:
+    """Average values over either centered or trailing windows, ignoring invalid samples."""
+
+    series = np.asarray(values, dtype=np.float64)
+    valid_mask = np.asarray(valid, dtype=bool)
+    if series.shape != valid_mask.shape:
+        raise ValueError("values and valid mask must have matching shapes")
+    if alignment not in SMOOTHING_ALIGNMENTS:
+        expected = ", ".join(SMOOTHING_ALIGNMENTS)
+        raise ValueError(f"Unsupported smoothing alignment {alignment!r}; expected one of: {expected}")
+    if window <= 1 or series.size == 0:
+        result = np.zeros_like(series, dtype=np.float64)
+        result[valid_mask] = series[valid_mask]
+        return result
+
+    filled = np.where(valid_mask, series, 0.0)
+    counts = valid_mask.astype(np.float64)
+    if alignment == "centered":
+        kernel = np.ones(window, dtype=np.float64)
+        sum_values = np.convolve(filled, kernel, mode="same")
+        count_values = np.convolve(counts, kernel, mode="same")
+    else:
+        cumulative_values = np.concatenate([[0.0], np.cumsum(filled, dtype=np.float64)])
+        cumulative_counts = np.concatenate([[0.0], np.cumsum(counts, dtype=np.float64)])
+        stops = np.arange(1, series.size + 1)
+        starts = np.maximum(0, stops - int(window))
+        sum_values = cumulative_values[stops] - cumulative_values[starts]
+        count_values = cumulative_counts[stops] - cumulative_counts[starts]
+
+    averaged = np.zeros_like(series, dtype=np.float64)
+    nonzero = count_values > 0
+    averaged[nonzero] = sum_values[nonzero] / count_values[nonzero]
+    return averaged
 
 
 def resolve_dimensions(root: zarr.Group) -> Tuple[int, int]:
@@ -315,6 +358,7 @@ def compute_track_speed(
     hysteresis_low_px: Optional[float] = None,
     hysteresis_min_frames: Optional[int] = None,
     smoothing_method: str = "moving_average",
+    smoothing_alignment: str = "centered",
     savgol_polyorder: int = 3,
 ) -> TrackSpeeds:
     """Compute instantaneous and smoothed speeds for a single track.
@@ -325,14 +369,22 @@ def compute_track_speed(
     for hysteresis_min_frames consecutive frames to exit "moving" state.
 
     Displacement smoothing can use either moving average (simple) or Savitzky-Golay
-    (shape-preserving polynomial fit). Savitzky-Golay is better for preserving peak
-    shapes and derivatives (e.g., acceleration) but is slightly more computationally
-    expensive.
+    (shape-preserving polynomial fit). Moving-average smoothing can be centered or
+    causal. Causal smoothing uses a trailing window so future motion cannot shift
+    estimated bout onset earlier in time.
 
     Args:
         smoothing_method: "moving_average" (default) or "savitzky_golay"
+        smoothing_alignment: "centered" (default) or "causal". Causal is currently
+            supported only with moving_average.
         savgol_polyorder: Polynomial order for Savitzky-Golay (default: 3)
     """
+    if smoothing_alignment not in SMOOTHING_ALIGNMENTS:
+        expected = ", ".join(SMOOTHING_ALIGNMENTS)
+        raise ValueError(f"Unsupported smoothing alignment {smoothing_alignment!r}; expected one of: {expected}")
+    if smoothing_alignment == "causal" and smoothing_method == "savitzky_golay":
+        raise ValueError("causal smoothing currently supports smoothing_method='moving_average' only")
+
     if frames.size == 0:
         empty = np.array([], dtype=np.float32)
         empty_int64 = np.array([], dtype=np.int64)
@@ -474,22 +526,20 @@ def compute_track_speed(
                     )
                 else:
                     # Window too small for Savitzky-Golay, fall back to moving average
-                    kernel = np.ones(distance_window, dtype=np.float64)
-                    sum_values = np.convolve(displacement_post_hysteresis, kernel, mode="same")
-                    count_values = np.convolve(valid.astype(np.float64), kernel, mode="same")
-                    displacement_post_smoothing = np.zeros_like(displacement_post_hysteresis)
-                    nonzero = count_values > 0
-                    displacement_post_smoothing[nonzero] = sum_values[nonzero] / count_values[nonzero]
+                    displacement_post_smoothing = _moving_average_ignore_mask(
+                        displacement_post_hysteresis,
+                        valid,
+                        distance_window,
+                        alignment=smoothing_alignment,
+                    )
             else:
                 # Moving average (default method)
-                kernel = np.ones(distance_window, dtype=np.float64)
-                # Average only over windows that contain at least one valid displacement sample.
-                sum_values = np.convolve(displacement_post_hysteresis, kernel, mode="same")
-                count_values = np.convolve(valid.astype(np.float64), kernel, mode="same")
-
-                displacement_post_smoothing = np.zeros_like(displacement_post_hysteresis)
-                nonzero = count_values > 0
-                displacement_post_smoothing[nonzero] = sum_values[nonzero] / count_values[nonzero]
+                displacement_post_smoothing = _moving_average_ignore_mask(
+                    displacement_post_hysteresis,
+                    valid,
+                    distance_window,
+                    alignment=smoothing_alignment,
+                )
         else:
             displacement_post_smoothing = displacement_post_hysteresis
 
@@ -519,14 +569,22 @@ def compute_track_speed(
     if speed_window <= 1:
         speed_averaged = speed_smoothed.copy()
     else:
-        values = np.nan_to_num(speed_smoothed, nan=0.0, copy=False)
-        counts = np.isfinite(speed_smoothed).astype(np.float32)
-        kernel = np.ones(speed_window, dtype=np.float32)
-        sum_values = np.convolve(values, kernel, mode="same")
-        count_values = np.convolve(counts, kernel, mode="same")
+        valid_speed = np.isfinite(speed_smoothed)
+        values = np.where(valid_speed, speed_smoothed, 0.0)
         speed_averaged = np.full_like(speed_smoothed, np.nan)
-        valid_avg = count_values > 0
-        speed_averaged[valid_avg] = sum_values[valid_avg] / count_values[valid_avg]
+        averaged = _moving_average_ignore_mask(
+            values,
+            valid_speed,
+            speed_window,
+            alignment=smoothing_alignment,
+        )
+        valid_avg = _moving_average_ignore_mask(
+            valid_speed.astype(np.float64),
+            valid_speed,
+            speed_window,
+            alignment=smoothing_alignment,
+        ) > 0
+        speed_averaged[valid_avg] = averaged[valid_avg]
 
     # Cumulative path distance with NaN values already replaced with 0.
     cumulative_path_distance = np.cumsum(frame_path_distance_smoothed)
@@ -781,6 +839,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Smoothing method for frame path-distance: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
     )
     parser.add_argument(
+        "--smoothing-alignment",
+        type=str,
+        choices=SMOOTHING_ALIGNMENTS,
+        default="centered",
+        help="Temporal smoothing window alignment: 'centered' uses past and future samples; 'causal' uses only current/past samples and is supported for moving_average (default: centered).",
+    )
+    parser.add_argument(
         "--savgol-polyorder",
         type=int,
         default=3,
@@ -890,6 +955,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             hysteresis_low_px=hysteresis_low,
             hysteresis_min_frames=hysteresis_min,
             smoothing_method=args.smoothing_method,
+            smoothing_alignment=args.smoothing_alignment,
             savgol_polyorder=args.savgol_polyorder,
         )
         tracks[int(det_id)] = speeds
@@ -942,6 +1008,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
             "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
             "smoothing_method": args.smoothing_method,
+            "smoothing_alignment": args.smoothing_alignment,
             "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
             "command": " ".join(sys.argv),
             "summary": summaries,

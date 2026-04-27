@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 
 import numpy as np
+import pytest
 import zarr
 from rich.console import Console
 
@@ -12,6 +13,7 @@ from fisheye.analysis.compute_speed import (
     TRANSITION_REASON_FRAME_GAP,
     TRANSITION_REASON_OK,
     TRANSITION_REASON_TELEPORT,
+    compute_track_speed,
 )
 
 
@@ -189,6 +191,51 @@ def test_build_track_datasets_materializes_transition_validity() -> None:
         track["frame_path_distance_raw_px"],
         np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
     )
+
+
+def test_causal_smoothing_does_not_leak_future_motion_into_onset() -> None:
+    frames = np.arange(7, dtype=np.int64)
+    positions = np.column_stack(
+        [
+            np.array([0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0], dtype=np.float32),
+            np.zeros(7, dtype=np.float32),
+        ]
+    )
+
+    centered = compute_track_speed(
+        frames,
+        positions,
+        fps=1.0,
+        smooth_seconds=3.0,
+        distance_smooth_seconds=3.0,
+        smoothing_method="moving_average",
+        smoothing_alignment="centered",
+    )
+    causal = compute_track_speed(
+        frames,
+        positions,
+        fps=1.0,
+        smooth_seconds=3.0,
+        distance_smooth_seconds=3.0,
+        smoothing_method="moving_average",
+        smoothing_alignment="causal",
+    )
+
+    assert centered.speed_smoothed[3] > 0.0
+    assert causal.speed_smoothed[3] == 0.0
+    assert causal.speed_smoothed[4] > 0.0
+
+
+def test_causal_smoothing_rejects_savitzky_golay_for_now() -> None:
+    with pytest.raises(ValueError, match="causal smoothing"):
+        compute_track_speed(
+            np.arange(4, dtype=np.int64),
+            np.column_stack([np.arange(4, dtype=np.float32), np.zeros(4, dtype=np.float32)]),
+            fps=1.0,
+            smooth_seconds=3.0,
+            smoothing_method="savitzky_golay",
+            smoothing_alignment="causal",
+        )
 
 
 def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:

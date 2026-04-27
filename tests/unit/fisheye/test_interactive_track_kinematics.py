@@ -12,6 +12,7 @@ from fisheye.visualization.interactive_track_kinematics import (
     discover_swim_bout_run_options,
     discover_track_kinematics_run_options,
     load_track_kinematics_interactive_data,
+    to_inter_bout_interval_dataframe,
     to_position_dataframe,
     to_swim_bout_dataframe,
     to_timeseries_dataframe,
@@ -56,16 +57,35 @@ def _add_hierarchical_swim_bouts(
     run.attrs["track_id"] = track_id
 
     bouts = np.asarray(
-        [(1, 0.010, 0.020), (2, 0.035, 0.045)],
+        [
+            (1, 0.010, 0.020, 0.010, 0.009, 1.20, 0.90, False),
+            (2, 0.035, 0.045, 0.010, 0.010, 1.80, 1.10, True),
+        ],
         dtype=[
             ("bout_id", "i4"),
             ("start_time_s", "f8"),
             ("end_time_s", "f8"),
+            ("duration_s", "f8"),
+            ("observed_duration_s", "f8"),
+            ("path_length_mm", "f8"),
+            ("net_displacement_mm", "f8"),
+            ("gap_censored", "?"),
+        ],
+    )
+    intervals = np.asarray(
+        [(1, 2, 0.020, 0.035, 0.015)],
+        dtype=[
+            ("prev_bout_id", "i4"),
+            ("next_bout_id", "i4"),
+            ("prev_end_time_s", "f8"),
+            ("next_start_time_s", "f8"),
+            ("interval_s", "f8"),
         ],
     )
     for level in ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged"):
         level_group = run.create_group(level)
         write_columnar_dataset(level_group, "bouts", bouts)
+        write_columnar_dataset(level_group, "inter_bout_intervals", intervals)
 
 
 def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: Path) -> None:
@@ -120,11 +140,15 @@ def test_load_track_kinematics_interactive_data_reads_canonical_swim_bouts(tmp_p
         speed_level="smoothed",
     )
     swim_bouts = to_swim_bout_dataframe(data)
+    inter_bout_intervals = to_inter_bout_interval_dataframe(data)
 
     assert data.swim_bout_source == "analysis_swim_bout_runs"
     assert data.swim_bout_label == "swim_bout_1 (speed_smoothed) (threshold)"
     assert swim_bouts["start_s"].tolist() == [0.010, 0.035]
     np.testing.assert_allclose(swim_bouts["duration_s"].to_numpy(), [0.010, 0.010])
+    np.testing.assert_allclose(swim_bouts["path_length_mm"].to_numpy(), [1.20, 1.80])
+    assert swim_bouts["gap_censored"].tolist() == [False, True]
+    assert inter_bout_intervals["interval_s"].tolist() == [0.015]
 
 
 def test_discover_track_and_derived_swim_bout_options(tmp_path: Path) -> None:
@@ -166,6 +190,7 @@ def test_load_track_kinematics_interactive_data_skips_mismatched_swim_bout_run(t
 
     assert data.swim_bout_source is None
     assert to_swim_bout_dataframe(data).empty
+    assert to_inter_bout_interval_dataframe(data).empty
 
 
 def test_load_track_kinematics_interactive_data_rejects_wrong_schema(tmp_path: Path) -> None:

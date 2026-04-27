@@ -165,6 +165,7 @@ Important behavior in
 - frame path-distance increments larger than `500 px` are treated as suspicious and excluded
 - optional hysteresis removes micro-jitter before smoothing
 - temporal smoothing can be moving-average or Savitzky-Golay
+- moving-average smoothing can be `centered` or `causal`
 
 This is conservative and generally reasonable for current data quality:
 
@@ -175,6 +176,8 @@ But it also means:
 
 - the stack is not modeling missing-frame motion
 - gap-heavy tracks will systematically undercount movement
+- centered smoothing can leak future motion backward in time, so onset-sensitive
+  bout segmentation should use `speed_filtered` or causal smoothing
 
 ### Tuning Hysteresis and Bout Segmentation
 
@@ -200,12 +203,13 @@ scripts/py -m fisheye.analysis.track_kinematics <archive.zarr> \
   --hysteresis-low-px 4 \
   --hysteresis-min-frames 3 \
   --smooth-seconds 0.10 \
+  --smoothing-alignment causal \
   --offline-run-name tk_hyst8_low4_s010
 
 scripts/py -m fisheye.analysis.detect_bouts_multi_level <archive.zarr> \
   --track-kinematics-run tk_hyst8_low4_s010 \
   --run-name bouts_tk_hyst8_low4_s010_filtered \
-  --threshold-mm 0.1 \
+  --threshold-mm 0.01 \
   --default-level filtered \
   --boundary-mode threshold \
   --overwrite
@@ -248,6 +252,16 @@ The explorer overlays `start_time_s` to `end_time_s`, so local-minimum mode
 should visually capture the full rise and decay around the core threshold
 segment while still preserving the core fields for stricter quantitative
 analyses.
+
+The explorer also reads the selected speed-level `bouts` and
+`inter_bout_intervals` tables directly from `analysis/swim_bout_runs/<run>/`.
+Its histogram panel is a pandas/Plotly view over those persisted fields, not a
+new recomputation from the speed trace. Current histogram metrics include bout
+duration, observed bout duration, path length, net displacement, and inter-bout
+interval.
+Use the swim-bout speed-level picker to compare filtered/hysteresis-derived
+bouts against smoothed-derived bouts from the same `detect_bouts_multi_level`
+run.
 
 For the current 2026-01-28 arena 2 canary review, `tk_hyst4_low2_s005` is the
 preferred default candidate when it exists. This is a review default for the

@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .compute_speed import (  # re-exported for compatibility
+    SMOOTHING_ALIGNMENTS,
     TRANSITION_REASON_CODES,
     TrackSpeeds,
     compute_track_speed,
@@ -617,6 +618,7 @@ def build_track_datasets(
     hysteresis_low_px: Optional[float] = None,
     hysteresis_min_frames: Optional[int] = None,
     smoothing_method: str = "moving_average",
+    smoothing_alignment: str = "centered",
     savgol_polyorder: int = 3,
 ) -> Tuple[Dict[int, Dict[str, np.ndarray]], List[Dict[str, float]]]:
     """Assemble per-track data arrays and summary statistics.
@@ -675,6 +677,7 @@ def build_track_datasets(
             hysteresis_low_px=hysteresis_low_px,
             hysteresis_min_frames=hysteresis_min_frames,
             smoothing_method=smoothing_method,
+            smoothing_alignment=smoothing_alignment,
             savgol_polyorder=savgol_polyorder,
         )
 
@@ -1750,6 +1753,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Smoothing method for frame path-distance in offline analysis: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
     )
     parser.add_argument(
+        "--smoothing-alignment",
+        type=str,
+        choices=SMOOTHING_ALIGNMENTS,
+        default="centered",
+        help="Temporal smoothing alignment: 'centered' uses past and future samples; 'causal' uses only current/past samples and is supported for moving_average (default: centered).",
+    )
+    parser.add_argument(
         "--savgol-polyorder",
         type=int,
         default=3,
@@ -1940,6 +1950,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 smooth_seconds=args.smooth_seconds,
                 pixel_to_mm=pixel_to_mm_online,
                 smoothing_method=args.smoothing_method,
+                smoothing_alignment=args.smoothing_alignment,
                 savgol_polyorder=args.savgol_polyorder,
             )
 
@@ -1985,6 +1996,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         "fps": fps,
                         "smoothing_seconds": args.smooth_seconds,
                         "smoothing_method": args.smoothing_method,
+                        "smoothing_alignment": args.smoothing_alignment,
                         "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                         "coordinate_space": saved_coordinate_space,
                         "calibration_used": saved_pixel_to_mm,
@@ -2009,6 +2021,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "fps": fps,
                             "smoothing_seconds": args.smooth_seconds,
                             "smoothing_method": args.smoothing_method,
+                            "smoothing_alignment": args.smoothing_alignment,
                             "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                             "pixel_to_mm": saved_pixel_to_mm,
                             "calibration": calibration_info,
@@ -2139,6 +2152,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     hysteresis_low_px=hysteresis_low,
                     hysteresis_min_frames=hysteresis_min,
                     smoothing_method=args.smoothing_method,
+                    smoothing_alignment=args.smoothing_alignment,
                     savgol_polyorder=args.savgol_polyorder,
                 )
 
@@ -2254,6 +2268,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "fps": fps,
                             "smoothing_seconds": args.smooth_seconds,
                             "smoothing_method": args.smoothing_method,
+                            "smoothing_alignment": args.smoothing_alignment,
                             "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                             "distance_interpolation_seconds": args.distance_interpolation_seconds,
                             "coordinate_space": "camera",
@@ -2282,6 +2297,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "fps": fps,
                                 "smoothing_seconds": args.smooth_seconds,
                                 "smoothing_method": args.smoothing_method,
+                                "smoothing_alignment": args.smoothing_alignment,
                                 "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                                 "distance_interpolation_seconds": args.distance_interpolation_seconds,
                                 "pixel_to_mm": pixel_to_mm,
