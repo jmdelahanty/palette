@@ -32,8 +32,11 @@ def _():
 
     from fisheye.visualization.interactive_track_kinematics import (
         DEFAULT_INTERACTIVE_ARTIFACT,
+        bout_kinematics_records_to_dataframe,
+        discover_bout_kinematics_run_options,
         discover_swim_bout_run_options,
         discover_track_kinematics_run_options,
+        load_bout_kinematics_records,
         load_track_kinematics_interactive_data,
         to_inter_bout_interval_dataframe,
         to_position_dataframe,
@@ -44,10 +47,13 @@ def _():
 
     return (
         DEFAULT_INTERACTIVE_ARTIFACT,
+        bout_kinematics_records_to_dataframe,
+        discover_bout_kinematics_run_options,
         discover_swim_bout_run_options,
         discover_track_kinematics_run_options,
         go,
         json,
+        load_bout_kinematics_records,
         load_track_kinematics_interactive_data,
         mo,
         np,
@@ -217,15 +223,18 @@ def _(
 
 
 @app.cell
-def _(initial_swim_bout_run, mo, swim_bout_options):
+def _(initial_speed_level, initial_swim_bout_run, mo, swim_bout_options):
     _none_label = "No swim-bout overlay"
     swim_label_to_option = {_none_label: None}
     swim_label_to_option.update({_option.label: _option for _option in swim_bout_options})
+    _initial_level = str(initial_speed_level).removeprefix("speed_") if initial_speed_level is not None else None
 
     def _matches_initial_bout(_option):
         if _option is None or initial_swim_bout_run is None:
             return False
-        return _option.run_name == str(initial_swim_bout_run)
+        if _option.run_name != str(initial_swim_bout_run):
+            return False
+        return _initial_level is None or _option.speed_level == _initial_level
 
     _selected_default = next(
         (
@@ -238,82 +247,101 @@ def _(initial_swim_bout_run, mo, swim_bout_options):
     swim_bout_picker = mo.ui.dropdown(
         options=list(swim_label_to_option),
         value=_selected_default,
-        label="Derived swim-bout run",
+        label="Derived swim-bout candidate",
     )
     swim_bout_picker
     return swim_bout_picker, swim_label_to_option
 
 
 @app.cell
-def _(initial_speed_level, mo, swim_bout_picker, swim_label_to_option):
+def _(initial_speed_level, swim_bout_picker, swim_label_to_option):
     selected_swim_bout = swim_label_to_option[swim_bout_picker.value]
-    selected_speed_level_fallback = (
+    selected_speed_level = (
         str(initial_speed_level)
         if selected_swim_bout is None and initial_speed_level is not None
         else selected_swim_bout.speed_level
         if selected_swim_bout is not None
         else None
     )
-    swim_bout_speed_level_label_to_value = {}
-    _level_order = ("speed_filtered", "speed_smoothed", "speed_raw", "speed_averaged")
-    _level_alias = {
-        "speed_raw": "raw",
-        "speed_filtered": "filtered",
-        "speed_smoothed": "smoothed",
-        "speed_averaged": "averaged",
-    }
-    if selected_swim_bout is None:
-        swim_bout_speed_level_picker = mo.md("No swim-bout speed level selected.")
-    else:
-        swim_bout_speed_level_label_to_value = {
-            f"{_level_alias[_level]} ({selected_swim_bout.n_bouts_by_level.get(_level, 0)} bouts)": _level_alias[_level]
-            for _level in _level_order
-            if _level in selected_swim_bout.n_bouts_by_level
-        }
-        if not swim_bout_speed_level_label_to_value:
-            swim_bout_speed_level_picker = mo.md("No swim-bout speed levels found.")
-        else:
-            _preferred = str(initial_speed_level) if initial_speed_level is not None else selected_swim_bout.speed_level
-            _selected_label = next(
-                (
-                    _label
-                    for _label, _value in swim_bout_speed_level_label_to_value.items()
-                    if _value == _preferred
-                ),
-                next(
-                    (
-                        _label
-                        for _label, _value in swim_bout_speed_level_label_to_value.items()
-                        if _value == selected_swim_bout.speed_level
-                    ),
-                    next(iter(swim_bout_speed_level_label_to_value)),
-                ),
-            )
-            swim_bout_speed_level_picker = mo.ui.dropdown(
-                options=list(swim_bout_speed_level_label_to_value),
-                value=_selected_label,
-                label="Swim-bout speed level",
-            )
-    swim_bout_speed_level_picker
-    return (
-        selected_speed_level_fallback,
-        selected_swim_bout,
-        swim_bout_speed_level_label_to_value,
-        swim_bout_speed_level_picker,
-    )
+    return selected_speed_level, selected_swim_bout
 
 
 @app.cell
 def _(
-    selected_speed_level_fallback,
-    swim_bout_speed_level_label_to_value,
-    swim_bout_speed_level_picker,
+    discover_bout_kinematics_run_options,
+    selected_speed_level,
+    selected_swim_bout,
+    selected_track,
+    time,
+    write_perf_event,
+    zarr_path,
 ):
-    if swim_bout_speed_level_label_to_value and hasattr(swim_bout_speed_level_picker, "value"):
-        selected_speed_level = swim_bout_speed_level_label_to_value[swim_bout_speed_level_picker.value]
+    _discovery_t0 = time.perf_counter()
+    bout_kinematics_options = discover_bout_kinematics_run_options(
+        zarr_path,
+        track_run_path=selected_track.run_path,
+        track_id=selected_track.track_id,
+        swim_bout_run=selected_swim_bout.run_name if selected_swim_bout is not None else None,
+        speed_level=selected_speed_level,
+    )
+    write_perf_event(
+        "discover_bout_kinematics_options",
+        time.perf_counter() - _discovery_t0,
+        zarr_path=zarr_path,
+        selected_track_run=selected_track.run_path,
+        selected_track_id=selected_track.track_id,
+        selected_swim_bout_run=selected_swim_bout.run_name if selected_swim_bout is not None else None,
+        selected_speed_level=selected_speed_level,
+        n_bout_kinematics_options=len(bout_kinematics_options),
+    )
+    return (bout_kinematics_options,)
+
+
+@app.cell
+def _(bout_kinematics_options, mo):
+    _none_label = "No bout-kinematics overlay"
+    bout_kinematics_label_to_option = {_none_label: None}
+    bout_kinematics_label_to_option.update({_option.label: _option for _option in bout_kinematics_options})
+    _selected_default = bout_kinematics_options[0].label if bout_kinematics_options else _none_label
+    bout_kinematics_picker = mo.ui.dropdown(
+        options=list(bout_kinematics_label_to_option),
+        value=_selected_default,
+        label="Bout-kinematics candidate",
+    )
+    bout_kinematics_picker
+    return bout_kinematics_label_to_option, bout_kinematics_picker
+
+
+@app.cell
+def _(
+    bout_kinematics_label_to_option,
+    bout_kinematics_picker,
+    bout_kinematics_records_to_dataframe,
+    load_bout_kinematics_records,
+    time,
+    write_perf_event,
+    zarr_path,
+):
+    selected_bout_kinematics = bout_kinematics_label_to_option[bout_kinematics_picker.value]
+    _load_t0 = time.perf_counter()
+    if selected_bout_kinematics is None:
+        bout_kinematics_df = bout_kinematics_records_to_dataframe({})
+        bout_kinematics_attrs = {}
     else:
-        selected_speed_level = selected_speed_level_fallback
-    return (selected_speed_level,)
+        _records_by_level, bout_kinematics_attrs = load_bout_kinematics_records(
+            zarr_path,
+            run_name=selected_bout_kinematics.run_name,
+        )
+        bout_kinematics_df = bout_kinematics_records_to_dataframe(_records_by_level)
+    write_perf_event(
+        "load_bout_kinematics",
+        time.perf_counter() - _load_t0,
+        selected_bout_kinematics_run=(
+            selected_bout_kinematics.run_name if selected_bout_kinematics is not None else None
+        ),
+        n_bout_kinematics_rows=len(bout_kinematics_df),
+    )
+    return bout_kinematics_attrs, bout_kinematics_df, selected_bout_kinematics
 
 
 @app.cell
@@ -354,6 +382,7 @@ def _(
 @app.cell
 def _(
     data,
+    selected_bout_kinematics,
     mo,
     performance_log_path,
     performance_session_id,
@@ -378,6 +407,8 @@ def _(
         **Swim Bout Overlay:** `{data.swim_bout_label or "none"}`
 
         **Selected Bout Candidate:** `{selected_swim_bout.label if selected_swim_bout else "none"}`
+
+        **Bout Kinematics:** `{selected_bout_kinematics.label if selected_bout_kinematics else "none"}`
 
         **Speed Level:** `{selected_speed_level or "artifact/default"}`
 
@@ -654,6 +685,7 @@ def _(
 
 @app.cell
 def _(
+    bout_kinematics_df,
     filtered_inter_bout_interval_df,
     filtered_swim_bout_df,
     histogram_bins,
@@ -712,6 +744,107 @@ def _(
 
 
 @app.cell
+def _(bout_kinematics_df, histogram_bins, mo, np, pd, px, time, write_perf_event):
+    _figure_t0 = time.perf_counter()
+    _net_metric_specs = [
+        ("net_delta_heading_deg", "Net heading change (deg)"),
+        ("abs_net_delta_heading_deg", "Absolute net heading change (deg)"),
+    ]
+    _within_metric_specs = [
+        ("within_heading_range_deg", "Within-bout heading range (deg)"),
+        ("within_heading_peak_to_peak_deg", "Within-bout heading peak-to-peak (deg)"),
+        ("within_heading_path_deg", "Within-bout heading path (deg)"),
+        ("within_heading_std_deg", "Within-bout heading std (deg)"),
+    ]
+
+    def _metric_frames(_metric_specs):
+        _frames = []
+        for _column, _label in _metric_specs:
+            if _column not in bout_kinematics_df:
+                continue
+            _values = bout_kinematics_df[["heading_level", _column]].copy()
+            _values = _values.rename(columns={_column: "value"})
+            _values["metric"] = _label
+            _values = _values[np.isfinite(_values["value"].to_numpy(dtype=float, copy=False))]
+            if len(_values):
+                _frames.append(_values[["heading_level", "metric", "value"]])
+        return _frames
+
+    _net_frames = _metric_frames(_net_metric_specs)
+    _within_frames = _metric_frames(_within_metric_specs)
+    _all_frames = [*_net_frames, *_within_frames]
+
+    if _net_frames:
+        _net_heading_histogram_df = pd.concat(_net_frames, ignore_index=True)
+        _net_heading_histogram_plot = px.histogram(
+            _net_heading_histogram_df,
+            x="value",
+            color="heading_level",
+            facet_col="metric",
+            facet_col_wrap=2,
+            nbins=int(histogram_bins.value),
+            barmode="overlay",
+            opacity=0.68,
+            title="Net Heading-Change Histograms",
+            labels={"value": "Degrees", "count": "Bout count", "heading_level": "Heading level"},
+        )
+        _net_heading_histogram_plot.update_xaxes(matches=None, range=[-180, 180])
+        _net_heading_histogram_plot.update_yaxes(matches=None)
+        _net_heading_histogram_plot.update_layout(
+            height=420,
+            margin=dict(l=40, r=20, t=70, b=40),
+        )
+    else:
+        _net_heading_histogram_df = pd.DataFrame(columns=["heading_level", "metric", "value"])
+        _net_heading_histogram_plot = "No net heading-change metrics available for the selected candidate."
+
+    if _within_frames:
+        _within_heading_histogram_df = pd.concat(_within_frames, ignore_index=True)
+        _within_heading_histogram_plot = px.histogram(
+            _within_heading_histogram_df,
+            x="value",
+            color="heading_level",
+            facet_col="metric",
+            facet_col_wrap=2,
+            nbins=int(histogram_bins.value),
+            barmode="overlay",
+            opacity=0.68,
+            title="Within-Bout Heading Metrics",
+            labels={"value": "Degrees", "count": "Bout count", "heading_level": "Heading level"},
+        )
+        _within_heading_histogram_plot.update_xaxes(matches=None)
+        _within_heading_histogram_plot.update_yaxes(matches=None)
+        _within_heading_histogram_plot.update_layout(
+            height=640,
+            margin=dict(l=40, r=20, t=70, b=40),
+        )
+    else:
+        _within_heading_histogram_df = pd.DataFrame(columns=["heading_level", "metric", "value"])
+        _within_heading_histogram_plot = "No within-bout heading metrics available for the selected candidate."
+
+    if _all_frames:
+        bout_heading_histogram_df = pd.concat(_all_frames, ignore_index=True)
+    else:
+        bout_heading_histogram_df = pd.DataFrame(columns=["heading_level", "metric", "value"])
+
+    write_perf_event(
+        "build_bout_heading_histograms",
+        time.perf_counter() - _figure_t0,
+        n_histogram_rows=len(bout_heading_histogram_df),
+        n_net_histogram_rows=len(_net_heading_histogram_df),
+        n_within_histogram_rows=len(_within_heading_histogram_df),
+        n_heading_levels=(
+            int(bout_heading_histogram_df["heading_level"].nunique())
+            if len(bout_heading_histogram_df)
+            else 0
+        ),
+        bins=int(histogram_bins.value),
+    )
+    mo.vstack([_net_heading_histogram_plot, _within_heading_histogram_plot])
+    return (bout_heading_histogram_df,)
+
+
+@app.cell
 def _(position_df, px, start_s, stop_s, time, write_perf_event):
     _figure_t0 = time.perf_counter()
     filtered_position_df = position_df[
@@ -748,6 +881,7 @@ def _(position_df, px, start_s, stop_s, time, write_perf_event):
 
 @app.cell
 def _(
+    bout_kinematics_df,
     data,
     filtered_inter_bout_interval_df,
     filtered_position_df,
@@ -767,6 +901,7 @@ def _(
             mo.stat(label="Visible bouts", value=f"{len(filtered_swim_bout_df):,}"),
             mo.stat(label="Inter-bout intervals", value=f"{len(inter_bout_interval_df):,}"),
             mo.stat(label="Visible intervals", value=f"{len(filtered_inter_bout_interval_df):,}"),
+            mo.stat(label="Bout kinematics rows", value=f"{len(bout_kinematics_df):,}"),
             mo.stat(label="Invalid intervals", value=f"{len(validity_df):,}"),
             mo.stat(label="Visible invalid", value=f"{len(filtered_validity_df):,}"),
             mo.stat(label="Track ID", value=str(data.spec.get("track_id", "unknown"))),
@@ -777,7 +912,7 @@ def _(
 
 
 @app.cell
-def _(data, inter_bout_interval_df, mo, swim_bout_df):
+def _(bout_kinematics_attrs, bout_kinematics_df, data, inter_bout_interval_df, mo, swim_bout_df):
     mo.accordion(
         {
             "Interactive spec": mo.tree(dict(data.spec)),
@@ -796,6 +931,13 @@ def _(data, inter_bout_interval_df, mo, swim_bout_df):
                     "bout_columns": list(swim_bout_df.columns),
                     "inter_bout_interval_rows": int(len(inter_bout_interval_df)),
                     "inter_bout_interval_columns": list(inter_bout_interval_df.columns),
+                }
+            ),
+            "Bout kinematics": mo.tree(
+                {
+                    "rows": int(len(bout_kinematics_df)),
+                    "columns": list(bout_kinematics_df.columns),
+                    "attrs": dict(bout_kinematics_attrs),
                 }
             ),
             "Validity overlay": mo.tree(

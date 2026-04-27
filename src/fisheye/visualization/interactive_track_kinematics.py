@@ -68,10 +68,30 @@ class SwimBoutRunOption:
 
 
 @dataclass(frozen=True)
+class BoutKinematicsRunOption:
+    run_name: str
+    label: str
+    default_heading_level: str
+    heading_levels: tuple[str, ...]
+    source_track_kinematics_run: Optional[str]
+    source_track_id: Optional[int]
+    source_swim_bout_run: Optional[str]
+    source_swim_bout_speed_level: Optional[str]
+    is_latest: bool
+
+
+@dataclass(frozen=True)
 class _SwimBoutPayload:
     spans: np.ndarray
     records: np.ndarray
     inter_bout_intervals: np.ndarray
+    label: Optional[str]
+    source: Optional[str]
+
+
+@dataclass(frozen=True)
+class _BoutKinematicsPayload:
+    records_by_level: dict[str, np.ndarray]
     label: Optional[str]
     source: Optional[str]
 
@@ -212,6 +232,15 @@ def _speed_level_key(speed_level: Optional[str], default: str = "speed_smoothed"
         "averaged": "speed_averaged",
     }
     return level_map.get(level, level if level.startswith("speed_") else f"speed_{level}")
+
+
+def _heading_level_key(heading_level: Optional[str], default: str = "heading_smoothed") -> str:
+    level = str(heading_level or default).strip()
+    level_map = {
+        "raw": "heading_raw",
+        "smoothed": "heading_smoothed",
+    }
+    return level_map.get(level, level if level.startswith("heading_") else f"heading_{level}")
 
 
 def _spans_from_start_stop(starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
@@ -484,17 +513,20 @@ def _bout_count(level_group: zarr.Group) -> int:
 def _swim_option_label(
     *,
     run_name: str,
-    default_level: str,
+    speed_level: str,
+    is_default_level: bool,
     detection_method: str,
     threshold_mm: Optional[float],
     count: int,
     is_latest: bool,
 ) -> str:
-    pieces = [run_name, default_level, f"{count} bouts"]
+    pieces = [run_name, speed_level, f"{count} bouts"]
     if threshold_mm is not None:
         pieces.append(f"threshold {threshold_mm:g} mm/s")
     if detection_method:
-        pieces.append(str(detection_method))
+        pieces.append(f"method {detection_method}")
+    if is_default_level:
+        pieces.append("default")
     if is_latest:
         pieces.append("latest")
     return " | ".join(pieces)
@@ -570,7 +602,7 @@ def discover_swim_bout_run_options(
 
     track_run_name = _normalize_path(track_run_path).split("/")[-1]
     latest = parent.attrs.get("latest")
-    speed_levels = ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged")
+    speed_levels = ("speed_filtered", "speed_smoothed", "speed_raw", "speed_averaged")
     options: list[SwimBoutRunOption] = []
     for run_name in _group_keys(parent):
         run_group = parent[run_name]
@@ -592,28 +624,118 @@ def discover_swim_bout_run_options(
             for level in speed_levels
             if level in run_group
         }
-        default_count = n_bouts_by_level.get(default_level, 0)
         method = str(run_group.attrs.get("detection_method", "unknown"))
         threshold = _safe_float(run_group.attrs.get("threshold_mm"))
         is_latest = str(latest) == str(run_name)
-        options.append(
-            SwimBoutRunOption(
-                run_name=run_name,
-                label=_swim_option_label(
+        ordered_levels = [default_level] + [
+            level for level in speed_levels if level != default_level
+        ]
+        for level in ordered_levels:
+            if level not in n_bouts_by_level:
+                continue
+            speed_level = level.replace("speed_", "", 1)
+            options.append(
+                SwimBoutRunOption(
                     run_name=run_name,
+                    label=_swim_option_label(
+                        run_name=run_name,
+                        speed_level=speed_level,
+                        is_default_level=level == default_level,
+                        detection_method=method,
+                        threshold_mm=threshold,
+                        count=n_bouts_by_level[level],
+                        is_latest=is_latest,
+                    ),
                     default_level=default_level,
+                    speed_level=speed_level,
+                    source_track_kinematics_run=str(source_run) if source_run is not None else None,
+                    track_id=source_track_id,
                     detection_method=method,
                     threshold_mm=threshold,
-                    count=default_count,
+                    n_bouts_by_level=n_bouts_by_level,
                     is_latest=is_latest,
-                ),
-                default_level=default_level,
-                speed_level=default_level.replace("speed_", "", 1),
-                source_track_kinematics_run=str(source_run) if source_run is not None else None,
-                track_id=source_track_id,
-                detection_method=method,
-                threshold_mm=threshold,
-                n_bouts_by_level=n_bouts_by_level,
+                )
+            )
+
+    level_order = {"filtered": 0, "smoothed": 1, "raw": 2, "averaged": 3}
+    return sorted(
+        options,
+        key=lambda item: (
+            not item.is_latest,
+            item.run_name,
+            item.speed_level != item.default_level.replace("speed_", "", 1),
+            level_order.get(item.speed_level, 99),
+        ),
+    )
+
+
+def discover_bout_kinematics_run_options(
+    zarr_path: Path | str,
+    *,
+    track_run_path: str,
+    track_id: int,
+    swim_bout_run: Optional[str],
+    speed_level: Optional[str],
+) -> list[BoutKinematicsRunOption]:
+    """Return bout-kinematics runs derived from the selected bout candidate."""
+
+    if swim_bout_run is None or not speed_level:
+        return []
+
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    parent = root.get("analysis/bout_kinematics_runs")
+    if parent is None:
+        return []
+
+    track_run_name = _normalize_path(track_run_path).split("/")[-1]
+    speed_level_key = _speed_level_key(speed_level)
+    latest = parent.attrs.get("latest")
+    options: list[BoutKinematicsRunOption] = []
+    for run_name in _group_keys(parent):
+        run_group = parent[run_name]
+        source_refs = run_group.attrs.get("source_refs")
+        source_refs = dict(source_refs) if isinstance(source_refs, Mapping) else {}
+        source_track_run = (
+            source_refs.get("source_track_kinematics_run")
+            or run_group.attrs.get("source_track_kinematics_run")
+        )
+        if source_track_run is None or not _run_names_match(source_track_run, track_run_name):
+            continue
+        source_track_id = _safe_int(source_refs.get("source_track_id") or run_group.attrs.get("source_track_id"))
+        if source_track_id is None or source_track_id != int(track_id):
+            continue
+        source_swim = source_refs.get("source_swim_bout_run") or run_group.attrs.get("source_swim_bout_run")
+        if str(source_swim) != str(swim_bout_run):
+            continue
+        source_speed = _speed_level_key(
+            source_refs.get("source_swim_bout_speed_level")
+            or run_group.attrs.get("source_swim_bout_speed_level")
+        )
+        if source_speed != speed_level_key:
+            continue
+
+        heading_levels = tuple(str(level) for level in run_group.attrs.get("heading_levels", []))
+        if not heading_levels:
+            heading_levels = tuple(level for level in ("heading_smoothed", "heading_raw") if level in run_group)
+        default_heading = _heading_level_key(run_group.attrs.get("default_heading_level", "heading_smoothed"))
+        is_latest = str(latest) == str(run_name)
+        label_parts = [
+            run_name,
+            f"headings {', '.join(level.replace('heading_', '') for level in heading_levels)}",
+            f"source {speed_level_key.replace('speed_', '')}",
+        ]
+        if is_latest:
+            label_parts.append("latest")
+        options.append(
+            BoutKinematicsRunOption(
+                run_name=run_name,
+                label=" | ".join(label_parts),
+                default_heading_level=default_heading,
+                heading_levels=heading_levels,
+                source_track_kinematics_run=str(source_track_run),
+                source_track_id=source_track_id,
+                source_swim_bout_run=str(source_swim),
+                source_swim_bout_speed_level=speed_level_key,
                 is_latest=is_latest,
             )
         )
@@ -905,6 +1027,50 @@ def to_swim_bout_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame
 
 def to_inter_bout_interval_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:
     return _structured_to_dataframe(data.inter_bout_intervals)
+
+
+def load_bout_kinematics_records(
+    zarr_path: Path | str,
+    *,
+    run_name: str,
+    heading_level: Optional[str] = None,
+) -> tuple[dict[str, np.ndarray], Mapping[str, Any]]:
+    """Load per-bout kinematics records from one analysis run."""
+
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    path = _join_path("analysis/bout_kinematics_runs", run_name)
+    try:
+        run_group = root[path]
+    except Exception as exc:
+        raise ValueError(f"Bout kinematics run not found: {path}") from exc
+
+    if heading_level is not None:
+        levels = (_heading_level_key(heading_level),)
+    else:
+        levels = tuple(str(level) for level in run_group.attrs.get("heading_levels", []))
+        if not levels:
+            levels = tuple(level for level in ("heading_smoothed", "heading_raw") if level in run_group)
+
+    records_by_level: dict[str, np.ndarray] = {}
+    for level in levels:
+        if level not in run_group:
+            continue
+        metrics = _load_structured_or_empty(run_group[level], "per_bout_metrics")
+        records_by_level[level] = metrics
+    return records_by_level, dict(run_group.attrs)
+
+
+def bout_kinematics_records_to_dataframe(records_by_level: Mapping[str, np.ndarray]) -> pd.DataFrame:
+    frames = []
+    for level, records in records_by_level.items():
+        frame = _structured_to_dataframe(records)
+        if frame.empty:
+            continue
+        frame.insert(0, "heading_level", level)
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def to_validity_span_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:

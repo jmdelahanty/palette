@@ -127,6 +127,9 @@ Existing analysis outputs already follow this direction:
 - `analysis/stimulus_runs/<run>` imports stimulus and alignment metadata.
 - `analysis/track_kinematics_runs/<online|offline>/<run>` stores
   identity-resolved movement outputs.
+- `analysis/bout_kinematics_runs/<run>` stores per-bout heading and movement
+  metrics derived from an exact swim-bout segmentation candidate without
+  mutating that segmentation artifact.
 - `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
   interpreted relative to heading/keypoint context. New unified mask-derived
   eye geometry should be available from `analysis/subject_shape_runs/<run>`
@@ -179,4 +182,5 @@ Subject-shape runs should be component-organized where possible:
 - [derived_metrics_schema_contract.md](derived_metrics_schema_contract.md)
 - [current_pipeline_contract.md](current_pipeline_contract.md)
 - [pose_kinematics_run_design.md](pose_kinematics_run_design.md)
+- [bout_kinematics_run_design.md](bout_kinematics_run_design.md)
 - [stimulus_response_run_design.md](stimulus_response_run_design.md)

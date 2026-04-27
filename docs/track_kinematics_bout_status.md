@@ -253,15 +253,20 @@ should visually capture the full rise and decay around the core threshold
 segment while still preserving the core fields for stricter quantitative
 analyses.
 
-The explorer also reads the selected speed-level `bouts` and
-`inter_bout_intervals` tables directly from `analysis/swim_bout_runs/<run>/`.
-Its histogram panel is a pandas/Plotly view over those persisted fields, not a
-new recomputation from the speed trace. Current histogram metrics include bout
-duration, observed bout duration, path length, net displacement, and inter-bout
-interval.
-Use the swim-bout speed-level picker to compare filtered/hysteresis-derived
-bouts against smoothed-derived bouts from the same `detect_bouts_multi_level`
-run.
+The explorer exposes each stored speed-level subgroup as its own derived
+swim-bout candidate while keeping the Zarr storage hierarchical. Selecting a
+candidate such as `filtered` or `smoothed` reads that candidate's `bouts` and
+`inter_bout_intervals` tables directly from
+`analysis/swim_bout_runs/<run>/<speed_level>/`. Its histogram panel is a
+pandas/Plotly view over those persisted fields, not a new recomputation from the
+speed trace. Current histogram metrics include bout duration, observed bout
+duration, path length, net displacement, and inter-bout interval.
+
+Downstream per-bout heading metrics should not be added back into
+`analysis/swim_bout_runs`. They belong in linked
+`analysis/bout_kinematics_runs` outputs so the segmentation candidate remains an
+immutable source artifact. See
+[bout_kinematics_run_design.md](bout_kinematics_run_design.md).
 
 For the current 2026-01-28 arena 2 canary review, `tk_hyst4_low2_s005` is the
 preferred default candidate when it exists. This is a review default for the

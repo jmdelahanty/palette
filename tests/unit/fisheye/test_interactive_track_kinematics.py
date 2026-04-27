@@ -168,13 +168,20 @@ def test_discover_track_and_derived_swim_bout_options(tmp_path: Path) -> None:
         track_id=track_options[0].track_id,
     )
 
-    assert len(swim_options) == 1
+    assert len(swim_options) == 4
+    assert [option.speed_level for option in swim_options] == [
+        "smoothed",
+        "filtered",
+        "raw",
+        "averaged",
+    ]
     assert swim_options[0].run_name == "swim_bout_1"
     assert swim_options[0].default_level == "speed_smoothed"
-    assert swim_options[0].speed_level == "smoothed"
     assert swim_options[0].source_track_kinematics_run == "track_kinematics_1"
     assert swim_options[0].track_id == 0
     assert swim_options[0].n_bouts_by_level["speed_smoothed"] == 2
+    assert "smoothed" in swim_options[0].label
+    assert "default" in swim_options[0].label
 
 
 def test_load_track_kinematics_interactive_data_skips_mismatched_swim_bout_run(tmp_path: Path) -> None:

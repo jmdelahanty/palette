@@ -1204,6 +1204,49 @@ Each track stores the ordered samples for that ID:
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
+### `analysis/bout_kinematics_runs/`
+
+Per-bout heading metrics linked to an exact track-kinematics run and swim-bout
+segmentation candidate.
+
+**Structure**: `analysis/bout_kinematics_runs/<run_name>/`
+
+**Run Attributes**:
+- `schema_id`: `"analysis.bout_kinematics_runs"`
+- `schema_version`: Schema integer
+- `method`, `method_version`: Bout-kinematics algorithm identifiers
+- `row_axis`: `"swim_bout_rows"`
+- `source_track_kinematics_run`, `source_track_id`
+- `source_swim_bout_run`, `source_swim_bout_speed_level`
+- `source_refs`: Exact source archive/path mapping consumed by the run,
+  including `zarr_path` and `source_heading_arrays`
+- `parameters`: Heading levels, pre/post windows, within-bout window policy,
+  and optional dominant-frequency settings
+- `default_heading_level`: Usually `heading_smoothed`
+
+**Heading-level groups**:
+
+```text
+heading_smoothed/per_bout_metrics/
+heading_raw/per_bout_metrics/
+```
+
+`per_bout_metrics/` is stored in columnar form. Key fields include:
+
+- `bout_id`, `source_start_frame`, `source_end_frame`
+- `pre_heading_mean_deg`, `post_heading_mean_deg`
+- `net_delta_heading_deg`, `abs_net_delta_heading_deg`
+- `within_heading_range_deg`, `within_heading_peak_to_peak_deg`
+- `within_heading_path_deg`, `within_heading_std_deg`
+- `within_heading_zero_crossings`
+- `within_heading_dominant_frequency_hz` plus `dominant_frequency_valid`
+- `pre_window_valid`, `post_window_valid`, `within_window_valid`
+- `failure_reason_bytes`
+
+These runs must not mutate `analysis/swim_bout_runs`; they are independently
+recomputable derived analyses linked to immutable segmentation candidates. See
+`docs/bout_kinematics_run_design.md`.
+
 ### `analysis/refined_online_runs/`
 
 Refined online target positions from stimulus runs (smoothed, outlier-removed, gap-filled).
