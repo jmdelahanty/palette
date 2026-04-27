@@ -74,6 +74,19 @@ consecutive-frame rules. It should not compute distance by taking `np.diff(...)`
 across only the valid positions in a time window, because that can invent
 movement across gaps.
 
+The next contract for this gap-handling work is
+[`track_validity_timeline_design.md`](./track_validity_timeline_design.md). That
+doc defines the planned per-track validity arrays, transition reason codes,
+swim-bout metric implications, and future plot overlays for invalid detections
+or movement gaps.
+
+`detect_bouts_multi_level` now uses that direction for new outputs. Bout tables
+write explicit `path_length_*`, `net_displacement_*`,
+`observed_duration_s`, `valid_transition_fraction`, and `gap_censored` fields
+instead of the older ambiguous `distance = mean_speed * duration` estimate.
+Path length is summed from `track_kinematics` frame path-distance arrays and is
+not back-estimated from speed when those source arrays are unavailable.
+
 The second-priority correctness issue remains swim-bout mirroring. Mirrored
 `swim_bouts/` groups inside a `track_kinematics` run should not be treated as
 authoritative unless the mirrored bout run proves both:

@@ -34,6 +34,9 @@ class TrackKinematicsInteractiveData:
     swim_bouts: np.ndarray
     swim_bout_label: Optional[str]
     swim_bout_source: Optional[str]
+    validity_spans: np.ndarray
+    validity_labels: np.ndarray
+    validity_source: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -134,8 +137,45 @@ def _load_array(root: zarr.Group, source_paths: Mapping[str, str], key: str) -> 
         return None
 
 
+def _load_track_array(
+    root: zarr.Group,
+    source_paths: Mapping[str, str],
+    *,
+    run_path: str,
+    track_id: int,
+    key: str,
+) -> Optional[np.ndarray]:
+    values = _load_array(root, source_paths, key)
+    if values is not None:
+        return values
+    direct_path = _join_path(run_path, "tracks", f"id_{int(track_id)}", key)
+    try:
+        return np.asarray(root[direct_path][:])
+    except Exception:
+        return None
+
+
+def _load_track_attrs(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    track_id: int,
+) -> Mapping[str, Any]:
+    direct_path = _join_path(run_path, "tracks", f"id_{int(track_id)}")
+    try:
+        track_group = root[direct_path]
+    except Exception:
+        return {}
+    attrs = getattr(track_group, "attrs", {})
+    return dict(attrs)
+
+
 def _empty_spans() -> np.ndarray:
     return np.empty((0, 2), dtype=np.float64)
+
+
+def _empty_labels() -> np.ndarray:
+    return np.empty((0,), dtype=object)
 
 
 def _speed_level_key(speed_level: Optional[str], default: str = "speed_smoothed") -> str:
@@ -160,6 +200,146 @@ def _spans_from_start_stop(starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
     if not rows:
         return _empty_spans()
     return np.asarray(rows, dtype=np.float64)
+
+
+def _reason_name(
+    mapping: object,
+    code: object,
+    *,
+    prefix: str,
+) -> str:
+    if isinstance(mapping, Mapping):
+        key = str(int(code)) if _safe_int(code) is not None else str(code)
+        value = mapping.get(key)
+        if value is not None:
+            return str(value)
+    parsed = _safe_int(code)
+    return f"{prefix}_{parsed}" if parsed is not None else prefix
+
+
+def _row_interval(time_seconds: np.ndarray, index: int) -> tuple[float, float] | None:
+    if index < 0 or index >= time_seconds.shape[0]:
+        return None
+    center = float(time_seconds[index])
+    if not np.isfinite(center):
+        return None
+    if time_seconds.shape[0] == 1:
+        return (center, center)
+    if index == 0:
+        left = center
+    else:
+        left = (float(time_seconds[index - 1]) + center) / 2.0
+    if index + 1 >= time_seconds.shape[0]:
+        right = center
+    else:
+        right = (center + float(time_seconds[index + 1])) / 2.0
+    if not (np.isfinite(left) and np.isfinite(right)):
+        return None
+    if right < left:
+        left, right = right, left
+    if right == left and time_seconds.shape[0] > 1:
+        if index > 0:
+            left = min(float(time_seconds[index - 1]), center)
+        if index + 1 < time_seconds.shape[0]:
+            right = max(center, float(time_seconds[index + 1]))
+    if right <= left:
+        return None
+    return (float(left), float(right))
+
+
+def _load_validity_spans(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    track_id: int,
+    source_paths: Mapping[str, str],
+    time_seconds: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, Optional[str]]:
+    track_attrs = _load_track_attrs(root, run_path=run_path, track_id=track_id)
+    transition_valid = _load_track_array(
+        root,
+        source_paths,
+        run_path=run_path,
+        track_id=track_id,
+        key="transition_valid",
+    )
+    transition_reason = _load_track_array(
+        root,
+        source_paths,
+        run_path=run_path,
+        track_id=track_id,
+        key="transition_reason_code",
+    )
+    sample_valid = _load_track_array(
+        root,
+        source_paths,
+        run_path=run_path,
+        track_id=track_id,
+        key="sample_valid",
+    )
+    sample_reason = _load_track_array(
+        root,
+        source_paths,
+        run_path=run_path,
+        track_id=track_id,
+        key="sample_reason_code",
+    )
+
+    rows: list[tuple[float, float, str]] = []
+    n_time = int(time_seconds.shape[0])
+    transition_map = track_attrs.get("transition_reason_codes", {})
+    sample_map = track_attrs.get("sample_reason_codes", {})
+
+    if transition_valid is not None and transition_valid.shape[0] == n_time:
+        transition_valid = np.asarray(transition_valid, dtype=bool)
+        if transition_reason is not None and transition_reason.shape[0] == n_time:
+            transition_reason_values = np.asarray(transition_reason)
+        else:
+            transition_reason_values = np.full(n_time, -1, dtype=np.int16)
+        for index in range(1, n_time):
+            if bool(transition_valid[index]):
+                continue
+            start = float(time_seconds[index - 1])
+            stop = float(time_seconds[index])
+            if not (np.isfinite(start) and np.isfinite(stop)):
+                continue
+            if stop < start:
+                start, stop = stop, start
+            if stop <= start:
+                continue
+            reason = _reason_name(
+                transition_map,
+                transition_reason_values[index],
+                prefix="transition",
+            )
+            if reason == "first_sample":
+                continue
+            rows.append((start, stop, f"transition:{reason}"))
+
+    if sample_valid is not None and sample_valid.shape[0] == n_time:
+        sample_valid = np.asarray(sample_valid, dtype=bool)
+        if sample_reason is not None and sample_reason.shape[0] == n_time:
+            sample_reason_values = np.asarray(sample_reason)
+        else:
+            sample_reason_values = np.full(n_time, -1, dtype=np.int16)
+        for index, valid in enumerate(sample_valid):
+            if bool(valid):
+                continue
+            interval = _row_interval(time_seconds, index)
+            if interval is None:
+                continue
+            reason = _reason_name(
+                sample_map,
+                sample_reason_values[index],
+                prefix="sample",
+            )
+            rows.append((interval[0], interval[1], f"sample:{reason}"))
+
+    if not rows:
+        return _empty_spans(), _empty_labels(), None
+    spans = np.asarray([(start, stop) for start, stop, _label in rows], dtype=np.float64)
+    labels = np.asarray([label for _start, _stop, label in rows], dtype=object)
+    return spans, labels, "track_validity"
 
 
 def _spans_from_structured_bouts(bouts: np.ndarray, fps: Optional[float]) -> np.ndarray:
@@ -561,6 +741,9 @@ def load_track_kinematics_interactive_data(
         )
 
     source_paths = _as_str_mapping(spec.get("source_paths"))
+    track_id = _safe_int(spec.get("track_id"))
+    if track_id is None:
+        track_id = 0
     time_seconds = _load_array(root, source_paths, "time_seconds")
     if time_seconds is None:
         raise ValueError("Interactive spec does not resolve a time_seconds source array")
@@ -584,6 +767,13 @@ def load_track_kinematics_interactive_data(
         requested_run=swim_bout_run,
         speed_level=speed_level,
     )
+    validity_spans, validity_labels, validity_source = _load_validity_spans(
+        root,
+        run_path=_normalize_path(run_path),
+        track_id=track_id,
+        source_paths=source_paths,
+        time_seconds=time_seconds,
+    )
 
     return TrackKinematicsInteractiveData(
         zarr_path=archive,
@@ -600,6 +790,9 @@ def load_track_kinematics_interactive_data(
         swim_bouts=swim_bouts,
         swim_bout_label=swim_bout_label,
         swim_bout_source=swim_bout_source,
+        validity_spans=validity_spans,
+        validity_labels=validity_labels,
+        validity_source=validity_source,
     )
 
 
@@ -637,5 +830,20 @@ def to_swim_bout_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame
             "start_s": starts,
             "end_s": ends,
             "duration_s": ends - starts,
+        }
+    )
+
+
+def to_validity_span_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:
+    if data.validity_spans.size == 0:
+        return pd.DataFrame(columns=["start_s", "end_s", "duration_s", "reason"])
+    starts = data.validity_spans[:, 0]
+    ends = data.validity_spans[:, 1]
+    return pd.DataFrame(
+        {
+            "start_s": starts,
+            "end_s": ends,
+            "duration_s": ends - starts,
+            "reason": data.validity_labels,
         }
     )

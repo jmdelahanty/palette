@@ -59,6 +59,12 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_track_array(track, "smoothed_acceleration_mm", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "cumulative_path_distance_px", np.cumsum(speed_px).astype(np.float32))
     _write_track_array(track, "cumulative_path_distance_mm", np.cumsum(speed_mm).astype(np.float32))
+    _write_track_array(track, "transition_valid", np.asarray([False, True, False, True, True, True], dtype=bool))
+    _write_track_array(track, "transition_reason_code", np.asarray([1, 0, 2, 0, 0, 0], dtype=np.int16))
+    _write_track_array(track, "sample_valid", np.asarray([True, True, True, False, True, True], dtype=bool))
+    _write_track_array(track, "sample_reason_code", np.asarray([0, 0, 0, 4, 0, 0], dtype=np.int16))
+    track.attrs["transition_reason_codes"] = {"0": "ok", "1": "first_sample", "2": "frame_gap"}
+    track.attrs["sample_reason_codes"] = {"0": "ok", "4": "keypoint_failed"}
     return zarr_path
 
 
@@ -105,6 +111,8 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
     assert spec["schema_id"] == mod.TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID
     assert spec["track_id"] == 0
     assert spec["source_paths"]["positions_mm"].endswith("/tracks/id_0/positions_mm")
+    assert spec["source_paths"]["transition_valid"].endswith("/tracks/id_0/transition_valid")
+    assert spec["source_paths"]["sample_valid"].endswith("/tracks/id_0/sample_valid")
     assert any(panel["id"] == "position_density" for panel in spec["panels"])
     spec_provenance = spec_group.attrs["provenance"]
     assert spec_provenance["stage"] == "track_kinematics_visualization"

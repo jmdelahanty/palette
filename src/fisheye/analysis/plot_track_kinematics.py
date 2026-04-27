@@ -698,6 +698,10 @@ def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.
         "smoothed_acceleration_mm",
         "cumulative_path_distance_px",
         "cumulative_path_distance_mm",
+        "sample_valid",
+        "sample_reason_code",
+        "transition_valid",
+        "transition_reason_code",
     )
     for name in track_arrays:
         if name in track_group:

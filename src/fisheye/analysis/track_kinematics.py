@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .compute_speed import (  # re-exported for compatibility
+    TRANSITION_REASON_CODES,
     TrackSpeeds,
     compute_track_speed,
     find_fps,
@@ -39,6 +40,34 @@ from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.utils.system import get_git_info, get_environment_info
 from fisheye.utils.zarr_io import open_zarr_root
 from .chaser_state_interpolator import load_structured_dataset
+
+
+SAMPLE_REASON_OK = 0
+SAMPLE_REASON_UNASSIGNED = 1
+SAMPLE_REASON_SOURCE_INTERPOLATED = 2
+SAMPLE_REASON_SOURCE_MISSING = 3
+SAMPLE_REASON_KEYPOINT_FAILED = 4
+SAMPLE_REASON_HEADING_UNUSABLE = 5
+SAMPLE_REASON_POSITION_NAN = 6
+SAMPLE_REASON_MANUAL_REJECT = 7
+
+SAMPLE_REASON_CODES = {
+    str(SAMPLE_REASON_OK): "ok",
+    str(SAMPLE_REASON_UNASSIGNED): "unassigned",
+    str(SAMPLE_REASON_SOURCE_INTERPOLATED): "source_interpolated",
+    str(SAMPLE_REASON_SOURCE_MISSING): "source_missing",
+    str(SAMPLE_REASON_KEYPOINT_FAILED): "keypoint_failed",
+    str(SAMPLE_REASON_HEADING_UNUSABLE): "heading_unusable",
+    str(SAMPLE_REASON_POSITION_NAN): "position_nan",
+    str(SAMPLE_REASON_MANUAL_REJECT): "manual_reject",
+}
+
+KEYPOINT_USABILITY_DATASET_CANDIDATES = (
+    "heading_usable",
+    "refined_success",
+    "detection_success",
+    "source_success",
+)
 
 
 @dataclass
@@ -129,6 +158,26 @@ def resolve_keypoint_group(
             return resolve_raw(latest_raw)
 
     raise ValueError("Unable to resolve a keypoint run; no runs detected.")
+
+
+def load_keypoint_usability_array(
+    group: zarr.Group,
+    expected_length: int,
+) -> Tuple[np.ndarray, str]:
+    """Return the best row-level keypoint/heading usability array available."""
+
+    for dataset_name in KEYPOINT_USABILITY_DATASET_CANDIDATES:
+        if dataset_name not in group:
+            continue
+        values = np.asarray(group[dataset_name][:], dtype=bool)
+        if values.shape[0] != expected_length:
+            raise ValueError(
+                f"Keypoint usability dataset '{dataset_name}' length "
+                f"{values.shape[0]} does not match expected row count {expected_length}."
+            )
+        return values, dataset_name
+
+    return np.ones(expected_length, dtype=bool), "implicit_all_true"
 
 
 def resolve_detection_from_path(root: zarr.Group, path: str) -> DetectionResolution:
@@ -430,6 +479,54 @@ def _boolean(data: np.ndarray) -> np.ndarray:
     return np.asarray(data, dtype=bool)
 
 
+def _build_sample_validity_arrays(
+    *,
+    track_id: int,
+    positions_px: np.ndarray,
+    headings_deg: np.ndarray,
+    keypoint_success: np.ndarray,
+    detection_source: Optional[np.ndarray],
+) -> Dict[str, np.ndarray]:
+    """Project upstream row/source/keypoint state into track-aligned validity arrays."""
+
+    n_rows = int(positions_px.shape[0])
+    sample_observed = np.full(n_rows, track_id >= 0, dtype=bool)
+    position_finite = np.all(np.isfinite(positions_px), axis=1)
+    heading_usable = np.asarray(keypoint_success, dtype=bool) & np.isfinite(headings_deg)
+    keypoint_usable = heading_usable.copy()
+    if detection_source is None:
+        source_observed = np.ones(n_rows, dtype=bool)
+    else:
+        source_observed = np.asarray(detection_source, dtype=np.int8) == 0
+
+    sample_valid = (
+        sample_observed
+        & source_observed
+        & keypoint_usable
+        & position_finite
+    )
+
+    reason = np.full(n_rows, SAMPLE_REASON_OK, dtype=np.int16)
+    reason[~position_finite] = SAMPLE_REASON_POSITION_NAN
+    reason[np.asarray(keypoint_success, dtype=bool) & ~np.isfinite(headings_deg)] = (
+        SAMPLE_REASON_HEADING_UNUSABLE
+    )
+    reason[~np.asarray(keypoint_success, dtype=bool)] = SAMPLE_REASON_KEYPOINT_FAILED
+    reason[~source_observed] = SAMPLE_REASON_SOURCE_INTERPOLATED
+    reason[~sample_observed] = SAMPLE_REASON_UNASSIGNED
+    reason[sample_valid] = SAMPLE_REASON_OK
+
+    return {
+        "sample_observed": sample_observed,
+        "sample_valid": sample_valid,
+        "source_observed": source_observed,
+        "keypoint_usable": keypoint_usable,
+        "position_finite": position_finite,
+        "heading_usable": heading_usable,
+        "sample_reason_code": reason,
+    }
+
+
 def _filter_public_track_rows(
     *,
     track_ids: np.ndarray,
@@ -549,6 +646,13 @@ def build_track_datasets(
             if detection_source is not None
             else np.zeros(mask.sum(), dtype=np.int8)
         )
+        sample_validity = _build_sample_validity_arrays(
+            track_id=int(track_id),
+            positions_px=coords_px,
+            headings_deg=headings_track,
+            keypoint_success=kp_success_track,
+            detection_source=det_source_track if detection_source is not None else None,
+        )
 
         order = np.argsort(track_frames, kind="stable")
         track_frames = track_frames[order]
@@ -556,6 +660,10 @@ def build_track_datasets(
         headings_track = headings_track[order]
         kp_success_track = kp_success_track[order]
         det_source_track = det_source_track[order]
+        sample_validity = {
+            name: values[order]
+            for name, values in sample_validity.items()
+        }
         detection_indices_sorted = detection_index[order]
 
         speeds = compute_track_speed(
@@ -580,6 +688,10 @@ def build_track_datasets(
         cumulative_path_px = speeds.cumulative_path_distance
         seconds = speeds.seconds
         speed_per_second_px = speeds.speed_per_second
+        delta_frames = speeds.delta_frames
+        delta_seconds = speeds.delta_seconds
+        transition_valid = speeds.transition_valid
+        transition_reason_code = speeds.transition_reason_code
 
         if pixel_to_mm_val is not None:
             coords_mm = coords_px * pixel_to_mm_val
@@ -712,6 +824,17 @@ def build_track_datasets(
             "smoothed_heading_radians": _float32(smoothed_heading_rad),
             "keypoint_success": _boolean(kp_success_track),
             "detection_source": det_source_track.astype(np.int8),
+            "sample_observed": _boolean(sample_validity["sample_observed"]),
+            "sample_valid": _boolean(sample_validity["sample_valid"]),
+            "source_observed": _boolean(sample_validity["source_observed"]),
+            "keypoint_usable": _boolean(sample_validity["keypoint_usable"]),
+            "position_finite": _boolean(sample_validity["position_finite"]),
+            "heading_usable": _boolean(sample_validity["heading_usable"]),
+            "sample_reason_code": sample_validity["sample_reason_code"].astype(np.int16),
+            "delta_frames": delta_frames.astype(np.int32),
+            "delta_seconds": _float32(delta_seconds),
+            "transition_valid": _boolean(transition_valid),
+            "transition_reason_code": transition_reason_code.astype(np.int16),
             "speed_raw_px": _float32(speed_raw_px),
             "speed_raw_mm": _float32(speed_raw_mm),
             "speed_filtered_px": _float32(speed_filtered_px),
@@ -940,6 +1063,22 @@ def save_track_kinematics_tracks(
         subgroup.create_array("smoothed_heading_radians", data=data["smoothed_heading_radians"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("keypoint_success", data=data["keypoint_success"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("detection_source", data=data["detection_source"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("sample_observed", data=data["sample_observed"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("sample_valid", data=data["sample_valid"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("source_observed", data=data["source_observed"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("keypoint_usable", data=data["keypoint_usable"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("position_finite", data=data["position_finite"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("heading_usable", data=data["heading_usable"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("sample_reason_code", data=data["sample_reason_code"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("delta_frames", data=data["delta_frames"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("delta_seconds", data=data["delta_seconds"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("transition_valid", data=data["transition_valid"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array(
+            "transition_reason_code",
+            data=data["transition_reason_code"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
         subgroup.create_array("speed_raw_px", data=data["speed_raw_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("speed_raw_mm", data=data["speed_raw_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("speed_filtered_px", data=data["speed_filtered_px"], chunks=base_chunk, overwrite=True)
@@ -1018,6 +1157,10 @@ def save_track_kinematics_tracks(
                     else None
                 ),
                 "num_samples": sample_count,
+                "sample_validity_schema_id": "palette.track_sample_validity.v1",
+                "sample_reason_codes": dict(SAMPLE_REASON_CODES),
+                "transition_validity_schema_id": "palette.track_transition_validity.v1",
+                "transition_reason_codes": dict(TRANSITION_REASON_CODES),
                 "summary": summary,
             }
         )
@@ -1916,10 +2059,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 "Offline: Heading array length does not match detection count."
             )
 
-        keypoint_success_offline = (
-            keypoints_offline.group["detection_success"][:]
-            if "detection_success" in keypoints_offline.group
-            else np.ones_like(heading_offline, dtype=bool)
+        keypoint_success_offline, keypoint_usability_dataset = (
+            load_keypoint_usability_array(
+                keypoints_offline.group,
+                expected_length=heading_offline.shape[0],
+            )
         )
 
         width_offline, height_offline = resolve_dimensions(root)
@@ -2093,6 +2237,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "keypoint_run": keypoints_offline.run_name,
                             "keypoint_variant": "refined" if keypoints_offline.is_refined else "raw",
                             "base_keypoint_run": keypoints_offline.base_run_name,
+                            "keypoint_usability_dataset": keypoint_usability_dataset,
                             "crop_run": keypoints_offline.crop_run,
                             "source_tracking_run": tracking_metadata.get("track_run"),
                             "source_arena_assignment_run": tracking_metadata.get("source_arena_assignment_run"),

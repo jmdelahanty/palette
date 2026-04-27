@@ -32,6 +32,15 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     track = run.create_group("tracks").create_group("id_0")
     frames = np.arange(12, dtype=np.int64)
     speed = np.asarray([0, 0, 3, 4, 5, 5, 4, 3, 0, 0, 0, 0], dtype=np.float32)
+    transition_valid = np.asarray(
+        [False, True, True, True, True, False, True, True, True, True, True, True],
+        dtype=bool,
+    )
+    delta_seconds = np.zeros(frames.size, dtype=np.float32)
+    delta_seconds[1:] = 0.01
+    path_mm = np.full(frames.size, 0.5, dtype=np.float32)
+    path_mm[0] = 0.0
+    path_px = path_mm / 0.1
     positions_px = np.column_stack(
         [
             np.linspace(10.0, 22.0, frames.size, dtype=np.float32),
@@ -44,6 +53,15 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_array(track, "speed_filtered_mm", speed)
     _write_array(track, "speed_smoothed_mm", speed)
     _write_array(track, "speed_averaged_mm", speed)
+    _write_array(track, "frame_path_distance_raw_mm", path_mm)
+    _write_array(track, "frame_path_distance_raw_px", path_px)
+    _write_array(track, "frame_path_distance_filtered_mm", path_mm)
+    _write_array(track, "frame_path_distance_filtered_px", path_px)
+    _write_array(track, "frame_path_distance_smoothed_mm", path_mm)
+    _write_array(track, "frame_path_distance_smoothed_px", path_px)
+    _write_array(track, "delta_seconds", delta_seconds)
+    _write_array(track, "transition_valid", transition_valid)
+    _write_array(track, "sample_valid", np.ones(frames.size, dtype=bool))
     _write_array(track, "positions_px", positions_px)
     _write_array(track, "positions_mm", positions_px * 0.1)
     return zarr_path
@@ -89,8 +107,28 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     assert provenance["inputs"]["source_track_path"].endswith("/tk_1/tracks/id_0")
     assert provenance["artifacts"]["run_path"] == "analysis/swim_bout_runs/bouts_filtered_default"
     assert bout_run["speed_filtered"]["bouts"].attrs["is_default_level"] is True
+    assert (
+        bout_run["speed_filtered"]["bouts"].attrs["bout_metric_schema_id"]
+        == "palette.swim_bout_metrics.v2"
+    )
     assert bout_run["speed_smoothed"]["bouts"].attrs["is_default_level"] is False
     assert "core_start_frame" in bout_run["speed_filtered"]["bouts"]
+    assert "distance" not in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "path_length_mm" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "observed_duration_s" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "gap_censored" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    bouts = bout_run["speed_filtered"]["bouts"]
+    assert bouts["n_invalid_transitions"][:].tolist() == [1]
+    assert bouts["gap_censored"][:].tolist() == [True]
+    np.testing.assert_allclose(bouts["observed_duration_s"][:], [0.05])
+    np.testing.assert_allclose(bouts["path_length_mm"][:], [2.5])
+    np.testing.assert_allclose(bouts["path_length_px"][:], [25.0])
+    np.testing.assert_allclose(bouts["mean_speed_mm_s"][:], [50.0])
+    np.testing.assert_allclose(bouts["valid_transition_fraction"][:], [5 / 6])
+    global_metrics = bout_run["speed_filtered"]["global_metrics"]
+    assert "total_distance" not in global_metrics.attrs["field_names"]
+    assert "total_path_length_mm" in global_metrics.attrs["field_names"]
+    np.testing.assert_allclose(global_metrics["total_path_length_mm"][:], [2.5])
     intervals = bout_run["speed_filtered"]["inter_bout_intervals"]
     assert intervals.attrs["field_names"] == [
         "prev_bout_id",

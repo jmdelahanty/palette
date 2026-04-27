@@ -37,6 +37,7 @@ def _():
         to_position_dataframe,
         to_swim_bout_dataframe,
         to_timeseries_dataframe,
+        to_validity_span_dataframe,
     )
 
     return (
@@ -53,6 +54,7 @@ def _():
         to_position_dataframe,
         to_swim_bout_dataframe,
         to_timeseries_dataframe,
+        to_validity_span_dataframe,
     )
 
 
@@ -325,12 +327,14 @@ def _(
     to_position_dataframe,
     to_swim_bout_dataframe,
     to_timeseries_dataframe,
+    to_validity_span_dataframe,
     write_perf_event,
 ):
     _dataframe_t0 = time.perf_counter()
     timeseries_df = to_timeseries_dataframe(data)
     position_df = to_position_dataframe(data)
     swim_bout_df = to_swim_bout_dataframe(data)
+    validity_df = to_validity_span_dataframe(data)
     write_perf_event(
         "build_dataframes",
         time.perf_counter() - _dataframe_t0,
@@ -339,8 +343,9 @@ def _(
         n_timeseries_columns=len(timeseries_df.columns),
         n_position_rows=len(position_df),
         n_swim_bout_rows=len(swim_bout_df),
+        n_validity_rows=len(validity_df),
     )
-    return position_df, swim_bout_df, timeseries_df
+    return position_df, swim_bout_df, timeseries_df, validity_df
 
 
 @app.cell
@@ -372,12 +377,16 @@ def _(data, mo, timeseries_df):
         value=bool(data.swim_bout_label),
         label="Overlay swim bouts",
     )
-    mo.vstack([speed_series_picker, time_window, show_swim_bouts])
-    return show_swim_bouts, speed_series_picker, time_window
+    show_invalid_intervals = mo.ui.checkbox(
+        value=bool(data.validity_source),
+        label="Overlay invalid/gap intervals",
+    )
+    mo.vstack([speed_series_picker, time_window, show_swim_bouts, show_invalid_intervals])
+    return show_invalid_intervals, show_swim_bouts, speed_series_picker, time_window
 
 
 @app.cell
-def _(swim_bout_df, time, time_window, timeseries_df, write_perf_event):
+def _(swim_bout_df, time, time_window, timeseries_df, validity_df, write_perf_event):
     _filter_t0 = time.perf_counter()
     start_s, stop_s = time_window.value
     time_mask = (timeseries_df["time_s"] >= start_s) & (timeseries_df["time_s"] <= stop_s)
@@ -388,6 +397,12 @@ def _(swim_bout_df, time, time_window, timeseries_df, write_perf_event):
         else []
     )
     filtered_swim_bout_df = swim_bout_df.loc[bout_mask].copy() if len(swim_bout_df) else swim_bout_df
+    validity_mask = (
+        (validity_df["end_s"] >= start_s) & (validity_df["start_s"] <= stop_s)
+        if len(validity_df)
+        else []
+    )
+    filtered_validity_df = validity_df.loc[validity_mask].copy() if len(validity_df) else validity_df
     write_perf_event(
         "filter_time_window",
         time.perf_counter() - _filter_t0,
@@ -397,8 +412,10 @@ def _(swim_bout_df, time, time_window, timeseries_df, write_perf_event):
         n_timeseries_rows_out=len(filtered_timeseries_df),
         n_swim_bout_rows_in=len(swim_bout_df),
         n_swim_bout_rows_out=len(filtered_swim_bout_df),
+        n_validity_rows_in=len(validity_df),
+        n_validity_rows_out=len(filtered_validity_df),
     )
-    return filtered_swim_bout_df, filtered_timeseries_df, start_s, stop_s
+    return filtered_swim_bout_df, filtered_timeseries_df, filtered_validity_df, start_s, stop_s
 
 
 @app.cell
@@ -406,8 +423,10 @@ def _(
     data,
     filtered_swim_bout_df,
     filtered_timeseries_df,
+    filtered_validity_df,
     go,
     np,
+    show_invalid_intervals,
     show_swim_bouts,
     speed_series_picker,
     time,
@@ -416,6 +435,32 @@ def _(
     _figure_t0 = time.perf_counter()
     fig = go.Figure()
     swim_bout_overlay_renderer = "none"
+    validity_overlay_renderer = "none"
+    if show_invalid_intervals.value and len(filtered_validity_df):
+        _starts = filtered_validity_df["start_s"].to_numpy(dtype=float)
+        _ends = filtered_validity_df["end_s"].to_numpy(dtype=float)
+        _widths = _ends - _starts
+        _valid = _widths > 0
+        if _valid.any():
+            _starts = _starts[_valid]
+            _widths = _widths[_valid]
+            _centers = _starts + (_widths / 2.0)
+            _labels = filtered_validity_df["reason"].to_numpy(dtype=object)[_valid]
+            fig.add_trace(
+                go.Bar(
+                    x=_centers,
+                    y=np.ones_like(_centers),
+                    width=_widths,
+                    base=np.zeros_like(_centers),
+                    yaxis="y2",
+                    marker=dict(color="crimson", line=dict(width=0)),
+                    opacity=0.16,
+                    customdata=_labels,
+                    hovertemplate="Invalid interval<br>%{x:.3f}s<br>%{customdata}<extra></extra>",
+                    name="Invalid/gap intervals",
+                )
+            )
+            validity_overlay_renderer = "bar_trace"
     if show_swim_bouts.value and len(filtered_swim_bout_df):
         _starts = filtered_swim_bout_df["start_s"].to_numpy(dtype=float)
         _ends = filtered_swim_bout_df["end_s"].to_numpy(dtype=float)
@@ -451,7 +496,7 @@ def _(
             )
         )
     fig.update_layout(
-        title="Speed Metrics with Swim Bout Overlay",
+        title="Speed Metrics with Swim Bout and Validity Overlays",
         xaxis_title="Time (s)",
         yaxis_title="Speed",
         hovermode="x unified",
@@ -474,8 +519,11 @@ def _(
         n_rendered_traces=len(fig.data),
         n_layout_shapes=len(fig.layout.shapes or []),
         n_visible_bouts=len(filtered_swim_bout_df),
+        n_visible_validity_intervals=len(filtered_validity_df),
         swim_bout_overlay_renderer=swim_bout_overlay_renderer,
+        validity_overlay_renderer=validity_overlay_renderer,
         show_swim_bouts=bool(show_swim_bouts.value),
+        show_invalid_intervals=bool(show_invalid_intervals.value),
     )
     fig
     return
@@ -522,8 +570,10 @@ def _(
     filtered_position_df,
     filtered_swim_bout_df,
     filtered_timeseries_df,
+    filtered_validity_df,
     mo,
     swim_bout_df,
+    validity_df,
 ):
     mo.hstack(
         [
@@ -531,6 +581,8 @@ def _(
             mo.stat(label="Position rows", value=f"{len(filtered_position_df):,}"),
             mo.stat(label="Swim bouts", value=f"{len(swim_bout_df):,}"),
             mo.stat(label="Visible bouts", value=f"{len(filtered_swim_bout_df):,}"),
+            mo.stat(label="Invalid intervals", value=f"{len(validity_df):,}"),
+            mo.stat(label="Visible invalid", value=f"{len(filtered_validity_df):,}"),
             mo.stat(label="Track ID", value=str(data.spec.get("track_id", "unknown"))),
             mo.stat(label="Position unit", value=data.position_unit),
         ]
@@ -550,6 +602,13 @@ def _(data, mo):
                     "label": data.swim_bout_label,
                     "source": data.swim_bout_source,
                     "count": int(data.swim_bouts.shape[0]),
+                }
+            ),
+            "Validity overlay": mo.tree(
+                {
+                    "source": data.validity_source,
+                    "count": int(data.validity_spans.shape[0]),
+                    "labels": sorted(set(str(label) for label in data.validity_labels)),
                 }
             ),
         }

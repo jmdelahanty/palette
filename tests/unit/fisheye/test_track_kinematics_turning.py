@@ -7,6 +7,12 @@ import zarr
 from rich.console import Console
 
 from fisheye.analysis import track_kinematics as mod
+from fisheye.analysis.compute_speed import (
+    TRANSITION_REASON_FIRST_SAMPLE,
+    TRANSITION_REASON_FRAME_GAP,
+    TRANSITION_REASON_OK,
+    TRANSITION_REASON_TELEPORT,
+)
 
 
 class _FakeArray:
@@ -40,6 +46,9 @@ class _FakeGroup:
 
     def __getitem__(self, key: str):
         return self._children[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._children
 
 
 def test_build_track_datasets_computes_turning_series_for_all_tracks() -> None:
@@ -95,6 +104,93 @@ def test_build_track_datasets_computes_turning_series_for_all_tracks() -> None:
     )
 
 
+def test_load_keypoint_usability_array_prefers_heading_usable() -> None:
+    group = _FakeGroup()
+    group.create_array("refined_success", data=np.array([False, True], dtype=bool))
+    group.create_array("heading_usable", data=np.array([True, False], dtype=bool))
+
+    values, dataset_name = mod.load_keypoint_usability_array(group, expected_length=2)
+
+    assert dataset_name == "heading_usable"
+    assert values.tolist() == [True, False]
+
+
+def test_build_track_datasets_materializes_sample_validity() -> None:
+    tracks, _summaries = mod.build_track_datasets(
+        track_ids=np.array([0, 0, 0, 0], dtype=np.int64),
+        frames=np.array([0, 1, 2, 3], dtype=np.int64),
+        positions_px=np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [3.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+        headings_deg=np.array([0.0, 0.0, 0.0, np.nan], dtype=np.float32),
+        keypoint_success=np.array([True, True, False, True], dtype=bool),
+        detection_source=np.array([0, 1, 0, 0], dtype=np.int8),
+        fps=1.0,
+        smooth_seconds=1.0,
+        pixel_to_mm=None,
+    )
+
+    track = tracks[0]
+    assert track["sample_observed"].tolist() == [True, True, True, True]
+    assert track["source_observed"].tolist() == [True, False, True, True]
+    assert track["keypoint_usable"].tolist() == [True, True, False, False]
+    assert track["position_finite"].tolist() == [True, True, True, True]
+    assert track["heading_usable"].tolist() == [True, True, False, False]
+    assert track["sample_valid"].tolist() == [True, False, False, False]
+    assert track["sample_reason_code"].tolist() == [
+        mod.SAMPLE_REASON_OK,
+        mod.SAMPLE_REASON_SOURCE_INTERPOLATED,
+        mod.SAMPLE_REASON_KEYPOINT_FAILED,
+        mod.SAMPLE_REASON_HEADING_UNUSABLE,
+    ]
+
+
+def test_build_track_datasets_materializes_transition_validity() -> None:
+    tracks, _summaries = mod.build_track_datasets(
+        track_ids=np.array([0, 0, 0, 0], dtype=np.int64),
+        frames=np.array([0, 1, 3, 4], dtype=np.int64),
+        positions_px=np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [3.0, 0.0],
+                [1000.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+        headings_deg=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        keypoint_success=np.array([True, True, True, True], dtype=bool),
+        detection_source=None,
+        fps=1.0,
+        smooth_seconds=1.0,
+        pixel_to_mm=None,
+    )
+
+    track = tracks[0]
+    assert track["delta_frames"].tolist() == [0, 1, 2, 1]
+    np.testing.assert_allclose(
+        track["delta_seconds"],
+        np.array([0.0, 1.0, 2.0, 1.0], dtype=np.float32),
+    )
+    assert track["transition_valid"].tolist() == [False, True, False, False]
+    assert track["transition_reason_code"].tolist() == [
+        TRANSITION_REASON_FIRST_SAMPLE,
+        TRANSITION_REASON_OK,
+        TRANSITION_REASON_FRAME_GAP,
+        TRANSITION_REASON_TELEPORT,
+    ]
+    np.testing.assert_allclose(
+        track["frame_path_distance_raw_px"],
+        np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+    )
+
+
 def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
     track_ids = np.array([0, 0], dtype=np.int64)
     frames = np.array([0, 1], dtype=np.int64)
@@ -128,6 +224,42 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
         subgroup["angular_velocity_deg_s"][:],
         np.array([np.nan, 20.0], dtype=np.float32),
         equal_nan=True,
+    )
+    assert subgroup["delta_frames"][:].tolist() == [0, 1]
+    np.testing.assert_allclose(
+        subgroup["delta_seconds"][:],
+        np.array([0.0, 1.0], dtype=np.float32),
+    )
+    assert subgroup["transition_valid"][:].tolist() == [False, True]
+    assert subgroup["transition_reason_code"][:].tolist() == [
+        TRANSITION_REASON_FIRST_SAMPLE,
+        TRANSITION_REASON_OK,
+    ]
+    assert (
+        subgroup.attrs["transition_validity_schema_id"]
+        == "palette.track_transition_validity.v1"
+    )
+    assert (
+        subgroup.attrs["sample_validity_schema_id"]
+        == "palette.track_sample_validity.v1"
+    )
+    assert subgroup["sample_observed"][:].tolist() == [True, True]
+    assert subgroup["sample_valid"][:].tolist() == [True, True]
+    assert subgroup["source_observed"][:].tolist() == [True, True]
+    assert subgroup["keypoint_usable"][:].tolist() == [True, True]
+    assert subgroup["position_finite"][:].tolist() == [True, True]
+    assert subgroup["heading_usable"][:].tolist() == [True, True]
+    assert subgroup["sample_reason_code"][:].tolist() == [
+        mod.SAMPLE_REASON_OK,
+        mod.SAMPLE_REASON_OK,
+    ]
+    assert (
+        subgroup.attrs["sample_reason_codes"][str(mod.SAMPLE_REASON_SOURCE_INTERPOLATED)]
+        == "source_interpolated"
+    )
+    assert (
+        subgroup.attrs["transition_reason_codes"][str(TRANSITION_REASON_FRAME_GAP)]
+        == "frame_gap"
     )
 
 

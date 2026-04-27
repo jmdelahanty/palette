@@ -3,6 +3,12 @@
 Goal: standardize coverage/success metadata across detection, refinement, crops,
 keypoints, masks, tracking, and diagnostics.
 
+Related track-level consumer contract:
+[`track_validity_timeline_design.md`](./track_validity_timeline_design.md).
+That document keeps stage-local coverage metadata in each producer, then defines
+how `track_kinematics` should project the relevant pieces into one per-track
+validity timeline for bout metrics, plots, and exports.
+
 ## Why
 
 Current coverage stats are inconsistent across stages:

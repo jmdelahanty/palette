@@ -42,9 +42,30 @@ from rich.table import Table
 from scipy.signal import savgol_filter
 
 
+TRANSITION_REASON_OK = 0
+TRANSITION_REASON_FIRST_SAMPLE = 1
+TRANSITION_REASON_FRAME_GAP = 2
+TRANSITION_REASON_NONPOSITIVE_DT = 3
+TRANSITION_REASON_POSITION_NAN = 4
+TRANSITION_REASON_TELEPORT = 5
+
+TRANSITION_REASON_CODES = {
+    str(TRANSITION_REASON_OK): "ok",
+    str(TRANSITION_REASON_FIRST_SAMPLE): "first_sample",
+    str(TRANSITION_REASON_FRAME_GAP): "frame_gap",
+    str(TRANSITION_REASON_NONPOSITIVE_DT): "nonpositive_dt",
+    str(TRANSITION_REASON_POSITION_NAN): "position_nan",
+    str(TRANSITION_REASON_TELEPORT): "teleport",
+}
+
+
 @dataclass
 class TrackSpeeds:
     frames: np.ndarray
+    delta_frames: np.ndarray
+    delta_seconds: np.ndarray
+    transition_valid: np.ndarray
+    transition_reason_code: np.ndarray
     speed_raw: np.ndarray  # Speed from raw frame path-distance
     speed_filtered: np.ndarray  # Speed from hysteresis-filtered frame path-distance
     speed_smoothed: np.ndarray  # Speed from temporally smoothed frame path-distance
@@ -315,7 +336,26 @@ def compute_track_speed(
     if frames.size == 0:
         empty = np.array([], dtype=np.float32)
         empty_int64 = np.array([], dtype=np.int64)
-        return TrackSpeeds(frames, empty, empty, empty, empty, empty, empty, empty, empty, empty_int64, empty)
+        empty_int32 = np.array([], dtype=np.int32)
+        empty_bool = np.array([], dtype=bool)
+        empty_int16 = np.array([], dtype=np.int16)
+        return TrackSpeeds(
+            frames=frames,
+            delta_frames=empty_int32,
+            delta_seconds=empty,
+            transition_valid=empty_bool,
+            transition_reason_code=empty_int16,
+            speed_raw=empty,
+            speed_filtered=empty,
+            speed_smoothed=empty,
+            speed_averaged=empty,
+            frame_path_distance_raw=empty,
+            frame_path_distance_filtered=empty,
+            frame_path_distance_smoothed=empty,
+            cumulative_path_distance=empty,
+            seconds=empty_int64,
+            speed_per_second=empty,
+        )
 
     order = np.argsort(frames)
     frames = frames[order].astype(np.int64, copy=False)
@@ -327,6 +367,14 @@ def compute_track_speed(
     frame_path_distance_raw = np.zeros(frames.shape[0], dtype=np.float64)
     frame_path_distance_filtered_data = np.zeros(frames.shape[0], dtype=np.float64)
     frame_path_distance_smoothed = np.zeros(frames.shape[0], dtype=np.float64)
+    delta_frames_full = np.zeros(frames.shape[0], dtype=np.int32)
+    delta_seconds_full = np.zeros(frames.shape[0], dtype=np.float64)
+    transition_valid = np.zeros(frames.shape[0], dtype=bool)
+    transition_reason_code = np.full(
+        frames.shape[0],
+        TRANSITION_REASON_FIRST_SAMPLE,
+        dtype=np.int16,
+    )
 
     distance_window_seconds = (
         distance_smooth_seconds if distance_smooth_seconds is not None else smooth_seconds
@@ -338,11 +386,18 @@ def compute_track_speed(
         delta_frames = np.diff(frames)
         delta_seconds = delta_frames / fps
         displacement = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+        delta_frames_full[1:] = delta_frames.astype(np.int32, copy=False)
+        delta_seconds_full[1:] = delta_seconds
 
         # Only consider valid consecutive frames (no gaps) for distance calculation
         # Also filter out extremely large displacements that likely indicate teleportation
         # or data artifacts (e.g., trial state changes, coordinate system glitches)
         consecutive_frames = delta_frames == 1
+
+        position_finite = (
+            np.all(np.isfinite(positions[:-1]), axis=1)
+            & np.all(np.isfinite(positions[1:]), axis=1)
+        )
 
         # Flag displacements > 500px as suspicious (likely teleportation/reset)
         # At 60fps, a fish moving at 200mm/s (~8in/s, quite fast) would be ~3.3mm/frame
@@ -351,6 +406,15 @@ def compute_track_speed(
         reasonable_displacement = displacement < 500.0
 
         valid = (delta_seconds > 0) & np.isfinite(displacement) & consecutive_frames & reasonable_displacement
+        transition_valid[1:] = valid
+
+        reason = np.full(delta_frames.shape, TRANSITION_REASON_OK, dtype=np.int16)
+        reason[~reasonable_displacement] = TRANSITION_REASON_TELEPORT
+        reason[~position_finite] = TRANSITION_REASON_POSITION_NAN
+        reason[~consecutive_frames] = TRANSITION_REASON_FRAME_GAP
+        reason[delta_seconds <= 0] = TRANSITION_REASON_NONPOSITIVE_DT
+        reason[valid] = TRANSITION_REASON_OK
+        transition_reason_code[1:] = reason
 
         # Retain only reasonable, consecutive displacements; others are treated as 0 to avoid
         # adding artificial distance or leaking into the smoothing window.
@@ -467,10 +531,6 @@ def compute_track_speed(
     # Cumulative path distance with NaN values already replaced with 0.
     cumulative_path_distance = np.cumsum(frame_path_distance_smoothed)
 
-    delta_seconds_full = np.zeros(frames.shape[0], dtype=np.float64)
-    if frames.size >= 2:
-        delta_seconds_full[1:] = np.diff(frames) / fps
-
     seconds = np.floor(frames / fps).astype(np.int64)
     unique_seconds = np.unique(seconds)
     speed_per_second = np.zeros(unique_seconds.size, dtype=np.float64)
@@ -486,6 +546,10 @@ def compute_track_speed(
 
     return TrackSpeeds(
         frames=frames,
+        delta_frames=delta_frames_full.astype(np.int32),
+        delta_seconds=delta_seconds_full.astype(np.float32),
+        transition_valid=transition_valid.astype(bool),
+        transition_reason_code=transition_reason_code.astype(np.int16),
         speed_raw=speed_raw.astype(np.float32),
         speed_filtered=speed_filtered.astype(np.float32),
         speed_smoothed=speed_smoothed.astype(np.float32),
@@ -577,6 +641,15 @@ def save_tracks(
         sub = tracks_parent.create_group(f"id_{track_id}")
         chunks = (min(1024, data.frames.size),)
         sub.create_array("frame_indices", data=data.frames, chunks=chunks, overwrite=True)
+        sub.create_array("delta_frames", data=data.delta_frames, chunks=chunks, overwrite=True)
+        sub.create_array("delta_seconds", data=data.delta_seconds, chunks=chunks, overwrite=True)
+        sub.create_array("transition_valid", data=data.transition_valid, chunks=chunks, overwrite=True)
+        sub.create_array(
+            "transition_reason_code",
+            data=data.transition_reason_code,
+            chunks=chunks,
+            overwrite=True,
+        )
         sub.create_array("speed_raw", data=data.speed_raw, chunks=chunks, overwrite=True)
         sub.create_array("speed_filtered", data=data.speed_filtered, chunks=chunks, overwrite=True)
         sub.create_array("speed_smoothed", data=data.speed_smoothed, chunks=chunks, overwrite=True)
@@ -635,6 +708,8 @@ def save_tracks(
         sub.attrs.update(
             {
                 "num_samples": int(summary.get("samples", data.frames.size)),
+                "transition_validity_schema_id": "palette.track_transition_validity.v1",
+                "transition_reason_codes": dict(TRANSITION_REASON_CODES),
                 "mean_speed": float(summary.get("mean_speed", float("nan"))),
                 "median_speed": float(summary.get("median_speed", float("nan"))),
                 "max_speed": float(summary.get("max_speed", float("nan"))),

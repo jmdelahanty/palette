@@ -15,6 +15,7 @@ from fisheye.visualization.interactive_track_kinematics import (
     to_position_dataframe,
     to_swim_bout_dataframe,
     to_timeseries_dataframe,
+    to_validity_span_dataframe,
 )
 from tests.unit.fisheye.test_plot_track_kinematics_artifacts import _make_track_kinematics_archive
 
@@ -83,6 +84,9 @@ def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: 
     assert data.position_unit == "mm"
     assert "speed_smoothed_mm" in data.series
     assert data.source_paths["time_seconds"].endswith("/tracks/id_0/time_seconds")
+    assert data.validity_source == "track_validity"
+    assert data.validity_labels.tolist() == ["transition:frame_gap", "sample:keypoint_failed"]
+    np.testing.assert_allclose(data.validity_spans, [[0.005, 0.010], [0.0125, 0.0175]])
 
 
 def test_track_kinematics_interactive_dataframes(tmp_path: Path) -> None:
@@ -95,11 +99,14 @@ def test_track_kinematics_interactive_dataframes(tmp_path: Path) -> None:
 
     timeseries = to_timeseries_dataframe(data)
     positions = to_position_dataframe(data)
+    validity = to_validity_span_dataframe(data)
 
     assert list(timeseries["frame_index"]) == [0, 1, 2, 3, 4, 5]
     assert "speed_smoothed_mm" in timeseries.columns
     assert list(positions.columns) == ["time_s", "x", "y", "unit"]
     assert positions["unit"].unique().tolist() == ["mm"]
+    assert validity["reason"].tolist() == ["transition:frame_gap", "sample:keypoint_failed"]
+    np.testing.assert_allclose(validity["duration_s"].to_numpy(), [0.005, 0.005])
 
 
 def test_load_track_kinematics_interactive_data_reads_canonical_swim_bouts(tmp_path: Path) -> None:

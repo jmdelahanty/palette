@@ -58,6 +58,14 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 
 SPEED_LEVELS = ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged")
+PATH_DISTANCE_LEVEL_SOURCE = {
+    "speed_raw": "raw",
+    "speed_filtered": "filtered",
+    "speed_smoothed": "smoothed",
+    # speed_averaged is a moving average of the smoothed speed trace; it does
+    # not have an independent frame-path-distance array.
+    "speed_averaged": "smoothed",
+}
 SPEED_LEVEL_ALIASES = {
     "raw": "speed_raw",
     "filtered": "speed_filtered",
@@ -88,11 +96,20 @@ def _bout_dtype() -> np.dtype:
         ('core_end_frame', 'i8'),
         ('duration_frames', 'i8'),
         ('duration_s', 'f8'),
+        ('elapsed_duration_s', 'f8'),
+        ('observed_duration_s', 'f8'),
         ('core_duration_frames', 'i8'),
         ('core_duration_s', 'f8'),
-        ('distance', 'f8'),
-        ('mean_speed', 'f8'),
-        ('peak_speed', 'f8'),
+        ('path_length_mm', 'f8'),
+        ('path_length_px', 'f8'),
+        ('net_displacement_mm', 'f8'),
+        ('net_displacement_px', 'f8'),
+        ('mean_speed_mm_s', 'f8'),
+        ('peak_speed_mm_s', 'f8'),
+        ('n_valid_transitions', 'i8'),
+        ('n_invalid_transitions', 'i8'),
+        ('valid_transition_fraction', 'f8'),
+        ('gap_censored', '?'),
         ('start_time_s', 'f8'),
         ('end_time_s', 'f8'),
         ('core_start_time_s', 'f8'),
@@ -102,6 +119,101 @@ def _bout_dtype() -> np.dtype:
 
 def _empty_bouts() -> np.ndarray:
     return np.zeros(0, dtype=_bout_dtype())
+
+
+def _finite_sum_or_nan(values: np.ndarray) -> float:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.sum(finite)) if finite.size else float("nan")
+
+
+def _finite_mean_or_nan(values: np.ndarray) -> float:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.mean(finite)) if finite.size else float("nan")
+
+
+def _transition_delta_seconds(frames: np.ndarray, fps: float) -> np.ndarray:
+    delta_seconds = np.zeros(frames.shape[0], dtype=np.float64)
+    if frames.size >= 2 and fps > 0:
+        delta_seconds[1:] = np.diff(frames.astype(np.float64, copy=False)) / float(fps)
+    return delta_seconds
+
+
+def _fallback_transition_valid(
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+) -> np.ndarray:
+    valid = np.zeros(frames.shape[0], dtype=bool)
+    if frames.size >= 2 and fps > 0:
+        delta_frames = np.diff(frames)
+        valid[1:] = (delta_frames == 1) & np.isfinite(speed[1:])
+    return valid
+
+
+def _effective_transition_valid(
+    *,
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+    transition_valid: Optional[np.ndarray],
+    sample_valid: Optional[np.ndarray],
+) -> np.ndarray:
+    if transition_valid is None:
+        effective = _fallback_transition_valid(speed, frames, fps)
+    else:
+        effective = np.asarray(transition_valid, dtype=bool).copy()
+        if effective.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"transition_valid length {effective.shape[0]} does not match frames length {frames.shape[0]}."
+            )
+
+    if sample_valid is not None:
+        sample_valid = np.asarray(sample_valid, dtype=bool)
+        if sample_valid.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"sample_valid length {sample_valid.shape[0]} does not match frames length {frames.shape[0]}."
+            )
+        endpoint_valid = np.zeros_like(effective)
+        if endpoint_valid.size >= 2:
+            endpoint_valid[1:] = sample_valid[1:] & sample_valid[:-1]
+        effective &= endpoint_valid
+
+    return effective
+
+
+def _sum_valid_path_distance(
+    path_distance: Optional[np.ndarray],
+    valid_mask: np.ndarray,
+) -> float:
+    if path_distance is None:
+        return float("nan")
+    values = np.asarray(path_distance, dtype=np.float64)
+    if values.shape[0] != valid_mask.shape[0]:
+        raise ValueError(
+            f"path-distance length {values.shape[0]} does not match validity length {valid_mask.shape[0]}."
+        )
+    return _finite_sum_or_nan(values[valid_mask])
+
+
+def _net_displacement(
+    positions: Optional[np.ndarray],
+    start_idx: int,
+    end_idx: int,
+) -> float:
+    if positions is None:
+        return float("nan")
+    values = np.asarray(positions, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] < 2:
+        return float("nan")
+    if start_idx < 0 or end_idx < 0 or start_idx >= values.shape[0] or end_idx >= values.shape[0]:
+        return float("nan")
+    start = values[start_idx, :2]
+    end = values[end_idx, :2]
+    if not (np.all(np.isfinite(start)) and np.all(np.isfinite(end))):
+        return float("nan")
+    return float(np.linalg.norm(end - start))
 
 
 def _nearest_global_minimum_index(values: np.ndarray, *, prefer_last: bool) -> int:
@@ -187,11 +299,34 @@ def _build_bout_array(
     core_ends_exclusive: np.ndarray,
     starts: np.ndarray,
     ends_exclusive: np.ndarray,
+    *,
+    path_distance_mm: Optional[np.ndarray] = None,
+    path_distance_px: Optional[np.ndarray] = None,
+    positions_mm: Optional[np.ndarray] = None,
+    positions_px: Optional[np.ndarray] = None,
+    delta_seconds: Optional[np.ndarray] = None,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Build the structured bout table from core and expanded boundaries."""
 
     n_bouts = len(starts)
     bouts = np.zeros(n_bouts, dtype=_bout_dtype())
+    if delta_seconds is None:
+        delta_seconds_arr = _transition_delta_seconds(frames, fps)
+    else:
+        delta_seconds_arr = np.asarray(delta_seconds, dtype=np.float64)
+        if delta_seconds_arr.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"delta_seconds length {delta_seconds_arr.shape[0]} does not match frames length {frames.shape[0]}."
+            )
+    effective_transition_valid = _effective_transition_valid(
+        speed=speed,
+        frames=frames,
+        fps=fps,
+        transition_valid=transition_valid,
+        sample_valid=sample_valid,
+    )
 
     for i, (start_idx, end_exclusive, core_start_idx, core_end_exclusive) in enumerate(
         zip(starts, ends_exclusive, core_starts, core_ends_exclusive)
@@ -203,20 +338,41 @@ def _build_bout_array(
 
         bout_speeds = speed[start_idx:end_exclusive]
         valid_speeds = bout_speeds[np.isfinite(bout_speeds)]
+        transition_slice = slice(start_idx, end_exclusive)
+        valid_transition_mask = effective_transition_valid[transition_slice]
 
         duration_frames = end_exclusive - start_idx
         duration_s = duration_frames / fps if fps > 0 else 0.0
+        elapsed_duration_s = duration_s
+        observed_duration_s = float(
+            np.sum(delta_seconds_arr[transition_slice][valid_transition_mask])
+        )
         core_duration_frames = core_end_exclusive - core_start_idx
         core_duration_s = core_duration_frames / fps if fps > 0 else 0.0
+        n_possible_transitions = int(max(0, end_exclusive - start_idx))
+        n_valid_transitions = int(np.sum(valid_transition_mask))
+        n_invalid_transitions = int(max(0, n_possible_transitions - n_valid_transitions))
+        valid_transition_fraction = (
+            float(n_valid_transitions / n_possible_transitions)
+            if n_possible_transitions > 0
+            else float("nan")
+        )
+        gap_censored = bool(n_invalid_transitions > 0)
 
-        if len(valid_speeds) > 0:
-            mean_speed = np.mean(valid_speeds)
-            peak_speed = np.max(valid_speeds)
-            distance = mean_speed * duration_s
-        else:
-            mean_speed = 0.0
-            peak_speed = 0.0
-            distance = 0.0
+        path_length_mm = _sum_valid_path_distance(
+            None if path_distance_mm is None else path_distance_mm[transition_slice],
+            valid_transition_mask,
+        )
+        path_length_px = _sum_valid_path_distance(
+            None if path_distance_px is None else path_distance_px[transition_slice],
+            valid_transition_mask,
+        )
+        mean_speed_mm_s = (
+            path_length_mm / observed_duration_s
+            if observed_duration_s > 0.0 and np.isfinite(path_length_mm)
+            else float("nan")
+        )
+        peak_speed_mm_s = float(np.max(valid_speeds)) if len(valid_speeds) > 0 else float("nan")
 
         end_idx = end_exclusive - 1
         core_end_idx = core_end_exclusive - 1
@@ -228,11 +384,20 @@ def _build_bout_array(
             int(frames[core_end_idx]),
             duration_frames,
             duration_s,
+            elapsed_duration_s,
+            observed_duration_s,
             core_duration_frames,
             core_duration_s,
-            distance,
-            mean_speed,
-            peak_speed,
+            path_length_mm,
+            path_length_px,
+            _net_displacement(positions_mm, start_idx, end_idx),
+            _net_displacement(positions_px, start_idx, end_idx),
+            mean_speed_mm_s,
+            peak_speed_mm_s,
+            n_valid_transitions,
+            n_invalid_transitions,
+            valid_transition_fraction,
+            gap_censored,
             frames[start_idx] / fps if fps > 0 else float('nan'),
             frames[end_idx] / fps if fps > 0 else float('nan'),
             frames[core_start_idx] / fps if fps > 0 else float('nan'),
@@ -435,11 +600,15 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
         ('n_bouts', 'i4'),
         ('bout_rate_per_min', 'f8'),
         ('total_active_time_s', 'f8'),
+        ('total_observed_active_time_s', 'f8'),
         ('percent_active', 'f8'),
         ('mean_bout_duration_s', 'f8'),
-        ('mean_bout_distance', 'f8'),
-        ('mean_bout_speed', 'f8'),
-        ('total_distance', 'f8'),
+        ('mean_bout_observed_duration_s', 'f8'),
+        ('mean_bout_path_length_mm', 'f8'),
+        ('total_path_length_mm', 'f8'),
+        ('mean_bout_speed_mm_s', 'f8'),
+        ('mean_valid_transition_fraction', 'f8'),
+        ('n_gap_censored_bouts', 'i4'),
         ('inter_bout_interval_count', 'i4'),
         ('inter_bout_interval_mean_s', 'f8'),
         ('inter_bout_interval_std_s', 'f8'),
@@ -455,6 +624,7 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
 
     if n_bouts > 0:
         total_active_time = float(np.sum(bouts['duration_s']))
+        total_observed_active_time = float(np.sum(bouts['observed_duration_s']))
         percent_active = (total_active_time / total_duration_s * 100.0) if total_duration_s > 0 else 0.0
         bout_rate_per_min = (n_bouts / total_duration_s * 60.0) if total_duration_s > 0 else 0.0
 
@@ -462,11 +632,15 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
             n_bouts,
             bout_rate_per_min,
             total_active_time,
+            total_observed_active_time,
             percent_active,
             float(np.mean(bouts['duration_s'])),
-            float(np.mean(bouts['distance'])),
-            float(np.mean(bouts['mean_speed'])),
-            float(np.sum(bouts['distance'])),
+            float(np.mean(bouts['observed_duration_s'])),
+            _finite_mean_or_nan(bouts['path_length_mm']),
+            _finite_sum_or_nan(bouts['path_length_mm']),
+            _finite_mean_or_nan(bouts['mean_speed_mm_s']),
+            _finite_mean_or_nan(bouts['valid_transition_fraction']),
+            int(np.sum(bouts['gap_censored'])),
             0,  # Will be updated with interval metrics
             float('nan'),
             float('nan'),
@@ -476,7 +650,8 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
         )
     else:
         global_metrics[0] = (
-            0, 0.0, 0.0, 0.0, float('nan'), float('nan'), float('nan'), 0.0,
+            0, 0.0, 0.0, 0.0, 0.0, float('nan'), float('nan'), float('nan'),
+            float('nan'), float('nan'), float('nan'), 0,
             0, float('nan'), float('nan'), float('nan'), float('nan'), float('nan'),
         )
 
@@ -492,6 +667,13 @@ def _detect_bouts_from_speed(
     min_gap_duration_s: float = 0.1,
     boundary_mode: str = "threshold",
     boundary_window_s: float = 0.25,
+    path_distance_mm: Optional[np.ndarray] = None,
+    path_distance_px: Optional[np.ndarray] = None,
+    positions_mm: Optional[np.ndarray] = None,
+    positions_px: Optional[np.ndarray] = None,
+    delta_seconds: Optional[np.ndarray] = None,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Detect swim bouts from speed trace using threshold-based detection.
@@ -578,6 +760,13 @@ def _detect_bouts_from_speed(
         core_ends_exclusive,
         starts,
         ends_exclusive,
+        path_distance_mm=path_distance_mm,
+        path_distance_px=path_distance_px,
+        positions_mm=positions_mm,
+        positions_px=positions_px,
+        delta_seconds=delta_seconds,
+        transition_valid=transition_valid,
+        sample_valid=sample_valid,
     )
 
 
@@ -592,6 +781,13 @@ def _detect_bouts_from_peaks(
     min_gap_duration_s: float = 0.1,
     boundary_mode: str = "threshold",
     boundary_window_s: float = 0.25,
+    path_distance_mm: Optional[np.ndarray] = None,
+    path_distance_px: Optional[np.ndarray] = None,
+    positions_mm: Optional[np.ndarray] = None,
+    positions_px: Optional[np.ndarray] = None,
+    delta_seconds: Optional[np.ndarray] = None,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Detect swim bouts from speed trace using peak-based detection.
@@ -698,6 +894,13 @@ def _detect_bouts_from_peaks(
         core_ends_exclusive,
         starts,
         ends_exclusive,
+        path_distance_mm=path_distance_mm,
+        path_distance_px=path_distance_px,
+        positions_mm=positions_mm,
+        positions_px=positions_px,
+        delta_seconds=delta_seconds,
+        transition_valid=transition_valid,
+        sample_valid=sample_valid,
     )
 
 
@@ -756,6 +959,11 @@ def _load_track_kinematics_track_speeds(
 
     track_group = tracks_group[track_key]
 
+    def _optional_track_array(name: str) -> Optional[np.ndarray]:
+        if name not in track_group:
+            return None
+        return track_group[name][:]
+
     # Load speed arrays
     speeds = {
         'speed_raw_mm': track_group['speed_raw_mm'][:],
@@ -763,6 +971,15 @@ def _load_track_kinematics_track_speeds(
         'speed_smoothed_mm': track_group['speed_smoothed_mm'][:],
         'speed_averaged_mm': track_group['speed_averaged_mm'][:],
         'frames': track_group['frame_indices'][:],
+        'frame_path_distance_raw_mm': _optional_track_array('frame_path_distance_raw_mm'),
+        'frame_path_distance_raw_px': _optional_track_array('frame_path_distance_raw_px'),
+        'frame_path_distance_filtered_mm': _optional_track_array('frame_path_distance_filtered_mm'),
+        'frame_path_distance_filtered_px': _optional_track_array('frame_path_distance_filtered_px'),
+        'frame_path_distance_smoothed_mm': _optional_track_array('frame_path_distance_smoothed_mm'),
+        'frame_path_distance_smoothed_px': _optional_track_array('frame_path_distance_smoothed_px'),
+        'delta_seconds': _optional_track_array('delta_seconds'),
+        'transition_valid': _optional_track_array('transition_valid'),
+        'sample_valid': _optional_track_array('sample_valid'),
     }
 
     # Load position data for bout_points (both px and mm)
@@ -798,6 +1015,23 @@ def _load_track_kinematics_track_speeds(
     }
 
     return speeds, metadata
+
+
+def _metric_inputs_for_level(
+    speeds: Dict[str, Optional[np.ndarray]],
+    metadata: Dict[str, Any],
+    level: str,
+) -> Dict[str, Optional[np.ndarray]]:
+    path_source = PATH_DISTANCE_LEVEL_SOURCE[level]
+    return {
+        "path_distance_mm": speeds.get(f"frame_path_distance_{path_source}_mm"),
+        "path_distance_px": speeds.get(f"frame_path_distance_{path_source}_px"),
+        "positions_mm": metadata.get("positions_mm"),
+        "positions_px": metadata.get("positions_px"),
+        "delta_seconds": speeds.get("delta_seconds"),
+        "transition_valid": speeds.get("transition_valid"),
+        "sample_valid": speeds.get("sample_valid"),
+    }
 
 
 def detect_and_save_bouts(
@@ -894,6 +1128,7 @@ def detect_and_save_bouts(
     for level in speed_levels:
         speed_key = f"{level}_mm"
         speed = speeds[speed_key]
+        metric_inputs = _metric_inputs_for_level(speeds, metadata, level)
 
         # Skip if all NaN
         if np.all(np.isnan(speed)):
@@ -911,6 +1146,7 @@ def detect_and_save_bouts(
                 min_gap_duration_s,
                 boundary_mode,
                 boundary_window_s,
+                **metric_inputs,
             )
         elif method == "peak":
             bouts = _detect_bouts_from_peaks(
@@ -924,6 +1160,7 @@ def detect_and_save_bouts(
                 min_gap_duration_s,
                 boundary_mode,
                 boundary_window_s,
+                **metric_inputs,
             )
         else:
             raise ValueError(f"Unknown detection method: {method}. Must be 'threshold' or 'peak'.")
@@ -1008,6 +1245,8 @@ def detect_and_save_bouts(
         'boundary_mode': boundary_mode,
         'boundary_window_s': float(boundary_window_s),
         'speed_levels': list(speed_levels),
+        'bout_metric_schema_id': 'palette.swim_bout_metrics.v2',
+        'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
     }
     inputs = {
@@ -1069,14 +1308,22 @@ def detect_and_save_bouts(
         level_specific_attrs = {
             'n_bouts': len(bouts),
             'speed_level': level,
+            'bout_metric_schema_id': 'palette.swim_bout_metrics.v2',
+            'path_distance_source_level': PATH_DISTANCE_LEVEL_SOURCE[level],
             'is_default_level': level == default_level_key,
         }
 
         if len(bouts) > 0:
             level_specific_attrs['total_bout_time_s'] = float(np.sum(bouts['duration_s']))
+            level_specific_attrs['total_observed_bout_time_s'] = float(np.sum(bouts['observed_duration_s']))
             level_specific_attrs['mean_bout_duration_s'] = float(np.mean(bouts['duration_s']))
-            level_specific_attrs['mean_bout_speed'] = float(np.mean(bouts['mean_speed']))
-            level_specific_attrs['total_distance'] = float(np.sum(bouts['distance']))
+            level_specific_attrs['mean_bout_observed_duration_s'] = float(np.mean(bouts['observed_duration_s']))
+            level_specific_attrs['mean_bout_speed_mm_s'] = _finite_mean_or_nan(bouts['mean_speed_mm_s'])
+            level_specific_attrs['total_path_length_mm'] = _finite_sum_or_nan(bouts['path_length_mm'])
+            level_specific_attrs['mean_valid_transition_fraction'] = _finite_mean_or_nan(
+                bouts['valid_transition_fraction']
+            )
+            level_specific_attrs['n_gap_censored_bouts'] = int(np.sum(bouts['gap_censored']))
 
         write_columnar_dataset(level_group, 'bouts', bouts, attrs=level_specific_attrs)
         write_columnar_dataset(level_group, 'inter_bout_intervals', intervals, attrs=None)
