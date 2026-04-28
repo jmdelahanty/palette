@@ -48,6 +48,38 @@ def test_eye_angle_definition_attrs_match_nasal_positive_binocular_math() -> Non
     assert attrs["minor_version_definition"] == "0.5*(-left_minor_signed_deg + right_minor_signed_deg)"
 
 
+def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
+    schema = eye_angle_analysis._eye_angle_output_schema()
+
+    assert schema["schema_id"] == "analysis.eye_angle_output_schema"
+    assert schema["schema_version"] == 1
+    assert schema["row_axes"]["roi"] == "keypoint_detection_rows"
+    assert schema["row_axes"]["frame"] == "video_frame_rows"
+    assert schema["groups"]["angles/roi"]["units"] == "deg"
+    assert "left_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "heading_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "left_speed_deg_s" in schema["groups"]["angles/roi"]["derivative_outputs"]
+    assert schema["groups"]["support"]["row_axis"] == "mixed"
+    support_outputs = schema["groups"]["support"]["outputs"]
+    assert {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": True} in support_outputs
+    assert schema["groups"]["qa/roi"]["outputs"] == [
+        "valid_left",
+        "valid_right",
+        "valid_frame",
+        "reason_codes",
+    ]
+    assert schema["signed_angle_convention"] == "per-eye signed angles are temporal-positive"
+    assert schema["vergence_signed_definition"] == "-(left_signed_deg + right_signed_deg)"
+    assert schema["qa_reason_codes_attr"] == "reason_code_map"
+
+
+def test_eye_angle_source_geometry_kind_maps_known_sources() -> None:
+    assert eye_angle_analysis._source_geometry_kind("analysis/subject_shape_runs") == "subject_shape_eye_geometry"
+    assert eye_angle_analysis._source_geometry_kind("refined_subject_masks_runs") == "refined_subject_eye_geometry"
+    assert eye_angle_analysis._source_geometry_kind("refined_eye_masks_runs") == "legacy_refined_eye_geometry"
+    assert eye_angle_analysis._source_geometry_kind("unknown") == "unknown_eye_geometry"
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

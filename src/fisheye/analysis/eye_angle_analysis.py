@@ -75,6 +75,12 @@ SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed"
 EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
 DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
+EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
+EYE_ANGLE_RUN_SCHEMA_VERSION = 1
+EYE_ANGLE_OUTPUT_SCHEMA_ID = "analysis.eye_angle_output_schema"
+EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 1
+EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
+EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
 
 _BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
     ("left_deg", "left_deg"),
@@ -121,6 +127,116 @@ def _eye_angle_definition_attrs() -> Dict[str, object]:
         "minor_vergence_definition": "abs(vergence_minor_signed_deg)",
         "minor_vergence_signed_definition": "-(left_minor_signed_deg + right_minor_signed_deg)",
         "minor_version_definition": "0.5*(-left_minor_signed_deg + right_minor_signed_deg)",
+    }
+
+
+def _source_geometry_kind(stage_group: str) -> str:
+    return {
+        EYE_GEOMETRY_STAGE_SUBJECT_SHAPE: "subject_shape_eye_geometry",
+        EYE_GEOMETRY_STAGE_REFINED_SUBJECT: "refined_subject_eye_geometry",
+        EYE_GEOMETRY_STAGE_REFINED_EYE: "legacy_refined_eye_geometry",
+    }.get(str(stage_group), "unknown_eye_geometry")
+
+
+def _eye_angle_output_schema() -> Dict[str, object]:
+    """Return a machine-readable schema for eye-angle output arrays."""
+
+    roi_angle_outputs = [
+        "left_deg",
+        "right_deg",
+        "left_signed_deg",
+        "right_signed_deg",
+        "vergence_deg",
+        "vergence_signed_deg",
+        "version_deg",
+        "left_minor_signed_deg",
+        "right_minor_signed_deg",
+        "vergence_minor_signed_deg",
+        "version_minor_deg",
+        "heading_deg",
+        "left_centroid_deg",
+        "right_centroid_deg",
+        "vergence_centroid_deg",
+    ]
+    derivative_outputs = [
+        "left_speed_deg_s",
+        "right_speed_deg_s",
+        "vergence_speed_deg_s",
+        "vergence_signed_speed_deg_s",
+        "version_speed_deg_s",
+        "left_accel_deg_s2",
+        "right_accel_deg_s2",
+        "vergence_accel_deg_s2",
+        "vergence_signed_accel_deg_s2",
+        "version_accel_deg_s2",
+    ]
+    support_outputs = [
+        {"name": "frame_indices", "row_axis": "roi", "value_kind": "frame_index"},
+        {"name": "time_seconds", "row_axis": "roi", "units": "s"},
+        {"name": "ellipse_major", "row_axis": "roi", "units": "px"},
+        {"name": "ellipse_minor", "row_axis": "roi", "units": "px"},
+        {"name": "ellipse_ratio", "row_axis": "roi", "value_kind": "ratio"},
+        {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": True},
+    ]
+    qa_outputs = ["valid_left", "valid_right", "valid_frame", "reason_codes"]
+    frame_outputs = [
+        "left_deg",
+        "right_deg",
+        "vergence_deg",
+        "vergence_signed_deg",
+        "version_deg",
+        "vergence_minor_signed_deg",
+        "version_minor_deg",
+        "left_centroid_deg",
+        "right_centroid_deg",
+        "vergence_centroid_deg",
+    ]
+    return {
+        "schema_id": EYE_ANGLE_OUTPUT_SCHEMA_ID,
+        "schema_version": EYE_ANGLE_OUTPUT_SCHEMA_VERSION,
+        "row_axes": {
+            "roi": EYE_ANGLE_ROW_AXIS,
+            "frame": "video_frame_rows",
+        },
+        "groups": {
+            "angles/roi": {
+                "row_axis": "roi",
+                "units": "deg",
+                "base_outputs": roi_angle_outputs,
+                "smoothed_suffix": "_smoothed",
+                "delta_suffix": "_delta_deg",
+                "delta_smoothed_suffix": "_delta_deg_smoothed",
+                "derivative_outputs": derivative_outputs,
+            },
+            "angles/frame": {
+                "row_axis": "frame",
+                "units": "deg",
+                "base_outputs": frame_outputs,
+                "smoothed_suffix": "_smoothed",
+                "delta_suffix": "_delta_deg",
+                "delta_smoothed_suffix": "_delta_deg_smoothed",
+            },
+            "qa/roi": {
+                "row_axis": "roi",
+                "outputs": qa_outputs,
+            },
+            "qa/frame": {
+                "row_axis": "frame",
+                "outputs": ["valid_frame", "reason_codes"],
+            },
+            "support": {
+                "row_axis": "mixed",
+                "outputs": support_outputs,
+            },
+        },
+        "angle_units": "degrees",
+        "time_units": "seconds",
+        "signed_angle_convention": "per-eye signed angles are temporal-positive",
+        "vergence_signed_definition": "-(left_signed_deg + right_signed_deg)",
+        "version_definition": "0.5*(-left_signed_deg + right_signed_deg)",
+        "centroid_angle_definition": "atan2(rotated_eye_vector_y, rotated_eye_vector_x) in fish frame",
+        "centroid_vergence_definition": "abs(left_centroid_deg) + abs(right_centroid_deg)",
+        "qa_reason_codes_attr": "reason_code_map",
     }
 
 
@@ -1579,13 +1695,19 @@ def run(args: argparse.Namespace) -> None:
     run_group.attrs.update(
         {
             "status": "complete",
+            "schema_id": EYE_ANGLE_RUN_SCHEMA_ID,
+            "schema_version": EYE_ANGLE_RUN_SCHEMA_VERSION,
+            "method": EYE_ANGLE_METHOD,
+            "row_axis": EYE_ANGLE_ROW_AXIS,
             "report_version": "1.4",
             "reason_code_map": REASON_CODE_MAP,
             "source_eye_geometry_stage": eye_geometry.stage_group,
             "source_eye_geometry_run": eye_geometry.run_name,
+            "source_geometry_kind": _source_geometry_kind(eye_geometry.stage_group),
             "source_subject_shape_run": eye_geometry.source_subject_shape_run,
             "source_refined_eye_run": eye_geometry.source_refined_eye_run,
             "source_refined_subject_masks_run": eye_geometry.source_refined_subject_run,
+            "eye_angle_output_schema": _eye_angle_output_schema(),
             **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
             "fps": float(fps) if fps else None,
             "num_detections": int(total_detections),

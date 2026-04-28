@@ -168,10 +168,11 @@ This is the near-term rollout order that should happen before more schema work.
     `subject_mask_runs/traditional_swim_bladder_masks_canary_001` was
     materialized successfully on 2026-04-01
 
-### 3. Delay downstream analysis geometry until labels exist
+### 3. Gate downstream analysis geometry on real mask labels
 
-- [ ] Do not start `analysis/subject_shape_runs` implementation until we have at
-      least a small curated refined body-mask set.
+- [x] Start `analysis/subject_shape_runs` implementation only after a small
+      refined body/eyes/swim canary set exists.
+      Status: first canary subject-shape and eye-angle-schema runs now exist.
 - [ ] Do not design body/spline contour arrays beyond the current contract until
       we see what the first curated masks actually look like.
 
@@ -283,7 +284,8 @@ For now:
   legacy viewers
 - subject-mask unification should keep eye-specific geometry/export consumers
   working without another schema reset
-- current eye-angle analysis and eye-mask training export already route through
+- current eye-angle analysis opts into subject-shape eye geometry when
+  available; eye-mask training export still routes through
   `fisheye.shared.eye_geometry_source`, preferring canonical refined-subject
   eye geometry with refined-eye fallback for historical archives
 - registry/query/operator surfaces should prefer unified subject-mask component
@@ -832,9 +834,10 @@ Mask-local eye outputs may remain in `refined_subject_masks_runs`:
 
 Analysis-facing eye geometry belongs in `analysis/subject_shape_runs` when it
 is part of a coherent body/eyes/swim shape run. Specialized outputs such as
-`analysis/eye_angle_runs` may remain separate during migration, but new
-eye-angle writers should consume subject-shape eye geometry when that surface is
-available.
+`analysis/eye_angle_runs` remain separate specialized analyses. Current
+eye-angle writers consume subject-shape eye geometry when that surface is
+available and record `source_geometry_kind` plus the v1 eye-angle run/output
+schema attrs.
 
 Current-state note for `refined_eye_masks_runs`:
 
@@ -950,7 +953,7 @@ The registry should represent:
    - `subject_masks`
    - legacy `refined_eye_masks` compatibility signals during transition
    - `refined_subject_masks`
-   - future `subject_shape`
+   - `subject_shape` derived geometry
 
 2. component availability
    - `subject_body`
@@ -1062,6 +1065,9 @@ This means the registry should eventually answer questions like:
   See `scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics`.
 - [x] Implement the first `analysis/subject_shape_runs` writer.
   See `scripts/py -m fisheye.analysis.subject_shape_runs`.
+- [x] Route the first downstream eye-angle analysis consumer through
+      `analysis/subject_shape_runs` when available, with refined-subject and
+      refined-eye compatibility fallbacks.
 - [ ] Include body B-spline fit support in the first body-shape writer or define
       it as the first follow-up slice.
 
@@ -1135,13 +1141,20 @@ Real canary evidence:
 - subject-shape component coverage:
   `subject_body=19235`, `swim_bladder=19235`, `eye_left=19234`,
   `eye_right=19234`
+- eye-angle schema canary:
+  `analysis/eye_angle_runs/eye_angle_subject_shape_schema_canary_20260428`
+- eye-angle schema canary source geometry:
+  `source_geometry_kind=subject_shape_eye_geometry`,
+  `schema_id=analysis.eye_angle_runs`, `schema_version=1`,
+  `valid_detection_fraction=0.9998960228749675`
 
 Remaining work is no longer open-ended architecture. It is operational hardening:
 
 - visual inspection and component approval of smart-finalized candidates
 - temporal QC as a second pass that flags suspicious rows without changing masks
 - faster/chunked eye-geometry backfill if this becomes a frequent full-run task
-- body B-spline/centerline support and downstream subject-shape consumers
+- body B-spline/centerline support and downstream subject-shape consumers beyond
+  the first eye-angle consumer
 - complete subject/refined-subject stale repair parity with the eye-mask
   precedent
 - top-level segmentation orchestration in `core/pipeline.py` so operators do not

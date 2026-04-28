@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-25
+last_verified: 2026-04-28
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
@@ -41,7 +41,7 @@ Near-term canonical relationship:
 crop_runs/<run>
   -> subject_mask_runs/<run>
   -> refined_subject_masks_runs/<run>
-  -> analysis/subject_shape_runs/<run> # future derived analysis geometry
+  -> analysis/subject_shape_runs/<run> # derived analysis geometry
 ```
 
 Legacy eye-specialized compatibility path during transition:
@@ -824,9 +824,9 @@ Metric-QC policy:
 
 ## Boundary With `analysis/subject_shape_runs`
 
-`analysis/subject_shape_runs/<run>` is the planned home for interpreted biological
-geometry that requires a coordinate convention, anatomical polarity, temporal
-context, track identity, or relationships between components.
+`analysis/subject_shape_runs/<run>` is the analysis home for interpreted
+biological geometry that requires a coordinate convention, anatomical polarity,
+temporal context, track identity, or relationships between components.
 
 Keep these out of `refined_subject_masks_runs` as canonical outputs:
 

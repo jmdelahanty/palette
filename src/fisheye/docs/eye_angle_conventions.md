@@ -34,17 +34,40 @@ historical `refined_eye_masks_runs/<run>` data as a compatibility fallback.
 
 The referenced sources are captured in run attributes:
 
+- `schema_id = "analysis.eye_angle_runs"` and `schema_version = 1`: stable
+  run-level contract for this analysis product.
+- `method = "ellipse_and_centroid_eye_angles"`: the writer computes both
+  ellipse-axis and centroid-position eye-angle families.
+- `row_axis = "keypoint_detection_rows"`: ROI outputs are row-aligned to the
+  refined keypoint/eye-geometry detection rows.
+- `eye_angle_output_schema`: machine-readable summary of output groups,
+  row axes, units, suffix conventions, derivative outputs, and QA reason-code
+  linkage.
 - `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
   and run used for geometry.
+- `source_geometry_kind`: normalized geometry role, one of
+  `subject_shape_eye_geometry`, `refined_subject_eye_geometry`, or
+  `legacy_refined_eye_geometry`; unknown future stages are recorded as
+  `unknown_eye_geometry`.
 - `source_subject_shape_run`: subject-shape source when analysis-facing shape
   geometry was used.
 - `source_refined_subject_masks_run`: canonical refined-subject source when
   available.
 - `source_refined_eye_run`: compatibility refined-eye source when one was used
   or mapped.
-- `source_keypoint_run`: refined keypoint source.
+- `source_keypoints_run`: canonical refined keypoint source. The legacy
+  `source_keypoint_run` alias may be mirrored during migration.
 
 The raw ROIs sampled by the viewer live under `keypoints_runs/<run>/roi_images`.
+
+Schema boundary:
+
+- `schema_id` / `schema_version` identify the run family contract.
+- `eye_angle_output_schema` describes the current output layout, units, suffix
+  conventions, derivative arrays, reason-code links, and mixed support row
+  axes. It is not a replacement for source lineage attrs.
+- `source_geometry_kind` records which eye-geometry authority was actually
+  consumed so readers do not have to infer semantics from path names alone.
 
 ## Execution model
 

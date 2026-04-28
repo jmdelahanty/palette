@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-25
+last_verified: 2026-04-28
 -->
 
 Purpose: define the runtime/storage contract for a generalized ROI-local
@@ -35,7 +35,7 @@ without overloading the existing eye-specific stages.
 crop_runs/<run>
   -> subject_mask_runs/<run>
   -> refined_subject_masks_runs/<run>  # canonical refined component masks
-  -> analysis/subject_shape_runs/<run> # future derived analysis geometry
+  -> analysis/subject_shape_runs/<run> # derived analysis geometry
 ```
 
 Legacy compatibility path:

@@ -16,9 +16,12 @@ detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined
 refined_detect_runs → arena_assignment_runs → tracking_runs → track_kinematics_runs
 ```
 
-Current eye geometry authority is `refined_subject_masks_runs/<run>` when that
-run contains `eye_left` and `eye_right` components. `refined_eye_masks_runs`
-remains readable for historical archives and as a derived compatibility layout.
+Current mask-local eye geometry authority is `refined_subject_masks_runs/<run>`
+when that run contains `eye_left` and `eye_right` components.
+`analysis/subject_shape_runs/<run>` is the preferred analysis-facing coherent
+body/eyes/swim shape surface. `analysis/eye_angle_runs` consumes subject-shape
+eye geometry when available, then falls back to refined-subject geometry and
+legacy `refined_eye_masks_runs` compatibility data.
 
 Relevant provenance attributes:
 
@@ -33,6 +36,8 @@ Relevant provenance attributes:
 | `subject_mask_runs/<run>` | `mask_probs_roi`; optional `masks_roi` convenience threshold | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `label_schema_id`, `run_semantics`, `masks_roi_materialized` |
 | `refined_subject_masks_runs/<run>` | `masks_roi`, component geometry, `relations/eye_pair/metrics/separation_px` | `source_subject_mask_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `refined_subject_mask_review_status`, `component_review_statuses`, `source_refined_eye_masks_run` *(when seeded from compatibility eye data)* |
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | Compatibility/historical refined-eye layout. Key attrs include `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)*, and `source_refined_subject_masks_run` when derived from canonical refined-subject masks. |
+| `analysis/subject_shape_runs/<run>` | component summaries, eye/swim ellipse summaries, body axes, relation metrics | `schema_id`, `schema_version`, `row_axis`, `method`, `method_version`, `source_refined_subject_masks_run`, `source_mask_labels`, `source_mask_label_schema_id`, `source_refs` |
+| `analysis/eye_angle_runs/<run>` | `angles/roi`, `angles/frame`, `qa/roi`, `qa/frame`, `support` | `schema_id`, `schema_version`, `method`, `row_axis`, `eye_angle_output_schema`, `source_eye_geometry_stage`, `source_eye_geometry_run`, `source_geometry_kind`, `source_subject_shape_run`, `source_refined_subject_masks_run`, `source_refined_eye_run`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
 | `tracking_runs/<run>` | `track_ids`, `track_arena_ids` | `source_detect_run`, `source_refined_run`, `source_arena_assignment_run`, `tracking_qc_state` |
 

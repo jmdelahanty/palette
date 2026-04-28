@@ -3,7 +3,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-04-26
+last_verified: 2026-04-28
 -->
 
 Purpose: define the current operator-facing source-of-truth contract for Palette
@@ -53,6 +53,7 @@ The default rule is:
 | Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
+| Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"` and v1 output schema | current runs prefer subject-shape eye geometry when available and record exact geometry/keypoint lineage |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -99,9 +100,14 @@ Current rules:
 - `refined_eye_masks_runs` remains readable and may be materialized as a
   derived compatibility artifact, but it should not become a second manual
   review authority for new operator-facing eye state.
-- Active eye geometry and export consumers should use the shared resolver that
-  prefers `refined_subject_masks_runs` and falls back to `refined_eye_masks_runs`
-  for historical archives.
+- Mask-level eye geometry and export consumers should use the shared resolver
+  that prefers `refined_subject_masks_runs` and falls back to
+  `refined_eye_masks_runs` for historical archives.
+- Eye-angle analysis is a specialized downstream consumer. It now opts into
+  `analysis/subject_shape_runs` as the preferred eye-geometry source when
+  left/right eye ellipse geometry is present, records
+  `source_geometry_kind`, and writes `schema_id = "analysis.eye_angle_runs"`
+  plus `eye_angle_output_schema` to describe its current output groups.
 
 The target steady state is one segmentation orchestration surface that writes
 one coherent probability-backed `subject_mask_runs/<run>` snapshot with
@@ -180,8 +186,10 @@ desired design:
   triage state, not training approval.
 - Temporal QC for abrupt area/centroid/component-count changes is planned as a
   second pass that flags rows without overwriting spatial masks.
-- `analysis/subject_shape_runs` has a first coherent body/eyes/swim writer, but
-  body centerline/B-spline support and downstream consumers are still open.
+- `analysis/subject_shape_runs` has a first coherent body/eyes/swim writer, and
+  `analysis/eye_angle_runs` now consumes it when available. Body
+  centerline/B-spline support and additional downstream consumers are still
+  open.
 
 ## Review Checklist
 

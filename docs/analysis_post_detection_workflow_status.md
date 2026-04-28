@@ -2,7 +2,7 @@
 
 Date anchored: 2026-03-06
 
-Last reviewed: 2026-04-26
+Last reviewed: 2026-04-28
 
 Purpose: summarize the current state of Palette's analysis and post-detection
 workflows, identify which repository docs are current versus aspirational or
@@ -151,7 +151,8 @@ The current analysis modules are still specialized:
 - `track_kinematics` focuses on track-level movement summaries
 - `compute_chaser_fish_metrics` is chaser/fish geometry specific
 - `swim_bout_statistics` focuses on bout segmentation and per-trial summaries
-- `eye_angle_analysis` is eye-mask / keypoint derived and not stimulus-aware
+- `eye_angle_analysis` is subject-shape/refined-subject/refined-eye geometry
+  plus keypoint-heading derived and not stimulus-aware
 - `chaser_phase_analysis` is a specialized consumer/visualizer
 
 This is useful, but it is not yet a unified framework for "post-detection

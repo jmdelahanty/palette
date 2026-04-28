@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-26
+last_verified: 2026-04-28
 -->
 
 Purpose: define the downstream deterministic analysis layer for biological
@@ -282,10 +282,18 @@ Required semantics:
 
 ## Relationship To Existing Analysis Runs
 
-`analysis/eye_angle_runs` already computes interpreted eye angles from eye
-geometry plus heading/keypoint context. That remains a valid specialized
-analysis run, but it should not be the first authority for mask-derived eye
-shape geometry in new unified body/eyes/swim workflows.
+`analysis/eye_angle_runs` computes interpreted eye angles from eye geometry plus
+heading/keypoint context. It remains a valid specialized analysis run, but it
+is not the first authority for mask-derived eye shape geometry in unified
+body/eyes/swim workflows.
+
+Current eye-angle v1 runs opt into `analysis/subject_shape_runs` as the
+preferred source when left/right eye ellipse geometry is present. They record
+`schema_id = "analysis.eye_angle_runs"`, `schema_version = 1`,
+`method = "ellipse_and_centroid_eye_angles"`,
+`row_axis = "keypoint_detection_rows"`, `source_geometry_kind`, and
+`eye_angle_output_schema` so consumers can distinguish subject-shape,
+refined-subject, and legacy refined-eye geometry sources.
 
 `analysis/subject_shape_runs` should not force every specialized metric to move
 immediately. It defines the mask-derived shape layer that can later feed or
@@ -298,10 +306,10 @@ Recommended near-term approach:
 - include `eye_left` and `eye_right` component geometry in
   `analysis/subject_shape_runs` when producing a coherent body/eyes/swim shape
   run.
-- keep current eye-angle outputs in `analysis/eye_angle_runs` during migration;
-  eye-angle writers should consume `analysis/subject_shape_runs` when
-  mask-derived eye geometry is available there, with refined-subject and
-  refined-eye geometry retained as compatibility fallbacks.
+- keep current eye-angle outputs in `analysis/eye_angle_runs`; eye-angle writers
+  should consume `analysis/subject_shape_runs` when mask-derived eye geometry is
+  available there, with refined-subject and refined-eye geometry retained as
+  explicit compatibility fallbacks.
 - do not create a separate eye-analysis authority for mask-derived eye geometry
   unless it is a downstream temporal, behavioral, or task-specific analysis.
 

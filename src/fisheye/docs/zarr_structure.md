@@ -888,10 +888,13 @@ their upstream `subject_mask_runs/<run>` source rather than re-deriving lineage
 from the latest crop run later. Component-local lineage continues to live under
 `components/<component>/provenance`.
 
-Eye geometry arrays used by current eye-angle analysis and eye-mask training
-export are read through `fisheye.shared.eye_geometry_source`, which exposes
-`eye_left`/`eye_right` component data as legacy-compatible `(N, 2, ...)`
-array-like views for callers that have not moved to component-native reads yet.
+Eye geometry arrays are read through `fisheye.shared.eye_geometry_source`, which
+exposes `eye_left`/`eye_right` component data as legacy-compatible
+`(N, 2, ...)` array-like views for callers that have not moved to
+component-native reads yet. Geometry-only consumers such as eye-angle analysis
+may opt into `analysis/subject_shape_runs` as the preferred source; mask/export
+consumers should continue using refined-subject geometry unless they explicitly
+only need derived shape primitives.
 
 ---
 
@@ -1448,10 +1451,21 @@ Eye angle analysis results:
 - Per-ROI and per-frame eye-angle metrics
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
+- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 1`,
+  `method = "ellipse_and_centroid_eye_angles"`,
+  `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
+  machine-readable output groups, units, suffixes, derivative arrays, and QA
+  reason-code linkage.
 - Preferred eye geometry source is `analysis/subject_shape_runs/<run>` when it
   has left/right eye ellipse geometry. Run attrs record
-  `source_subject_shape_run`, `source_refined_subject_masks_run`, and
-  `source_refined_eye_run` as applicable.
+  `source_geometry_kind`, `source_subject_shape_run`,
+  `source_refined_subject_masks_run`, and `source_refined_eye_run` as
+  applicable.
+- Keypoint lineage uses canonical `source_keypoints_run`; the legacy
+  `source_keypoint_run` alias may be mirrored during migration.
+- `source_geometry_kind` normalizes the consumed geometry source as
+  `subject_shape_eye_geometry`, `refined_subject_eye_geometry`,
+  `legacy_refined_eye_geometry`, or `unknown_eye_geometry`.
 
 ### `analysis/subject_shape_runs/`
 

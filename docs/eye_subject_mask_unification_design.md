@@ -2,7 +2,7 @@
 
 <!-- design-meta
 status: active
-last_verified: 2026-04-25
+last_verified: 2026-04-28
 -->
 
 Purpose: define the target runtime/refined model for moving eye refinement under
@@ -402,9 +402,11 @@ That means:
 - those derived compatibility runs should be read-only in legacy viewers so
   they cannot drift away from canonical refined-subject eye state
 - migration/backfill into subject-mask stages remains non-destructive
-- current eye-angle analysis and eye-mask training export route through
-  `fisheye.shared.eye_geometry_source`, preferring canonical refined-subject
-  eye geometry and falling back to refined-eye geometry for historical archives
+- current eye-angle analysis opts into subject-shape eye geometry when a
+  coherent body/eyes/swim shape run exists
+- eye-mask training export routes through `fisheye.shared.eye_geometry_source`,
+  preferring canonical refined-subject eye geometry and falling back to
+  refined-eye geometry for historical archives
 
 ### Steady-state target
 

@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-26
+last_verified: 2026-04-28
 -->
 
 Purpose: define the shared storage and provenance contract for deterministic
@@ -55,10 +55,12 @@ Recommended `row_axis` values:
 
 - `refined_subject_mask_rows`
 - `refined_keypoint_rows`
+- `keypoint_detection_rows`
 - `detect_instance_rows`
 - `frames`
 - `tracks`
 - `track_samples`
+- `swim_bout_rows`
 - `stimulus_steps`
 - `profile_summary`
 
@@ -131,9 +133,14 @@ Existing analysis outputs already follow this direction:
   metrics derived from an exact swim-bout segmentation candidate without
   mutating that segmentation artifact.
 - `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
-  interpreted relative to heading/keypoint context. New unified mask-derived
-  eye geometry should be available from `analysis/subject_shape_runs/<run>`
-  when a coherent body/eyes/swim shape run exists.
+  interpreted relative to heading/keypoint context. Current v1 runs declare
+  `schema_id = "analysis.eye_angle_runs"`, `schema_version = 1`,
+  `method = "ellipse_and_centroid_eye_angles"`,
+  `row_axis = "keypoint_detection_rows"`, and
+  `eye_angle_output_schema` for output-group/units/suffix conventions.
+  Eye-angle writers should prefer `analysis/subject_shape_runs/<run>` eye
+  geometry when a coherent body/eyes/swim shape run exists, and preserve
+  refined-subject/refined-eye fallbacks as explicit lineage.
 - `analysis/stimulus_response_runs/<run>` is the planned stimulus-aware
   downstream consumer.
 
