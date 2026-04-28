@@ -28,6 +28,30 @@ It should produce per-bout metrics such as net heading change, within-bout
 heading excursion, within-bout heading path length, and optional within-bout
 dominant frequency.
 
+## Use-Case Boundary
+
+Use `analysis/swim_bout_runs/<run>/<speed_level>/` when the question is about
+bout segmentation itself:
+
+- which speed trace and thresholding parameters define a bout candidate
+- where each bout starts and ends
+- what core and expanded boundaries were selected
+- what segmentation-time movement summaries were available from the source
+  track, such as duration, path length, net displacement, and gap coverage
+
+Use `analysis/bout_kinematics_runs/<run>/<heading_level>/per_bout_metrics/`
+when the question is about measurements derived from a frozen bout candidate:
+
+- what heading change the bout produced
+- what stable pre/post position displacement the bout produced
+- how much within-bout heading excursion or oscillation occurred
+- which heading source, pre/post epoch policy, and measurement parameters were
+  used
+
+This boundary lets operators tune and compare segmentation candidates without
+rewriting downstream biological measurements, and lets analysts recompute
+kinematics without changing the bout-definition artifact.
+
 ## Why This Should Not Mutate `swim_bout_runs`
 
 The tempting shortcut would be to add heading-change columns directly to:
@@ -57,8 +81,8 @@ For repeatability with published bout-centric larval zebrafish analyses, Palette
 should support a net heading-change metric computed from stable interbout
 windows:
 
-- average heading over a pre-bout window
-- average heading over a post-bout window
+- average heading over a pre-bout measurement epoch
+- average heading over a post-bout measurement epoch
 - subtract the two circular means after unwrapping or using circular arithmetic
 
 This metric answers:
@@ -69,6 +93,20 @@ What net reorientation did this bout produce?
 
 It should not be replaced by a start-frame/end-frame heading subtraction, because
 boundary frames can be noisy and the fish can still be in the motor act.
+
+The writer should support two pre/post epoch modes:
+
+- `fixed_window`: use fixed-duration windows immediately before bout start and
+  immediately after bout end. This is useful for short, controlled audits and
+  for recordings where interbout epoch boundaries are not yet trusted.
+- `interbout_epoch`: use the full preceding interbout epoch and the full
+  following interbout epoch, derived from adjacent bouts in the selected
+  segmentation candidate. This is the Johnson-parity mode.
+
+For `interbout_epoch` mode, the first bout has no preceding interbout epoch and
+the last bout has no following interbout epoch. The initial policy should mark
+those sides invalid by default rather than inventing archive-edge epochs. Edge
+handling can be added later as an explicit parameter if needed.
 
 ## Within-Bout Heading Metrics
 
@@ -85,11 +123,31 @@ per_bout_metrics/
   source_end_frame
   source_core_start_frame                         optional
   source_core_end_frame                           optional
+  source_core_start_time_s_interpolated           optional
+  source_core_end_time_s_interpolated             optional
+  source_core_duration_s_interpolated             optional
+  source_core_start_time_interpolated_valid       optional
+  source_core_end_time_interpolated_valid         optional
+  pre_epoch_start_frame
+  pre_epoch_end_frame
+  post_epoch_start_frame
+  post_epoch_end_frame
 
   pre_heading_mean_deg
   post_heading_mean_deg
   net_delta_heading_deg
   abs_net_delta_heading_deg
+
+  pre_position_mean_x_mm
+  pre_position_mean_y_mm
+  post_position_mean_x_mm
+  post_position_mean_y_mm
+  interbout_epoch_displacement_mm
+  pre_position_mean_x_px
+  pre_position_mean_y_px
+  post_position_mean_x_px
+  post_position_mean_y_px
+  interbout_epoch_displacement_px
 
   within_heading_range_deg
   within_heading_peak_to_peak_deg
@@ -100,8 +158,14 @@ per_bout_metrics/
 
   pre_window_valid
   post_window_valid
+  pre_position_valid
+  post_position_valid
   within_window_valid
   dominant_frequency_valid
+  pre_window_sample_count
+  post_window_sample_count
+  pre_position_sample_count
+  post_position_sample_count
   failure_reason_bytes                            optional preferred string encoding
 ```
 
@@ -110,6 +174,19 @@ Recommended initial semantics:
 - `net_delta_heading_deg`: post-window circular mean minus pre-window circular
   mean, signed in the configured heading convention.
 - `abs_net_delta_heading_deg`: absolute value of `net_delta_heading_deg`.
+- `pre_epoch_*` / `post_epoch_*`: the resolved frame intervals used for
+  pre/post heading and position means. These are fixed-size windows in
+  `fixed_window` mode and adjacent interbout epochs in `interbout_epoch` mode.
+  Stored start/end frame fields are inclusive source-frame bounds, with `-1`
+  used when the side has no resolved epoch.
+- `pre_position_mean_*` / `post_position_mean_*`: coordinate means over the
+  same resolved pre/post epochs. Pixel fields should be populated whenever
+  pixel positions are available; millimeter fields should be `NaN` when
+  calibrated positions are unavailable.
+- `interbout_epoch_displacement_*`: Euclidean distance between post- and
+  pre-position means. This is distinct from segmentation-time `path_length_*`
+  and `net_displacement_*`, because it measures stable interbout mean-position
+  displacement rather than frame-boundary or within-bout trajectory distance.
 - `within_heading_range_deg`: max minus min unwrapped heading during the bout.
 - `within_heading_peak_to_peak_deg`: alias-level semantic metric for
   within-bout oscillation amplitude. Keep this as a distinct schema field even
@@ -168,15 +245,15 @@ Recommended initial levels:
 
 The run should record `default_heading_level = "heading_smoothed"`.
 
-## Proposed Storage Shape
+## Current Storage Shape
 
 ```text
 analysis/bout_kinematics_runs/<run_name>/
   attrs:
     schema_id: "analysis.bout_kinematics_runs"
-    schema_version: 1
+    schema_version: 4
     method: "heading_window_and_within_bout_metrics"
-    method_version: "<implementation version>"
+    method_version: "bout_kinematics.v4"
     created_at_utc
     row_axis: "swim_bout_rows"
     source_refs:
@@ -186,6 +263,7 @@ analysis/bout_kinematics_runs/<run_name>/
       source_swim_bout_run
       source_swim_bout_speed_level
       source_swim_bout_path
+      source_peak_events_path                    optional, when source has peak_events
       source_track_id
       source_heading_arrays:
         heading_smoothed: <track path>/smoothed_heading_degrees
@@ -193,6 +271,7 @@ analysis/bout_kinematics_runs/<run_name>/
     parameters:
       default_heading_level: "heading_smoothed"
       heading_levels: ["heading_smoothed", "heading_raw"]
+      pre_post_mode: "fixed_window" | "interbout_epoch"
       pre_window_s
       post_window_s
       resolved_pre_window_frames
@@ -200,6 +279,8 @@ analysis/bout_kinematics_runs/<run_name>/
       within_window: "bout_start_end" | "core_start_end"
       heading_units: "degrees"
       heading_unwrap_policy
+      source_interpolated_threshold_fields
+      source_peak_event_fields
       zero_crossing_derivative_threshold_deg_s
       dominant_frequency:
         enabled
@@ -227,6 +308,32 @@ The run should also record enough source identity to validate that the
 - source swim-bout run name
 - source speed level
 - source track id
+
+When the source swim-bout schema provides interpolated core-threshold timing,
+`bout_kinematics_runs` should copy those source fields into
+`per_bout_metrics`. They are source-boundary annotations, not new segmentation
+or row-alignment keys. Frame fields remain authoritative for slicing heading and
+position arrays.
+
+When the source swim-bout speed subgroup provides an aligned `peak_events`
+table, `bout_kinematics_runs` should also copy the peak-event boundary context
+into `per_bout_metrics`. These fields preserve the signal-derived boundary
+estimate beside the integer frame-boundary contract:
+
+- `source_peak_frame`, `source_peak_time_s`
+- `source_peak_signal_value_mm_s`, `source_peak_prominence_mm_s`
+- `source_peak_width_s`, `source_peak_width_height_mm_s`
+- `source_peak_left_width_frame_interpolated`
+- `source_peak_right_width_frame_interpolated`
+- `source_peak_left_width_time_s`
+- `source_peak_right_width_time_s`
+- `source_peak_boundary_mode_bytes`
+- `source_peak_shape_split_policy_bytes`
+
+These fields are copied provenance/review annotations. Current heading and
+position metrics still use integer `source_start_frame` / `source_end_frame`
+boundaries for array slicing. Fractional-time heading or position interpolation
+would be a separate future analysis mode.
 - source track-kinematics run
 - source heading arrays used for each heading level
 - segmentation parameter snapshot or source provenance hash when available
@@ -247,9 +354,10 @@ positive axes.
 
 ## Window Parameters
 
-User-facing pre/post windows should be specified in seconds. Writers should
-persist:
+User-facing fixed pre/post windows should be specified in seconds. Writers
+should persist:
 
+- selected `pre_post_mode`
 - requested `pre_window_s`
 - requested `post_window_s`
 - resolved frame counts for the run FPS
@@ -257,6 +365,23 @@ persist:
 
 This keeps the command interface stable across recordings with different frame
 rates while preserving enough detail to audit the exact sample windows used.
+
+When `pre_post_mode="fixed_window"`, the resolved pre/post epochs are:
+
+- `[bout_start - resolved_pre_window_frames, bout_start)`
+- `(bout_end, bout_end + resolved_post_window_frames]`
+
+using the selected track-kinematics frame index and marking the side invalid if
+the full requested window is not available or contains gaps.
+
+When `pre_post_mode="interbout_epoch"`, the resolved pre/post epochs are:
+
+- preceding epoch: frames after the previous bout end and before this bout start
+- following epoch: frames after this bout end and before the next bout start
+
+The first bout has no preceding epoch and the last bout has no following epoch;
+those sides should be marked invalid by default. This avoids silently mixing
+archive-edge behavior into Johnson-style measurements.
 
 ## Track Scope
 
@@ -289,8 +414,11 @@ Per-bout metrics should prefer explicit validity over implicit sentinel values.
 Recommended failure tags:
 
 - `missing_heading_source`
+- `missing_position_source`
 - `insufficient_pre_window`
 - `insufficient_post_window`
+- `insufficient_pre_position`
+- `insufficient_post_position`
 - `insufficient_within_bout_samples`
 - `heading_contains_gap`
 - `dominant_frequency_disabled`

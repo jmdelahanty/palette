@@ -44,13 +44,15 @@ def _add_hierarchical_swim_bouts(
     *,
     source_track_kinematics_run: str = "track_kinematics_1",
     track_id: int = 0,
+    detection_method: str = "threshold",
+    include_peak_events: bool = False,
 ) -> None:
     root = zarr.open_group(str(zarr_path), mode="a")
     swim_parent = root["analysis"].create_group("swim_bout_runs")
     swim_parent.attrs["latest"] = "swim_bout_1"
 
     run = swim_parent.create_group("swim_bout_1")
-    run.attrs["detection_method"] = "threshold"
+    run.attrs["detection_method"] = detection_method
     run.attrs["default_level"] = "speed_smoothed"
     run.attrs["fps"] = 200.0
     run.attrs["source_track_kinematics_run"] = source_track_kinematics_run
@@ -82,10 +84,29 @@ def _add_hierarchical_swim_bouts(
             ("interval_s", "f8"),
         ],
     )
+    peak_events = np.asarray(
+        [
+            (1, 2, 0.0125, 4.0, 3.0, 1.5, 4.5, b"relative_prominence_width", b"none"),
+            (2, 8, 0.0400, 5.0, 4.0, 6.5, 9.5, b"relative_prominence_width", b"none"),
+        ],
+        dtype=[
+            ("bout_id", "i4"),
+            ("peak_frame", "i8"),
+            ("peak_time_s", "f8"),
+            ("peak_signal_value_mm_s", "f8"),
+            ("peak_prominence_mm_s", "f8"),
+            ("left_width_frame_interpolated", "f8"),
+            ("right_width_frame_interpolated", "f8"),
+            ("boundary_mode", "S32"),
+            ("shape_split_policy", "S32"),
+        ],
+    )
     for level in ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged"):
         level_group = run.create_group(level)
         write_columnar_dataset(level_group, "bouts", bouts)
         write_columnar_dataset(level_group, "inter_bout_intervals", intervals)
+        if include_peak_events:
+            write_columnar_dataset(level_group, "peak_events", peak_events)
 
 
 def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: Path) -> None:
@@ -149,6 +170,34 @@ def test_load_track_kinematics_interactive_data_reads_canonical_swim_bouts(tmp_p
     np.testing.assert_allclose(swim_bouts["path_length_mm"].to_numpy(), [1.20, 1.80])
     assert swim_bouts["gap_censored"].tolist() == [False, True]
     assert inter_bout_intervals["interval_s"].tolist() == [0.015]
+
+
+def test_load_track_kinematics_interactive_data_merges_aligned_peak_event_boundaries(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive_with_interactive_artifact(tmp_path)
+    _add_hierarchical_swim_bouts(
+        zarr_path,
+        detection_method="peak_event",
+        include_peak_events=True,
+    )
+
+    data = load_track_kinematics_interactive_data(
+        zarr_path,
+        run_path="analysis/track_kinematics_runs/offline/track_kinematics_1",
+        swim_bout_run="latest",
+        speed_level="smoothed",
+    )
+    swim_bouts = to_swim_bout_dataframe(data)
+
+    assert data.swim_bout_label == "swim_bout_1 (speed_smoothed) (peak_event)"
+    assert swim_bouts["peak_event_boundary_mode"].tolist() == [
+        "relative_prominence_width",
+        "relative_prominence_width",
+    ]
+    np.testing.assert_allclose(swim_bouts["peak_event_peak_prominence_mm_s"].to_numpy(), [3.0, 4.0])
+    np.testing.assert_allclose(swim_bouts["peak_event_left_width_time_s"].to_numpy(), [0.0075, 0.0325])
+    np.testing.assert_allclose(swim_bouts["peak_event_right_width_time_s"].to_numpy(), [0.0225, 0.0475])
 
 
 def test_discover_track_and_derived_swim_bout_options(tmp_path: Path) -> None:

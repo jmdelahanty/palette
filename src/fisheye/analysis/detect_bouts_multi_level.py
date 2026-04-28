@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Detect swim bouts from all 4 speed processing levels in track kinematics tracks.
+Detect swim bouts from speed processing levels in track kinematics tracks.
 
 This script reads pre-computed speed data from track kinematics tracks (raw,
-filtered, smoothed, averaged) and detects swim bouts using the same threshold
-across all levels. Results are stored hierarchically under a single run name
-with 4 subgroups.
+filtered, smoothed, averaged, and exponential response) and detects swim bouts
+using the same threshold across all levels. Results are stored hierarchically
+under a single run name with one subgroup per speed candidate.
 
 Storage structure:
     analysis/swim_bout_runs/<run_name>/
@@ -19,6 +19,9 @@ Storage structure:
     │   ├── bouts
     │   └── metadata
     ├── speed_averaged/
+    │   ├── bouts
+    │   └── metadata
+    ├── speed_exponential/
     │   ├── bouts
     │   └── metadata
     ├── default_level = "speed_smoothed" or "speed_filtered" (attr)
@@ -43,21 +46,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 from scipy import signal
 
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 
-SPEED_LEVELS = ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged")
+SPEED_LEVELS = (
+    "speed_raw",
+    "speed_filtered",
+    "speed_smoothed",
+    "speed_averaged",
+    "speed_exponential",
+)
+BASE_SPEED_LEVELS = ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged")
 PATH_DISTANCE_LEVEL_SOURCE = {
     "speed_raw": "raw",
     "speed_filtered": "filtered",
@@ -65,15 +76,66 @@ PATH_DISTANCE_LEVEL_SOURCE = {
     # speed_averaged is a moving average of the smoothed speed trace; it does
     # not have an independent frame-path-distance array.
     "speed_averaged": "smoothed",
+    # speed_exponential is a derived response trace; use the same movement
+    # metric source as the configured source speed level.
+    "speed_exponential": "filtered",
 }
 SPEED_LEVEL_ALIASES = {
     "raw": "speed_raw",
     "filtered": "speed_filtered",
     "smoothed": "speed_smoothed",
     "averaged": "speed_averaged",
+    "exp": "speed_exponential",
+    "exponential": "speed_exponential",
 }
 SPEED_LEVEL_CHOICES = tuple(SPEED_LEVEL_ALIASES) + SPEED_LEVELS
 BOUNDARY_MODES = ("threshold", "local_minimum")
+GAP_MERGE_POLICIES = ("sampled_frame_gap", "interpolated_core_gap")
+PEAK_EVENT_BOUNDARY_MODES = ("relative_prominence_width",)
+SHAPE_SPLIT_POLICIES = ("none",)
+DURATION_FRAME_ROUNDING_POLICY = "ceil_seconds_times_fps"
+BOUNDARY_FRAME_ROUNDING_POLICY = "round_seconds_times_fps"
+SWIM_BOUT_RUN_SCHEMA_ID = "palette.swim_bout_runs"
+SWIM_BOUT_RUN_SCHEMA_VERSION = 5
+BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v2"
+PEAK_EVENT_SCHEMA_ID = "palette.swim_bout_peak_events.v1"
+PEAK_EVENT_SCHEMA_VERSION = 1
+METHOD_VERSION = "detect_bouts_multi_level.v6"
+THRESHOLD_CROSSING_INTERPOLATION = "linear_between_samples"
+
+
+def _duration_seconds_to_frames(duration_s: float, fps: float) -> int:
+    """Resolve a duration in seconds to an integer frame count.
+
+    Ceiling preserves the user-facing lower bound: a positive duration that
+    falls between frame intervals still requires at least the next frame.
+    """
+
+    duration_s = float(duration_s)
+    fps = float(fps)
+    if duration_s < 0:
+        raise ValueError(f"duration_s must be >= 0, got {duration_s!r}.")
+    if fps <= 0:
+        raise ValueError(f"fps must be > 0, got {fps!r}.")
+    if duration_s == 0:
+        return 0
+    # Subtract a tiny epsilon so exact products like 0.1 * 60 do not become
+    # 7 frames because of floating point representation.
+    return max(0, int(math.ceil(duration_s * fps - 1e-9)))
+
+
+def _resolve_min_gap_frames(
+    *,
+    min_gap_duration_s: float,
+    fps: float,
+    min_gap_frames: Optional[int],
+) -> tuple[int, str]:
+    if min_gap_frames is not None:
+        resolved = int(min_gap_frames)
+        if resolved < 0:
+            raise ValueError(f"min_gap_frames must be >= 0, got {min_gap_frames!r}.")
+        return resolved, "explicit_frames"
+    return _duration_seconds_to_frames(min_gap_duration_s, fps), DURATION_FRAME_ROUNDING_POLICY
 
 
 def normalize_speed_level(value: str) -> str:
@@ -114,11 +176,46 @@ def _bout_dtype() -> np.dtype:
         ('end_time_s', 'f8'),
         ('core_start_time_s', 'f8'),
         ('core_end_time_s', 'f8'),
+        ('core_start_time_s_interpolated', 'f8'),
+        ('core_end_time_s_interpolated', 'f8'),
+        ('core_duration_s_interpolated', 'f8'),
+        ('core_start_time_interpolated_valid', '?'),
+        ('core_end_time_interpolated_valid', '?'),
     ])
 
 
 def _empty_bouts() -> np.ndarray:
     return np.zeros(0, dtype=_bout_dtype())
+
+
+def _peak_event_dtype() -> np.dtype:
+    return np.dtype([
+        ('bout_id', 'i4'),
+        ('peak_index', 'i8'),
+        ('peak_frame', 'i8'),
+        ('peak_time_s', 'f8'),
+        ('peak_signal_value_mm_s', 'f8'),
+        ('peak_prominence_mm_s', 'f8'),
+        ('peak_width_samples', 'f8'),
+        ('peak_width_s', 'f8'),
+        ('peak_width_height_mm_s', 'f8'),
+        ('left_ips', 'f8'),
+        ('right_ips', 'f8'),
+        ('left_width_frame_interpolated', 'f8'),
+        ('right_width_frame_interpolated', 'f8'),
+        ('left_base_index', 'i8'),
+        ('right_base_index', 'i8'),
+        ('left_base_frame', 'i8'),
+        ('right_base_frame', 'i8'),
+        ('left_base_signal_value_mm_s', 'f8'),
+        ('right_base_signal_value_mm_s', 'f8'),
+        ('boundary_mode', 'S32'),
+        ('shape_split_policy', 'S32'),
+    ])
+
+
+def _empty_peak_events() -> np.ndarray:
+    return np.zeros(0, dtype=_peak_event_dtype())
 
 
 def _finite_sum_or_nan(values: np.ndarray) -> float:
@@ -183,6 +280,56 @@ def _effective_transition_valid(
     return effective
 
 
+def _causal_exponential_speed_response(
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+    *,
+    tau_s: float,
+    transition_valid: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Return a causal normalized exponential response to a speed trace.
+
+    The recurrence is equivalent to convolution with a one-sided exponential
+    kernel. Invalid samples reset the response so motion does not smear across
+    track gaps.
+    """
+
+    if tau_s <= 0:
+        raise ValueError(f"exponential_tau_s must be > 0, got {tau_s!r}.")
+    speed = np.asarray(speed, dtype=np.float64)
+    frames = np.asarray(frames, dtype=np.int64)
+    if speed.shape[0] != frames.shape[0]:
+        raise ValueError(f"speed length {speed.shape[0]} does not match frames length {frames.shape[0]}.")
+    if fps <= 0:
+        raise ValueError(f"fps must be > 0, got {fps!r}.")
+
+    if transition_valid is None:
+        valid_transition = _fallback_transition_valid(speed, frames, fps)
+    else:
+        valid_transition = np.asarray(transition_valid, dtype=bool)
+        if valid_transition.shape[0] != speed.shape[0]:
+            raise ValueError(
+                f"transition_valid length {valid_transition.shape[0]} does not match speed length {speed.shape[0]}."
+            )
+
+    response = np.full(speed.shape, np.nan, dtype=np.float64)
+    state: Optional[float] = None
+    for idx, value in enumerate(speed):
+        if not np.isfinite(value):
+            state = None
+            continue
+        value = max(float(value), 0.0)
+        if state is None or idx == 0 or not bool(valid_transition[idx]):
+            state = value
+        else:
+            dt_s = max(float(frames[idx] - frames[idx - 1]) / float(fps), 0.0)
+            alpha = 1.0 - float(np.exp(-dt_s / float(tau_s)))
+            state = alpha * value + (1.0 - alpha) * state
+        response[idx] = state
+    return response
+
+
 def _sum_valid_path_distance(
     path_distance: Optional[np.ndarray],
     valid_mask: np.ndarray,
@@ -214,6 +361,173 @@ def _net_displacement(
     if not (np.all(np.isfinite(start)) and np.all(np.isfinite(end))):
         return float("nan")
     return float(np.linalg.norm(end - start))
+
+
+def _threshold_crossing_time_s(
+    *,
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+    threshold: float,
+    below_idx: int,
+    above_idx: int,
+) -> tuple[float, bool]:
+    """Linearly interpolate a threshold crossing between adjacent samples."""
+
+    if fps <= 0:
+        return float("nan"), False
+    if below_idx < 0 or above_idx < 0 or below_idx >= speed.size or above_idx >= speed.size:
+        return float("nan"), False
+    if abs(int(above_idx) - int(below_idx)) != 1:
+        return float("nan"), False
+    below_speed = float(speed[below_idx])
+    above_speed = float(speed[above_idx])
+    if not (np.isfinite(below_speed) and np.isfinite(above_speed)):
+        return float("nan"), False
+    if below_speed == above_speed:
+        return float("nan"), False
+    threshold = float(threshold)
+    lower = min(below_speed, above_speed)
+    upper = max(below_speed, above_speed)
+    if threshold < lower or threshold > upper:
+        return float("nan"), False
+
+    fraction = (threshold - below_speed) / (above_speed - below_speed)
+    if not np.isfinite(fraction):
+        return float("nan"), False
+    fraction = float(np.clip(fraction, 0.0, 1.0))
+    frame = float(frames[below_idx]) + fraction * float(frames[above_idx] - frames[below_idx])
+    return frame / float(fps), True
+
+
+def _core_threshold_crossing_times_s(
+    *,
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+    threshold: Optional[float],
+    core_start_idx: int,
+    core_end_exclusive: int,
+) -> tuple[float, bool, float, bool, float]:
+    """Return interpolated start/end crossing times for a threshold core."""
+
+    if threshold is None:
+        return float("nan"), False, float("nan"), False, float("nan")
+
+    core_end_idx = int(core_end_exclusive) - 1
+    start_time, start_valid = _threshold_crossing_time_s(
+        speed=speed,
+        frames=frames,
+        fps=fps,
+        threshold=float(threshold),
+        below_idx=int(core_start_idx) - 1,
+        above_idx=int(core_start_idx),
+    )
+    end_time, end_valid = _threshold_crossing_time_s(
+        speed=speed,
+        frames=frames,
+        fps=fps,
+        threshold=float(threshold),
+        below_idx=core_end_idx + 1,
+        above_idx=core_end_idx,
+    )
+    duration = (
+        float(end_time - start_time)
+        if start_valid and end_valid and end_time >= start_time
+        else float("nan")
+    )
+    return start_time, start_valid, end_time, end_valid, duration
+
+
+def _interpolated_frame_at_sample_index(frames: np.ndarray, sample_index: float) -> float:
+    """Map a fractional signal sample index to a source frame coordinate."""
+
+    if frames.size == 0 or not np.isfinite(sample_index):
+        return float("nan")
+    if sample_index <= 0:
+        return float(frames[0])
+    last_index = frames.size - 1
+    if sample_index >= last_index:
+        return float(frames[last_index])
+    left = int(np.floor(sample_index))
+    right = int(np.ceil(sample_index))
+    if left == right:
+        return float(frames[left])
+    fraction = float(sample_index - left)
+    return float(frames[left]) + fraction * float(frames[right] - frames[left])
+
+
+def _gap_merge_min_gap_duration_s(
+    *,
+    min_gap_duration_s: float,
+    fps: float,
+    min_gap_frames: Optional[int],
+) -> tuple[float, str]:
+    if min_gap_frames is not None:
+        return float(int(min_gap_frames) / float(fps)), "explicit_frames"
+    return float(min_gap_duration_s), "seconds"
+
+
+def _merge_threshold_segments(
+    *,
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+    threshold: float,
+    starts: np.ndarray,
+    ends_exclusive: np.ndarray,
+    min_gap_frames: int,
+    min_gap_duration_s: float,
+    gap_merge_policy: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(starts) <= 1:
+        return starts, ends_exclusive
+
+    if gap_merge_policy not in GAP_MERGE_POLICIES:
+        expected = ", ".join(GAP_MERGE_POLICIES)
+        raise ValueError(f"Unsupported gap_merge_policy {gap_merge_policy!r}; expected one of: {expected}")
+
+    merged_starts = [int(starts[0])]
+    merged_ends: list[int] = []
+    current_end = int(ends_exclusive[0])
+    for i in range(1, len(starts)):
+        next_start = int(starts[i])
+        next_end = int(ends_exclusive[i])
+        if gap_merge_policy == "sampled_frame_gap":
+            should_merge = (next_start - current_end) < int(min_gap_frames)
+        else:
+            prev_end_idx = current_end - 1
+            prev_end_time_s, prev_end_valid = _threshold_crossing_time_s(
+                speed=speed,
+                frames=frames,
+                fps=fps,
+                threshold=float(threshold),
+                below_idx=current_end,
+                above_idx=prev_end_idx,
+            )
+            next_start_time_s, next_start_valid = _threshold_crossing_time_s(
+                speed=speed,
+                frames=frames,
+                fps=fps,
+                threshold=float(threshold),
+                below_idx=next_start - 1,
+                above_idx=next_start,
+            )
+            if prev_end_valid and next_start_valid:
+                gap_s = float(next_start_time_s - prev_end_time_s)
+                should_merge = gap_s < float(min_gap_duration_s)
+            else:
+                should_merge = (next_start - current_end) < int(min_gap_frames)
+
+        if should_merge:
+            current_end = next_end
+        else:
+            merged_ends.append(current_end)
+            merged_starts.append(next_start)
+            current_end = next_end
+
+    merged_ends.append(current_end)
+    return np.asarray(merged_starts, dtype=np.int64), np.asarray(merged_ends, dtype=np.int64)
 
 
 def _nearest_global_minimum_index(values: np.ndarray, *, prefer_last: bool) -> int:
@@ -307,6 +621,7 @@ def _build_bout_array(
     delta_seconds: Optional[np.ndarray] = None,
     transition_valid: Optional[np.ndarray] = None,
     sample_valid: Optional[np.ndarray] = None,
+    threshold: Optional[float] = None,
 ) -> np.ndarray:
     """Build the structured bout table from core and expanded boundaries."""
 
@@ -376,6 +691,20 @@ def _build_bout_array(
 
         end_idx = end_exclusive - 1
         core_end_idx = core_end_exclusive - 1
+        (
+            core_start_time_s_interpolated,
+            core_start_time_interpolated_valid,
+            core_end_time_s_interpolated,
+            core_end_time_interpolated_valid,
+            core_duration_s_interpolated,
+        ) = _core_threshold_crossing_times_s(
+            speed=speed,
+            frames=frames,
+            fps=fps,
+            threshold=threshold,
+            core_start_idx=core_start_idx,
+            core_end_exclusive=core_end_exclusive,
+        )
         bouts[i] = (
             i + 1,
             int(frames[start_idx]),
@@ -402,6 +731,11 @@ def _build_bout_array(
             frames[end_idx] / fps if fps > 0 else float('nan'),
             frames[core_start_idx] / fps if fps > 0 else float('nan'),
             frames[core_end_idx] / fps if fps > 0 else float('nan'),
+            core_start_time_s_interpolated,
+            core_end_time_s_interpolated,
+            core_duration_s_interpolated,
+            core_start_time_interpolated_valid,
+            core_end_time_interpolated_valid,
         )
 
     return bouts
@@ -665,6 +999,8 @@ def _detect_bouts_from_speed(
     threshold: float,
     min_bout_duration_s: float = 0.05,
     min_gap_duration_s: float = 0.1,
+    min_gap_frames: Optional[int] = None,
+    gap_merge_policy: str = "sampled_frame_gap",
     boundary_mode: str = "threshold",
     boundary_window_s: float = 0.25,
     path_distance_mm: Optional[np.ndarray] = None,
@@ -683,8 +1019,15 @@ def _detect_bouts_from_speed(
         frames: Frame indices
         fps: Frames per second
         threshold: Speed threshold for bout detection
-        min_bout_duration_s: Minimum duration to count as bout
-        min_gap_duration_s: Minimum gap between bouts
+        min_bout_duration_s: Minimum duration to count as bout. Resolved to
+            frames with ceiling.
+        min_gap_duration_s: Minimum gap between bouts. Resolved to frames with
+            ceiling when min_gap_frames is not provided.
+        min_gap_frames: Explicit minimum gap in frames, overriding
+            min_gap_duration_s when provided.
+        gap_merge_policy: "sampled_frame_gap" merges by below-threshold frame
+            count; "interpolated_core_gap" merges threshold-separated segments
+            by interpolated core crossing times.
         boundary_mode: "threshold" keeps threshold-crossing boundaries;
             "local_minimum" expands start/end to nearby local minima while
             preserving core_* threshold boundaries.
@@ -694,9 +1037,17 @@ def _detect_bouts_from_speed(
     Returns:
         Structured array with bout data
     """
+    if gap_merge_policy not in GAP_MERGE_POLICIES:
+        expected = ", ".join(GAP_MERGE_POLICIES)
+        raise ValueError(f"Unsupported gap_merge_policy {gap_merge_policy!r}; expected one of: {expected}")
+
     # Convert duration thresholds to frames
-    min_bout_frames = int(min_bout_duration_s * fps)
-    min_gap_frames = int(min_gap_duration_s * fps)
+    min_bout_frames = _duration_seconds_to_frames(min_bout_duration_s, fps)
+    resolved_min_gap_frames, _min_gap_frame_source = _resolve_min_gap_frames(
+        min_gap_duration_s=min_gap_duration_s,
+        fps=fps,
+        min_gap_frames=min_gap_frames,
+    )
     boundary_window_frames = max(0, int(round(boundary_window_s * fps)))
 
     # Find frames above threshold
@@ -712,23 +1063,22 @@ def _detect_bouts_from_speed(
     starts = np.where(diff == 1)[0]
     ends = np.where(diff == -1)[0]
 
-    # Merge bouts separated by small gaps
-    if len(starts) > 1:
-        merged_starts = [starts[0]]
-        merged_ends = []
-
-        for i in range(1, len(starts)):
-            gap = starts[i] - ends[i-1]
-            if gap < min_gap_frames:
-                # Merge with previous bout (extend end)
-                continue
-            else:
-                merged_ends.append(ends[i-1])
-                merged_starts.append(starts[i])
-
-        merged_ends.append(ends[-1])
-        starts = np.array(merged_starts)
-        ends = np.array(merged_ends)
+    merge_min_gap_duration_s, _merge_min_gap_source = _gap_merge_min_gap_duration_s(
+        min_gap_duration_s=min_gap_duration_s,
+        fps=fps,
+        min_gap_frames=min_gap_frames,
+    )
+    starts, ends = _merge_threshold_segments(
+        speed=speed,
+        frames=frames,
+        fps=fps,
+        threshold=threshold,
+        starts=starts,
+        ends_exclusive=ends,
+        min_gap_frames=resolved_min_gap_frames,
+        min_gap_duration_s=merge_min_gap_duration_s,
+        gap_merge_policy=gap_merge_policy,
+    )
 
     core_starts = starts
     core_ends_exclusive = ends
@@ -767,6 +1117,7 @@ def _detect_bouts_from_speed(
         delta_seconds=delta_seconds,
         transition_valid=transition_valid,
         sample_valid=sample_valid,
+        threshold=threshold,
     )
 
 
@@ -779,6 +1130,8 @@ def _detect_bouts_from_peaks(
     rel_height: float = 0.9,
     min_bout_duration_s: float = 0.05,
     min_gap_duration_s: float = 0.1,
+    min_gap_frames: Optional[int] = None,
+    gap_merge_policy: str = "sampled_frame_gap",
     boundary_mode: str = "threshold",
     boundary_window_s: float = 0.25,
     path_distance_mm: Optional[np.ndarray] = None,
@@ -801,8 +1154,14 @@ def _detect_bouts_from_peaks(
         rel_height: Relative height for bout boundaries. Higher values (0.7-1.0) capture more
             of the bout tail; lower values (0.3-0.5) set tighter boundaries. Default 0.9 works
             well for asymmetric speed peaks with gradual tails.
-        min_bout_duration_s: Minimum duration to count as bout
-        min_gap_duration_s: Minimum gap between bouts
+        min_bout_duration_s: Minimum duration to count as bout. Resolved to
+            frames with ceiling.
+        min_gap_duration_s: Minimum gap between bouts. Resolved to frames with
+            ceiling when min_gap_frames is not provided.
+        min_gap_frames: Explicit minimum gap in frames, overriding
+            min_gap_duration_s when provided.
+        gap_merge_policy: Currently only "sampled_frame_gap" is supported for
+            peak detection.
         boundary_mode: "threshold" keeps peak-width boundaries; "local_minimum"
             expands start/end to nearby local minima.
         boundary_window_s: Maximum search window on each side for local-minimum
@@ -812,9 +1171,15 @@ def _detect_bouts_from_peaks(
         Structured array with bout data
     """
     # Convert duration thresholds to frames
-    min_bout_frames = int(min_bout_duration_s * fps)
-    min_gap_frames = int(min_gap_duration_s * fps)
+    min_bout_frames = _duration_seconds_to_frames(min_bout_duration_s, fps)
+    resolved_min_gap_frames, _min_gap_frame_source = _resolve_min_gap_frames(
+        min_gap_duration_s=min_gap_duration_s,
+        fps=fps,
+        min_gap_frames=min_gap_frames,
+    )
     boundary_window_frames = max(0, int(round(boundary_window_s * fps)))
+    if gap_merge_policy != "sampled_frame_gap":
+        raise ValueError("Peak detection currently supports gap_merge_policy='sampled_frame_gap' only.")
 
     # Handle NaN values - replace with 0 for peak detection
     speed_clean = np.where(np.isnan(speed), 0.0, speed)
@@ -853,7 +1218,7 @@ def _detect_bouts_from_peaks(
 
         for i in range(1, len(starts)):
             gap = starts[i] - ends_exclusive[i-1]
-            if gap < min_gap_frames:
+            if gap < resolved_min_gap_frames:
                 # Merge with previous bout (extend end)
                 continue
             else:
@@ -904,13 +1269,231 @@ def _detect_bouts_from_peaks(
     )
 
 
+def _build_peak_event_array(
+    *,
+    peaks: np.ndarray,
+    properties: Mapping[str, np.ndarray],
+    widths: np.ndarray,
+    width_heights: np.ndarray,
+    left_ips: np.ndarray,
+    right_ips: np.ndarray,
+    frames: np.ndarray,
+    speed: np.ndarray,
+    fps: float,
+    boundary_mode: str,
+    shape_split_policy: str,
+) -> np.ndarray:
+    peak_events = np.zeros(peaks.size, dtype=_peak_event_dtype())
+    if peaks.size == 0:
+        return peak_events
+
+    prominences = np.asarray(properties.get("prominences"), dtype=np.float64)
+    left_bases = np.asarray(properties.get("left_bases"), dtype=np.int64)
+    right_bases = np.asarray(properties.get("right_bases"), dtype=np.int64)
+    if prominences.shape[0] != peaks.size:
+        prominences = np.full(peaks.size, np.nan, dtype=np.float64)
+    if left_bases.shape[0] != peaks.size:
+        left_bases = np.full(peaks.size, -1, dtype=np.int64)
+    if right_bases.shape[0] != peaks.size:
+        right_bases = np.full(peaks.size, -1, dtype=np.int64)
+
+    for idx, peak_index in enumerate(peaks):
+        peak_index = int(peak_index)
+        left_base = int(left_bases[idx])
+        right_base = int(right_bases[idx])
+        left_width_frame = _interpolated_frame_at_sample_index(frames, float(left_ips[idx]))
+        right_width_frame = _interpolated_frame_at_sample_index(frames, float(right_ips[idx]))
+        peak_width_s = (
+            float((right_width_frame - left_width_frame) / fps)
+            if fps > 0 and np.isfinite(left_width_frame) and np.isfinite(right_width_frame)
+            else float("nan")
+        )
+        peak_events[idx] = (
+            idx + 1,
+            peak_index,
+            int(frames[peak_index]),
+            float(frames[peak_index] / fps) if fps > 0 else float("nan"),
+            float(speed[peak_index]) if np.isfinite(speed[peak_index]) else float("nan"),
+            float(prominences[idx]),
+            float(widths[idx]) if idx < widths.size else float("nan"),
+            peak_width_s,
+            float(width_heights[idx]) if idx < width_heights.size else float("nan"),
+            float(left_ips[idx]) if idx < left_ips.size else float("nan"),
+            float(right_ips[idx]) if idx < right_ips.size else float("nan"),
+            left_width_frame,
+            right_width_frame,
+            left_base,
+            right_base,
+            int(frames[left_base]) if 0 <= left_base < frames.size else -1,
+            int(frames[right_base]) if 0 <= right_base < frames.size else -1,
+            float(speed[left_base]) if 0 <= left_base < speed.size and np.isfinite(speed[left_base]) else float("nan"),
+            float(speed[right_base]) if 0 <= right_base < speed.size and np.isfinite(speed[right_base]) else float("nan"),
+            boundary_mode.encode("utf-8"),
+            shape_split_policy.encode("utf-8"),
+        )
+    return peak_events
+
+
+def _resolve_peak_event_boundaries(
+    *,
+    speed: np.ndarray,
+    peaks: np.ndarray,
+    left_ips: np.ndarray,
+    right_ips: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    starts = np.floor(left_ips).astype(np.int64)
+    ends_exclusive = np.ceil(right_ips).astype(np.int64) + 1
+    starts = np.clip(starts, 0, max(0, speed.size - 1))
+    ends_exclusive = np.clip(ends_exclusive, 1, speed.size)
+
+    # Width estimates for adjacent peaks can overlap. Keep one event per peak
+    # but split overlapping envelopes at the local valley between peak centers.
+    for idx in range(1, peaks.size):
+        previous_end = int(ends_exclusive[idx - 1])
+        current_start = int(starts[idx])
+        if current_start >= previous_end:
+            continue
+        left_peak = int(peaks[idx - 1])
+        right_peak = int(peaks[idx])
+        valley_start = min(left_peak, right_peak)
+        valley_stop = max(left_peak, right_peak) + 1
+        valley_values = np.asarray(speed[valley_start:valley_stop], dtype=np.float64)
+        finite = np.isfinite(valley_values)
+        if finite.any():
+            local_indices = np.flatnonzero(finite)
+            local_min_idx = int(local_indices[np.argmin(valley_values[finite])])
+            split = valley_start + local_min_idx + 1
+        else:
+            split = int(round((left_peak + right_peak) / 2.0))
+        split = max(int(peaks[idx - 1]) + 1, min(split, int(peaks[idx])))
+        ends_exclusive[idx - 1] = split
+        starts[idx] = split
+
+    return starts, ends_exclusive
+
+
+def _detect_bouts_from_peak_events(
+    speed: np.ndarray,
+    frames: np.ndarray,
+    fps: float,
+    *,
+    min_peak_height_mm_s: Optional[float] = None,
+    min_peak_prominence_mm_s: Optional[float] = 1.0,
+    min_peak_distance_s: float = 0.05,
+    peak_width_rel_height: float = 0.9,
+    peak_event_boundary_mode: str = "relative_prominence_width",
+    shape_split_policy: str = "none",
+    min_bout_duration_s: float = 0.05,
+    path_distance_mm: Optional[np.ndarray] = None,
+    path_distance_px: Optional[np.ndarray] = None,
+    positions_mm: Optional[np.ndarray] = None,
+    positions_px: Optional[np.ndarray] = None,
+    delta_seconds: Optional[np.ndarray] = None,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Detect one event per accepted speed peak."""
+
+    if peak_event_boundary_mode not in PEAK_EVENT_BOUNDARY_MODES:
+        expected = ", ".join(PEAK_EVENT_BOUNDARY_MODES)
+        raise ValueError(
+            f"Unsupported peak_event_boundary_mode {peak_event_boundary_mode!r}; expected one of: {expected}"
+        )
+    if shape_split_policy not in SHAPE_SPLIT_POLICIES:
+        expected = ", ".join(SHAPE_SPLIT_POLICIES)
+        raise ValueError(f"Unsupported shape_split_policy {shape_split_policy!r}; expected one of: {expected}")
+    if min_peak_distance_s < 0:
+        raise ValueError(f"min_peak_distance_s must be >= 0, got {min_peak_distance_s!r}.")
+    if peak_width_rel_height <= 0:
+        raise ValueError(f"peak_width_rel_height must be > 0, got {peak_width_rel_height!r}.")
+
+    speed_clean = np.asarray(speed, dtype=np.float64)
+    speed_clean = np.where(np.isfinite(speed_clean), speed_clean, 0.0)
+    min_bout_frames = _duration_seconds_to_frames(min_bout_duration_s, fps)
+    min_peak_distance_frames = _duration_seconds_to_frames(min_peak_distance_s, fps)
+    peak_kwargs: dict[str, Any] = {}
+    if min_peak_height_mm_s is not None:
+        peak_kwargs["height"] = float(min_peak_height_mm_s)
+    if min_peak_prominence_mm_s is not None:
+        peak_kwargs["prominence"] = float(min_peak_prominence_mm_s)
+    else:
+        peak_kwargs["prominence"] = 0.0
+    if min_peak_distance_frames > 0:
+        peak_kwargs["distance"] = int(min_peak_distance_frames)
+
+    peaks, properties = signal.find_peaks(speed_clean, **peak_kwargs)
+    if peaks.size == 0:
+        return _empty_bouts(), _empty_peak_events()
+
+    widths, width_heights, left_ips, right_ips = signal.peak_widths(
+        speed_clean,
+        peaks,
+        rel_height=float(peak_width_rel_height),
+    )
+    starts, ends_exclusive = _resolve_peak_event_boundaries(
+        speed=speed_clean,
+        peaks=peaks,
+        left_ips=left_ips,
+        right_ips=right_ips,
+    )
+
+    durations = ends_exclusive - starts
+    valid = (durations >= min_bout_frames) & (starts <= peaks) & (peaks < ends_exclusive)
+    peaks = peaks[valid]
+    starts = starts[valid]
+    ends_exclusive = ends_exclusive[valid]
+    widths = widths[valid]
+    width_heights = width_heights[valid]
+    left_ips = left_ips[valid]
+    right_ips = right_ips[valid]
+    properties = {
+        key: np.asarray(value)[valid]
+        for key, value in properties.items()
+        if np.asarray(value).shape[0] == valid.shape[0]
+    }
+    if peaks.size == 0:
+        return _empty_bouts(), _empty_peak_events()
+
+    bouts = _build_bout_array(
+        speed,
+        frames,
+        fps,
+        starts,
+        ends_exclusive,
+        starts.copy(),
+        ends_exclusive.copy(),
+        path_distance_mm=path_distance_mm,
+        path_distance_px=path_distance_px,
+        positions_mm=positions_mm,
+        positions_px=positions_px,
+        delta_seconds=delta_seconds,
+        transition_valid=transition_valid,
+        sample_valid=sample_valid,
+        threshold=None,
+    )
+    peak_events = _build_peak_event_array(
+        peaks=peaks,
+        properties=properties,
+        widths=widths,
+        width_heights=width_heights,
+        left_ips=left_ips,
+        right_ips=right_ips,
+        frames=frames,
+        speed=speed,
+        fps=fps,
+        boundary_mode=peak_event_boundary_mode,
+        shape_split_policy=shape_split_policy,
+    )
+    return bouts, peak_events
+
+
 def _load_track_kinematics_track_speeds(
     zarr_path: Path,
     track_kinematics_run: str,
     track_id: int = 0,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
     """
-    Load all 4 speed levels from a track kinematics track.
+    Load speed levels from a track kinematics track.
 
     Args:
         zarr_path: Path to capture zarr
@@ -919,7 +1502,8 @@ def _load_track_kinematics_track_speeds(
 
     Returns:
         Tuple of (speed_dict, metadata_dict)
-        speed_dict keys: speed_raw_mm, speed_filtered_mm, speed_smoothed_mm, speed_averaged_mm, frames
+        speed_dict keys include speed_raw_mm, speed_filtered_mm,
+        speed_smoothed_mm, speed_averaged_mm, and frames.
         metadata_dict keys: fps, pixel_to_mm, n_frames, etc.
     """
     root = open_zarr_root(zarr_path, mode='r')
@@ -1021,8 +1605,11 @@ def _metric_inputs_for_level(
     speeds: Dict[str, Optional[np.ndarray]],
     metadata: Dict[str, Any],
     level: str,
+    *,
+    path_distance_level_source: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Optional[np.ndarray]]:
-    path_source = PATH_DISTANCE_LEVEL_SOURCE[level]
+    path_sources = path_distance_level_source or PATH_DISTANCE_LEVEL_SOURCE
+    path_source = path_sources[level]
     return {
         "path_distance_mm": speeds.get(f"frame_path_distance_{path_source}_mm"),
         "path_distance_px": speeds.get(f"frame_path_distance_{path_source}_px"),
@@ -1046,45 +1633,96 @@ def detect_and_save_bouts(
     rel_height: float = 0.9,
     min_bout_duration_s: float = 0.05,
     min_gap_duration_s: float = 0.1,
+    min_gap_frames: Optional[int] = None,
+    gap_merge_policy: str = "sampled_frame_gap",
+    min_peak_height_mm_s: Optional[float] = None,
+    min_peak_prominence_mm_s: Optional[float] = 1.0,
+    min_peak_distance_s: float = 0.05,
+    peak_width_rel_height: float = 0.9,
+    peak_event_boundary_mode: str = "relative_prominence_width",
+    shape_split_policy: str = "none",
     default_level: str = "speed_smoothed",
     overwrite: bool = False,
     boundary_mode: str = "threshold",
     boundary_window_s: float = 0.25,
+    exponential_tau_s: float = 0.05,
+    exponential_source_level: str = "filtered",
     command: Optional[str] = None,
 ) -> str:
     """
-    Detect bouts from all 4 speed levels and save hierarchically.
+    Detect bouts from source and derived speed levels and save hierarchically.
 
     Args:
         zarr_path: Path to capture zarr
         run_name: Name for this bout detection run (auto-generated if None)
         track_kinematics_run: Track kinematics run name (or "latest")
         track_id: Track ID to analyze
-        method: Detection method ("threshold" or "peak")
+        method: Detection method ("threshold", "peak", or "peak_event")
         threshold_mm: Speed threshold in mm/s (for threshold method)
         prominence: Minimum peak prominence in mm/s (for peak method)
         min_peak_height: Minimum absolute peak height in mm/s (for peak method, optional)
         rel_height: Relative height for bout boundaries (for peak method). Higher values
             (0.7-1.0) capture more of the bout tail (default: 0.9)
         min_bout_duration_s: Minimum bout duration
-        min_gap_duration_s: Minimum gap between bouts
+        min_gap_duration_s: Minimum gap between bouts, resolved to frames with
+            ceiling when min_gap_frames is not provided.
+        min_gap_frames: Explicit minimum gap in frames. Overrides
+            min_gap_duration_s when provided.
+        gap_merge_policy: Rule for merging threshold-separated segments.
+            "sampled_frame_gap" uses sampled below-threshold frame counts.
+            "interpolated_core_gap" uses interpolated core threshold crossing
+            times when available and falls back to sampled frames otherwise.
+        min_peak_height_mm_s: Minimum absolute peak height in mm/s for
+            peak_event mode.
+        min_peak_prominence_mm_s: Minimum peak prominence in mm/s for
+            peak_event mode.
+        min_peak_distance_s: Minimum spacing between accepted peak-event peaks.
+        peak_width_rel_height: Relative height passed to scipy.signal.peak_widths
+            for peak_event boundaries.
+        peak_event_boundary_mode: Boundary assignment mode for peak_event runs.
+            The first implementation supports relative_prominence_width.
+        shape_split_policy: Optional waveform-shape split policy. The first
+            implementation supports none only.
         default_level: Speed subgroup that downstream consumers should use by
-            default. Accepts raw/filtered/smoothed/averaged aliases.
+            default. Accepts raw/filtered/smoothed/averaged/exponential aliases.
         overwrite: Delete and recreate an existing run with the same name.
         boundary_mode: Boundary mode for stored start/end. "threshold" stores
             threshold/peak-width boundaries; "local_minimum" expands to nearby
             low-speed minima and preserves threshold/peak boundaries in core_*.
         boundary_window_s: Local-minimum search window on each side of each
             threshold/peak core.
+        exponential_tau_s: Time constant for the causal exponential response
+            speed candidate.
+        exponential_source_level: Source speed level for the exponential
+            response candidate. Accepts raw/filtered/smoothed/averaged aliases.
         command: Optional command string to record in stage provenance.
 
     Returns:
         The run name used (either provided or auto-generated)
     """
     default_level_key = normalize_speed_level(default_level)
+    exponential_source_key = normalize_speed_level(exponential_source_level)
+    if exponential_source_key == "speed_exponential":
+        raise ValueError("exponential_source_level cannot be speed_exponential.")
+    if exponential_tau_s <= 0:
+        raise ValueError(f"exponential_tau_s must be > 0, got {exponential_tau_s!r}.")
     if boundary_mode not in BOUNDARY_MODES:
         expected = ", ".join(BOUNDARY_MODES)
         raise ValueError(f"Unsupported boundary_mode {boundary_mode!r}; expected one of: {expected}")
+    if gap_merge_policy not in GAP_MERGE_POLICIES:
+        expected = ", ".join(GAP_MERGE_POLICIES)
+        raise ValueError(f"Unsupported gap_merge_policy {gap_merge_policy!r}; expected one of: {expected}")
+    if method in {"peak", "peak_event"} and gap_merge_policy != "sampled_frame_gap":
+        raise ValueError(f"{method} detection currently supports gap_merge_policy='sampled_frame_gap' only.")
+    if peak_event_boundary_mode not in PEAK_EVENT_BOUNDARY_MODES:
+        expected = ", ".join(PEAK_EVENT_BOUNDARY_MODES)
+        raise ValueError(
+            f"Unsupported peak_event_boundary_mode {peak_event_boundary_mode!r}; expected one of: {expected}"
+        )
+    if shape_split_policy not in SHAPE_SPLIT_POLICIES:
+        expected = ", ".join(SHAPE_SPLIT_POLICIES)
+        raise ValueError(f"Unsupported shape_split_policy {shape_split_policy!r}; expected one of: {expected}")
+    gap_merge_policy_active = method != "peak_event"
 
     print(f"\n{'='*60}")
     print(f"MULTI-LEVEL SWIM BOUT DETECTION")
@@ -1094,8 +1732,10 @@ def detect_and_save_bouts(
     print(f"Track ID: {track_id}")
     print(f"Method: {method}")
     print(f"Boundary mode: {boundary_mode}")
+    print(f"Gap merge policy: {gap_merge_policy}")
     if boundary_mode == "local_minimum":
         print(f"Boundary window: {boundary_window_s} s")
+    print(f"Exponential response: source={exponential_source_key}, tau={exponential_tau_s} s")
     if method == "threshold":
         print(f"Threshold: {threshold_mm} mm/s")
     elif method == "peak":
@@ -1103,6 +1743,14 @@ def detect_and_save_bouts(
         if min_peak_height is not None:
             print(f"Min peak height: {min_peak_height} mm/s")
         print(f"Relative height: {rel_height}")
+    elif method == "peak_event":
+        print(f"Peak-event min prominence: {min_peak_prominence_mm_s} mm/s")
+        if min_peak_height_mm_s is not None:
+            print(f"Peak-event min height: {min_peak_height_mm_s} mm/s")
+        print(f"Peak-event min distance: {min_peak_distance_s} s")
+        print(f"Peak-event boundary mode: {peak_event_boundary_mode}")
+        print(f"Peak-event width relative height: {peak_width_rel_height}")
+        print(f"Shape split policy: {shape_split_policy}")
     print(f"Default level: {default_level_key}")
     print()
 
@@ -1114,58 +1762,123 @@ def detect_and_save_bouts(
 
     fps = metadata['fps']
     frames = speeds['frames']
+    resolved_min_bout_frames = _duration_seconds_to_frames(min_bout_duration_s, fps)
+    resolved_min_gap_frames, min_gap_frame_source = _resolve_min_gap_frames(
+        min_gap_duration_s=min_gap_duration_s,
+        fps=fps,
+        min_gap_frames=min_gap_frames,
+    )
+    gap_merge_min_gap_duration_s, gap_merge_min_gap_source = _gap_merge_min_gap_duration_s(
+        min_gap_duration_s=min_gap_duration_s,
+        fps=fps,
+        min_gap_frames=min_gap_frames,
+    )
+    resolved_boundary_window_frames = max(0, int(round(boundary_window_s * fps)))
+    speeds["speed_exponential_mm"] = _causal_exponential_speed_response(
+        speeds[f"{exponential_source_key}_mm"],
+        frames,
+        fps,
+        tau_s=float(exponential_tau_s),
+        transition_valid=speeds.get("transition_valid"),
+    )
+    path_distance_level_source = {
+        **PATH_DISTANCE_LEVEL_SOURCE,
+        "speed_exponential": PATH_DISTANCE_LEVEL_SOURCE[exponential_source_key],
+    }
 
     print(f"  FPS: {fps}")
     print(f"  Frames: {metadata['n_frames']}")
     print(f"  Track kinematics run: {metadata['track_kinematics_run']}")
+    if gap_merge_policy_active:
+        print(
+            f"  Min gap: {resolved_min_gap_frames} frames "
+            f"({resolved_min_gap_frames / fps:.4f} s effective, source={min_gap_frame_source})"
+        )
+        print(
+            f"  Gap merge: {gap_merge_policy} "
+            f"({gap_merge_min_gap_duration_s:.4f} s threshold, source={gap_merge_min_gap_source})"
+        )
+    else:
+        print("  Gap merge: not used by peak_event")
     print()
 
     # Detect bouts for each speed level
     speed_levels = list(SPEED_LEVELS)
     bout_results = {}
+    peak_event_results = {}
 
     print("Detecting bouts for each speed level:")
     for level in speed_levels:
         speed_key = f"{level}_mm"
         speed = speeds[speed_key]
-        metric_inputs = _metric_inputs_for_level(speeds, metadata, level)
+        metric_inputs = _metric_inputs_for_level(
+            speeds,
+            metadata,
+            level,
+            path_distance_level_source=path_distance_level_source,
+        )
 
         # Skip if all NaN
         if np.all(np.isnan(speed)):
             print(f"  {level}: SKIPPED (all NaN)")
             bout_results[level] = _empty_bouts()
+            peak_event_results[level] = _empty_peak_events()
             continue
 
         if method == "threshold":
             bouts = _detect_bouts_from_speed(
-                speed,
-                frames,
-                fps,
-                threshold_mm,
-                min_bout_duration_s,
-                min_gap_duration_s,
-                boundary_mode,
-                boundary_window_s,
+                speed=speed,
+                frames=frames,
+                fps=fps,
+                threshold=threshold_mm,
+                min_bout_duration_s=min_bout_duration_s,
+                min_gap_duration_s=min_gap_duration_s,
+                min_gap_frames=min_gap_frames,
+                gap_merge_policy=gap_merge_policy,
+                boundary_mode=boundary_mode,
+                boundary_window_s=boundary_window_s,
                 **metric_inputs,
             )
         elif method == "peak":
             bouts = _detect_bouts_from_peaks(
-                speed,
-                frames,
-                fps,
-                prominence,
-                min_peak_height,
-                rel_height,
-                min_bout_duration_s,
-                min_gap_duration_s,
-                boundary_mode,
-                boundary_window_s,
+                speed=speed,
+                frames=frames,
+                fps=fps,
+                prominence=prominence,
+                min_peak_height=min_peak_height,
+                rel_height=rel_height,
+                min_bout_duration_s=min_bout_duration_s,
+                min_gap_duration_s=min_gap_duration_s,
+                min_gap_frames=min_gap_frames,
+                gap_merge_policy=gap_merge_policy,
+                boundary_mode=boundary_mode,
+                boundary_window_s=boundary_window_s,
+                **metric_inputs,
+            )
+            peak_events = _empty_peak_events()
+        elif method == "peak_event":
+            bouts, peak_events = _detect_bouts_from_peak_events(
+                speed=speed,
+                frames=frames,
+                fps=fps,
+                min_peak_height_mm_s=min_peak_height_mm_s,
+                min_peak_prominence_mm_s=min_peak_prominence_mm_s,
+                min_peak_distance_s=min_peak_distance_s,
+                peak_width_rel_height=peak_width_rel_height,
+                peak_event_boundary_mode=peak_event_boundary_mode,
+                shape_split_policy=shape_split_policy,
+                min_bout_duration_s=min_bout_duration_s,
                 **metric_inputs,
             )
         else:
-            raise ValueError(f"Unknown detection method: {method}. Must be 'threshold' or 'peak'.")
+            raise ValueError(
+                f"Unknown detection method: {method}. Must be 'threshold', 'peak', or 'peak_event'."
+            )
 
         bout_results[level] = bouts
+        if method == "threshold":
+            peak_events = _empty_peak_events()
+        peak_event_results[level] = peak_events
         print(f"  {level}: {len(bouts)} bouts detected")
 
     print()
@@ -1209,12 +1922,39 @@ def detect_and_save_bouts(
         capture_env_vars=False,
     )
     created_at_utc = datetime.now(timezone.utc).isoformat()
+    run_group.attrs['schema_id'] = SWIM_BOUT_RUN_SCHEMA_ID
+    run_group.attrs['schema_version'] = SWIM_BOUT_RUN_SCHEMA_VERSION
     run_group.attrs['created_at_utc'] = created_at_utc
     run_group.attrs['detection_method'] = method
     run_group.attrs['min_bout_duration_s'] = min_bout_duration_s
     run_group.attrs['min_gap_duration_s'] = min_gap_duration_s
+    run_group.attrs['min_gap_frames'] = (
+        int(min_gap_frames) if min_gap_frames is not None else None
+    )
+    run_group.attrs['resolved_min_bout_frames'] = int(resolved_min_bout_frames)
+    run_group.attrs['resolved_min_gap_frames'] = int(resolved_min_gap_frames)
+    run_group.attrs['effective_min_bout_duration_s'] = float(resolved_min_bout_frames / fps)
+    run_group.attrs['effective_min_gap_duration_s'] = float(resolved_min_gap_frames / fps)
+    run_group.attrs['min_gap_frame_source'] = min_gap_frame_source
+    run_group.attrs['gap_merge_policy'] = gap_merge_policy
+    run_group.attrs['gap_merge_policy_active'] = bool(gap_merge_policy_active)
+    run_group.attrs['gap_merge_min_gap_duration_s'] = float(gap_merge_min_gap_duration_s)
+    run_group.attrs['gap_merge_min_gap_source'] = gap_merge_min_gap_source
+    run_group.attrs['duration_frame_rounding_policy'] = DURATION_FRAME_ROUNDING_POLICY
     run_group.attrs['boundary_mode'] = boundary_mode
     run_group.attrs['boundary_window_s'] = float(boundary_window_s)
+    run_group.attrs['resolved_boundary_window_frames'] = int(resolved_boundary_window_frames)
+    run_group.attrs['boundary_frame_rounding_policy'] = BOUNDARY_FRAME_ROUNDING_POLICY
+    run_group.attrs['threshold_crossing_interpolation'] = THRESHOLD_CROSSING_INTERPOLATION
+    run_group.attrs['interpolated_threshold_fields'] = [
+        'core_start_time_s_interpolated',
+        'core_end_time_s_interpolated',
+        'core_duration_s_interpolated',
+    ]
+    run_group.attrs['exponential_tau_s'] = float(exponential_tau_s)
+    run_group.attrs['exponential_source_level'] = exponential_source_key
+    run_group.attrs['peak_event_schema_id'] = PEAK_EVENT_SCHEMA_ID
+    run_group.attrs['peak_event_schema_version'] = PEAK_EVENT_SCHEMA_VERSION
 
     # Method-specific parameters
     if method == "threshold":
@@ -1223,6 +1963,17 @@ def detect_and_save_bouts(
         run_group.attrs['prominence'] = prominence
         run_group.attrs['min_peak_height'] = min_peak_height if min_peak_height is not None else float('nan')
         run_group.attrs['rel_height'] = rel_height
+    elif method == "peak_event":
+        run_group.attrs['min_peak_height_mm_s'] = (
+            float(min_peak_height_mm_s) if min_peak_height_mm_s is not None else float('nan')
+        )
+        run_group.attrs['min_peak_prominence_mm_s'] = (
+            float(min_peak_prominence_mm_s) if min_peak_prominence_mm_s is not None else float('nan')
+        )
+        run_group.attrs['min_peak_distance_s'] = float(min_peak_distance_s)
+        run_group.attrs['peak_width_rel_height'] = float(peak_width_rel_height)
+        run_group.attrs['peak_event_boundary_mode'] = peak_event_boundary_mode
+        run_group.attrs['shape_split_policy'] = shape_split_policy
 
     run_group.attrs['source_track_kinematics_run'] = metadata['track_kinematics_run']
     run_group.attrs['track_id'] = track_id
@@ -1239,13 +1990,48 @@ def detect_and_save_bouts(
         'prominence': float(prominence) if method == "peak" else None,
         'min_peak_height': float(min_peak_height) if min_peak_height is not None else None,
         'rel_height': float(rel_height) if method == "peak" else None,
+        'min_peak_height_mm_s': (
+            float(min_peak_height_mm_s) if min_peak_height_mm_s is not None else None
+        ),
+        'min_peak_prominence_mm_s': (
+            float(min_peak_prominence_mm_s) if min_peak_prominence_mm_s is not None else None
+        ),
+        'min_peak_distance_s': float(min_peak_distance_s),
+        'peak_width_rel_height': float(peak_width_rel_height),
+        'peak_event_boundary_mode': peak_event_boundary_mode,
+        'shape_split_policy': shape_split_policy,
         'min_bout_duration_s': float(min_bout_duration_s),
         'min_gap_duration_s': float(min_gap_duration_s),
+        'min_gap_frames': int(min_gap_frames) if min_gap_frames is not None else None,
+        'resolved_min_bout_frames': int(resolved_min_bout_frames),
+        'resolved_min_gap_frames': int(resolved_min_gap_frames),
+        'effective_min_bout_duration_s': float(resolved_min_bout_frames / fps),
+        'effective_min_gap_duration_s': float(resolved_min_gap_frames / fps),
+        'min_gap_frame_source': min_gap_frame_source,
+        'gap_merge_policy': gap_merge_policy,
+        'gap_merge_policy_active': bool(gap_merge_policy_active),
+        'gap_merge_min_gap_duration_s': float(gap_merge_min_gap_duration_s),
+        'gap_merge_min_gap_source': gap_merge_min_gap_source,
+        'duration_frame_rounding_policy': DURATION_FRAME_ROUNDING_POLICY,
         'default_level': default_level_key,
         'boundary_mode': boundary_mode,
         'boundary_window_s': float(boundary_window_s),
+        'resolved_boundary_window_frames': int(resolved_boundary_window_frames),
+        'boundary_frame_rounding_policy': BOUNDARY_FRAME_ROUNDING_POLICY,
+        'threshold_crossing_interpolation': THRESHOLD_CROSSING_INTERPOLATION,
+        'interpolated_threshold_fields': [
+            'core_start_time_s_interpolated',
+            'core_end_time_s_interpolated',
+            'core_duration_s_interpolated',
+        ],
+        'exponential_tau_s': float(exponential_tau_s),
+        'exponential_source_level': exponential_source_key,
         'speed_levels': list(speed_levels),
-        'bout_metric_schema_id': 'palette.swim_bout_metrics.v2',
+        'swim_bout_run_schema_id': SWIM_BOUT_RUN_SCHEMA_ID,
+        'swim_bout_run_schema_version': SWIM_BOUT_RUN_SCHEMA_VERSION,
+        'bout_metric_schema_id': BOUT_METRIC_SCHEMA_ID,
+        'peak_event_schema_id': PEAK_EVENT_SCHEMA_ID,
+        'peak_event_schema_version': PEAK_EVENT_SCHEMA_VERSION,
         'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
     }
@@ -1274,7 +2060,7 @@ def detect_and_save_bouts(
         parameters=parameters,
         inputs=inputs,
         command=command,
-        version="detect_bouts_multi_level.v1",
+        version=METHOD_VERSION,
         git=git_info,
         environment=env_info.get("environment"),
         platform=env_info.get("platform"),
@@ -1289,6 +2075,7 @@ def detect_and_save_bouts(
     for level in speed_levels:
         level_group = run_group.create_group(level)
         bouts = bout_results[level]
+        peak_events = peak_event_results[level]
 
         # Compute inter-bout intervals and global metrics
         intervals, interval_metrics, interval_histogram = _compute_inter_bout_intervals(bouts, fps)
@@ -1308,10 +2095,67 @@ def detect_and_save_bouts(
         level_specific_attrs = {
             'n_bouts': len(bouts),
             'speed_level': level,
-            'bout_metric_schema_id': 'palette.swim_bout_metrics.v2',
-            'path_distance_source_level': PATH_DISTANCE_LEVEL_SOURCE[level],
+            'bout_metric_schema_id': BOUT_METRIC_SCHEMA_ID,
+            'peak_event_schema_id': PEAK_EVENT_SCHEMA_ID,
+            'peak_event_schema_version': PEAK_EVENT_SCHEMA_VERSION,
+            'n_peak_events': int(len(peak_events)),
+            'path_distance_source_level': path_distance_level_source[level],
             'is_default_level': level == default_level_key,
+            'min_bout_duration_s': float(min_bout_duration_s),
+            'min_gap_duration_s': float(min_gap_duration_s),
+            'min_gap_frames': int(min_gap_frames) if min_gap_frames is not None else None,
+            'resolved_min_bout_frames': int(resolved_min_bout_frames),
+            'resolved_min_gap_frames': int(resolved_min_gap_frames),
+            'effective_min_bout_duration_s': float(resolved_min_bout_frames / fps),
+            'effective_min_gap_duration_s': float(resolved_min_gap_frames / fps),
+            'min_gap_frame_source': min_gap_frame_source,
+            'gap_merge_policy': gap_merge_policy,
+            'gap_merge_policy_active': bool(gap_merge_policy_active),
+            'gap_merge_min_gap_duration_s': float(gap_merge_min_gap_duration_s),
+            'gap_merge_min_gap_source': gap_merge_min_gap_source,
+            'duration_frame_rounding_policy': DURATION_FRAME_ROUNDING_POLICY,
+            'threshold_crossing_interpolation': THRESHOLD_CROSSING_INTERPOLATION,
+            'interpolated_threshold_fields': [
+                'core_start_time_s_interpolated',
+                'core_end_time_s_interpolated',
+                'core_duration_s_interpolated',
+            ],
+            'peak_event_boundary_mode': peak_event_boundary_mode,
+            'shape_split_policy': shape_split_policy,
+            'min_peak_height_mm_s': (
+                float(min_peak_height_mm_s) if min_peak_height_mm_s is not None else float('nan')
+            ),
+            'min_peak_prominence_mm_s': (
+                float(min_peak_prominence_mm_s) if min_peak_prominence_mm_s is not None else float('nan')
+            ),
+            'min_peak_distance_s': float(min_peak_distance_s),
+            'peak_width_rel_height': float(peak_width_rel_height),
         }
+        if level == "speed_exponential":
+            level_specific_attrs["speed_transform"] = "causal_exponential_response"
+            level_specific_attrs["speed_transform_kernel"] = "exp(-t/tau)"
+            level_specific_attrs["exponential_tau_s"] = float(exponential_tau_s)
+            level_specific_attrs["exponential_source_level"] = exponential_source_key
+            store_array(
+                level_group,
+                "speed_exponential_mm",
+                np.asarray(speeds["speed_exponential_mm"], dtype=np.float32),
+                attrs={
+                    "units": "mm/s",
+                    "speed_transform": "causal_exponential_response",
+                    "source_speed_level": exponential_source_key,
+                    "tau_s": float(exponential_tau_s),
+                    "kernel": "exp(-t/tau)",
+                    "causal": True,
+                    "normalized": True,
+                },
+            )
+            store_array(
+                level_group,
+                "frame_indices",
+                np.asarray(frames, dtype=np.int64),
+                attrs={"source": "track_kinematics.frame_indices"},
+            )
 
         if len(bouts) > 0:
             level_specific_attrs['total_bout_time_s'] = float(np.sum(bouts['duration_s']))
@@ -1325,7 +2169,9 @@ def detect_and_save_bouts(
             )
             level_specific_attrs['n_gap_censored_bouts'] = int(np.sum(bouts['gap_censored']))
 
+        level_group.attrs.update(level_specific_attrs)
         write_columnar_dataset(level_group, 'bouts', bouts, attrs=level_specific_attrs)
+        write_columnar_dataset(level_group, 'peak_events', peak_events, attrs=level_specific_attrs)
         write_columnar_dataset(level_group, 'inter_bout_intervals', intervals, attrs=None)
         write_columnar_dataset(level_group, 'inter_bout_interval_histogram', interval_histogram, attrs=None)
         write_columnar_dataset(level_group, 'global_metrics', global_metrics, attrs=None)
@@ -1345,6 +2191,7 @@ def detect_and_save_bouts(
     print(f"  speed_filtered: {len(bout_results['speed_filtered'])} bouts")
     print(f"  speed_smoothed: {len(bout_results['speed_smoothed'])} bouts")
     print(f"  speed_averaged: {len(bout_results['speed_averaged'])} bouts")
+    print(f"  speed_exponential: {len(bout_results['speed_exponential'])} bouts")
     print(f"Default level: {default_level_key}")
     print()
 
@@ -1353,7 +2200,7 @@ def detect_and_save_bouts(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detect swim bouts from all 4 speed processing levels",
+        description="Detect swim bouts from speed processing levels",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -1395,9 +2242,9 @@ def main():
     parser.add_argument(
         '--method',
         type=str,
-        choices=['threshold', 'peak'],
+        choices=['threshold', 'peak', 'peak_event'],
         default='threshold',
-        help='Detection method: "threshold" or "peak" (default: threshold)',
+        help='Detection method: "threshold", "peak", or "peak_event" (default: threshold)',
     )
 
     # Threshold method parameters
@@ -1415,7 +2262,7 @@ def main():
         default='speed_smoothed',
         help=(
             'Speed level downstream consumers should use by default. '
-            'Accepts raw/filtered/smoothed/averaged aliases or stored subgroup '
+            'Accepts raw/filtered/smoothed/averaged/exponential aliases or stored subgroup '
             'names. Default: speed_smoothed.'
         ),
     )
@@ -1440,6 +2287,21 @@ def main():
         help='Search window in seconds on each side for --boundary-mode local_minimum (default: 0.25).',
     )
 
+    parser.add_argument(
+        '--exponential-tau-s',
+        type=float,
+        default=0.05,
+        help='Time constant in seconds for the causal exponential speed candidate (default: 0.05).',
+    )
+
+    parser.add_argument(
+        '--exponential-source-level',
+        type=str,
+        choices=tuple(choice for choice in SPEED_LEVEL_CHOICES if normalize_speed_level(choice) != "speed_exponential"),
+        default='filtered',
+        help='Source speed level for the exponential response candidate (default: filtered).',
+    )
+
     # Peak method parameters
     parser.add_argument(
         '--prominence',
@@ -1462,19 +2324,88 @@ def main():
         help='Relative height for bout boundaries in peak method. Higher values (0.7-1.0) capture more of the bout tail; lower values (0.3-0.5) set tighter boundaries (default: 0.9)',
     )
 
+    # Peak-event method parameters
+    parser.add_argument(
+        '--min-peak-height-mm-s',
+        type=float,
+        default=None,
+        help='Minimum absolute peak height in mm/s for peak_event method.',
+    )
+
+    parser.add_argument(
+        '--min-peak-prominence-mm-s',
+        type=float,
+        default=1.0,
+        help='Minimum peak prominence in mm/s for peak_event method (default: 1.0).',
+    )
+
+    parser.add_argument(
+        '--min-peak-distance-s',
+        type=float,
+        default=0.05,
+        help='Minimum time between accepted peak_event peaks in seconds (default: 0.05).',
+    )
+
+    parser.add_argument(
+        '--peak-width-rel-height',
+        type=float,
+        default=0.9,
+        help='Relative height passed to scipy.signal.peak_widths for peak_event boundaries (default: 0.9).',
+    )
+
+    parser.add_argument(
+        '--peak-event-boundary-mode',
+        type=str,
+        choices=PEAK_EVENT_BOUNDARY_MODES,
+        default='relative_prominence_width',
+        help='Boundary assignment mode for peak_event method (default: relative_prominence_width).',
+    )
+
+    parser.add_argument(
+        '--shape-split-policy',
+        type=str,
+        choices=SHAPE_SPLIT_POLICIES,
+        default='none',
+        help='Optional waveform-shape split policy for peak_event method (default: none).',
+    )
+
     # Common parameters
     parser.add_argument(
         '--min-bout-duration',
         type=float,
         default=0.05,
-        help='Minimum bout duration in seconds (default: 0.05)',
+        help='Minimum bout duration in seconds, resolved with ceil(seconds * fps) (default: 0.05)',
     )
 
     parser.add_argument(
         '--min-gap-duration',
         type=float,
         default=0.1,
-        help='Minimum gap between bouts in seconds (default: 0.1)',
+        help=(
+            'Minimum gap between bouts in seconds. Resolved to frames with '
+            'ceil(seconds * fps) unless --min-gap-frames is provided '
+            '(default: 0.1).'
+        ),
+    )
+
+    parser.add_argument(
+        '--min-gap-frames',
+        type=int,
+        default=None,
+        help='Explicit minimum gap between bouts in frames. Overrides --min-gap-duration.',
+    )
+
+    parser.add_argument(
+        '--gap-merge-policy',
+        type=str,
+        choices=GAP_MERGE_POLICIES,
+        default='sampled_frame_gap',
+        help=(
+            'How threshold-separated segments are merged. sampled_frame_gap '
+            'uses resolved below-threshold frame counts. interpolated_core_gap '
+            'uses interpolated core threshold-crossing times when available '
+            'and falls back to sampled frame gaps otherwise. Default: sampled_frame_gap.'
+        ),
     )
 
     args = parser.parse_args()
@@ -1496,10 +2427,20 @@ def main():
         rel_height=args.rel_height,
         min_bout_duration_s=args.min_bout_duration,
         min_gap_duration_s=args.min_gap_duration,
+        min_gap_frames=args.min_gap_frames,
+        gap_merge_policy=args.gap_merge_policy,
+        min_peak_height_mm_s=args.min_peak_height_mm_s,
+        min_peak_prominence_mm_s=args.min_peak_prominence_mm_s,
+        min_peak_distance_s=args.min_peak_distance_s,
+        peak_width_rel_height=args.peak_width_rel_height,
+        peak_event_boundary_mode=args.peak_event_boundary_mode,
+        shape_split_policy=args.shape_split_policy,
         default_level=args.default_level,
         overwrite=args.overwrite,
         boundary_mode=args.boundary_mode,
         boundary_window_s=args.boundary_window_s,
+        exponential_tau_s=args.exponential_tau_s,
+        exponential_source_level=args.exponential_source_level,
         command=" ".join(sys.argv),
     )
 

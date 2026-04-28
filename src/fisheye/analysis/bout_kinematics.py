@@ -30,9 +30,9 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 
 SCHEMA_ID = "analysis.bout_kinematics_runs"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 METHOD = "heading_window_and_within_bout_metrics"
-METHOD_VERSION = "bout_kinematics.v1"
+METHOD_VERSION = "bout_kinematics.v4"
 BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_kinematics_summary.v1"
 BOUT_KINEMATICS_PLOT_RENDERER = "matplotlib_static_plotly_spec.v1"
 BOUT_KINEMATICS_PNG_PREFIX = "bout_kinematics_summary"
@@ -47,6 +47,7 @@ HEADING_LEVEL_ALIASES = {
     **{level: level for level in HEADING_LEVEL_TO_ARRAY},
 }
 WITHIN_WINDOWS = ("bout_start_end", "core_start_end")
+PRE_POST_MODES = ("fixed_window", "interbout_epoch")
 
 
 def normalize_heading_level(value: str) -> str:
@@ -67,10 +68,41 @@ def _metrics_dtype() -> np.dtype:
             ("source_end_frame", "i8"),
             ("source_core_start_frame", "i8"),
             ("source_core_end_frame", "i8"),
+            ("source_core_start_time_s_interpolated", "f8"),
+            ("source_core_end_time_s_interpolated", "f8"),
+            ("source_core_duration_s_interpolated", "f8"),
+            ("source_core_start_time_interpolated_valid", "?"),
+            ("source_core_end_time_interpolated_valid", "?"),
+            ("source_peak_frame", "i8"),
+            ("source_peak_time_s", "f8"),
+            ("source_peak_signal_value_mm_s", "f8"),
+            ("source_peak_prominence_mm_s", "f8"),
+            ("source_peak_width_s", "f8"),
+            ("source_peak_width_height_mm_s", "f8"),
+            ("source_peak_left_width_frame_interpolated", "f8"),
+            ("source_peak_right_width_frame_interpolated", "f8"),
+            ("source_peak_left_width_time_s", "f8"),
+            ("source_peak_right_width_time_s", "f8"),
+            ("source_peak_boundary_mode_bytes", "S64"),
+            ("source_peak_shape_split_policy_bytes", "S64"),
+            ("pre_epoch_start_frame", "i8"),
+            ("pre_epoch_end_frame", "i8"),
+            ("post_epoch_start_frame", "i8"),
+            ("post_epoch_end_frame", "i8"),
             ("pre_heading_mean_deg", "f8"),
             ("post_heading_mean_deg", "f8"),
             ("net_delta_heading_deg", "f8"),
             ("abs_net_delta_heading_deg", "f8"),
+            ("pre_position_mean_x_mm", "f8"),
+            ("pre_position_mean_y_mm", "f8"),
+            ("post_position_mean_x_mm", "f8"),
+            ("post_position_mean_y_mm", "f8"),
+            ("interbout_epoch_displacement_mm", "f8"),
+            ("pre_position_mean_x_px", "f8"),
+            ("pre_position_mean_y_px", "f8"),
+            ("post_position_mean_x_px", "f8"),
+            ("post_position_mean_y_px", "f8"),
+            ("interbout_epoch_displacement_px", "f8"),
             ("within_heading_range_deg", "f8"),
             ("within_heading_peak_to_peak_deg", "f8"),
             ("within_heading_path_deg", "f8"),
@@ -79,10 +111,14 @@ def _metrics_dtype() -> np.dtype:
             ("within_heading_dominant_frequency_hz", "f8"),
             ("pre_window_valid", "?"),
             ("post_window_valid", "?"),
+            ("pre_position_valid", "?"),
+            ("post_position_valid", "?"),
             ("within_window_valid", "?"),
             ("dominant_frequency_valid", "?"),
             ("pre_window_sample_count", "i4"),
             ("post_window_sample_count", "i4"),
+            ("pre_position_sample_count", "i4"),
+            ("post_position_sample_count", "i4"),
             ("within_window_sample_count", "i4"),
             ("failure_reason_bytes", "S256"),
         ]
@@ -203,6 +239,74 @@ def _field_or_default(bouts: np.ndarray, field: str, default: int) -> np.ndarray
     return np.full(len(bouts), default)
 
 
+def _float_field_or_nan(bouts: np.ndarray, field: str) -> np.ndarray:
+    if field in (bouts.dtype.names or ()):
+        return np.asarray(bouts[field], dtype=np.float64)
+    return np.full(len(bouts), float("nan"), dtype=np.float64)
+
+
+def _bool_field_or_false(bouts: np.ndarray, field: str) -> np.ndarray:
+    if field in (bouts.dtype.names or ()):
+        return np.asarray(bouts[field], dtype=bool)
+    return np.zeros(len(bouts), dtype=bool)
+
+
+def _bytes_field_or_empty(records: Optional[np.ndarray], field: str, count: int) -> np.ndarray:
+    output = np.full(count, b"", dtype="S64")
+    if records is None or field not in (records.dtype.names or ()):
+        return output
+    for idx, value in enumerate(records[field]):
+        if idx >= count:
+            break
+        if isinstance(value, bytes):
+            output[idx] = value[:64]
+        else:
+            output[idx] = str(value).encode("utf-8")[:64]
+    return output
+
+
+def _records_align_by_bout_id(bouts: np.ndarray, records: np.ndarray) -> bool:
+    bout_names = bouts.dtype.names or ()
+    record_names = records.dtype.names or ()
+    if "bout_id" not in bout_names or "bout_id" not in record_names:
+        return True
+    try:
+        return bool(np.array_equal(bouts["bout_id"], records["bout_id"]))
+    except Exception:
+        return False
+
+
+def _epoch_bounds(frames: np.ndarray, epoch_slice: slice) -> tuple[int, int]:
+    if epoch_slice.stop <= epoch_slice.start:
+        return -1, -1
+    return int(frames[epoch_slice.start]), int(frames[epoch_slice.stop - 1])
+
+
+def _position_epoch_stats(
+    positions: Optional[np.ndarray],
+    epoch_slice: slice,
+) -> tuple[float, float, int, bool]:
+    if positions is None:
+        return float("nan"), float("nan"), 0, False
+    epoch = np.asarray(positions[epoch_slice], dtype=np.float64)
+    if epoch.ndim != 2 or epoch.shape[1] != 2 or epoch.shape[0] == 0:
+        return float("nan"), float("nan"), 0, False
+    finite_rows = np.isfinite(epoch).all(axis=1)
+    finite_count = int(np.count_nonzero(finite_rows))
+    valid = finite_count == int(epoch.shape[0])
+    if not valid:
+        return float("nan"), float("nan"), finite_count, False
+    mean = np.mean(epoch, axis=0)
+    return float(mean[0]), float(mean[1]), finite_count, True
+
+
+def _distance_2d(x0: float, y0: float, x1: float, y1: float) -> float:
+    values = np.asarray([x0, y0, x1, y1], dtype=np.float64)
+    if not np.isfinite(values).all():
+        return float("nan")
+    return float(np.hypot(float(x1) - float(x0), float(y1) - float(y0)))
+
+
 def _resolve_track_run(
     root: zarr.Group,
     track_kinematics_run: str,
@@ -260,10 +364,14 @@ def _resolve_swim_bout_run(
 def _build_metrics_for_heading(
     *,
     bouts: np.ndarray,
+    peak_events: Optional[np.ndarray],
     frames: np.ndarray,
     times: np.ndarray,
     headings: np.ndarray,
+    positions_mm: Optional[np.ndarray],
+    positions_px: Optional[np.ndarray],
     fps: float,
+    pre_post_mode: str,
     pre_window_frames: int,
     post_window_frames: int,
     within_window: str,
@@ -286,6 +394,84 @@ def _build_metrics_for_heading(
     )
     core_starts = _field_or_default(bouts, "core_start_frame", -1).astype(np.int64)
     core_ends = _field_or_default(bouts, "core_end_frame", -1).astype(np.int64)
+    source_core_start_time_s_interpolated = _float_field_or_nan(
+        bouts,
+        "core_start_time_s_interpolated",
+    )
+    source_core_end_time_s_interpolated = _float_field_or_nan(
+        bouts,
+        "core_end_time_s_interpolated",
+    )
+    source_core_duration_s_interpolated = _float_field_or_nan(
+        bouts,
+        "core_duration_s_interpolated",
+    )
+    source_core_start_time_interpolated_valid = _bool_field_or_false(
+        bouts,
+        "core_start_time_interpolated_valid",
+    )
+    source_core_end_time_interpolated_valid = _bool_field_or_false(
+        bouts,
+        "core_end_time_interpolated_valid",
+    )
+    aligned_peak_events = (
+        peak_events
+        if peak_events is not None
+        and len(peak_events) == len(bouts)
+        and peak_events.dtype.names is not None
+        and _records_align_by_bout_id(bouts, peak_events)
+        else None
+    )
+    if aligned_peak_events is None:
+        source_peak_frame = np.full(len(bouts), -1, dtype=np.int64)
+        source_peak_time_s = np.full(len(bouts), float("nan"), dtype=np.float64)
+        source_peak_signal_value_mm_s = np.full(len(bouts), float("nan"), dtype=np.float64)
+        source_peak_prominence_mm_s = np.full(len(bouts), float("nan"), dtype=np.float64)
+        source_peak_width_s = np.full(len(bouts), float("nan"), dtype=np.float64)
+        source_peak_width_height_mm_s = np.full(len(bouts), float("nan"), dtype=np.float64)
+        source_peak_left_width_frame_interpolated = np.full(len(bouts), float("nan"), dtype=np.float64)
+        source_peak_right_width_frame_interpolated = np.full(len(bouts), float("nan"), dtype=np.float64)
+    else:
+        source_peak_frame = _field_or_default(aligned_peak_events, "peak_frame", -1).astype(np.int64)
+        source_peak_time_s = _float_field_or_nan(aligned_peak_events, "peak_time_s")
+        source_peak_signal_value_mm_s = _float_field_or_nan(aligned_peak_events, "peak_signal_value_mm_s")
+        source_peak_prominence_mm_s = _float_field_or_nan(aligned_peak_events, "peak_prominence_mm_s")
+        source_peak_width_s = _float_field_or_nan(aligned_peak_events, "peak_width_s")
+        source_peak_width_height_mm_s = _float_field_or_nan(aligned_peak_events, "peak_width_height_mm_s")
+        source_peak_left_width_frame_interpolated = _float_field_or_nan(
+            aligned_peak_events,
+            "left_width_frame_interpolated",
+        )
+        source_peak_right_width_frame_interpolated = _float_field_or_nan(
+            aligned_peak_events,
+            "right_width_frame_interpolated",
+        )
+    source_peak_left_width_time_s = (
+        source_peak_left_width_frame_interpolated / float(fps)
+        if fps > 0
+        else np.full(len(bouts), float("nan"), dtype=np.float64)
+    )
+    source_peak_right_width_time_s = (
+        source_peak_right_width_frame_interpolated / float(fps)
+        if fps > 0
+        else np.full(len(bouts), float("nan"), dtype=np.float64)
+    )
+    source_peak_boundary_mode_bytes = _bytes_field_or_empty(aligned_peak_events, "boundary_mode", len(bouts))
+    source_peak_shape_split_policy_bytes = _bytes_field_or_empty(
+        aligned_peak_events,
+        "shape_split_policy",
+        len(bouts),
+    )
+    sorted_rows = np.argsort(start_frames)
+    previous_end_indices = np.full(len(bouts), -1, dtype=np.int64)
+    next_start_indices = np.full(len(bouts), -1, dtype=np.int64)
+    for order_idx, row_idx in enumerate(sorted_rows):
+        if order_idx > 0:
+            previous_row = int(sorted_rows[order_idx - 1])
+            previous_end_indices[int(row_idx)] = int(frame_to_index.get(int(end_frames[previous_row]), -1))
+        if order_idx + 1 < len(sorted_rows):
+            next_row = int(sorted_rows[order_idx + 1])
+            next_start_indices[int(row_idx)] = int(frame_to_index.get(int(start_frames[next_row]), -1))
 
     for row_idx, (bout_id, start_frame, end_frame, core_start, core_end) in enumerate(
         zip(bout_ids, start_frames, end_frames, core_starts, core_ends)
@@ -296,11 +482,56 @@ def _build_metrics_for_heading(
         metrics[row_idx]["source_end_frame"] = int(end_frame)
         metrics[row_idx]["source_core_start_frame"] = int(core_start)
         metrics[row_idx]["source_core_end_frame"] = int(core_end)
+        metrics[row_idx]["source_core_start_time_s_interpolated"] = float(
+            source_core_start_time_s_interpolated[row_idx]
+        )
+        metrics[row_idx]["source_core_end_time_s_interpolated"] = float(
+            source_core_end_time_s_interpolated[row_idx]
+        )
+        metrics[row_idx]["source_core_duration_s_interpolated"] = float(
+            source_core_duration_s_interpolated[row_idx]
+        )
+        metrics[row_idx]["source_core_start_time_interpolated_valid"] = bool(
+            source_core_start_time_interpolated_valid[row_idx]
+        )
+        metrics[row_idx]["source_core_end_time_interpolated_valid"] = bool(
+            source_core_end_time_interpolated_valid[row_idx]
+        )
+        metrics[row_idx]["source_peak_frame"] = int(source_peak_frame[row_idx])
+        metrics[row_idx]["source_peak_time_s"] = float(source_peak_time_s[row_idx])
+        metrics[row_idx]["source_peak_signal_value_mm_s"] = float(source_peak_signal_value_mm_s[row_idx])
+        metrics[row_idx]["source_peak_prominence_mm_s"] = float(source_peak_prominence_mm_s[row_idx])
+        metrics[row_idx]["source_peak_width_s"] = float(source_peak_width_s[row_idx])
+        metrics[row_idx]["source_peak_width_height_mm_s"] = float(source_peak_width_height_mm_s[row_idx])
+        metrics[row_idx]["source_peak_left_width_frame_interpolated"] = float(
+            source_peak_left_width_frame_interpolated[row_idx]
+        )
+        metrics[row_idx]["source_peak_right_width_frame_interpolated"] = float(
+            source_peak_right_width_frame_interpolated[row_idx]
+        )
+        metrics[row_idx]["source_peak_left_width_time_s"] = float(source_peak_left_width_time_s[row_idx])
+        metrics[row_idx]["source_peak_right_width_time_s"] = float(source_peak_right_width_time_s[row_idx])
+        metrics[row_idx]["source_peak_boundary_mode_bytes"] = source_peak_boundary_mode_bytes[row_idx]
+        metrics[row_idx]["source_peak_shape_split_policy_bytes"] = source_peak_shape_split_policy_bytes[row_idx]
+        metrics[row_idx]["pre_epoch_start_frame"] = -1
+        metrics[row_idx]["pre_epoch_end_frame"] = -1
+        metrics[row_idx]["post_epoch_start_frame"] = -1
+        metrics[row_idx]["post_epoch_end_frame"] = -1
         for field in (
             "pre_heading_mean_deg",
             "post_heading_mean_deg",
             "net_delta_heading_deg",
             "abs_net_delta_heading_deg",
+            "pre_position_mean_x_mm",
+            "pre_position_mean_y_mm",
+            "post_position_mean_x_mm",
+            "post_position_mean_y_mm",
+            "interbout_epoch_displacement_mm",
+            "pre_position_mean_x_px",
+            "pre_position_mean_y_px",
+            "post_position_mean_x_px",
+            "post_position_mean_y_px",
+            "interbout_epoch_displacement_px",
             "within_heading_range_deg",
             "within_heading_peak_to_peak_deg",
             "within_heading_path_deg",
@@ -317,8 +548,29 @@ def _build_metrics_for_heading(
             metrics[row_idx]["failure_reason_bytes"] = ";".join(reasons).encode("utf-8")
             continue
 
-        pre_slice = slice(max(0, start_idx - pre_window_frames), start_idx)
-        post_slice = slice(end_idx + 1, min(len(headings), end_idx + 1 + post_window_frames))
+        if pre_post_mode == "fixed_window":
+            pre_slice = slice(max(0, start_idx - pre_window_frames), start_idx)
+            post_slice = slice(end_idx + 1, min(len(headings), end_idx + 1 + post_window_frames))
+        else:
+            previous_end_idx = int(previous_end_indices[row_idx])
+            next_start_idx = int(next_start_indices[row_idx])
+            if previous_end_idx >= 0 and previous_end_idx < start_idx:
+                pre_slice = slice(previous_end_idx + 1, start_idx)
+            else:
+                pre_slice = slice(start_idx, start_idx)
+            if next_start_idx >= 0 and end_idx < next_start_idx:
+                post_slice = slice(end_idx + 1, next_start_idx)
+            else:
+                post_slice = slice(end_idx + 1, end_idx + 1)
+        (
+            metrics[row_idx]["pre_epoch_start_frame"],
+            metrics[row_idx]["pre_epoch_end_frame"],
+        ) = _epoch_bounds(frames, pre_slice)
+        (
+            metrics[row_idx]["post_epoch_start_frame"],
+            metrics[row_idx]["post_epoch_end_frame"],
+        ) = _epoch_bounds(frames, post_slice)
+
         pre = np.asarray(headings[pre_slice], dtype=np.float64)
         post = np.asarray(headings[post_slice], dtype=np.float64)
 
@@ -326,14 +578,34 @@ def _build_metrics_for_heading(
         post_valid_count = int(np.count_nonzero(np.isfinite(post)))
         metrics[row_idx]["pre_window_sample_count"] = pre_valid_count
         metrics[row_idx]["post_window_sample_count"] = post_valid_count
-        pre_valid = pre.size == pre_window_frames and pre_window_frames > 0 and pre_valid_count == pre_window_frames
-        post_valid = post.size == post_window_frames and post_window_frames > 0 and post_valid_count == post_window_frames
+        if pre_post_mode == "fixed_window":
+            pre_valid = (
+                pre.size == pre_window_frames
+                and pre_window_frames > 0
+                and pre_valid_count == pre_window_frames
+            )
+            post_valid = (
+                post.size == post_window_frames
+                and post_window_frames > 0
+                and post_valid_count == post_window_frames
+            )
+        else:
+            pre_valid = pre.size > 0 and pre_valid_count == pre.size
+            post_valid = post.size > 0 and post_valid_count == post.size
         metrics[row_idx]["pre_window_valid"] = pre_valid
         metrics[row_idx]["post_window_valid"] = post_valid
         if not pre_valid:
-            reasons.append("insufficient_pre_window" if pre_valid_count < pre_window_frames else "heading_contains_gap")
+            reasons.append(
+                "insufficient_pre_window"
+                if pre.size == 0 or (pre_post_mode == "fixed_window" and pre.size < pre_window_frames)
+                else "heading_contains_gap"
+            )
         if not post_valid:
-            reasons.append("insufficient_post_window" if post_valid_count < post_window_frames else "heading_contains_gap")
+            reasons.append(
+                "insufficient_post_window"
+                if post.size == 0 or (pre_post_mode == "fixed_window" and post.size < post_window_frames)
+                else "heading_contains_gap"
+            )
 
         if pre_valid:
             metrics[row_idx]["pre_heading_mean_deg"] = _circular_mean_deg(pre)
@@ -346,6 +618,42 @@ def _build_metrics_for_heading(
             )
             metrics[row_idx]["net_delta_heading_deg"] = delta
             metrics[row_idx]["abs_net_delta_heading_deg"] = abs(delta)
+
+        pre_x_mm, pre_y_mm, pre_count_mm, pre_valid_mm = _position_epoch_stats(positions_mm, pre_slice)
+        post_x_mm, post_y_mm, post_count_mm, post_valid_mm = _position_epoch_stats(positions_mm, post_slice)
+        pre_x_px, pre_y_px, pre_count_px, pre_valid_px = _position_epoch_stats(positions_px, pre_slice)
+        post_x_px, post_y_px, post_count_px, post_valid_px = _position_epoch_stats(positions_px, post_slice)
+        metrics[row_idx]["pre_position_mean_x_mm"] = pre_x_mm
+        metrics[row_idx]["pre_position_mean_y_mm"] = pre_y_mm
+        metrics[row_idx]["post_position_mean_x_mm"] = post_x_mm
+        metrics[row_idx]["post_position_mean_y_mm"] = post_y_mm
+        metrics[row_idx]["pre_position_mean_x_px"] = pre_x_px
+        metrics[row_idx]["pre_position_mean_y_px"] = pre_y_px
+        metrics[row_idx]["post_position_mean_x_px"] = post_x_px
+        metrics[row_idx]["post_position_mean_y_px"] = post_y_px
+        metrics[row_idx]["interbout_epoch_displacement_mm"] = _distance_2d(
+            pre_x_mm,
+            pre_y_mm,
+            post_x_mm,
+            post_y_mm,
+        )
+        metrics[row_idx]["interbout_epoch_displacement_px"] = _distance_2d(
+            pre_x_px,
+            pre_y_px,
+            post_x_px,
+            post_y_px,
+        )
+        pre_position_valid = pre_valid_mm or pre_valid_px
+        post_position_valid = post_valid_mm or post_valid_px
+        metrics[row_idx]["pre_position_valid"] = pre_position_valid
+        metrics[row_idx]["post_position_valid"] = post_position_valid
+        metrics[row_idx]["pre_position_sample_count"] = max(pre_count_mm, pre_count_px)
+        metrics[row_idx]["post_position_sample_count"] = max(post_count_mm, post_count_px)
+        has_position_source = positions_mm is not None or positions_px is not None
+        if not pre_position_valid:
+            reasons.append("missing_position_source" if not has_position_source else "insufficient_pre_position")
+        if not post_position_valid:
+            reasons.append("missing_position_source" if not has_position_source else "insufficient_post_position")
 
         within_start_frame = core_start if within_window == "core_start_end" and core_start >= 0 else start_frame
         within_end_frame = core_end if within_window == "core_start_end" and core_end >= 0 else end_frame
@@ -472,8 +780,41 @@ def _build_bout_kinematics_interactive_spec(
             "bout_id",
             "source_start_frame",
             "source_end_frame",
+            "source_core_start_frame",
+            "source_core_end_frame",
+            "source_core_start_time_s_interpolated",
+            "source_core_end_time_s_interpolated",
+            "source_core_duration_s_interpolated",
+            "source_core_start_time_interpolated_valid",
+            "source_core_end_time_interpolated_valid",
+            "source_peak_frame",
+            "source_peak_time_s",
+            "source_peak_signal_value_mm_s",
+            "source_peak_prominence_mm_s",
+            "source_peak_width_s",
+            "source_peak_width_height_mm_s",
+            "source_peak_left_width_frame_interpolated",
+            "source_peak_right_width_frame_interpolated",
+            "source_peak_left_width_time_s",
+            "source_peak_right_width_time_s",
+            "source_peak_boundary_mode_bytes",
+            "source_peak_shape_split_policy_bytes",
+            "pre_epoch_start_frame",
+            "pre_epoch_end_frame",
+            "post_epoch_start_frame",
+            "post_epoch_end_frame",
             "net_delta_heading_deg",
             "abs_net_delta_heading_deg",
+            "pre_position_mean_x_mm",
+            "pre_position_mean_y_mm",
+            "post_position_mean_x_mm",
+            "post_position_mean_y_mm",
+            "interbout_epoch_displacement_mm",
+            "pre_position_mean_x_px",
+            "pre_position_mean_y_px",
+            "post_position_mean_x_px",
+            "post_position_mean_y_px",
+            "interbout_epoch_displacement_px",
             "within_heading_range_deg",
             "within_heading_peak_to_peak_deg",
             "within_heading_path_deg",
@@ -568,6 +909,7 @@ def write_bout_kinematics_visualization_artifacts(
         "artifact_dpi": int(artifact_dpi),
         "heading_levels": list(heading_levels),
         "default_heading_level": default_heading_level,
+        "pre_post_mode": parameters.get("pre_post_mode"),
     }
     signature = _artifact_signature(
         {
@@ -665,6 +1007,7 @@ def compute_and_save_bout_kinematics(
     speed_level: str = "filtered",
     heading_levels: Sequence[str] = ("heading_smoothed", "heading_raw"),
     default_heading_level: str = "heading_smoothed",
+    pre_post_mode: str = "fixed_window",
     pre_window_s: float = 0.05,
     post_window_s: float = 0.05,
     within_window: str = "bout_start_end",
@@ -683,6 +1026,9 @@ def compute_and_save_bout_kinematics(
     if within_window not in WITHIN_WINDOWS:
         expected = ", ".join(WITHIN_WINDOWS)
         raise ValueError(f"Unsupported within_window {within_window!r}; expected one of: {expected}")
+    if pre_post_mode not in PRE_POST_MODES:
+        expected = ", ".join(PRE_POST_MODES)
+        raise ValueError(f"Unsupported pre_post_mode {pre_post_mode!r}; expected one of: {expected}")
 
     default_heading_level = normalize_heading_level(default_heading_level)
     normalized_heading_levels = tuple(dict.fromkeys(normalize_heading_level(level) for level in heading_levels))
@@ -710,6 +1056,23 @@ def compute_and_save_bout_kinematics(
     fps = float(track_run_group.attrs.get("fps", 0.0))
     if fps <= 0:
         raise ValueError(f"Track kinematics run {track_run_path} has invalid fps={fps!r}.")
+    positions_mm = None
+    positions_px = None
+    source_position_arrays: dict[str, str] = {}
+    if "positions_mm" in track_group:
+        positions_mm = np.asarray(track_group["positions_mm"][:], dtype=np.float64)
+        if positions_mm.shape != (frames.shape[0], 2):
+            raise ValueError(
+                f"positions_mm shape {positions_mm.shape} does not match expected {(frames.shape[0], 2)}."
+            )
+        source_position_arrays["positions_mm"] = f"{track_run_path}/tracks/id_{int(track_id)}/positions_mm"
+    if "positions_px" in track_group:
+        positions_px = np.asarray(track_group["positions_px"][:], dtype=np.float64)
+        if positions_px.shape != (frames.shape[0], 2):
+            raise ValueError(
+                f"positions_px shape {positions_px.shape} does not match expected {(frames.shape[0], 2)}."
+            )
+        source_position_arrays["positions_px"] = f"{track_run_path}/tracks/id_{int(track_id)}/positions_px"
 
     pre_window_frames = max(1, int(round(float(pre_window_s) * fps)))
     post_window_frames = max(1, int(round(float(post_window_s) * fps)))
@@ -741,7 +1104,15 @@ def compute_and_save_bout_kinematics(
             f"does not match selected {track_run_path!r}."
         )
 
-    bouts, bout_attrs = load_structured_dataset(swim_run_group[source_speed_level], "bouts")
+    swim_level_group = swim_run_group[source_speed_level]
+    bouts, bout_attrs = load_structured_dataset(swim_level_group, "bouts")
+    peak_events: Optional[np.ndarray] = None
+    peak_event_attrs: Mapping[str, Any] = {}
+    if "peak_events" in swim_level_group:
+        loaded_peak_events, loaded_peak_event_attrs = load_structured_dataset(swim_level_group, "peak_events")
+        if len(loaded_peak_events) == len(bouts) and _records_align_by_bout_id(bouts, loaded_peak_events):
+            peak_events = loaded_peak_events
+            peak_event_attrs = loaded_peak_event_attrs
 
     if "analysis" not in root:
         analysis = root.create_group("analysis")
@@ -775,10 +1146,27 @@ def compute_and_save_bout_kinematics(
         "source_swim_bout_path": swim_level_path,
         "source_track_id": int(track_id),
         "source_heading_arrays": source_heading_arrays,
+        "source_position_arrays": source_position_arrays,
     }
+    if peak_events is not None:
+        source_refs["source_peak_events_path"] = f"{swim_level_path}/peak_events"
+    source_bout_field_names = list(bout_attrs.get("field_names", bouts.dtype.names or []))
+    source_interpolated_threshold_fields = [
+        field
+        for field in (
+            "core_start_time_s_interpolated",
+            "core_end_time_s_interpolated",
+            "core_duration_s_interpolated",
+            "core_start_time_interpolated_valid",
+            "core_end_time_interpolated_valid",
+        )
+        if field in source_bout_field_names
+    ]
+    source_peak_event_fields = list(peak_event_attrs.get("field_names", peak_events.dtype.names if peak_events is not None else []))
     parameters = {
         "default_heading_level": default_heading_level,
         "heading_levels": list(normalized_heading_levels),
+        "pre_post_mode": pre_post_mode,
         "pre_window_s": float(pre_window_s),
         "post_window_s": float(post_window_s),
         "resolved_pre_window_frames": int(pre_window_frames),
@@ -786,6 +1174,8 @@ def compute_and_save_bout_kinematics(
         "within_window": within_window,
         "heading_units": "degrees",
         "heading_unwrap_policy": "numpy.unwrap_contiguous_window",
+        "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
+        "source_peak_event_fields": source_peak_event_fields,
         "zero_crossing_derivative_threshold_deg_s": float(zero_crossing_derivative_threshold_deg_s),
         "dominant_frequency": {
             "enabled": bool(dominant_frequency),
@@ -824,10 +1214,14 @@ def compute_and_save_bout_kinematics(
         level_group.attrs["source_swim_bout_path"] = swim_level_path
         metrics = _build_metrics_for_heading(
             bouts=bouts,
+            peak_events=peak_events,
             frames=frames,
             times=times,
             headings=headings,
+            positions_mm=positions_mm,
+            positions_px=positions_px,
             fps=fps,
+            pre_post_mode=pre_post_mode,
             pre_window_frames=pre_window_frames,
             post_window_frames=post_window_frames,
             within_window=within_window,
@@ -846,7 +1240,9 @@ def compute_and_save_bout_kinematics(
                 "heading_level": heading_level,
                 "heading_source_array": array_name,
                 "source_bout_count": int(len(bouts)),
-                "source_bout_field_names": list(bout_attrs.get("field_names", bouts.dtype.names or [])),
+                "source_bout_field_names": source_bout_field_names,
+                "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
+                "source_peak_event_fields": source_peak_event_fields,
             },
         )
         written_levels.append(heading_level)
@@ -911,6 +1307,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Heading level to compute. Repeatable. Defaults to smoothed and raw.",
     )
     parser.add_argument("--default-heading-level", type=str, default="heading_smoothed")
+    parser.add_argument(
+        "--pre-post-mode",
+        choices=PRE_POST_MODES,
+        default="fixed_window",
+        help="How to resolve pre/post measurement epochs.",
+    )
     parser.add_argument("--pre-window-s", type=float, default=0.05)
     parser.add_argument("--post-window-s", type=float, default=0.05)
     parser.add_argument("--within-window", choices=WITHIN_WINDOWS, default="bout_start_end")
@@ -941,6 +1343,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         speed_level=args.speed_level,
         heading_levels=tuple(args.heading_levels) if args.heading_levels else ("heading_smoothed", "heading_raw"),
         default_heading_level=args.default_heading_level,
+        pre_post_mode=args.pre_post_mode,
         pre_window_s=args.pre_window_s,
         post_window_s=args.post_window_s,
         within_window=args.within_window,

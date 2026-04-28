@@ -381,9 +381,12 @@ def _(
 
 @app.cell
 def _(
+    bout_kinematics_attrs,
+    bout_kinematics_df,
     data,
     selected_bout_kinematics,
     mo,
+    pd,
     performance_log_path,
     performance_session_id,
     selected_speed_level,
@@ -417,7 +420,105 @@ def _(
         **Performance Session:** `{performance_session_id}`
         """
     )
-    return
+    _selected_summary_rows = [
+        {
+            "surface": "track_kinematics",
+            "field": "run",
+            "value": selected_track.run_name,
+        },
+        {
+            "surface": "track_kinematics",
+            "field": "scope",
+            "value": selected_track.run_scope,
+        },
+        {
+            "surface": "track_kinematics",
+            "field": "track_id",
+            "value": selected_track.track_id,
+        },
+        {
+            "surface": "track_kinematics",
+            "field": "artifact",
+            "value": data.artifact_name,
+        },
+        {
+            "surface": "swim_bout",
+            "field": "run",
+            "value": selected_swim_bout.run_name if selected_swim_bout else "none",
+        },
+        {
+            "surface": "swim_bout",
+            "field": "speed_level",
+            "value": selected_speed_level or "artifact/default",
+        },
+        {
+            "surface": "swim_bout",
+            "field": "n_bouts",
+            "value": (
+                selected_swim_bout.n_bouts_by_level.get(f"speed_{selected_swim_bout.speed_level}", 0)
+                if selected_swim_bout
+                else 0
+            ),
+        },
+        {
+            "surface": "swim_bout",
+            "field": "threshold_mm_s",
+            "value": selected_swim_bout.threshold_mm if selected_swim_bout else None,
+        },
+        {
+            "surface": "swim_bout",
+            "field": "exponential_tau_s",
+            "value": selected_swim_bout.exponential_tau_s if selected_swim_bout else None,
+        },
+        {
+            "surface": "swim_bout",
+            "field": "exponential_source_level",
+            "value": selected_swim_bout.exponential_source_level if selected_swim_bout else None,
+        },
+        {
+            "surface": "swim_bout",
+            "field": "method",
+            "value": selected_swim_bout.detection_method if selected_swim_bout else "none",
+        },
+        {
+            "surface": "bout_kinematics",
+            "field": "run",
+            "value": selected_bout_kinematics.run_name if selected_bout_kinematics else "none",
+        },
+        {
+            "surface": "bout_kinematics",
+            "field": "pre_post_mode",
+            "value": selected_bout_kinematics.pre_post_mode if selected_bout_kinematics else "none",
+        },
+        {
+            "surface": "bout_kinematics",
+            "field": "default_heading_level",
+            "value": selected_bout_kinematics.default_heading_level if selected_bout_kinematics else "none",
+        },
+        {
+            "surface": "bout_kinematics",
+            "field": "heading_levels",
+            "value": ", ".join(selected_bout_kinematics.heading_levels) if selected_bout_kinematics else "none",
+        },
+        {
+            "surface": "bout_kinematics",
+            "field": "rows_loaded",
+            "value": len(bout_kinematics_df),
+        },
+        {
+            "surface": "bout_kinematics",
+            "field": "schema_version",
+            "value": bout_kinematics_attrs.get("schema_version", "none"),
+        },
+    ]
+    selected_summary_df = pd.DataFrame(_selected_summary_rows)
+    mo.vstack(
+        [
+            mo.md("### Selected Candidate Details"),
+            mo.ui.table(selected_summary_df, selection=None),
+        ]
+    )
+    return (selected_summary_df,)
 
 
 @app.cell
@@ -452,7 +553,7 @@ def _(
 
 
 @app.cell
-def _(data, mo, selected_speed_level, timeseries_df):
+def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, timeseries_df):
     _speed_columns = [
         _column
         for _column in timeseries_df.columns
@@ -489,6 +590,53 @@ def _(data, mo, selected_speed_level, timeseries_df):
         value=bool(data.swim_bout_label),
         label="Overlay swim bouts",
     )
+    _interpolated_columns = {
+        "core_start_time_s_interpolated",
+        "core_end_time_s_interpolated",
+        "core_start_time_interpolated_valid",
+        "core_end_time_interpolated_valid",
+    }
+    _has_interpolated_boundaries = (
+        len(swim_bout_df)
+        and _interpolated_columns.issubset(swim_bout_df.columns)
+        and (
+            swim_bout_df["core_start_time_interpolated_valid"].astype(bool)
+            & swim_bout_df["core_end_time_interpolated_valid"].astype(bool)
+        ).any()
+    )
+    _peak_width_columns = {
+        "peak_event_left_width_time_s",
+        "peak_event_right_width_time_s",
+    }
+    _has_peak_width_boundaries = (
+        len(swim_bout_df)
+        and _peak_width_columns.issubset(swim_bout_df.columns)
+        and (
+            np.isfinite(swim_bout_df["peak_event_left_width_time_s"].to_numpy(dtype=float))
+            & np.isfinite(swim_bout_df["peak_event_right_width_time_s"].to_numpy(dtype=float))
+        ).any()
+    )
+    _boundary_options = ["sampled_frame_boundaries"]
+    if _has_interpolated_boundaries:
+        _boundary_options.append("interpolated_core_threshold")
+    if _has_peak_width_boundaries:
+        _boundary_options.append("interpolated_peak_width")
+    _is_peak_event = (
+        selected_swim_bout is not None
+        and str(selected_swim_bout.detection_method).lower() == "peak_event"
+    )
+    _default_boundary = (
+        "interpolated_peak_width"
+        if _is_peak_event and _has_peak_width_boundaries
+        else _boundary_options[-1]
+        if _has_interpolated_boundaries
+        else _boundary_options[0]
+    )
+    swim_bout_boundary_picker = mo.ui.dropdown(
+        options=_boundary_options,
+        value=_default_boundary,
+        label="Bout overlay boundaries",
+    )
     show_invalid_intervals = mo.ui.checkbox(
         value=bool(data.validity_source),
         label="Overlay invalid/gap intervals",
@@ -505,17 +653,27 @@ def _(data, mo, selected_speed_level, timeseries_df):
             speed_series_picker,
             time_window,
             show_swim_bouts,
+            swim_bout_boundary_picker,
             show_invalid_intervals,
             histogram_bins,
         ]
     )
-    return histogram_bins, show_invalid_intervals, show_swim_bouts, speed_series_picker, time_window
+    return (
+        histogram_bins,
+        show_invalid_intervals,
+        show_swim_bouts,
+        speed_series_picker,
+        swim_bout_boundary_picker,
+        time_window,
+    )
 
 
 @app.cell
 def _(
     inter_bout_interval_df,
+    np,
     swim_bout_df,
+    swim_bout_boundary_picker,
     time,
     time_window,
     timeseries_df,
@@ -526,12 +684,75 @@ def _(
     start_s, stop_s = time_window.value
     time_mask = (timeseries_df["time_s"] >= start_s) & (timeseries_df["time_s"] <= stop_s)
     filtered_timeseries_df = timeseries_df.loc[time_mask].copy()
+    swim_bout_boundary_mode = str(swim_bout_boundary_picker.value)
+    _swim_bout_df_for_filter = swim_bout_df
+    swim_bout_start_col = "start_s"
+    swim_bout_end_col = "end_s"
+    if (
+        swim_bout_boundary_mode == "interpolated_core_threshold"
+        and {
+            "core_start_time_s_interpolated",
+            "core_end_time_s_interpolated",
+            "core_start_time_interpolated_valid",
+            "core_end_time_interpolated_valid",
+        }.issubset(swim_bout_df.columns)
+    ):
+        _swim_bout_df_for_filter = swim_bout_df.copy()
+        _interp_valid = (
+            _swim_bout_df_for_filter["core_start_time_interpolated_valid"].astype(bool)
+            & _swim_bout_df_for_filter["core_end_time_interpolated_valid"].astype(bool)
+            & np.isfinite(_swim_bout_df_for_filter["core_start_time_s_interpolated"].to_numpy(dtype=float))
+            & np.isfinite(_swim_bout_df_for_filter["core_end_time_s_interpolated"].to_numpy(dtype=float))
+        )
+        _swim_bout_df_for_filter["overlay_start_s"] = np.where(
+            _interp_valid,
+            _swim_bout_df_for_filter["core_start_time_s_interpolated"].to_numpy(dtype=float),
+            _swim_bout_df_for_filter["start_s"].to_numpy(dtype=float),
+        )
+        _swim_bout_df_for_filter["overlay_end_s"] = np.where(
+            _interp_valid,
+            _swim_bout_df_for_filter["core_end_time_s_interpolated"].to_numpy(dtype=float),
+            _swim_bout_df_for_filter["end_s"].to_numpy(dtype=float),
+        )
+        swim_bout_start_col = "overlay_start_s"
+        swim_bout_end_col = "overlay_end_s"
+    elif (
+        swim_bout_boundary_mode == "interpolated_peak_width"
+        and {
+            "peak_event_left_width_time_s",
+            "peak_event_right_width_time_s",
+        }.issubset(swim_bout_df.columns)
+    ):
+        _swim_bout_df_for_filter = swim_bout_df.copy()
+        _peak_width_valid = (
+            np.isfinite(_swim_bout_df_for_filter["peak_event_left_width_time_s"].to_numpy(dtype=float))
+            & np.isfinite(_swim_bout_df_for_filter["peak_event_right_width_time_s"].to_numpy(dtype=float))
+        )
+        _swim_bout_df_for_filter["overlay_start_s"] = np.where(
+            _peak_width_valid,
+            _swim_bout_df_for_filter["peak_event_left_width_time_s"].to_numpy(dtype=float),
+            _swim_bout_df_for_filter["start_s"].to_numpy(dtype=float),
+        )
+        _swim_bout_df_for_filter["overlay_end_s"] = np.where(
+            _peak_width_valid,
+            _swim_bout_df_for_filter["peak_event_right_width_time_s"].to_numpy(dtype=float),
+            _swim_bout_df_for_filter["end_s"].to_numpy(dtype=float),
+        )
+        swim_bout_start_col = "overlay_start_s"
+        swim_bout_end_col = "overlay_end_s"
     bout_mask = (
-        (swim_bout_df["end_s"] >= start_s) & (swim_bout_df["start_s"] <= stop_s)
-        if len(swim_bout_df)
+        (
+            (_swim_bout_df_for_filter[swim_bout_end_col] >= start_s)
+            & (_swim_bout_df_for_filter[swim_bout_start_col] <= stop_s)
+        )
+        if len(_swim_bout_df_for_filter)
         else []
     )
-    filtered_swim_bout_df = swim_bout_df.loc[bout_mask].copy() if len(swim_bout_df) else swim_bout_df
+    filtered_swim_bout_df = (
+        _swim_bout_df_for_filter.loc[bout_mask].copy()
+        if len(_swim_bout_df_for_filter)
+        else _swim_bout_df_for_filter
+    )
     if len(inter_bout_interval_df) and {"prev_end_time_s", "next_start_time_s"}.issubset(
         inter_bout_interval_df.columns
     ):
@@ -561,12 +782,16 @@ def _(
         n_inter_bout_interval_rows_out=len(filtered_inter_bout_interval_df),
         n_validity_rows_in=len(validity_df),
         n_validity_rows_out=len(filtered_validity_df),
+        swim_bout_boundary_mode=swim_bout_boundary_mode,
     )
     return (
         filtered_inter_bout_interval_df,
         filtered_swim_bout_df,
         filtered_timeseries_df,
         filtered_validity_df,
+        swim_bout_boundary_mode,
+        swim_bout_end_col,
+        swim_bout_start_col,
         start_s,
         stop_s,
     )
@@ -583,6 +808,9 @@ def _(
     show_invalid_intervals,
     show_swim_bouts,
     speed_series_picker,
+    swim_bout_boundary_mode,
+    swim_bout_end_col,
+    swim_bout_start_col,
     time,
     write_perf_event,
 ):
@@ -616,8 +844,8 @@ def _(
             )
             validity_overlay_renderer = "bar_trace"
     if show_swim_bouts.value and len(filtered_swim_bout_df):
-        _starts = filtered_swim_bout_df["start_s"].to_numpy(dtype=float)
-        _ends = filtered_swim_bout_df["end_s"].to_numpy(dtype=float)
+        _starts = filtered_swim_bout_df[swim_bout_start_col].to_numpy(dtype=float)
+        _ends = filtered_swim_bout_df[swim_bout_end_col].to_numpy(dtype=float)
         _widths = _ends - _starts
         _valid = _widths > 0
         if _valid.any():
@@ -634,7 +862,7 @@ def _(
                     marker=dict(color="orange", line=dict(width=0)),
                     opacity=0.18,
                     hoverinfo="skip",
-                    name=f"Swim bouts: {data.swim_bout_label}",
+                    name=f"Swim bouts: {data.swim_bout_label} ({swim_bout_boundary_mode})",
                 )
             )
             swim_bout_overlay_renderer = "bar_trace"
@@ -675,6 +903,7 @@ def _(
         n_visible_bouts=len(filtered_swim_bout_df),
         n_visible_validity_intervals=len(filtered_validity_df),
         swim_bout_overlay_renderer=swim_bout_overlay_renderer,
+        swim_bout_boundary_mode=swim_bout_boundary_mode,
         validity_overlay_renderer=validity_overlay_renderer,
         show_swim_bouts=bool(show_swim_bouts.value),
         show_invalid_intervals=bool(show_invalid_intervals.value),

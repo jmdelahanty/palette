@@ -1200,28 +1200,139 @@ Each track stores the ordered samples for that ID:
 - `cumulative_path_distance_px`, `cumulative_path_distance_mm`: Cumulative gap-aware path distance
 - `second_indices`, `speed_per_second_px`, `speed_per_second_mm`, `heading_per_second_degrees`, `heading_per_second_resultant`
 - `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
-- `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `distance_px`, `distance_mm`, `mean_speed_mm_s`, `peak_speed_mm_s`, `start_x_px`, `end_x_px`, …) with subgroup attrs recording the source swim-bout run.
+- `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `distance_px`, `distance_mm`, `mean_speed_mm_s`, `peak_speed_mm_s`, `start_x_px`, `end_x_px`, …) with subgroup attrs recording the source swim-bout run. Treat this as a convenience mirror; `analysis/swim_bout_runs` remains the authoritative segmentation surface.
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
+
+### `analysis/swim_bout_runs/`
+
+Bout segmentation candidates derived from track-kinematics speed traces.
+
+**Structure**: `analysis/swim_bout_runs/<run_name>/<speed_level>/`
+
+Each `<speed_level>/` subgroup answers "what bouts did this speed-level detector
+find?" and stores:
+
+- `bouts`: columnar bout-boundary table with `bout_id`, start/end frames and
+  times, optional core start/end fields, duration, observed duration,
+  path-length, net-displacement, and gap-coverage fields
+- `inter_bout_intervals`: columnar table between adjacent bouts
+- optional candidate-specific arrays, such as `speed_exponential_mm` for the
+  causal exponential response candidate
+- run and speed-level attrs describing the source track-kinematics run,
+  `track_id`, speed source, thresholding, hysteresis, boundary mode, smoothing,
+  and overwrite/review parameters
+- frame-resolved duration attrs:
+  `min_bout_duration_s`, `resolved_min_bout_frames`,
+  `effective_min_bout_duration_s`, `min_gap_duration_s`,
+  optional explicit `min_gap_frames`, `resolved_min_gap_frames`,
+  `effective_min_gap_duration_s`, `min_gap_frame_source`, and
+  `duration_frame_rounding_policy`
+
+Known speed-level subgroups include `speed_raw`, `speed_filtered`,
+`speed_smoothed`, `speed_averaged`, and derived `speed_exponential`. The
+exponential candidate records `speed_transform="causal_exponential_response"`,
+`exponential_tau_s`, and `exponential_source_level` attrs.
+
+`speed_exponential` is a derived response trace for segmentation comparison, not
+an independent measured speed. Its causal smoothing/decay can soften rises,
+lower peaks, and extend tails relative to `speed_filtered`. Biological speed
+measurements should remain grounded in the source speed/path-distance arrays and
+the selected bout boundaries.
+
+Duration parameters are operator-facing seconds by default, but bout
+segmentation is frame-discrete. New runs resolve positive second durations with
+`duration_frame_rounding_policy="ceil_seconds_times_fps"` and persist the
+resolved frame counts. Operators may also set explicit `min_gap_frames`; when
+present, it overrides `min_gap_duration_s` and is recorded with
+`min_gap_frame_source="explicit_frames"`.
+
+Gap merging is an explicit persisted policy:
+
+- `gap_merge_policy="sampled_frame_gap"`: the default; merge
+  threshold-separated segments using sampled below-threshold frame counts and
+  `resolved_min_gap_frames`
+- `gap_merge_policy="interpolated_core_gap"`: compare linearly interpolated
+  core threshold-crossing times and `gap_merge_min_gap_duration_s`, falling
+  back to the sampled frame rule when interpolation is not valid
+- `gap_merge_policy_active`: false for `detection_method="peak_event"` because
+  peak-event detection uses peak spacing and width envelopes instead of
+  threshold-region gap merging
+- `gap_merge_min_gap_duration_s`: the seconds threshold used by the
+  interpolated policy; equals `min_gap_duration_s` unless explicit
+  `min_gap_frames` was provided
+- `gap_merge_min_gap_source`: `seconds` or `explicit_frames`
+
+Swim-bout schema v5 adds `detection_method="peak_event"` as an additive
+segmentation family. Peak-event runs still write normal `bouts` rows, but each
+speed-level subgroup also contains an aligned `peak_events/` columnar table.
+This table stores the peak-finding metadata used to create each event:
+
+- `peak_frame`, `peak_time_s`
+- `peak_signal_value_mm_s`
+- `peak_prominence_mm_s`
+- `peak_width_samples`, `peak_width_s`, `peak_width_height_mm_s`
+- `left_ips`, `right_ips`
+- `left_width_frame_interpolated`, `right_width_frame_interpolated`
+- `left_base_frame`, `right_base_frame`
+- `left_base_signal_value_mm_s`, `right_base_signal_value_mm_s`
+- `boundary_mode`
+- `shape_split_policy`
+
+The first peak-event implementation supports
+`peak_event_boundary_mode="relative_prominence_width"` and
+`shape_split_policy="none"`. Valley-depth splitting remains future work.
+
+Frame boundary fields (`start_frame`, `end_frame`, `core_start_frame`,
+`core_end_frame`) are authoritative for row alignment and array slicing.
+Swim-bout schema v3 and newer stores optional sub-frame threshold timing
+annotations:
+
+- `core_start_time_s_interpolated`
+- `core_end_time_s_interpolated`
+- `core_duration_s_interpolated`
+- `core_start_time_interpolated_valid`
+- `core_end_time_interpolated_valid`
+- `threshold_crossing_interpolation`
+
+These annotations estimate threshold crossings for `core_*` boundaries only.
+They are finite only when a finite adjacent sample pair brackets the threshold
+crossing, and they must not replace frame-index boundaries. Peak-event
+interpolated width boundaries live in the aligned `peak_events/` table instead.
+`boundary_mode=local_minimum` can still use `start/end` as expanded event
+envelope boundaries while `core_*` and interpolated core times describe the
+detection criterion.
+
+Use this surface for operator review and comparison of bout definitions. Do not
+store downstream heading-change or Johnson-style pre/post position measurements
+here; those belong in linked `analysis/bout_kinematics_runs` outputs.
 
 ### `analysis/bout_kinematics_runs/`
 
 Per-bout heading metrics linked to an exact track-kinematics run and swim-bout
 segmentation candidate.
 
+Use this surface for downstream per-bout biological measurements after a bout
+candidate has been selected. The primary table is `per_bout_metrics/`, aligned
+to source swim-bout rows, and records both metric values and validity state for
+the measurement logic used.
+
 **Structure**: `analysis/bout_kinematics_runs/<run_name>/`
 
 **Run Attributes**:
 - `schema_id`: `"analysis.bout_kinematics_runs"`
-- `schema_version`: Schema integer
-- `method`, `method_version`: Bout-kinematics algorithm identifiers
+- `schema_version`: Current schema is `4`
+- `method`: `"heading_window_and_within_bout_metrics"`
+- `method_version`: Current implementation is `"bout_kinematics.v4"`
 - `row_axis`: `"swim_bout_rows"`
 - `source_track_kinematics_run`, `source_track_id`
 - `source_swim_bout_run`, `source_swim_bout_speed_level`
 - `source_refs`: Exact source archive/path mapping consumed by the run,
-  including `zarr_path` and `source_heading_arrays`
-- `parameters`: Heading levels, pre/post windows, within-bout window policy,
-  and optional dominant-frequency settings
+  including `zarr_path`, `source_heading_arrays`, and optional
+  `source_peak_events_path`
+- `parameters`: Heading levels, `pre_post_mode`, fixed pre/post windows,
+  within-bout window policy, copied source boundary field lists, and optional
+  dominant-frequency settings
 - `default_heading_level`: Usually `heading_smoothed`
 
 **Heading-level groups**:
@@ -1233,14 +1344,40 @@ heading_raw/per_bout_metrics/
 
 `per_bout_metrics/` is stored in columnar form. Key fields include:
 
-- `bout_id`, `source_start_frame`, `source_end_frame`
+- `bout_id`, `source_start_frame`, `source_end_frame`,
+  `source_core_start_frame`, `source_core_end_frame`
+- optional source interpolated core-threshold timing copied from the source
+  swim-bout row: `source_core_start_time_s_interpolated`,
+  `source_core_end_time_s_interpolated`,
+  `source_core_duration_s_interpolated`,
+  `source_core_start_time_interpolated_valid`, and
+  `source_core_end_time_interpolated_valid`
+- optional source peak-event boundary context copied from aligned
+  `peak_events/` rows: `source_peak_frame`, `source_peak_time_s`,
+  `source_peak_signal_value_mm_s`, `source_peak_prominence_mm_s`,
+  `source_peak_width_s`, `source_peak_width_height_mm_s`,
+  `source_peak_left_width_frame_interpolated`,
+  `source_peak_right_width_frame_interpolated`,
+  `source_peak_left_width_time_s`, `source_peak_right_width_time_s`,
+  `source_peak_boundary_mode_bytes`, and
+  `source_peak_shape_split_policy_bytes`
+- `pre_epoch_start_frame`, `pre_epoch_end_frame`
+- `post_epoch_start_frame`, `post_epoch_end_frame`
+  (`*_end_frame` values are inclusive; `-1` means no resolved epoch)
 - `pre_heading_mean_deg`, `post_heading_mean_deg`
 - `net_delta_heading_deg`, `abs_net_delta_heading_deg`
+- `pre_position_mean_x_mm`, `pre_position_mean_y_mm`
+- `post_position_mean_x_mm`, `post_position_mean_y_mm`
+- `interbout_epoch_displacement_mm`
+- optional pixel-space mirrors: `pre_position_mean_x_px`,
+  `pre_position_mean_y_px`, `post_position_mean_x_px`,
+  `post_position_mean_y_px`, `interbout_epoch_displacement_px`
 - `within_heading_range_deg`, `within_heading_peak_to_peak_deg`
 - `within_heading_path_deg`, `within_heading_std_deg`
 - `within_heading_zero_crossings`
 - `within_heading_dominant_frequency_hz` plus `dominant_frequency_valid`
-- `pre_window_valid`, `post_window_valid`, `within_window_valid`
+- `pre_window_valid`, `post_window_valid`, `pre_position_valid`,
+  `post_position_valid`, `within_window_valid`
 - `failure_reason_bytes`
 
 These runs must not mutate `analysis/swim_bout_runs`; they are independently

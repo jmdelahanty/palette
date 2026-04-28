@@ -141,6 +141,56 @@ New analysis families should follow the same `analysis/<analysis_type>_runs`
 placement unless there is a clear reason they are an authority rather than a
 derived product.
 
+## Swim Bout Segmentation vs Per-Bout Metrics
+
+`analysis/swim_bout_runs/<run>/<speed_level>/` is the bout segmentation
+candidate surface. It should store the selected speed-level bout table,
+inter-bout intervals, segmentation parameters, boundary semantics, and
+segmentation-time summaries needed to review or compare candidate bout
+definitions. Since bouts are frame-discrete, run schemas must persist both the
+operator-facing duration parameters and their resolved frame counts. For example,
+`min_gap_duration_s` should be paired with `resolved_min_gap_frames`,
+`effective_min_gap_duration_s`, `min_gap_frame_source`, and the rounding policy
+used to convert seconds to frames.
+
+Frame-index bout boundaries remain the source of truth for row alignment.
+Sub-frame timing should be stored as optional interpolated annotations beside
+the frame fields. For swim-bout threshold detectors, those annotations describe
+`core_*` threshold crossings, not `start/end` envelope boundaries, and consumers
+must fall back to sampled frame times when interpolation is not valid. For
+peak-event detectors, interpolated peak-width boundaries live in the aligned
+`peak_events/` table and may be copied into downstream `source_peak_*` fields.
+
+Any policy that changes whether candidate threshold regions are merged or split
+must be recorded separately from boundary rendering. For example,
+`gap_merge_policy="sampled_frame_gap"` and
+`gap_merge_policy="interpolated_core_gap"` can produce different bout counts
+from the same speed trace and threshold, so both the policy and its effective
+minimum-gap threshold must live in run provenance and subgroup attrs.
+Peak/event detection is a separate segmentation family, not a hidden extension
+of threshold gap merging. See
+[`swim_bout_peak_event_detector_design.md`](swim_bout_peak_event_detector_design.md).
+
+`analysis/bout_kinematics_runs/<run>/<heading_level>/per_bout_metrics/` is the
+linked measurement surface. It should store downstream per-bout biological
+measurements computed from one exact swim-bout candidate and one exact
+track-kinematics source. Examples include net heading change, pre/post position
+means, interbout-epoch displacement, within-bout heading excursion, and explicit
+validity/failure fields.
+
+When the source swim-bout candidate has an aligned `peak_events/` table,
+`bout_kinematics_runs` should preserve that source-boundary context as copied
+`source_peak_*` columns and a `source_peak_events_path` lineage reference. These
+fields do not replace integer frame boundaries. They let review tools and future
+fractional-time analyses see the signal-derived peak-width boundaries while
+current heading/position metrics continue to slice frame-indexed arrays by
+`source_start_frame` and `source_end_frame`.
+
+The rule is: changing bout detection creates or overwrites a `swim_bout_runs`
+candidate; changing measurement logic creates or overwrites a
+`bout_kinematics_runs` candidate. Neither surface should silently mutate the
+other.
+
 ## Relationship To `derived_metrics_schema`
 
 `derived_metrics_schema` describes the semantics of metric arrays inside a run.

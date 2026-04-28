@@ -7,7 +7,10 @@ import pytest
 import zarr
 
 from fisheye.analysis.detect_bouts_multi_level import (
+    _causal_exponential_speed_response,
+    _detect_bouts_from_peak_events,
     _detect_bouts_from_speed,
+    _duration_seconds_to_frames,
     detect_and_save_bouts,
     normalize_speed_level,
 )
@@ -70,11 +73,129 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
 def test_normalize_speed_level_accepts_aliases() -> None:
     assert normalize_speed_level("filtered") == "speed_filtered"
     assert normalize_speed_level("speed_filtered") == "speed_filtered"
+    assert normalize_speed_level("exponential") == "speed_exponential"
 
 
 def test_normalize_speed_level_rejects_unknown() -> None:
     with pytest.raises(ValueError, match="Unsupported speed level"):
         normalize_speed_level("median")
+
+
+def test_duration_seconds_to_frames_uses_ceiling() -> None:
+    assert _duration_seconds_to_frames(0.03, 60.0) == 2
+    assert _duration_seconds_to_frames(0.1, 60.0) == 6
+    assert _duration_seconds_to_frames(0.0, 60.0) == 0
+
+
+def test_min_gap_duration_resolves_to_ceiled_frames() -> None:
+    frames = np.arange(8, dtype=np.int64)
+    speed = np.asarray([0, 2, 2, 0, 2, 2, 0, 0], dtype=np.float32)
+
+    merged = _detect_bouts_from_speed(
+        speed,
+        frames,
+        fps=60.0,
+        threshold=1.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.03,
+    )
+    assert merged["start_frame"].tolist() == [1]
+    assert merged["end_frame"].tolist() == [5]
+
+    split = _detect_bouts_from_speed(
+        speed,
+        frames,
+        fps=60.0,
+        threshold=1.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.03,
+        min_gap_frames=1,
+    )
+    assert split["start_frame"].tolist() == [1, 4]
+    assert split["end_frame"].tolist() == [2, 5]
+
+
+def test_interpolated_core_gap_policy_can_split_subframe_threshold_gaps() -> None:
+    frames = np.arange(7, dtype=np.int64)
+    speed = np.asarray([0.0, 3.0, 3.0, 0.0, 3.0, 3.0, 0.0], dtype=np.float32)
+
+    sampled = _detect_bouts_from_speed(
+        speed,
+        frames,
+        fps=10.0,
+        threshold=2.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.12,
+        gap_merge_policy="sampled_frame_gap",
+    )
+    assert sampled["start_frame"].tolist() == [1]
+    assert sampled["end_frame"].tolist() == [5]
+
+    interpolated = _detect_bouts_from_speed(
+        speed,
+        frames,
+        fps=10.0,
+        threshold=2.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.12,
+        gap_merge_policy="interpolated_core_gap",
+    )
+    assert interpolated["start_frame"].tolist() == [1, 4]
+    assert interpolated["end_frame"].tolist() == [2, 5]
+    np.testing.assert_allclose(
+        interpolated["core_start_time_s_interpolated"],
+        [1.0 / 15.0, 11.0 / 30.0],
+    )
+    np.testing.assert_allclose(
+        interpolated["core_end_time_s_interpolated"],
+        [7.0 / 30.0, 8.0 / 15.0],
+    )
+
+
+def test_threshold_bouts_record_interpolated_core_crossing_times() -> None:
+    frames = np.arange(6, dtype=np.int64)
+    speed = np.asarray([0.0, 1.0, 3.0, 5.0, 1.0, 0.0], dtype=np.float32)
+
+    bouts = _detect_bouts_from_speed(
+        speed,
+        frames,
+        fps=10.0,
+        threshold=2.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.01,
+    )
+
+    assert bouts["start_frame"].tolist() == [2]
+    assert bouts["end_frame"].tolist() == [3]
+    assert bouts["core_start_time_interpolated_valid"].tolist() == [True]
+    assert bouts["core_end_time_interpolated_valid"].tolist() == [True]
+    np.testing.assert_allclose(bouts["core_start_time_s_interpolated"], [0.15])
+    np.testing.assert_allclose(bouts["core_end_time_s_interpolated"], [0.375])
+    np.testing.assert_allclose(bouts["core_duration_s_interpolated"], [0.225])
+
+
+def test_peak_event_detector_splits_two_prominent_peaks_in_one_threshold_blob() -> None:
+    frames = np.arange(7, dtype=np.int64)
+    speed = np.asarray([0.0, 1.0, 10.0, 2.0, 9.0, 1.0, 0.0], dtype=np.float32)
+
+    bouts, peak_events = _detect_bouts_from_peak_events(
+        speed,
+        frames,
+        fps=10.0,
+        min_peak_height_mm_s=5.0,
+        min_peak_prominence_mm_s=4.0,
+        min_peak_distance_s=0.1,
+        peak_width_rel_height=0.9,
+        min_bout_duration_s=0.01,
+    )
+
+    assert bouts["bout_id"].tolist() == [1, 2]
+    assert peak_events["bout_id"].tolist() == [1, 2]
+    assert peak_events["peak_frame"].tolist() == [2, 4]
+    np.testing.assert_allclose(peak_events["peak_signal_value_mm_s"], [10.0, 9.0])
+    assert (bouts["start_frame"] <= peak_events["peak_frame"]).all()
+    assert (peak_events["peak_frame"] <= bouts["end_frame"]).all()
+    assert bouts["end_frame"][0] < bouts["start_frame"][1]
 
 
 def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) -> None:
@@ -99,24 +220,59 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     provenance = bout_run.attrs["provenance"]
     assert provenance["contract"]["name"] == "palette_stage_provenance"
     assert provenance["stage"] == "detect_bouts_multi_level"
-    assert provenance["version"] == "detect_bouts_multi_level.v1"
+    assert provenance["version"] == "detect_bouts_multi_level.v6"
     assert provenance["parameters"]["threshold_mm"] == 2.0
     assert provenance["parameters"]["default_level"] == "speed_filtered"
     assert provenance["parameters"]["boundary_mode"] == "threshold"
+    assert provenance["parameters"]["duration_frame_rounding_policy"] == "ceil_seconds_times_fps"
+    assert provenance["parameters"]["threshold_crossing_interpolation"] == "linear_between_samples"
+    assert provenance["parameters"]["resolved_min_bout_frames"] == 1
+    assert provenance["parameters"]["resolved_min_gap_frames"] == 1
+    assert provenance["parameters"]["min_gap_frame_source"] == "ceil_seconds_times_fps"
+    assert provenance["parameters"]["gap_merge_policy"] == "sampled_frame_gap"
+    assert provenance["parameters"]["gap_merge_policy_active"] is True
+    assert provenance["parameters"]["gap_merge_min_gap_duration_s"] == 0.01
+    assert provenance["parameters"]["gap_merge_min_gap_source"] == "seconds"
+    assert provenance["parameters"]["exponential_tau_s"] == 0.05
+    assert provenance["parameters"]["exponential_source_level"] == "speed_filtered"
     assert provenance["inputs"]["source_track_kinematics_run"] == "tk_1"
     assert provenance["inputs"]["source_track_path"].endswith("/tk_1/tracks/id_0")
     assert provenance["artifacts"]["run_path"] == "analysis/swim_bout_runs/bouts_filtered_default"
     assert bout_run["speed_filtered"]["bouts"].attrs["is_default_level"] is True
+    assert bout_run.attrs["schema_id"] == "palette.swim_bout_runs"
+    assert bout_run.attrs["schema_version"] == 5
+    assert bout_run.attrs["resolved_min_gap_frames"] == 1
+    assert bout_run.attrs["gap_merge_policy"] == "sampled_frame_gap"
+    assert bout_run.attrs["gap_merge_policy_active"] is True
+    assert bout_run.attrs["gap_merge_min_gap_duration_s"] == 0.01
+    assert bout_run.attrs["gap_merge_min_gap_source"] == "seconds"
+    assert bout_run.attrs["threshold_crossing_interpolation"] == "linear_between_samples"
+    assert bout_run["speed_filtered"].attrs["resolved_min_gap_frames"] == 1
+    assert bout_run["speed_filtered"].attrs["gap_merge_policy"] == "sampled_frame_gap"
+    assert "peak_events" in bout_run["speed_filtered"]
+    assert bout_run["speed_filtered"]["peak_events"].attrs["peak_event_schema_id"] == (
+        "palette.swim_bout_peak_events.v1"
+    )
+    assert bout_run["speed_filtered"]["peak_events"]["bout_id"].shape == (0,)
     assert (
         bout_run["speed_filtered"]["bouts"].attrs["bout_metric_schema_id"]
         == "palette.swim_bout_metrics.v2"
     )
     assert bout_run["speed_smoothed"]["bouts"].attrs["is_default_level"] is False
+    assert "speed_exponential" in bout_run
+    assert bout_run["speed_exponential"].attrs["speed_transform"] == "causal_exponential_response"
+    assert bout_run["speed_exponential"].attrs["exponential_source_level"] == "speed_filtered"
+    assert bout_run["speed_exponential"]["bouts"].attrs["speed_transform"] == "causal_exponential_response"
+    assert bout_run["speed_exponential"]["bouts"].attrs["exponential_source_level"] == "speed_filtered"
+    assert "speed_exponential_mm" in bout_run["speed_exponential"]
+    assert bout_run["speed_exponential"]["speed_exponential_mm"].shape == (12,)
     assert "core_start_frame" in bout_run["speed_filtered"]["bouts"]
     assert "distance" not in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     assert "path_length_mm" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     assert "observed_duration_s" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     assert "gap_censored" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "core_start_time_s_interpolated" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "core_end_time_s_interpolated" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     bouts = bout_run["speed_filtered"]["bouts"]
     assert bouts["n_invalid_transitions"][:].tolist() == [1]
     assert bouts["gap_censored"][:].tolist() == [True]
@@ -141,6 +297,71 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
         "interval_s",
     ]
     assert intervals["interval_s"].shape == (0,)
+
+
+def test_detect_and_save_bouts_writes_peak_event_metadata(tmp_path: Path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+
+    run_name = detect_and_save_bouts(
+        zarr_path=zarr_path,
+        run_name="bouts_peak_event",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        method="peak_event",
+        min_peak_height_mm_s=3.0,
+        min_peak_prominence_mm_s=2.0,
+        min_peak_distance_s=0.05,
+        peak_width_rel_height=0.9,
+        min_bout_duration_s=0.01,
+        default_level="filtered",
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    bout_run = root["analysis"]["swim_bout_runs"][run_name]
+    assert bout_run.attrs["detection_method"] == "peak_event"
+    assert bout_run.attrs["schema_version"] == 5
+    assert bout_run.attrs["peak_event_schema_version"] == 1
+    assert bout_run.attrs["min_peak_height_mm_s"] == 3.0
+    assert bout_run.attrs["min_peak_prominence_mm_s"] == 2.0
+    assert bout_run.attrs["min_peak_distance_s"] == 0.05
+    assert bout_run.attrs["peak_event_boundary_mode"] == "relative_prominence_width"
+    assert bout_run.attrs["shape_split_policy"] == "none"
+    assert bout_run.attrs["gap_merge_policy_active"] is False
+    provenance = bout_run.attrs["provenance"]
+    assert provenance["version"] == "detect_bouts_multi_level.v6"
+    assert provenance["parameters"]["method"] == "peak_event"
+    assert provenance["parameters"]["min_peak_height_mm_s"] == 3.0
+    assert provenance["parameters"]["min_peak_prominence_mm_s"] == 2.0
+    assert provenance["parameters"]["peak_event_schema_version"] == 1
+    assert provenance["parameters"]["gap_merge_policy_active"] is False
+
+    level = bout_run["speed_filtered"]
+    assert level.attrs["n_peak_events"] == level.attrs["n_bouts"]
+    peak_events = level["peak_events"]
+    bouts = level["bouts"]
+    assert peak_events["bout_id"].shape == bouts["bout_id"].shape
+    assert peak_events["peak_frame"][:].tolist() == [4]
+    assert peak_events["peak_signal_value_mm_s"][:].tolist() == [5.0]
+    assert peak_events["boundary_mode"][:].shape[0] == 1
+    assert "peak_prominence_mm_s" in peak_events.attrs["field_names"]
+
+
+def test_causal_exponential_speed_response_resets_on_gap() -> None:
+    speed = np.asarray([0.0, 10.0, 0.0, 10.0], dtype=np.float32)
+    frames = np.asarray([0, 1, 2, 10], dtype=np.int64)
+    response = _causal_exponential_speed_response(
+        speed,
+        frames,
+        fps=10.0,
+        tau_s=0.1,
+        transition_valid=np.asarray([False, True, True, False]),
+    )
+
+    expected_alpha = 1.0 - np.exp(-1.0)
+    np.testing.assert_allclose(response[0], 0.0)
+    np.testing.assert_allclose(response[1], 10.0 * expected_alpha)
+    assert response[2] < response[1]
+    np.testing.assert_allclose(response[3], 10.0)
 
 
 def test_threshold_bouts_can_expand_to_local_minimum_boundaries() -> None:

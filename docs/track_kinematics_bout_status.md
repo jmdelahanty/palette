@@ -2,7 +2,7 @@
 
 Date anchored: 2026-03-06
 
-Last reviewed: 2026-04-26
+Last reviewed: 2026-04-27
 
 Purpose: document the current implementation status of track-level kinematics,
 distance/speed summaries, heading handling, and downstream swim-bout analysis so
@@ -187,7 +187,8 @@ parameters as separate candidate runs:
 - `track_kinematics` controls the source speed traces, including hysteresis
   thresholds and smoothing window.
 - `detect_bouts_multi_level` consumes those traces and writes bout intervals for
-  `speed_raw`, `speed_filtered`, `speed_smoothed`, and `speed_averaged`.
+  `speed_raw`, `speed_filtered`, `speed_smoothed`, `speed_averaged`, and a
+  derived `speed_exponential` response trace.
 - the swim-bout run's `default_level` declares which speed subgroup downstream
   consumers should use when they do not explicitly request a level.
 
@@ -214,6 +215,112 @@ scripts/py -m fisheye.analysis.detect_bouts_multi_level <archive.zarr> \
   --boundary-mode threshold \
   --overwrite
 ```
+
+The `speed_exponential` candidate is computed inside `detect_bouts_multi_level`
+as a causal normalized exponential response to a source speed trace, defaulting
+to `speed_filtered`:
+
+```text
+k(t) = exp(-t / tau), t >= 0
+```
+
+This candidate is meant to mimic the asymmetric rise/decay shape of swim-bout
+motion without replacing the source speed traces. It should be compared against
+filtered and smoothed candidates in the explorer rather than silently becoming a
+global default.
+
+The current exponential candidate is a causal response transform, not yet a
+fitted biological bout template. Because each output sample blends the current
+filtered speed with prior response state, short `tau` values track
+`speed_filtered` closely, while longer `tau` values soften the rise, lower some
+peaks, and extend the decay tail. Lower peaks are therefore expected and should
+not be interpreted as a change in measured fish speed; they are a property of
+the response trace used for segmentation. If peak speed is needed as a
+biological measurement, read it from the source speed/path-distance arrays in
+downstream metrics rather than from `speed_exponential`.
+
+Candidate `tau` values should eventually be grounded from data, not selected by
+name alone. A practical future calibration is:
+
+- choose a visually trusted set of filtered-speed bouts for one recording or
+  recording class
+- align bouts to peak filtered speed
+- average or robustly summarize the post-peak decay shape
+- fit or grid-search a causal exponential response that best matches the decay
+  and boundary agreement
+- record the fitted `tau`, source cohort, and selection metric in provenance
+
+Until that calibration exists, `tau` should be treated as an exploratory
+segmentation parameter. At 60 fps, `tau=0.025s` is about 1.5 frames, with a
+half-life of about 17 ms and a three-tau tail of about 75 ms; that makes it a
+short causal smoothing/decay candidate rather than a broad integration window.
+
+Bout segmentation is ultimately frame-discrete. Duration knobs remain
+operator-facing seconds, but new `detect_bouts_multi_level` runs resolve them to
+frame counts and persist those counts:
+
+- `min_bout_duration_s` resolves to `resolved_min_bout_frames`
+- `min_gap_duration_s` resolves to `resolved_min_gap_frames`
+- positive second durations use
+  `duration_frame_rounding_policy="ceil_seconds_times_fps"`
+- `--min-gap-frames` may be used to set the gap rule directly in frames; when
+  present it overrides `--min-gap-duration`
+
+This matters for bout splitting. At 60 fps, `--min-gap-duration 0.03` resolves
+to 2 frames with ceiling, not 1 frame by truncation. Two threshold-crossing
+regions separated by fewer than `resolved_min_gap_frames` below-threshold frames
+are merged; gaps at or above that frame count split bouts.
+
+The default merge rule remains `gap_merge_policy="sampled_frame_gap"`: merge or
+split using the sampled below-threshold frame count. More nuanced threshold
+candidates can opt into `gap_merge_policy="interpolated_core_gap"`, which
+compares linearly interpolated core threshold-crossing times and falls back to
+the sampled frame rule if crossings are not bracketed cleanly. When
+`--min-gap-frames` is used, the interpolated policy converts it back to seconds
+as `min_gap_frames / fps`; otherwise it uses `--min-gap-duration` directly.
+This lets higher-resolution threshold timing affect whether a shallow valley
+separates two bouts without changing the authoritative frame-index boundaries.
+
+This is still a gap policy, not a waveform-shape policy. A future
+`shape_split_policy`, for example splitting on a sufficiently deep valley
+between two peaks inside one threshold region, should be a separate opt-in
+policy with its own provenance rather than folded into `gap_merge_policy`.
+See
+[`swim_bout_peak_event_detector_design.md`](swim_bout_peak_event_detector_design.md)
+for the additive `peak_event` detector and vocabulary. The first implemented
+slice uses `scipy.signal.find_peaks`, relative-prominence-width boundaries, and
+an aligned `peak_events` table; valley-depth splitting remains future work.
+
+The 2026-04-27 canary run
+`bouts_tk_hyst4_low2_s005_peak_event_exp_tau025_prom2_dist050` showed the
+expected tradeoff. Peak-event detection improved some obvious
+threshold-bridging failures, but permissive peak criteria also split small tail
+ripples after large bouts into separate events. Treat `peak_event` as an
+exploratory review candidate for now, not the default operator path. A focused
+parameter sweep over peak prominence, peak distance, and peak-width contour
+selected the current canary candidate below. If broader review still shows tail
+over-segmentation, add a separate `peak_merge_policy` or refractory-style policy
+rather than hiding that behavior inside the threshold gap merge rule.
+
+The current 2026-01-28 arena 2 peak-event review candidate is
+`bouts_tk_hyst4_low2_s005_peak_event_exp_tau025_prom5_dist010_w098` at
+`speed_exponential`. It uses `peak_width_rel_height=0.98`, which visually
+captures the large-pulse tail better than the narrower `0.90` boundary without
+the broad over-extension seen in the `1.00` candidate. The linked downstream
+bout-kinematics run is
+`bk_tk_hyst4_low2_s005_peak_event_prom5_w098_interbout`.
+
+The Marimo explorer can render this candidate with
+`interpolated_peak_width` overlays from the persisted `peak_events` table. The
+linked bout-kinematics schema v4 run also copies that peak-event context into
+`source_peak_*` fields while keeping integer frame boundaries as the metric
+slicing contract.
+
+Do not zero tiny nonzero values in stored smoothed or exponential speed traces
+just to make the plot baseline look cleaner. Those values are transformation
+outputs. If they are visually distracting, handle them as a viewer option or a
+clearly named segmentation threshold/deadband; keep the stored source traces
+unchanged.
 
 For iterative tuning, create one named pair of runs per candidate rather than
 rewriting one generic run in place. When regenerating the same candidate after a
@@ -253,6 +360,29 @@ should visually capture the full rise and decay around the core threshold
 segment while still preserving the core fields for stricter quantitative
 analyses.
 
+The frame boundary fields are sampled-frame boundaries. They are authoritative
+for array indexing, but the true physical threshold crossing can fall between
+two sampled frames. Swim-bout schema v3 and newer stores interpolated
+threshold-crossing fields beside the frame fields rather than replacing them:
+
+- `core_start_time_s_interpolated`: linear interpolation between the previous
+  below-threshold sample and the first core sample above threshold
+- `core_end_time_s_interpolated`: linear interpolation between the last core
+  sample above threshold and the next below-threshold sample
+- `core_duration_s_interpolated`: interpolated end minus interpolated start
+- `threshold_crossing_interpolation`: e.g. `"linear_between_samples"`
+
+These interpolated fields belong to `core_*` because they estimate the
+threshold-crossing criterion. They do not estimate local-minimum envelope
+boundaries, and peak-event width boundaries are stored separately in the
+aligned `peak_events/` table. With `boundary_mode=threshold`, `start/end` and
+`core_*` are the same sampled frames, so the interpolated core times also
+describe the displayed bout boundaries. With `boundary_mode=local_minimum`,
+`start/end` remain the expanded event envelope and `core_*` remains the
+criterion-crossing segment. Interpolated values are finite only when a finite
+adjacent sample pair brackets the threshold crossing; otherwise consumers
+should fall back to the sampled frame time fields.
+
 The explorer exposes each stored speed-level subgroup as its own derived
 swim-bout candidate while keeping the Zarr storage hierarchical. Selecting a
 candidate such as `filtered` or `smoothed` reads that candidate's `bouts` and
@@ -262,10 +392,23 @@ pandas/Plotly view over those persisted fields, not a new recomputation from the
 speed trace. Current histogram metrics include bout duration, observed bout
 duration, path length, net displacement, and inter-bout interval.
 
+When interpolated core-threshold fields are present, the explorer can render
+swim-bout overlays from either sampled frame boundaries or interpolated core
+threshold boundaries. Histograms and source tables remain views over persisted
+fields.
+
+Use `analysis/swim_bout_runs` for operator review of bout segmentation
+candidates. It should answer "what bouts did this speed-level detector find?"
+and expose the source boundaries, core boundaries, duration, path-length,
+net-displacement, and gap-coverage fields needed to judge that candidate.
+
 Downstream per-bout heading metrics should not be added back into
 `analysis/swim_bout_runs`. They belong in linked
 `analysis/bout_kinematics_runs` outputs so the segmentation candidate remains an
-immutable source artifact. See
+immutable source artifact. Use `per_bout_metrics` there when the question is
+"what did this already-defined bout do biologically?", including heading change,
+pre/post position means, interbout-epoch displacement, within-bout heading
+excursion, and measurement validity. See
 [bout_kinematics_run_design.md](bout_kinematics_run_design.md).
 
 For the current 2026-01-28 arena 2 canary review, `tk_hyst4_low2_s005` is the
@@ -415,7 +558,7 @@ This is the newer track-kinematics-based bout detector.
 It:
 
 - loads one selected `track_kinematics` track
-- reads all four speed levels
+- reads the source speed levels and derives optional response candidates
 - detects bouts on each level separately
 - writes hierarchical results under `analysis/swim_bout_runs/<run>/`
 
@@ -425,6 +568,7 @@ Speed levels:
 - `speed_filtered`
 - `speed_smoothed`
 - `speed_averaged`
+- `speed_exponential`
 
 This path is useful because it treats bout detection as a consumer of the
 canonical track kinematics artifact.
