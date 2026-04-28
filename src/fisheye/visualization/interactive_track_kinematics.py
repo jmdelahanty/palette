@@ -953,7 +953,9 @@ def _load_global_swim_bout_payload(
         )
         intervals = _load_structured_or_empty(level_group, "inter_bout_intervals")
         series = {}
-        if level_key == "speed_exponential" and "speed_exponential_mm" in level_group:
+        if "detection_signal_mm_s" in level_group:
+            series["detection_signal_mm_s"] = np.asarray(level_group["detection_signal_mm_s"][:], dtype=np.float64)
+        elif level_key == "speed_exponential" and "speed_exponential_mm" in level_group:
             series["speed_exponential_mm"] = np.asarray(level_group["speed_exponential_mm"][:], dtype=np.float64)
         label = f"{run_name} ({level_key}) ({method})"
         return _SwimBoutPayload(

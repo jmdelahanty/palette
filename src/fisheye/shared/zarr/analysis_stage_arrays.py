@@ -88,7 +88,7 @@ STIMULUS_RESPONSE_PER_BOUT_ARRAYS: Tuple[ArraySpec, ...] = (
     ArraySpec("end_frame", "int64", ("n_bouts",)),
     ArraySpec("duration_s", "float32", ("n_bouts",)),
     ArraySpec("mean_speed_mm_s", "float32", ("n_bouts",)),
-    ArraySpec("peak_speed_mm_s", "float32", ("n_bouts",)),
+    ArraySpec("peak_physical_speed_mm_s", "float32", ("n_bouts",)),
 )
 
 # ---------------------------------------------------------------------------

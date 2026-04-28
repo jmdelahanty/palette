@@ -48,7 +48,8 @@ Implemented:
 - `detect_bouts_multi_level` consumes track-level transition/sample validity
   when available and writes explicit bout metrics: `observed_duration_s`,
   `path_length_mm`, `path_length_px`, `net_displacement_mm`,
-  `net_displacement_px`, `mean_speed_mm_s`, `peak_speed_mm_s`,
+  `net_displacement_px`, `mean_speed_mm_s`,
+  `peak_detection_signal_mm_s`, `peak_physical_speed_mm_s`,
   `n_invalid_transitions`, `valid_transition_fraction`, and `gap_censored`.
 - New swim-bout outputs no longer write the ambiguous first-class `distance`
   field; path length is grounded in track-kinematics frame path-distance arrays.
@@ -295,7 +296,8 @@ For each bout interval, persist:
 | `net_displacement_mm` | Euclidean displacement between valid endpoint positions. |
 | `net_displacement_px` | Pixel-space endpoint displacement. |
 | `mean_speed_mm_s` | `path_length_mm / observed_duration_s` when observed duration is positive. |
-| `peak_speed_mm_s` | Maximum selected speed trace inside the bout. |
+| `peak_detection_signal_mm_s` | Maximum detector signal inside the bout. For transformed levels, this is the transformed response value. |
+| `peak_physical_speed_mm_s` | Maximum declared physical speed source inside the same bout boundaries. |
 | `n_invalid_transitions` | Count of invalid transitions inside the bout. |
 | `valid_transition_fraction` | Valid transition count divided by possible transition count. |
 | `gap_censored` | True when the interval contains invalid or missing transitions. |

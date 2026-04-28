@@ -1200,7 +1200,7 @@ Each track stores the ordered samples for that ID:
 - `cumulative_path_distance_px`, `cumulative_path_distance_mm`: Cumulative gap-aware path distance
 - `second_indices`, `speed_per_second_px`, `speed_per_second_mm`, `heading_per_second_degrees`, `heading_per_second_resultant`
 - `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
-- `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `distance_px`, `distance_mm`, `mean_speed_mm_s`, `peak_speed_mm_s`, `start_x_px`, `end_x_px`, …) with subgroup attrs recording the source swim-bout run. Treat this as a convenience mirror; `analysis/swim_bout_runs` remains the authoritative segmentation surface.
+- `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `path_length_mm`, `net_displacement_mm`, `mean_speed_mm_s`, `peak_detection_signal_mm_s`, `peak_physical_speed_mm_s`, …) with subgroup attrs recording the source swim-bout run. Treat this as a convenience mirror; `analysis/swim_bout_runs` remains the authoritative segmentation surface.
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
@@ -1217,8 +1217,8 @@ find?" and stores:
   times, optional core start/end fields, duration, observed duration,
   path-length, net-displacement, and gap-coverage fields
 - `inter_bout_intervals`: columnar table between adjacent bouts
-- optional candidate-specific arrays, such as `speed_exponential_mm` for the
-  causal exponential response candidate
+- optional transformed detector-signal arrays, such as
+  `detection_signal_mm_s` for the causal exponential response candidate
 - run and speed-level attrs describing the source track-kinematics run,
   `track_id`, speed source, thresholding, hysteresis, boundary mode, smoothing,
   and overwrite/review parameters
@@ -1230,15 +1230,24 @@ find?" and stores:
   `duration_frame_rounding_policy`
 
 Known speed-level subgroups include `speed_raw`, `speed_filtered`,
-`speed_smoothed`, `speed_averaged`, and derived `speed_exponential`. The
-exponential candidate records `speed_transform="causal_exponential_response"`,
-`exponential_tau_s`, and `exponential_source_level` attrs.
+`speed_smoothed`, `speed_averaged`, and derived `speed_exponential`. Each
+subgroup records a generic detector-signal contract through attrs such as
+`detection_signal_transform_type`, `detection_signal_source_path`,
+`detection_signal_source_level`, and `movement_metric_source_level`. Identity
+levels point directly at their track-kinematics speed arrays; transformed levels
+store the derived signal as `detection_signal_mm_s`.
 
 `speed_exponential` is a derived response trace for segmentation comparison, not
 an independent measured speed. Its causal smoothing/decay can soften rises,
 lower peaks, and extend tails relative to `speed_filtered`. Biological speed
 measurements should remain grounded in the source speed/path-distance arrays and
 the selected bout boundaries.
+
+Within `bouts`, `peak_detection_signal_mm_s` is the maximum of the signal used
+to define that subgroup's bout boundaries. `peak_physical_speed_mm_s` is the
+maximum of the declared physical movement source inside the same boundaries.
+For identity levels these can be equal; for transformed detector signals they
+are intentionally distinct.
 
 Duration parameters are operator-facing seconds by default, but bout
 segmentation is frame-discrete. New runs resolve positive second durations with
@@ -1572,7 +1581,7 @@ Step attributes: `step_index`, `step_name`, `stimulus_mode`, `stimulus_mode_id`,
 | `end_frame` | `(n_bouts,)` | `int64` | |
 | `duration_s` | `(n_bouts,)` | `float32` | |
 | `mean_speed_mm_s` | `(n_bouts,)` | `float32` | |
-| `peak_speed_mm_s` | `(n_bouts,)` | `float32` | |
+| `peak_physical_speed_mm_s` | `(n_bouts,)` | `float32` | |
 
 **`steps/step_{i}/grating/`** — MOVING_GRATING steps only:
 

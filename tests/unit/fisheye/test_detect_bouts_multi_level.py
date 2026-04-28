@@ -220,7 +220,7 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     provenance = bout_run.attrs["provenance"]
     assert provenance["contract"]["name"] == "palette_stage_provenance"
     assert provenance["stage"] == "detect_bouts_multi_level"
-    assert provenance["version"] == "detect_bouts_multi_level.v6"
+    assert provenance["version"] == "detect_bouts_multi_level.v7"
     assert provenance["parameters"]["threshold_mm"] == 2.0
     assert provenance["parameters"]["default_level"] == "speed_filtered"
     assert provenance["parameters"]["boundary_mode"] == "threshold"
@@ -240,7 +240,8 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     assert provenance["artifacts"]["run_path"] == "analysis/swim_bout_runs/bouts_filtered_default"
     assert bout_run["speed_filtered"]["bouts"].attrs["is_default_level"] is True
     assert bout_run.attrs["schema_id"] == "palette.swim_bout_runs"
-    assert bout_run.attrs["schema_version"] == 5
+    assert bout_run.attrs["schema_version"] == 6
+    assert bout_run.attrs["detection_signal_schema_id"] == "palette.swim_bout_detection_signal.v1"
     assert bout_run.attrs["resolved_min_gap_frames"] == 1
     assert bout_run.attrs["gap_merge_policy"] == "sampled_frame_gap"
     assert bout_run.attrs["gap_merge_policy_active"] is True
@@ -256,19 +257,33 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     assert bout_run["speed_filtered"]["peak_events"]["bout_id"].shape == (0,)
     assert (
         bout_run["speed_filtered"]["bouts"].attrs["bout_metric_schema_id"]
-        == "palette.swim_bout_metrics.v2"
+        == "palette.swim_bout_metrics.v3"
     )
     assert bout_run["speed_smoothed"]["bouts"].attrs["is_default_level"] is False
     assert "speed_exponential" in bout_run
+    assert bout_run["speed_filtered"].attrs["detection_signal_transform_type"] == "identity"
+    assert bout_run["speed_filtered"].attrs["detection_signal_is_primary_physical_speed"] is True
+    assert bout_run["speed_filtered"].attrs["movement_metric_source_level"] == "filtered"
+    assert bout_run["speed_filtered"].attrs["peak_detection_signal_field"] == "peak_detection_signal_mm_s"
     assert bout_run["speed_exponential"].attrs["speed_transform"] == "causal_exponential_response"
     assert bout_run["speed_exponential"].attrs["exponential_source_level"] == "speed_filtered"
+    assert bout_run["speed_exponential"].attrs["detection_signal_transform_type"] == "convolution"
+    assert bout_run["speed_exponential"].attrs["detection_signal_kernel_family"] == "causal_exponential"
+    assert bout_run["speed_exponential"].attrs["detection_signal_source_level"] == "speed_filtered"
+    assert bout_run["speed_exponential"].attrs["detection_signal_is_primary_physical_speed"] is False
     assert bout_run["speed_exponential"]["bouts"].attrs["speed_transform"] == "causal_exponential_response"
     assert bout_run["speed_exponential"]["bouts"].attrs["exponential_source_level"] == "speed_filtered"
-    assert "speed_exponential_mm" in bout_run["speed_exponential"]
-    assert bout_run["speed_exponential"]["speed_exponential_mm"].shape == (12,)
+    assert "detection_signal_mm_s" in bout_run["speed_exponential"]
+    assert bout_run["speed_exponential"]["detection_signal_mm_s"].attrs["detection_signal_transform_type"] == (
+        "convolution"
+    )
+    assert bout_run["speed_exponential"]["detection_signal_mm_s"].shape == (12,)
     assert "core_start_frame" in bout_run["speed_filtered"]["bouts"]
     assert "distance" not in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     assert "path_length_mm" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "peak_detection_signal_mm_s" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "peak_physical_speed_mm_s" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
+    assert "peak_speed_mm_s" not in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     assert "observed_duration_s" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     assert "gap_censored" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
     assert "core_start_time_s_interpolated" in bout_run["speed_filtered"]["bouts"].attrs["field_names"]
@@ -280,6 +295,8 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
     np.testing.assert_allclose(bouts["path_length_mm"][:], [2.5])
     np.testing.assert_allclose(bouts["path_length_px"][:], [25.0])
     np.testing.assert_allclose(bouts["mean_speed_mm_s"][:], [50.0])
+    np.testing.assert_allclose(bouts["peak_detection_signal_mm_s"][:], [5.0])
+    np.testing.assert_allclose(bouts["peak_physical_speed_mm_s"][:], [5.0])
     np.testing.assert_allclose(bouts["valid_transition_fraction"][:], [5 / 6])
     global_metrics = bout_run["speed_filtered"]["global_metrics"]
     assert "total_distance" not in global_metrics.attrs["field_names"]
@@ -319,7 +336,7 @@ def test_detect_and_save_bouts_writes_peak_event_metadata(tmp_path: Path) -> Non
     root = zarr.open_group(str(zarr_path), mode="r")
     bout_run = root["analysis"]["swim_bout_runs"][run_name]
     assert bout_run.attrs["detection_method"] == "peak_event"
-    assert bout_run.attrs["schema_version"] == 5
+    assert bout_run.attrs["schema_version"] == 6
     assert bout_run.attrs["peak_event_schema_version"] == 1
     assert bout_run.attrs["min_peak_height_mm_s"] == 3.0
     assert bout_run.attrs["min_peak_prominence_mm_s"] == 2.0
@@ -328,7 +345,7 @@ def test_detect_and_save_bouts_writes_peak_event_metadata(tmp_path: Path) -> Non
     assert bout_run.attrs["shape_split_policy"] == "none"
     assert bout_run.attrs["gap_merge_policy_active"] is False
     provenance = bout_run.attrs["provenance"]
-    assert provenance["version"] == "detect_bouts_multi_level.v6"
+    assert provenance["version"] == "detect_bouts_multi_level.v7"
     assert provenance["parameters"]["method"] == "peak_event"
     assert provenance["parameters"]["min_peak_height_mm_s"] == 3.0
     assert provenance["parameters"]["min_peak_prominence_mm_s"] == 2.0

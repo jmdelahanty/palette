@@ -155,6 +155,10 @@ per_bout_metrics/
   within_heading_std_deg
   within_heading_zero_crossings
   within_heading_dominant_frequency_hz            optional, NaN when not computed
+  within_angular_velocity_mean_deg_s              future schema extension
+  within_angular_speed_mean_deg_s                 future schema extension
+  within_angular_speed_max_deg_s                  future schema extension
+  within_angular_velocity_std_deg_s               future schema extension
 
   pre_window_valid
   post_window_valid
@@ -202,6 +206,24 @@ Recommended initial semantics:
 - `within_heading_dominant_frequency_hz`: optional frequency estimate. This is
   only meaningful when the bout has enough samples and the recording frame rate
   supports the desired frequency band.
+
+Future angular-velocity summaries should be derived from validated framewise
+heading transitions, not by mutating the source swim-bout segmentation:
+
+- `within_angular_velocity_mean_deg_s`: signed mean turning rate over valid
+  within-bout transitions. This can cancel when left/right turns occur in the
+  same bout, so it should not be the only magnitude summary.
+- `within_angular_speed_mean_deg_s`: mean absolute turning rate over valid
+  within-bout transitions.
+- `within_angular_speed_max_deg_s`: peak absolute turning rate over valid
+  within-bout transitions.
+- `within_angular_velocity_std_deg_s`: variability of signed turning rate over
+  valid within-bout transitions.
+
+The default heading source for these summaries should be smoothed heading,
+with raw-heading variants allowed when high-frequency framewise motion is the
+scientific target. Values should be `NaN` when the bout crosses invalid track
+transitions, nonpositive time deltas, or heading gaps.
 
 ## Dominant Frequency Policy
 

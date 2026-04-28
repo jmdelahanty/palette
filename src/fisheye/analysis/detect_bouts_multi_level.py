@@ -2,10 +2,10 @@
 """
 Detect swim bouts from speed processing levels in track kinematics tracks.
 
-This script reads pre-computed speed data from track kinematics tracks (raw,
-filtered, smoothed, averaged, and exponential response) and detects swim bouts
-using the same threshold across all levels. Results are stored hierarchically
-under a single run name with one subgroup per speed candidate.
+This script reads pre-computed speed data from track kinematics tracks plus
+optional transformed detector signals and detects swim bouts across candidate
+levels. Results are stored hierarchically under a single run name with one
+subgroup per detector-signal candidate.
 
 Storage structure:
     analysis/swim_bout_runs/<run_name>/
@@ -23,6 +23,7 @@ Storage structure:
     │   └── metadata
     ├── speed_exponential/
     │   ├── bouts
+    │   ├── detection_signal_mm_s
     │   └── metadata
     ├── default_level = "speed_smoothed" or "speed_filtered" (attr)
     └── run_metadata (attrs: threshold, source_track_kinematics_run, etc.)
@@ -96,11 +97,13 @@ SHAPE_SPLIT_POLICIES = ("none",)
 DURATION_FRAME_ROUNDING_POLICY = "ceil_seconds_times_fps"
 BOUNDARY_FRAME_ROUNDING_POLICY = "round_seconds_times_fps"
 SWIM_BOUT_RUN_SCHEMA_ID = "palette.swim_bout_runs"
-SWIM_BOUT_RUN_SCHEMA_VERSION = 5
-BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v2"
+SWIM_BOUT_RUN_SCHEMA_VERSION = 6
+BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v3"
+DETECTION_SIGNAL_SCHEMA_ID = "palette.swim_bout_detection_signal.v1"
+DETECTION_SIGNAL_SCHEMA_VERSION = 1
 PEAK_EVENT_SCHEMA_ID = "palette.swim_bout_peak_events.v1"
 PEAK_EVENT_SCHEMA_VERSION = 1
-METHOD_VERSION = "detect_bouts_multi_level.v6"
+METHOD_VERSION = "detect_bouts_multi_level.v7"
 THRESHOLD_CROSSING_INTERPOLATION = "linear_between_samples"
 
 
@@ -167,7 +170,8 @@ def _bout_dtype() -> np.dtype:
         ('net_displacement_mm', 'f8'),
         ('net_displacement_px', 'f8'),
         ('mean_speed_mm_s', 'f8'),
-        ('peak_speed_mm_s', 'f8'),
+        ('peak_detection_signal_mm_s', 'f8'),
+        ('peak_physical_speed_mm_s', 'f8'),
         ('n_valid_transitions', 'i8'),
         ('n_invalid_transitions', 'i8'),
         ('valid_transition_fraction', 'f8'),
@@ -328,6 +332,56 @@ def _causal_exponential_speed_response(
             state = alpha * value + (1.0 - alpha) * state
         response[idx] = state
     return response
+
+
+def _detection_signal_attrs(
+    *,
+    level: str,
+    source_track_path: str,
+    path_distance_source_level: str,
+    exponential_source_key: str,
+    exponential_tau_s: float,
+) -> Dict[str, Any]:
+    """Describe the signal used to define bout boundaries for one subgroup."""
+
+    is_exponential = level == "speed_exponential"
+    source_level = exponential_source_key if is_exponential else level
+    source_array = f"{source_level}_mm"
+    attrs: Dict[str, Any] = {
+        "signal_level": level,
+        "detection_signal_schema_id": DETECTION_SIGNAL_SCHEMA_ID,
+        "detection_signal_schema_version": DETECTION_SIGNAL_SCHEMA_VERSION,
+        "detection_signal_role": "bout_detection",
+        "detection_signal_units": "mm/s",
+        "detection_signal_source_level": source_level,
+        "detection_signal_source_array": source_array,
+        "detection_signal_source_path": f"{source_track_path}/{source_array}",
+        "detection_signal_array": "detection_signal_mm_s" if is_exponential else source_array,
+        "detection_signal_transform_type": "convolution" if is_exponential else "identity",
+        "detection_signal_transform_family": "causal_exponential" if is_exponential else "identity",
+        "detection_signal_is_primary_physical_speed": not is_exponential,
+        "movement_metric_source_level": path_distance_source_level,
+        "movement_metric_path_distance_array": f"frame_path_distance_{path_distance_source_level}_mm",
+        "peak_detection_signal_field": "peak_detection_signal_mm_s",
+        "peak_physical_speed_field": "peak_physical_speed_mm_s",
+    }
+    if is_exponential:
+        attrs.update(
+            {
+                "detection_signal_kernel": "exp(-t/tau)",
+                "detection_signal_kernel_family": "causal_exponential",
+                "detection_signal_tau_s": float(exponential_tau_s),
+                "detection_signal_causal": True,
+                "detection_signal_normalized": True,
+                # Legacy attrs retained for old consumers while the generic
+                # detection-signal contract becomes the canonical wording.
+                "speed_transform": "causal_exponential_response",
+                "speed_transform_kernel": "exp(-t/tau)",
+                "exponential_tau_s": float(exponential_tau_s),
+                "exponential_source_level": exponential_source_key,
+            }
+        )
+    return attrs
 
 
 def _sum_valid_path_distance(
@@ -618,6 +672,7 @@ def _build_bout_array(
     path_distance_px: Optional[np.ndarray] = None,
     positions_mm: Optional[np.ndarray] = None,
     positions_px: Optional[np.ndarray] = None,
+    physical_speed_mm: Optional[np.ndarray] = None,
     delta_seconds: Optional[np.ndarray] = None,
     transition_valid: Optional[np.ndarray] = None,
     sample_valid: Optional[np.ndarray] = None,
@@ -651,8 +706,13 @@ def _build_bout_array(
         core_start_idx = int(core_start_idx)
         core_end_exclusive = int(core_end_exclusive)
 
-        bout_speeds = speed[start_idx:end_exclusive]
-        valid_speeds = bout_speeds[np.isfinite(bout_speeds)]
+        bout_detection_signal = speed[start_idx:end_exclusive]
+        valid_detection_signal = bout_detection_signal[np.isfinite(bout_detection_signal)]
+        if physical_speed_mm is not None:
+            physical_speed_slice = np.asarray(physical_speed_mm, dtype=np.float64)[start_idx:end_exclusive]
+        else:
+            physical_speed_slice = bout_detection_signal
+        valid_physical_speeds = physical_speed_slice[np.isfinite(physical_speed_slice)]
         transition_slice = slice(start_idx, end_exclusive)
         valid_transition_mask = effective_transition_valid[transition_slice]
 
@@ -687,7 +747,12 @@ def _build_bout_array(
             if observed_duration_s > 0.0 and np.isfinite(path_length_mm)
             else float("nan")
         )
-        peak_speed_mm_s = float(np.max(valid_speeds)) if len(valid_speeds) > 0 else float("nan")
+        peak_detection_signal_mm_s = (
+            float(np.max(valid_detection_signal)) if len(valid_detection_signal) > 0 else float("nan")
+        )
+        peak_physical_speed_mm_s = (
+            float(np.max(valid_physical_speeds)) if len(valid_physical_speeds) > 0 else float("nan")
+        )
 
         end_idx = end_exclusive - 1
         core_end_idx = core_end_exclusive - 1
@@ -722,7 +787,8 @@ def _build_bout_array(
             _net_displacement(positions_mm, start_idx, end_idx),
             _net_displacement(positions_px, start_idx, end_idx),
             mean_speed_mm_s,
-            peak_speed_mm_s,
+            peak_detection_signal_mm_s,
+            peak_physical_speed_mm_s,
             n_valid_transitions,
             n_invalid_transitions,
             valid_transition_fraction,
@@ -941,6 +1007,8 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
         ('mean_bout_path_length_mm', 'f8'),
         ('total_path_length_mm', 'f8'),
         ('mean_bout_speed_mm_s', 'f8'),
+        ('mean_bout_peak_detection_signal_mm_s', 'f8'),
+        ('mean_bout_peak_physical_speed_mm_s', 'f8'),
         ('mean_valid_transition_fraction', 'f8'),
         ('n_gap_censored_bouts', 'i4'),
         ('inter_bout_interval_count', 'i4'),
@@ -973,6 +1041,8 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
             _finite_mean_or_nan(bouts['path_length_mm']),
             _finite_sum_or_nan(bouts['path_length_mm']),
             _finite_mean_or_nan(bouts['mean_speed_mm_s']),
+            _finite_mean_or_nan(bouts['peak_detection_signal_mm_s']),
+            _finite_mean_or_nan(bouts['peak_physical_speed_mm_s']),
             _finite_mean_or_nan(bouts['valid_transition_fraction']),
             int(np.sum(bouts['gap_censored'])),
             0,  # Will be updated with interval metrics
@@ -985,7 +1055,7 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
     else:
         global_metrics[0] = (
             0, 0.0, 0.0, 0.0, 0.0, float('nan'), float('nan'), float('nan'),
-            float('nan'), float('nan'), float('nan'), 0,
+            float('nan'), float('nan'), float('nan'), float('nan'), float('nan'), 0,
             0, float('nan'), float('nan'), float('nan'), float('nan'), float('nan'),
         )
 
@@ -1007,6 +1077,7 @@ def _detect_bouts_from_speed(
     path_distance_px: Optional[np.ndarray] = None,
     positions_mm: Optional[np.ndarray] = None,
     positions_px: Optional[np.ndarray] = None,
+    physical_speed_mm: Optional[np.ndarray] = None,
     delta_seconds: Optional[np.ndarray] = None,
     transition_valid: Optional[np.ndarray] = None,
     sample_valid: Optional[np.ndarray] = None,
@@ -1114,6 +1185,7 @@ def _detect_bouts_from_speed(
         path_distance_px=path_distance_px,
         positions_mm=positions_mm,
         positions_px=positions_px,
+        physical_speed_mm=physical_speed_mm,
         delta_seconds=delta_seconds,
         transition_valid=transition_valid,
         sample_valid=sample_valid,
@@ -1138,6 +1210,7 @@ def _detect_bouts_from_peaks(
     path_distance_px: Optional[np.ndarray] = None,
     positions_mm: Optional[np.ndarray] = None,
     positions_px: Optional[np.ndarray] = None,
+    physical_speed_mm: Optional[np.ndarray] = None,
     delta_seconds: Optional[np.ndarray] = None,
     transition_valid: Optional[np.ndarray] = None,
     sample_valid: Optional[np.ndarray] = None,
@@ -1263,6 +1336,7 @@ def _detect_bouts_from_peaks(
         path_distance_px=path_distance_px,
         positions_mm=positions_mm,
         positions_px=positions_px,
+        physical_speed_mm=physical_speed_mm,
         delta_seconds=delta_seconds,
         transition_valid=transition_valid,
         sample_valid=sample_valid,
@@ -1388,6 +1462,7 @@ def _detect_bouts_from_peak_events(
     path_distance_px: Optional[np.ndarray] = None,
     positions_mm: Optional[np.ndarray] = None,
     positions_px: Optional[np.ndarray] = None,
+    physical_speed_mm: Optional[np.ndarray] = None,
     delta_seconds: Optional[np.ndarray] = None,
     transition_valid: Optional[np.ndarray] = None,
     sample_valid: Optional[np.ndarray] = None,
@@ -1466,6 +1541,7 @@ def _detect_bouts_from_peak_events(
         path_distance_px=path_distance_px,
         positions_mm=positions_mm,
         positions_px=positions_px,
+        physical_speed_mm=physical_speed_mm,
         delta_seconds=delta_seconds,
         transition_valid=transition_valid,
         sample_valid=sample_valid,
@@ -1615,6 +1691,7 @@ def _metric_inputs_for_level(
         "path_distance_px": speeds.get(f"frame_path_distance_{path_source}_px"),
         "positions_mm": metadata.get("positions_mm"),
         "positions_px": metadata.get("positions_px"),
+        "physical_speed_mm": speeds.get(f"speed_{path_source}_mm"),
         "delta_seconds": speeds.get("delta_seconds"),
         "transition_valid": speeds.get("transition_valid"),
         "sample_valid": speeds.get("sample_valid"),
@@ -1953,6 +2030,8 @@ def detect_and_save_bouts(
     ]
     run_group.attrs['exponential_tau_s'] = float(exponential_tau_s)
     run_group.attrs['exponential_source_level'] = exponential_source_key
+    run_group.attrs['detection_signal_schema_id'] = DETECTION_SIGNAL_SCHEMA_ID
+    run_group.attrs['detection_signal_schema_version'] = DETECTION_SIGNAL_SCHEMA_VERSION
     run_group.attrs['peak_event_schema_id'] = PEAK_EVENT_SCHEMA_ID
     run_group.attrs['peak_event_schema_version'] = PEAK_EVENT_SCHEMA_VERSION
 
@@ -1983,6 +2062,10 @@ def detect_and_save_bouts(
     run_group.attrs['git_commit'] = git_info['commit_hash']
     run_group.attrs['git_branch'] = git_info['branch']
     run_group.attrs['git_dirty'] = git_info['is_dirty']
+    source_track_path = (
+        f"analysis/track_kinematics_runs/offline/"
+        f"{metadata['track_kinematics_run']}/tracks/id_{int(track_id)}"
+    )
 
     parameters = {
         'method': method,
@@ -2040,10 +2123,7 @@ def detect_and_save_bouts(
         'source_track_kinematics_run': metadata['track_kinematics_run'],
         'source_track_kinematics_stage': metadata.get('track_kinematics_stage'),
         'source_track_kinematics_version': metadata.get('track_kinematics_version'),
-        'source_track_path': (
-            f"analysis/track_kinematics_runs/offline/"
-            f"{metadata['track_kinematics_run']}/tracks/id_{int(track_id)}"
-        ),
+        'source_track_path': source_track_path,
         'source_track_kinematics_created_at_utc': metadata.get(
             'track_kinematics_created_at_utc'
         ),
@@ -2131,23 +2211,29 @@ def detect_and_save_bouts(
             'min_peak_distance_s': float(min_peak_distance_s),
             'peak_width_rel_height': float(peak_width_rel_height),
         }
+        level_specific_attrs.update(
+            _detection_signal_attrs(
+                level=level,
+                source_track_path=source_track_path,
+                path_distance_source_level=path_distance_level_source[level],
+                exponential_source_key=exponential_source_key,
+                exponential_tau_s=float(exponential_tau_s),
+            )
+        )
         if level == "speed_exponential":
-            level_specific_attrs["speed_transform"] = "causal_exponential_response"
-            level_specific_attrs["speed_transform_kernel"] = "exp(-t/tau)"
-            level_specific_attrs["exponential_tau_s"] = float(exponential_tau_s)
-            level_specific_attrs["exponential_source_level"] = exponential_source_key
             store_array(
                 level_group,
-                "speed_exponential_mm",
+                "detection_signal_mm_s",
                 np.asarray(speeds["speed_exponential_mm"], dtype=np.float32),
                 attrs={
                     "units": "mm/s",
-                    "speed_transform": "causal_exponential_response",
-                    "source_speed_level": exponential_source_key,
-                    "tau_s": float(exponential_tau_s),
-                    "kernel": "exp(-t/tau)",
-                    "causal": True,
-                    "normalized": True,
+                    **_detection_signal_attrs(
+                        level=level,
+                        source_track_path=source_track_path,
+                        path_distance_source_level=path_distance_level_source[level],
+                        exponential_source_key=exponential_source_key,
+                        exponential_tau_s=float(exponential_tau_s),
+                    ),
                 },
             )
             store_array(
@@ -2163,6 +2249,12 @@ def detect_and_save_bouts(
             level_specific_attrs['mean_bout_duration_s'] = float(np.mean(bouts['duration_s']))
             level_specific_attrs['mean_bout_observed_duration_s'] = float(np.mean(bouts['observed_duration_s']))
             level_specific_attrs['mean_bout_speed_mm_s'] = _finite_mean_or_nan(bouts['mean_speed_mm_s'])
+            level_specific_attrs['mean_bout_peak_detection_signal_mm_s'] = _finite_mean_or_nan(
+                bouts['peak_detection_signal_mm_s']
+            )
+            level_specific_attrs['mean_bout_peak_physical_speed_mm_s'] = _finite_mean_or_nan(
+                bouts['peak_physical_speed_mm_s']
+            )
             level_specific_attrs['total_path_length_mm'] = _finite_sum_or_nan(bouts['path_length_mm'])
             level_specific_attrs['mean_valid_transition_fraction'] = _finite_mean_or_nan(
                 bouts['valid_transition_fraction']

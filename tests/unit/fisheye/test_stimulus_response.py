@@ -500,11 +500,36 @@ def _make_bouts(
             end_frame=b["end"],
             duration_s=b["dur"],
             mean_speed=b["mean"],
-            peak_speed=b["peak"],
+            peak_physical_speed=b["peak"],
         )
         for b in bouts
     ]
     return {fish_id: entries}
+
+
+def test_load_bout_data_reads_current_physical_peak_schema() -> None:
+    root = zarr.group()
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("swim_bout_runs")
+    parent.attrs["latest"] = "bouts_v6"
+    run = parent.create_group("bouts_v6")
+    run.attrs["default_level"] = "speed_exponential"
+    run.attrs["track_id"] = 0
+    level = run.create_group("speed_exponential")
+    bouts = level.create_group("bouts")
+    bouts.create_array("bout_id", data=np.array([1], dtype=np.int32))
+    bouts.create_array("start_frame", data=np.array([10], dtype=np.int64))
+    bouts.create_array("end_frame", data=np.array([20], dtype=np.int64))
+    bouts.create_array("duration_s", data=np.array([0.25], dtype=np.float32))
+    bouts.create_array("mean_speed_mm_s", data=np.array([4.0], dtype=np.float32))
+    bouts.create_array("peak_detection_signal_mm_s", data=np.array([3.0], dtype=np.float32))
+    bouts.create_array("peak_physical_speed_mm_s", data=np.array([8.0], dtype=np.float32))
+
+    loaded, run_name = load_bout_data(root, bout_run="bouts_v6")
+
+    assert run_name == "bouts_v6"
+    assert loaded[0][0].mean_speed == pytest.approx(4.0)
+    assert loaded[0][0].peak_physical_speed == pytest.approx(8.0)
 
 
 class TestComputeStepBoutMetrics:
@@ -561,7 +586,7 @@ class TestComputeStepBoutMetrics:
         _, per_bout = compute_step_bout_metrics(bouts, [0], step)
         assert per_bout["duration_s"].tolist() == pytest.approx([0.33, 0.17, 0.50], abs=0.01)
         assert per_bout["mean_speed_mm_s"].tolist() == pytest.approx([15.0, 10.0, 20.0])
-        assert per_bout["peak_speed_mm_s"].tolist() == pytest.approx([25.0, 18.0, 35.0])
+        assert per_bout["peak_physical_speed_mm_s"].tolist() == pytest.approx([25.0, 18.0, 35.0])
 
 
 class TestWriteWithBouts:
@@ -600,6 +625,7 @@ class TestWriteWithBouts:
             assert "per_bout" in s0
             assert "fish_id" in s0["per_bout"]
             assert "mean_speed_mm_s" in s0["per_bout"]
+            assert "peak_physical_speed_mm_s" in s0["per_bout"]
 
     def test_no_bouts_still_works(self) -> None:
         root = zarr.group()

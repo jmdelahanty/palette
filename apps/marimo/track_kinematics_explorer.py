@@ -557,14 +557,20 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
     _speed_columns = [
         _column
         for _column in timeseries_df.columns
-        if "speed" in _column.lower() and timeseries_df[_column].notna().any()
+        if ("speed" in _column.lower() or "detection_signal" in _column.lower())
+        and timeseries_df[_column].notna().any()
     ]
     _level = str(selected_speed_level or "").strip()
     if _level.startswith("speed_"):
         _level = _level.removeprefix("speed_")
+    _preferred_candidates = (
+        ("detection_signal_mm_s", f"speed_{_level}_mm", f"speed_{_level}_px")
+        if _level == "exponential"
+        else (f"speed_{_level}_mm", f"speed_{_level}_px")
+    )
     _preferred_columns = [
         _column
-        for _column in (f"speed_{_level}_mm", f"speed_{_level}_px")
+        for _column in _preferred_candidates
         if _level and _column in _speed_columns
     ]
     _fallback_columns = [
@@ -576,7 +582,7 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
     speed_series_picker = mo.ui.multiselect(
         options=_speed_columns,
         value=_default_speed_columns,
-        label="Speed traces",
+        label="Speed / detection traces",
     )
     _max_time = float(timeseries_df["time_s"].max()) if len(timeseries_df) else 0.0
     time_window = mo.ui.range_slider(
@@ -880,7 +886,7 @@ def _(
     fig.update_layout(
         title="Speed Metrics with Swim Bout and Validity Overlays",
         xaxis_title="Time (s)",
-        yaxis_title="Speed",
+        yaxis_title="Speed / detection signal",
         hovermode="x unified",
         height=420,
         margin=dict(l=40, r=20, t=50, b=40),

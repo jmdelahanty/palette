@@ -516,7 +516,22 @@ class BoutEntry:
     end_frame: int
     duration_s: float
     mean_speed: float
-    peak_speed: float
+    peak_physical_speed: float
+
+
+def _read_first_bout_column(
+    bouts_group: zarr.Group,
+    names: Sequence[str],
+    *,
+    dtype: np.dtype | type = np.float64,
+) -> np.ndarray:
+    """Read the first available bout column from current or legacy schemas."""
+
+    for name in names:
+        if name in bouts_group:
+            return bouts_group[name][:].astype(dtype)
+    expected = ", ".join(names)
+    raise ValueError(f"Bouts group is missing expected column; tried: {expected}")
 
 
 def load_bout_data(
@@ -567,8 +582,14 @@ def load_bout_data(
     start_frames = bouts_group["start_frame"][:].astype(np.int64)
     end_frames = bouts_group["end_frame"][:].astype(np.int64)
     durations = bouts_group["duration_s"][:].astype(np.float64)
-    mean_speeds = bouts_group["mean_speed"][:].astype(np.float64)
-    peak_speeds = bouts_group["peak_speed"][:].astype(np.float64)
+    mean_speeds = _read_first_bout_column(
+        bouts_group,
+        ("mean_speed_mm_s", "mean_speed"),
+    )
+    peak_physical_speeds = _read_first_bout_column(
+        bouts_group,
+        ("peak_physical_speed_mm_s", "peak_speed_mm_s", "peak_speed"),
+    )
 
     bouts_by_fish: Dict[int, List[BoutEntry]] = {}
     bout_list = bouts_by_fish.setdefault(track_id, [])
@@ -580,7 +601,7 @@ def load_bout_data(
             end_frame=int(end_frames[j]),
             duration_s=float(durations[j]),
             mean_speed=float(mean_speeds[j]),
-            peak_speed=float(peak_speeds[j]),
+            peak_physical_speed=float(peak_physical_speeds[j]),
         ))
 
     console.print(
@@ -602,7 +623,7 @@ def compute_step_bout_metrics(
         num_bouts, mean_bout_duration_s, mean_interbout_interval_s per fish.
     per_bout : dict
         fish_id, bout_id, start_frame, end_frame, duration_s,
-        mean_speed_mm_s, peak_speed_mm_s for all bouts in this step.
+        mean_speed_mm_s, peak_physical_speed_mm_s for all bouts in this step.
     """
     sf, ef = step.start_frame, step.end_frame
     n_fish = len(fish_ids)
@@ -651,7 +672,7 @@ def compute_step_bout_metrics(
             all_end.append(b.end_frame)
             all_dur.append(b.duration_s)
             all_mean_spd.append(b.mean_speed)
-            all_peak_spd.append(b.peak_speed)
+            all_peak_spd.append(b.peak_physical_speed)
 
     per_fish = {
         "num_bouts": num_bouts,
@@ -665,7 +686,7 @@ def compute_step_bout_metrics(
         "end_frame": np.array(all_end, dtype=np.int64),
         "duration_s": np.array(all_dur, dtype=np.float32),
         "mean_speed_mm_s": np.array(all_mean_spd, dtype=np.float32),
-        "peak_speed_mm_s": np.array(all_peak_spd, dtype=np.float32),
+        "peak_physical_speed_mm_s": np.array(all_peak_spd, dtype=np.float32),
     }
     return per_fish, per_bout
 
@@ -2139,7 +2160,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                  "end_frame": np.array([], dtype=np.int64),
                  "duration_s": np.array([], dtype=np.float32),
                  "mean_speed_mm_s": np.array([], dtype=np.float32),
-                 "peak_speed_mm_s": np.array([], dtype=np.float32)},
+                 "peak_physical_speed_mm_s": np.array([], dtype=np.float32)},
             ))
         if "grating" in r:
             if step_grating_data is None:

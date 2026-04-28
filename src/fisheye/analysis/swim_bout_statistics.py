@@ -58,6 +58,13 @@ warnings.filterwarnings("ignore", category=ZarrFutureWarning)
 from fisheye.shared.citrus_enums import EXPERIMENT_EVENT_TYPE, EVENT_NAME_TO_ID
 
 
+_PEAK_PHYSICAL_METRIC_RENAMES = {
+    "peak_speed_max_px_s": "peak_physical_speed_max_px_s",
+    "peak_speed_max_mm_s": "peak_physical_speed_max_mm_s",
+    "peak_speed_max_bl_s": "peak_physical_speed_max_bl_s",
+}
+
+
 def _normalize_column(values: np.ndarray) -> np.ndarray:
     """Decode byte arrays to unicode for DataFrame reconstruction."""
     if values.ndim > 1:
@@ -101,6 +108,17 @@ def _to_serializable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): _to_serializable(v) for k, v in value.items()}
     return value
+
+
+def _normalize_peak_physical_metric_names(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Rename legacy peak-speed summary keys to explicit physical-speed keys."""
+
+    normalized = dict(metrics)
+    for old_key, new_key in _PEAK_PHYSICAL_METRIC_RENAMES.items():
+        if old_key in normalized:
+            normalized.setdefault(new_key, normalized[old_key])
+            normalized.pop(old_key, None)
+    return normalized
 
 
 def _structured_to_dicts(array: np.ndarray) -> List[Dict[str, Any]]:
@@ -193,7 +211,7 @@ def _make_bout_arrays(
         ("end_time_s", "f8"),
         ("distance_px", "f8"),
         ("mean_speed_px_s", "f8"),
-        ("peak_speed_px_s", "f8"),
+        ("peak_physical_speed_px_s", "f8"),
         ("start_x_px", "f8"),
         ("start_y_px", "f8"),
         ("end_x_px", "f8"),
@@ -205,8 +223,8 @@ def _make_bout_arrays(
             ("distance_bl", "f8"),
             ("mean_speed_mm_s", "f8"),
             ("mean_speed_bl_s", "f8"),
-            ("peak_speed_mm_s", "f8"),
-            ("peak_speed_bl_s", "f8"),
+            ("peak_physical_speed_mm_s", "f8"),
+            ("peak_physical_speed_bl_s", "f8"),
             ("start_x_mm", "f8"),
             ("start_y_mm", "f8"),
             ("end_x_mm", "f8"),
@@ -244,7 +262,7 @@ def _make_bout_arrays(
         bout_array["end_time_s"][idx] = float(bout.end_time_s)
         bout_array["distance_px"][idx] = float(bout.distance_px)
         bout_array["mean_speed_px_s"][idx] = float(bout.mean_speed_px_s)
-        bout_array["peak_speed_px_s"][idx] = float(bout.peak_speed_px_s)
+        bout_array["peak_physical_speed_px_s"][idx] = float(bout.peak_speed_px_s)
         bout_array["start_x_px"][idx] = start_x
         bout_array["start_y_px"][idx] = start_y
         bout_array["end_x_px"][idx] = end_x
@@ -255,8 +273,8 @@ def _make_bout_arrays(
             bout_array["distance_bl"][idx] = float(bout.distance_bl or np.nan)
             bout_array["mean_speed_mm_s"][idx] = float(bout.mean_speed_mm_s or np.nan)
             bout_array["mean_speed_bl_s"][idx] = float(bout.mean_speed_bl_s or np.nan)
-            bout_array["peak_speed_mm_s"][idx] = float(bout.peak_speed_mm_s or np.nan)
-            bout_array["peak_speed_bl_s"][idx] = float(bout.peak_speed_bl_s or np.nan)
+            bout_array["peak_physical_speed_mm_s"][idx] = float(bout.peak_speed_mm_s or np.nan)
+            bout_array["peak_physical_speed_bl_s"][idx] = float(bout.peak_speed_bl_s or np.nan)
             px_to_mm = calibration.pixel_to_mm
             bout_array["start_x_mm"][idx] = start_x * px_to_mm if not np.isnan(start_x) else np.nan
             bout_array["start_y_mm"][idx] = start_y * px_to_mm if not np.isnan(start_y) else np.nan
@@ -414,8 +432,8 @@ def _print_summary(global_metrics: Dict[str, Any], calibration: Optional[Calibra
             line += f" ({speed_mean_mm:.2f} ± {speed_std_mm:.2f} mm/s)"
         print(line)
 
-    peak_speed_px = global_metrics.get("peak_speed_max_px_s")
-    peak_speed_mm = global_metrics.get("peak_speed_max_mm_s")
+    peak_speed_px = global_metrics.get("peak_physical_speed_max_px_s")
+    peak_speed_mm = global_metrics.get("peak_physical_speed_max_mm_s")
     if _valid(peak_speed_px):
         line = f"Peak speed: {peak_speed_px:.1f} px/s"
         if calibration and _valid(peak_speed_mm):
@@ -591,7 +609,7 @@ def _summarize_bouts(
         "distance_median_px": float(np.median(distances_px)),
         "mean_speed_mean_px_s": float(mean_speeds_px.mean()),
         "mean_speed_std_px_s": float(mean_speeds_px.std()),
-        "peak_speed_max_px_s": float(peak_speeds_px.max()),
+        "peak_physical_speed_max_px_s": float(peak_speeds_px.max()),
     }
 
     if calibration:
@@ -624,8 +642,8 @@ def _summarize_bouts(
         if peak_speeds_mm.size:
             summary.update(
                 {
-                    "peak_speed_max_mm_s": float(peak_speeds_mm.max()),
-                    "peak_speed_max_bl_s": float(peak_speeds_bl.max()) if peak_speeds_bl.size else None,
+                    "peak_physical_speed_max_mm_s": float(peak_speeds_mm.max()),
+                    "peak_physical_speed_max_bl_s": float(peak_speeds_bl.max()) if peak_speeds_bl.size else None,
                 }
             )
 
@@ -824,7 +842,7 @@ def run_statistics(args: argparse.Namespace) -> Tuple[Dict[str, Any], Dict[str, 
                 print("Stimulus run not found; skipping per-trial statistics.")
 
     calibration = analyzer.calibration
-    global_metrics = analyzer.calculate_summary_statistics()
+    global_metrics = _normalize_peak_physical_metric_names(analyzer.calculate_summary_statistics())
     global_metrics["coverage_pct"] = float(
         np.sum(~np.isnan(analyzer.positions_x)) / analyzer.total_frames * 100.0
     )

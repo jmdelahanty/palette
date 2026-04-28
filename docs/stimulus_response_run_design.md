@@ -132,7 +132,7 @@ analysis/stimulus_response_runs/<run_name>/
         │   ├── end_frame           int64[...]
         │   ├── duration_s          float32[...]
         │   ├── mean_speed_mm_s     float32[...]
-        │   └── peak_speed_mm_s     float32[...]
+        │   └── peak_physical_speed_mm_s float32[...]
         │
         ├── grating/                     # MOVING_GRATING steps only
         │   │                            # This group does NOT exist for non-grating steps
@@ -352,7 +352,7 @@ These are computed for every protocol step regardless of stimulus type.
 | `start_frame` / `end_frame` | Bout boundaries |
 | `duration_s` | Bout duration |
 | `mean_speed_mm_s` | Mean speed during bout |
-| `peak_speed_mm_s` | Peak speed during bout |
+| `peak_physical_speed_mm_s` | Peak physical speed during bout |
 
 ### Grating-specific metrics (MOVING_GRATING steps only)
 

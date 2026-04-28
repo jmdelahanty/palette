@@ -57,17 +57,20 @@ path.
 These are signal-processing terms, not biological conclusions. The biological
 interpretation comes later in `bout_kinematics_runs`.
 
-## Peak Speed vs Peak Detection
+## Peak Detection Signal Vs Physical Speed
 
-Peak detection is not the same operation as computing `peak_speed_mm_s` inside
-an already detected bout.
+Peak detection is not the same operation as computing physical movement metrics
+inside an already detected bout.
 
-`peak_speed_mm_s` is a summary statistic. It assumes a bout interval already
-exists and answers:
+`peak_detection_signal_mm_s` is a detector-signal summary. It assumes a bout
+interval already exists and answers:
 
 ```text
-What was the maximum speed value inside this bout?
+What was the maximum value of the signal that defined this bout?
 ```
+
+`peak_physical_speed_mm_s` answers the corresponding physical-speed question
+using the declared movement source inside the same boundaries.
 
 `scipy.signal.find_peaks` is a detector primitive. It runs before event
 intervals are finalized and answers:
@@ -96,8 +99,8 @@ their surrounding valleys, not only contiguous time above an absolute threshold.
 
 This is why `peak_event` is useful as an additional detector family. It can
 separate visually distinct movement pulses inside one long above-threshold
-region, while `peak_speed_mm_s` only summarizes a bout after the bout boundary
-has already been chosen.
+region, while `peak_detection_signal_mm_s` only summarizes a bout after the bout
+boundary has already been chosen.
 
 ## Detector Families
 
@@ -125,8 +128,8 @@ It sets:
 
 ```text
 detection_method = "peak_event"
-method_version = "detect_bouts_multi_level.v6"
-swim_bout_run_schema_version = 5
+method_version = "detect_bouts_multi_level.v7"
+swim_bout_run_schema_version = 6
 peak_event_schema_version = 1
 ```
 
@@ -151,6 +154,20 @@ The detector signal is for segmentation only. Biological movement metrics such
 as path length, net displacement, and mean speed should continue to be computed
 from `track_kinematics` path-distance and position arrays, not from the
 transformed detector signal.
+
+Each subgroup persists this distinction in metadata:
+
+```text
+detection_signal_transform_type = identity|convolution
+detection_signal_source_path = ...
+movement_metric_source_level = raw|filtered|smoothed
+peak_detection_signal_field = peak_detection_signal_mm_s
+peak_physical_speed_field = peak_physical_speed_mm_s
+```
+
+For transformed signals, the derived trace is stored as
+`detection_signal_mm_s`. The transform-specific attrs, such as kernel family and
+tau, define how that signal was produced.
 
 ## Proposed Algorithm
 

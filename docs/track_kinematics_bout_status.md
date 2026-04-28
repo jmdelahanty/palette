@@ -235,9 +235,9 @@ filtered speed with prior response state, short `tau` values track
 `speed_filtered` closely, while longer `tau` values soften the rise, lower some
 peaks, and extend the decay tail. Lower peaks are therefore expected and should
 not be interpreted as a change in measured fish speed; they are a property of
-the response trace used for segmentation. If peak speed is needed as a
-biological measurement, read it from the source speed/path-distance arrays in
-downstream metrics rather than from `speed_exponential`.
+the response trace used for segmentation. New bout tables distinguish
+`peak_detection_signal_mm_s` from `peak_physical_speed_mm_s` so transformed
+detector responses do not silently redefine biological speed metrics.
 
 Candidate `tau` values should eventually be grounded from data, not selected by
 name alone. A practical future calibration is:
@@ -476,6 +476,28 @@ which is the right basic approach for angular data.
 The new turning arrays make successive-sample heading changes explicit, but the
 downstream stack still does not yet standardize how turning should be summarized
 or consumed in later stimulus-response analyses.
+
+Recommended next semantics:
+
+- Keep `angular_velocity_deg_s` as the current raw-heading field for
+  compatibility.
+- Add explicit `angular_velocity_raw_deg_s` and
+  `angular_velocity_smoothed_deg_s` when the track schema is next revised.
+- Add absolute-value companions such as `angular_speed_raw_deg_s` and
+  `angular_speed_smoothed_deg_s` when downstream consumers need unsigned
+  turning rate.
+- Compute angular velocity from wrapped successive heading deltas divided by
+  elapsed time; never subtract circular angles without wrap/unwrap handling.
+- Treat gaps, invalid keypoints, missing headings, nonpositive time deltas, and
+  invalid track transitions as `NaN`, not zero.
+- Use smoothed heading as the default display/summary source when the question
+  is robust turning behavior, and raw heading when the question is high-frequency
+  framewise motion.
+
+Framewise angular velocity belongs in `track_kinematics_runs`. Bout-level
+summaries such as mean absolute turning rate or peak absolute turning rate
+belong in `bout_kinematics_runs`, because they depend on a selected swim-bout
+segmentation.
 
 ### Acceleration
 
