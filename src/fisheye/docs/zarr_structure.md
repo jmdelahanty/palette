@@ -1539,6 +1539,33 @@ Expected component groups:
   component-specific validity consumed by coherent body/eyes/swim
   subject-shape analysis.
 
+Current centerline/tail-anchor arrays:
+
+- `components/subject_body/centerline_xy`: `(N, P, 2)` sampled head-to-tail
+  centerline in ROI pixels.
+- `components/subject_body/centerline_valid`: `(N,)` centerline validity.
+- `components/subject_body/centerline_failure_reason_bytes`: `(N, width)`
+  stable reason tags.
+- `components/subject_body/head_endpoint_xy`: `(N, 2)` anterior endpoint.
+- `components/subject_body/tail_tip_xy`: `(N, 2)` posterior centerline
+  endpoint; source-specific measurement of semantic `tail_tip`.
+- `components/subject_body/tail_base_xy`: `(N, 2)` centerline projection of
+  the caudal swim-bladder contour anchor.
+- `components/subject_body/tail_base_valid`: `(N,)` tail-base projection
+  validity.
+- `components/subject_body/tail_base_arclength_px`: `(N,)` arclength from head
+  endpoint to tail base.
+- `components/subject_body/tail_segment_arclength_px`: `(N,)` arclength from
+  tail base to tail tip.
+- `components/subject_body/body_arclength_px`: `(N,)` current centerline
+  arclength from head endpoint to tail tip.
+- `components/swim_bladder/caudal_contour_point_xy`: `(N, 2)` swim-bladder
+  contour point with minimum projection on the body-frame forward axis.
+- `components/swim_bladder/caudal_contour_projection_px`: `(N,)` projection of
+  the caudal contour point in body-frame coordinates.
+- `components/swim_bladder/caudal_contour_valid`: `(N,)` caudal-anchor
+  validity.
+
 Expected relation groups:
 
 - `relations/eye_pair/`: cross-eye metrics such as separation.
@@ -1573,9 +1600,11 @@ canonical outputs:
 
 The first writer is `fisheye.analysis.subject_shape_runs`. It writes
 row-aligned body/eyes/swim component summaries, body principal-axis estimates,
-eye/swim ellipse summaries, eye-pair relations, and swim/eye-to-body relations
-using serial or Dask worker-chunk execution. Body centerline and B-spline
-support remain follow-up derived-shape methods. The storage and provenance
+eye/swim ellipse summaries, eye-pair relations, swim/eye-to-body relations,
+mask-component body-frame arrays, caudal swim-bladder contour anchors, and a
+conservative skeleton-derived subject-body centerline with head/tail endpoints
+using serial or Dask worker-chunk execution. B-spline fitting, tail curvature,
+and mask-width profiles remain follow-up derived-shape methods. The storage and provenance
 contract is documented in `docs/subject_shape_runs_contract.md`; the shared
 derived-run contract is documented in `docs/derived_analysis_run_contract.md`.
 Shared fish-relative frame semantics are documented in

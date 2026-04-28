@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
 import sys
@@ -15,6 +16,8 @@ from typing import Any, Mapping, Optional, Sequence
 import dask
 from dask import delayed
 import numpy as np
+from skimage.measure import find_contours, label as label_components
+from skimage.morphology import skeletonize
 import zarr
 
 try:
@@ -36,11 +39,22 @@ from ..utils.zarr_io import open_zarr_root
 
 SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
 SUBJECT_SHAPE_SCHEMA_VERSION = 1
-SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v1"
+SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v2"
+SUBJECT_SHAPE_METHOD_VERSION = 2
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
 COMPONENT_ORDER = ("subject_body", "swim_bladder", "eye_left", "eye_right")
 ELLIPSE_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
 EYE_COMPONENTS = ("eye_left", "eye_right")
+BODY_FRAME_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
+BODY_FRAME_SCHEMA_ID = "fish_anatomical_body_frame"
+BODY_FRAME_SCHEMA_VERSION = 1
+BODY_FRAME_ESTIMATOR = "mask_component_axis"
+TAIL_GEOMETRY_SCHEMA_ID = "analysis.subject_shape.tail_geometry"
+TAIL_GEOMETRY_SCHEMA_VERSION = 1
+TAIL_ANCHOR_METHOD = "caudal_swim_bladder_contour_min_forward_projection_v1"
+CENTERLINE_METHOD = "skeleton_longest_endpoint_path_v1"
+CENTERLINE_SAMPLE_COUNT = 64
+REASON_BYTES_WIDTH = 64
 SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
 EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
@@ -61,6 +75,39 @@ class ComponentBatch:
     secondary_axis_length_px: np.ndarray
     ellipse_params: np.ndarray
     ellipse_success: np.ndarray
+
+
+@dataclass(frozen=True)
+class BodyFrameBatch:
+    origin_xy: np.ndarray
+    forward_axis_xy: np.ndarray
+    left_axis_xy: np.ndarray
+    heading_deg: np.ndarray
+    valid: np.ndarray
+    failure_reason_bytes: np.ndarray
+
+
+@dataclass(frozen=True)
+class CaudalAnchorBatch:
+    point_xy: np.ndarray
+    projection_px: np.ndarray
+    valid: np.ndarray
+    failure_reason_bytes: np.ndarray
+
+
+@dataclass(frozen=True)
+class CenterlineBatch:
+    centerline_xy: np.ndarray
+    centerline_valid: np.ndarray
+    centerline_failure_reason_bytes: np.ndarray
+    head_endpoint_xy: np.ndarray
+    tail_tip_xy: np.ndarray
+    tail_base_xy: np.ndarray
+    tail_base_valid: np.ndarray
+    tail_base_arclength_px: np.ndarray
+    tail_base_failure_reason_bytes: np.ndarray
+    tail_segment_arclength_px: np.ndarray
+    body_arclength_px: np.ndarray
 
 
 def _utc_now() -> str:
@@ -122,6 +169,26 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def _encode_reason(reason: object, *, width: int = REASON_BYTES_WIDTH) -> np.ndarray:
+    data = str(reason or "").encode("utf-8", errors="replace")[: max(0, int(width) - 1)]
+    out = np.zeros((int(width),), dtype=np.uint8)
+    out[: len(data)] = np.frombuffer(data, dtype=np.uint8)
+    return out
+
+
+def _encode_reasons(reasons: Sequence[object], *, width: int = REASON_BYTES_WIDTH) -> np.ndarray:
+    out = np.zeros((len(reasons), int(width)), dtype=np.uint8)
+    for idx, reason in enumerate(reasons):
+        out[int(idx), :] = _encode_reason(reason, width=width)
+    return out
+
+
+def _set_reason_bytes_attrs(group: zarr.Group, *, width: int = REASON_BYTES_WIDTH) -> None:
+    group.attrs["reason_encoding"] = "utf8-null-terminated"
+    group.attrs["reason_bytes_width"] = int(width)
+    group.attrs["reason_bytes_null_terminated"] = True
 
 
 def _label_index_map(refined_group: zarr.Group) -> dict[str, int]:
@@ -209,6 +276,10 @@ def _metric_chunks_lastdim(total_rows: int, width: int) -> tuple[int, ...]:
     return (refined_subject_mask_metric_row_chunk(total_rows), int(width))
 
 
+def _metric_chunks_3d(total_rows: int, middle: int, width: int) -> tuple[int, ...]:
+    return (refined_subject_mask_metric_row_chunk(total_rows), int(middle), int(width))
+
+
 def _component_review_states(refined_group: zarr.Group, components: Sequence[str]) -> dict[str, str]:
     statuses = refined_group.attrs.get("component_review_statuses")
     if not isinstance(statuses, Mapping):
@@ -254,6 +325,14 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
     if component_name == "subject_body":
         component_group.attrs["principal_axis_method"] = "pca_mask_pixels_v1"
         component_group.attrs["principal_axis_semantics"] = "unoriented_principal_axis_in_roi_xy"
+        component_group.attrs["centerline_method"] = CENTERLINE_METHOD
+        component_group.attrs["centerline_sample_count"] = CENTERLINE_SAMPLE_COUNT
+        component_group.attrs["tail_tip_semantic_label"] = "tail_tip"
+        component_group.attrs["tail_tip_estimator"] = "subject_body_centerline_posterior_endpoint"
+        component_group.attrs["tail_base_definition"] = (
+            "body_centerline_projection_of_caudal_swim_bladder_contour_point"
+        )
+        _set_reason_bytes_attrs(component_group)
         _create_array(
             component_group,
             "principal_axis_xy",
@@ -279,6 +358,63 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
             chunks=chunks_1d,
             fill_value=np.nan,
         )
+        _create_array(
+            component_group,
+            "centerline_xy",
+            shape=(total_rows, CENTERLINE_SAMPLE_COUNT, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_3d(total_rows, CENTERLINE_SAMPLE_COUNT, 2),
+            fill_value=np.nan,
+        )
+        _create_array(component_group, "centerline_valid", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "centerline_failure_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+        for name in ("head_endpoint_xy", "tail_tip_xy", "tail_base_xy"):
+            _create_array(
+                component_group,
+                name,
+                shape=(total_rows, 2),
+                dtype=np.float32,
+                chunks=_metric_chunks_lastdim(total_rows, 2),
+                fill_value=np.nan,
+            )
+        _create_array(component_group, "tail_base_valid", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "tail_base_arclength_px",
+            shape=(total_rows,),
+            dtype=np.float32,
+            chunks=chunks_1d,
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "tail_base_failure_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+        _create_array(
+            component_group,
+            "tail_segment_arclength_px",
+            shape=(total_rows,),
+            dtype=np.float32,
+            chunks=chunks_1d,
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "body_arclength_px",
+            shape=(total_rows,),
+            dtype=np.float32,
+            chunks=chunks_1d,
+            fill_value=np.nan,
+        )
 
     if component_name in ELLIPSE_COMPONENTS:
         component_group.attrs["ellipse_method"] = "cv2.fitEllipse_component_contour_v1"
@@ -291,6 +427,71 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
             fill_value=np.nan,
         )
         _create_array(component_group, "ellipse_success", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+
+    if component_name == "swim_bladder":
+        component_group.attrs["caudal_anchor_method"] = TAIL_ANCHOR_METHOD
+        component_group.attrs["caudal_anchor_definition"] = "min_projection_on_body_forward_axis"
+        _set_reason_bytes_attrs(component_group)
+        _create_array(
+            component_group,
+            "caudal_contour_point_xy",
+            shape=(total_rows, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_lastdim(total_rows, 2),
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "caudal_contour_projection_px",
+            shape=(total_rows,),
+            dtype=np.float32,
+            chunks=chunks_1d,
+            fill_value=np.nan,
+        )
+        _create_array(component_group, "caudal_contour_valid", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "caudal_contour_failure_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+
+
+def _prepare_body_frame_group(run_group: zarr.Group, *, total_rows: int) -> None:
+    chunks_1d = _metric_chunks(total_rows)
+    group = run_group.require_group("body_frame")
+    _set_reason_bytes_attrs(group)
+    group.attrs.update(
+        {
+            "body_frame_schema_id": BODY_FRAME_SCHEMA_ID,
+            "body_frame_schema_version": BODY_FRAME_SCHEMA_VERSION,
+            "body_frame_estimator": BODY_FRAME_ESTIMATOR,
+            "body_frame_coordinate_space": "roi_pixels",
+            "body_frame_angle_convention": "math_ccw_degrees_after_y_flip",
+            "origin_definition": "midpoint_eye_left_eye_right",
+            "forward_axis_definition": "swim_bladder_centroid_to_eye_pair_midpoint",
+            "left_axis_definition": "eye_right_to_eye_left_projected_perpendicular_to_forward",
+        }
+    )
+    for name in ("origin_xy", "forward_axis_xy", "left_axis_xy"):
+        _create_array(
+            group,
+            name,
+            shape=(total_rows, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_lastdim(total_rows, 2),
+            fill_value=np.nan,
+        )
+    _create_array(group, "heading_deg", shape=(total_rows,), dtype=np.float32, chunks=chunks_1d, fill_value=np.nan)
+    _create_array(group, "valid", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+    _create_array(
+        group,
+        "failure_reason_bytes",
+        shape=(total_rows, REASON_BYTES_WIDTH),
+        dtype=np.uint8,
+        chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+    )
 
 
 def _prepare_relation_groups(run_group: zarr.Group, components: Sequence[str], *, total_rows: int) -> tuple[str, ...]:
@@ -424,6 +625,8 @@ def _prepare_subject_shape_run(
     for component_name in components:
         _prepare_component_group(run_group, component_name, total_rows=total_rows)
     relation_names = _prepare_relation_groups(run_group, components, total_rows=total_rows)
+    if set(BODY_FRAME_COMPONENTS).issubset(set(components)):
+        _prepare_body_frame_group(run_group, total_rows=total_rows)
 
     created = _utc_now()
     dask_metadata = {
@@ -447,7 +650,7 @@ def _prepare_subject_shape_run(
             "schema_id": SUBJECT_SHAPE_SCHEMA_ID,
             "schema_version": SUBJECT_SHAPE_SCHEMA_VERSION,
             "method": SUBJECT_SHAPE_METHOD,
-            "method_version": 1,
+            "method_version": SUBJECT_SHAPE_METHOD_VERSION,
             "created_at_utc": created,
             "created_utc": created,
             "row_axis": "refined_subject_mask_rows",
@@ -460,6 +663,26 @@ def _prepare_subject_shape_run(
             "source_refs": source_refs,
             "component_names": list(components),
             "relation_names": list(relation_names),
+            "body_frame_schema_id": BODY_FRAME_SCHEMA_ID,
+            "body_frame_schema_version": BODY_FRAME_SCHEMA_VERSION,
+            "body_frame_estimator": (
+                BODY_FRAME_ESTIMATOR if set(BODY_FRAME_COMPONENTS).issubset(set(components)) else None
+            ),
+            "body_frame_source_refs": {
+                "refined_subject_masks_run": f"refined_subject_masks_runs/{refined_run_name}",
+                "swim_bladder_component": "refined_subject_masks_runs/{}/components/swim_bladder".format(
+                    refined_run_name
+                ),
+                "eye_left_component": f"refined_subject_masks_runs/{refined_run_name}/components/eye_left",
+                "eye_right_component": f"refined_subject_masks_runs/{refined_run_name}/components/eye_right",
+            }
+            if set(BODY_FRAME_COMPONENTS).issubset(set(components))
+            else None,
+            "tail_geometry_schema_id": TAIL_GEOMETRY_SCHEMA_ID,
+            "tail_geometry_schema_version": TAIL_GEOMETRY_SCHEMA_VERSION,
+            "tail_anchor_method": TAIL_ANCHOR_METHOD,
+            "centerline_method": CENTERLINE_METHOD,
+            "centerline_sample_count": CENTERLINE_SAMPLE_COUNT,
             "chunk_size": max(1, int(chunk_size)),
             "chunk_count": len(_row_chunks(total_rows, max(1, int(chunk_size)))),
             **dask_metadata,
@@ -498,6 +721,12 @@ def _prepare_subject_shape_run(
             "method": SUBJECT_SHAPE_METHOD,
             "components": list(components),
             "relations": list(relation_names),
+            "body_frame_estimator": (
+                BODY_FRAME_ESTIMATOR if set(BODY_FRAME_COMPONENTS).issubset(set(components)) else None
+            ),
+            "tail_anchor_method": TAIL_ANCHOR_METHOD,
+            "centerline_method": CENTERLINE_METHOD,
+            "centerline_sample_count": CENTERLINE_SAMPLE_COUNT,
             "chunk_size": max(1, int(chunk_size)),
         },
         inputs={
@@ -617,6 +846,410 @@ def _write_component_batch(
         group["ellipse_success"][row_slice] = batch.ellipse_success
 
 
+def _unit_vector_xy(vector: np.ndarray) -> Optional[np.ndarray]:
+    vec = np.asarray(vector, dtype=np.float64).reshape(2)
+    if not np.all(np.isfinite(vec)):
+        return None
+    norm = float(np.linalg.norm(vec))
+    if norm <= 1e-6:
+        return None
+    return vec / norm
+
+
+def _compute_body_frame_batch(batches: Mapping[str, ComponentBatch]) -> BodyFrameBatch:
+    any_batch = next(iter(batches.values()))
+    row_count = int(any_batch.mask_present.shape[0])
+    origin_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    forward_axis_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    left_axis_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    heading_deg = np.full((row_count,), np.nan, dtype=np.float32)
+    valid = np.zeros((row_count,), dtype=bool)
+    reasons = ["missing_source_component"] * row_count
+
+    if not set(BODY_FRAME_COMPONENTS).issubset(batches):
+        return BodyFrameBatch(
+            origin_xy=origin_xy,
+            forward_axis_xy=forward_axis_xy,
+            left_axis_xy=left_axis_xy,
+            heading_deg=heading_deg,
+            valid=valid,
+            failure_reason_bytes=_encode_reasons(reasons),
+        )
+
+    swim = batches["swim_bladder"]
+    left = batches["eye_left"]
+    right = batches["eye_right"]
+    for row_idx in range(row_count):
+        if not (swim.centroid_valid[row_idx] and left.centroid_valid[row_idx] and right.centroid_valid[row_idx]):
+            reasons[row_idx] = "missing_source_anchor"
+            continue
+        swim_xy = swim.centroid_xy[row_idx].astype(np.float64)
+        left_xy = left.centroid_xy[row_idx].astype(np.float64)
+        right_xy = right.centroid_xy[row_idx].astype(np.float64)
+        eye_midpoint = (left_xy + right_xy) * 0.5
+        forward = _unit_vector_xy(eye_midpoint - swim_xy)
+        if forward is None:
+            reasons[row_idx] = "degenerate_forward_axis"
+            continue
+        left_candidate = left_xy - right_xy
+        left_candidate = left_candidate - float(np.dot(left_candidate, forward)) * forward
+        left_axis = _unit_vector_xy(left_candidate)
+        if left_axis is None:
+            reasons[row_idx] = "left_right_unresolved"
+            continue
+        origin_xy[row_idx] = eye_midpoint.astype(np.float32)
+        forward_axis_xy[row_idx] = forward.astype(np.float32)
+        left_axis_xy[row_idx] = left_axis.astype(np.float32)
+        heading_deg[row_idx] = np.float32(math.degrees(math.atan2(-float(forward[1]), float(forward[0]))))
+        valid[row_idx] = True
+        reasons[row_idx] = "ok"
+    return BodyFrameBatch(
+        origin_xy=origin_xy,
+        forward_axis_xy=forward_axis_xy,
+        left_axis_xy=left_axis_xy,
+        heading_deg=heading_deg,
+        valid=valid,
+        failure_reason_bytes=_encode_reasons(reasons),
+    )
+
+
+def _write_body_frame_batch(run_group: zarr.Group, row_slice: slice, batch: BodyFrameBatch) -> None:
+    if "body_frame" not in run_group:
+        return
+    group = run_group["body_frame"]
+    group["origin_xy"][row_slice, :] = batch.origin_xy
+    group["forward_axis_xy"][row_slice, :] = batch.forward_axis_xy
+    group["left_axis_xy"][row_slice, :] = batch.left_axis_xy
+    group["heading_deg"][row_slice] = batch.heading_deg
+    group["valid"][row_slice] = batch.valid
+    group["failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
+
+
+def _single_component_count(mask: np.ndarray) -> int:
+    labels = label_components(np.asarray(mask, dtype=bool), connectivity=2)
+    return int(labels.max()) if labels.size else 0
+
+
+def _contour_points_xy(mask: np.ndarray) -> Optional[np.ndarray]:
+    contours = find_contours(np.asarray(mask, dtype=bool).astype(np.float32), level=0.5)
+    if not contours:
+        return None
+    points: list[np.ndarray] = []
+    for contour in contours:
+        if int(contour.shape[0]) < 2:
+            continue
+        xy = np.stack([contour[:, 1], contour[:, 0]], axis=1).astype(np.float64, copy=False)
+        points.append(xy)
+    if not points:
+        return None
+    return np.concatenate(points, axis=0)
+
+
+def _compute_caudal_anchor_batch(
+    swim_masks: np.ndarray,
+    body_frame: BodyFrameBatch,
+) -> CaudalAnchorBatch:
+    masks_bool = np.asarray(swim_masks, dtype=np.uint8) > 0
+    row_count = int(masks_bool.shape[0])
+    point_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    projection_px = np.full((row_count,), np.nan, dtype=np.float32)
+    valid = np.zeros((row_count,), dtype=bool)
+    reasons = ["missing_swim_bladder_mask"] * row_count
+    for row_idx in range(row_count):
+        if not bool(body_frame.valid[row_idx]):
+            reasons[row_idx] = "missing_body_frame"
+            continue
+        mask = masks_bool[row_idx]
+        if int(np.count_nonzero(mask)) == 0:
+            reasons[row_idx] = "missing_swim_bladder_mask"
+            continue
+        if _single_component_count(mask) != 1:
+            reasons[row_idx] = "fragmented_swim_bladder_mask"
+            continue
+        contour_xy = _contour_points_xy(mask)
+        if contour_xy is None or int(contour_xy.shape[0]) == 0:
+            reasons[row_idx] = "empty_swim_bladder_contour"
+            continue
+        origin = body_frame.origin_xy[row_idx].astype(np.float64)
+        forward = body_frame.forward_axis_xy[row_idx].astype(np.float64)
+        projections = (contour_xy - origin[None, :]) @ forward
+        if not np.any(np.isfinite(projections)):
+            reasons[row_idx] = "caudal_projection_failed"
+            continue
+        caudal_idx = int(np.nanargmin(projections))
+        point_xy[row_idx] = contour_xy[caudal_idx].astype(np.float32)
+        projection_px[row_idx] = np.float32(float(projections[caudal_idx]))
+        valid[row_idx] = True
+        reasons[row_idx] = "ok"
+    return CaudalAnchorBatch(
+        point_xy=point_xy,
+        projection_px=projection_px,
+        valid=valid,
+        failure_reason_bytes=_encode_reasons(reasons),
+    )
+
+
+def _write_caudal_anchor_batch(run_group: zarr.Group, row_slice: slice, batch: CaudalAnchorBatch) -> None:
+    components = run_group.get("components")
+    if components is None or "swim_bladder" not in components:
+        return
+    group = components["swim_bladder"]
+    if "caudal_contour_point_xy" not in group:
+        return
+    group["caudal_contour_point_xy"][row_slice, :] = batch.point_xy
+    group["caudal_contour_projection_px"][row_slice] = batch.projection_px
+    group["caudal_contour_valid"][row_slice] = batch.valid
+    group["caudal_contour_failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
+
+
+def _skeleton_neighbors(coords_yx: np.ndarray) -> list[list[tuple[int, float]]]:
+    index_by_coord = {(int(y), int(x)): int(idx) for idx, (y, x) in enumerate(coords_yx)}
+    neighbors: list[list[tuple[int, float]]] = [[] for _ in range(int(coords_yx.shape[0]))]
+    for idx, (y, x) in enumerate(coords_yx):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                other = index_by_coord.get((int(y) + dy, int(x) + dx))
+                if other is None:
+                    continue
+                weight = math.sqrt(2.0) if dy != 0 and dx != 0 else 1.0
+                neighbors[int(idx)].append((int(other), float(weight)))
+    return neighbors
+
+
+def _dijkstra_path_tree(
+    neighbors: Sequence[Sequence[tuple[int, float]]],
+    start_idx: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    node_count = len(neighbors)
+    dist = np.full((node_count,), np.inf, dtype=np.float64)
+    prev = np.full((node_count,), -1, dtype=np.int64)
+    dist[int(start_idx)] = 0.0
+    heap: list[tuple[float, int]] = [(0.0, int(start_idx))]
+    while heap:
+        current_dist, current = heapq.heappop(heap)
+        if current_dist > float(dist[current]):
+            continue
+        for other, weight in neighbors[current]:
+            next_dist = current_dist + float(weight)
+            if next_dist < float(dist[other]):
+                dist[other] = next_dist
+                prev[other] = current
+                heapq.heappush(heap, (next_dist, int(other)))
+    return dist, prev
+
+
+def _farthest_endpoint(dist: np.ndarray, endpoints: Sequence[int]) -> Optional[int]:
+    best_idx: Optional[int] = None
+    best_dist = -np.inf
+    for endpoint in endpoints:
+        value = float(dist[int(endpoint)])
+        if np.isfinite(value) and value > best_dist:
+            best_dist = value
+            best_idx = int(endpoint)
+    return best_idx
+
+
+def _reconstruct_path(prev: np.ndarray, start_idx: int, end_idx: int) -> Optional[list[int]]:
+    path = [int(end_idx)]
+    current = int(end_idx)
+    seen = {current}
+    while current != int(start_idx):
+        current = int(prev[current])
+        if current < 0 or current in seen:
+            return None
+        path.append(current)
+        seen.add(current)
+    path.reverse()
+    return path
+
+
+def _longest_skeleton_endpoint_path_xy(mask: np.ndarray) -> tuple[Optional[np.ndarray], str]:
+    mask_bool = np.asarray(mask, dtype=bool)
+    if int(np.count_nonzero(mask_bool)) == 0:
+        return None, "missing_subject_body_mask"
+    if _single_component_count(mask_bool) != 1:
+        return None, "fragmented_subject_body_mask"
+    skeleton = skeletonize(mask_bool)
+    coords_yx = np.argwhere(skeleton)
+    if int(coords_yx.shape[0]) < 2:
+        return None, "skeleton_empty"
+    neighbors = _skeleton_neighbors(coords_yx)
+    endpoints = [idx for idx, items in enumerate(neighbors) if len(items) == 1]
+    if len(endpoints) < 2:
+        return None, "skeleton_endpoint_ambiguous"
+    dist0, _prev0 = _dijkstra_path_tree(neighbors, endpoints[0])
+    start = _farthest_endpoint(dist0, endpoints)
+    if start is None:
+        return None, "centerline_order_failed"
+    dist1, prev1 = _dijkstra_path_tree(neighbors, start)
+    end = _farthest_endpoint(dist1, endpoints)
+    if end is None or end == start:
+        return None, "centerline_order_failed"
+    path_indices = _reconstruct_path(prev1, start, end)
+    if path_indices is None or len(path_indices) < 2:
+        return None, "centerline_order_failed"
+    path_yx = coords_yx[np.asarray(path_indices, dtype=np.int64)]
+    path_xy = np.stack([path_yx[:, 1], path_yx[:, 0]], axis=1).astype(np.float64)
+    return path_xy, "ok"
+
+
+def _polyline_arclength(points_xy: np.ndarray) -> tuple[np.ndarray, float]:
+    points = np.asarray(points_xy, dtype=np.float64)
+    if int(points.shape[0]) < 2:
+        return np.zeros((int(points.shape[0]),), dtype=np.float64), 0.0
+    seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    cumulative = np.concatenate([np.zeros((1,), dtype=np.float64), np.cumsum(seg)])
+    return cumulative, float(cumulative[-1])
+
+
+def _resample_polyline(points_xy: np.ndarray, sample_count: int) -> tuple[Optional[np.ndarray], float]:
+    points = np.asarray(points_xy, dtype=np.float64)
+    cumulative, total = _polyline_arclength(points)
+    if total <= 1e-6:
+        return None, total
+    targets = np.linspace(0.0, total, int(sample_count), dtype=np.float64)
+    x = np.interp(targets, cumulative, points[:, 0])
+    y = np.interp(targets, cumulative, points[:, 1])
+    return np.stack([x, y], axis=1), total
+
+
+def _project_point_to_polyline(point_xy: np.ndarray, polyline_xy: np.ndarray) -> tuple[Optional[np.ndarray], float]:
+    point = np.asarray(point_xy, dtype=np.float64).reshape(2)
+    polyline = np.asarray(polyline_xy, dtype=np.float64)
+    if int(polyline.shape[0]) < 2:
+        return None, float("nan")
+    cumulative, _total = _polyline_arclength(polyline)
+    best_point: Optional[np.ndarray] = None
+    best_arclength = float("nan")
+    best_dist = np.inf
+    for idx in range(int(polyline.shape[0]) - 1):
+        a = polyline[idx]
+        b = polyline[idx + 1]
+        ab = b - a
+        denom = float(np.dot(ab, ab))
+        if denom <= 1e-12:
+            continue
+        t = min(1.0, max(0.0, float(np.dot(point - a, ab) / denom)))
+        candidate = a + t * ab
+        dist = float(np.linalg.norm(point - candidate))
+        if dist < best_dist:
+            best_dist = dist
+            best_point = candidate
+            best_arclength = float(cumulative[idx] + t * math.sqrt(denom))
+    return best_point, best_arclength
+
+
+def _compute_centerline_batch(
+    body_masks: np.ndarray,
+    body_frame: BodyFrameBatch,
+    caudal_anchor: CaudalAnchorBatch,
+    *,
+    sample_count: int = CENTERLINE_SAMPLE_COUNT,
+) -> CenterlineBatch:
+    masks_bool = np.asarray(body_masks, dtype=np.uint8) > 0
+    row_count = int(masks_bool.shape[0])
+    centerline_xy = np.full((row_count, int(sample_count), 2), np.nan, dtype=np.float32)
+    centerline_valid = np.zeros((row_count,), dtype=bool)
+    centerline_reasons = ["missing_subject_body_mask"] * row_count
+    head_endpoint_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    tail_tip_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    tail_base_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    tail_base_valid = np.zeros((row_count,), dtype=bool)
+    tail_base_arclength_px = np.full((row_count,), np.nan, dtype=np.float32)
+    tail_base_reasons = ["missing_centerline"] * row_count
+    tail_segment_arclength_px = np.full((row_count,), np.nan, dtype=np.float32)
+    body_arclength_px = np.full((row_count,), np.nan, dtype=np.float32)
+
+    for row_idx in range(row_count):
+        if not bool(body_frame.valid[row_idx]):
+            centerline_reasons[row_idx] = "missing_body_frame"
+            tail_base_reasons[row_idx] = "missing_body_frame"
+            continue
+        path_xy, reason = _longest_skeleton_endpoint_path_xy(masks_bool[row_idx])
+        if path_xy is None:
+            centerline_reasons[row_idx] = reason
+            tail_base_reasons[row_idx] = "missing_centerline"
+            continue
+        origin = body_frame.origin_xy[row_idx].astype(np.float64)
+        forward = body_frame.forward_axis_xy[row_idx].astype(np.float64)
+        first_projection = float(np.dot(path_xy[0] - origin, forward))
+        last_projection = float(np.dot(path_xy[-1] - origin, forward))
+        if not (np.isfinite(first_projection) and np.isfinite(last_projection)):
+            centerline_reasons[row_idx] = "endpoint_orientation_failed"
+            tail_base_reasons[row_idx] = "missing_centerline"
+            continue
+        if abs(first_projection - last_projection) <= 1e-6:
+            centerline_reasons[row_idx] = "ambiguous_polarity"
+            tail_base_reasons[row_idx] = "missing_centerline"
+            continue
+        if first_projection < last_projection:
+            path_xy = path_xy[::-1]
+        sampled, total_length = _resample_polyline(path_xy, int(sample_count))
+        if sampled is None or total_length <= 1e-6:
+            centerline_reasons[row_idx] = "centerline_order_failed"
+            tail_base_reasons[row_idx] = "missing_centerline"
+            continue
+        centerline_xy[row_idx] = sampled.astype(np.float32)
+        centerline_valid[row_idx] = True
+        centerline_reasons[row_idx] = "ok"
+        head_endpoint_xy[row_idx] = path_xy[0].astype(np.float32)
+        tail_tip_xy[row_idx] = path_xy[-1].astype(np.float32)
+        body_arclength_px[row_idx] = np.float32(total_length)
+
+        if not bool(caudal_anchor.valid[row_idx]):
+            tail_base_reasons[row_idx] = "missing_tail_anchor"
+            continue
+        projected, arclength = _project_point_to_polyline(caudal_anchor.point_xy[row_idx], path_xy)
+        if projected is None or not np.isfinite(arclength):
+            tail_base_reasons[row_idx] = "tail_base_projection_failed"
+            continue
+        tail_length = float(total_length - arclength)
+        if tail_length < 0.0:
+            tail_base_reasons[row_idx] = "tail_base_projection_failed"
+            continue
+        tail_base_xy[row_idx] = projected.astype(np.float32)
+        tail_base_valid[row_idx] = True
+        tail_base_arclength_px[row_idx] = np.float32(arclength)
+        tail_segment_arclength_px[row_idx] = np.float32(tail_length)
+        tail_base_reasons[row_idx] = "ok"
+
+    return CenterlineBatch(
+        centerline_xy=centerline_xy,
+        centerline_valid=centerline_valid,
+        centerline_failure_reason_bytes=_encode_reasons(centerline_reasons),
+        head_endpoint_xy=head_endpoint_xy,
+        tail_tip_xy=tail_tip_xy,
+        tail_base_xy=tail_base_xy,
+        tail_base_valid=tail_base_valid,
+        tail_base_arclength_px=tail_base_arclength_px,
+        tail_base_failure_reason_bytes=_encode_reasons(tail_base_reasons),
+        tail_segment_arclength_px=tail_segment_arclength_px,
+        body_arclength_px=body_arclength_px,
+    )
+
+
+def _write_centerline_batch(run_group: zarr.Group, row_slice: slice, batch: CenterlineBatch) -> None:
+    components = run_group.get("components")
+    if components is None or "subject_body" not in components:
+        return
+    group = components["subject_body"]
+    if "centerline_xy" not in group:
+        return
+    group["centerline_xy"][row_slice, :, :] = batch.centerline_xy
+    group["centerline_valid"][row_slice] = batch.centerline_valid
+    group["centerline_failure_reason_bytes"][row_slice, :] = batch.centerline_failure_reason_bytes
+    group["head_endpoint_xy"][row_slice, :] = batch.head_endpoint_xy
+    group["tail_tip_xy"][row_slice, :] = batch.tail_tip_xy
+    group["tail_base_xy"][row_slice, :] = batch.tail_base_xy
+    group["tail_base_valid"][row_slice] = batch.tail_base_valid
+    group["tail_base_arclength_px"][row_slice] = batch.tail_base_arclength_px
+    group["tail_base_failure_reason_bytes"][row_slice, :] = batch.tail_base_failure_reason_bytes
+    group["tail_segment_arclength_px"][row_slice] = batch.tail_segment_arclength_px
+    group["body_arclength_px"][row_slice] = batch.body_arclength_px
+
+
 def _angle_between_unoriented_axes(axis_a: np.ndarray, axis_b: np.ndarray) -> float:
     dot = float(np.dot(axis_a, axis_b))
     cross = float(axis_a[0] * axis_b[1] - axis_a[1] * axis_b[0])
@@ -718,6 +1351,7 @@ def _process_and_write_subject_shape_chunk_groups(
         "execution_backend": execution_backend,
     }
     batches: dict[str, ComponentBatch] = {}
+    component_masks_by_name: dict[str, np.ndarray] = {}
     rows_with_component: dict[str, int] = {}
     for component_name, component_idx in component_indices:
         phase_start = time.perf_counter()
@@ -725,8 +1359,40 @@ def _process_and_write_subject_shape_chunk_groups(
         batch = _compute_component_batch(component_masks, str(component_name))
         _write_component_batch(run_group, str(component_name), row_slice, batch)
         batches[str(component_name)] = batch
+        if str(component_name) in {"subject_body", "swim_bladder"}:
+            component_masks_by_name[str(component_name)] = component_masks
         rows_with_component[str(component_name)] = int(np.count_nonzero(batch.mask_present))
         chunk_timing[f"write_{component_name}_seconds"] = float(time.perf_counter() - phase_start)
+
+    body_frame: Optional[BodyFrameBatch] = None
+    if set(BODY_FRAME_COMPONENTS).issubset(batches):
+        phase_start = time.perf_counter()
+        body_frame = _compute_body_frame_batch(batches)
+        _write_body_frame_batch(run_group, row_slice, body_frame)
+        chunk_timing["write_body_frame_seconds"] = float(time.perf_counter() - phase_start)
+        rows_with_component["body_frame_valid"] = int(np.count_nonzero(body_frame.valid))
+
+    caudal_anchor: Optional[CaudalAnchorBatch] = None
+    if body_frame is not None and "swim_bladder" in component_masks_by_name:
+        phase_start = time.perf_counter()
+        caudal_anchor = _compute_caudal_anchor_batch(component_masks_by_name["swim_bladder"], body_frame)
+        _write_caudal_anchor_batch(run_group, row_slice, caudal_anchor)
+        chunk_timing["write_caudal_anchor_seconds"] = float(time.perf_counter() - phase_start)
+        rows_with_component["caudal_contour_valid"] = int(np.count_nonzero(caudal_anchor.valid))
+
+    if body_frame is not None and caudal_anchor is not None and "subject_body" in component_masks_by_name:
+        phase_start = time.perf_counter()
+        centerline = _compute_centerline_batch(
+            component_masks_by_name["subject_body"],
+            body_frame,
+            caudal_anchor,
+            sample_count=CENTERLINE_SAMPLE_COUNT,
+        )
+        _write_centerline_batch(run_group, row_slice, centerline)
+        chunk_timing["write_centerline_seconds"] = float(time.perf_counter() - phase_start)
+        rows_with_component["centerline_valid"] = int(np.count_nonzero(centerline.centerline_valid))
+        rows_with_component["tail_base_valid"] = int(np.count_nonzero(centerline.tail_base_valid))
+
     phase_start = time.perf_counter()
     _write_relations(run_group, row_slice, batches)
     chunk_timing["write_relations_seconds"] = float(time.perf_counter() - phase_start)
