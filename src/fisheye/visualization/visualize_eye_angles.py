@@ -18,7 +18,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
-import zarr
+
+from fisheye.utils.zarr_io import open_zarr_root
+
 try:
     from scipy.stats import gaussian_kde
 except Exception:  # pragma: no cover
@@ -69,7 +71,7 @@ def _save_with_metadata(fig: plt.Figure, path: Path, metadata: Dict[str, object]
 
 
 def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[str, object], Dict[str, np.ndarray]]:
-    root = zarr.open(str(zarr_path), mode="r")
+    root = open_zarr_root(zarr_path, mode="r")
     analysis = root.get("analysis")
     if analysis is None or "eye_angle_runs" not in analysis:
         raise ValueError("Archive is missing analysis/eye_angle_runs.")
@@ -233,6 +235,25 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "support": support_data,
     }
     return attrs, data
+
+
+def _eye_angle_contract_metadata(attrs: Dict[str, object]) -> Dict[str, object]:
+    """Return stable contract/source metadata for summaries and PNG XMP."""
+
+    return {
+        "schema_id": attrs.get("schema_id"),
+        "schema_version": attrs.get("schema_version"),
+        "method": attrs.get("method"),
+        "row_axis": attrs.get("row_axis"),
+        "source_geometry_kind": attrs.get("source_geometry_kind"),
+        "source_eye_geometry_stage": attrs.get("source_eye_geometry_stage"),
+        "source_eye_geometry_run": attrs.get("source_eye_geometry_run"),
+        "source_subject_shape_run": attrs.get("source_subject_shape_run"),
+        "source_refined_subject_masks_run": attrs.get("source_refined_subject_masks_run"),
+        "source_refined_eye_run": attrs.get("source_refined_eye_run"),
+        "source_keypoints_run": attrs.get("source_keypoints_run") or attrs.get("source_keypoint_run"),
+        "eye_angle_output_schema": attrs.get("eye_angle_output_schema"),
+    }
 
 
 def _downsample(values: Optional[np.ndarray], max_points: int) -> np.ndarray:
@@ -439,6 +460,27 @@ def _format_summary_lines(attrs: Dict[str, object], counts: Dict[str, int], roi_
     ]
     if valid_frames is not None:
         lines.append(f"Frames: {valid_frames}/{total_frames} valid ({(valid_frames/total_frames*100.0) if total_frames else 0:.1f}%)")
+    schema_id = attrs.get("schema_id")
+    schema_version = attrs.get("schema_version")
+    if schema_id:
+        schema_text = str(schema_id)
+        if schema_version is not None:
+            schema_text = f"{schema_text} v{schema_version}"
+        lines.append(f"Schema: {schema_text}")
+    method = attrs.get("method")
+    if method:
+        lines.append(f"Method: {method}")
+    geometry_kind = attrs.get("source_geometry_kind")
+    geometry_stage = attrs.get("source_eye_geometry_stage")
+    geometry_run = attrs.get("source_eye_geometry_run")
+    if geometry_kind or geometry_stage or geometry_run:
+        geometry_desc = str(geometry_kind or "unknown_eye_geometry")
+        if geometry_stage or geometry_run:
+            geometry_desc += f" ({geometry_stage or '?'} / {geometry_run or '?'})"
+        lines.append(f"Eye geometry: {geometry_desc}")
+    source_keypoints = attrs.get("source_keypoints_run") or attrs.get("source_keypoint_run")
+    if source_keypoints:
+        lines.append(f"Keypoints: {source_keypoints}")
     fps = attrs.get("fps")
     if fps:
         lines.append(f"FPS: {fps:.3f}")
@@ -944,6 +986,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "provenance": provenance,
             "angle_source": angle_source,
             "angle_source_label": variant_label,
+            "eye_angle_contract": _eye_angle_contract_metadata(attrs),
         }
 
         if args.output:

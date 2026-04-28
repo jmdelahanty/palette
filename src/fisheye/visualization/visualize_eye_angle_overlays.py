@@ -30,8 +30,14 @@ import zarr
 from matplotlib.widgets import Button, Slider
 
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
-from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
+from fisheye.shared.eye_geometry_source import (
+    EYE_GEOMETRY_STAGE_REFINED_EYE,
+    EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
+    EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+    resolve_eye_geometry_source,
+)
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
+from fisheye.utils.zarr_io import open_zarr_root
 
 
 DEFAULT_LEFT_COLOR = np.array([0.90, 0.23, 0.31], dtype=np.float32)   # reddish
@@ -46,7 +52,7 @@ _HEAD_KEYPOINT_LABELS = ("swim_bladder", "eye_left", "eye_right")
 def _open_zarr(zarr_path: Path) -> zarr.Group:
     if not zarr_path.exists():
         raise FileNotFoundError(f"Zarr archive not found: {zarr_path}")
-    return zarr.open_group(str(zarr_path), mode="r")
+    return open_zarr_root(zarr_path, mode="r")
 
 
 def _get_latest(root: zarr.Group, base: str, explicit: Optional[str]) -> str:
@@ -473,19 +479,49 @@ def _load_keypoints(root: zarr.Group, keypoint_run: str) -> tuple[Optional[zarr.
     return None, None
 
 
-def _load_masks(
+def _resolve_eye_angle_geometry_source(
     root: zarr.Group,
     *,
+    run_attrs: Mapping[str, object],
+):
+    source_stage = str(run_attrs.get("source_eye_geometry_stage") or "")
+    source_run = str(run_attrs.get("source_eye_geometry_run") or "")
+    if source_stage == EYE_GEOMETRY_STAGE_SUBJECT_SHAPE:
+        return resolve_eye_geometry_source(
+            root,
+            subject_shape_run=source_run or run_attrs.get("source_subject_shape_run"),
+        )
+    if source_stage == EYE_GEOMETRY_STAGE_REFINED_SUBJECT:
+        return resolve_eye_geometry_source(root, refined_subject_run=source_run)
+    if source_stage == EYE_GEOMETRY_STAGE_REFINED_EYE:
+        return resolve_eye_geometry_source(root, refined_eye_run=source_run)
+
+    subject_shape_run = run_attrs.get("source_subject_shape_run")
+    if subject_shape_run:
+        return resolve_eye_geometry_source(root, subject_shape_run=subject_shape_run)
+    return resolve_eye_geometry_source(root, prefer_subject_shape=True)
+
+
+def _load_display_masks_and_geometry(
+    root: zarr.Group,
+    *,
+    run_attrs: Mapping[str, object],
     refined_subject_run: Optional[str],
     refined_eye_run: Optional[str],
 ):
-    source = resolve_eye_geometry_source(
+    geometry_source = _resolve_eye_angle_geometry_source(root, run_attrs=run_attrs)
+    mask_source = resolve_eye_geometry_source(
         root,
         refined_subject_run=refined_subject_run,
         refined_eye_run=refined_eye_run,
         prefer_subject=True,
     )
-    return source.masks_roi, source.ellipse_params
+    if mask_source.masks_roi is None:
+        raise RuntimeError(
+            "Resolved eye-angle geometry does not include masks; pass --refined-subject-run "
+            "or --refined-eye-run for overlay pixels."
+        )
+    return mask_source.masks_roi, geometry_source.ellipse_params
 
 
 def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[AngleRecord], Dict[int, str]]:
@@ -695,8 +731,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     roi_images = _load_roi_images(root, keypoint_run)
     keypoints_roi, keypoint_indices = _load_keypoints(root, keypoint_run)
-    masks, ellipse_params = _load_masks(
+    masks, ellipse_params = _load_display_masks_and_geometry(
         root,
+        run_attrs=run_group.attrs,
         refined_subject_run=refined_subject_run,
         refined_eye_run=refined_run,
     )

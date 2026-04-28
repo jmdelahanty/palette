@@ -14,7 +14,12 @@ from fisheye.shared.eye_geometry_source import (
     resolve_eye_geometry_source,
 )
 from fisheye.visualization.visualize_eye_angle_overlays import (
+    _load_display_masks_and_geometry,
     _resolve_keypoint_run_name as resolve_overlay_keypoint_run,
+)
+from fisheye.visualization.visualize_eye_angles import (
+    _eye_angle_contract_metadata,
+    _format_summary_lines,
 )
 
 
@@ -268,6 +273,77 @@ def test_overlay_keypoint_resolution_falls_back_to_legacy() -> None:
         run_attrs={"source_keypoint_run": "kp_legacy"},
     )
     assert resolved == "kp_legacy"
+
+
+def test_eye_angle_dashboard_contract_metadata_prefers_canonical_keypoint_attr() -> None:
+    metadata = _eye_angle_contract_metadata(
+        {
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 1,
+            "method": "ellipse_and_centroid_eye_angles",
+            "row_axis": "keypoint_detection_rows",
+            "source_geometry_kind": "subject_shape_eye_geometry",
+            "source_eye_geometry_stage": "analysis/subject_shape_runs",
+            "source_eye_geometry_run": "shape_001",
+            "source_keypoints_run": "kp_canonical",
+            "source_keypoint_run": "kp_legacy",
+            "eye_angle_output_schema": {"schema_id": "analysis.eye_angle_output_schema"},
+        }
+    )
+
+    assert metadata["schema_id"] == "analysis.eye_angle_runs"
+    assert metadata["schema_version"] == 1
+    assert metadata["source_geometry_kind"] == "subject_shape_eye_geometry"
+    assert metadata["source_keypoints_run"] == "kp_canonical"
+    assert metadata["eye_angle_output_schema"] == {"schema_id": "analysis.eye_angle_output_schema"}
+
+
+def test_eye_angle_dashboard_summary_includes_schema_and_lineage() -> None:
+    summary = _format_summary_lines(
+        {
+            "run_name": "eye_angle_001",
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 1,
+            "method": "ellipse_and_centroid_eye_angles",
+            "source_geometry_kind": "subject_shape_eye_geometry",
+            "source_eye_geometry_stage": "analysis/subject_shape_runs",
+            "source_eye_geometry_run": "shape_001",
+            "source_keypoints_run": "kp_canonical",
+            "num_detections": 2,
+        },
+        counts={},
+        roi_valid=np.asarray([True, False]),
+        frame_valid=None,
+    )
+
+    assert "Schema: analysis.eye_angle_runs v1" in summary
+    assert "Method: ellipse_and_centroid_eye_angles" in summary
+    assert "Eye geometry: subject_shape_eye_geometry (analysis/subject_shape_runs / shape_001)" in summary
+    assert "Keypoints: kp_canonical" in summary
+
+
+def test_eye_angle_overlay_draws_vectors_from_actual_subject_shape_geometry() -> None:
+    import zarr
+
+    root = zarr.group()
+    _add_refined_subject_eye_geometry(root)
+    _add_subject_shape_eye_geometry(root)
+
+    masks, ellipse_params = _load_display_masks_and_geometry(
+        root,
+        run_attrs={
+            "source_eye_geometry_stage": EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+            "source_eye_geometry_run": "shape_001",
+            "source_refined_subject_masks_run": "refined_001",
+        },
+        refined_subject_run="refined_001",
+        refined_eye_run=None,
+    )
+
+    assert masks.shape == (2, 2, 4, 4)
+    assert ellipse_params.shape == (2, 2, 5)
+    np.testing.assert_allclose(ellipse_params[:, 0, 0], [1.0, 1.0])
+    np.testing.assert_allclose(ellipse_params[:, 1, 0], [2.0, 2.0])
 
 
 def test_eye_angle_chunk_uses_label_resolved_indices() -> None:
