@@ -12,6 +12,53 @@ interactive plot products.
   full HTML apps or decoded RGB image arrays as canonical data.
 - Keep all plot artifacts attached to the run whose data they summarize.
 
+## Run-Type Policy
+
+Every major analysis run type should provide a canonical visualization artifact
+writer.
+
+Required behavior:
+
+- Provide a `--write-zarr-artifacts` or equivalent finalize/apply path that
+  writes at least one compact PNG summary under the run's own
+  `visualizations/` group.
+- Keep the numeric arrays, structured tables, and attrs as the source of truth;
+  PNGs are review snapshots, not primary scientific data.
+- Include enough provenance in the artifact attrs to recover source arrays,
+  source runs, command parameters, renderer, git state, and creation time.
+- Maintain the run-local `attrs["visualizations"]` manifest so registry,
+  CLI, Crimson, marimo, and reports can discover available plots without
+  knowing stage-specific filenames.
+- Prefer one small canonical overview PNG per run first. Add more snapshots
+  only when they answer distinct QC questions.
+- Prefer an interactive plot spec beside the PNG when the review naturally
+  involves selectable traces, overlays, time windows, or linked derived runs.
+
+Default generation policy:
+
+- Do not automatically write heavy or numerous plot artifacts every time a run
+  is created unless the command explicitly requests visualization artifacts.
+- It is acceptable for operator-facing workflow wrappers to make
+  `--write-zarr-artifacts` the recommended or default path for review-oriented
+  runs.
+- Per-frame, per-bout, or debug-image grids should remain opt-in and should be
+  clearly marked as review/debug artifacts.
+
+Marimo, Crimson, and other viewers should discover and enrich persisted
+artifacts. They should not be the only way to understand whether a run looks
+reasonable.
+
+Initial coverage targets:
+
+- `track_kinematics_runs`: speed, acceleration, heading/turning, cumulative
+  path, position density, validity overlays, and optional swim-bout overlays.
+- `swim_bout_runs`: detection signal, thresholds/parameters, selected bout
+  boundaries, bout duration/distance summaries, and interbout intervals.
+- `bout_kinematics_runs`: heading-change, angular-speed, within-bout, and
+  pre/post/interbout summaries.
+- `stimulus_response_runs`: stimulus-aligned response summaries and per-step /
+  per-fish aggregate diagnostics.
+
 ## Storage Locations
 
 Run-local visualizations live under:

@@ -1192,7 +1192,10 @@ Each track stores the ordered samples for that ID:
 - `speed_filtered_px`, `speed_filtered_mm`: Speed after hysteresis filtering
 - `speed_smoothed_px`, `speed_smoothed_mm`: Speed after temporal smoothing
 - `speed_averaged_px`, `speed_averaged_mm`: Optional longer-window averaged speed
-- `heading_degrees`, `heading_radians`, `delta_heading_degrees`, `angular_velocity_deg_s`, `smoothed_heading_degrees`, `smoothed_heading_radians`
+- `heading_degrees`, `heading_radians`, `delta_heading_degrees`, `angular_velocity_deg_s`
+- `angular_velocity_raw_deg_s`, `angular_speed_raw_deg_s`
+- `delta_heading_smoothed_degrees`, `angular_velocity_smoothed_deg_s`, `angular_speed_smoothed_deg_s`
+- `smoothed_heading_degrees`, `smoothed_heading_radians`
 - `acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`, `smoothed_acceleration_mm`
 - `frame_path_distance_raw_px`, `frame_path_distance_raw_mm`: Gap-aware pre-hysteresis frame path-distance increments
 - `frame_path_distance_filtered_px`, `frame_path_distance_filtered_mm`: Gap-aware hysteresis-filtered frame path-distance increments
@@ -1330,9 +1333,9 @@ the measurement logic used.
 
 **Run Attributes**:
 - `schema_id`: `"analysis.bout_kinematics_runs"`
-- `schema_version`: Current schema is `4`
+- `schema_version`: Current schema is `5`
 - `method`: `"heading_window_and_within_bout_metrics"`
-- `method_version`: Current implementation is `"bout_kinematics.v4"`
+- `method_version`: Current implementation is `"bout_kinematics.v5"`
 - `row_axis`: `"swim_bout_rows"`
 - `source_track_kinematics_run`, `source_track_id`
 - `source_swim_bout_run`, `source_swim_bout_speed_level`
@@ -1385,6 +1388,10 @@ heading_raw/per_bout_metrics/
 - `within_heading_path_deg`, `within_heading_std_deg`
 - `within_heading_zero_crossings`
 - `within_heading_dominant_frequency_hz` plus `dominant_frequency_valid`
+- `within_angular_velocity_mean_deg_s`, `within_angular_speed_mean_deg_s`,
+  `within_angular_speed_max_deg_s`, `within_angular_velocity_std_deg_s`
+- `within_angular_velocity_valid`,
+  `within_angular_velocity_transition_count`
 - `pre_window_valid`, `post_window_valid`, `pre_position_valid`,
   `post_position_valid`, `within_window_valid`
 - `failure_reason_bytes`

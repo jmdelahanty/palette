@@ -604,6 +604,49 @@ def _wrap_heading_delta_degrees(delta_degrees: np.ndarray) -> np.ndarray:
     return ((delta + 180.0) % 360.0) - 180.0
 
 
+def _compute_heading_turning(
+    headings_deg: np.ndarray,
+    delta_seconds_full: np.ndarray,
+    *,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return gap-aware heading delta, angular velocity, and angular speed."""
+
+    headings = np.asarray(headings_deg, dtype=np.float64)
+    delta_seconds = np.asarray(delta_seconds_full, dtype=np.float64)
+    delta_heading = np.full(headings.shape[0], np.nan, dtype=np.float64)
+    angular_velocity = np.full(headings.shape[0], np.nan, dtype=np.float64)
+    angular_speed = np.full(headings.shape[0], np.nan, dtype=np.float64)
+
+    if headings.size < 2:
+        return delta_heading, angular_velocity, angular_speed
+
+    step_delta = _wrap_heading_delta_degrees(headings[1:] - headings[:-1])
+    valid = (
+        np.isfinite(headings[1:])
+        & np.isfinite(headings[:-1])
+        & np.isfinite(delta_seconds[1:])
+        & (delta_seconds[1:] > 0)
+    )
+    if transition_valid is not None:
+        transition = np.asarray(transition_valid, dtype=bool)
+        if transition.shape[0] == headings.shape[0]:
+            valid &= transition[1:]
+    if sample_valid is not None:
+        samples = np.asarray(sample_valid, dtype=bool)
+        if samples.shape[0] == headings.shape[0]:
+            valid &= samples[1:] & samples[:-1]
+
+    delta_heading_step_values = delta_heading[1:]
+    delta_heading_step_values[valid] = step_delta[valid]
+    angular_velocity_values = np.full(step_delta.shape, np.nan, dtype=np.float64)
+    angular_velocity_values[valid] = step_delta[valid] / delta_seconds[1:][valid]
+    angular_velocity[1:] = angular_velocity_values
+    angular_speed[1:] = np.abs(angular_velocity_values)
+    return delta_heading, angular_velocity, angular_speed
+
+
 def build_track_datasets(
     track_ids: np.ndarray,
     frames: np.ndarray,
@@ -728,25 +771,6 @@ def build_track_datasets(
         if track_frames.size >= 2:
             delta_seconds_full[1:] = np.diff(track_frames) / fps
 
-        delta_heading_degrees = np.full(track_frames.shape[0], np.nan, dtype=np.float64)
-        angular_velocity_deg_s = np.full(track_frames.shape[0], np.nan, dtype=np.float64)
-
-        if headings_track.size >= 2:
-            delta_heading_step = _wrap_heading_delta_degrees(
-                headings_track[1:] - headings_track[:-1]
-            )
-            turning_valid = (
-                np.isfinite(headings_track[1:])
-                & np.isfinite(headings_track[:-1])
-                & (delta_seconds_full[1:] > 0)
-            )
-            delta_heading_slice = delta_heading_degrees[1:]
-            delta_heading_slice[turning_valid] = delta_heading_step[turning_valid]
-            angular_velocity_slice = angular_velocity_deg_s[1:]
-            angular_velocity_slice[turning_valid] = (
-                delta_heading_step[turning_valid] / delta_seconds_full[1:][turning_valid]
-            )
-
         # Acceleration from smoothed speed profile
         acceleration_px = np.full(speed_smoothed_px.shape, np.nan, dtype=np.float64)
         acceleration_mm = np.full(speed_smoothed_px.shape, np.nan, dtype=np.float64)
@@ -798,6 +822,24 @@ def build_track_datasets(
 
         smoothed_heading_deg = np.rad2deg(smoothed_heading_rad)
 
+        delta_heading_degrees, angular_velocity_raw_deg_s, angular_speed_raw_deg_s = (
+            _compute_heading_turning(
+                headings_track,
+                delta_seconds_full,
+                transition_valid=transition_valid,
+                sample_valid=sample_validity["sample_valid"],
+            )
+        )
+        delta_heading_smoothed_degrees, angular_velocity_smoothed_deg_s, angular_speed_smoothed_deg_s = (
+            _compute_heading_turning(
+                smoothed_heading_deg,
+                delta_seconds_full,
+                transition_valid=transition_valid,
+                sample_valid=sample_validity["sample_valid"],
+            )
+        )
+        angular_velocity_deg_s = angular_velocity_raw_deg_s
+
         unique_seconds = speeds.seconds.astype(np.int64)
         # fallback if TrackSpeeds.seconds is empty
         if unique_seconds.size == 0 and seconds_per_frame.size > 0:
@@ -823,6 +865,11 @@ def build_track_datasets(
             "heading_radians": _float32(heading_rad),
             "delta_heading_degrees": _float32(delta_heading_degrees),
             "angular_velocity_deg_s": _float32(angular_velocity_deg_s),
+            "angular_velocity_raw_deg_s": _float32(angular_velocity_raw_deg_s),
+            "angular_speed_raw_deg_s": _float32(angular_speed_raw_deg_s),
+            "delta_heading_smoothed_degrees": _float32(delta_heading_smoothed_degrees),
+            "angular_velocity_smoothed_deg_s": _float32(angular_velocity_smoothed_deg_s),
+            "angular_speed_smoothed_deg_s": _float32(angular_speed_smoothed_deg_s),
             "smoothed_heading_degrees": _float32(smoothed_heading_deg),
             "smoothed_heading_radians": _float32(smoothed_heading_rad),
             "keypoint_success": _boolean(kp_success_track),
@@ -1062,6 +1109,36 @@ def save_track_kinematics_tracks(
         subgroup.create_array("heading_radians", data=data["heading_radians"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("delta_heading_degrees", data=data["delta_heading_degrees"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("angular_velocity_deg_s", data=data["angular_velocity_deg_s"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array(
+            "angular_velocity_raw_deg_s",
+            data=data["angular_velocity_raw_deg_s"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "angular_speed_raw_deg_s",
+            data=data["angular_speed_raw_deg_s"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "delta_heading_smoothed_degrees",
+            data=data["delta_heading_smoothed_degrees"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "angular_velocity_smoothed_deg_s",
+            data=data["angular_velocity_smoothed_deg_s"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
+        subgroup.create_array(
+            "angular_speed_smoothed_deg_s",
+            data=data["angular_speed_smoothed_deg_s"],
+            chunks=base_chunk,
+            overwrite=True,
+        )
         subgroup.create_array("smoothed_heading_degrees", data=data["smoothed_heading_degrees"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_heading_radians", data=data["smoothed_heading_radians"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("keypoint_success", data=data["keypoint_success"], chunks=base_chunk, overwrite=True)

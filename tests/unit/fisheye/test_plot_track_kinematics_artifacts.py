@@ -55,6 +55,15 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_track_array(track, "speed_averaged_px", speed_px)
     _write_track_array(track, "speed_averaged_mm", speed_mm)
     _write_track_array(track, "smoothed_heading_degrees", np.linspace(0.0, 5.0, n, dtype=np.float32))
+    _write_track_array(track, "delta_heading_degrees", np.linspace(0.0, 2.0, n, dtype=np.float32))
+    _write_track_array(track, "angular_velocity_deg_s", np.linspace(0.0, 20.0, n, dtype=np.float32))
+    _write_track_array(track, "angular_velocity_raw_deg_s", np.linspace(0.0, 20.0, n, dtype=np.float32))
+    _write_track_array(track, "angular_speed_raw_deg_s", np.linspace(0.0, 20.0, n, dtype=np.float32))
+    _write_track_array(track, "delta_heading_smoothed_degrees", np.linspace(0.0, 1.0, n, dtype=np.float32))
+    _write_track_array(track, "angular_velocity_smoothed_deg_s", np.linspace(0.0, 10.0, n, dtype=np.float32))
+    _write_track_array(track, "angular_speed_smoothed_deg_s", np.linspace(0.0, 10.0, n, dtype=np.float32))
+    _write_track_array(track, "acceleration_px", np.zeros(n, dtype=np.float32))
+    _write_track_array(track, "acceleration_mm", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "smoothed_acceleration_px", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "smoothed_acceleration_mm", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "cumulative_path_distance_px", np.cumsum(speed_px).astype(np.float32))
@@ -111,9 +120,16 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
     assert spec["schema_id"] == mod.TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID
     assert spec["track_id"] == 0
     assert spec["source_paths"]["positions_mm"].endswith("/tracks/id_0/positions_mm")
+    assert spec["source_paths"]["smoothed_acceleration_mm"].endswith(
+        "/tracks/id_0/smoothed_acceleration_mm"
+    )
+    assert spec["source_paths"]["angular_speed_smoothed_deg_s"].endswith(
+        "/tracks/id_0/angular_speed_smoothed_deg_s"
+    )
     assert spec["source_paths"]["transition_valid"].endswith("/tracks/id_0/transition_valid")
     assert spec["source_paths"]["sample_valid"].endswith("/tracks/id_0/sample_valid")
     assert any(panel["id"] == "position_density" for panel in spec["panels"])
+    assert any(panel["id"] == "turning" for panel in spec["panels"])
     spec_provenance = spec_group.attrs["provenance"]
     assert spec_provenance["stage"] == "track_kinematics_visualization"
     assert spec_provenance["artifacts"]["interactive_artifact"].endswith(

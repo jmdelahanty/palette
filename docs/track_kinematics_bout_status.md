@@ -465,6 +465,11 @@ For each track, the current implementation stores:
 - `heading_radians`
 - `delta_heading_degrees`
 - `angular_velocity_deg_s`
+- `angular_velocity_raw_deg_s`
+- `angular_speed_raw_deg_s`
+- `delta_heading_smoothed_degrees`
+- `angular_velocity_smoothed_deg_s`
+- `angular_speed_smoothed_deg_s`
 - `smoothed_heading_degrees`
 - `smoothed_heading_radians`
 - `heading_per_second_degrees`
@@ -477,15 +482,14 @@ The new turning arrays make successive-sample heading changes explicit, but the
 downstream stack still does not yet standardize how turning should be summarized
 or consumed in later stimulus-response analyses.
 
-Recommended next semantics:
+Current semantics:
 
-- Keep `angular_velocity_deg_s` as the current raw-heading field for
-  compatibility.
-- Add explicit `angular_velocity_raw_deg_s` and
-  `angular_velocity_smoothed_deg_s` when the track schema is next revised.
-- Add absolute-value companions such as `angular_speed_raw_deg_s` and
-  `angular_speed_smoothed_deg_s` when downstream consumers need unsigned
-  turning rate.
+- `angular_velocity_deg_s` is retained as the raw-heading compatibility field
+  and matches `angular_velocity_raw_deg_s`.
+- `angular_velocity_raw_deg_s` and `angular_speed_raw_deg_s` are derived from
+  `heading_degrees`.
+- `angular_velocity_smoothed_deg_s` and `angular_speed_smoothed_deg_s` are
+  derived from `smoothed_heading_degrees`.
 - Compute angular velocity from wrapped successive heading deltas divided by
   elapsed time; never subtract circular angles without wrap/unwrap handling.
 - Treat gaps, invalid keypoints, missing headings, nonpositive time deltas, and

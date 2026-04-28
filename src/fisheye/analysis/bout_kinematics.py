@@ -30,9 +30,9 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 
 SCHEMA_ID = "analysis.bout_kinematics_runs"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 METHOD = "heading_window_and_within_bout_metrics"
-METHOD_VERSION = "bout_kinematics.v4"
+METHOD_VERSION = "bout_kinematics.v5"
 BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_kinematics_summary.v1"
 BOUT_KINEMATICS_PLOT_RENDERER = "matplotlib_static_plotly_spec.v1"
 BOUT_KINEMATICS_PNG_PREFIX = "bout_kinematics_summary"
@@ -109,17 +109,23 @@ def _metrics_dtype() -> np.dtype:
             ("within_heading_std_deg", "f8"),
             ("within_heading_zero_crossings", "i4"),
             ("within_heading_dominant_frequency_hz", "f8"),
+            ("within_angular_velocity_mean_deg_s", "f8"),
+            ("within_angular_speed_mean_deg_s", "f8"),
+            ("within_angular_speed_max_deg_s", "f8"),
+            ("within_angular_velocity_std_deg_s", "f8"),
             ("pre_window_valid", "?"),
             ("post_window_valid", "?"),
             ("pre_position_valid", "?"),
             ("post_position_valid", "?"),
             ("within_window_valid", "?"),
+            ("within_angular_velocity_valid", "?"),
             ("dominant_frequency_valid", "?"),
             ("pre_window_sample_count", "i4"),
             ("post_window_sample_count", "i4"),
             ("pre_position_sample_count", "i4"),
             ("post_position_sample_count", "i4"),
             ("within_window_sample_count", "i4"),
+            ("within_angular_velocity_transition_count", "i4"),
             ("failure_reason_bytes", "S256"),
         ]
     )
@@ -176,6 +182,47 @@ def _zero_crossings(
     if signs.size < 2:
         return 0
     return int(np.count_nonzero(signs[1:] != signs[:-1]))
+
+
+def _angular_velocity_steps(
+    headings: np.ndarray,
+    times: np.ndarray,
+    *,
+    transition_valid: Optional[np.ndarray] = None,
+    sample_valid: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, bool, int, Optional[str]]:
+    """Return valid per-transition angular velocity values for a heading window."""
+
+    heading_values = np.asarray(headings, dtype=np.float64)
+    time_values = np.asarray(times, dtype=np.float64)
+    if heading_values.size < 2 or time_values.size != heading_values.size:
+        return np.asarray([], dtype=np.float64), False, 0, "insufficient_angular_velocity_samples"
+
+    dt = np.diff(time_values)
+    unwrapped = np.rad2deg(np.unwrap(np.deg2rad(heading_values)))
+    delta = np.diff(unwrapped)
+    valid = (
+        np.isfinite(heading_values[1:])
+        & np.isfinite(heading_values[:-1])
+        & np.isfinite(dt)
+        & (dt > 0)
+    )
+    if transition_valid is not None:
+        transition = np.asarray(transition_valid, dtype=bool)
+        if transition.shape[0] == heading_values.shape[0]:
+            valid &= transition[1:]
+    if sample_valid is not None:
+        samples = np.asarray(sample_valid, dtype=bool)
+        if samples.shape[0] == heading_values.shape[0]:
+            valid &= samples[1:] & samples[:-1]
+
+    transition_count = int(valid.size)
+    if transition_count == 0:
+        return np.asarray([], dtype=np.float64), False, 0, "insufficient_angular_velocity_samples"
+    if not bool(np.all(valid)):
+        return np.asarray([], dtype=np.float64), False, transition_count, "heading_transition_contains_gap"
+
+    return delta[valid] / dt[valid], True, transition_count, None
 
 
 def _dominant_frequency_hz(
@@ -368,6 +415,8 @@ def _build_metrics_for_heading(
     frames: np.ndarray,
     times: np.ndarray,
     headings: np.ndarray,
+    transition_valid: Optional[np.ndarray],
+    sample_valid: Optional[np.ndarray],
     positions_mm: Optional[np.ndarray],
     positions_px: Optional[np.ndarray],
     fps: float,
@@ -537,6 +586,10 @@ def _build_metrics_for_heading(
             "within_heading_path_deg",
             "within_heading_std_deg",
             "within_heading_dominant_frequency_hz",
+            "within_angular_velocity_mean_deg_s",
+            "within_angular_speed_mean_deg_s",
+            "within_angular_speed_max_deg_s",
+            "within_angular_velocity_std_deg_s",
         ):
             metrics[row_idx][field] = float("nan")
         metrics[row_idx]["within_heading_zero_crossings"] = 0
@@ -663,9 +716,21 @@ def _build_metrics_for_heading(
             reasons.append("source_bout_missing")
             within = np.asarray([], dtype=np.float64)
             within_times = np.asarray([], dtype=np.float64)
+            within_transition_valid = None
+            within_sample_valid = None
         else:
             within = np.asarray(headings[within_start_idx : within_end_idx + 1], dtype=np.float64)
             within_times = np.asarray(times[within_start_idx : within_end_idx + 1], dtype=np.float64)
+            within_transition_valid = (
+                np.asarray(transition_valid[within_start_idx : within_end_idx + 1], dtype=bool)
+                if transition_valid is not None
+                else None
+            )
+            within_sample_valid = (
+                np.asarray(sample_valid[within_start_idx : within_end_idx + 1], dtype=bool)
+                if sample_valid is not None
+                else None
+            )
 
         within_valid_count = int(np.count_nonzero(np.isfinite(within)))
         metrics[row_idx]["within_window_sample_count"] = within_valid_count
@@ -699,6 +764,22 @@ def _build_metrics_for_heading(
             metrics[row_idx]["dominant_frequency_valid"] = frequency_valid
             if frequency_reason is not None:
                 reasons.append(frequency_reason)
+            angular_velocity, angular_valid, angular_count, angular_reason = _angular_velocity_steps(
+                within,
+                within_times,
+                transition_valid=within_transition_valid,
+                sample_valid=within_sample_valid,
+            )
+            metrics[row_idx]["within_angular_velocity_transition_count"] = angular_count
+            metrics[row_idx]["within_angular_velocity_valid"] = angular_valid
+            if angular_valid:
+                angular_speed = np.abs(angular_velocity)
+                metrics[row_idx]["within_angular_velocity_mean_deg_s"] = float(np.mean(angular_velocity))
+                metrics[row_idx]["within_angular_speed_mean_deg_s"] = float(np.mean(angular_speed))
+                metrics[row_idx]["within_angular_speed_max_deg_s"] = float(np.max(angular_speed))
+                metrics[row_idx]["within_angular_velocity_std_deg_s"] = float(np.std(angular_velocity))
+            elif angular_reason is not None:
+                reasons.append(angular_reason)
 
         unique_reasons = list(dict.fromkeys(reasons))
         metrics[row_idx]["failure_reason_bytes"] = (
@@ -726,13 +807,15 @@ def _plot_bout_kinematics_summary(
     if default_metrics is None:
         default_metrics = next(iter(metrics_by_level.values()))
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
     axes_flat = axes.ravel()
     metric_specs = [
         ("net_delta_heading_deg", "Net heading change (deg)", (-180.0, 180.0)),
         ("abs_net_delta_heading_deg", "Absolute net heading change (deg)", (0.0, 180.0)),
         ("within_heading_range_deg", "Within-bout heading range (deg)", None),
         ("within_heading_path_deg", "Within-bout heading path (deg)", None),
+        ("within_angular_speed_mean_deg_s", "Mean angular speed (deg/s)", None),
+        ("within_angular_speed_max_deg_s", "Peak angular speed (deg/s)", None),
     ]
     for ax, (field, label, xlim) in zip(axes_flat, metric_specs):
         for level, metrics in metrics_by_level.items():
@@ -820,6 +903,12 @@ def _build_bout_kinematics_interactive_spec(
             "within_heading_path_deg",
             "within_heading_std_deg",
             "within_heading_zero_crossings",
+            "within_angular_velocity_mean_deg_s",
+            "within_angular_speed_mean_deg_s",
+            "within_angular_speed_max_deg_s",
+            "within_angular_velocity_std_deg_s",
+            "within_angular_velocity_valid",
+            "within_angular_velocity_transition_count",
         ):
             source_paths[f"{level}.{field}"] = f"{base}/{field}"
 
@@ -867,6 +956,19 @@ def _build_bout_kinematics_interactive_spec(
                 "x": "bout_id",
                 "y": "net_delta_heading_deg",
                 "heading_levels": list(heading_levels),
+            },
+            {
+                "id": "within_bout_angular_velocity_histograms",
+                "kind": "facet_histogram",
+                "heading_levels": list(heading_levels),
+                "metrics": [
+                    "within_angular_velocity_mean_deg_s",
+                    "within_angular_speed_mean_deg_s",
+                    "within_angular_speed_max_deg_s",
+                    "within_angular_velocity_std_deg_s",
+                ],
+                "x_axis_policy": "independent_degrees_per_second",
+                "bins": int(bins),
             },
         ],
     }
@@ -1059,6 +1161,9 @@ def compute_and_save_bout_kinematics(
     positions_mm = None
     positions_px = None
     source_position_arrays: dict[str, str] = {}
+    source_validity_arrays: dict[str, str] = {}
+    transition_valid = None
+    sample_valid = None
     if "positions_mm" in track_group:
         positions_mm = np.asarray(track_group["positions_mm"][:], dtype=np.float64)
         if positions_mm.shape != (frames.shape[0], 2):
@@ -1073,6 +1178,20 @@ def compute_and_save_bout_kinematics(
                 f"positions_px shape {positions_px.shape} does not match expected {(frames.shape[0], 2)}."
             )
         source_position_arrays["positions_px"] = f"{track_run_path}/tracks/id_{int(track_id)}/positions_px"
+    if "transition_valid" in track_group:
+        transition_valid = np.asarray(track_group["transition_valid"][:], dtype=bool)
+        if transition_valid.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"transition_valid length {transition_valid.shape[0]} does not match frames length {frames.shape[0]}."
+            )
+        source_validity_arrays["transition_valid"] = f"{track_run_path}/tracks/id_{int(track_id)}/transition_valid"
+    if "sample_valid" in track_group:
+        sample_valid = np.asarray(track_group["sample_valid"][:], dtype=bool)
+        if sample_valid.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"sample_valid length {sample_valid.shape[0]} does not match frames length {frames.shape[0]}."
+            )
+        source_validity_arrays["sample_valid"] = f"{track_run_path}/tracks/id_{int(track_id)}/sample_valid"
 
     pre_window_frames = max(1, int(round(float(pre_window_s) * fps)))
     post_window_frames = max(1, int(round(float(post_window_s) * fps)))
@@ -1147,6 +1266,7 @@ def compute_and_save_bout_kinematics(
         "source_track_id": int(track_id),
         "source_heading_arrays": source_heading_arrays,
         "source_position_arrays": source_position_arrays,
+        "source_validity_arrays": source_validity_arrays,
     }
     if peak_events is not None:
         source_refs["source_peak_events_path"] = f"{swim_level_path}/peak_events"
@@ -1218,6 +1338,8 @@ def compute_and_save_bout_kinematics(
             frames=frames,
             times=times,
             headings=headings,
+            transition_valid=transition_valid,
+            sample_valid=sample_valid,
             positions_mm=positions_mm,
             positions_px=positions_px,
             fps=fps,

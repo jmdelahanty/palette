@@ -1019,7 +1019,13 @@ def _load_swim_bout_payload(
     )
 
 
-def _collect_series(root: zarr.Group, source_paths: Mapping[str, str]) -> dict[str, np.ndarray]:
+def _collect_series(
+    root: zarr.Group,
+    source_paths: Mapping[str, str],
+    *,
+    run_path: str,
+    track_id: int,
+) -> dict[str, np.ndarray]:
     preferred_keys = (
         "speed_raw_mm",
         "speed_filtered_mm",
@@ -1029,8 +1035,17 @@ def _collect_series(root: zarr.Group, source_paths: Mapping[str, str]) -> dict[s
         "speed_filtered_px",
         "speed_smoothed_px",
         "speed_averaged_px",
+        "acceleration_mm",
+        "acceleration_px",
         "smoothed_acceleration_mm",
         "smoothed_acceleration_px",
+        "delta_heading_degrees",
+        "angular_velocity_deg_s",
+        "angular_velocity_raw_deg_s",
+        "angular_speed_raw_deg_s",
+        "delta_heading_smoothed_degrees",
+        "angular_velocity_smoothed_deg_s",
+        "angular_speed_smoothed_deg_s",
         "smoothed_heading_degrees",
         "cumulative_path_distance_mm",
         "cumulative_path_distance_px",
@@ -1044,6 +1059,14 @@ def _collect_series(root: zarr.Group, source_paths: Mapping[str, str]) -> dict[s
     series: dict[str, np.ndarray] = {}
     for key in preferred_keys:
         values = _load_array(root, source_paths, key)
+        if values is None:
+            values = _load_track_array(
+                root,
+                source_paths,
+                run_path=run_path,
+                track_id=track_id,
+                key=key,
+            )
         if values is None:
             continue
         if values.ndim == 1:
@@ -1106,7 +1129,12 @@ def load_track_kinematics_interactive_data(
         source_paths=source_paths,
         time_seconds=time_seconds,
     )
-    series = _collect_series(root, source_paths)
+    series = _collect_series(
+        root,
+        source_paths,
+        run_path=_normalize_path(run_path),
+        track_id=track_id,
+    )
     series.update(swim_bout_payload.series)
 
     return TrackKinematicsInteractiveData(

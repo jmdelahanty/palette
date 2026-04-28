@@ -9,7 +9,8 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - **Profile/refinement visual artifacts** are written **inside zarr** under
   `visualizations/<artifact_name>`.
 - Some tools export zarr-stored PNG artifacts back out to filesystem paths for viewing.
-- Static plot snapshots and future interactive plot specs should follow
+- Major analysis run types should expose a run-local PNG summary writer; static
+  plot snapshots and future interactive plot specs should follow
   `docs/plot_visualization_artifact_contract.md`.
 
 ## Storage Matrix
@@ -65,6 +66,10 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - Rendered PNGs are review snapshots. Interactive plots should be represented by
   lightweight specs pointing back to source arrays, not by full HTML documents
   or decoded RGB image arrays in zarr.
+- Persisted visualization artifacts are expected for reviewable analysis runs,
+  but generation may remain explicit via `--write-zarr-artifacts` or an
+  equivalent finalize/apply command so heavy debug plots are not produced
+  accidentally.
 
 ## Why A Profile May Have No Visible PNG Artifacts
 

@@ -45,8 +45,81 @@ def _():
         to_validity_span_dataframe,
     )
 
+    def add_interval_bar_overlay(
+        fig,
+        *,
+        starts,
+        ends,
+        name,
+        color,
+        opacity,
+        labels=None,
+        hovertemplate=None,
+        hoverinfo=None,
+    ):
+        starts = np.asarray(starts, dtype=float)
+        ends = np.asarray(ends, dtype=float)
+        widths = ends - starts
+        valid = widths > 0
+        if not valid.any():
+            return "none"
+        starts = starts[valid]
+        widths = widths[valid]
+        centers = starts + (widths / 2.0)
+        customdata = None
+        if labels is not None:
+            customdata = np.asarray(labels, dtype=object)[valid]
+        fig.add_trace(
+            go.Bar(
+                x=centers,
+                y=np.ones_like(centers),
+                width=widths,
+                base=np.zeros_like(centers),
+                yaxis="y2",
+                marker=dict(color=color, line=dict(width=0)),
+                opacity=opacity,
+                customdata=customdata,
+                hovertemplate=hovertemplate,
+                hoverinfo=hoverinfo,
+                name=name,
+            )
+        )
+        return "bar_trace"
+
+    def apply_full_width_timeseries_layout(
+        fig,
+        *,
+        title,
+        yaxis_title,
+        height=420,
+    ):
+        fig.update_layout(
+            title=title,
+            xaxis_title="Time (s)",
+            yaxis_title=yaxis_title,
+            hovermode="x unified",
+            height=int(height),
+            margin=dict(l=56, r=20, t=56, b=110),
+            barmode="overlay",
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.22,
+                xanchor="left",
+                x=0.0,
+            ),
+            yaxis2=dict(
+                overlaying="y",
+                range=[0, 1],
+                visible=False,
+                fixedrange=True,
+            ),
+        )
+
     return (
         DEFAULT_INTERACTIVE_ARTIFACT,
+        add_interval_bar_overlay,
+        apply_full_width_timeseries_layout,
         bout_kinematics_records_to_dataframe,
         discover_bout_kinematics_run_options,
         discover_swim_bout_run_options,
@@ -584,6 +657,48 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
         value=_default_speed_columns,
         label="Speed / detection traces",
     )
+    _acceleration_columns = [
+        _column
+        for _column in timeseries_df.columns
+        if "acceleration" in _column.lower()
+        and timeseries_df[_column].notna().any()
+    ]
+    _default_acceleration_columns = [
+        _column
+        for _column in ("smoothed_acceleration_mm", "smoothed_acceleration_px", "acceleration_mm", "acceleration_px")
+        if _column in _acceleration_columns
+    ][:1]
+    acceleration_series_picker = mo.ui.multiselect(
+        options=_acceleration_columns,
+        value=_default_acceleration_columns,
+        label="Acceleration traces",
+    )
+    _turning_columns = [
+        _column
+        for _column in timeseries_df.columns
+        if (
+            "angular_velocity" in _column.lower()
+            or "angular_speed" in _column.lower()
+            or "delta_heading" in _column.lower()
+        )
+        and timeseries_df[_column].notna().any()
+    ]
+    _default_turning_columns = [
+        _column
+        for _column in (
+            "angular_speed_smoothed_deg_s",
+            "angular_velocity_smoothed_deg_s",
+            "angular_speed_raw_deg_s",
+            "angular_velocity_raw_deg_s",
+            "angular_velocity_deg_s",
+        )
+        if _column in _turning_columns
+    ][:2]
+    turning_series_picker = mo.ui.multiselect(
+        options=_turning_columns,
+        value=_default_turning_columns,
+        label="Turning / angular traces",
+    )
     _max_time = float(timeseries_df["time_s"].max()) if len(timeseries_df) else 0.0
     time_window = mo.ui.range_slider(
         start=0.0,
@@ -657,6 +772,8 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
     mo.vstack(
         [
             speed_series_picker,
+            acceleration_series_picker,
+            turning_series_picker,
             time_window,
             show_swim_bouts,
             swim_bout_boundary_picker,
@@ -665,12 +782,14 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
         ]
     )
     return (
+        acceleration_series_picker,
         histogram_bins,
         show_invalid_intervals,
         show_swim_bouts,
         speed_series_picker,
         swim_bout_boundary_picker,
         time_window,
+        turning_series_picker,
     )
 
 
@@ -805,6 +924,8 @@ def _(
 
 @app.cell
 def _(
+    add_interval_bar_overlay,
+    apply_full_width_timeseries_layout,
     data,
     filtered_swim_bout_df,
     filtered_timeseries_df,
@@ -825,53 +946,26 @@ def _(
     swim_bout_overlay_renderer = "none"
     validity_overlay_renderer = "none"
     if show_invalid_intervals.value and len(filtered_validity_df):
-        _starts = filtered_validity_df["start_s"].to_numpy(dtype=float)
-        _ends = filtered_validity_df["end_s"].to_numpy(dtype=float)
-        _widths = _ends - _starts
-        _valid = _widths > 0
-        if _valid.any():
-            _starts = _starts[_valid]
-            _widths = _widths[_valid]
-            _centers = _starts + (_widths / 2.0)
-            _labels = filtered_validity_df["reason"].to_numpy(dtype=object)[_valid]
-            fig.add_trace(
-                go.Bar(
-                    x=_centers,
-                    y=np.ones_like(_centers),
-                    width=_widths,
-                    base=np.zeros_like(_centers),
-                    yaxis="y2",
-                    marker=dict(color="crimson", line=dict(width=0)),
-                    opacity=0.16,
-                    customdata=_labels,
-                    hovertemplate="Invalid interval<br>%{x:.3f}s<br>%{customdata}<extra></extra>",
-                    name="Invalid/gap intervals",
-                )
-            )
-            validity_overlay_renderer = "bar_trace"
+        validity_overlay_renderer = add_interval_bar_overlay(
+            fig,
+            starts=filtered_validity_df["start_s"].to_numpy(dtype=float),
+            ends=filtered_validity_df["end_s"].to_numpy(dtype=float),
+            name="Invalid/gap intervals",
+            color="crimson",
+            opacity=0.16,
+            labels=filtered_validity_df["reason"].to_numpy(dtype=object),
+            hovertemplate="Invalid interval<br>%{x:.3f}s<br>%{customdata}<extra></extra>",
+        )
     if show_swim_bouts.value and len(filtered_swim_bout_df):
-        _starts = filtered_swim_bout_df[swim_bout_start_col].to_numpy(dtype=float)
-        _ends = filtered_swim_bout_df[swim_bout_end_col].to_numpy(dtype=float)
-        _widths = _ends - _starts
-        _valid = _widths > 0
-        if _valid.any():
-            _starts = _starts[_valid]
-            _widths = _widths[_valid]
-            _centers = _starts + (_widths / 2.0)
-            fig.add_trace(
-                go.Bar(
-                    x=_centers,
-                    y=np.ones_like(_centers),
-                    width=_widths,
-                    base=np.zeros_like(_centers),
-                    yaxis="y2",
-                    marker=dict(color="orange", line=dict(width=0)),
-                    opacity=0.18,
-                    hoverinfo="skip",
-                    name=f"Swim bouts: {data.swim_bout_label} ({swim_bout_boundary_mode})",
-                )
-            )
-            swim_bout_overlay_renderer = "bar_trace"
+        swim_bout_overlay_renderer = add_interval_bar_overlay(
+            fig,
+            starts=filtered_swim_bout_df[swim_bout_start_col].to_numpy(dtype=float),
+            ends=filtered_swim_bout_df[swim_bout_end_col].to_numpy(dtype=float),
+            name=f"Swim bouts: {data.swim_bout_label} ({swim_bout_boundary_mode})",
+            color="orange",
+            opacity=0.18,
+            hoverinfo="skip",
+        )
     for column in speed_series_picker.value:
         if column not in filtered_timeseries_df:
             continue
@@ -883,20 +977,11 @@ def _(
                 name=column,
             )
         )
-    fig.update_layout(
+    apply_full_width_timeseries_layout(
+        fig,
         title="Speed Metrics with Swim Bout and Validity Overlays",
-        xaxis_title="Time (s)",
         yaxis_title="Speed / detection signal",
-        hovermode="x unified",
         height=420,
-        margin=dict(l=40, r=20, t=50, b=40),
-        barmode="overlay",
-        yaxis2=dict(
-            overlaying="y",
-            range=[0, 1],
-            visible=False,
-            fixedrange=True,
-        ),
     )
     write_perf_event(
         "build_timeseries_figure",
@@ -915,6 +1000,160 @@ def _(
         show_invalid_intervals=bool(show_invalid_intervals.value),
     )
     fig
+    return
+
+
+@app.cell
+def _(
+    acceleration_series_picker,
+    add_interval_bar_overlay,
+    apply_full_width_timeseries_layout,
+    data,
+    filtered_swim_bout_df,
+    filtered_timeseries_df,
+    filtered_validity_df,
+    go,
+    show_invalid_intervals,
+    show_swim_bouts,
+    swim_bout_boundary_mode,
+    swim_bout_end_col,
+    swim_bout_start_col,
+    time,
+    write_perf_event,
+):
+    _figure_t0 = time.perf_counter()
+    acceleration_fig = go.Figure()
+    acceleration_swim_overlay_renderer = "none"
+    acceleration_validity_overlay_renderer = "none"
+    if show_invalid_intervals.value and len(filtered_validity_df):
+        acceleration_validity_overlay_renderer = add_interval_bar_overlay(
+            acceleration_fig,
+            starts=filtered_validity_df["start_s"].to_numpy(dtype=float),
+            ends=filtered_validity_df["end_s"].to_numpy(dtype=float),
+            name="Invalid/gap intervals",
+            color="crimson",
+            opacity=0.16,
+            labels=filtered_validity_df["reason"].to_numpy(dtype=object),
+            hovertemplate="Invalid interval<br>%{x:.3f}s<br>%{customdata}<extra></extra>",
+        )
+    if show_swim_bouts.value and len(filtered_swim_bout_df):
+        acceleration_swim_overlay_renderer = add_interval_bar_overlay(
+            acceleration_fig,
+            starts=filtered_swim_bout_df[swim_bout_start_col].to_numpy(dtype=float),
+            ends=filtered_swim_bout_df[swim_bout_end_col].to_numpy(dtype=float),
+            name=f"Swim bouts: {data.swim_bout_label} ({swim_bout_boundary_mode})",
+            color="orange",
+            opacity=0.18,
+            hoverinfo="skip",
+        )
+    for _acceleration_column in acceleration_series_picker.value:
+        if _acceleration_column not in filtered_timeseries_df:
+            continue
+        acceleration_fig.add_trace(
+            go.Scattergl(
+                x=filtered_timeseries_df["time_s"],
+                y=filtered_timeseries_df[_acceleration_column],
+                mode="lines",
+                name=_acceleration_column,
+            )
+        )
+    apply_full_width_timeseries_layout(
+        acceleration_fig,
+        title="Acceleration Metrics with Swim Bout and Validity Overlays",
+        yaxis_title="Acceleration",
+        height=360,
+    )
+    write_perf_event(
+        "build_acceleration_figure",
+        time.perf_counter() - _figure_t0,
+        run_path=data.run_path,
+        n_rows=len(filtered_timeseries_df),
+        n_traces=len(acceleration_series_picker.value),
+        n_rendered_traces=len(acceleration_fig.data),
+        n_visible_bouts=len(filtered_swim_bout_df),
+        n_visible_validity_intervals=len(filtered_validity_df),
+        swim_bout_overlay_renderer=acceleration_swim_overlay_renderer,
+        swim_bout_boundary_mode=swim_bout_boundary_mode,
+        validity_overlay_renderer=acceleration_validity_overlay_renderer,
+    )
+    acceleration_fig
+    return
+
+
+@app.cell
+def _(
+    add_interval_bar_overlay,
+    apply_full_width_timeseries_layout,
+    data,
+    filtered_swim_bout_df,
+    filtered_timeseries_df,
+    filtered_validity_df,
+    go,
+    show_invalid_intervals,
+    show_swim_bouts,
+    swim_bout_boundary_mode,
+    swim_bout_end_col,
+    swim_bout_start_col,
+    time,
+    turning_series_picker,
+    write_perf_event,
+):
+    _figure_t0 = time.perf_counter()
+    turning_fig = go.Figure()
+    turning_swim_overlay_renderer = "none"
+    turning_validity_overlay_renderer = "none"
+    if show_invalid_intervals.value and len(filtered_validity_df):
+        turning_validity_overlay_renderer = add_interval_bar_overlay(
+            turning_fig,
+            starts=filtered_validity_df["start_s"].to_numpy(dtype=float),
+            ends=filtered_validity_df["end_s"].to_numpy(dtype=float),
+            name="Invalid/gap intervals",
+            color="crimson",
+            opacity=0.16,
+            labels=filtered_validity_df["reason"].to_numpy(dtype=object),
+            hovertemplate="Invalid interval<br>%{x:.3f}s<br>%{customdata}<extra></extra>",
+        )
+    if show_swim_bouts.value and len(filtered_swim_bout_df):
+        turning_swim_overlay_renderer = add_interval_bar_overlay(
+            turning_fig,
+            starts=filtered_swim_bout_df[swim_bout_start_col].to_numpy(dtype=float),
+            ends=filtered_swim_bout_df[swim_bout_end_col].to_numpy(dtype=float),
+            name=f"Swim bouts: {data.swim_bout_label} ({swim_bout_boundary_mode})",
+            color="orange",
+            opacity=0.18,
+            hoverinfo="skip",
+        )
+    for _turning_column in turning_series_picker.value:
+        if _turning_column not in filtered_timeseries_df:
+            continue
+        turning_fig.add_trace(
+            go.Scattergl(
+                x=filtered_timeseries_df["time_s"],
+                y=filtered_timeseries_df[_turning_column],
+                mode="lines",
+                name=_turning_column,
+            )
+        )
+    apply_full_width_timeseries_layout(
+        turning_fig,
+        title="Turning and Angular Velocity Metrics with Swim Bout and Validity Overlays",
+        yaxis_title="Degrees or degrees/s",
+        height=360,
+    )
+    write_perf_event(
+        "build_turning_figure",
+        time.perf_counter() - _figure_t0,
+        run_path=data.run_path,
+        n_rows=len(filtered_timeseries_df),
+        n_traces=len(turning_series_picker.value),
+        n_rendered_traces=len(turning_fig.data),
+        n_visible_bouts=len(filtered_swim_bout_df),
+        n_visible_validity_intervals=len(filtered_validity_df),
+        swim_bout_overlay_renderer=turning_swim_overlay_renderer,
+        swim_bout_boundary_mode=swim_bout_boundary_mode,
+        validity_overlay_renderer=turning_validity_overlay_renderer,
+    )
+    turning_fig
     return
 
 

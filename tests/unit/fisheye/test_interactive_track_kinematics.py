@@ -124,6 +124,8 @@ def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: 
     assert data.positions is not None
     assert data.position_unit == "mm"
     assert "speed_smoothed_mm" in data.series
+    assert "smoothed_acceleration_mm" in data.series
+    assert "angular_speed_smoothed_deg_s" in data.series
     assert data.source_paths["time_seconds"].endswith("/tracks/id_0/time_seconds")
     assert data.validity_source == "track_validity"
     assert data.validity_labels.tolist() == ["transition:frame_gap", "sample:keypoint_failed"]
@@ -144,6 +146,9 @@ def test_track_kinematics_interactive_dataframes(tmp_path: Path) -> None:
 
     assert list(timeseries["frame_index"]) == [0, 1, 2, 3, 4, 5]
     assert "speed_smoothed_mm" in timeseries.columns
+    assert "smoothed_acceleration_mm" in timeseries.columns
+    assert "angular_velocity_smoothed_deg_s" in timeseries.columns
+    assert "angular_speed_smoothed_deg_s" in timeseries.columns
     assert list(positions.columns) == ["time_s", "x", "y", "unit"]
     assert positions["unit"].unique().tolist() == ["mm"]
     assert validity["reason"].tolist() == ["transition:frame_gap", "sample:keypoint_failed"]

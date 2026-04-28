@@ -51,6 +51,8 @@ def _make_archive(tmp_path: Path) -> Path:
         "positions_mm",
         np.column_stack([frames.astype(np.float32) * 0.1, frames.astype(np.float32) * 0.05]),
     )
+    _write_array(track, "transition_valid", np.asarray([False, *([True] * 9)], dtype=bool))
+    _write_array(track, "sample_valid", np.ones(10, dtype=bool))
 
     bout_parent = analysis.create_group("swim_bout_runs")
     bout_parent.attrs["latest"] = "bouts_1"
@@ -111,8 +113,8 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
 
     assert parent.attrs["latest"] == "bout_kinematics_1"
     assert run.attrs["schema_id"] == "analysis.bout_kinematics_runs"
-    assert run.attrs["schema_version"] == 4
-    assert run.attrs["method_version"] == "bout_kinematics.v4"
+    assert run.attrs["schema_version"] == 5
+    assert run.attrs["method_version"] == "bout_kinematics.v5"
     assert run.attrs["default_heading_level"] == "heading_smoothed"
     assert run.attrs["source_swim_bout_run"] == "bouts_1"
     assert run.attrs["source_swim_bout_speed_level"] == "speed_filtered"
@@ -138,6 +140,10 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     assert run.attrs["source_refs"]["source_position_arrays"] == {
         "positions_mm": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/positions_mm",
         "positions_px": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/positions_px",
+    }
+    assert run.attrs["source_refs"]["source_validity_arrays"] == {
+        "transition_valid": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/transition_valid",
+        "sample_valid": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/sample_valid",
     }
     assert run.attrs["provenance"]["stage"] == "bout_kinematics"
     assert run.attrs["provenance"]["inputs"]["zarr_path"] == str(zarr_path)
@@ -186,6 +192,10 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     np.testing.assert_allclose(smoothed["within_heading_range_deg"][:], [20.0])
     np.testing.assert_allclose(smoothed["within_heading_peak_to_peak_deg"][:], [20.0])
     np.testing.assert_allclose(smoothed["within_heading_path_deg"][:], [40.0])
+    np.testing.assert_allclose(smoothed["within_angular_velocity_mean_deg_s"][:], [0.0])
+    np.testing.assert_allclose(smoothed["within_angular_speed_mean_deg_s"][:], [200.0])
+    np.testing.assert_allclose(smoothed["within_angular_speed_max_deg_s"][:], [200.0])
+    np.testing.assert_allclose(smoothed["within_angular_velocity_std_deg_s"][:], [200.0])
     assert smoothed["within_heading_zero_crossings"][:].tolist() == [1]
     assert smoothed["pre_window_valid"][:].tolist() == [True]
     assert smoothed["post_window_valid"][:].tolist() == [True]
@@ -194,6 +204,8 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     assert smoothed["pre_position_sample_count"][:].tolist() == [2]
     assert smoothed["post_position_sample_count"][:].tolist() == [2]
     assert smoothed["within_window_valid"][:].tolist() == [True]
+    assert smoothed["within_angular_velocity_valid"][:].tolist() == [True]
+    assert smoothed["within_angular_velocity_transition_count"][:].tolist() == [2]
     assert smoothed["dominant_frequency_valid"][:].tolist() == [False]
     assert smoothed_records["failure_reason_bytes"].tolist() == [b"dominant_frequency_disabled"]
 
@@ -203,6 +215,9 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     np.testing.assert_allclose(raw["net_delta_heading_deg"][:], [40.0])
     np.testing.assert_allclose(raw["within_heading_range_deg"][:], [40.0])
     np.testing.assert_allclose(raw["within_heading_path_deg"][:], [80.0])
+    np.testing.assert_allclose(raw["within_angular_velocity_mean_deg_s"][:], [0.0])
+    np.testing.assert_allclose(raw["within_angular_speed_mean_deg_s"][:], [400.0])
+    np.testing.assert_allclose(raw["within_angular_speed_max_deg_s"][:], [400.0])
 
     visualizations = run["visualizations"]
     png = visualizations["bout_kinematics_summary_track_0_png"]
@@ -214,6 +229,33 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     spec_payload = np.asarray(spec_artifact["spec_json"][:], dtype=np.uint8).tobytes()
     assert b"net_heading_change_histograms" in spec_payload
     assert b"within_bout_heading_histograms" in spec_payload
+
+
+def test_compute_and_save_bout_kinematics_marks_angular_velocity_invalid_across_gaps(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/transition_valid"][4] = False
+
+    run_name = compute_and_save_bout_kinematics(
+        zarr_path,
+        run_name="bout_kinematics_gap",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        swim_bout_run="bouts_1",
+        speed_level="filtered",
+        overwrite=False,
+    )
+
+    run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
+    smoothed = run["heading_smoothed"]["per_bout_metrics"]
+    smoothed_records, _ = load_structured_dataset(run["heading_smoothed"], "per_bout_metrics")
+    assert smoothed["within_angular_velocity_valid"][:].tolist() == [False]
+    assert smoothed["within_angular_velocity_transition_count"][:].tolist() == [2]
+    assert np.isnan(smoothed["within_angular_velocity_mean_deg_s"][:]).all()
+    assert np.isnan(smoothed["within_angular_speed_mean_deg_s"][:]).all()
+    assert b"heading_transition_contains_gap" in smoothed_records["failure_reason_bytes"][0]
 
 
 def test_compute_and_save_bout_kinematics_copies_peak_event_boundary_context(tmp_path: Path) -> None:

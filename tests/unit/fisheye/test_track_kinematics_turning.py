@@ -93,15 +93,37 @@ def test_build_track_datasets_computes_turning_series_for_all_tracks() -> None:
         np.array([np.nan, 20.0], dtype=np.float32),
         equal_nan=True,
     )
+    np.testing.assert_allclose(
+        tracks[0]["angular_velocity_raw_deg_s"],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        tracks[0]["angular_speed_raw_deg_s"],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        tracks[0]["angular_velocity_smoothed_deg_s"],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+        atol=1e-4,
+    )
+    np.testing.assert_allclose(
+        tracks[0]["angular_speed_smoothed_deg_s"],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+        atol=1e-4,
+    )
 
     np.testing.assert_allclose(
         tracks[1]["delta_heading_degrees"],
-        np.array([np.nan, -20.0], dtype=np.float32),
+        np.array([np.nan, np.nan], dtype=np.float32),
         equal_nan=True,
     )
     np.testing.assert_allclose(
         tracks[1]["angular_velocity_deg_s"],
-        np.array([np.nan, -10.0], dtype=np.float32),
+        np.array([np.nan, np.nan], dtype=np.float32),
         equal_nan=True,
     )
 
@@ -151,6 +173,11 @@ def test_build_track_datasets_materializes_sample_validity() -> None:
         mod.SAMPLE_REASON_KEYPOINT_FAILED,
         mod.SAMPLE_REASON_HEADING_UNUSABLE,
     ]
+    np.testing.assert_allclose(
+        track["angular_velocity_raw_deg_s"],
+        np.array([np.nan, np.nan, np.nan, np.nan], dtype=np.float32),
+        equal_nan=True,
+    )
 
 
 def test_build_track_datasets_materializes_transition_validity() -> None:
@@ -190,6 +217,11 @@ def test_build_track_datasets_materializes_transition_validity() -> None:
     np.testing.assert_allclose(
         track["frame_path_distance_raw_px"],
         np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        track["angular_velocity_raw_deg_s"],
+        np.array([np.nan, 0.0, np.nan, np.nan], dtype=np.float32),
+        equal_nan=True,
     )
 
 
@@ -271,6 +303,34 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
         subgroup["angular_velocity_deg_s"][:],
         np.array([np.nan, 20.0], dtype=np.float32),
         equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        subgroup["angular_velocity_raw_deg_s"][:],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        subgroup["angular_speed_raw_deg_s"][:],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        subgroup["delta_heading_smoothed_degrees"][:],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+        atol=1e-4,
+    )
+    np.testing.assert_allclose(
+        subgroup["angular_velocity_smoothed_deg_s"][:],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+        atol=1e-4,
+    )
+    np.testing.assert_allclose(
+        subgroup["angular_speed_smoothed_deg_s"][:],
+        np.array([np.nan, 20.0], dtype=np.float32),
+        equal_nan=True,
+        atol=1e-4,
     )
     assert subgroup["delta_frames"][:].tolist() == [0, 1]
     np.testing.assert_allclose(

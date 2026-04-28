@@ -693,9 +693,18 @@ def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.
         "speed_smoothed_mm",
         "speed_averaged_px",
         "speed_averaged_mm",
+        "acceleration_px",
+        "acceleration_mm",
         "smoothed_heading_degrees",
         "smoothed_acceleration_px",
         "smoothed_acceleration_mm",
+        "delta_heading_degrees",
+        "angular_velocity_deg_s",
+        "angular_velocity_raw_deg_s",
+        "angular_speed_raw_deg_s",
+        "delta_heading_smoothed_degrees",
+        "angular_velocity_smoothed_deg_s",
+        "angular_speed_smoothed_deg_s",
         "cumulative_path_distance_px",
         "cumulative_path_distance_mm",
         "sample_valid",
@@ -778,6 +787,35 @@ def _build_track_interactive_spec(
             "series": _compact_series(
                 [_series_spec("Smoothed acceleration", accel_path, source_paths, color="tab:red")]
             ),
+        },
+        {
+            "id": "turning",
+            "kind": "timeseries",
+            "x_path_key": "time_seconds",
+            "y_label": "Turning (deg/s)",
+            "series": _compact_series(
+                [
+                    _series_spec(
+                        "Smoothed angular speed",
+                        "angular_speed_smoothed_deg_s",
+                        source_paths,
+                        color="tab:cyan",
+                    ),
+                    _series_spec(
+                        "Smoothed angular velocity",
+                        "angular_velocity_smoothed_deg_s",
+                        source_paths,
+                        color="tab:blue",
+                    ),
+                    _series_spec(
+                        "Raw angular speed",
+                        "angular_speed_raw_deg_s",
+                        source_paths,
+                        color="tab:gray",
+                    ),
+                ]
+            ),
+            "interval_overlay": "swim_bouts" if swim_bout_label else None,
         },
         {
             "id": "heading",

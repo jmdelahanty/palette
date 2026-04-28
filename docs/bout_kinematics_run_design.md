@@ -155,21 +155,24 @@ per_bout_metrics/
   within_heading_std_deg
   within_heading_zero_crossings
   within_heading_dominant_frequency_hz            optional, NaN when not computed
-  within_angular_velocity_mean_deg_s              future schema extension
-  within_angular_speed_mean_deg_s                 future schema extension
-  within_angular_speed_max_deg_s                  future schema extension
-  within_angular_velocity_std_deg_s               future schema extension
+  within_angular_velocity_mean_deg_s
+  within_angular_speed_mean_deg_s
+  within_angular_speed_max_deg_s
+  within_angular_velocity_std_deg_s
 
   pre_window_valid
   post_window_valid
   pre_position_valid
   post_position_valid
   within_window_valid
+  within_angular_velocity_valid
   dominant_frequency_valid
   pre_window_sample_count
   post_window_sample_count
   pre_position_sample_count
   post_position_sample_count
+  within_window_sample_count
+  within_angular_velocity_transition_count
   failure_reason_bytes                            optional preferred string encoding
 ```
 
@@ -207,8 +210,8 @@ Recommended initial semantics:
   only meaningful when the bout has enough samples and the recording frame rate
   supports the desired frequency band.
 
-Future angular-velocity summaries should be derived from validated framewise
-heading transitions, not by mutating the source swim-bout segmentation:
+Angular-velocity summaries are derived from validated framewise heading
+transitions, not by mutating the source swim-bout segmentation:
 
 - `within_angular_velocity_mean_deg_s`: signed mean turning rate over valid
   within-bout transitions. This can cancel when left/right turns occur in the
@@ -273,9 +276,9 @@ The run should record `default_heading_level = "heading_smoothed"`.
 analysis/bout_kinematics_runs/<run_name>/
   attrs:
     schema_id: "analysis.bout_kinematics_runs"
-    schema_version: 4
+    schema_version: 5
     method: "heading_window_and_within_bout_metrics"
-    method_version: "bout_kinematics.v4"
+    method_version: "bout_kinematics.v5"
     created_at_utc
     row_axis: "swim_bout_rows"
     source_refs:
