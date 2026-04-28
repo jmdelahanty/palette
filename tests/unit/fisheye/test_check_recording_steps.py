@@ -373,10 +373,35 @@ def test_track_status_format_helpers() -> None:
     assert mod._track_status_rich(True, "block", 1, 25.0) == "[yellow]WARN[/yellow] (1 unassigned, 25.0%)"  # noqa: SLF001
 
 
+def test_eye_angle_status_format_helpers() -> None:
+    assert mod._eye_angle_status_text(False, False, None, None, []) == "MISS"  # noqa: SLF001
+    assert (  # noqa: SLF001
+        mod._eye_angle_status_text(
+            True,
+            True,
+            0.875,
+            "subject_shape_eye_geometry",
+            [],
+        )
+        == "OK (valid 87.5%, subject_shape_eye_geometry)"
+    )
+    assert (  # noqa: SLF001
+        mod._eye_angle_status_text(
+            True,
+            False,
+            0.0,
+            "subject_shape_eye_geometry",
+            ["valid_detection_fraction=0"],
+        )
+        == "WARN (valid 0.0%, subject_shape_eye_geometry, valid_detection_fraction=0)"
+    )
+
+
 def test_display_field_label_marks_legacy_eye_and_unified_subject_fields() -> None:
     assert mod._display_field_label("eye_masks") == "eye_masks (legacy compat)"  # noqa: SLF001
     assert mod._display_field_label("refined_eye_masks") == "refined_eye_masks (legacy compat)"  # noqa: SLF001
     assert mod._display_field_label("eye_mask_review_status") == "eye_mask_review_status (legacy compat)"  # noqa: SLF001
+    assert mod._display_field_label("eye_angles") == "eye_angles (analysis)"  # noqa: SLF001
     assert mod._display_field_label("subject_mask_components") == "subject_mask_components (unified)"  # noqa: SLF001
     assert mod._display_field_label("refined_subject_mask_components") == "refined_subject_mask_components (unified)"  # noqa: SLF001
     assert mod._display_field_label("detect") == "detect"  # noqa: SLF001
@@ -458,6 +483,66 @@ def test_check_zarr_reads_track_unassigned_warning_from_latest_run(tmp_path: Pat
     assert info["track_qc_state"] == "warn"
     assert info["track_unassigned_rows"] == 1
     assert info["track_unassigned_rate_percent"] == pytest.approx(25.0)
+
+
+def test_check_zarr_reads_ready_eye_angle_analysis_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_angle_ready_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("eye_angle_runs")
+    parent.attrs["latest"] = "eye_angle_001"
+    run = parent.create_group("eye_angle_001")
+    run.attrs.update(
+        {
+            "status": "complete",
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 1,
+            "method": "ellipse_and_centroid_eye_angles",
+            "row_axis": "keypoint_detection_rows",
+            "source_geometry_kind": "subject_shape_eye_geometry",
+            "source_eye_geometry_stage": "analysis/subject_shape_runs",
+            "source_eye_geometry_run": "shape_001",
+            "source_keypoints_run": "refined_keypoints_001",
+            "valid_detection_fraction": 0.75,
+        }
+    )
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["eye_angles_present"] is True
+    assert info["eye_angles_ready"] is True
+    assert info["eye_angle_run"] == "eye_angle_001"
+    assert info["eye_angle_valid_detection_fraction"] == pytest.approx(0.75)
+    assert info["eye_angle_source_geometry_kind"] == "subject_shape_eye_geometry"
+    assert info["eye_angle_readiness_reasons"] == []
+
+
+def test_check_zarr_reports_eye_angle_analysis_contract_warnings(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_angle_warn_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("eye_angle_runs")
+    parent.attrs["latest"] = "eye_angle_001"
+    run = parent.create_group("eye_angle_001")
+    run.attrs.update(
+        {
+            "status": "complete",
+            "schema_id": "legacy.eye_angle_runs",
+            "schema_version": 0,
+            "valid_detection_fraction": 0.0,
+        }
+    )
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["eye_angles_present"] is True
+    assert info["eye_angles_ready"] is False
+    reasons = info["eye_angle_readiness_reasons"]
+    assert "schema_id=legacy.eye_angle_runs" in reasons
+    assert "schema_version=0" in reasons
+    assert "source_geometry_kind=missing" in reasons
+    assert "source_keypoints_run=missing" in reasons
+    assert "valid_detection_fraction=0" in reasons
 
 
 def test_check_zarr_reads_subject_mask_status_and_components(tmp_path: Path) -> None:

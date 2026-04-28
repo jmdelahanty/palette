@@ -62,6 +62,8 @@ _STEP_NAME_ALIASES = {
     "arena_assignment": "arena_assignment",
     "tracks": "tracks",
     "track": "tracks",
+    "eye_angles": "eye_angles",
+    "eye_angle_runs": "eye_angles",
     "stimulus": "stimulus",
     "calibration": "calibration",
     "dish_mask": "dish_mask",
@@ -85,6 +87,7 @@ _OVERVIEW_STEP_PREFIX = {
     "refined_subject_masks": "refined_subject_masks",
     "arena_assignment": "arena_assignment",
     "tracks": "tracks",
+    "eye_angles": "eye_angles",
     "stimulus": "stimulus",
     "calibration": "calibration",
     "dish_mask": "dish_mask",
@@ -99,6 +102,7 @@ _DISPLAY_FIELD_LABELS = {
     "eye_masks": "eye_masks (legacy compat)",
     "refined_eye_masks": "refined_eye_masks (legacy compat)",
     "eye_mask_review_status": "eye_mask_review_status (legacy compat)",
+    "eye_angles": "eye_angles (analysis)",
     "subject_mask_components": "subject_mask_components (unified)",
     "refined_subject_mask_components": "refined_subject_mask_components (unified)",
 }
@@ -178,6 +182,13 @@ class RecordingStatus:
     track_qc_state: Optional[str]
     track_unassigned_rows: Optional[int]
     track_unassigned_rate_percent: Optional[float]
+    eye_angles_present: bool
+    eye_angles_ready: bool
+    eye_angle_run: Optional[str]
+    eye_angle_status: Optional[str]
+    eye_angle_valid_detection_fraction: Optional[float]
+    eye_angle_source_geometry_kind: Optional[str]
+    eye_angle_readiness_reasons: List[str]
     stimulus_runs: int
     calibration_present: bool
     tuning_present: int
@@ -703,6 +714,13 @@ def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[s
         "track_qc_state": None,
         "track_unassigned_rows": None,
         "track_unassigned_rate_percent": None,
+        "eye_angles_present": False,
+        "eye_angles_ready": False,
+        "eye_angle_run": None,
+        "eye_angle_status": None,
+        "eye_angle_valid_detection_fraction": None,
+        "eye_angle_source_geometry_kind": None,
+        "eye_angle_readiness_reasons": [],
         "stimulus_runs": 0,
         "calibration_present": False,
         "tuning_present": 0,
@@ -787,6 +805,90 @@ def _extract_tracking_qc_details(details: Optional[Dict[str, object]]) -> Dict[s
         "track_qc_state": track_qc_state,
         "track_unassigned_rows": n_unassigned_rows,
         "track_unassigned_rate_percent": unassigned_row_rate_percent,
+    }
+
+
+_EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
+_EYE_ANGLE_RUN_SCHEMA_VERSION = 1
+_EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
+_EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
+
+
+def _extract_eye_angle_readiness(
+    *,
+    run_name: Optional[str],
+    run_group: Optional[zarr.Group],
+    details: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """Summarize downstream eye-angle analysis readiness from attrs/details."""
+
+    if run_group is None and not details:
+        return {
+            "present": False,
+            "ready": False,
+            "run": run_name,
+            "status": None,
+            "valid_detection_fraction": None,
+            "source_geometry_kind": None,
+            "readiness_reasons": ["missing_run"],
+        }
+
+    attrs = dict(run_group.attrs) if run_group is not None else dict(details or {})
+    if details:
+        attrs.update({key: value for key, value in details.items() if value is not None})
+
+    status = _normalize_attr(attrs.get("status"))
+    schema_id = _normalize_attr(attrs.get("schema_id"))
+    schema_version = _coerce_int(attrs.get("schema_version"))
+    method = _normalize_attr(attrs.get("method"))
+    row_axis = _normalize_attr(attrs.get("row_axis"))
+    source_geometry_kind = _normalize_attr(attrs.get("source_geometry_kind"))
+    source_stage = _normalize_attr(attrs.get("source_eye_geometry_stage"))
+    source_run = _normalize_attr(attrs.get("source_eye_geometry_run"))
+    source_keypoints_run = _normalize_attr(
+        attrs.get("source_keypoints_run") or attrs.get("source_keypoint_run")
+    )
+    valid_fraction_raw = attrs.get("valid_detection_fraction")
+    if valid_fraction_raw is None:
+        valid_fraction_raw = attrs.get("valid_fraction")
+    if valid_fraction_raw is None:
+        valid_fraction_raw = attrs.get("valid_detection_rate")
+    valid_fraction = _coerce_float(valid_fraction_raw)
+    if valid_fraction is not None and valid_fraction > 1.0:
+        valid_fraction = valid_fraction / 100.0
+
+    reasons: List[str] = []
+    if status != "complete":
+        reasons.append(f"status={status or 'missing'}")
+    if schema_id != _EYE_ANGLE_RUN_SCHEMA_ID:
+        reasons.append(f"schema_id={schema_id or 'missing'}")
+    if schema_version != _EYE_ANGLE_RUN_SCHEMA_VERSION:
+        reasons.append(f"schema_version={schema_version if schema_version is not None else 'missing'}")
+    if method != _EYE_ANGLE_METHOD:
+        reasons.append(f"method={method or 'missing'}")
+    if row_axis != _EYE_ANGLE_ROW_AXIS:
+        reasons.append(f"row_axis={row_axis or 'missing'}")
+    if not source_geometry_kind:
+        reasons.append("source_geometry_kind=missing")
+    if not source_stage:
+        reasons.append("source_eye_geometry_stage=missing")
+    if not source_run:
+        reasons.append("source_eye_geometry_run=missing")
+    if not source_keypoints_run:
+        reasons.append("source_keypoints_run=missing")
+    if valid_fraction is None:
+        reasons.append("valid_detection_fraction=missing")
+    elif valid_fraction <= 0.0:
+        reasons.append("valid_detection_fraction=0")
+
+    return {
+        "present": True,
+        "ready": not reasons,
+        "run": run_name,
+        "status": status,
+        "valid_detection_fraction": valid_fraction,
+        "source_geometry_kind": source_geometry_kind,
+        "readiness_reasons": reasons,
     }
 
 
@@ -1152,6 +1254,33 @@ def _registry_status_payload(
     payload["track_qc_state"] = tracking_qc_details["track_qc_state"]
     payload["track_unassigned_rows"] = tracking_qc_details["track_unassigned_rows"]
     payload["track_unassigned_rate_percent"] = tracking_qc_details["track_unassigned_rate_percent"]
+
+    eye_angles_row = selected_rows.get("eye_angles")
+    eye_angles_status = _normalize_step_status(eye_angles_row.get("status") if eye_angles_row else None)
+    eye_angles_details = _parse_step_json(
+        eye_angles_row.get("details_json") if eye_angles_row else None
+    ) or {}
+    eye_angle_readiness = _extract_eye_angle_readiness(
+        run_name=_normalize_attr(eye_angles_row.get("run_name") if eye_angles_row else None),
+        run_group=None,
+        details={
+            **eye_angles_details,
+            "status": eye_angles_details.get("status") or ("complete" if eye_angles_status == "ok" else None),
+        }
+        if eye_angles_row is not None
+        else None,
+    )
+    payload["eye_angles_present"] = bool(
+        eye_angles_row is not None
+        and eye_angles_status not in {None, "missing", "absent", "na"}
+    )
+    payload["eye_angles_ready"] = bool(eye_angles_status == "ok" and eye_angle_readiness["ready"])
+    payload["eye_angle_run"] = eye_angle_readiness["run"]
+    payload["eye_angle_status"] = eye_angle_readiness["status"]
+    payload["eye_angle_valid_detection_fraction"] = eye_angle_readiness["valid_detection_fraction"]
+    payload["eye_angle_source_geometry_kind"] = eye_angle_readiness["source_geometry_kind"]
+    payload["eye_angle_readiness_reasons"] = list(eye_angle_readiness["readiness_reasons"])  # type: ignore[arg-type]
+
     stimulus_row = selected_rows.get("stimulus")
     stimulus_details = _parse_step_json(stimulus_row.get("details_json") if stimulus_row else None) or {}
     stimulus_runs = _coerce_int(stimulus_details.get("stimulus_runs"))
@@ -1271,6 +1400,13 @@ def _build_recording_status(
         track_qc_state=zarr_info["track_qc_state"],  # type: ignore[arg-type]
         track_unassigned_rows=zarr_info["track_unassigned_rows"],  # type: ignore[arg-type]
         track_unassigned_rate_percent=zarr_info["track_unassigned_rate_percent"],  # type: ignore[arg-type]
+        eye_angles_present=bool(zarr_info["eye_angles_present"]),
+        eye_angles_ready=bool(zarr_info["eye_angles_ready"]),
+        eye_angle_run=zarr_info["eye_angle_run"],  # type: ignore[arg-type]
+        eye_angle_status=zarr_info["eye_angle_status"],  # type: ignore[arg-type]
+        eye_angle_valid_detection_fraction=zarr_info["eye_angle_valid_detection_fraction"],  # type: ignore[arg-type]
+        eye_angle_source_geometry_kind=zarr_info["eye_angle_source_geometry_kind"],  # type: ignore[arg-type]
+        eye_angle_readiness_reasons=list(zarr_info["eye_angle_readiness_reasons"]),  # type: ignore[arg-type]
         stimulus_runs=int(zarr_info["stimulus_runs"]),
         calibration_present=bool(zarr_info["calibration_present"]),
         tuning_present=int(zarr_info["tuning_present"]),
@@ -1323,6 +1459,13 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
             plan.track_qc_state,
             plan.track_unassigned_rows,
             plan.track_unassigned_rate_percent,
+        ),
+        "eye_angles": _eye_angle_status_text(
+            plan.eye_angles_present,
+            plan.eye_angles_ready,
+            plan.eye_angle_valid_detection_fraction,
+            plan.eye_angle_source_geometry_kind,
+            plan.eye_angle_readiness_reasons,
         ),
         "stimulus": _status_text(plan.stimulus_runs > 0),
         "calibration": _status_text(plan.calibration_present),
@@ -2312,8 +2455,43 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             else:
                 track_present = len(list(track_parent.keys())) > 0
 
-    stim_runs = 0
+    eye_angle_readiness = _extract_eye_angle_readiness(run_name=None, run_group=None)
     analysis = root.get("analysis")
+    eye_angle_parent = analysis.get("eye_angle_runs") if analysis is not None else None
+    if eye_angle_parent is not None:
+        latest_eye_angle = _normalize_attr(eye_angle_parent.attrs.get("latest"))
+        candidate_run = None
+        if latest_eye_angle and latest_eye_angle in eye_angle_parent:
+            candidate_run = latest_eye_angle
+        else:
+            if hasattr(eye_angle_parent, "group_keys"):
+                names = list(eye_angle_parent.group_keys())
+            else:
+                names = list(eye_angle_parent.keys())
+            if names:
+                candidate_run = sorted(names)[-1]
+        if candidate_run:
+            eye_angle_readiness = _extract_eye_angle_readiness(
+                run_name=str(candidate_run),
+                run_group=eye_angle_parent[candidate_run],
+            )
+        else:
+            if hasattr(eye_angle_parent, "group_keys"):
+                present = len(list(eye_angle_parent.group_keys())) > 0
+            else:
+                present = len(list(eye_angle_parent.keys())) > 0
+            if present:
+                eye_angle_readiness = {
+                    "present": True,
+                    "ready": False,
+                    "run": None,
+                    "status": None,
+                    "valid_detection_fraction": None,
+                    "source_geometry_kind": None,
+                    "readiness_reasons": ["missing_latest_run"],
+                }
+
+    stim_runs = 0
     if analysis is not None and "stimulus_runs" in analysis:
         stim_group = analysis["stimulus_runs"]
         if hasattr(stim_group, "group_keys"):
@@ -2411,6 +2589,13 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "track_qc_state": track_qc_state,
         "track_unassigned_rows": track_unassigned_rows,
         "track_unassigned_rate_percent": track_unassigned_rate_percent,
+        "eye_angles_present": bool(eye_angle_readiness["present"]),
+        "eye_angles_ready": bool(eye_angle_readiness["ready"]),
+        "eye_angle_run": eye_angle_readiness["run"],
+        "eye_angle_status": eye_angle_readiness["status"],
+        "eye_angle_valid_detection_fraction": eye_angle_readiness["valid_detection_fraction"],
+        "eye_angle_source_geometry_kind": eye_angle_readiness["source_geometry_kind"],
+        "eye_angle_readiness_reasons": eye_angle_readiness["readiness_reasons"],
         "stimulus_runs": stim_runs,
         "calibration_present": calibration_present,
         "tuning_present": tuning_present,
@@ -2504,6 +2689,48 @@ def _track_status_rich(
             f"{_format_one_decimal(unassigned_row_rate_percent)}%)"
         )
     return f"[yellow]WARN[/yellow] ({n_unassigned_rows} unassigned)"
+
+
+def _eye_angle_status_text(
+    present: bool,
+    ready: bool,
+    valid_detection_fraction: Optional[float],
+    source_geometry_kind: Optional[str],
+    readiness_reasons: List[str],
+) -> str:
+    if not present:
+        return "MISS"
+    details: List[str] = []
+    if valid_detection_fraction is not None:
+        details.append(f"valid {_format_one_decimal(valid_detection_fraction * 100.0)}%")
+    if source_geometry_kind:
+        details.append(source_geometry_kind)
+    if ready:
+        return f"OK ({', '.join(details)})" if details else "OK"
+    if readiness_reasons:
+        details.append("; ".join(readiness_reasons[:3]))
+    return f"WARN ({', '.join(details)})" if details else "WARN"
+
+
+def _eye_angle_status_rich(
+    present: bool,
+    ready: bool,
+    valid_detection_fraction: Optional[float],
+    source_geometry_kind: Optional[str],
+    readiness_reasons: List[str],
+) -> str:
+    text = _eye_angle_status_text(
+        present,
+        ready,
+        valid_detection_fraction,
+        source_geometry_kind,
+        readiness_reasons,
+    )
+    if not present:
+        return "[red]MISS[/red]"
+    if ready:
+        return f"[chartreuse1]{text}[/chartreuse1]"
+    return f"[yellow]{text}[/yellow]"
 
 
 def _crop_status_rich(present: bool, status: Optional[str]) -> str:
@@ -3058,6 +3285,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         table.add_column("Refined Subject Components (unified)")
         table.add_column("Arena Assignment")
         table.add_column("Track")
+        table.add_column("Eye Angles")
         table.add_column("Stimulus")
         table.add_column("Calib")
         table.add_column("Tuning")
@@ -3135,6 +3363,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     plan.track_qc_state,
                     plan.track_unassigned_rows,
                     plan.track_unassigned_rate_percent,
+                ),
+                _eye_angle_status_rich(
+                    plan.eye_angles_present,
+                    plan.eye_angles_ready,
+                    plan.eye_angle_valid_detection_fraction,
+                    plan.eye_angle_source_geometry_kind,
+                    plan.eye_angle_readiness_reasons,
                 ),
                 stimulus_text,
                 _status_rich(plan.calibration_present),
@@ -3232,6 +3467,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "  track: "
                 f"{_track_status_text(plan.track_present, plan.track_qc_state, plan.track_unassigned_rows, plan.track_unassigned_rate_percent)}"
             )
+            print(
+                "  eye_angles: "
+                f"{_eye_angle_status_text(plan.eye_angles_present, plan.eye_angles_ready, plan.eye_angle_valid_detection_fraction, plan.eye_angle_source_geometry_kind, plan.eye_angle_readiness_reasons)}"
+            )
+            if plan.eye_angle_run:
+                print(f"  eye_angle_run: {plan.eye_angle_run}")
             print(f"  stimulus_runs: {plan.stimulus_runs} ({_status_text(stimulus_ok)})")
             print(f"  calibration: {_status_text(plan.calibration_present)}")
             if is_production:
