@@ -63,6 +63,25 @@ Version 1 payload shape:
   rewrite.
 - Existing arrays stay where they already live.
 
+## Metadata Backfill
+
+Older refined-keypoint runs may already contain the derived arrays but lack the
+run-level `derived_metrics_schema` attr. These runs can be upgraded without
+rerunning keypoint prediction or refinement:
+
+```bash
+scripts/py -m fisheye.utils.backfill_keypoint_derived_metrics_schema \
+  /path/to/archive_analysis.zarr \
+  --apply
+```
+
+The backfill is metadata-only. It writes `derived_metrics_schema` only when the
+run already has the refined-keypoint arrays described by the schema:
+`keypoints_roi`, `triangle_area`, `triangle_angles`, `min_angle`, and
+`geometry_valid`. It resolves keypoint labels from run-level `keypoint_labels`
+first, then `pose_schema`, and skips runs whose labels cannot identify the
+swim-bladder/left-eye/right-eye triangle.
+
 ## Relationship To Entity Schema
 
 `derived_metrics_schema` does not replace the entity schema.
