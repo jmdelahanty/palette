@@ -147,6 +147,19 @@ Future body-frame estimators may use keypoints, mask components, centerlines,
 B-splines, or hybrid methods. The tail/spline writer must record the exact body
 frame estimator and source refs used.
 
+## Mask QC Prerequisite
+
+Centerline and spline extraction should not be the first authority for bad body
+masks. If a `subject_body` mask includes a connected arena artifact, such as a
+dish scratch attached to the fish, the body mask itself should be flagged by
+the refined-mask QC layer before subject-shape geometry is trusted.
+
+See [subject_body_mask_qc_design.md](subject_body_mask_qc_design.md) for the
+mask-level QC contract. Subject-shape writers should still run fail-closed
+geometry checks, but severe source-mask QC failures should propagate into
+centerline, spline, and tail-anchor validity rather than being silently fixed by
+choosing a different skeleton branch.
+
 ## Proposed Storage
 
 The first implementation should extend `analysis/subject_shape_runs/<run>` with
@@ -208,7 +221,9 @@ analysis/subject_shape_runs/<run>/
       head_endpoint_xy
       tail_tip_xy
       tail_base_xy
+      tail_base_valid
       tail_base_arclength_px
+      tail_base_failure_reason_bytes
       tail_segment_arclength_px
       body_arclength_px
       tail_sample_s
@@ -365,6 +380,21 @@ The canary visualization should overlay:
 
 This visualization should be created before treating the spline output as a
 trusted analysis source.
+
+Current export command:
+
+```bash
+scripts/py -m fisheye.visualization.visualize_subject_shape_overlays \
+  /path/to/archive_analysis.zarr \
+  --shape-run <subject_shape_run> \
+  --rows 0 100 250 \
+  --output-dir /tmp/palette_subject_shape_overlays
+```
+
+The visualizer prefers crop ROI images when a crop run is available, and falls
+back to a subject-body mask background when crop pixels cannot be resolved. The
+first version exports static PNGs; an interactive slider can reuse the same
+renderer after canary review.
 
 ## Implementation Checklist
 

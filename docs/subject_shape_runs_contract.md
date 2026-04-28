@@ -71,6 +71,15 @@ Practical test:
   relationship, track identity, temporal context, or smoothing policy, write it
   to `analysis/subject_shape_runs` or a more specific downstream analysis run.
 
+Mask-quality prerequisite:
+
+- `subject_body` mask-local QC belongs with `refined_subject_masks_runs`; see
+  [subject_body_mask_qc_design.md](subject_body_mask_qc_design.md).
+- Subject-shape writers should fail closed or mark warnings when source
+  mask-level QC indicates a severe or review-required body mask, but
+  `analysis/subject_shape_runs` should not be the primary authority for whether
+  the refined mask pixels are plausible.
+
 ## Non-Goals
 
 - Do not store raw model probabilities here.
@@ -173,7 +182,11 @@ analysis/subject_shape_runs/
         heading_rad                (N,) optional
         tail_tip_xy                (N, 2) optional
         tail_base_xy               (N, 2) optional
+        tail_base_valid            (N,) optional
+        tail_base_arclength_px     (N,) optional
+        tail_base_failure_reason_bytes (N, width) optional
         tail_segment_arclength_px  (N,) optional
+        body_arclength_px          (N,) optional
         tail_sample_s              (K,) optional normalized tail arclength samples
         tail_sample_xy             (N, K, 2) optional
         tail_tangent_xy            (N, K, 2) optional
@@ -186,6 +199,10 @@ analysis/subject_shape_runs/
       swim_bladder/
         centroid_xy                (N, 2) optional mirror/cache
         ellipse_params             (N, 5) optional
+        caudal_contour_point_xy    (N, 2) optional
+        caudal_contour_projection_px (N,) optional
+        caudal_contour_valid       (N,) optional
+        caudal_contour_failure_reason_bytes (N, width) optional
         validity/
       eye_left/
         ellipse_params             (N, 5) optional mirror/cache

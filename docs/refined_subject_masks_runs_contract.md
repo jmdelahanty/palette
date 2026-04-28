@@ -172,6 +172,11 @@ Required behavior:
 - topology cleanup must write metrics/reasons that expose removed area and
   probability mass, and rows with large or ambiguous cleanup deltas must be
   marked for review instead of silently approved
+- subject-body mask-level QC is owned by this refined-mask stage, not by
+  downstream subject-shape extraction. See
+  [subject_body_mask_qc_design.md](subject_body_mask_qc_design.md) for the
+  additive QC group and review-gating policy for connected but implausible body
+  masks such as attached dish scratches.
 
 Initial allowed seed sources for unified assembly:
 
