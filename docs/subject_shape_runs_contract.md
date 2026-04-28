@@ -28,7 +28,9 @@ The first implementation is `fisheye.analysis.subject_shape_runs`. It writes
 row-aligned component summaries, body principal-axis estimates, eye/swim ellipse
 summaries, eye-pair relations, and swim/eye-to-body relations with optional
 Dask worker-chunk execution. Body centerline and B-spline methods remain
-follow-up shape methods under this same run family.
+follow-up shape methods under this same run family. The same run family is also
+the preferred materialized home for shared body-frame arrays derived from
+refined masks, centerlines, B-splines, keypoints, or hybrid estimators.
 
 ## Boundary Rule
 
@@ -114,6 +116,10 @@ Required when used:
 
 - `source_refined_keypoints_run`
 - `source_keypoint_heading_computation`
+- `body_frame_schema_id`
+- `body_frame_schema_version`
+- `body_frame_estimator`
+- `body_frame_source_refs`
 - `source_tracking_run`
 - `source_track_kinematics_run`
 - `temporal_window`
@@ -141,6 +147,15 @@ analysis/subject_shape_runs/
       frame_indices                (N,)
       detection_indices            (N,) optional
       source_refined_row_ids        (N,) optional
+    body_frame/                     optional shared fish anatomical frame
+      origin_xy                     (N, 2)
+      forward_axis_xy               (N, 2)
+      left_axis_xy                  (N, 2)
+      heading_deg                   (N,)
+      valid                         (N,)
+      failure_reason_bytes          (N, width) optional uint8 utf8-null-terminated tags
+      midline_xy                    (N, P, 2) optional
+      arclength_px                  (N,) optional
     components/
       subject_body/
         centroid_xy                (N, 2) optional mirror/cache
@@ -182,6 +197,37 @@ analysis/subject_shape_runs/
 
 This layout is intentionally permissive. The first implementation should write
 only the arrays it can validate.
+
+## Body Frame Placement
+
+`analysis/subject_shape_runs/<run>/body_frame/` is the preferred shared
+materialized location for fish anatomical body-frame outputs.
+
+Reasoning:
+
+- a body frame is deterministic derived biology, not reviewed mask-pixel
+  authority
+- the best estimator may come from body masks, centerlines, B-splines, keypoints,
+  mask component centroids, or a hybrid of those sources
+- downstream consumers such as eye angles, body/tail shape metrics, and
+  bout-level metrics should be able to consume the same frame without
+  duplicating sign and polarity conventions
+
+The body-frame contract separates semantic anchors from estimators:
+
+- semantic anchors name anatomy, such as `swim_bladder`, `eye_left`,
+  `eye_right`, `subject_body`, `tail_tip`, or `snout_tip`
+- estimators declare how those anchors were measured and how frame arrays were
+  materialized
+- outputs expose shared arrays such as `origin_xy`, `forward_axis_xy`,
+  `left_axis_xy`, `heading_deg`, and `valid`
+
+Keypoint-only datasets remain valid. A writer may materialize a body frame from
+`pose_schema.metadata.heading_computation` when masks or body splines are not
+available. Mask/spline estimators should preserve keypoint or mask-component
+anchors for head/tail polarity and anatomical left/right resolution.
+
+See [body_frame_contract.md](body_frame_contract.md).
 
 ## Component And Relation Organization
 
@@ -287,13 +333,20 @@ heading/keypoint context. It remains a valid specialized analysis run, but it
 is not the first authority for mask-derived eye shape geometry in unified
 body/eyes/swim workflows.
 
-Current eye-angle v1 runs opt into `analysis/subject_shape_runs` as the
+Current eye-angle v4 runs opt into `analysis/subject_shape_runs` as the
 preferred source when left/right eye ellipse geometry is present. They record
-`schema_id = "analysis.eye_angle_runs"`, `schema_version = 1`,
+`schema_id = "analysis.eye_angle_runs"`, `schema_version = 4`,
 `method = "ellipse_and_centroid_eye_angles"`,
 `row_axis = "keypoint_detection_rows"`, `source_geometry_kind`, and
 `eye_angle_output_schema` so consumers can distinguish subject-shape,
-refined-subject, and legacy refined-eye geometry sources.
+refined-subject, and legacy refined-eye geometry sources. Schema v4 also
+records `preferred_angle_family = "gaze"` and
+`preferred_eye_axis = "ellipse_minor"` because the ellipse minor axis is the
+biologically preferred eye-look direction in current overhead imagery, and it
+materializes keypoint-derived `support/body_frame/` arrays for signed-angle
+polarity. It retains the v3-compatible `vergence_gaze_deg` total/axis
+separation and adds per-eye nasal gaze plus
+`mean_eye_vergence_gaze_deg` for Johnson/BEAST-style comparisons.
 
 `analysis/subject_shape_runs` should not force every specialized metric to move
 immediately. It defines the mask-derived shape layer that can later feed or
@@ -318,9 +371,16 @@ Recommended near-term approach:
 - Which body centerline method is the first supported implementation?
 - Should body/eyes/swim shape outputs be track-aligned from the start, or
   remain row-aligned with refined masks until tracking is explicitly requested?
+- What approval/quality threshold should be required before a mask/spline body
+  frame supersedes a keypoint-only fallback?
+- How should the first tail-anchor/spline implementation choose between raw
+  centerline samples and B-spline samples for canonical body and tail length?
+  See [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md).
 
 ## Related Documents
 
+- [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [body_frame_contract.md](body_frame_contract.md)
 - [current_pipeline_contract.md](current_pipeline_contract.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
 - [refined_subject_masks_runs_contract.md](refined_subject_masks_runs_contract.md)

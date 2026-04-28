@@ -34,8 +34,10 @@ def _():
         DEFAULT_INTERACTIVE_ARTIFACT,
         bout_kinematics_records_to_dataframe,
         discover_bout_kinematics_run_options,
+        discover_eye_angle_run_options,
         discover_swim_bout_run_options,
         discover_track_kinematics_run_options,
+        load_eye_angle_timeseries_data,
         load_bout_kinematics_records,
         load_track_kinematics_interactive_data,
         to_inter_bout_interval_dataframe,
@@ -122,10 +124,12 @@ def _():
         apply_full_width_timeseries_layout,
         bout_kinematics_records_to_dataframe,
         discover_bout_kinematics_run_options,
+        discover_eye_angle_run_options,
         discover_swim_bout_run_options,
         discover_track_kinematics_run_options,
         go,
         json,
+        load_eye_angle_timeseries_data,
         load_bout_kinematics_records,
         load_track_kinematics_interactive_data,
         mo,
@@ -144,6 +148,7 @@ def _():
 @app.cell
 def _(
     DEFAULT_INTERACTIVE_ARTIFACT,
+    discover_eye_angle_run_options,
     discover_track_kinematics_run_options,
     json,
     mo,
@@ -159,6 +164,7 @@ def _(
     initial_run_path = cli_args.get("run-path")
     initial_swim_bout_run = cli_args.get("swim-bout-run")
     initial_speed_level = cli_args.get("speed-level")
+    initial_eye_angle_run = cli_args.get("eye-angle-run")
     performance_log_raw = cli_args.get(
         "performance-log",
         "/tmp/palette_track_kinematics_explorer_perf.jsonl",
@@ -224,8 +230,18 @@ def _(
             "No track-kinematics interactive artifacts were found. "
             "Run plot_track_kinematics with --write-zarr-artifacts first."
         )
+    _eye_discovery_t0 = time.perf_counter()
+    eye_angle_options = discover_eye_angle_run_options(zarr_path)
+    write_perf_event(
+        "discover_eye_angle_options",
+        time.perf_counter() - _eye_discovery_t0,
+        zarr_path=zarr_path,
+        n_eye_angle_options=len(eye_angle_options),
+    )
     return (
         artifact,
+        eye_angle_options,
+        initial_eye_angle_run,
         initial_run_path,
         initial_speed_level,
         initial_swim_bout_run,
@@ -266,6 +282,84 @@ def _(initial_run_path, mo, track_options):
     )
     track_picker
     return track_label_to_option, track_picker
+
+
+@app.cell
+def _(eye_angle_options, initial_eye_angle_run, mo):
+    _none_label = "No eye-angle run"
+
+    def _matches_initial_eye(_option):
+        if initial_eye_angle_run is None:
+            return False
+        _wanted = str(initial_eye_angle_run).strip("/")
+        return _option.run_path.strip("/") == _wanted or _option.run_name == _wanted.split("/")[-1]
+
+    eye_angle_label_to_option = {_none_label: None}
+    eye_angle_label_to_option.update({_option.label: _option for _option in eye_angle_options})
+    _selected_default = next(
+        (
+            _option.label
+            for _option in eye_angle_options
+            if _matches_initial_eye(_option)
+        ),
+        next(
+            (
+                _option.label
+                for _option in eye_angle_options
+                if _option.is_latest
+            ),
+            eye_angle_options[0].label if eye_angle_options else _none_label,
+        ),
+    )
+    eye_angle_picker = mo.ui.dropdown(
+        options=list(eye_angle_label_to_option),
+        value=_selected_default,
+        label="Eye-angle run",
+    )
+    eye_angle_picker
+    return eye_angle_label_to_option, eye_angle_picker
+
+
+@app.cell
+def _(
+    eye_angle_label_to_option,
+    eye_angle_picker,
+    load_eye_angle_timeseries_data,
+    pd,
+    time,
+    write_perf_event,
+    zarr_path,
+):
+    selected_eye_angle = eye_angle_label_to_option[eye_angle_picker.value]
+    _load_eye_t0 = time.perf_counter()
+    if selected_eye_angle is None:
+        eye_angle_attrs = {}
+        eye_angle_data = None
+        eye_angle_df = pd.DataFrame(columns=["time_s"])
+        eye_angle_row_axis = "none"
+    else:
+        eye_angle_data = load_eye_angle_timeseries_data(
+            zarr_path,
+            run_name=selected_eye_angle.run_name,
+        )
+        eye_angle_attrs = dict(eye_angle_data.attrs)
+        eye_angle_df = eye_angle_data.dataframe
+        eye_angle_row_axis = eye_angle_data.row_axis
+    write_perf_event(
+        "load_eye_angle_timeseries",
+        time.perf_counter() - _load_eye_t0,
+        selected_eye_angle_run=selected_eye_angle.run_name if selected_eye_angle is not None else None,
+        row_axis=eye_angle_row_axis,
+        n_eye_angle_rows=len(eye_angle_df),
+        n_eye_angle_columns=len(eye_angle_df.columns),
+    )
+    return (
+        eye_angle_attrs,
+        eye_angle_data,
+        eye_angle_df,
+        eye_angle_row_axis,
+        selected_eye_angle,
+    )
 
 
 @app.cell
@@ -457,7 +551,11 @@ def _(
     bout_kinematics_attrs,
     bout_kinematics_df,
     data,
+    eye_angle_attrs,
+    eye_angle_df,
+    eye_angle_row_axis,
     selected_bout_kinematics,
+    selected_eye_angle,
     mo,
     pd,
     performance_log_path,
@@ -485,6 +583,8 @@ def _(
         **Selected Bout Candidate:** `{selected_swim_bout.label if selected_swim_bout else "none"}`
 
         **Bout Kinematics:** `{selected_bout_kinematics.label if selected_bout_kinematics else "none"}`
+
+        **Eye Angles:** `{selected_eye_angle.label if selected_eye_angle else "none"}`
 
         **Speed Level:** `{selected_speed_level or "artifact/default"}`
 
@@ -583,6 +683,36 @@ def _(
             "field": "schema_version",
             "value": bout_kinematics_attrs.get("schema_version", "none"),
         },
+        {
+            "surface": "eye_angle",
+            "field": "run",
+            "value": selected_eye_angle.run_name if selected_eye_angle else "none",
+        },
+        {
+            "surface": "eye_angle",
+            "field": "schema_version",
+            "value": eye_angle_attrs.get("schema_version", "none"),
+        },
+        {
+            "surface": "eye_angle",
+            "field": "preferred_angle_family",
+            "value": eye_angle_attrs.get("preferred_angle_family", "none"),
+        },
+        {
+            "surface": "eye_angle",
+            "field": "preferred_eye_axis",
+            "value": eye_angle_attrs.get("preferred_eye_axis", "none"),
+        },
+        {
+            "surface": "eye_angle",
+            "field": "row_axis_loaded",
+            "value": eye_angle_row_axis,
+        },
+        {
+            "surface": "eye_angle",
+            "field": "rows_loaded",
+            "value": len(eye_angle_df),
+        },
     ]
     selected_summary_df = pd.DataFrame(_selected_summary_rows)
     mo.vstack(
@@ -626,7 +756,7 @@ def _(
 
 
 @app.cell
-def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, timeseries_df):
+def _(data, eye_angle_df, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, timeseries_df):
     _speed_columns = [
         _column
         for _column in timeseries_df.columns
@@ -698,6 +828,30 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
         options=_turning_columns,
         value=_default_turning_columns,
         label="Turning / angular traces",
+    )
+    _eye_angle_columns = [
+        _column
+        for _column in eye_angle_df.columns
+        if _column not in {"time_s", "frame_index", "row_index", "valid_frame", "valid_left", "valid_right"}
+        and eye_angle_df[_column].notna().any()
+    ]
+    _default_eye_angle_columns = [
+        _column
+        for _column in (
+            "mean_eye_vergence_gaze_deg_smoothed",
+            "left_nasal_gaze_deg_smoothed",
+            "right_nasal_gaze_deg_smoothed",
+            "left_gaze_signed_deg_smoothed",
+            "right_gaze_signed_deg_smoothed",
+        )
+        if _column in _eye_angle_columns
+    ][:3]
+    if not _default_eye_angle_columns:
+        _default_eye_angle_columns = _eye_angle_columns[:3]
+    eye_angle_series_picker = mo.ui.multiselect(
+        options=_eye_angle_columns,
+        value=_default_eye_angle_columns,
+        label="Eye-angle traces",
     )
     _max_time = float(timeseries_df["time_s"].max()) if len(timeseries_df) else 0.0
     time_window = mo.ui.range_slider(
@@ -774,6 +928,7 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
             speed_series_picker,
             acceleration_series_picker,
             turning_series_picker,
+            eye_angle_series_picker,
             time_window,
             show_swim_bouts,
             swim_bout_boundary_picker,
@@ -783,6 +938,7 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
     )
     return (
         acceleration_series_picker,
+        eye_angle_series_picker,
         histogram_bins,
         show_invalid_intervals,
         show_swim_bouts,
@@ -795,6 +951,7 @@ def _(data, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, time
 
 @app.cell
 def _(
+    eye_angle_df,
     inter_bout_interval_df,
     np,
     swim_bout_df,
@@ -809,6 +966,12 @@ def _(
     start_s, stop_s = time_window.value
     time_mask = (timeseries_df["time_s"] >= start_s) & (timeseries_df["time_s"] <= stop_s)
     filtered_timeseries_df = timeseries_df.loc[time_mask].copy()
+    eye_time_mask = (
+        (eye_angle_df["time_s"] >= start_s) & (eye_angle_df["time_s"] <= stop_s)
+        if len(eye_angle_df) and "time_s" in eye_angle_df
+        else []
+    )
+    filtered_eye_angle_df = eye_angle_df.loc[eye_time_mask].copy() if len(eye_angle_df) else eye_angle_df
     swim_bout_boundary_mode = str(swim_bout_boundary_picker.value)
     _swim_bout_df_for_filter = swim_bout_df
     swim_bout_start_col = "start_s"
@@ -901,6 +1064,8 @@ def _(
         stop_s=float(stop_s),
         n_timeseries_rows_in=len(timeseries_df),
         n_timeseries_rows_out=len(filtered_timeseries_df),
+        n_eye_angle_rows_in=len(eye_angle_df),
+        n_eye_angle_rows_out=len(filtered_eye_angle_df),
         n_swim_bout_rows_in=len(swim_bout_df),
         n_swim_bout_rows_out=len(filtered_swim_bout_df),
         n_inter_bout_interval_rows_in=len(inter_bout_interval_df),
@@ -911,6 +1076,7 @@ def _(
     )
     return (
         filtered_inter_bout_interval_df,
+        filtered_eye_angle_df,
         filtered_swim_bout_df,
         filtered_timeseries_df,
         filtered_validity_df,
@@ -1159,6 +1325,105 @@ def _(
 
 @app.cell
 def _(
+    add_interval_bar_overlay,
+    apply_full_width_timeseries_layout,
+    eye_angle_data,
+    eye_angle_row_axis,
+    eye_angle_series_picker,
+    filtered_eye_angle_df,
+    filtered_swim_bout_df,
+    filtered_validity_df,
+    go,
+    mo,
+    selected_eye_angle,
+    show_invalid_intervals,
+    show_swim_bouts,
+    swim_bout_boundary_mode,
+    swim_bout_end_col,
+    swim_bout_start_col,
+    time,
+    write_perf_event,
+):
+    _figure_t0 = time.perf_counter()
+    if selected_eye_angle is None:
+        eye_angle_plot_output = mo.md("No eye-angle run selected.")
+        _rendered_eye_traces = 0
+        _eye_bout_overlay_renderer = "none"
+        _eye_validity_overlay_renderer = "none"
+    elif not len(filtered_eye_angle_df) or not eye_angle_series_picker.value:
+        eye_angle_plot_output = mo.md("No eye-angle traces available for the selected run/window.")
+        _rendered_eye_traces = 0
+        _eye_bout_overlay_renderer = "none"
+        _eye_validity_overlay_renderer = "none"
+    else:
+        eye_angle_fig = go.Figure()
+        _eye_bout_overlay_renderer = "none"
+        _eye_validity_overlay_renderer = "none"
+        if show_invalid_intervals.value and len(filtered_validity_df):
+            _eye_validity_overlay_renderer = add_interval_bar_overlay(
+                eye_angle_fig,
+                starts=filtered_validity_df["start_s"].to_numpy(dtype=float),
+                ends=filtered_validity_df["end_s"].to_numpy(dtype=float),
+                name="Invalid/gap intervals",
+                color="crimson",
+                opacity=0.16,
+                labels=filtered_validity_df["reason"].to_numpy(dtype=object),
+                hovertemplate="Invalid interval<br>%{x:.3f}s<br>%{customdata}<extra></extra>",
+            )
+        if show_swim_bouts.value and len(filtered_swim_bout_df):
+            _eye_bout_overlay_renderer = add_interval_bar_overlay(
+                eye_angle_fig,
+                starts=filtered_swim_bout_df[swim_bout_start_col].to_numpy(dtype=float),
+                ends=filtered_swim_bout_df[swim_bout_end_col].to_numpy(dtype=float),
+                name=f"Swim bouts ({swim_bout_boundary_mode})",
+                color="orange",
+                opacity=0.18,
+                hoverinfo="skip",
+            )
+        _rendered_eye_traces = 0
+        for _eye_column in eye_angle_series_picker.value:
+            if _eye_column not in filtered_eye_angle_df:
+                continue
+            eye_angle_fig.add_trace(
+                go.Scattergl(
+                    x=filtered_eye_angle_df["time_s"],
+                    y=filtered_eye_angle_df[_eye_column],
+                    mode="lines",
+                    name=_eye_column,
+                )
+            )
+            _rendered_eye_traces += 1
+        _eye_title = (
+            f"Eye-Angle Traces ({eye_angle_data.run_name}; {eye_angle_row_axis} rows)"
+            if eye_angle_data is not None
+            else "Eye-Angle Traces"
+        )
+        apply_full_width_timeseries_layout(
+            eye_angle_fig,
+            title=_eye_title,
+            yaxis_title="Eye angle (deg)",
+            height=420,
+        )
+        eye_angle_plot_output = eye_angle_fig
+    write_perf_event(
+        "build_eye_angle_figure",
+        time.perf_counter() - _figure_t0,
+        selected_eye_angle_run=selected_eye_angle.run_name if selected_eye_angle is not None else None,
+        row_axis=eye_angle_row_axis,
+        n_rows=len(filtered_eye_angle_df),
+        n_traces=len(eye_angle_series_picker.value),
+        n_rendered_traces=_rendered_eye_traces,
+        n_visible_bouts=len(filtered_swim_bout_df),
+        n_visible_validity_intervals=len(filtered_validity_df),
+        swim_bout_overlay_renderer=_eye_bout_overlay_renderer,
+        validity_overlay_renderer=_eye_validity_overlay_renderer,
+    )
+    eye_angle_plot_output
+    return
+
+
+@app.cell
+def _(
     bout_kinematics_df,
     filtered_inter_bout_interval_df,
     filtered_swim_bout_df,
@@ -1230,6 +1495,14 @@ def _(bout_kinematics_df, histogram_bins, mo, np, pd, px, time, write_perf_event
         ("within_heading_path_deg", "Within-bout heading path (deg)"),
         ("within_heading_std_deg", "Within-bout heading std (deg)"),
     ]
+    _eye_metric_specs = [
+        ("pre_vergence_gaze_mean_deg", "Pre-bout vergence gaze (deg)"),
+        ("post_vergence_gaze_mean_deg", "Post-bout vergence gaze (deg)"),
+        ("within_bout_vergence_gaze_mean_deg", "Within-bout mean vergence gaze (deg)"),
+        ("within_bout_vergence_gaze_max_deg", "Within-bout max vergence gaze (deg)"),
+        ("within_bout_vergence_gaze_range_deg", "Within-bout vergence range (deg)"),
+        ("within_bout_converged_fraction", "Within-bout converged fraction"),
+    ]
 
     def _metric_frames(_metric_specs):
         _frames = []
@@ -1246,7 +1519,8 @@ def _(bout_kinematics_df, histogram_bins, mo, np, pd, px, time, write_perf_event
 
     _net_frames = _metric_frames(_net_metric_specs)
     _within_frames = _metric_frames(_within_metric_specs)
-    _all_frames = [*_net_frames, *_within_frames]
+    _eye_frames = _metric_frames(_eye_metric_specs)
+    _all_frames = [*_net_frames, *_within_frames, *_eye_frames]
 
     if _net_frames:
         _net_heading_histogram_df = pd.concat(_net_frames, ignore_index=True)
@@ -1296,6 +1570,30 @@ def _(bout_kinematics_df, histogram_bins, mo, np, pd, px, time, write_perf_event
         _within_heading_histogram_df = pd.DataFrame(columns=["heading_level", "metric", "value"])
         _within_heading_histogram_plot = "No within-bout heading metrics available for the selected candidate."
 
+    if _eye_frames:
+        _eye_gaze_histogram_df = pd.concat(_eye_frames, ignore_index=True)
+        _eye_gaze_histogram_plot = px.histogram(
+            _eye_gaze_histogram_df,
+            x="value",
+            color="heading_level",
+            facet_col="metric",
+            facet_col_wrap=2,
+            nbins=int(histogram_bins.value),
+            barmode="overlay",
+            opacity=0.68,
+            title="Bout Eye-Gaze Metrics",
+            labels={"value": "Value", "count": "Bout count", "heading_level": "Analysis level"},
+        )
+        _eye_gaze_histogram_plot.update_xaxes(matches=None)
+        _eye_gaze_histogram_plot.update_yaxes(matches=None)
+        _eye_gaze_histogram_plot.update_layout(
+            height=760,
+            margin=dict(l=40, r=20, t=70, b=40),
+        )
+    else:
+        _eye_gaze_histogram_df = pd.DataFrame(columns=["heading_level", "metric", "value"])
+        _eye_gaze_histogram_plot = "No bout eye-gaze metrics available for the selected candidate."
+
     if _all_frames:
         bout_heading_histogram_df = pd.concat(_all_frames, ignore_index=True)
     else:
@@ -1307,6 +1605,7 @@ def _(bout_kinematics_df, histogram_bins, mo, np, pd, px, time, write_perf_event
         n_histogram_rows=len(bout_heading_histogram_df),
         n_net_histogram_rows=len(_net_heading_histogram_df),
         n_within_histogram_rows=len(_within_heading_histogram_df),
+        n_eye_gaze_histogram_rows=len(_eye_gaze_histogram_df),
         n_heading_levels=(
             int(bout_heading_histogram_df["heading_level"].nunique())
             if len(bout_heading_histogram_df)
@@ -1314,7 +1613,7 @@ def _(bout_kinematics_df, histogram_bins, mo, np, pd, px, time, write_perf_event
         ),
         bins=int(histogram_bins.value),
     )
-    mo.vstack([_net_heading_histogram_plot, _within_heading_histogram_plot])
+    mo.vstack([_net_heading_histogram_plot, _within_heading_histogram_plot, _eye_gaze_histogram_plot])
     return (bout_heading_histogram_df,)
 
 

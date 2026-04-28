@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""View PNG visualization artifacts directly from a Palette Zarr store."""
+"""View or export PNG visualization artifacts directly from a Palette Zarr store."""
 
 from __future__ import annotations
 
@@ -174,6 +174,20 @@ def load_png_artifact_bytes(root: zarr.Group, artifact_path: str) -> tuple[str, 
     return resolved_path, data
 
 
+def export_png_artifact(
+    root: zarr.Group,
+    artifact_path: str,
+    output_path: Path,
+) -> tuple[str, Path]:
+    """Write a PNG visualization artifact to a filesystem path."""
+
+    resolved_path, png_bytes = load_png_artifact_bytes(root, artifact_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(png_bytes)
+    return resolved_path, output_path
+
+
 def _view_png_bytes(png_bytes: bytes, *, title: str, figsize: tuple[float, float]) -> None:
     import matplotlib.pyplot as plt
 
@@ -206,8 +220,7 @@ def _print_artifact_list(artifacts: Iterable[VisualizationArtifact]) -> int:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "View PNG visualization artifacts directly from a Palette Zarr archive "
-            "without exporting them to filesystem PNGs."
+            "View or export PNG visualization artifacts directly from a Palette Zarr archive."
         )
     )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
@@ -222,6 +235,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--artifact", help="Artifact name under <run-path>/visualizations.")
     parser.add_argument("--list", action="store_true", help="List visualization artifacts and exit.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "Write the resolved PNG bytes to this filesystem path. When set, the "
+            "Matplotlib viewer is skipped unless --show is also passed."
+        ),
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="With --output, also open the Matplotlib viewer after writing the file.",
+    )
     parser.add_argument("--title", help="Optional Matplotlib window title.")
     parser.add_argument("--figsize", default="16,10", help="Figure size as WIDTH,HEIGHT inches (default: 16,10).")
     return parser
@@ -257,6 +283,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             artifact_name=args.artifact,
         )
         resolved_path, png_bytes = load_png_artifact_bytes(root, artifact_path)
+        if args.output is not None:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(png_bytes)
+            print(output_path)
+            if not args.show:
+                return 0
+
         title = args.title or resolved_path
         _view_png_bytes(png_bytes, title=title, figsize=_parse_figsize(args.figsize))
         return 0

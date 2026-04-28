@@ -58,6 +58,22 @@ def test_load_png_artifact_bytes_resolves_interactive_snapshot(tmp_path: Path) -
     assert payload == PNG_BYTES
 
 
+def test_export_png_artifact_writes_filesystem_png(tmp_path: Path) -> None:
+    zarr_path = _make_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="r")
+    output_path = tmp_path / "exports" / "example.png"
+
+    resolved, written_path = mod.export_png_artifact(
+        root,
+        "analysis/example_runs/example_1/visualizations/example_summary_interactive",
+        output_path,
+    )
+
+    assert resolved == "analysis/example_runs/example_1/visualizations/example_summary_png"
+    assert written_path == output_path
+    assert output_path.read_bytes() == PNG_BYTES
+
+
 def test_main_view_uses_run_path_and_artifact_without_writing(monkeypatch, tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
     viewed: list[tuple[int, str, tuple[float, float]]] = []
@@ -83,6 +99,33 @@ def test_main_view_uses_run_path_and_artifact_without_writing(monkeypatch, tmp_p
 
     assert rc == 0
     assert viewed == [(len(PNG_BYTES), "Example", (4.0, 3.0))]
+
+
+def test_main_output_writes_png_without_viewing(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = _make_archive(tmp_path)
+    output_path = tmp_path / "example.png"
+    viewed: list[bytes] = []
+
+    def _fake_view(png_bytes: bytes, *, title: str, figsize: tuple[float, float]) -> None:
+        viewed.append(png_bytes)
+
+    monkeypatch.setattr(mod, "_view_png_bytes", _fake_view)
+
+    rc = mod.main(
+        [
+            str(zarr_path),
+            "--run-path",
+            "analysis/example_runs/example_1",
+            "--artifact",
+            "example_summary_interactive",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert rc == 0
+    assert output_path.read_bytes() == PNG_BYTES
+    assert viewed == []
 
 
 def test_main_list_prints_visualization_artifacts(capsys, tmp_path: Path) -> None:

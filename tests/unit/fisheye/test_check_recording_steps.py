@@ -496,7 +496,7 @@ def test_check_zarr_reads_ready_eye_angle_analysis_run(tmp_path: Path) -> None:
         {
             "status": "complete",
             "schema_id": "analysis.eye_angle_runs",
-            "schema_version": 1,
+            "schema_version": 4,
             "method": "ellipse_and_centroid_eye_angles",
             "row_axis": "keypoint_detection_rows",
             "source_geometry_kind": "subject_shape_eye_geometry",

@@ -30,12 +30,14 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 
 SCHEMA_ID = "analysis.bout_kinematics_runs"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 METHOD = "heading_window_and_within_bout_metrics"
-METHOD_VERSION = "bout_kinematics.v5"
+METHOD_VERSION = "bout_kinematics.v6"
 BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_kinematics_summary.v1"
+BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_eye_gaze_summary.v1"
 BOUT_KINEMATICS_PLOT_RENDERER = "matplotlib_static_plotly_spec.v1"
 BOUT_KINEMATICS_PNG_PREFIX = "bout_kinematics_summary"
+BOUT_EYE_GAZE_PNG_PREFIX = "bout_eye_gaze_summary"
 
 HEADING_LEVEL_TO_ARRAY = {
     "heading_smoothed": "smoothed_heading_degrees",
@@ -48,6 +50,8 @@ HEADING_LEVEL_ALIASES = {
 }
 WITHIN_WINDOWS = ("bout_start_end", "core_start_end")
 PRE_POST_MODES = ("fixed_window", "interbout_epoch")
+EYE_GAZE_LEVEL = "eye_gaze"
+EYE_ANGLE_FAMILIES = ("gaze",)
 
 
 def normalize_heading_level(value: str) -> str:
@@ -126,6 +130,54 @@ def _metrics_dtype() -> np.dtype:
             ("post_position_sample_count", "i4"),
             ("within_window_sample_count", "i4"),
             ("within_angular_velocity_transition_count", "i4"),
+            ("failure_reason_bytes", "S256"),
+        ]
+    )
+
+
+def _eye_gaze_metrics_dtype() -> np.dtype:
+    return np.dtype(
+        [
+            ("bout_id", "i4"),
+            ("source_start_frame", "i8"),
+            ("source_end_frame", "i8"),
+            ("source_core_start_frame", "i8"),
+            ("source_core_end_frame", "i8"),
+            ("pre_epoch_start_frame", "i8"),
+            ("pre_epoch_end_frame", "i8"),
+            ("post_epoch_start_frame", "i8"),
+            ("post_epoch_end_frame", "i8"),
+            ("within_epoch_start_frame", "i8"),
+            ("within_epoch_end_frame", "i8"),
+            ("pre_left_gaze_mean_deg", "f8"),
+            ("pre_right_gaze_mean_deg", "f8"),
+            ("pre_vergence_gaze_mean_deg", "f8"),
+            ("pre_vergence_gaze_signed_mean_deg", "f8"),
+            ("pre_vergence_gaze_std_deg", "f8"),
+            ("pre_vergence_gaze_valid_fraction", "f8"),
+            ("pre_converged_fraction", "f8"),
+            ("post_left_gaze_mean_deg", "f8"),
+            ("post_right_gaze_mean_deg", "f8"),
+            ("post_vergence_gaze_mean_deg", "f8"),
+            ("post_vergence_gaze_signed_mean_deg", "f8"),
+            ("post_vergence_gaze_std_deg", "f8"),
+            ("post_vergence_gaze_valid_fraction", "f8"),
+            ("post_converged_fraction", "f8"),
+            ("within_bout_left_gaze_mean_deg", "f8"),
+            ("within_bout_right_gaze_mean_deg", "f8"),
+            ("within_bout_vergence_gaze_mean_deg", "f8"),
+            ("within_bout_vergence_gaze_signed_mean_deg", "f8"),
+            ("within_bout_vergence_gaze_max_deg", "f8"),
+            ("within_bout_vergence_gaze_range_deg", "f8"),
+            ("within_bout_vergence_gaze_std_deg", "f8"),
+            ("within_bout_vergence_gaze_valid_fraction", "f8"),
+            ("within_bout_converged_fraction", "f8"),
+            ("pre_eye_window_valid", "?"),
+            ("post_eye_window_valid", "?"),
+            ("within_eye_window_valid", "?"),
+            ("pre_eye_sample_count", "i4"),
+            ("post_eye_sample_count", "i4"),
+            ("within_eye_sample_count", "i4"),
             ("failure_reason_bytes", "S256"),
         ]
     )
@@ -406,6 +458,392 @@ def _resolve_swim_bout_run(
         raise ValueError(f"Speed level {level!r} not found in swim-bout run {run_name!r}.")
     level_path = f"analysis/swim_bout_runs/{run_name}/{level}"
     return parent, run_group, str(run_name), level, level_path
+
+
+def _resolve_eye_angle_run(
+    root: zarr.Group,
+    eye_angle_run: str,
+) -> tuple[zarr.Group, str, str]:
+    parent = root.get("analysis/eye_angle_runs")
+    if parent is None:
+        raise ValueError("No analysis/eye_angle_runs group found.")
+
+    spec = str(eye_angle_run).strip().strip("/")
+    parts = spec.split("/")
+    if spec.startswith("analysis/eye_angle_runs/") and len(parts) >= 3:
+        run_name = parts[2]
+    else:
+        run_name = parent.attrs.get("latest") if spec == "latest" else spec
+
+    if not run_name or run_name not in parent:
+        raise ValueError(f"Eye-angle run {eye_angle_run!r} not found.")
+
+    run_path = f"analysis/eye_angle_runs/{run_name}"
+    return parent[run_name], str(run_name), run_path
+
+
+def _aligned_frame_values(
+    array: zarr.Array,
+    frames: np.ndarray,
+    *,
+    dtype: np.dtype | type,
+    source_path: str,
+) -> np.ndarray:
+    frame_indices = np.asarray(frames, dtype=np.int64)
+    if frame_indices.size == 0:
+        return np.asarray([], dtype=dtype)
+    if np.any(frame_indices < 0):
+        raise ValueError(f"{source_path} cannot be aligned to negative frame indices.")
+    if int(np.max(frame_indices)) >= int(array.shape[0]):
+        raise ValueError(
+            f"{source_path} length {array.shape[0]} cannot cover requested frame "
+            f"{int(np.max(frame_indices))}."
+        )
+    return np.asarray(array[frame_indices], dtype=dtype)
+
+
+def _load_eye_gaze_frame_series(
+    root: zarr.Group,
+    *,
+    eye_angle_run: str,
+    eye_angle_family: str,
+    frames: np.ndarray,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    family = str(eye_angle_family).strip()
+    if family not in EYE_ANGLE_FAMILIES:
+        expected = ", ".join(EYE_ANGLE_FAMILIES)
+        raise ValueError(f"Unsupported eye_angle_family {eye_angle_family!r}; expected one of: {expected}")
+
+    run_group, run_name, run_path = _resolve_eye_angle_run(root, eye_angle_run)
+    schema_version = int(run_group.attrs.get("schema_version", 0) or 0)
+    if schema_version < 2:
+        raise ValueError(
+            f"Eye-angle run {run_name!r} has schema_version={schema_version}; "
+            "bout eye-gaze summaries require schema v2 frame-level gaze arrays."
+        )
+
+    frame_group = run_group.get("angles/frame")
+    if frame_group is None:
+        raise ValueError(f"Eye-angle run {run_name!r} is missing angles/frame outputs.")
+
+    required_arrays = {
+        "left_gaze_deg": "left_gaze_deg",
+        "right_gaze_deg": "right_gaze_deg",
+        "vergence_gaze_deg": "vergence_gaze_deg",
+    }
+    series: dict[str, np.ndarray] = {}
+    source_arrays: dict[str, str] = {}
+    for key, array_name in required_arrays.items():
+        if array_name not in frame_group:
+            raise ValueError(f"Eye-angle run {run_name!r} is missing angles/frame/{array_name}.")
+        source_path = f"{run_path}/angles/frame/{array_name}"
+        series[key] = _aligned_frame_values(
+            frame_group[array_name],
+            frames,
+            dtype=np.float64,
+            source_path=source_path,
+        )
+        source_arrays[key] = source_path
+
+    signed_name = "vergence_gaze_signed_deg"
+    if signed_name in frame_group:
+        source_path = f"{run_path}/angles/frame/{signed_name}"
+        series[signed_name] = _aligned_frame_values(
+            frame_group[signed_name],
+            frames,
+            dtype=np.float64,
+            source_path=source_path,
+        )
+        source_arrays[signed_name] = source_path
+    else:
+        series[signed_name] = np.full(frames.shape[0], float("nan"), dtype=np.float64)
+
+    valid = np.isfinite(series["left_gaze_deg"]) & np.isfinite(series["right_gaze_deg"])
+    valid &= np.isfinite(series["vergence_gaze_deg"])
+    qa_group = run_group.get("qa/frame")
+    if qa_group is not None and "valid_frame" in qa_group:
+        source_path = f"{run_path}/qa/frame/valid_frame"
+        valid &= _aligned_frame_values(
+            qa_group["valid_frame"],
+            frames,
+            dtype=bool,
+            source_path=source_path,
+        )
+        source_arrays["valid_frame"] = source_path
+    series["valid_frame"] = np.asarray(valid, dtype=bool)
+
+    source_refs = {
+        "source_eye_angle_run": run_name,
+        "source_eye_angle_path": run_path,
+        "source_eye_angle_schema_version": schema_version,
+        "source_eye_angle_family": family,
+        "source_eye_angle_arrays": source_arrays,
+    }
+    return series, source_refs
+
+
+def _eye_epoch_stats(
+    *,
+    series: Mapping[str, np.ndarray],
+    epoch_slice: slice,
+    min_valid_fraction: float,
+    vergence_threshold_deg: Optional[float],
+) -> dict[str, Any]:
+    window_size = max(0, int(epoch_slice.stop) - int(epoch_slice.start))
+    if window_size <= 0:
+        return {
+            "sample_count": 0,
+            "valid_fraction": 0.0,
+            "window_valid": False,
+            "left_mean": float("nan"),
+            "right_mean": float("nan"),
+            "vergence_mean": float("nan"),
+            "vergence_signed_mean": float("nan"),
+            "vergence_max": float("nan"),
+            "vergence_range": float("nan"),
+            "vergence_std": float("nan"),
+            "converged_fraction": float("nan"),
+            "reason": "insufficient_eye_window",
+        }
+
+    left = np.asarray(series["left_gaze_deg"][epoch_slice], dtype=np.float64)
+    right = np.asarray(series["right_gaze_deg"][epoch_slice], dtype=np.float64)
+    vergence = np.asarray(series["vergence_gaze_deg"][epoch_slice], dtype=np.float64)
+    signed = np.asarray(series["vergence_gaze_signed_deg"][epoch_slice], dtype=np.float64)
+    valid = np.asarray(series["valid_frame"][epoch_slice], dtype=bool)
+    valid &= np.isfinite(left) & np.isfinite(right) & np.isfinite(vergence)
+    valid_count = int(np.count_nonzero(valid))
+    valid_fraction = float(valid_count / window_size) if window_size > 0 else 0.0
+    window_valid = bool(valid_count > 0 and valid_fraction >= float(min_valid_fraction))
+    if not window_valid:
+        reason = "insufficient_eye_window" if valid_count == 0 else "eye_angle_contains_gap"
+        return {
+            "sample_count": valid_count,
+            "valid_fraction": valid_fraction,
+            "window_valid": False,
+            "left_mean": float("nan"),
+            "right_mean": float("nan"),
+            "vergence_mean": float("nan"),
+            "vergence_signed_mean": float("nan"),
+            "vergence_max": float("nan"),
+            "vergence_range": float("nan"),
+            "vergence_std": float("nan"),
+            "converged_fraction": float("nan"),
+            "reason": reason,
+        }
+
+    valid_left = left[valid]
+    valid_right = right[valid]
+    valid_vergence = vergence[valid]
+    valid_signed = signed[valid & np.isfinite(signed)]
+    if vergence_threshold_deg is None:
+        converged_fraction = float("nan")
+    else:
+        converged_fraction = float(
+            np.count_nonzero(valid_vergence >= float(vergence_threshold_deg)) / valid_vergence.size
+        )
+
+    return {
+        "sample_count": valid_count,
+        "valid_fraction": valid_fraction,
+        "window_valid": True,
+        "left_mean": float(np.mean(valid_left)),
+        "right_mean": float(np.mean(valid_right)),
+        "vergence_mean": float(np.mean(valid_vergence)),
+        "vergence_signed_mean": float(np.mean(valid_signed)) if valid_signed.size else float("nan"),
+        "vergence_max": float(np.max(valid_vergence)),
+        "vergence_range": float(np.max(valid_vergence) - np.min(valid_vergence)),
+        "vergence_std": float(np.std(valid_vergence)),
+        "converged_fraction": converged_fraction,
+        "reason": None,
+    }
+
+
+def _build_metrics_for_eye_gaze(
+    *,
+    bouts: np.ndarray,
+    frames: np.ndarray,
+    eye_series: Mapping[str, np.ndarray],
+    pre_post_mode: str,
+    pre_window_frames: int,
+    post_window_frames: int,
+    within_window: str,
+    eye_validity_min_fraction: float,
+    vergence_threshold_deg: Optional[float],
+) -> np.ndarray:
+    metrics = np.zeros(len(bouts), dtype=_eye_gaze_metrics_dtype())
+    if len(metrics) == 0:
+        return metrics
+
+    for field in (
+        "pre_left_gaze_mean_deg",
+        "pre_right_gaze_mean_deg",
+        "pre_vergence_gaze_mean_deg",
+        "pre_vergence_gaze_signed_mean_deg",
+        "pre_vergence_gaze_std_deg",
+        "pre_vergence_gaze_valid_fraction",
+        "pre_converged_fraction",
+        "post_left_gaze_mean_deg",
+        "post_right_gaze_mean_deg",
+        "post_vergence_gaze_mean_deg",
+        "post_vergence_gaze_signed_mean_deg",
+        "post_vergence_gaze_std_deg",
+        "post_vergence_gaze_valid_fraction",
+        "post_converged_fraction",
+        "within_bout_left_gaze_mean_deg",
+        "within_bout_right_gaze_mean_deg",
+        "within_bout_vergence_gaze_mean_deg",
+        "within_bout_vergence_gaze_signed_mean_deg",
+        "within_bout_vergence_gaze_max_deg",
+        "within_bout_vergence_gaze_range_deg",
+        "within_bout_vergence_gaze_std_deg",
+        "within_bout_vergence_gaze_valid_fraction",
+        "within_bout_converged_fraction",
+    ):
+        metrics[field] = float("nan")
+
+    frame_to_index = {int(frame): idx for idx, frame in enumerate(np.asarray(frames, dtype=np.int64))}
+    start_frames = np.asarray(bouts["start_frame"], dtype=np.int64)
+    end_frames = np.asarray(bouts["end_frame"], dtype=np.int64)
+    bout_ids = (
+        np.asarray(bouts["bout_id"], dtype=np.int32)
+        if "bout_id" in (bouts.dtype.names or ())
+        else np.arange(1, len(bouts) + 1, dtype=np.int32)
+    )
+    core_starts = _field_or_default(bouts, "core_start_frame", -1).astype(np.int64)
+    core_ends = _field_or_default(bouts, "core_end_frame", -1).astype(np.int64)
+
+    sorted_rows = np.argsort(start_frames)
+    previous_end_indices = np.full(len(bouts), -1, dtype=np.int64)
+    next_start_indices = np.full(len(bouts), -1, dtype=np.int64)
+    for order_idx, row_idx in enumerate(sorted_rows):
+        if order_idx > 0:
+            previous_row = int(sorted_rows[order_idx - 1])
+            previous_end_indices[int(row_idx)] = int(frame_to_index.get(int(end_frames[previous_row]), -1))
+        if order_idx + 1 < len(sorted_rows):
+            next_row = int(sorted_rows[order_idx + 1])
+            next_start_indices[int(row_idx)] = int(frame_to_index.get(int(start_frames[next_row]), -1))
+
+    for row_idx, (bout_id, start_frame, end_frame, core_start, core_end) in enumerate(
+        zip(bout_ids, start_frames, end_frames, core_starts, core_ends)
+    ):
+        reasons: list[str] = []
+        metrics[row_idx]["bout_id"] = int(bout_id)
+        metrics[row_idx]["source_start_frame"] = int(start_frame)
+        metrics[row_idx]["source_end_frame"] = int(end_frame)
+        metrics[row_idx]["source_core_start_frame"] = int(core_start)
+        metrics[row_idx]["source_core_end_frame"] = int(core_end)
+        metrics[row_idx]["pre_epoch_start_frame"] = -1
+        metrics[row_idx]["pre_epoch_end_frame"] = -1
+        metrics[row_idx]["post_epoch_start_frame"] = -1
+        metrics[row_idx]["post_epoch_end_frame"] = -1
+        metrics[row_idx]["within_epoch_start_frame"] = -1
+        metrics[row_idx]["within_epoch_end_frame"] = -1
+
+        start_idx = frame_to_index.get(int(start_frame))
+        end_idx = frame_to_index.get(int(end_frame))
+        if start_idx is None or end_idx is None or end_idx < start_idx:
+            reasons.append("source_bout_missing")
+            metrics[row_idx]["failure_reason_bytes"] = ";".join(reasons).encode("utf-8")
+            continue
+
+        if pre_post_mode == "fixed_window":
+            pre_slice = slice(max(0, start_idx - pre_window_frames), start_idx)
+            post_slice = slice(end_idx + 1, min(len(frames), end_idx + 1 + post_window_frames))
+        else:
+            previous_end_idx = int(previous_end_indices[row_idx])
+            next_start_idx = int(next_start_indices[row_idx])
+            pre_slice = slice(previous_end_idx + 1, start_idx) if 0 <= previous_end_idx < start_idx else slice(start_idx, start_idx)
+            post_slice = slice(end_idx + 1, next_start_idx) if next_start_idx >= 0 and end_idx < next_start_idx else slice(end_idx + 1, end_idx + 1)
+
+        within_start_frame = core_start if within_window == "core_start_end" and core_start >= 0 else start_frame
+        within_end_frame = core_end if within_window == "core_start_end" and core_end >= 0 else end_frame
+        within_start_idx = frame_to_index.get(int(within_start_frame))
+        within_end_idx = frame_to_index.get(int(within_end_frame))
+        if within_start_idx is None or within_end_idx is None or within_end_idx < within_start_idx:
+            within_slice = slice(start_idx, start_idx)
+            reasons.append("source_bout_missing")
+        else:
+            within_slice = slice(within_start_idx, within_end_idx + 1)
+
+        (
+            metrics[row_idx]["pre_epoch_start_frame"],
+            metrics[row_idx]["pre_epoch_end_frame"],
+        ) = _epoch_bounds(frames, pre_slice)
+        (
+            metrics[row_idx]["post_epoch_start_frame"],
+            metrics[row_idx]["post_epoch_end_frame"],
+        ) = _epoch_bounds(frames, post_slice)
+        (
+            metrics[row_idx]["within_epoch_start_frame"],
+            metrics[row_idx]["within_epoch_end_frame"],
+        ) = _epoch_bounds(frames, within_slice)
+
+        pre_stats = _eye_epoch_stats(
+            series=eye_series,
+            epoch_slice=pre_slice,
+            min_valid_fraction=eye_validity_min_fraction,
+            vergence_threshold_deg=vergence_threshold_deg,
+        )
+        post_stats = _eye_epoch_stats(
+            series=eye_series,
+            epoch_slice=post_slice,
+            min_valid_fraction=eye_validity_min_fraction,
+            vergence_threshold_deg=vergence_threshold_deg,
+        )
+        within_stats = _eye_epoch_stats(
+            series=eye_series,
+            epoch_slice=within_slice,
+            min_valid_fraction=eye_validity_min_fraction,
+            vergence_threshold_deg=vergence_threshold_deg,
+        )
+
+        metrics[row_idx]["pre_left_gaze_mean_deg"] = pre_stats["left_mean"]
+        metrics[row_idx]["pre_right_gaze_mean_deg"] = pre_stats["right_mean"]
+        metrics[row_idx]["pre_vergence_gaze_mean_deg"] = pre_stats["vergence_mean"]
+        metrics[row_idx]["pre_vergence_gaze_signed_mean_deg"] = pre_stats["vergence_signed_mean"]
+        metrics[row_idx]["pre_vergence_gaze_std_deg"] = pre_stats["vergence_std"]
+        metrics[row_idx]["pre_vergence_gaze_valid_fraction"] = pre_stats["valid_fraction"]
+        metrics[row_idx]["pre_converged_fraction"] = pre_stats["converged_fraction"]
+        metrics[row_idx]["pre_eye_window_valid"] = pre_stats["window_valid"]
+        metrics[row_idx]["pre_eye_sample_count"] = pre_stats["sample_count"]
+
+        metrics[row_idx]["post_left_gaze_mean_deg"] = post_stats["left_mean"]
+        metrics[row_idx]["post_right_gaze_mean_deg"] = post_stats["right_mean"]
+        metrics[row_idx]["post_vergence_gaze_mean_deg"] = post_stats["vergence_mean"]
+        metrics[row_idx]["post_vergence_gaze_signed_mean_deg"] = post_stats["vergence_signed_mean"]
+        metrics[row_idx]["post_vergence_gaze_std_deg"] = post_stats["vergence_std"]
+        metrics[row_idx]["post_vergence_gaze_valid_fraction"] = post_stats["valid_fraction"]
+        metrics[row_idx]["post_converged_fraction"] = post_stats["converged_fraction"]
+        metrics[row_idx]["post_eye_window_valid"] = post_stats["window_valid"]
+        metrics[row_idx]["post_eye_sample_count"] = post_stats["sample_count"]
+
+        metrics[row_idx]["within_bout_left_gaze_mean_deg"] = within_stats["left_mean"]
+        metrics[row_idx]["within_bout_right_gaze_mean_deg"] = within_stats["right_mean"]
+        metrics[row_idx]["within_bout_vergence_gaze_mean_deg"] = within_stats["vergence_mean"]
+        metrics[row_idx]["within_bout_vergence_gaze_signed_mean_deg"] = within_stats["vergence_signed_mean"]
+        metrics[row_idx]["within_bout_vergence_gaze_max_deg"] = within_stats["vergence_max"]
+        metrics[row_idx]["within_bout_vergence_gaze_range_deg"] = within_stats["vergence_range"]
+        metrics[row_idx]["within_bout_vergence_gaze_std_deg"] = within_stats["vergence_std"]
+        metrics[row_idx]["within_bout_vergence_gaze_valid_fraction"] = within_stats["valid_fraction"]
+        metrics[row_idx]["within_bout_converged_fraction"] = within_stats["converged_fraction"]
+        metrics[row_idx]["within_eye_window_valid"] = within_stats["window_valid"]
+        metrics[row_idx]["within_eye_sample_count"] = within_stats["sample_count"]
+
+        for prefix, stats in (
+            ("pre", pre_stats),
+            ("post", post_stats),
+            ("within", within_stats),
+        ):
+            if stats["reason"] is not None:
+                reasons.append(f"{prefix}_{stats['reason']}")
+
+        unique_reasons = list(dict.fromkeys(reasons))
+        metrics[row_idx]["failure_reason_bytes"] = (
+            ";".join(unique_reasons).encode("utf-8") if unique_reasons else b"ok"
+        )
+
+    return metrics
 
 
 def _build_metrics_for_heading(
@@ -846,6 +1284,44 @@ def _plot_bout_kinematics_summary(
     return _png_bytes_from_figure(fig, dpi=150)
 
 
+def _plot_bout_eye_gaze_summary(
+    *,
+    metrics: np.ndarray,
+    source_speed_level: str,
+    bins: int,
+) -> bytes:
+    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
+    axes_flat = axes.ravel()
+    metric_specs = [
+        ("pre_vergence_gaze_mean_deg", "Pre-bout vergence (deg)", None),
+        ("post_vergence_gaze_mean_deg", "Post-bout vergence (deg)", None),
+        ("within_bout_vergence_gaze_mean_deg", "Within-bout mean vergence (deg)", None),
+        ("within_bout_vergence_gaze_max_deg", "Within-bout max vergence (deg)", None),
+        ("within_bout_vergence_gaze_range_deg", "Within-bout vergence range (deg)", None),
+        ("within_bout_converged_fraction", "Within-bout converged fraction", (0.0, 1.0)),
+    ]
+    for ax, (field, label, xlim) in zip(axes_flat, metric_specs):
+        values = _safe_metric_values(metrics, field)
+        if values.size:
+            ax.hist(values, bins=int(bins), alpha=0.72, color="#2ca02c")
+        else:
+            ax.text(0.5, 0.5, "No values", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(label)
+        ax.set_xlabel(label)
+        ax.set_ylabel("Bout count")
+        ax.grid(alpha=0.25)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+
+    n_bouts = int(len(metrics))
+    fig.suptitle(
+        f"Bout eye-gaze summaries ({source_speed_level}, {n_bouts} bouts)",
+        fontsize=14,
+    )
+    fig.tight_layout()
+    return _png_bytes_from_figure(fig, dpi=150)
+
+
 def _build_bout_kinematics_interactive_spec(
     *,
     run_name: str,
@@ -974,12 +1450,219 @@ def _build_bout_kinematics_interactive_spec(
     }
 
 
+def _build_bout_eye_gaze_interactive_spec(
+    *,
+    run_name: str,
+    source_refs: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    bins: int,
+) -> dict[str, Any]:
+    base = f"analysis/bout_kinematics_runs/{run_name}/eye_gaze/per_bout_metrics"
+    source_paths: dict[str, str] = {
+        "run": f"analysis/bout_kinematics_runs/{run_name}",
+        "eye_gaze.per_bout_metrics": base,
+    }
+    for field in (
+        "bout_id",
+        "source_start_frame",
+        "source_end_frame",
+        "source_core_start_frame",
+        "source_core_end_frame",
+        "pre_epoch_start_frame",
+        "pre_epoch_end_frame",
+        "post_epoch_start_frame",
+        "post_epoch_end_frame",
+        "within_epoch_start_frame",
+        "within_epoch_end_frame",
+        "pre_left_gaze_mean_deg",
+        "pre_right_gaze_mean_deg",
+        "pre_vergence_gaze_mean_deg",
+        "pre_vergence_gaze_signed_mean_deg",
+        "pre_vergence_gaze_std_deg",
+        "pre_vergence_gaze_valid_fraction",
+        "pre_converged_fraction",
+        "post_left_gaze_mean_deg",
+        "post_right_gaze_mean_deg",
+        "post_vergence_gaze_mean_deg",
+        "post_vergence_gaze_signed_mean_deg",
+        "post_vergence_gaze_std_deg",
+        "post_vergence_gaze_valid_fraction",
+        "post_converged_fraction",
+        "within_bout_left_gaze_mean_deg",
+        "within_bout_right_gaze_mean_deg",
+        "within_bout_vergence_gaze_mean_deg",
+        "within_bout_vergence_gaze_signed_mean_deg",
+        "within_bout_vergence_gaze_max_deg",
+        "within_bout_vergence_gaze_range_deg",
+        "within_bout_vergence_gaze_std_deg",
+        "within_bout_vergence_gaze_valid_fraction",
+        "within_bout_converged_fraction",
+        "pre_eye_window_valid",
+        "post_eye_window_valid",
+        "within_eye_window_valid",
+    ):
+        source_paths[f"eye_gaze.{field}"] = f"{base}/{field}"
+
+    return {
+        "schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+        "title": "Bout eye-gaze summaries",
+        "run_name": run_name,
+        "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+        "source_refs": dict(source_refs),
+        "source_paths": source_paths,
+        "parameters": dict(parameters),
+        "analysis_level": EYE_GAZE_LEVEL,
+        "panels": [
+            {
+                "id": "bout_eye_gaze_histograms",
+                "kind": "facet_histogram",
+                "metrics": [
+                    "pre_vergence_gaze_mean_deg",
+                    "post_vergence_gaze_mean_deg",
+                    "within_bout_vergence_gaze_mean_deg",
+                    "within_bout_vergence_gaze_max_deg",
+                    "within_bout_vergence_gaze_range_deg",
+                    "within_bout_converged_fraction",
+                ],
+                "bins": int(bins),
+            },
+            {
+                "id": "bout_eye_gaze_validity",
+                "kind": "valid_fraction_summary",
+                "metrics": [
+                    "pre_vergence_gaze_valid_fraction",
+                    "post_vergence_gaze_valid_fraction",
+                    "within_bout_vergence_gaze_valid_fraction",
+                ],
+            },
+        ],
+    }
+
+
+def write_bout_eye_gaze_visualization_artifacts(
+    *,
+    zarr_path: Path,
+    run_group: zarr.Group,
+    run_name: str,
+    eye_gaze_metrics: np.ndarray,
+    source_refs: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    source_speed_level: str,
+    bins: int,
+    artifact_dpi: int,
+    command: Optional[str],
+) -> None:
+    png_artifact_name = f"{BOUT_EYE_GAZE_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_png"
+    spec_artifact_name = f"{BOUT_EYE_GAZE_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_interactive"
+    source_paths = {
+        "run": f"analysis/bout_kinematics_runs/{run_name}",
+        "eye_gaze.per_bout_metrics": (
+            f"analysis/bout_kinematics_runs/{run_name}/eye_gaze/per_bout_metrics"
+        ),
+    }
+    source_runs = {
+        "bout_kinematics": run_name,
+        "track_kinematics": source_refs.get("source_track_kinematics_run"),
+        "swim_bout": source_refs.get("source_swim_bout_run"),
+        "swim_bout_speed_level": source_refs.get("source_swim_bout_speed_level"),
+        "eye_angle": source_refs.get("source_eye_angle_run"),
+    }
+    plot_parameters = {
+        "bins": int(bins),
+        "artifact_dpi": int(artifact_dpi),
+        "analysis_level": EYE_GAZE_LEVEL,
+        "pre_post_mode": parameters.get("pre_post_mode"),
+        "eye_gaze": parameters.get("eye_gaze", {}),
+    }
+    signature = _artifact_signature(
+        {
+            "schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+            "run_name": run_name,
+            "source_refs": source_refs,
+            "parameters": plot_parameters,
+        }
+    )
+    created_at_utc = datetime.now(timezone.utc).isoformat()
+    env_info = get_environment_info(disk_path=str(zarr_path), capture_env_vars=False)
+    provenance = build_stage_provenance(
+        stage="bout_eye_gaze_visualization",
+        created_at_utc=created_at_utc,
+        parameters={
+            **plot_parameters,
+            "plot_schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+            "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+        },
+        inputs={
+            "zarr_path": str(zarr_path),
+            "source_refs": dict(source_refs),
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+        },
+        command=command,
+        version=BOUT_KINEMATICS_PLOT_RENDERER,
+        git=get_git_info(),
+        environment=env_info.get("environment"),
+        platform=env_info.get("platform"),
+        artifacts={
+            "png_artifact": f"visualizations/{png_artifact_name}",
+            "interactive_artifact": f"visualizations/{spec_artifact_name}",
+            "artifact_signature": signature,
+        },
+    )
+    png_bytes = _plot_bout_eye_gaze_summary(
+        metrics=eye_gaze_metrics,
+        source_speed_level=source_speed_level,
+        bins=bins,
+    )
+    write_png_visualization_artifact(
+        run_group,
+        png_artifact_name,
+        png_bytes,
+        description="Bout eye-gaze summary PNG",
+        created_by="fisheye.analysis.bout_kinematics",
+        artifact_signature=signature,
+        created_at_utc=created_at_utc,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=plot_parameters,
+        extra_attrs={
+            "plot_schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+            "provenance": provenance,
+        },
+    )
+    spec = _build_bout_eye_gaze_interactive_spec(
+        run_name=run_name,
+        source_refs=source_refs,
+        parameters=parameters,
+        bins=bins,
+    )
+    write_interactive_plot_spec_artifact(
+        run_group,
+        spec_artifact_name,
+        spec,
+        description="Bout eye-gaze interactive plot spec",
+        created_by="fisheye.analysis.bout_kinematics",
+        renderer=BOUT_KINEMATICS_PLOT_RENDERER,
+        artifact_signature=signature,
+        created_at_utc=created_at_utc,
+        snapshot_artifact=png_artifact_name,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=plot_parameters,
+        extra_attrs={
+            "plot_schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+            "provenance": provenance,
+        },
+    )
+
+
 def write_bout_kinematics_visualization_artifacts(
     *,
     zarr_path: Path,
     run_group: zarr.Group,
     run_name: str,
     metrics_by_level: Mapping[str, np.ndarray],
+    eye_gaze_metrics: Optional[np.ndarray],
     source_refs: Mapping[str, Any],
     parameters: Mapping[str, Any],
     heading_levels: Sequence[str],
@@ -1096,6 +1779,19 @@ def write_bout_kinematics_visualization_artifacts(
             "provenance": provenance,
         },
     )
+    if eye_gaze_metrics is not None:
+        write_bout_eye_gaze_visualization_artifacts(
+            zarr_path=zarr_path,
+            run_group=run_group,
+            run_name=run_name,
+            eye_gaze_metrics=eye_gaze_metrics,
+            source_refs=source_refs,
+            parameters=parameters,
+            source_speed_level=source_speed_level,
+            bins=int(bins),
+            artifact_dpi=int(artifact_dpi),
+            command=command,
+        )
 
 
 def compute_and_save_bout_kinematics(
@@ -1117,6 +1813,11 @@ def compute_and_save_bout_kinematics(
     dominant_frequency: bool = False,
     dominant_frequency_min_samples: int = 8,
     dominant_frequency_detrend: bool = True,
+    include_eye_gaze: bool = False,
+    eye_angle_run: str = "latest",
+    eye_angle_family: str = "gaze",
+    eye_validity_min_fraction: float = 1.0,
+    vergence_threshold_deg: Optional[float] = None,
     write_visualizations: bool = False,
     visualization_bins: int = 40,
     visualization_dpi: int = 150,
@@ -1131,6 +1832,11 @@ def compute_and_save_bout_kinematics(
     if pre_post_mode not in PRE_POST_MODES:
         expected = ", ".join(PRE_POST_MODES)
         raise ValueError(f"Unsupported pre_post_mode {pre_post_mode!r}; expected one of: {expected}")
+    if not 0.0 <= float(eye_validity_min_fraction) <= 1.0:
+        raise ValueError("eye_validity_min_fraction must be between 0 and 1.")
+    if str(eye_angle_family).strip() not in EYE_ANGLE_FAMILIES:
+        expected = ", ".join(EYE_ANGLE_FAMILIES)
+        raise ValueError(f"Unsupported eye_angle_family {eye_angle_family!r}; expected one of: {expected}")
 
     default_heading_level = normalize_heading_level(default_heading_level)
     normalized_heading_levels = tuple(dict.fromkeys(normalize_heading_level(level) for level in heading_levels))
@@ -1270,6 +1976,15 @@ def compute_and_save_bout_kinematics(
     }
     if peak_events is not None:
         source_refs["source_peak_events_path"] = f"{swim_level_path}/peak_events"
+    eye_series: Optional[dict[str, np.ndarray]] = None
+    if include_eye_gaze:
+        eye_series, eye_source_refs = _load_eye_gaze_frame_series(
+            root,
+            eye_angle_run=eye_angle_run,
+            eye_angle_family=eye_angle_family,
+            frames=frames,
+        )
+        source_refs.update(eye_source_refs)
     source_bout_field_names = list(bout_attrs.get("field_names", bouts.dtype.names or []))
     source_interpolated_threshold_fields = [
         field
@@ -1302,6 +2017,15 @@ def compute_and_save_bout_kinematics(
             "min_samples": int(dominant_frequency_min_samples),
             "method": "rfft_peak",
             "detrend": bool(dominant_frequency_detrend),
+        },
+        "eye_gaze": {
+            "enabled": bool(include_eye_gaze),
+            "eye_angle_run": str(eye_angle_run),
+            "eye_angle_family": str(eye_angle_family),
+            "eye_validity_min_fraction": float(eye_validity_min_fraction),
+            "vergence_threshold_deg": (
+                None if vergence_threshold_deg is None else float(vergence_threshold_deg)
+            ),
         },
     }
     run_group.attrs["schema_id"] = SCHEMA_ID
@@ -1370,7 +2094,51 @@ def compute_and_save_bout_kinematics(
         written_levels.append(heading_level)
         metrics_by_level[heading_level] = metrics
 
+    written_analysis_levels = list(written_levels)
+    eye_gaze_metrics: Optional[np.ndarray] = None
+    if include_eye_gaze:
+        if eye_series is None:
+            raise ValueError("include_eye_gaze=True did not resolve an eye-angle source.")
+        eye_group = run_group.create_group(EYE_GAZE_LEVEL)
+        eye_group.attrs["eye_angle_family"] = str(eye_angle_family)
+        eye_group.attrs["eye_angle_run"] = source_refs["source_eye_angle_run"]
+        eye_group.attrs["eye_angle_path"] = source_refs["source_eye_angle_path"]
+        eye_group.attrs["source_swim_bout_path"] = swim_level_path
+        eye_gaze_metrics = _build_metrics_for_eye_gaze(
+            bouts=bouts,
+            frames=frames,
+            eye_series=eye_series,
+            pre_post_mode=pre_post_mode,
+            pre_window_frames=pre_window_frames,
+            post_window_frames=post_window_frames,
+            within_window=within_window,
+            eye_validity_min_fraction=float(eye_validity_min_fraction),
+            vergence_threshold_deg=vergence_threshold_deg,
+        )
+        write_columnar_dataset(
+            eye_group,
+            "per_bout_metrics",
+            eye_gaze_metrics,
+            attrs={
+                "schema_id": f"{SCHEMA_ID}.eye_gaze.per_bout_metrics",
+                "schema_version": SCHEMA_VERSION,
+                "analysis_level": EYE_GAZE_LEVEL,
+                "eye_angle_family": str(eye_angle_family),
+                "eye_angle_run": source_refs["source_eye_angle_run"],
+                "eye_angle_path": source_refs["source_eye_angle_path"],
+                "source_bout_count": int(len(bouts)),
+                "source_bout_field_names": source_bout_field_names,
+                "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
+                "eye_validity_min_fraction": float(eye_validity_min_fraction),
+                "vergence_threshold_deg": (
+                    None if vergence_threshold_deg is None else float(vergence_threshold_deg)
+                ),
+            },
+        )
+        written_analysis_levels.append(EYE_GAZE_LEVEL)
+
     run_group.attrs["heading_levels"] = written_levels
+    run_group.attrs["analysis_levels"] = written_analysis_levels
     parent.attrs["latest"] = run_name
 
     git_info = get_git_info()
@@ -1388,6 +2156,7 @@ def compute_and_save_bout_kinematics(
         artifacts={
             "run_path": f"analysis/bout_kinematics_runs/{run_name}",
             "heading_levels": written_levels,
+            "analysis_levels": written_analysis_levels,
         },
     )
     write_stage_provenance(run_group, provenance)
@@ -1398,6 +2167,7 @@ def compute_and_save_bout_kinematics(
             run_group=run_group,
             run_name=str(run_name),
             metrics_by_level=metrics_by_level,
+            eye_gaze_metrics=eye_gaze_metrics,
             source_refs=source_refs,
             parameters=parameters,
             heading_levels=written_levels,
@@ -1447,6 +2217,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Disable linear detrending before frequency estimation.",
     )
     parser.add_argument(
+        "--include-eye-gaze",
+        action="store_true",
+        help="Also compute per-bout eye-gaze summaries from an eye-angle v2 run.",
+    )
+    parser.add_argument("--eye-angle-run", type=str, default="latest")
+    parser.add_argument("--eye-angle-family", choices=EYE_ANGLE_FAMILIES, default="gaze")
+    parser.add_argument("--eye-validity-min-fraction", type=float, default=1.0)
+    parser.add_argument(
+        "--vergence-threshold-deg",
+        type=float,
+        default=None,
+        help="Optional vergence threshold used for converged-fraction summaries.",
+    )
+    parser.add_argument(
         "--write-zarr-artifacts",
         action="store_true",
         help="Write PNG and interactive visualization artifacts under the bout-kinematics run.",
@@ -1473,6 +2257,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         dominant_frequency=args.dominant_frequency,
         dominant_frequency_min_samples=args.dominant_frequency_min_samples,
         dominant_frequency_detrend=not args.dominant_frequency_no_detrend,
+        include_eye_gaze=args.include_eye_gaze,
+        eye_angle_run=args.eye_angle_run,
+        eye_angle_family=args.eye_angle_family,
+        eye_validity_min_fraction=args.eye_validity_min_fraction,
+        vergence_threshold_deg=args.vergence_threshold_deg,
         write_visualizations=args.write_zarr_artifacts,
         visualization_bins=args.visualization_bins,
         visualization_dpi=args.visualization_dpi,

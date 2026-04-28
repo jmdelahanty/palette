@@ -23,6 +23,7 @@ import zarr
 from matplotlib.widgets import Slider, Button
 
 from ..pose.schema import PoseSchema, schema_from_metadata, schema_from_package
+from ..utils.zarr_io import open_zarr_root
 
 
 @dataclass
@@ -45,7 +46,7 @@ class KeypointRecord:
 def open_zarr(zarr_path: Path) -> zarr.Group:
     if not zarr_path.exists():
         raise FileNotFoundError(f"Zarr path does not exist: {zarr_path}")
-    return zarr.open_group(str(zarr_path), mode="r")
+    return open_zarr_root(zarr_path, mode="r")
 
 
 def _resolve_latest_by_method(group: zarr.Group, method: str) -> Optional[str]:

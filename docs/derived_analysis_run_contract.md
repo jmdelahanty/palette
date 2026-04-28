@@ -122,6 +122,25 @@ Failure reasons should be short, stable tags such as:
 - `insufficient_valid_points`
 - `source_row_stale`
 
+## Body-Frame Support Data
+
+Analyses that interpret values in fish-relative coordinates should declare the
+body-frame source they used.
+
+Preferred placement:
+
+- shared mask/spline-derived body frames live in
+  `analysis/subject_shape_runs/<run>/body_frame/`
+- analysis-local support caches may live in
+  `analysis/<analysis_type>_runs/<run>/support/body_frame/`
+- `pose_schema.metadata.heading_computation` remains the keypoint-only fallback
+  estimator for datasets without mask/spline body-frame products
+
+Writers should record `body_frame_schema_id`, `body_frame_schema_version`,
+`body_frame_estimator`, `body_frame_coordinate_space`,
+`body_frame_angle_convention`, and exact `body_frame_source_refs` when a run
+uses fish-relative coordinates. See `docs/body_frame_contract.md`.
+
 ## Relationship To Existing Analysis Runs
 
 Existing analysis outputs already follow this direction:
@@ -131,16 +150,27 @@ Existing analysis outputs already follow this direction:
   identity-resolved movement outputs.
 - `analysis/bout_kinematics_runs/<run>` stores per-bout heading and movement
   metrics derived from an exact swim-bout segmentation candidate without
-  mutating that segmentation artifact.
+  mutating that segmentation artifact. Schema v6 may also include an optional
+  `eye_gaze/per_bout_metrics` subgroup with pre/post/within-bout eye-gaze and
+  vergence summaries linked to an exact `analysis/eye_angle_runs/<run>` source.
 - `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
-  interpreted relative to heading/keypoint context. Current v1 runs declare
-  `schema_id = "analysis.eye_angle_runs"`, `schema_version = 1`,
+  interpreted relative to heading/keypoint context. Current v4 runs declare
+  `schema_id = "analysis.eye_angle_runs"`, `schema_version = 4`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `row_axis = "keypoint_detection_rows"`, and
   `eye_angle_output_schema` for output-group/units/suffix conventions.
+  Readers should prefer explicit `*_gaze_*` arrays derived from the
+  ellipse minor axis; legacy major/minor names remain compatibility outputs.
+  Schema v4 retains the v3-compatible total axis-separation field
+  `vergence_gaze_deg` and adds `left_nasal_gaze_deg`,
+  `right_nasal_gaze_deg`, and BEAST/Johnson-comparable
+  `mean_eye_vergence_gaze_deg`.
   Eye-angle writers should prefer `analysis/subject_shape_runs/<run>` eye
   geometry when a coherent body/eyes/swim shape run exists, and preserve
-  refined-subject/refined-eye fallbacks as explicit lineage.
+  refined-subject/refined-eye fallbacks as explicit lineage. Current v4 runs
+  materialize keypoint-derived `support/body_frame/` arrays and future writers
+  should prefer shared `analysis/subject_shape_runs/<run>/body_frame/` when
+  available.
 - `analysis/stimulus_response_runs/<run>` is the planned stimulus-aware
   downstream consumer.
 
@@ -221,6 +251,8 @@ mask-pixel authority.
 
 Subject-shape runs should be component-organized where possible:
 
+- `body_frame/` stores shared row-aligned fish anatomical frame arrays when the
+  run materializes a mask/spline/keypoint/hybrid body frame.
 - `components/<component>` stores derived geometry whose primary subject is one
   semantic refined-mask component.
 - expected first-class components are `subject_body`, `swim_bladder`,
@@ -236,6 +268,7 @@ Subject-shape runs should be component-organized where possible:
 ## Related Documents
 
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
+- [body_frame_contract.md](body_frame_contract.md)
 - [derived_metrics_schema_contract.md](derived_metrics_schema_contract.md)
 - [current_pipeline_contract.md](current_pipeline_contract.md)
 - [pose_kinematics_run_design.md](pose_kinematics_run_design.md)

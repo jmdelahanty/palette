@@ -26,7 +26,9 @@ This layer should consume:
 
 It should produce per-bout metrics such as net heading change, within-bout
 heading excursion, within-bout heading path length, and optional within-bout
-dominant frequency.
+dominant frequency. When explicitly enabled, it should also join frame-level
+eye-gaze outputs from an exact `analysis/eye_angle_runs/<run>` source and
+write bout-aligned eye summaries without mutating either source run.
 
 ## Use-Case Boundary
 
@@ -47,6 +49,11 @@ when the question is about measurements derived from a frozen bout candidate:
 - how much within-bout heading excursion or oscillation occurred
 - which heading source, pre/post epoch policy, and measurement parameters were
   used
+
+Use `analysis/bout_kinematics_runs/<run>/eye_gaze/per_bout_metrics/` when the
+question is how eye convergence or gaze state relates to those same frozen bout
+boundaries. The source eye trace remains owned by `analysis/eye_angle_runs`; the
+bout-kinematics run stores only windowed per-bout summaries and lineage.
 
 This boundary lets operators tune and compare segmentation candidates without
 rewriting downstream biological measurements, and lets analysts recompute
@@ -276,9 +283,9 @@ The run should record `default_heading_level = "heading_smoothed"`.
 analysis/bout_kinematics_runs/<run_name>/
   attrs:
     schema_id: "analysis.bout_kinematics_runs"
-    schema_version: 5
+    schema_version: 6
     method: "heading_window_and_within_bout_metrics"
-    method_version: "bout_kinematics.v5"
+    method_version: "bout_kinematics.v6"
     created_at_utc
     row_axis: "swim_bout_rows"
     source_refs:
@@ -293,6 +300,11 @@ analysis/bout_kinematics_runs/<run_name>/
       source_heading_arrays:
         heading_smoothed: <track path>/smoothed_heading_degrees
         heading_raw: <track path>/heading_degrees
+      source_eye_angle_run                      optional, when eye_gaze is enabled
+      source_eye_angle_path                     optional
+      source_eye_angle_schema_version           optional
+      source_eye_angle_family                   optional
+      source_eye_angle_arrays                   optional
     parameters:
       default_heading_level: "heading_smoothed"
       heading_levels: ["heading_smoothed", "heading_raw"]
@@ -312,6 +324,12 @@ analysis/bout_kinematics_runs/<run_name>/
         min_samples
         method
         detrend
+      eye_gaze:
+        enabled
+        eye_angle_run
+        eye_angle_family: "gaze"
+        eye_validity_min_fraction
+        vergence_threshold_deg                  optional
   heading_smoothed/
     per_bout_metrics/
       bout_id
@@ -324,6 +342,49 @@ analysis/bout_kinematics_runs/<run_name>/
       source_start_frame
       source_end_frame
       ...
+  eye_gaze/                                    optional
+    per_bout_metrics/
+      bout_id
+      source_start_frame
+      source_end_frame
+      source_core_start_frame
+      source_core_end_frame
+      pre_epoch_start_frame
+      pre_epoch_end_frame
+      post_epoch_start_frame
+      post_epoch_end_frame
+      within_epoch_start_frame
+      within_epoch_end_frame
+      pre_left_gaze_mean_deg
+      pre_right_gaze_mean_deg
+      pre_vergence_gaze_mean_deg
+      pre_vergence_gaze_signed_mean_deg
+      pre_vergence_gaze_std_deg
+      pre_vergence_gaze_valid_fraction
+      pre_converged_fraction
+      post_left_gaze_mean_deg
+      post_right_gaze_mean_deg
+      post_vergence_gaze_mean_deg
+      post_vergence_gaze_signed_mean_deg
+      post_vergence_gaze_std_deg
+      post_vergence_gaze_valid_fraction
+      post_converged_fraction
+      within_bout_left_gaze_mean_deg
+      within_bout_right_gaze_mean_deg
+      within_bout_vergence_gaze_mean_deg
+      within_bout_vergence_gaze_signed_mean_deg
+      within_bout_vergence_gaze_max_deg
+      within_bout_vergence_gaze_range_deg
+      within_bout_vergence_gaze_std_deg
+      within_bout_vergence_gaze_valid_fraction
+      within_bout_converged_fraction
+      pre_eye_window_valid
+      post_eye_window_valid
+      within_eye_window_valid
+      pre_eye_sample_count
+      post_eye_sample_count
+      within_eye_sample_count
+      failure_reason_bytes
 ```
 
 The run should also record enough source identity to validate that the
@@ -368,6 +429,14 @@ heading-level attrs such as `heading_source_array` may mirror part of this
 information for local convenience, but readers should treat `source_refs` as the
 canonical provenance mapping if the two ever disagree.
 
+The optional `eye_gaze` subgroup follows the same provenance rule. It consumes
+`analysis/eye_angle_runs/<run>/angles/frame/*_gaze_*` arrays, aligned by source
+frame index to the selected track-kinematics frames. Its `pre_*`, `post_*`, and
+`within_*` windows are the same resolved windows used for heading metrics. If a
+`vergence_threshold_deg` is configured, `*_converged_fraction` records the
+fraction of valid samples meeting or exceeding that threshold; otherwise those
+fields are `NaN`.
+
 ## Visualization Policy
 
 Visual summaries should keep signed net heading changes separate from
@@ -376,6 +445,18 @@ and should be plotted on a fixed `[-180, 180]` degree x-axis. Within-bout range,
 peak-to-peak, path length, and standard deviation are nonnegative excursion
 metrics and may legitimately exceed 180 degrees, so they should use independent
 positive axes.
+
+When the run contains `eye_gaze/per_bout_metrics`, the writer should also persist
+a separate eye-gaze visualization pair under `visualizations/`:
+
+- `bout_eye_gaze_summary_track_<id>_png`
+- `bout_eye_gaze_summary_track_<id>_interactive`
+
+This plot spec uses `palette.plot_spec.bout_eye_gaze_summary.v1` and should
+focus on bout-aligned eye summaries such as pre/post vergence, within-bout mean
+and maximum vergence, within-bout vergence range, and optional converged
+fractions. Keeping this separate from the heading plot avoids mixing different
+biological quantities into one overloaded artifact.
 
 ## Window Parameters
 

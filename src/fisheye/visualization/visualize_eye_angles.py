@@ -9,16 +9,22 @@ summary derived from ``fisheye.analysis.eye_angle_analysis``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
+import zarr
 
+from fisheye.shared.plot_artifacts import write_png_visualization_artifact
+from fisheye.shared.stage_provenance import build_stage_provenance
+from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 try:
@@ -36,6 +42,8 @@ except ImportError:  # pragma: no cover
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "plots"
 MAX_TIMELINE_POINTS = 8000
 SCATTER_DECIMATE = 10
+EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID = "palette.plot_spec.eye_angle_dashboard.v1"
+EYE_ANGLE_DASHBOARD_RENDERER = "palette-eye-angle-dashboard-v1"
 
 
 def _serialize_xmp(payload: Dict[str, object]) -> str:
@@ -53,21 +61,30 @@ def _serialize_xmp(payload: Dict[str, object]) -> str:
     )
 
 
-def _save_with_metadata(fig: plt.Figure, path: Path, metadata: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _png_bytes_with_metadata(
+    fig: plt.Figure,
+    metadata: Mapping[str, object],
+    *,
+    dpi: int = 150,
+) -> bytes:
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+    fig.savefig(buffer, format="png", dpi=int(dpi), bbox_inches="tight")
     buffer.seek(0)
 
     if Image is None or PngImagePlugin is None:  # pragma: no cover
-        with path.open("wb") as fh:
-            fh.write(buffer.getvalue())
-        return
+        return buffer.getvalue()
 
     image = Image.open(buffer)
     pnginfo = PngImagePlugin.PngInfo()
-    pnginfo.add_text("XML:com.adobe.xmp", _serialize_xmp(metadata))
-    image.save(path, pnginfo=pnginfo)
+    pnginfo.add_text("XML:com.adobe.xmp", _serialize_xmp(dict(metadata)))
+    output = io.BytesIO()
+    image.save(output, format="PNG", pnginfo=pnginfo)
+    return output.getvalue()
+
+
+def _save_png_bytes(path: Path, png_bytes: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png_bytes)
 
 
 def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[str, object], Dict[str, np.ndarray]]:
@@ -117,12 +134,32 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_minor_signed_smoothed": _maybe("vergence_minor_signed_deg_smoothed"),
         "version_minor": _maybe("version_minor_deg"),
         "version_minor_smoothed": _maybe("version_minor_deg_smoothed"),
+        "left_gaze": _maybe("left_gaze_deg"),
+        "left_gaze_smoothed": _maybe("left_gaze_deg_smoothed"),
+        "right_gaze": _maybe("right_gaze_deg"),
+        "right_gaze_smoothed": _maybe("right_gaze_deg_smoothed"),
+        "left_gaze_signed": _maybe("left_gaze_signed_deg"),
+        "left_gaze_signed_smoothed": _maybe("left_gaze_signed_deg_smoothed"),
+        "right_gaze_signed": _maybe("right_gaze_signed_deg"),
+        "right_gaze_signed_smoothed": _maybe("right_gaze_signed_deg_smoothed"),
+        "vergence_gaze": _maybe("vergence_gaze_deg"),
+        "vergence_gaze_smoothed": _maybe("vergence_gaze_deg_smoothed"),
+        "vergence_gaze_signed": _maybe("vergence_gaze_signed_deg"),
+        "vergence_gaze_signed_smoothed": _maybe("vergence_gaze_signed_deg_smoothed"),
+        "left_nasal_gaze": _maybe("left_nasal_gaze_deg"),
+        "left_nasal_gaze_smoothed": _maybe("left_nasal_gaze_deg_smoothed"),
+        "right_nasal_gaze": _maybe("right_nasal_gaze_deg"),
+        "right_nasal_gaze_smoothed": _maybe("right_nasal_gaze_deg_smoothed"),
+        "mean_eye_vergence_gaze": _maybe("mean_eye_vergence_gaze_deg"),
+        "mean_eye_vergence_gaze_smoothed": _maybe("mean_eye_vergence_gaze_deg_smoothed"),
+        "version_gaze": _maybe("version_gaze_deg"),
+        "version_gaze_smoothed": _maybe("version_gaze_deg_smoothed"),
         "left_speed": _maybe("left_speed_deg_s"),
         "right_speed": _maybe("right_speed_deg_s"),
         "vergence_speed": _maybe("vergence_speed_deg_s"),
         "vergence_signed_speed": _maybe("vergence_signed_speed_deg_s"),
         "version_speed": _maybe("version_speed_deg_s"),
-        # Centroid-based angles (paper-comparable)
+        # Centroid-based eye-position angles (auxiliary pose context)
         "left_centroid": _maybe("left_centroid_deg"),
         "left_centroid_smoothed": _maybe("left_centroid_deg_smoothed"),
         "right_centroid": _maybe("right_centroid_deg"),
@@ -154,6 +191,26 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_minor_signed_smoothed": _maybe("vergence_minor_signed_delta_deg_smoothed"),
         "version_minor": _maybe("version_minor_delta_deg"),
         "version_minor_smoothed": _maybe("version_minor_delta_deg_smoothed"),
+        "left_gaze": _maybe("left_gaze_delta_deg"),
+        "left_gaze_smoothed": _maybe("left_gaze_delta_deg_smoothed"),
+        "right_gaze": _maybe("right_gaze_delta_deg"),
+        "right_gaze_smoothed": _maybe("right_gaze_delta_deg_smoothed"),
+        "left_gaze_signed": _maybe("left_gaze_signed_delta_deg"),
+        "left_gaze_signed_smoothed": _maybe("left_gaze_signed_delta_deg_smoothed"),
+        "right_gaze_signed": _maybe("right_gaze_signed_delta_deg"),
+        "right_gaze_signed_smoothed": _maybe("right_gaze_signed_delta_deg_smoothed"),
+        "vergence_gaze": _maybe("vergence_gaze_delta_deg"),
+        "vergence_gaze_smoothed": _maybe("vergence_gaze_delta_deg_smoothed"),
+        "vergence_gaze_signed": _maybe("vergence_gaze_signed_delta_deg"),
+        "vergence_gaze_signed_smoothed": _maybe("vergence_gaze_signed_delta_deg_smoothed"),
+        "left_nasal_gaze": _maybe("left_nasal_gaze_delta_deg"),
+        "left_nasal_gaze_smoothed": _maybe("left_nasal_gaze_delta_deg_smoothed"),
+        "right_nasal_gaze": _maybe("right_nasal_gaze_delta_deg"),
+        "right_nasal_gaze_smoothed": _maybe("right_nasal_gaze_delta_deg_smoothed"),
+        "mean_eye_vergence_gaze": _maybe("mean_eye_vergence_gaze_delta_deg"),
+        "mean_eye_vergence_gaze_smoothed": _maybe("mean_eye_vergence_gaze_delta_deg_smoothed"),
+        "version_gaze": _maybe("version_gaze_delta_deg"),
+        "version_gaze_smoothed": _maybe("version_gaze_delta_deg_smoothed"),
         # Centroid-based deltas
         "left_centroid": _maybe("left_centroid_delta_deg"),
         "left_centroid_smoothed": _maybe("left_centroid_delta_deg_smoothed"),
@@ -190,6 +247,26 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_data["version_smoothed"] = _frame_maybe("version_deg_smoothed")
         frame_data["version_minor"] = _frame_maybe("version_minor_deg")
         frame_data["version_minor_smoothed"] = _frame_maybe("version_minor_deg_smoothed")
+        frame_data["left_gaze"] = _frame_maybe("left_gaze_deg")
+        frame_data["left_gaze_smoothed"] = _frame_maybe("left_gaze_deg_smoothed")
+        frame_data["right_gaze"] = _frame_maybe("right_gaze_deg")
+        frame_data["right_gaze_smoothed"] = _frame_maybe("right_gaze_deg_smoothed")
+        frame_data["left_gaze_signed"] = _frame_maybe("left_gaze_signed_deg")
+        frame_data["left_gaze_signed_smoothed"] = _frame_maybe("left_gaze_signed_deg_smoothed")
+        frame_data["right_gaze_signed"] = _frame_maybe("right_gaze_signed_deg")
+        frame_data["right_gaze_signed_smoothed"] = _frame_maybe("right_gaze_signed_deg_smoothed")
+        frame_data["vergence_gaze"] = _frame_maybe("vergence_gaze_deg")
+        frame_data["vergence_gaze_smoothed"] = _frame_maybe("vergence_gaze_deg_smoothed")
+        frame_data["vergence_gaze_signed"] = _frame_maybe("vergence_gaze_signed_deg")
+        frame_data["vergence_gaze_signed_smoothed"] = _frame_maybe("vergence_gaze_signed_deg_smoothed")
+        frame_data["left_nasal_gaze"] = _frame_maybe("left_nasal_gaze_deg")
+        frame_data["left_nasal_gaze_smoothed"] = _frame_maybe("left_nasal_gaze_deg_smoothed")
+        frame_data["right_nasal_gaze"] = _frame_maybe("right_nasal_gaze_deg")
+        frame_data["right_nasal_gaze_smoothed"] = _frame_maybe("right_nasal_gaze_deg_smoothed")
+        frame_data["mean_eye_vergence_gaze"] = _frame_maybe("mean_eye_vergence_gaze_deg")
+        frame_data["mean_eye_vergence_gaze_smoothed"] = _frame_maybe("mean_eye_vergence_gaze_deg_smoothed")
+        frame_data["version_gaze"] = _frame_maybe("version_gaze_deg")
+        frame_data["version_gaze_smoothed"] = _frame_maybe("version_gaze_deg_smoothed")
         frame_deltas["left"] = _frame_maybe("left_delta_deg")
         frame_deltas["left_smoothed"] = _frame_maybe("left_delta_deg_smoothed")
         frame_deltas["right"] = _frame_maybe("right_delta_deg")
@@ -204,6 +281,26 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_deltas["version_smoothed"] = _frame_maybe("version_delta_deg_smoothed")
         frame_deltas["version_minor"] = _frame_maybe("version_minor_delta_deg")
         frame_deltas["version_minor_smoothed"] = _frame_maybe("version_minor_delta_deg_smoothed")
+        frame_deltas["left_gaze"] = _frame_maybe("left_gaze_delta_deg")
+        frame_deltas["left_gaze_smoothed"] = _frame_maybe("left_gaze_delta_deg_smoothed")
+        frame_deltas["right_gaze"] = _frame_maybe("right_gaze_delta_deg")
+        frame_deltas["right_gaze_smoothed"] = _frame_maybe("right_gaze_delta_deg_smoothed")
+        frame_deltas["left_gaze_signed"] = _frame_maybe("left_gaze_signed_delta_deg")
+        frame_deltas["left_gaze_signed_smoothed"] = _frame_maybe("left_gaze_signed_delta_deg_smoothed")
+        frame_deltas["right_gaze_signed"] = _frame_maybe("right_gaze_signed_delta_deg")
+        frame_deltas["right_gaze_signed_smoothed"] = _frame_maybe("right_gaze_signed_delta_deg_smoothed")
+        frame_deltas["vergence_gaze"] = _frame_maybe("vergence_gaze_delta_deg")
+        frame_deltas["vergence_gaze_smoothed"] = _frame_maybe("vergence_gaze_delta_deg_smoothed")
+        frame_deltas["vergence_gaze_signed"] = _frame_maybe("vergence_gaze_signed_delta_deg")
+        frame_deltas["vergence_gaze_signed_smoothed"] = _frame_maybe("vergence_gaze_signed_delta_deg_smoothed")
+        frame_deltas["left_nasal_gaze"] = _frame_maybe("left_nasal_gaze_delta_deg")
+        frame_deltas["left_nasal_gaze_smoothed"] = _frame_maybe("left_nasal_gaze_delta_deg_smoothed")
+        frame_deltas["right_nasal_gaze"] = _frame_maybe("right_nasal_gaze_delta_deg")
+        frame_deltas["right_nasal_gaze_smoothed"] = _frame_maybe("right_nasal_gaze_delta_deg_smoothed")
+        frame_deltas["mean_eye_vergence_gaze"] = _frame_maybe("mean_eye_vergence_gaze_delta_deg")
+        frame_deltas["mean_eye_vergence_gaze_smoothed"] = _frame_maybe("mean_eye_vergence_gaze_delta_deg_smoothed")
+        frame_deltas["version_gaze"] = _frame_maybe("version_gaze_delta_deg")
+        frame_deltas["version_gaze_smoothed"] = _frame_maybe("version_gaze_delta_deg_smoothed")
     if "frame" in qa:
         frame_data["frame_valid"] = qa["frame"]["valid_frame"][:]
         frame_data["frame_reason"] = qa["frame"]["reason_codes"][:]
@@ -252,8 +349,158 @@ def _eye_angle_contract_metadata(attrs: Dict[str, object]) -> Dict[str, object]:
         "source_refined_subject_masks_run": attrs.get("source_refined_subject_masks_run"),
         "source_refined_eye_run": attrs.get("source_refined_eye_run"),
         "source_keypoints_run": attrs.get("source_keypoints_run") or attrs.get("source_keypoint_run"),
+        "preferred_angle_family": attrs.get("preferred_angle_family"),
+        "preferred_eye_axis": attrs.get("preferred_eye_axis"),
+        "gaze_angle_source": attrs.get("gaze_angle_source"),
         "eye_angle_output_schema": attrs.get("eye_angle_output_schema"),
     }
+
+
+def _artifact_signature(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _eye_angle_dashboard_artifact_name(angle_source: str) -> str:
+    return f"eye_angle_dashboard_{angle_source}_png"
+
+
+def _eye_angle_source_paths(run_name: str) -> Dict[str, str]:
+    run_path = f"analysis/eye_angle_runs/{run_name}"
+    return {
+        "run": run_path,
+        "angles_roi": f"{run_path}/angles/roi",
+        "angles_frame": f"{run_path}/angles/frame",
+        "qa_roi": f"{run_path}/qa/roi",
+        "qa_frame": f"{run_path}/qa/frame",
+        "support": f"{run_path}/support",
+    }
+
+
+def _eye_angle_source_runs(attrs: Mapping[str, object]) -> Dict[str, object]:
+    source_runs: Dict[str, object] = {
+        "eye_angle": attrs.get("run_name"),
+    }
+    for key in (
+        "source_eye_geometry_run",
+        "source_subject_shape_run",
+        "source_refined_subject_masks_run",
+        "source_refined_eye_run",
+    ):
+        value = attrs.get(key)
+        if value:
+            source_runs[key] = value
+    source_keypoints = attrs.get("source_keypoints_run") or attrs.get("source_keypoint_run")
+    if source_keypoints:
+        source_runs["source_keypoints_run"] = source_keypoints
+    return source_runs
+
+
+def _resolve_eye_angle_run_group(
+    zarr_path: Path,
+    run_name: str,
+    *,
+    mode: str,
+) -> zarr.Group:
+    root = open_zarr_root(zarr_path, mode=mode)
+    analysis = root.get("analysis")
+    if analysis is None or "eye_angle_runs" not in analysis:
+        raise ValueError("Archive is missing analysis/eye_angle_runs.")
+    parent = analysis["eye_angle_runs"]
+    if run_name not in parent:
+        raise ValueError(f"Run '{run_name}' not found in analysis/eye_angle_runs.")
+    return parent[run_name]
+
+
+def _write_eye_angle_png_artifact(
+    *,
+    zarr_path: Path,
+    run_group: zarr.Group,
+    attrs: Mapping[str, object],
+    angle_source: str,
+    variant_label: str,
+    png_bytes: bytes,
+    generated_at_utc: str,
+    artifact_dpi: int = 150,
+    command: Optional[str] = None,
+) -> str:
+    run_name = str(attrs.get("run_name") or run_group.name.rsplit("/", 1)[-1])
+    source_paths = _eye_angle_source_paths(run_name)
+    source_runs = _eye_angle_source_runs(attrs)
+    parameters = {
+        "angle_source": angle_source,
+        "angle_source_label": variant_label,
+        "artifact_dpi": int(artifact_dpi),
+        "max_timeline_points": MAX_TIMELINE_POINTS,
+        "scatter_decimate": SCATTER_DECIMATE,
+    }
+    signature = _artifact_signature(
+        {
+            "schema_id": EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID,
+            "run_name": run_name,
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+            "parameters": parameters,
+        }
+    )
+    env_info = get_environment_info(
+        disk_path=str(zarr_path),
+        capture_env_vars=False,
+    )
+    provenance = build_stage_provenance(
+        stage="eye_angle_visualization",
+        created_at_utc=generated_at_utc,
+        parameters={
+            **parameters,
+            "plot_schema_id": EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID,
+            "renderer": EYE_ANGLE_DASHBOARD_RENDERER,
+        },
+        inputs={
+            "zarr_path": str(zarr_path),
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+            "run_name": run_name,
+            "eye_angle_contract": _eye_angle_contract_metadata(dict(attrs)),
+        },
+        command=command,
+        version=EYE_ANGLE_DASHBOARD_RENDERER,
+        git=get_git_info(),
+        environment=env_info.get("environment"),
+        platform=env_info.get("platform"),
+        artifacts={
+            "png_artifact": f"visualizations/{_eye_angle_dashboard_artifact_name(angle_source)}",
+            "artifact_signature": signature,
+        },
+    )
+    artifact_name = _eye_angle_dashboard_artifact_name(angle_source)
+    write_png_visualization_artifact(
+        run_group,
+        artifact_name,
+        png_bytes,
+        description=f"Eye angle dashboard PNG ({variant_label})",
+        created_by="fisheye.visualization.visualize_eye_angles",
+        artifact_signature=signature,
+        created_at_utc=generated_at_utc,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=parameters,
+        extra_attrs={
+            "plot_schema_id": EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID,
+            "renderer": EYE_ANGLE_DASHBOARD_RENDERER,
+            "run_name": run_name,
+            "angle_source": angle_source,
+            "angle_source_label": variant_label,
+            "eye_angle_contract": _eye_angle_contract_metadata(dict(attrs)),
+            "provenance": provenance,
+        },
+    )
+    return f"visualizations/{artifact_name}"
 
 
 def _downsample(values: Optional[np.ndarray], max_points: int) -> np.ndarray:
@@ -322,7 +569,7 @@ def _select_angle_variant(
     roi_angles: Dict[str, Optional[np.ndarray]],
     roi_deltas: Dict[str, Optional[np.ndarray]],
     source: str,
-) -> Tuple[Dict[str, Optional[np.ndarray]], str, Dict[str, Dict[str, object]]]:
+) -> Tuple[Dict[str, Optional[np.ndarray]], str, Dict[str, object]]:
     """Return the angle series to visualize along with a human-friendly label."""
 
     deltas: Dict[str, Optional[np.ndarray]] = {}
@@ -381,6 +628,71 @@ def _select_angle_variant(
             }
         )
         label = "Ellipse major axis"
+    elif source == "gaze":
+        explicit_gaze = isinstance(roi_angles.get("left_gaze"), np.ndarray)
+        beast_mean_gaze = isinstance(roi_angles.get("mean_eye_vergence_gaze"), np.ndarray)
+        left_gaze = _pick("left_nasal_gaze", required=False) if beast_mean_gaze else _pick("left_gaze", required=False)
+        right_gaze = _pick("right_nasal_gaze", required=False) if beast_mean_gaze else _pick("right_gaze", required=False)
+        vergence_gaze = (
+            _pick("mean_eye_vergence_gaze", required=False)
+            if beast_mean_gaze
+            else _pick("vergence_gaze", required=False)
+        )
+        left_signed = _pick("left_gaze_signed", required=False)
+        right_signed = _pick("right_gaze_signed", required=False)
+        vergence_signed = None if beast_mean_gaze else _pick("vergence_gaze_signed", required=False)
+        version_gaze = _pick("version_gaze", required=False)
+        if not isinstance(left_signed, np.ndarray):
+            left_signed = _pick("left_minor_signed")
+        if not isinstance(right_signed, np.ndarray):
+            right_signed = _pick("right_minor_signed")
+        if not isinstance(vergence_signed, np.ndarray):
+            vergence_signed = _pick("vergence_minor_signed")
+        if not isinstance(left_gaze, np.ndarray):
+            left_gaze = np.abs(left_signed)
+        if not isinstance(right_gaze, np.ndarray):
+            right_gaze = np.abs(right_signed)
+        if not isinstance(vergence_gaze, np.ndarray):
+            vergence_gaze = np.abs(vergence_signed)
+        if not isinstance(version_gaze, np.ndarray):
+            version_gaze = _pick("version_minor", required=False)
+        variant = {
+            "left": left_gaze,
+            "right": right_gaze,
+            "vergence": vergence_gaze,
+            "left_signed": left_signed,
+            "right_signed": right_signed,
+            "vergence_signed": vergence_signed,
+            "version": version_gaze,
+        }
+        series_lookup.update(
+            {
+                "left": (
+                    "left_nasal_gaze"
+                    if beast_mean_gaze
+                    else ("left_gaze" if explicit_gaze else "left_minor_signed")
+                ),
+                "right": (
+                    "right_nasal_gaze"
+                    if beast_mean_gaze
+                    else ("right_gaze" if explicit_gaze else "right_minor_signed")
+                ),
+                "vergence": (
+                    "mean_eye_vergence_gaze"
+                    if beast_mean_gaze
+                    else ("vergence_gaze" if explicit_gaze else "vergence_minor_signed")
+                ),
+                "left_signed": "left_gaze_signed" if explicit_gaze else "left_minor_signed",
+                "right_signed": "right_gaze_signed" if explicit_gaze else "right_minor_signed",
+                "vergence_signed": None if beast_mean_gaze else ("vergence_gaze_signed" if explicit_gaze else "vergence_minor_signed"),
+                "version": "version_gaze" if explicit_gaze else "version_minor",
+            }
+        )
+        label = (
+            "Gaze axis (ellipse minor; BEAST mean per-eye vergence)"
+            if beast_mean_gaze
+            else "Gaze axis (ellipse minor)"
+        )
     elif source == "minor":
         left_signed = _pick("left_minor_signed")
         right_signed = _pick("right_minor_signed")
@@ -405,7 +717,32 @@ def _select_angle_variant(
                 "version": "version_minor",
             }
         )
-        label = "Ellipse minor axis"
+        label = "Ellipse minor axis (legacy name)"
+    elif source == "minor_signed":
+        left_signed = _pick("left_minor_signed")
+        right_signed = _pick("right_minor_signed")
+        vergence_signed = _pick("vergence_minor_signed")
+        variant = {
+            "left": left_signed,
+            "right": right_signed,
+            "vergence": vergence_signed,
+            "left_signed": left_signed,
+            "right_signed": right_signed,
+            "vergence_signed": vergence_signed,
+            "version": _pick("version_minor", required=False),
+        }
+        series_lookup.update(
+            {
+                "left": "left_minor_signed",
+                "right": "right_minor_signed",
+                "vergence": "vergence_minor_signed",
+                "left_signed": "left_minor_signed",
+                "right_signed": "right_minor_signed",
+                "vergence_signed": "vergence_minor_signed",
+                "version": "version_minor",
+            }
+        )
+        label = "Ellipse minor axis signed"
     elif source == "centroid":
         # Centroid-based angles measure eye position (not orientation) in fish frame
         left_centroid = _pick("left_centroid")
@@ -431,17 +768,18 @@ def _select_angle_variant(
                 "version": None,
             }
         )
-        label = "Centroid position (paper)"
+        label = "Centroid position"
     else:
         raise ValueError(f"Unknown angle source '{source}'.")
 
     if used_smoothed:
         label = f"{label} (smoothed)"
 
-    variant_meta: Dict[str, Dict[str, object]] = {
+    variant_meta: Dict[str, object] = {
         "deltas": deltas,
         "smoothed": smoothed_flags,
         "series_lookup": series_lookup,
+        "presentation": {"signed_eye_traces": source == "minor_signed"},
     }
 
     return variant, label, variant_meta
@@ -470,6 +808,10 @@ def _format_summary_lines(attrs: Dict[str, object], counts: Dict[str, int], roi_
     method = attrs.get("method")
     if method:
         lines.append(f"Method: {method}")
+    preferred_family = attrs.get("preferred_angle_family")
+    preferred_axis = attrs.get("preferred_eye_axis")
+    if preferred_family or preferred_axis:
+        lines.append(f"Preferred eye angle: {preferred_family or 'unknown'} ({preferred_axis or 'unknown axis'})")
     geometry_kind = attrs.get("source_geometry_kind")
     geometry_stage = attrs.get("source_eye_geometry_stage")
     geometry_run = attrs.get("source_eye_geometry_run")
@@ -507,7 +849,7 @@ def _plot_eye_angle_dashboard(
     title: Optional[str],
     angle_variant: Dict[str, Optional[np.ndarray]],
     variant_label: str,
-    variant_meta: Dict[str, Dict[str, object]],
+    variant_meta: Dict[str, object],
 ) -> plt.Figure:
     roi = data["roi_angles"]
     qa = data["qa"]
@@ -518,6 +860,10 @@ def _plot_eye_angle_dashboard(
     delta_meta = variant_meta.get("deltas", {})
     smoothed_flags = variant_meta.get("smoothed", {})
     series_lookup = variant_meta.get("series_lookup", {})
+    presentation = variant_meta.get("presentation", {})
+    signed_eye_traces = bool(
+        isinstance(presentation, dict) and presentation.get("signed_eye_traces")
+    )
 
     fps = attrs.get("fps")
     time_axis_raw = support.get("time_seconds")
@@ -552,13 +898,13 @@ def _plot_eye_angle_dashboard(
     frame_time_ds = _downsample(frame_time_axis, MAX_TIMELINE_POINTS) if frame_time_axis.size else frame_time_axis
     left_ds = _downsample(left, MAX_TIMELINE_POINTS)
     right_ds = _downsample(right, MAX_TIMELINE_POINTS)
-    vergence_plot = vergence_signed if isinstance(vergence_signed, np.ndarray) else vergence
+    vergence_plot = vergence
     vergence_plot_ds = _downsample(vergence_plot, MAX_TIMELINE_POINTS)
 
     ellipse_ratio = support.get("ellipse_ratio")
     ellipse_ratio_valid = ellipse_ratio[np.isfinite(ellipse_ratio)] if isinstance(ellipse_ratio, np.ndarray) else np.array([])
 
-    threshold = _find_bimodal_valley(vergence_signed_valid) if vergence_signed_valid.size else np.nan
+    threshold = _find_bimodal_valley(vergence_valid) if vergence_valid.size else np.nan
 
     fig = plt.figure(figsize=(18, 15))
     gs = gridspec.GridSpec(
@@ -577,8 +923,8 @@ def _plot_eye_angle_dashboard(
         ax_left.plot(left_ds, color="#1f77b4", linewidth=0.8)
     ax_left.set_title("Left Eye Over Time")
     ax_left.set_xlabel(time_label)
-    ax_left.set_ylabel("Angle (deg)")
-    ax_left.set_ylim(-5, 185)
+    ax_left.set_ylabel("Signed Angle (deg)" if signed_eye_traces else "Angle (deg)")
+    ax_left.set_ylim((-95, 95) if signed_eye_traces else (-5, 185))
     ax_left.grid(alpha=0.2)
 
     ax_right = fig.add_subplot(gs[0, 1])
@@ -588,8 +934,8 @@ def _plot_eye_angle_dashboard(
         ax_right.plot(right_ds, color="#ff7f0e", linewidth=0.8)
     ax_right.set_title("Right Eye Over Time")
     ax_right.set_xlabel(time_label)
-    ax_right.set_ylabel("Angle (deg)")
-    ax_right.set_ylim(-5, 185)
+    ax_right.set_ylabel("Signed Angle (deg)" if signed_eye_traces else "Angle (deg)")
+    ax_right.set_ylim((-95, 95) if signed_eye_traces else (-5, 185))
     ax_right.grid(alpha=0.2)
 
     ax_vergence = fig.add_subplot(gs[0, 2])
@@ -597,12 +943,12 @@ def _plot_eye_angle_dashboard(
     if vergence_plot_ds.size == 0:
         ax_vergence.text(0.5, 0.5, "No vergence data", ha="center", va="center")
     elif time_ds.size:
-        ax_vergence.plot(time_ds, vergence_plot_ds, color="#2ca02c", linewidth=0.8, label="Vergence (signed)")
+        ax_vergence.plot(time_ds, vergence_plot_ds, color="#2ca02c", linewidth=0.8, label="Vergence")
         plotted_series = True
     else:
-        ax_vergence.plot(vergence_plot_ds, color="#2ca02c", linewidth=0.8, label="Vergence (signed)")
+        ax_vergence.plot(vergence_plot_ds, color="#2ca02c", linewidth=0.8, label="Vergence")
         plotted_series = True
-    ax_vergence.set_title("Vergence (signed) Over Time")
+    ax_vergence.set_title("Vergence Over Time")
     ax_vergence.set_xlabel(time_label)
     ax_vergence.set_ylabel("Angle (deg)")
     ax_vergence.set_ylim(-5, 185)
@@ -918,14 +1264,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--angle-source",
-        choices=["ellipse", "minor", "centroid"],
-        default="ellipse",
-        help="Which angle series to treat as primary (default: ellipse).",
+        choices=["gaze", "ellipse", "minor", "minor_signed", "centroid"],
+        default="gaze",
+        help=(
+            "Which angle series to treat as primary "
+            "(default: gaze, the ellipse-minor axis; use minor_signed for left/right_minor_signed_deg)."
+        ),
     )
     parser.add_argument(
         "--all-variants",
         action="store_true",
-        help="Render dashboards for every angle variant (ellipse, minor, centroid).",
+        help="Render dashboards for every angle variant (gaze, ellipse, minor, minor_signed, centroid).",
     )
     parser.add_argument(
         "--title",
@@ -938,6 +1287,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate plot without displaying.",
     )
     parser.add_argument(
+        "--write-zarr-artifact",
+        "--write-zarr-artifacts",
+        dest="write_zarr_artifact",
+        action="store_true",
+        help=(
+            "Persist the rendered PNG under "
+            "analysis/eye_angle_runs/<run>/visualizations in addition to filesystem output."
+        ),
+    )
+    parser.add_argument(
+        "--artifact-dpi",
+        type=int,
+        default=150,
+        help="DPI for filesystem PNGs and persisted Zarr PNG artifacts (default: 150).",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress status messages.",
@@ -947,14 +1312,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(None if argv is None else list(argv))
+    argv_list = None if argv is None else list(argv)
+    args = parser.parse_args(argv_list)
+    command = (
+        " ".join(sys.argv)
+        if argv_list is None
+        else " ".join(["fisheye.visualization.visualize_eye_angles", *map(str, argv_list)])
+    )
 
     attrs, data = _load_eye_angle_run(args.zarr_path, args.run)
     if not args.quiet:
         print(f"Loaded eye angle run '{attrs['run_name']}' from {args.zarr_path}")
 
     requested_sources = (
-        ["ellipse", "minor", "centroid"]
+        ["gaze", "ellipse", "minor", "minor_signed", "centroid"]
         if args.all_variants
         else [args.angle_source]
     )
@@ -979,8 +1350,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         figs.append(fig)
 
         provenance = attrs.get("provenance", {})
+        generated_at_utc = datetime.now(timezone.utc).isoformat()
         metadata = {
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "generated_at_utc": generated_at_utc,
             "source_zarr": str(args.zarr_path),
             "run_name": attrs.get("run_name"),
             "provenance": provenance,
@@ -1001,9 +1373,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 / f"eye_angle_dashboard_{attrs.get('run_name', 'latest')}_{angle_source}_{timestamp}.png"
             )
 
-        _save_with_metadata(fig, output_path, metadata)
+        png_bytes = _png_bytes_with_metadata(fig, metadata, dpi=int(args.artifact_dpi))
+        _save_png_bytes(output_path, png_bytes)
         if not args.quiet:
             print(f"Saved dashboard ({angle_source}) to {output_path}")
+
+        if args.write_zarr_artifact:
+            run_group = _resolve_eye_angle_run_group(
+                args.zarr_path,
+                str(attrs["run_name"]),
+                mode="a",
+            )
+            artifact_path = _write_eye_angle_png_artifact(
+                zarr_path=args.zarr_path,
+                run_group=run_group,
+                attrs=attrs,
+                angle_source=angle_source,
+                variant_label=variant_label,
+                png_bytes=png_bytes,
+                generated_at_utc=generated_at_utc,
+                artifact_dpi=int(args.artifact_dpi),
+                command=command,
+            )
+            if not args.quiet:
+                print(f"Wrote dashboard artifact ({angle_source}) to {artifact_path}")
 
         if args.no_show:
             plt.close(fig)

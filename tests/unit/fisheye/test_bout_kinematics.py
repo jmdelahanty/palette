@@ -80,6 +80,25 @@ def _make_archive(tmp_path: Path) -> Path:
     return zarr_path
 
 
+def _add_eye_angle_run(root: zarr.Group) -> None:
+    eye_parent = root["analysis"].create_group("eye_angle_runs")
+    eye_parent.attrs["latest"] = "eye_1"
+    eye_run = eye_parent.create_group("eye_1")
+    eye_run.attrs["schema_id"] = "analysis.eye_angle_runs"
+    eye_run.attrs["schema_version"] = 3
+    eye_run.attrs["method"] = "ellipse_and_centroid_eye_angles"
+    eye_run.attrs["preferred_angle_family"] = "gaze"
+    eye_run.attrs["preferred_eye_axis"] = "ellipse_minor"
+    frame_angles = eye_run.create_group("angles").create_group("frame")
+    frames = np.arange(10, dtype=np.float32)
+    _write_array(frame_angles, "left_gaze_deg", frames)
+    _write_array(frame_angles, "right_gaze_deg", frames * 2.0)
+    _write_array(frame_angles, "vergence_gaze_deg", frames * 3.0)
+    _write_array(frame_angles, "vergence_gaze_signed_deg", frames * 4.0)
+    frame_qa = eye_run.create_group("qa").create_group("frame")
+    _write_array(frame_qa, "valid_frame", np.ones(10, dtype=bool))
+
+
 def test_normalize_heading_level_accepts_aliases() -> None:
     assert normalize_heading_level("smoothed") == "heading_smoothed"
     assert normalize_heading_level("heading_raw") == "heading_raw"
@@ -113,8 +132,8 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
 
     assert parent.attrs["latest"] == "bout_kinematics_1"
     assert run.attrs["schema_id"] == "analysis.bout_kinematics_runs"
-    assert run.attrs["schema_version"] == 5
-    assert run.attrs["method_version"] == "bout_kinematics.v5"
+    assert run.attrs["schema_version"] == 6
+    assert run.attrs["method_version"] == "bout_kinematics.v6"
     assert run.attrs["default_heading_level"] == "heading_smoothed"
     assert run.attrs["source_swim_bout_run"] == "bouts_1"
     assert run.attrs["source_swim_bout_speed_level"] == "speed_filtered"
@@ -128,6 +147,7 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
         "core_end_time_interpolated_valid",
     ]
     assert run.attrs["parameters"]["source_peak_event_fields"] == []
+    assert run.attrs["parameters"]["eye_gaze"]["enabled"] is False
     assert run.attrs["source_refs"]["zarr_path"] == str(zarr_path)
     assert run.attrs["source_refs"]["source_track_id"] == 0
     assert run.attrs["source_refs"]["source_heading_arrays"] == {
@@ -229,6 +249,101 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     spec_payload = np.asarray(spec_artifact["spec_json"][:], dtype=np.uint8).tobytes()
     assert b"net_heading_change_histograms" in spec_payload
     assert b"within_bout_heading_histograms" in spec_payload
+
+
+def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    _add_eye_angle_run(root)
+
+    run_name = compute_and_save_bout_kinematics(
+        zarr_path,
+        run_name="bout_kinematics_eye_gaze",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        swim_bout_run="bouts_1",
+        speed_level="filtered",
+        heading_levels=("heading_smoothed",),
+        pre_window_s=0.2,
+        post_window_s=0.2,
+        include_eye_gaze=True,
+        eye_angle_run="eye_1",
+        eye_validity_min_fraction=1.0,
+        vergence_threshold_deg=10.0,
+        write_visualizations=True,
+        visualization_bins=8,
+    )
+
+    run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
+    assert run.attrs["schema_version"] == 6
+    assert run.attrs["analysis_levels"] == ["heading_smoothed", "eye_gaze"]
+    assert run.attrs["parameters"]["eye_gaze"] == {
+        "enabled": True,
+        "eye_angle_run": "eye_1",
+        "eye_angle_family": "gaze",
+        "eye_validity_min_fraction": 1.0,
+        "vergence_threshold_deg": 10.0,
+    }
+    assert run.attrs["source_refs"]["source_eye_angle_run"] == "eye_1"
+    assert run.attrs["source_refs"]["source_eye_angle_path"] == "analysis/eye_angle_runs/eye_1"
+    assert run.attrs["source_refs"]["source_eye_angle_schema_version"] == 3
+    assert run.attrs["source_refs"]["source_eye_angle_arrays"]["vergence_gaze_deg"] == (
+        "analysis/eye_angle_runs/eye_1/angles/frame/vergence_gaze_deg"
+    )
+
+    eye_group = run["eye_gaze"]
+    assert eye_group.attrs["eye_angle_family"] == "gaze"
+    metrics = eye_group["per_bout_metrics"]
+    records, _ = load_structured_dataset(eye_group, "per_bout_metrics")
+    assert metrics.attrs["schema_id"] == "analysis.bout_kinematics_runs.eye_gaze.per_bout_metrics"
+    assert metrics.attrs["eye_angle_run"] == "eye_1"
+    assert metrics.attrs["vergence_threshold_deg"] == 10.0
+
+    assert metrics["pre_epoch_start_frame"][:].tolist() == [1]
+    assert metrics["pre_epoch_end_frame"][:].tolist() == [2]
+    assert metrics["post_epoch_start_frame"][:].tolist() == [6]
+    assert metrics["post_epoch_end_frame"][:].tolist() == [7]
+    assert metrics["within_epoch_start_frame"][:].tolist() == [3]
+    assert metrics["within_epoch_end_frame"][:].tolist() == [5]
+    np.testing.assert_allclose(metrics["pre_left_gaze_mean_deg"][:], [1.5])
+    np.testing.assert_allclose(metrics["pre_right_gaze_mean_deg"][:], [3.0])
+    np.testing.assert_allclose(metrics["pre_vergence_gaze_mean_deg"][:], [4.5])
+    np.testing.assert_allclose(metrics["pre_vergence_gaze_signed_mean_deg"][:], [6.0])
+    np.testing.assert_allclose(metrics["pre_vergence_gaze_std_deg"][:], [1.5])
+    np.testing.assert_allclose(metrics["pre_converged_fraction"][:], [0.0])
+    np.testing.assert_allclose(metrics["post_left_gaze_mean_deg"][:], [6.5])
+    np.testing.assert_allclose(metrics["post_right_gaze_mean_deg"][:], [13.0])
+    np.testing.assert_allclose(metrics["post_vergence_gaze_mean_deg"][:], [19.5])
+    np.testing.assert_allclose(metrics["post_vergence_gaze_signed_mean_deg"][:], [26.0])
+    np.testing.assert_allclose(metrics["post_converged_fraction"][:], [1.0])
+    np.testing.assert_allclose(metrics["within_bout_left_gaze_mean_deg"][:], [4.0])
+    np.testing.assert_allclose(metrics["within_bout_right_gaze_mean_deg"][:], [8.0])
+    np.testing.assert_allclose(metrics["within_bout_vergence_gaze_mean_deg"][:], [12.0])
+    np.testing.assert_allclose(metrics["within_bout_vergence_gaze_signed_mean_deg"][:], [16.0])
+    np.testing.assert_allclose(metrics["within_bout_vergence_gaze_max_deg"][:], [15.0])
+    np.testing.assert_allclose(metrics["within_bout_vergence_gaze_range_deg"][:], [6.0])
+    np.testing.assert_allclose(metrics["within_bout_vergence_gaze_std_deg"][:], [np.std([9.0, 12.0, 15.0])])
+    np.testing.assert_allclose(metrics["within_bout_converged_fraction"][:], [2.0 / 3.0])
+    assert metrics["pre_eye_window_valid"][:].tolist() == [True]
+    assert metrics["post_eye_window_valid"][:].tolist() == [True]
+    assert metrics["within_eye_window_valid"][:].tolist() == [True]
+    assert metrics["pre_eye_sample_count"][:].tolist() == [2]
+    assert metrics["post_eye_sample_count"][:].tolist() == [2]
+    assert metrics["within_eye_sample_count"][:].tolist() == [3]
+    assert records["failure_reason_bytes"].tolist() == [b"ok"]
+
+    visualizations = run["visualizations"]
+    png = visualizations["bout_eye_gaze_summary_track_0_png"]
+    assert bytes(np.asarray(png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
+    assert png.attrs["plot_schema_id"] == "palette.plot_spec.bout_eye_gaze_summary.v1"
+    assert png.attrs["source_runs"]["eye_angle"] == "eye_1"
+    spec_artifact = visualizations["bout_eye_gaze_summary_track_0_interactive"]
+    assert spec_artifact.attrs["snapshot_artifact"] == "bout_eye_gaze_summary_track_0_png"
+    assert spec_artifact.attrs["plot_schema_id"] == "palette.plot_spec.bout_eye_gaze_summary.v1"
+    spec_payload = np.asarray(spec_artifact["spec_json"][:], dtype=np.uint8).tobytes()
+    assert b"bout_eye_gaze_histograms" in spec_payload
 
 
 def test_compute_and_save_bout_kinematics_marks_angular_velocity_invalid_across_gaps(

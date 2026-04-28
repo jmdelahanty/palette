@@ -9,8 +9,10 @@ from fisheye.analysis import plot_track_kinematics as plot_mod
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.visualization.interactive_track_kinematics import (
     DEFAULT_INTERACTIVE_ARTIFACT,
+    discover_eye_angle_run_options,
     discover_swim_bout_run_options,
     discover_track_kinematics_run_options,
+    load_eye_angle_timeseries_data,
     load_track_kinematics_interactive_data,
     to_inter_bout_interval_dataframe,
     to_position_dataframe,
@@ -107,6 +109,49 @@ def _add_hierarchical_swim_bouts(
         write_columnar_dataset(level_group, "inter_bout_intervals", intervals)
         if include_peak_events:
             write_columnar_dataset(level_group, "peak_events", peak_events)
+
+
+def _add_eye_angle_run(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a")
+    analysis = root["analysis"] if "analysis" in root else root.create_group("analysis")
+    parent = analysis.create_group("eye_angle_runs")
+    parent.attrs["latest"] = "eye_angle_1"
+    run = parent.create_group("eye_angle_1")
+    run.attrs.update(
+        {
+            "schema_id": "analysis.eye_angle_runs",
+            "schema_version": 4,
+            "preferred_angle_family": "gaze",
+            "preferred_eye_axis": "ellipse_minor",
+            "row_axis": "keypoint_detection_rows",
+            "fps": 200.0,
+        }
+    )
+    angles = run.create_group("angles")
+    roi = angles.create_group("roi")
+    frame = angles.create_group("frame")
+    qa = run.create_group("qa")
+    qa_roi = qa.create_group("roi")
+    qa_frame = qa.create_group("frame")
+    support = run.create_group("support")
+
+    support.create_array("time_seconds", data=np.asarray([0.0, 0.005, 0.010], dtype=np.float64))
+    support.create_array("frame_indices", data=np.asarray([0, 1, 2], dtype=np.int64))
+    support.create_array("frame_time_seconds", data=np.asarray([0.0, 0.005, 0.010, 0.015], dtype=np.float64))
+
+    roi.create_array("left_minor_signed_deg", data=np.asarray([-20.0, -10.0, -5.0], dtype=np.float32))
+    roi.create_array("left_minor_signed_deg_smoothed", data=np.asarray([-18.0, -12.0, -6.0], dtype=np.float32))
+    roi.create_array("left_gaze_signed_deg", data=np.asarray([-20.0, -10.0, -5.0], dtype=np.float32))
+    roi.create_array("left_nasal_gaze_deg_smoothed", data=np.asarray([70.0, 80.0, 85.0], dtype=np.float32))
+    roi.create_array("mean_eye_vergence_gaze_deg_smoothed", data=np.asarray([30.0, 31.0, 32.0], dtype=np.float32))
+
+    frame.create_array("left_gaze_signed_deg_smoothed", data=np.asarray([-18.0, -12.0, -6.0, -4.0], dtype=np.float32))
+    frame.create_array("right_gaze_signed_deg_smoothed", data=np.asarray([12.0, 10.0, 8.0, 6.0], dtype=np.float32))
+    frame.create_array("mean_eye_vergence_gaze_deg_smoothed", data=np.asarray([30.0, 31.0, 32.0, 33.0], dtype=np.float32))
+    frame.create_array("left_nasal_gaze_deg_smoothed", data=np.asarray([72.0, 78.0, 84.0, 86.0], dtype=np.float32))
+
+    qa_roi.create_array("valid_frame", data=np.asarray([True, True, False], dtype=bool))
+    qa_frame.create_array("valid_frame", data=np.asarray([True, True, True, False], dtype=bool))
 
 
 def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: Path) -> None:
@@ -236,6 +281,41 @@ def test_discover_track_and_derived_swim_bout_options(tmp_path: Path) -> None:
     assert swim_options[0].n_bouts_by_level["speed_smoothed"] == 2
     assert "smoothed" in swim_options[0].label
     assert "default" in swim_options[0].label
+
+
+def test_discover_and_load_eye_angle_timeseries(tmp_path: Path) -> None:
+    zarr_path = _make_archive_with_interactive_artifact(tmp_path)
+    _add_eye_angle_run(zarr_path)
+
+    options = discover_eye_angle_run_options(zarr_path)
+
+    assert len(options) == 1
+    assert options[0].run_name == "eye_angle_1"
+    assert options[0].run_path == "analysis/eye_angle_runs/eye_angle_1"
+    assert options[0].schema_version == 4
+    assert options[0].preferred_angle_family == "gaze"
+    assert options[0].is_latest is True
+
+    frame_data = load_eye_angle_timeseries_data(zarr_path, run_name="latest")
+
+    assert frame_data.run_name == "eye_angle_1"
+    assert frame_data.row_axis == "frame"
+    assert frame_data.dataframe["time_s"].tolist() == [0.0, 0.005, 0.010, 0.015]
+    assert "mean_eye_vergence_gaze_deg_smoothed" in frame_data.dataframe
+    assert "left_gaze_signed_deg_smoothed" in frame_data.dataframe
+    assert "left_minor_signed_deg" not in frame_data.dataframe
+    assert frame_data.dataframe["valid_frame"].tolist() == [True, True, True, False]
+
+    roi_data = load_eye_angle_timeseries_data(
+        zarr_path,
+        run_name="analysis/eye_angle_runs/eye_angle_1",
+        prefer_frame=False,
+    )
+
+    assert roi_data.row_axis == "roi"
+    assert roi_data.dataframe["frame_index"].tolist() == [0, 1, 2]
+    np.testing.assert_allclose(roi_data.dataframe["left_minor_signed_deg"], [-20.0, -10.0, -5.0])
+    assert roi_data.dataframe["valid_frame"].tolist() == [True, True, False]
 
 
 def test_load_track_kinematics_interactive_data_skips_mismatched_swim_bout_run(tmp_path: Path) -> None:

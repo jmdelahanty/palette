@@ -34,6 +34,20 @@ Those are heuristic-policy concerns, not heading semantics. See:
 This contract does not require every keypoint run to define heading semantics.
 Runs may explicitly disable heading computation or omit it entirely.
 
+## Relationship To Body Frame
+
+`heading_computation` defines a keypoint-derived forward axis and scalar
+heading. It is a valid estimator for the broader fish anatomical body frame, but
+it is not the whole body-frame contract.
+
+The body-frame contract additionally defines an origin, anatomical left axis,
+validity, estimator provenance, and optional materialized support arrays. Mask
+or spline-derived body frames should live in derived analysis outputs such as
+`analysis/subject_shape_runs/<run>/body_frame/`, while this contract remains the
+canonical keypoint heading fallback for datasets without masks.
+
+See `docs/body_frame_contract.md`.
+
 ## Placement And Precedence
 
 ### Canonical location

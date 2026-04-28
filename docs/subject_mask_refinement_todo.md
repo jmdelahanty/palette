@@ -1142,11 +1142,28 @@ Real canary evidence:
   `subject_body=19235`, `swim_bladder=19235`, `eye_left=19234`,
   `eye_right=19234`
 - eye-angle schema canary:
-  `analysis/eye_angle_runs/eye_angle_subject_shape_schema_canary_20260428`
+  `analysis/eye_angle_runs/eye_angle_subject_shape_schema_v2_canary_20260428`
+  *(historical v2 canary; current writer schema is v4 with `support/body_frame`
+  and BEAST-comparable mean per-eye vergence)*
 - eye-angle schema canary source geometry:
   `source_geometry_kind=subject_shape_eye_geometry`,
-  `schema_id=analysis.eye_angle_runs`, `schema_version=1`,
+  `schema_id=analysis.eye_angle_runs`, `schema_version=2` for that historical run,
+  `preferred_angle_family=gaze`, `preferred_eye_axis=ellipse_minor`,
   `valid_detection_fraction=0.9998960228749675`
+- current body-frame-backed eye-angle canary:
+  `analysis/eye_angle_runs/eye_angle_body_frame_schema_v4_beast_canary_20260428`
+- current eye-angle canary source geometry:
+  `source_geometry_kind=subject_shape_eye_geometry`,
+  `schema_id=analysis.eye_angle_runs`, `schema_version=4`,
+  `preferred_angle_family=gaze`, `preferred_eye_axis=ellipse_minor`,
+  `support/body_frame` materialized from the keypoint head-axis estimator,
+  `vergence_gaze_deg` defined as the smaller angle between the two
+  directionless eye-axis lines, `mean_eye_vergence_gaze_deg` added as the
+  Johnson/BEAST-comparable mean per-eye convergence field,
+  `valid_detection_fraction=19233 / 19235`
+- current eye-angle v4 canary values:
+  `median(mean_eye_vergence_gaze_deg)=16.979 deg`,
+  `median(vergence_gaze_deg)=33.937 deg`
 
 Remaining work is no longer open-ended architecture. It is operational hardening:
 

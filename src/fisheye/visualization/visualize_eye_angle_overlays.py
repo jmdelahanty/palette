@@ -3,7 +3,8 @@
 Interactive explorer that overlays refined eye masks and signed eye-angle
 metrics on the ROI crops used by the eye pipeline. Supports toggling between
 major-axis (nasal-positive) and minor-axis (temporal-positive) angle
-interpretations for side-by-side evaluation.
+interpretations for side-by-side evaluation. Schema v2 treats the minor axis as
+the preferred gaze axis, so the viewer opens in minor-axis mode when available.
 
 Loads a Palette archive, pulls the specified (or latest) eye-angle analysis run
 along with its corresponding refined eye masks and keypoint crops, then renders
@@ -164,10 +165,10 @@ class EyeAngleOverlayViewer:
         self.line_artists: List[plt.Artist] = []
 
         self.modes: List[str] = []
-        if any(np.isfinite(rec.left_signed) and np.isfinite(rec.right_signed) for rec in self._angles):
-            self.modes.append("ellipse_major")
         if any(np.isfinite(rec.left_minor_signed) and np.isfinite(rec.right_minor_signed) for rec in self._angles):
             self.modes.append("ellipse_minor")
+        if any(np.isfinite(rec.left_signed) and np.isfinite(rec.right_signed) for rec in self._angles):
+            self.modes.append("ellipse_major")
         if not self.modes:
             self.modes.append("ellipse_major")
         else:
@@ -294,7 +295,7 @@ class EyeAngleOverlayViewer:
     def _mode_label(self) -> str:
         return {
             "ellipse_major": "Ellipse Major",
-            "ellipse_minor": "Ellipse Minor",
+            "ellipse_minor": "Gaze (Ellipse Minor)",
         }.get(self.angle_mode, self.angle_mode.title())
 
     def _toggle_mode(self, _event=None) -> None:

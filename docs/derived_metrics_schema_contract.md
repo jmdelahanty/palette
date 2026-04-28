@@ -108,6 +108,18 @@ For keypoints, heading semantics remain separate:
 
 `derived_metrics_schema` does not replace or redefine heading computation.
 
+## Relationship To Body Frame
+
+`derived_metrics_schema` may describe that an output was measured in a
+fish-relative coordinate system, but it should not define or materialize that
+coordinate frame.
+
+The body-frame source belongs in run attrs or a `body_frame/` support group,
+following `docs/body_frame_contract.md`. Metric objects may reference that frame
+through stable strings such as `coordinate_space = "fish_anatomical_body_frame"`
+or a source path, but the frame estimator and provenance remain outside the
+metric schema.
+
 ## Metric Object Contract
 
 Each entry in `metrics` should declare:
@@ -236,6 +248,7 @@ content.
 ## Related Documents
 
 - `docs/keypoint_heading_computation_contract.md`
+- `docs/body_frame_contract.md`
 - `docs/keypoint_derived_metric_schema_contract.md`
 - `docs/crimson_detect_bbox_read_contract.md`
 - `docs/subject_mask_runs_contract.md`

@@ -14,6 +14,10 @@ This document is the short current-state contract. Deeper design notes and TODOs
 remain useful, but operator/query behavior should be judged against this file
 first.
 
+For a beginner-facing explanation of the coordinate systems, formulas, and
+behavioral analytics used by these stages, start with
+[`analytics_math_primer.md`](analytics_math_primer.md).
+
 ## Design Philosophy
 
 Palette should keep these artifact roles distinct:
@@ -52,8 +56,8 @@ The default rule is:
 | Refined subject masks | `subject_mask_runs/<run>` sources plus component provenance | `refined_subject_masks_runs/<run>` | none; this is the canonical refined component surface | component availability, review state, and lifecycle from refined subject-mask component rows |
 | Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
-| Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
-| Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"` and v1 output schema | current runs prefer subject-shape eye geometry when available and record exact geometry/keypoint lineage |
+| Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape and shared body-frame surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
+| Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"` and v4 output schema | current runs prefer subject-shape eye geometry when available, expose explicit gaze/minor-axis arrays plus BEAST-comparable mean per-eye vergence, and record exact geometry/keypoint/body-frame lineage |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -90,6 +94,10 @@ Current rules:
   heading belong in `analysis/subject_shape_runs` when they are part of coherent
   mask-derived body/eyes/swim geometry. Specialized downstream analysis runs
   should consume that surface when possible.
+- Fish-relative coordinates should use the body-frame contract. Keypoint
+  heading remains the fallback estimator, while shared mask/spline/hybrid body
+  frames should materialize under
+  `analysis/subject_shape_runs/<run>/body_frame/` when available.
 - Production assembly/export from `refined_subject_masks_runs` is
   approved-only by default; pending or missing component reviews require an
   explicit draft/QA override.
@@ -107,7 +115,13 @@ Current rules:
   `analysis/subject_shape_runs` as the preferred eye-geometry source when
   left/right eye ellipse geometry is present, records
   `source_geometry_kind`, and writes `schema_id = "analysis.eye_angle_runs"`
-  plus `eye_angle_output_schema` to describe its current output groups.
+  plus `eye_angle_output_schema` to describe its current output groups. Schema
+  v4 makes `preferred_angle_family="gaze"`,
+  `preferred_eye_axis="ellipse_minor"`, and `support/body_frame/` explicit;
+  legacy major/minor arrays are retained for compatibility and QA. It also
+  keeps `vergence_gaze_deg` as the v3-compatible total/axis-separation
+  aggregate while adding `mean_eye_vergence_gaze_deg` for Johnson/BEAST-style
+  mean per-eye convergence.
 
 The target steady state is one segmentation orchestration surface that writes
 one coherent probability-backed `subject_mask_runs/<run>` snapshot with
@@ -188,8 +202,8 @@ desired design:
   second pass that flags rows without overwriting spatial masks.
 - `analysis/subject_shape_runs` has a first coherent body/eyes/swim writer, and
   `analysis/eye_angle_runs` now consumes it when available. Body
-  centerline/B-spline support and additional downstream consumers are still
-  open.
+  centerline/B-spline support, materialized `body_frame/` outputs, and
+  additional downstream consumers are still open.
 
 ## Review Checklist
 
@@ -212,6 +226,8 @@ When reviewing new pipeline work, ask:
 - [subject_mask_refinement_todo.md](subject_mask_refinement_todo.md)
 - [subject_mask_stage_unification_todo.md](subject_mask_stage_unification_todo.md)
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
+- [body_frame_contract.md](body_frame_contract.md)
+- [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
 - [repo_wide_staleness_checklist.md](repo_wide_staleness_checklist.md)
 - [repo_wide_staleness_gap_matrix.md](repo_wide_staleness_gap_matrix.md)
 - [refined_detect_row_identity_contract.md](refined_detect_row_identity_contract.md)

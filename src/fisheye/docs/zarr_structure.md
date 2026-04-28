@@ -1451,11 +1451,27 @@ Eye angle analysis results:
 - Per-ROI and per-frame eye-angle metrics
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
-- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 1`,
+- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 4`,
   `method = "ellipse_and_centroid_eye_angles"`,
   `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
   machine-readable output groups, units, suffixes, derivative arrays, and QA
   reason-code linkage.
+- Schema v4 exposes explicit gaze arrays derived from the ellipse minor axis:
+  `left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`,
+  `right_gaze_signed_deg`, `vergence_gaze_deg`,
+  `vergence_gaze_signed_deg`, and `version_gaze_deg`, plus smoothed, delta,
+  speed, and acceleration variants where applicable. New consumers should use
+  these over legacy major-axis `left_deg` / `right_deg` fields.
+- Schema v4 retains `vergence_gaze_deg` as the v3-compatible total/axis
+  separation and adds `left_nasal_gaze_deg`, `right_nasal_gaze_deg`, and
+  `mean_eye_vergence_gaze_deg` for BEAST/Johnson-style mean per-eye vergence.
+- Run attrs include `preferred_angle_family = "gaze"`,
+  `preferred_eye_axis = "ellipse_minor"`, and
+  `gaze_angle_source = "ellipse_minor"`.
+- Schema v4 materializes keypoint-derived body-frame support arrays under
+  `support/body_frame/` so signed eye angles are anatomical-left-positive and
+  convergence polarity is not conflated with ellipse-axis orientation
+  disambiguation.
 - Preferred eye geometry source is `analysis/subject_shape_runs/<run>` when it
   has left/right eye ellipse geometry. Run attrs record
   `source_geometry_kind`, `source_subject_shape_run`,
@@ -1490,12 +1506,27 @@ Expected run attrs:
 - `row_axis`: initially `"refined_subject_mask_rows"`
 - `source_refs`: exact input runs and paths
 - `source_refined_subject_masks_run`
+- optional `body_frame_schema_id`, `body_frame_schema_version`,
+  `body_frame_estimator`, `body_frame_coordinate_space`,
+  `body_frame_angle_convention`, and `body_frame_source_refs` when the run
+  materializes a shared fish anatomical body frame
 
 Expected row-aligned index group:
 
 - `row_index/frame_indices`
 - `row_index/detection_indices` when available
 - `row_index/source_refined_row_ids` when available
+
+Expected body-frame group when materialized:
+
+- `body_frame/origin_xy`: `(N, 2)` anatomical frame origin in ROI or image pixels
+- `body_frame/forward_axis_xy`: `(N, 2)` unit vector pointing posterior-to-anterior
+- `body_frame/left_axis_xy`: `(N, 2)` unit vector pointing anatomical left
+- `body_frame/heading_deg`: `(N,)` heading from `atan2(-dy, dx)`
+- `body_frame/valid`: `(N,)` body-frame validity
+- `body_frame/failure_reason_bytes`: `(N, width)` optional uint8 utf8-null-terminated stable reason tags
+- `body_frame/midline_xy`: `(N, P, 2)` optional centerline/spline samples
+- `body_frame/arclength_px`: `(N,)` optional body midline/spline arc length
 
 Expected component groups:
 
@@ -1547,6 +1578,8 @@ using serial or Dask worker-chunk execution. Body centerline and B-spline
 support remain follow-up derived-shape methods. The storage and provenance
 contract is documented in `docs/subject_shape_runs_contract.md`; the shared
 derived-run contract is documented in `docs/derived_analysis_run_contract.md`.
+Shared fish-relative frame semantics are documented in
+`docs/body_frame_contract.md`.
 
 ### `analysis/stimulus_response_runs/`
 

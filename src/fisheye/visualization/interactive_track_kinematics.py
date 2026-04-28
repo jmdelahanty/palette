@@ -42,6 +42,16 @@ class TrackKinematicsInteractiveData:
 
 
 @dataclass(frozen=True)
+class EyeAngleTimeseriesData:
+    zarr_path: Path
+    run_name: str
+    run_path: str
+    row_axis: str
+    attrs: Mapping[str, Any]
+    dataframe: pd.DataFrame
+
+
+@dataclass(frozen=True)
 class TrackKinematicsRunOption:
     run_name: str
     run_path: str
@@ -49,6 +59,20 @@ class TrackKinematicsRunOption:
     artifact_name: str
     track_id: int
     label: str
+    is_latest: bool
+    attrs: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class EyeAngleRunOption:
+    run_name: str
+    run_path: str
+    label: str
+    schema_version: Optional[int]
+    preferred_angle_family: Optional[str]
+    preferred_eye_axis: Optional[str]
+    row_axis: Optional[str]
+    n_rows: int
     is_latest: bool
     attrs: Mapping[str, Any]
 
@@ -611,6 +635,51 @@ def _bout_count(level_group: zarr.Group) -> int:
     return 0
 
 
+def _columnar_row_count(group: zarr.Group, dataset_name: str) -> int:
+    if dataset_name not in group:
+        return 0
+    node = group[dataset_name]
+    if isinstance(node, zarr.Array):
+        return int(node.shape[0])
+    if isinstance(node, zarr.Group):
+        fields = list(node.attrs.get("field_names", []))
+        if fields and fields[0] in node:
+            return int(node[fields[0]].shape[0])
+    return 0
+
+
+def _first_array_length(group: zarr.Group, names: tuple[str, ...]) -> int:
+    for name in names:
+        if name in group:
+            node = group[name]
+            if hasattr(node, "shape") and node.shape:
+                return int(node.shape[0])
+    return 0
+
+
+def _eye_angle_option_label(
+    *,
+    run_name: str,
+    schema_version: Optional[int],
+    preferred_angle_family: Optional[str],
+    preferred_eye_axis: Optional[str],
+    row_axis: Optional[str],
+    n_rows: int,
+    is_latest: bool,
+) -> str:
+    pieces = [run_name]
+    if schema_version is not None:
+        pieces.append(f"schema v{schema_version}")
+    if preferred_angle_family or preferred_eye_axis:
+        pieces.append(f"{preferred_angle_family or 'unknown'} / {preferred_eye_axis or 'unknown axis'}")
+    if row_axis:
+        pieces.append(str(row_axis))
+    pieces.append(f"{n_rows} rows")
+    if is_latest:
+        pieces.append("latest")
+    return " | ".join(pieces)
+
+
 def _swim_option_label(
     *,
     run_name: str,
@@ -636,6 +705,223 @@ def _swim_option_label(
     if is_latest:
         pieces.append("latest")
     return " | ".join(pieces)
+
+
+def discover_eye_angle_run_options(zarr_path: Path | str) -> list[EyeAngleRunOption]:
+    """Return available eye-angle analysis runs."""
+
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    parent = root.get("analysis/eye_angle_runs")
+    if parent is None:
+        return []
+
+    latest = parent.attrs.get("latest")
+    options: list[EyeAngleRunOption] = []
+    for run_name in _group_keys(parent):
+        run_group = parent[run_name]
+        angles = run_group["angles"] if "angles" in run_group else None
+        roi_group = angles["roi"] if angles is not None and "roi" in angles else None
+        if roi_group is None:
+            continue
+        n_rows = _first_array_length(
+            roi_group,
+            (
+                "mean_eye_vergence_gaze_deg",
+                "left_gaze_signed_deg",
+                "left_minor_signed_deg",
+                "left_deg",
+            ),
+        )
+        schema_version = _safe_int(run_group.attrs.get("schema_version"))
+        preferred_angle_family = run_group.attrs.get("preferred_angle_family")
+        preferred_eye_axis = run_group.attrs.get("preferred_eye_axis")
+        row_axis = run_group.attrs.get("row_axis")
+        is_latest = str(latest) == str(run_name)
+        run_path = _join_path("analysis/eye_angle_runs", run_name)
+        preferred_angle_family_str = (
+            str(preferred_angle_family) if preferred_angle_family is not None else None
+        )
+        preferred_eye_axis_str = str(preferred_eye_axis) if preferred_eye_axis is not None else None
+        row_axis_str = str(row_axis) if row_axis is not None else None
+        options.append(
+            EyeAngleRunOption(
+                run_name=run_name,
+                run_path=run_path,
+                label=_eye_angle_option_label(
+                    run_name=run_name,
+                    schema_version=schema_version,
+                    preferred_angle_family=preferred_angle_family_str,
+                    preferred_eye_axis=preferred_eye_axis_str,
+                    row_axis=row_axis_str,
+                    n_rows=n_rows,
+                    is_latest=is_latest,
+                ),
+                schema_version=schema_version,
+                preferred_angle_family=preferred_angle_family_str,
+                preferred_eye_axis=preferred_eye_axis_str,
+                row_axis=row_axis_str,
+                n_rows=n_rows,
+                is_latest=is_latest,
+                attrs=dict(run_group.attrs),
+            )
+        )
+
+    return sorted(options, key=lambda item: (not item.is_latest, item.run_name))
+
+
+_EYE_ANGLE_TIMESERIES_COLUMNS: tuple[str, ...] = (
+    "left_gaze_signed_deg",
+    "left_gaze_signed_deg_smoothed",
+    "right_gaze_signed_deg",
+    "right_gaze_signed_deg_smoothed",
+    "left_minor_signed_deg",
+    "left_minor_signed_deg_smoothed",
+    "right_minor_signed_deg",
+    "right_minor_signed_deg_smoothed",
+    "left_nasal_gaze_deg",
+    "left_nasal_gaze_deg_smoothed",
+    "right_nasal_gaze_deg",
+    "right_nasal_gaze_deg_smoothed",
+    "mean_eye_vergence_gaze_deg",
+    "mean_eye_vergence_gaze_deg_smoothed",
+    "vergence_gaze_deg",
+    "vergence_gaze_deg_smoothed",
+    "vergence_gaze_signed_deg",
+    "vergence_gaze_signed_deg_smoothed",
+    "version_gaze_deg",
+    "version_gaze_deg_smoothed",
+    "left_centroid_deg",
+    "left_centroid_deg_smoothed",
+    "right_centroid_deg",
+    "right_centroid_deg_smoothed",
+    "vergence_centroid_deg",
+    "vergence_centroid_deg_smoothed",
+)
+
+
+def _optional_1d_array(group: Optional[zarr.Group], name: str, *, length: Optional[int] = None) -> Optional[np.ndarray]:
+    if group is None or name not in group:
+        return None
+    node = group[name]
+    if not hasattr(node, "shape"):
+        return None
+    values = np.asarray(node[:])
+    if values.ndim != 1:
+        return None
+    if length is not None and int(values.shape[0]) != int(length):
+        return None
+    return values
+
+
+def _resolve_eye_angle_run_name(parent: zarr.Group, run_name: Optional[str]) -> str:
+    if run_name is None or str(run_name).lower() in {"", "latest"}:
+        latest = parent.attrs.get("latest")
+        if isinstance(latest, str) and latest in parent:
+            return latest
+    normalized = _normalize_path(str(run_name))
+    candidate = normalized.split("/")[-1]
+    if candidate in parent:
+        return candidate
+    raise ValueError(f"Eye-angle run {run_name!r} not found in analysis/eye_angle_runs.")
+
+
+def load_eye_angle_timeseries_data(
+    zarr_path: Path | str,
+    *,
+    run_name: Optional[str] = None,
+    prefer_frame: bool = True,
+) -> EyeAngleTimeseriesData:
+    """Load eye-angle arrays into a time-indexed dataframe for interactive plotting."""
+
+    archive = Path(zarr_path)
+    root = open_zarr_root(archive, mode="r")
+    parent = root.get("analysis/eye_angle_runs")
+    if parent is None:
+        raise ValueError("No analysis/eye_angle_runs group found.")
+    resolved_run = _resolve_eye_angle_run_name(parent, run_name)
+    run_group = parent[resolved_run]
+    angles = run_group["angles"]
+    support = run_group["support"] if "support" in run_group else None
+    qa = run_group["qa"] if "qa" in run_group else None
+    roi_group = angles["roi"]
+    frame_group = angles["frame"] if "frame" in angles else None
+
+    frame_rows = (
+        _first_array_length(
+            frame_group,
+            (
+                "mean_eye_vergence_gaze_deg",
+                "mean_eye_vergence_gaze_deg_smoothed",
+                "left_gaze_signed_deg",
+                "left_gaze_signed_deg_smoothed",
+                "left_nasal_gaze_deg",
+                "left_nasal_gaze_deg_smoothed",
+            ),
+        )
+        if frame_group is not None
+        else 0
+    )
+    if prefer_frame and frame_group is not None and frame_rows > 0:
+        data_group = frame_group
+        row_axis = "frame"
+        row_count = frame_rows
+        qa_group = qa["frame"] if qa is not None and "frame" in qa else None
+        time_seconds = _optional_1d_array(support, "frame_time_seconds", length=row_count)
+        frame_indices = np.arange(row_count, dtype=np.int64)
+    else:
+        data_group = roi_group
+        row_axis = "roi"
+        row_count = _first_array_length(
+            roi_group,
+            (
+                "mean_eye_vergence_gaze_deg",
+                "left_gaze_signed_deg",
+                "left_minor_signed_deg",
+                "left_deg",
+            ),
+        )
+        qa_group = qa["roi"] if qa is not None and "roi" in qa else None
+        time_seconds = _optional_1d_array(support, "time_seconds", length=row_count)
+        frame_indices = _optional_1d_array(support, "frame_indices", length=row_count)
+        if frame_indices is not None:
+            frame_indices = frame_indices.astype(np.int64, copy=False)
+
+    if row_count <= 0:
+        dataframe = pd.DataFrame(columns=["time_s"])
+    else:
+        if time_seconds is None:
+            fps = _safe_float(run_group.attrs.get("fps"))
+            if frame_indices is not None and fps and fps > 0:
+                time_seconds = frame_indices.astype(np.float64, copy=False) / float(fps)
+            elif fps and fps > 0:
+                time_seconds = np.arange(row_count, dtype=np.float64) / float(fps)
+            else:
+                time_seconds = np.arange(row_count, dtype=np.float64)
+        dataframe = pd.DataFrame({"time_s": np.asarray(time_seconds, dtype=np.float64)})
+        if frame_indices is not None and len(frame_indices) == row_count:
+            dataframe["frame_index"] = np.asarray(frame_indices, dtype=np.int64)
+        else:
+            dataframe["row_index"] = np.arange(row_count, dtype=np.int64)
+
+        for column_name in _EYE_ANGLE_TIMESERIES_COLUMNS:
+            values = _optional_1d_array(data_group, column_name, length=row_count)
+            if values is None:
+                continue
+            dataframe[column_name] = values.astype(np.float64, copy=False)
+
+        for qa_name in ("valid_frame", "valid_left", "valid_right"):
+            values = _optional_1d_array(qa_group, qa_name, length=row_count)
+            if values is not None:
+                dataframe[qa_name] = values.astype(bool, copy=False)
+
+    return EyeAngleTimeseriesData(
+        zarr_path=archive,
+        run_name=resolved_run,
+        run_path=_join_path("analysis/eye_angle_runs", resolved_run),
+        row_axis=row_axis,
+        attrs=dict(run_group.attrs),
+        dataframe=dataframe,
+    )
 
 
 def discover_track_kinematics_run_options(
@@ -844,12 +1130,14 @@ def discover_bout_kinematics_run_options(
         pre_post_mode = parameters.get("pre_post_mode")
         n_rows_by_level = {}
         for level in heading_levels:
-            metrics = run_group.get(level, {}).get("per_bout_metrics") if level in run_group else None
-            if isinstance(metrics, zarr.Group):
-                fields = list(metrics.attrs.get("field_names", []))
-                n_rows_by_level[level] = int(metrics[fields[0]].shape[0]) if fields and fields[0] in metrics else 0
-            else:
-                n_rows_by_level[level] = 0
+            n_rows_by_level[level] = (
+                _columnar_row_count(run_group[level], "per_bout_metrics")
+                if level in run_group
+                else 0
+            )
+        has_eye_gaze = "eye_gaze" in run_group and _columnar_row_count(run_group["eye_gaze"], "per_bout_metrics") > 0
+        if has_eye_gaze:
+            n_rows_by_level["eye_gaze"] = _columnar_row_count(run_group["eye_gaze"], "per_bout_metrics")
         is_latest = str(latest) == str(run_name)
         label_parts = [
             run_name,
@@ -857,6 +1145,8 @@ def discover_bout_kinematics_run_options(
             f"headings {', '.join(level.replace('heading_', '') for level in heading_levels)}",
             f"source {speed_level_key.replace('speed_', '')}",
         ]
+        if has_eye_gaze:
+            label_parts.append("eye gaze")
         if is_latest:
             label_parts.append("latest")
         options.append(
@@ -1227,11 +1517,13 @@ def load_bout_kinematics_records(
         raise ValueError(f"Bout kinematics run not found: {path}") from exc
 
     if heading_level is not None:
-        levels = (_heading_level_key(heading_level),)
+        levels = ("eye_gaze",) if str(heading_level).strip() == "eye_gaze" else (_heading_level_key(heading_level),)
     else:
         levels = tuple(str(level) for level in run_group.attrs.get("heading_levels", []))
         if not levels:
             levels = tuple(level for level in ("heading_smoothed", "heading_raw") if level in run_group)
+        if "eye_gaze" in run_group:
+            levels = (*levels, "eye_gaze")
 
     records_by_level: dict[str, np.ndarray] = {}
     for level in levels:
@@ -1249,6 +1541,7 @@ def bout_kinematics_records_to_dataframe(records_by_level: Mapping[str, np.ndarr
         if frame.empty:
             continue
         frame.insert(0, "heading_level", level)
+        frame.insert(1, "analysis_level", level)
         frames.append(frame)
     if not frames:
         return pd.DataFrame()

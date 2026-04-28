@@ -38,11 +38,19 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.detect_reason_codec import REASON_BYTES_ENCODING, REASON_BYTES_MIN_WIDTH
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_EYE,
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
     resolve_eye_geometry_source,
+)
+from fisheye.pose.body_frame import (
+    BODY_FRAME_COORDINATE_SPACE_ROI,
+    BODY_FRAME_SCHEMA_ID,
+    BODY_FRAME_SCHEMA_VERSION,
+    build_keypoint_body_frame_contract_attrs,
+    compute_keypoint_body_frame,
 )
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.utils.metadata import get_fps
@@ -76,9 +84,9 @@ EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
 SERIAL_EXECUTION_BACKEND = "serial_driver"
 DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
 EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
-EYE_ANGLE_RUN_SCHEMA_VERSION = 1
+EYE_ANGLE_RUN_SCHEMA_VERSION = 4
 EYE_ANGLE_OUTPUT_SCHEMA_ID = "analysis.eye_angle_output_schema"
-EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 1
+EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 4
 EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
 EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
 
@@ -94,6 +102,16 @@ _BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
     ("right_minor_signed_deg", "right_minor_signed_deg"),
     ("vergence_minor_signed_deg", "vergence_minor_signed_deg"),
     ("version_minor_deg", "version_minor_deg"),
+    ("left_gaze_deg", "left_gaze_deg"),
+    ("right_gaze_deg", "right_gaze_deg"),
+    ("left_gaze_signed_deg", "left_gaze_signed_deg"),
+    ("right_gaze_signed_deg", "right_gaze_signed_deg"),
+    ("vergence_gaze_deg", "vergence_gaze_deg"),
+    ("vergence_gaze_signed_deg", "vergence_gaze_signed_deg"),
+    ("left_nasal_gaze_deg", "left_nasal_gaze_deg"),
+    ("right_nasal_gaze_deg", "right_nasal_gaze_deg"),
+    ("mean_eye_vergence_gaze_deg", "mean_eye_vergence_gaze_deg"),
+    ("version_gaze_deg", "version_gaze_deg"),
     ("heading_deg", "heading_deg"),
     ("left_centroid_deg", "left_centroid_deg"),
     ("right_centroid_deg", "right_centroid_deg"),
@@ -118,15 +136,33 @@ def _eye_angle_definition_attrs() -> Dict[str, object]:
     """Return stable metadata definitions for eye-angle output arrays."""
     return {
         "signed_angles": True,
-        "signed_angle_convention": "per-eye signed angles are temporal-positive",
-        "vergence_definition": "abs(vergence_signed_deg)",
-        "vergence_signed_definition": "-(left_signed_deg + right_signed_deg)",
-        "version_definition": "0.5*(-left_signed_deg + right_signed_deg)",
+        "signed_angle_convention": "per-eye signed angles are body-frame anatomical-left-positive",
+        "vergence_definition": "undirected_axis_separation(left_signed_deg, right_signed_deg)",
+        "vergence_signed_definition": "same as vergence_deg for directionless ellipse axes",
+        "version_definition": "0.5*(left_signed_deg + right_signed_deg)",
         "minor_signed_angles": True,
-        "minor_signed_angle_convention": "per-eye minor signed angles are temporal-positive",
-        "minor_vergence_definition": "abs(vergence_minor_signed_deg)",
-        "minor_vergence_signed_definition": "-(left_minor_signed_deg + right_minor_signed_deg)",
-        "minor_version_definition": "0.5*(-left_minor_signed_deg + right_minor_signed_deg)",
+        "minor_signed_angle_convention": "per-eye minor signed angles are body-frame anatomical-left-positive",
+        "minor_vergence_definition": "undirected_axis_separation(left_minor_signed_deg, right_minor_signed_deg)",
+        "minor_vergence_signed_definition": "same as vergence_minor_deg for directionless ellipse axes",
+        "minor_version_definition": "0.5*(left_minor_signed_deg + right_minor_signed_deg)",
+        "preferred_eye_axis": "ellipse_minor",
+        "preferred_angle_family": "gaze",
+        "gaze_angle_source": "ellipse_minor",
+        "gaze_angle_definition": "left/right_gaze_signed_deg are aliases of left/right_minor_signed_deg",
+        "gaze_vergence_definition": "undirected_axis_separation(left_gaze_signed_deg, right_gaze_signed_deg)",
+        "gaze_vergence_signed_definition": "same as vergence_gaze_deg for directionless ellipse axes",
+        "gaze_total_vergence_definition": (
+            "vergence_gaze_deg retains the v3-compatible undirected axis separation; "
+            "under expected outward anatomical eye-axis polarity it equals "
+            "left_nasal_gaze_deg + right_nasal_gaze_deg"
+        ),
+        "mean_eye_vergence_gaze_definition": "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)",
+        "nasal_gaze_definition": "90 - abs(outward_from_midline_gaze_axis_angle_deg)",
+        "beast_comparable_eye_vergence": "mean_eye_vergence_gaze_deg",
+        "gaze_version_definition": "0.5*(left_gaze_signed_deg + right_gaze_signed_deg)",
+        "body_frame_schema_id": BODY_FRAME_SCHEMA_ID,
+        "body_frame_schema_version": BODY_FRAME_SCHEMA_VERSION,
+        "body_frame_estimator": "keypoint_head_axis",
     }
 
 
@@ -153,6 +189,16 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         "right_minor_signed_deg",
         "vergence_minor_signed_deg",
         "version_minor_deg",
+        "left_gaze_deg",
+        "right_gaze_deg",
+        "left_gaze_signed_deg",
+        "right_gaze_signed_deg",
+        "vergence_gaze_deg",
+        "vergence_gaze_signed_deg",
+        "left_nasal_gaze_deg",
+        "right_nasal_gaze_deg",
+        "mean_eye_vergence_gaze_deg",
+        "version_gaze_deg",
         "heading_deg",
         "left_centroid_deg",
         "right_centroid_deg",
@@ -164,11 +210,23 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         "vergence_speed_deg_s",
         "vergence_signed_speed_deg_s",
         "version_speed_deg_s",
+        "left_gaze_speed_deg_s",
+        "right_gaze_speed_deg_s",
+        "vergence_gaze_speed_deg_s",
+        "vergence_gaze_signed_speed_deg_s",
+        "version_gaze_speed_deg_s",
+        "mean_eye_vergence_gaze_speed_deg_s",
         "left_accel_deg_s2",
         "right_accel_deg_s2",
         "vergence_accel_deg_s2",
         "vergence_signed_accel_deg_s2",
         "version_accel_deg_s2",
+        "left_gaze_accel_deg_s2",
+        "right_gaze_accel_deg_s2",
+        "vergence_gaze_accel_deg_s2",
+        "vergence_gaze_signed_accel_deg_s2",
+        "version_gaze_accel_deg_s2",
+        "mean_eye_vergence_gaze_accel_deg_s2",
     ]
     support_outputs = [
         {"name": "frame_indices", "row_axis": "roi", "value_kind": "frame_index"},
@@ -176,6 +234,12 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         {"name": "ellipse_major", "row_axis": "roi", "units": "px"},
         {"name": "ellipse_minor", "row_axis": "roi", "units": "px"},
         {"name": "ellipse_ratio", "row_axis": "roi", "value_kind": "ratio"},
+        {"name": "body_frame/origin_xy", "row_axis": "roi", "units": "px"},
+        {"name": "body_frame/forward_axis_xy", "row_axis": "roi", "value_kind": "unit_vector_xy"},
+        {"name": "body_frame/left_axis_xy", "row_axis": "roi", "value_kind": "unit_vector_xy"},
+        {"name": "body_frame/heading_deg", "row_axis": "roi", "units": "deg"},
+        {"name": "body_frame/valid", "row_axis": "roi", "value_kind": "bool"},
+        {"name": "body_frame/failure_reason_bytes", "row_axis": "roi", "value_kind": "reason_tag"},
         {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": True},
     ]
     qa_outputs = ["valid_left", "valid_right", "valid_frame", "reason_codes"]
@@ -187,6 +251,16 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         "version_deg",
         "vergence_minor_signed_deg",
         "version_minor_deg",
+        "left_gaze_deg",
+        "right_gaze_deg",
+        "left_gaze_signed_deg",
+        "right_gaze_signed_deg",
+        "vergence_gaze_deg",
+        "vergence_gaze_signed_deg",
+        "left_nasal_gaze_deg",
+        "right_nasal_gaze_deg",
+        "mean_eye_vergence_gaze_deg",
+        "version_gaze_deg",
         "left_centroid_deg",
         "right_centroid_deg",
         "vergence_centroid_deg",
@@ -231,11 +305,30 @@ def _eye_angle_output_schema() -> Dict[str, object]:
         },
         "angle_units": "degrees",
         "time_units": "seconds",
-        "signed_angle_convention": "per-eye signed angles are temporal-positive",
-        "vergence_signed_definition": "-(left_signed_deg + right_signed_deg)",
-        "version_definition": "0.5*(-left_signed_deg + right_signed_deg)",
+        "signed_angle_convention": "per-eye signed angles are body-frame anatomical-left-positive",
+        "vergence_signed_definition": "same as vergence_deg for directionless ellipse axes",
+        "version_definition": "0.5*(left_signed_deg + right_signed_deg)",
+        "preferred_angle_family": "gaze",
+        "preferred_eye_axis": "ellipse_minor",
+        "gaze_angle_source": "ellipse_minor",
+        "gaze_angle_definition": "left/right_gaze_signed_deg are aliases of left/right_minor_signed_deg",
+        "gaze_vergence_signed_definition": "same as vergence_gaze_deg for directionless ellipse axes",
+        "gaze_vergence_definition": "undirected_axis_separation(left_gaze_signed_deg, right_gaze_signed_deg)",
+        "gaze_total_vergence_definition": (
+            "vergence_gaze_deg retains the v3-compatible undirected axis separation; "
+            "under expected outward anatomical eye-axis polarity it equals "
+            "left_nasal_gaze_deg + right_nasal_gaze_deg"
+        ),
+        "mean_eye_vergence_gaze_definition": "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)",
+        "nasal_gaze_definition": "90 - abs(outward_from_midline_gaze_axis_angle_deg)",
+        "beast_comparable_eye_vergence": "mean_eye_vergence_gaze_deg",
+        "gaze_version_definition": "0.5*(left_gaze_signed_deg + right_gaze_signed_deg)",
         "centroid_angle_definition": "atan2(rotated_eye_vector_y, rotated_eye_vector_x) in fish frame",
         "centroid_vergence_definition": "abs(left_centroid_deg) + abs(right_centroid_deg)",
+        "body_frame_schema_id": BODY_FRAME_SCHEMA_ID,
+        "body_frame_schema_version": BODY_FRAME_SCHEMA_VERSION,
+        "body_frame_estimator": "keypoint_head_axis",
+        "body_frame_group": "support/body_frame",
         "qa_reason_codes_attr": "reason_code_map",
     }
 
@@ -250,11 +343,21 @@ class EyeAngleResults:
     right_signed_deg: np.ndarray
     left_minor_signed_deg: np.ndarray
     right_minor_signed_deg: np.ndarray
+    left_gaze_deg: np.ndarray
+    right_gaze_deg: np.ndarray
+    left_gaze_signed_deg: np.ndarray
+    right_gaze_signed_deg: np.ndarray
+    left_nasal_gaze_deg: np.ndarray
+    right_nasal_gaze_deg: np.ndarray
+    mean_eye_vergence_gaze_deg: np.ndarray
     vergence_deg: np.ndarray
     vergence_signed_deg: np.ndarray
     vergence_minor_signed_deg: np.ndarray
+    vergence_gaze_deg: np.ndarray
+    vergence_gaze_signed_deg: np.ndarray
     version_deg: np.ndarray
     version_minor_deg: np.ndarray
+    version_gaze_deg: np.ndarray
     ellipse_major: np.ndarray
     ellipse_minor: np.ndarray
     ellipse_ratio: np.ndarray
@@ -263,7 +366,12 @@ class EyeAngleResults:
     valid_frame: np.ndarray
     reason_codes: np.ndarray
     heading_deg: np.ndarray
-    # Centroid-based angles (paper-comparable)
+    body_frame_origin_xy: np.ndarray
+    body_frame_forward_axis_xy: np.ndarray
+    body_frame_left_axis_xy: np.ndarray
+    body_frame_valid: np.ndarray
+    body_frame_failure_reason_bytes: np.ndarray
+    # Centroid-based eye-position angles (auxiliary pose context)
     left_centroid_deg: np.ndarray
     right_centroid_deg: np.ndarray
     vergence_centroid_deg: np.ndarray
@@ -325,11 +433,32 @@ def _to_half_turn(angle_rad: np.ndarray) -> np.ndarray:
     return np.mod(angle_rad, np.pi)
 
 
-def _unit(v: np.ndarray) -> np.ndarray:
-    """Return unit-length vectors, protecting against zero magnitude."""
-    norm = np.linalg.norm(v, axis=-1, keepdims=True)
-    norm = np.where(norm == 0.0, 1.0, norm)
-    return v / norm
+def _signed_angle_from_body_axes(
+    vectors_xy: np.ndarray,
+    forward_axis_xy: np.ndarray,
+    left_axis_xy: np.ndarray,
+) -> np.ndarray:
+    """Return anatomical-left-positive signed angles against body axes."""
+    forward = np.einsum("ij,ij->i", vectors_xy, forward_axis_xy)
+    left = np.einsum("ij,ij->i", vectors_xy, left_axis_xy)
+    return np.rad2deg(np.arctan2(left, forward)).astype(np.float32, copy=False)
+
+
+def _undirected_axis_separation_deg(left_signed_deg: np.ndarray, right_signed_deg: np.ndarray) -> np.ndarray:
+    """Return the smaller angle between two directionless eye axes.
+
+    OpenCV ellipse axes have a 180-degree ambiguity. After each eye axis is
+    oriented into the forward half-plane, the biologically useful vergence is
+    the smaller separation between the two undirected axis lines, not the raw
+    directed left/right difference.
+    """
+
+    left = np.asarray(left_signed_deg, dtype=np.float64)
+    right = np.asarray(right_signed_deg, dtype=np.float64)
+    diff = np.abs(left - right)
+    diff = np.mod(diff, 360.0)
+    diff = np.where(diff > 180.0, 360.0 - diff, diff)
+    return np.minimum(diff, 180.0 - diff).astype(np.float32, copy=False)
 
 
 def _resolve_smoothing_window(length: int, desired: int) -> int:
@@ -407,21 +536,21 @@ def _process_chunk(
     valid_frame = np.zeros(chunk_len, dtype=bool)
     reason_codes = np.zeros(chunk_len, dtype=np.uint16)
 
-    heading_out = heading_deg.astype(np.float64, copy=True)
-    heading_valid = np.isfinite(heading_out)
-
     bladder = keypoints_roi[:, int(keypoint_indices["swim_bladder"]), :]
     eye_left_kp = keypoints_roi[:, int(keypoint_indices["eye_left"]), :]
     eye_right_kp = keypoints_roi[:, int(keypoint_indices["eye_right"]), :]
+    body_frame = compute_keypoint_body_frame(
+        keypoints_roi,
+        keypoint_indices=keypoint_indices,
+        detection_success=detection_success,
+    )
+    heading_out = body_frame.heading_deg.astype(np.float64, copy=True)
+    body_frame_valid = body_frame.valid
 
     reason_codes[~detection_success] |= REASON_DETECTION_FAILURE
-    reason_codes[~heading_valid] |= REASON_HEADING_INVALID
+    reason_codes[~body_frame_valid] |= REASON_HEADING_INVALID
 
-    heading_rad = np.full(chunk_len, np.nan, dtype=np.float64)
-    heading_rad[heading_valid] = np.deg2rad(heading_out[heading_valid])
-    heading_rad = _to_half_turn(heading_rad)
-
-    # ---------- Centroid-based angles (paper-comparable) ----------
+    # ---------- Centroid-based eye-position angles (auxiliary pose context) ----------
     # Measures eye position angle in fish-frame coordinates.
     # Paper method: vergence = |theta_L| + |theta_R|
     left_centroid = np.full(chunk_len, np.nan, dtype=np.float32)
@@ -432,8 +561,7 @@ def _process_chunk(
     head_center = (bladder + eye_left_kp + eye_right_kp) / 3.0
 
     centroid_mask = (
-        detection_success
-        & heading_valid
+        body_frame_valid
         & np.all(np.isfinite(head_center), axis=1)
         & np.all(np.isfinite(eye_left_kp), axis=1)
         & np.all(np.isfinite(eye_right_kp), axis=1)
@@ -446,21 +574,16 @@ def _process_chunk(
         vL = eye_left_kp[cidxs] - head_center[cidxs]
         vR = eye_right_kp[cidxs] - head_center[cidxs]
 
-        # Convert to math coords (y up) to match heading computation: (x, -y)
-        vLx, vLy = vL[:, 0], -vL[:, 1]
-        vRx, vRy = vR[:, 0], -vR[:, 1]
-
-        # Rotate by -heading into fish frame (heading aligned to +x)
-        ang = np.deg2rad(heading_out[cidxs]).astype(np.float64)
-        c, s = np.cos(-ang), np.sin(-ang)
-
-        Lx = c * vLx - s * vLy
-        Ly = s * vLx + c * vLy
-        Rx = c * vRx - s * vRy
-        Ry = s * vRx + c * vRy
-
-        theta_L = np.degrees(np.arctan2(Ly, Lx)).astype(np.float32)
-        theta_R = np.degrees(np.arctan2(Ry, Rx)).astype(np.float32)
+        theta_L = _signed_angle_from_body_axes(
+            vL,
+            body_frame.forward_axis_xy[cidxs].astype(np.float64, copy=False),
+            body_frame.left_axis_xy[cidxs].astype(np.float64, copy=False),
+        )
+        theta_R = _signed_angle_from_body_axes(
+            vR,
+            body_frame.forward_axis_xy[cidxs].astype(np.float64, copy=False),
+            body_frame.left_axis_xy[cidxs].astype(np.float64, copy=False),
+        )
 
         left_centroid[cidxs] = theta_L
         right_centroid[cidxs] = theta_R
@@ -493,7 +616,7 @@ def _process_chunk(
         if np.any(circular_mask):
             reason_codes[circular_mask] |= fail_bit
 
-        combined_mask = finite_mask & detection_success
+        combined_mask = finite_mask & body_frame_valid
         reason_codes[~finite_mask] |= fail_bit
 
         if np.any(combined_mask):
@@ -502,49 +625,34 @@ def _process_chunk(
             alpha_eye = np.deg2rad(angle_deg[idxs]).astype(np.float64)
             alpha_eye = _to_half_turn(alpha_eye)
 
-            centers = 0.5 * (eye_left_kp[idxs] + eye_right_kp[idxs])
-            # u_head: fish head axis from swim bladder to head centre
-            head_axis = _unit(centers - bladder[idxs])
-            if eye_idx == 0:
-                nasal_axis = _unit(centers - eye_left_kp[idxs])
-            else:
-                nasal_axis = _unit(centers - eye_right_kp[idxs])
-            temporal_axis = -nasal_axis
+            forward_axis = body_frame.forward_axis_xy[idxs].astype(np.float64, copy=False)
 
             axis_major = np.stack([np.cos(alpha_eye), np.sin(alpha_eye)], axis=1)
-            dot_temporal_major = np.einsum("ij,ij->i", axis_major, temporal_axis)
-            sign_major = np.where(dot_temporal_major >= 0.0, 1.0, -1.0)
+            sign_major = np.where(np.einsum("ij,ij->i", axis_major, forward_axis) >= 0.0, 1.0, -1.0)
             axis_major_aligned = axis_major * sign_major[:, None]
-
-            dot_head_major = np.clip(
-                np.einsum("ij,ij->i", axis_major_aligned, head_axis),
-                -1.0,
-                1.0,
+            signed_major = _signed_angle_from_body_axes(
+                axis_major_aligned,
+                body_frame.forward_axis_xy[idxs].astype(np.float64, copy=False),
+                body_frame.left_axis_xy[idxs].astype(np.float64, copy=False),
             )
-            theta_major_rad = np.arccos(dot_head_major)
-            theta_major_deg = np.degrees(theta_major_rad).astype(np.float32)
 
-            target_array[idxs] = theta_major_deg
-            signed_array[idxs] = sign_major.astype(np.float32) * theta_major_deg
+            target_array[idxs] = np.abs(signed_major)
+            signed_array[idxs] = signed_major
 
             axis_minor = np.stack([-np.sin(alpha_eye), np.cos(alpha_eye)], axis=1)
-            dot_temporal = np.einsum("ij,ij->i", axis_minor, temporal_axis)
-            sign_minor = np.where(dot_temporal >= 0.0, 1.0, -1.0)
+            sign_minor = np.where(np.einsum("ij,ij->i", axis_minor, forward_axis) >= 0.0, 1.0, -1.0)
             axis_minor_aligned = axis_minor * sign_minor[:, None]
-
-            dot_head_minor = np.clip(
-                np.einsum("ij,ij->i", axis_minor_aligned, head_axis),
-                -1.0,
-                1.0,
+            signed_minor = _signed_angle_from_body_axes(
+                axis_minor_aligned,
+                body_frame.forward_axis_xy[idxs].astype(np.float64, copy=False),
+                body_frame.left_axis_xy[idxs].astype(np.float64, copy=False),
             )
-            theta_minor_rad = np.arccos(dot_head_minor)
-            theta_minor_deg = np.degrees(theta_minor_rad).astype(np.float32)
-            theta_minor_clipped = np.clip(theta_minor_deg, 0.0, 90.0)
+            signed_minor = np.clip(signed_minor, -90.0, 90.0)
 
             if eye_idx == 0:
-                left_minor_signed[idxs] = sign_minor.astype(np.float32) * theta_minor_clipped
+                left_minor_signed[idxs] = signed_minor
             else:
-                right_minor_signed[idxs] = sign_minor.astype(np.float32) * theta_minor_clipped
+                right_minor_signed[idxs] = signed_minor
 
             ellipse_major[idxs] = major[idxs].astype(np.float32, copy=False)
             ellipse_minor[idxs] = minor[idxs].astype(np.float32, copy=False)
@@ -565,29 +673,32 @@ def _process_chunk(
 
     mask = valid_frame
     if np.any(mask):
-        # Adopt binocular movement conventions:
-        #   vergence  = θ_L(nasal) + θ_R(nasal)
-        #             = -(left_temporal + right_temporal)
-        #   version   = 0.5 * (θ_L(nasal) - θ_R(nasal))
-        # Minor variants follow the same relationships.
-        left_temporal = left_signed[mask]
-        right_temporal = right_signed[mask]
-        left_minor_temporal = left_minor_signed[mask]
-        right_minor_temporal = right_minor_signed[mask]
+        # Body-frame signed eye angles are anatomical-left-positive. Ellipse
+        # axes are directionless, so vergence is the smaller angle between the
+        # two undirected eye-axis lines rather than the raw directed delta.
+        left_body = left_signed[mask]
+        right_body = right_signed[mask]
+        left_minor_body = left_minor_signed[mask]
+        right_minor_body = right_minor_signed[mask]
 
-        left_nasal = -left_temporal
-        right_nasal = -right_temporal
-        left_minor_nasal = -left_minor_temporal
-        right_minor_nasal = -right_minor_temporal
-
-        vergence_signed_vals = left_nasal + right_nasal
-        vergence[mask] = np.abs(vergence_signed_vals)
+        vergence_signed_vals = _undirected_axis_separation_deg(left_body, right_body)
+        vergence[mask] = vergence_signed_vals
         vergence_signed[mask] = vergence_signed_vals
-        version[mask] = 0.5 * (left_nasal - right_nasal)
+        version[mask] = 0.5 * (left_body + right_body)
 
-        vergence_minor_signed_vals = left_minor_nasal + right_minor_nasal
+        vergence_minor_signed_vals = _undirected_axis_separation_deg(left_minor_body, right_minor_body)
         vergence_minor_signed[mask] = vergence_minor_signed_vals
-        version_minor[mask] = 0.5 * (left_minor_nasal - right_minor_nasal)
+        version_minor[mask] = 0.5 * (left_minor_body + right_minor_body)
+
+    left_nasal_gaze = 90.0 - np.abs(left_minor_signed)
+    right_nasal_gaze = 90.0 - np.abs(right_minor_signed)
+    left_nasal_gaze[~valid_left] = np.nan
+    right_nasal_gaze[~valid_right] = np.nan
+    mean_eye_vergence_gaze = np.full(chunk_len, np.nan, dtype=np.float32)
+    if np.any(valid_frame):
+        mean_eye_vergence_gaze[valid_frame] = (
+            0.5 * (left_nasal_gaze[valid_frame] + right_nasal_gaze[valid_frame])
+        ).astype(np.float32, copy=False)
 
     return EyeAngleResults(
         left_deg=left_angles,
@@ -596,11 +707,21 @@ def _process_chunk(
         right_signed_deg=right_signed,
         left_minor_signed_deg=left_minor_signed,
         right_minor_signed_deg=right_minor_signed,
+        left_gaze_deg=np.abs(left_minor_signed),
+        right_gaze_deg=np.abs(right_minor_signed),
+        left_gaze_signed_deg=left_minor_signed,
+        right_gaze_signed_deg=right_minor_signed,
+        left_nasal_gaze_deg=left_nasal_gaze.astype(np.float32, copy=False),
+        right_nasal_gaze_deg=right_nasal_gaze.astype(np.float32, copy=False),
+        mean_eye_vergence_gaze_deg=mean_eye_vergence_gaze,
         vergence_deg=vergence,
         vergence_signed_deg=vergence_signed,
         vergence_minor_signed_deg=vergence_minor_signed,
+        vergence_gaze_deg=vergence_minor_signed,
+        vergence_gaze_signed_deg=vergence_minor_signed,
         version_deg=version,
         version_minor_deg=version_minor,
+        version_gaze_deg=version_minor,
         ellipse_major=ellipse_major,
         ellipse_minor=ellipse_minor,
         ellipse_ratio=ellipse_ratio,
@@ -609,6 +730,11 @@ def _process_chunk(
         valid_frame=valid_frame,
         reason_codes=reason_codes,
         heading_deg=heading_out.astype(np.float32, copy=False),
+        body_frame_origin_xy=body_frame.origin_xy,
+        body_frame_forward_axis_xy=body_frame.forward_axis_xy,
+        body_frame_left_axis_xy=body_frame.left_axis_xy,
+        body_frame_valid=body_frame.valid,
+        body_frame_failure_reason_bytes=body_frame.failure_reason_bytes,
         left_centroid_deg=left_centroid,
         right_centroid_deg=right_centroid,
         vergence_centroid_deg=vergence_centroid,
@@ -887,6 +1013,7 @@ def _prepare_base_output_arrays(
     qa_group = run_group.require_group("qa")
     qa_roi = qa_group.require_group("roi")
     support_group = run_group.require_group("support")
+    body_frame_group = support_group.require_group("body_frame")
 
     _prepare_output_arrays(
         roi_group,
@@ -911,6 +1038,26 @@ def _prepare_base_output_arrays(
             ("ellipse_ratio", (total_detections,), (chunk_len,), "f4"),
         ],
     )
+    _prepare_output_arrays(
+        body_frame_group,
+        [
+            ("origin_xy", (total_detections, 2), (chunk_len, 2), "f4"),
+            ("forward_axis_xy", (total_detections, 2), (chunk_len, 2), "f4"),
+            ("left_axis_xy", (total_detections, 2), (chunk_len, 2), "f4"),
+            ("heading_deg", (total_detections,), (chunk_len,), "f4"),
+            ("valid", (total_detections,), (chunk_len,), "bool"),
+            ("failure_reason_bytes", (total_detections, 64), (chunk_len, 64), "u1"),
+        ],
+    )
+    body_frame_group.attrs.update(
+        build_keypoint_body_frame_contract_attrs(
+            source_refined_keypoints_run=None,
+            coordinate_space=BODY_FRAME_COORDINATE_SPACE_ROI,
+        )
+    )
+    body_frame_group.attrs["reason_encoding"] = REASON_BYTES_ENCODING
+    body_frame_group.attrs["reason_bytes_width"] = REASON_BYTES_MIN_WIDTH
+    body_frame_group.attrs["reason_bytes_null_terminated"] = True
 
 
 def _write_base_eye_angle_result(
@@ -924,6 +1071,7 @@ def _write_base_eye_angle_result(
     roi_group = run_group["angles"]["roi"]
     qa_roi = run_group["qa"]["roi"]
     support_group = run_group["support"]
+    body_frame_group = support_group["body_frame"]
 
     for dataset_name, field_name in _BASE_ROI_RESULT_FIELDS:
         roi_group[dataset_name][row_slice] = getattr(result, field_name)
@@ -933,6 +1081,12 @@ def _write_base_eye_angle_result(
     support_group["time_seconds"][row_slice] = time_seconds
     for dataset_name, field_name in _BASE_SUPPORT_RESULT_FIELDS:
         support_group[dataset_name][row_slice] = getattr(result, field_name)
+    body_frame_group["origin_xy"][row_slice] = result.body_frame_origin_xy
+    body_frame_group["forward_axis_xy"][row_slice] = result.body_frame_forward_axis_xy
+    body_frame_group["left_axis_xy"][row_slice] = result.body_frame_left_axis_xy
+    body_frame_group["heading_deg"][row_slice] = result.heading_deg
+    body_frame_group["valid"][row_slice] = result.body_frame_valid
+    body_frame_group["failure_reason_bytes"][row_slice, :] = result.body_frame_failure_reason_bytes
 
 
 def _process_and_write_eye_angle_chunk_groups(
@@ -1146,6 +1300,12 @@ def run(args: argparse.Namespace) -> None:
         console.print(f"Created run group: [cyan]analysis/eye_angle_runs/{resolved_run_name}[/cyan]")
 
     _prepare_base_output_arrays(run_group, total_detections=total_detections, chunk_len=chunk_len)
+    run_group["support"]["body_frame"].attrs.update(
+        build_keypoint_body_frame_contract_attrs(
+            source_refined_keypoints_run=keypoint_run_name,
+            coordinate_space=BODY_FRAME_COORDINATE_SPACE_ROI,
+        )
+    )
     chunks = _row_chunks(total_detections, chunk_size)
     chunk_timings: list[dict[str, object]] = []
     stage_start = time.perf_counter()
@@ -1207,6 +1367,16 @@ def run(args: argparse.Namespace) -> None:
     vergence_minor_signed = roi_group["vergence_minor_signed_deg"][:]
     version = roi_group["version_deg"][:]
     version_minor = roi_group["version_minor_deg"][:]
+    left_gaze = roi_group["left_gaze_deg"][:]
+    right_gaze = roi_group["right_gaze_deg"][:]
+    left_gaze_signed = roi_group["left_gaze_signed_deg"][:]
+    right_gaze_signed = roi_group["right_gaze_signed_deg"][:]
+    vergence_gaze = roi_group["vergence_gaze_deg"][:]
+    vergence_gaze_signed = roi_group["vergence_gaze_signed_deg"][:]
+    left_nasal_gaze = roi_group["left_nasal_gaze_deg"][:]
+    right_nasal_gaze = roi_group["right_nasal_gaze_deg"][:]
+    mean_eye_vergence_gaze = roi_group["mean_eye_vergence_gaze_deg"][:]
+    version_gaze = roi_group["version_gaze_deg"][:]
     heading_deg_out = roi_group["heading_deg"][:]
     left_centroid = roi_group["left_centroid_deg"][:]
     right_centroid = roi_group["right_centroid_deg"][:]
@@ -1245,6 +1415,36 @@ def run(args: argparse.Namespace) -> None:
         if fps
         else np.full_like(version, np.nan)
     )
+    left_gaze_speed = (
+        _compute_derivative(left_gaze, time_seconds, valid_left, max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(left_gaze, np.nan)
+    )
+    right_gaze_speed = (
+        _compute_derivative(right_gaze, time_seconds, valid_right, max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(right_gaze, np.nan)
+    )
+    vergence_gaze_speed = (
+        _compute_derivative(vergence_gaze, time_seconds, valid_frame, max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(vergence_gaze, np.nan)
+    )
+    vergence_gaze_signed_speed = (
+        _compute_derivative(vergence_gaze_signed, time_seconds, valid_frame, max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(vergence_gaze_signed, np.nan)
+    )
+    version_gaze_speed = (
+        _compute_derivative(version_gaze, time_seconds, valid_frame, max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(version_gaze, np.nan)
+    )
+    mean_eye_vergence_gaze_speed = (
+        _compute_derivative(mean_eye_vergence_gaze, time_seconds, valid_frame, max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(mean_eye_vergence_gaze, np.nan)
+    )
 
     left_accel = (
         _compute_derivative(left_speed, time_seconds, np.isfinite(left_speed), max_dt=DERIVATIVE_MAX_DT)
@@ -1271,6 +1471,46 @@ def run(args: argparse.Namespace) -> None:
         if fps
         else np.full_like(version, np.nan)
     )
+    left_gaze_accel = (
+        _compute_derivative(left_gaze_speed, time_seconds, np.isfinite(left_gaze_speed), max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(left_gaze, np.nan)
+    )
+    right_gaze_accel = (
+        _compute_derivative(right_gaze_speed, time_seconds, np.isfinite(right_gaze_speed), max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(right_gaze, np.nan)
+    )
+    vergence_gaze_accel = (
+        _compute_derivative(vergence_gaze_speed, time_seconds, np.isfinite(vergence_gaze_speed), max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(vergence_gaze, np.nan)
+    )
+    vergence_gaze_signed_accel = (
+        _compute_derivative(
+            vergence_gaze_signed_speed,
+            time_seconds,
+            np.isfinite(vergence_gaze_signed_speed),
+            max_dt=DERIVATIVE_MAX_DT,
+        )
+        if fps
+        else np.full_like(vergence_gaze_signed, np.nan)
+    )
+    version_gaze_accel = (
+        _compute_derivative(version_gaze_speed, time_seconds, np.isfinite(version_gaze_speed), max_dt=DERIVATIVE_MAX_DT)
+        if fps
+        else np.full_like(version_gaze, np.nan)
+    )
+    mean_eye_vergence_gaze_accel = (
+        _compute_derivative(
+            mean_eye_vergence_gaze_speed,
+            time_seconds,
+            np.isfinite(mean_eye_vergence_gaze_speed),
+            max_dt=DERIVATIVE_MAX_DT,
+        )
+        if fps
+        else np.full_like(mean_eye_vergence_gaze, np.nan)
+    )
 
     window_setting = smoothing_window_param if smoothing_window_param is not None else ANGLE_SMOOTHING_WINDOW
     detection_smooth_window = _resolve_smoothing_window(total_detections, window_setting)
@@ -1286,6 +1526,16 @@ def run(args: argparse.Namespace) -> None:
         right_minor_signed_smoothed = _smooth_signal(right_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
         vergence_minor_signed_smoothed = _smooth_signal(vergence_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
         version_minor_smoothed = _smooth_signal(version_minor, detection_smooth_window).astype(np.float32, copy=False)
+        left_gaze_smoothed = _smooth_signal(left_gaze, detection_smooth_window).astype(np.float32, copy=False)
+        right_gaze_smoothed = _smooth_signal(right_gaze, detection_smooth_window).astype(np.float32, copy=False)
+        left_gaze_signed_smoothed = _smooth_signal(left_gaze_signed, detection_smooth_window).astype(np.float32, copy=False)
+        right_gaze_signed_smoothed = _smooth_signal(right_gaze_signed, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_gaze_smoothed = _smooth_signal(vergence_gaze, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_gaze_signed_smoothed = _smooth_signal(vergence_gaze_signed, detection_smooth_window).astype(np.float32, copy=False)
+        left_nasal_gaze_smoothed = _smooth_signal(left_nasal_gaze, detection_smooth_window).astype(np.float32, copy=False)
+        right_nasal_gaze_smoothed = _smooth_signal(right_nasal_gaze, detection_smooth_window).astype(np.float32, copy=False)
+        mean_eye_vergence_gaze_smoothed = _smooth_signal(mean_eye_vergence_gaze, detection_smooth_window).astype(np.float32, copy=False)
+        version_gaze_smoothed = _smooth_signal(version_gaze, detection_smooth_window).astype(np.float32, copy=False)
         left_centroid_smoothed = _smooth_signal(left_centroid, detection_smooth_window).astype(np.float32, copy=False)
         right_centroid_smoothed = _smooth_signal(right_centroid, detection_smooth_window).astype(np.float32, copy=False)
         vergence_centroid_smoothed = _smooth_signal(vergence_centroid, detection_smooth_window).astype(np.float32, copy=False)
@@ -1301,6 +1551,16 @@ def run(args: argparse.Namespace) -> None:
         right_minor_signed_smoothed = np.array(right_minor_signed, copy=True)
         vergence_minor_signed_smoothed = np.array(vergence_minor_signed, copy=True)
         version_minor_smoothed = np.array(version_minor, copy=True)
+        left_gaze_smoothed = np.array(left_gaze, copy=True)
+        right_gaze_smoothed = np.array(right_gaze, copy=True)
+        left_gaze_signed_smoothed = np.array(left_gaze_signed, copy=True)
+        right_gaze_signed_smoothed = np.array(right_gaze_signed, copy=True)
+        vergence_gaze_smoothed = np.array(vergence_gaze, copy=True)
+        vergence_gaze_signed_smoothed = np.array(vergence_gaze_signed, copy=True)
+        left_nasal_gaze_smoothed = np.array(left_nasal_gaze, copy=True)
+        right_nasal_gaze_smoothed = np.array(right_nasal_gaze, copy=True)
+        mean_eye_vergence_gaze_smoothed = np.array(mean_eye_vergence_gaze, copy=True)
+        version_gaze_smoothed = np.array(version_gaze, copy=True)
         left_centroid_smoothed = np.array(left_centroid, copy=True)
         right_centroid_smoothed = np.array(right_centroid, copy=True)
         vergence_centroid_smoothed = np.array(vergence_centroid, copy=True)
@@ -1316,6 +1576,16 @@ def run(args: argparse.Namespace) -> None:
     right_minor_delta = _compute_delta(right_minor_signed)
     vergence_minor_delta = _compute_delta(vergence_minor_signed)
     version_minor_delta = _compute_delta(version_minor)
+    left_gaze_delta = _compute_delta(left_gaze)
+    right_gaze_delta = _compute_delta(right_gaze)
+    left_gaze_signed_delta = _compute_delta(left_gaze_signed)
+    right_gaze_signed_delta = _compute_delta(right_gaze_signed)
+    vergence_gaze_delta = _compute_delta(vergence_gaze)
+    vergence_gaze_signed_delta = _compute_delta(vergence_gaze_signed)
+    left_nasal_gaze_delta = _compute_delta(left_nasal_gaze)
+    right_nasal_gaze_delta = _compute_delta(right_nasal_gaze)
+    mean_eye_vergence_gaze_delta = _compute_delta(mean_eye_vergence_gaze)
+    version_gaze_delta = _compute_delta(version_gaze)
     left_centroid_delta = _compute_delta(left_centroid)
     right_centroid_delta = _compute_delta(right_centroid)
     vergence_centroid_delta = _compute_delta(vergence_centroid)
@@ -1331,6 +1601,16 @@ def run(args: argparse.Namespace) -> None:
     right_minor_delta_smoothed = _compute_delta(right_minor_signed_smoothed)
     vergence_minor_delta_smoothed = _compute_delta(vergence_minor_signed_smoothed)
     version_minor_delta_smoothed = _compute_delta(version_minor_smoothed)
+    left_gaze_delta_smoothed = _compute_delta(left_gaze_smoothed)
+    right_gaze_delta_smoothed = _compute_delta(right_gaze_smoothed)
+    left_gaze_signed_delta_smoothed = _compute_delta(left_gaze_signed_smoothed)
+    right_gaze_signed_delta_smoothed = _compute_delta(right_gaze_signed_smoothed)
+    vergence_gaze_delta_smoothed = _compute_delta(vergence_gaze_smoothed)
+    vergence_gaze_signed_delta_smoothed = _compute_delta(vergence_gaze_signed_smoothed)
+    left_nasal_gaze_delta_smoothed = _compute_delta(left_nasal_gaze_smoothed)
+    right_nasal_gaze_delta_smoothed = _compute_delta(right_nasal_gaze_smoothed)
+    mean_eye_vergence_gaze_delta_smoothed = _compute_delta(mean_eye_vergence_gaze_smoothed)
+    version_gaze_delta_smoothed = _compute_delta(version_gaze_smoothed)
     left_centroid_delta_smoothed = _compute_delta(left_centroid_smoothed)
     right_centroid_delta_smoothed = _compute_delta(right_centroid_smoothed)
     vergence_centroid_delta_smoothed = _compute_delta(vergence_centroid_smoothed)
@@ -1348,6 +1628,16 @@ def run(args: argparse.Namespace) -> None:
             "vergence_signed_minor": vergence_minor_signed,
             "version": version,
             "version_minor": version_minor,
+            "left_gaze": left_gaze,
+            "right_gaze": right_gaze,
+            "left_gaze_signed": left_gaze_signed,
+            "right_gaze_signed": right_gaze_signed,
+            "vergence_gaze": vergence_gaze,
+            "vergence_gaze_signed": vergence_gaze_signed,
+            "left_nasal_gaze": left_nasal_gaze,
+            "right_nasal_gaze": right_nasal_gaze,
+            "mean_eye_vergence_gaze": mean_eye_vergence_gaze,
+            "version_gaze": version_gaze,
             "left_centroid": left_centroid,
             "right_centroid": right_centroid,
             "vergence_centroid": vergence_centroid,
@@ -1360,6 +1650,16 @@ def run(args: argparse.Namespace) -> None:
     frame_vergence_signed_minor = frame_arrays["vergence_signed_minor"]
     frame_version = frame_arrays["version"]
     frame_version_minor = frame_arrays["version_minor"]
+    frame_left_gaze = frame_arrays["left_gaze"]
+    frame_right_gaze = frame_arrays["right_gaze"]
+    frame_left_gaze_signed = frame_arrays["left_gaze_signed"]
+    frame_right_gaze_signed = frame_arrays["right_gaze_signed"]
+    frame_vergence_gaze = frame_arrays["vergence_gaze"]
+    frame_vergence_gaze_signed = frame_arrays["vergence_gaze_signed"]
+    frame_left_nasal_gaze = frame_arrays["left_nasal_gaze"]
+    frame_right_nasal_gaze = frame_arrays["right_nasal_gaze"]
+    frame_mean_eye_vergence_gaze = frame_arrays["mean_eye_vergence_gaze"]
+    frame_version_gaze = frame_arrays["version_gaze"]
     frame_left_centroid = frame_arrays["left_centroid"]
     frame_right_centroid = frame_arrays["right_centroid"]
     frame_vergence_centroid = frame_arrays["vergence_centroid"]
@@ -1373,6 +1673,16 @@ def run(args: argparse.Namespace) -> None:
         frame_version_smoothed = _smooth_signal(frame_version, frame_smooth_window).astype(np.float32, copy=False)
         frame_vergence_minor_signed_smoothed = _smooth_signal(frame_vergence_signed_minor, frame_smooth_window).astype(np.float32, copy=False)
         frame_version_minor_smoothed = _smooth_signal(frame_version_minor, frame_smooth_window).astype(np.float32, copy=False)
+        frame_left_gaze_smoothed = _smooth_signal(frame_left_gaze, frame_smooth_window).astype(np.float32, copy=False)
+        frame_right_gaze_smoothed = _smooth_signal(frame_right_gaze, frame_smooth_window).astype(np.float32, copy=False)
+        frame_left_gaze_signed_smoothed = _smooth_signal(frame_left_gaze_signed, frame_smooth_window).astype(np.float32, copy=False)
+        frame_right_gaze_signed_smoothed = _smooth_signal(frame_right_gaze_signed, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_gaze_smoothed = _smooth_signal(frame_vergence_gaze, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_gaze_signed_smoothed = _smooth_signal(frame_vergence_gaze_signed, frame_smooth_window).astype(np.float32, copy=False)
+        frame_left_nasal_gaze_smoothed = _smooth_signal(frame_left_nasal_gaze, frame_smooth_window).astype(np.float32, copy=False)
+        frame_right_nasal_gaze_smoothed = _smooth_signal(frame_right_nasal_gaze, frame_smooth_window).astype(np.float32, copy=False)
+        frame_mean_eye_vergence_gaze_smoothed = _smooth_signal(frame_mean_eye_vergence_gaze, frame_smooth_window).astype(np.float32, copy=False)
+        frame_version_gaze_smoothed = _smooth_signal(frame_version_gaze, frame_smooth_window).astype(np.float32, copy=False)
         frame_left_centroid_smoothed = _smooth_signal(frame_left_centroid, frame_smooth_window).astype(np.float32, copy=False)
         frame_right_centroid_smoothed = _smooth_signal(frame_right_centroid, frame_smooth_window).astype(np.float32, copy=False)
         frame_vergence_centroid_smoothed = _smooth_signal(frame_vergence_centroid, frame_smooth_window).astype(np.float32, copy=False)
@@ -1384,6 +1694,16 @@ def run(args: argparse.Namespace) -> None:
         frame_version_smoothed = np.array(frame_version, copy=True)
         frame_vergence_minor_signed_smoothed = np.array(frame_vergence_signed_minor, copy=True)
         frame_version_minor_smoothed = np.array(frame_version_minor, copy=True)
+        frame_left_gaze_smoothed = np.array(frame_left_gaze, copy=True)
+        frame_right_gaze_smoothed = np.array(frame_right_gaze, copy=True)
+        frame_left_gaze_signed_smoothed = np.array(frame_left_gaze_signed, copy=True)
+        frame_right_gaze_signed_smoothed = np.array(frame_right_gaze_signed, copy=True)
+        frame_vergence_gaze_smoothed = np.array(frame_vergence_gaze, copy=True)
+        frame_vergence_gaze_signed_smoothed = np.array(frame_vergence_gaze_signed, copy=True)
+        frame_left_nasal_gaze_smoothed = np.array(frame_left_nasal_gaze, copy=True)
+        frame_right_nasal_gaze_smoothed = np.array(frame_right_nasal_gaze, copy=True)
+        frame_mean_eye_vergence_gaze_smoothed = np.array(frame_mean_eye_vergence_gaze, copy=True)
+        frame_version_gaze_smoothed = np.array(frame_version_gaze, copy=True)
         frame_left_centroid_smoothed = np.array(frame_left_centroid, copy=True)
         frame_right_centroid_smoothed = np.array(frame_right_centroid, copy=True)
         frame_vergence_centroid_smoothed = np.array(frame_vergence_centroid, copy=True)
@@ -1395,6 +1715,16 @@ def run(args: argparse.Namespace) -> None:
     frame_vergence_minor_delta = _compute_delta(frame_vergence_signed_minor)
     frame_version_delta = _compute_delta(frame_version)
     frame_version_minor_delta = _compute_delta(frame_version_minor)
+    frame_left_gaze_delta = _compute_delta(frame_left_gaze)
+    frame_right_gaze_delta = _compute_delta(frame_right_gaze)
+    frame_left_gaze_signed_delta = _compute_delta(frame_left_gaze_signed)
+    frame_right_gaze_signed_delta = _compute_delta(frame_right_gaze_signed)
+    frame_vergence_gaze_delta = _compute_delta(frame_vergence_gaze)
+    frame_vergence_gaze_signed_delta = _compute_delta(frame_vergence_gaze_signed)
+    frame_left_nasal_gaze_delta = _compute_delta(frame_left_nasal_gaze)
+    frame_right_nasal_gaze_delta = _compute_delta(frame_right_nasal_gaze)
+    frame_mean_eye_vergence_gaze_delta = _compute_delta(frame_mean_eye_vergence_gaze)
+    frame_version_gaze_delta = _compute_delta(frame_version_gaze)
     frame_left_centroid_delta = _compute_delta(frame_left_centroid)
     frame_right_centroid_delta = _compute_delta(frame_right_centroid)
     frame_vergence_centroid_delta = _compute_delta(frame_vergence_centroid)
@@ -1406,6 +1736,16 @@ def run(args: argparse.Namespace) -> None:
     frame_vergence_minor_delta_smoothed = _compute_delta(frame_vergence_minor_signed_smoothed)
     frame_version_delta_smoothed = _compute_delta(frame_version_smoothed)
     frame_version_minor_delta_smoothed = _compute_delta(frame_version_minor_smoothed)
+    frame_left_gaze_delta_smoothed = _compute_delta(frame_left_gaze_smoothed)
+    frame_right_gaze_delta_smoothed = _compute_delta(frame_right_gaze_smoothed)
+    frame_left_gaze_signed_delta_smoothed = _compute_delta(frame_left_gaze_signed_smoothed)
+    frame_right_gaze_signed_delta_smoothed = _compute_delta(frame_right_gaze_signed_smoothed)
+    frame_vergence_gaze_delta_smoothed = _compute_delta(frame_vergence_gaze_smoothed)
+    frame_vergence_gaze_signed_delta_smoothed = _compute_delta(frame_vergence_gaze_signed_smoothed)
+    frame_left_nasal_gaze_delta_smoothed = _compute_delta(frame_left_nasal_gaze_smoothed)
+    frame_right_nasal_gaze_delta_smoothed = _compute_delta(frame_right_nasal_gaze_smoothed)
+    frame_mean_eye_vergence_gaze_delta_smoothed = _compute_delta(frame_mean_eye_vergence_gaze_smoothed)
+    frame_version_gaze_delta_smoothed = _compute_delta(frame_version_gaze_smoothed)
     frame_left_centroid_delta_smoothed = _compute_delta(frame_left_centroid_smoothed)
     frame_right_centroid_delta_smoothed = _compute_delta(frame_right_centroid_smoothed)
     frame_vergence_centroid_delta_smoothed = _compute_delta(frame_vergence_centroid_smoothed)
@@ -1461,18 +1801,70 @@ def run(args: argparse.Namespace) -> None:
             ("version_minor_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("version_minor_delta_deg", (total_detections,), (chunk_len,), "f4"),
             ("version_minor_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("left_nasal_gaze_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_nasal_gaze_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("left_nasal_gaze_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_nasal_gaze_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_nasal_gaze_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_nasal_gaze_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_nasal_gaze_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_nasal_gaze_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("mean_eye_vergence_gaze_deg", (total_detections,), (chunk_len,), "f4"),
+            ("mean_eye_vergence_gaze_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("mean_eye_vergence_gaze_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("mean_eye_vergence_gaze_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("version_gaze_deg", (total_detections,), (chunk_len,), "f4"),
+            ("version_gaze_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("version_gaze_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("version_gaze_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("right_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("vergence_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("vergence_signed_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("version_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_signed_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
+            ("version_gaze_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
+            ("mean_eye_vergence_gaze_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("left_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
             ("right_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
             ("vergence_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
             ("vergence_signed_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
             ("version_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
+            ("left_gaze_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
+            ("right_gaze_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_gaze_signed_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
+            ("version_gaze_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
+            ("mean_eye_vergence_gaze_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
             ("heading_deg", (total_detections,), (chunk_len,), "f4"),
-            # Centroid-based angles (paper-comparable)
+            # Centroid-based eye-position angles
             ("left_centroid_deg", (total_detections,), (chunk_len,), "f4"),
             ("left_centroid_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_centroid_delta_deg", (total_detections,), (chunk_len,), "f4"),
@@ -1520,16 +1912,58 @@ def run(args: argparse.Namespace) -> None:
     roi_group["version_minor_deg_smoothed"][:] = version_minor_smoothed
     roi_group["version_minor_delta_deg"][:] = version_minor_delta
     roi_group["version_minor_delta_deg_smoothed"][:] = version_minor_delta_smoothed
+    roi_group["left_gaze_deg_smoothed"][:] = left_gaze_smoothed
+    roi_group["left_gaze_delta_deg"][:] = left_gaze_delta
+    roi_group["left_gaze_delta_deg_smoothed"][:] = left_gaze_delta_smoothed
+    roi_group["right_gaze_deg_smoothed"][:] = right_gaze_smoothed
+    roi_group["right_gaze_delta_deg"][:] = right_gaze_delta
+    roi_group["right_gaze_delta_deg_smoothed"][:] = right_gaze_delta_smoothed
+    roi_group["left_gaze_signed_deg_smoothed"][:] = left_gaze_signed_smoothed
+    roi_group["left_gaze_signed_delta_deg"][:] = left_gaze_signed_delta
+    roi_group["left_gaze_signed_delta_deg_smoothed"][:] = left_gaze_signed_delta_smoothed
+    roi_group["right_gaze_signed_deg_smoothed"][:] = right_gaze_signed_smoothed
+    roi_group["right_gaze_signed_delta_deg"][:] = right_gaze_signed_delta
+    roi_group["right_gaze_signed_delta_deg_smoothed"][:] = right_gaze_signed_delta_smoothed
+    roi_group["vergence_gaze_deg_smoothed"][:] = vergence_gaze_smoothed
+    roi_group["vergence_gaze_delta_deg"][:] = vergence_gaze_delta
+    roi_group["vergence_gaze_delta_deg_smoothed"][:] = vergence_gaze_delta_smoothed
+    roi_group["vergence_gaze_signed_deg_smoothed"][:] = vergence_gaze_signed_smoothed
+    roi_group["vergence_gaze_signed_delta_deg"][:] = vergence_gaze_signed_delta
+    roi_group["vergence_gaze_signed_delta_deg_smoothed"][:] = vergence_gaze_signed_delta_smoothed
+    roi_group["left_nasal_gaze_deg_smoothed"][:] = left_nasal_gaze_smoothed
+    roi_group["left_nasal_gaze_delta_deg"][:] = left_nasal_gaze_delta
+    roi_group["left_nasal_gaze_delta_deg_smoothed"][:] = left_nasal_gaze_delta_smoothed
+    roi_group["right_nasal_gaze_deg_smoothed"][:] = right_nasal_gaze_smoothed
+    roi_group["right_nasal_gaze_delta_deg"][:] = right_nasal_gaze_delta
+    roi_group["right_nasal_gaze_delta_deg_smoothed"][:] = right_nasal_gaze_delta_smoothed
+    roi_group["mean_eye_vergence_gaze_deg_smoothed"][:] = mean_eye_vergence_gaze_smoothed
+    roi_group["mean_eye_vergence_gaze_delta_deg"][:] = mean_eye_vergence_gaze_delta
+    roi_group["mean_eye_vergence_gaze_delta_deg_smoothed"][:] = mean_eye_vergence_gaze_delta_smoothed
+    roi_group["version_gaze_deg_smoothed"][:] = version_gaze_smoothed
+    roi_group["version_gaze_delta_deg"][:] = version_gaze_delta
+    roi_group["version_gaze_delta_deg_smoothed"][:] = version_gaze_delta_smoothed
     roi_group["left_speed_deg_s"][:] = left_speed
     roi_group["right_speed_deg_s"][:] = right_speed
     roi_group["vergence_speed_deg_s"][:] = vergence_speed
     roi_group["vergence_signed_speed_deg_s"][:] = vergence_signed_speed
     roi_group["version_speed_deg_s"][:] = version_speed
+    roi_group["left_gaze_speed_deg_s"][:] = left_gaze_speed
+    roi_group["right_gaze_speed_deg_s"][:] = right_gaze_speed
+    roi_group["vergence_gaze_speed_deg_s"][:] = vergence_gaze_speed
+    roi_group["vergence_gaze_signed_speed_deg_s"][:] = vergence_gaze_signed_speed
+    roi_group["version_gaze_speed_deg_s"][:] = version_gaze_speed
+    roi_group["mean_eye_vergence_gaze_speed_deg_s"][:] = mean_eye_vergence_gaze_speed
     roi_group["left_accel_deg_s2"][:] = left_accel
     roi_group["right_accel_deg_s2"][:] = right_accel
     roi_group["vergence_accel_deg_s2"][:] = vergence_accel
     roi_group["vergence_signed_accel_deg_s2"][:] = vergence_signed_accel
     roi_group["version_accel_deg_s2"][:] = version_accel
+    roi_group["left_gaze_accel_deg_s2"][:] = left_gaze_accel
+    roi_group["right_gaze_accel_deg_s2"][:] = right_gaze_accel
+    roi_group["vergence_gaze_accel_deg_s2"][:] = vergence_gaze_accel
+    roi_group["vergence_gaze_signed_accel_deg_s2"][:] = vergence_gaze_signed_accel
+    roi_group["version_gaze_accel_deg_s2"][:] = version_gaze_accel
+    roi_group["mean_eye_vergence_gaze_accel_deg_s2"][:] = mean_eye_vergence_gaze_accel
     # Centroid-based angles
     roi_group["left_centroid_deg_smoothed"][:] = left_centroid_smoothed
     roi_group["left_centroid_delta_deg"][:] = left_centroid_delta
@@ -1572,7 +2006,47 @@ def run(args: argparse.Namespace) -> None:
             ("version_minor_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_minor_delta_deg", (num_frames,), (frame_chunk,), "f4"),
             ("version_minor_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            # Centroid-based angles (paper-comparable)
+            ("left_gaze_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_gaze_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("left_gaze_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_gaze_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("left_gaze_signed_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_gaze_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("left_gaze_signed_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_gaze_signed_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_signed_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_signed_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_gaze_signed_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_signed_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_signed_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_gaze_signed_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("left_nasal_gaze_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_nasal_gaze_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("left_nasal_gaze_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_nasal_gaze_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_nasal_gaze_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_nasal_gaze_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_nasal_gaze_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_nasal_gaze_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("mean_eye_vergence_gaze_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("mean_eye_vergence_gaze_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("mean_eye_vergence_gaze_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("mean_eye_vergence_gaze_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("version_gaze_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("version_gaze_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("version_gaze_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("version_gaze_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            # Centroid-based eye-position angles
             ("left_centroid_deg", (num_frames,), (frame_chunk,), "f4"),
             ("left_centroid_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("left_centroid_delta_deg", (num_frames,), (frame_chunk,), "f4"),
@@ -1616,6 +2090,46 @@ def run(args: argparse.Namespace) -> None:
         frame_group["version_minor_deg_smoothed"][:] = frame_version_minor_smoothed
         frame_group["version_minor_delta_deg"][:] = frame_version_minor_delta
         frame_group["version_minor_delta_deg_smoothed"][:] = frame_version_minor_delta_smoothed
+        frame_group["left_gaze_deg"][:] = frame_left_gaze
+        frame_group["left_gaze_deg_smoothed"][:] = frame_left_gaze_smoothed
+        frame_group["left_gaze_delta_deg"][:] = frame_left_gaze_delta
+        frame_group["left_gaze_delta_deg_smoothed"][:] = frame_left_gaze_delta_smoothed
+        frame_group["right_gaze_deg"][:] = frame_right_gaze
+        frame_group["right_gaze_deg_smoothed"][:] = frame_right_gaze_smoothed
+        frame_group["right_gaze_delta_deg"][:] = frame_right_gaze_delta
+        frame_group["right_gaze_delta_deg_smoothed"][:] = frame_right_gaze_delta_smoothed
+        frame_group["left_gaze_signed_deg"][:] = frame_left_gaze_signed
+        frame_group["left_gaze_signed_deg_smoothed"][:] = frame_left_gaze_signed_smoothed
+        frame_group["left_gaze_signed_delta_deg"][:] = frame_left_gaze_signed_delta
+        frame_group["left_gaze_signed_delta_deg_smoothed"][:] = frame_left_gaze_signed_delta_smoothed
+        frame_group["right_gaze_signed_deg"][:] = frame_right_gaze_signed
+        frame_group["right_gaze_signed_deg_smoothed"][:] = frame_right_gaze_signed_smoothed
+        frame_group["right_gaze_signed_delta_deg"][:] = frame_right_gaze_signed_delta
+        frame_group["right_gaze_signed_delta_deg_smoothed"][:] = frame_right_gaze_signed_delta_smoothed
+        frame_group["vergence_gaze_deg"][:] = frame_vergence_gaze
+        frame_group["vergence_gaze_deg_smoothed"][:] = frame_vergence_gaze_smoothed
+        frame_group["vergence_gaze_delta_deg"][:] = frame_vergence_gaze_delta
+        frame_group["vergence_gaze_delta_deg_smoothed"][:] = frame_vergence_gaze_delta_smoothed
+        frame_group["vergence_gaze_signed_deg"][:] = frame_vergence_gaze_signed
+        frame_group["vergence_gaze_signed_deg_smoothed"][:] = frame_vergence_gaze_signed_smoothed
+        frame_group["vergence_gaze_signed_delta_deg"][:] = frame_vergence_gaze_signed_delta
+        frame_group["vergence_gaze_signed_delta_deg_smoothed"][:] = frame_vergence_gaze_signed_delta_smoothed
+        frame_group["left_nasal_gaze_deg"][:] = frame_left_nasal_gaze
+        frame_group["left_nasal_gaze_deg_smoothed"][:] = frame_left_nasal_gaze_smoothed
+        frame_group["left_nasal_gaze_delta_deg"][:] = frame_left_nasal_gaze_delta
+        frame_group["left_nasal_gaze_delta_deg_smoothed"][:] = frame_left_nasal_gaze_delta_smoothed
+        frame_group["right_nasal_gaze_deg"][:] = frame_right_nasal_gaze
+        frame_group["right_nasal_gaze_deg_smoothed"][:] = frame_right_nasal_gaze_smoothed
+        frame_group["right_nasal_gaze_delta_deg"][:] = frame_right_nasal_gaze_delta
+        frame_group["right_nasal_gaze_delta_deg_smoothed"][:] = frame_right_nasal_gaze_delta_smoothed
+        frame_group["mean_eye_vergence_gaze_deg"][:] = frame_mean_eye_vergence_gaze
+        frame_group["mean_eye_vergence_gaze_deg_smoothed"][:] = frame_mean_eye_vergence_gaze_smoothed
+        frame_group["mean_eye_vergence_gaze_delta_deg"][:] = frame_mean_eye_vergence_gaze_delta
+        frame_group["mean_eye_vergence_gaze_delta_deg_smoothed"][:] = frame_mean_eye_vergence_gaze_delta_smoothed
+        frame_group["version_gaze_deg"][:] = frame_version_gaze
+        frame_group["version_gaze_deg_smoothed"][:] = frame_version_gaze_smoothed
+        frame_group["version_gaze_delta_deg"][:] = frame_version_gaze_delta
+        frame_group["version_gaze_delta_deg_smoothed"][:] = frame_version_gaze_delta_smoothed
         # Centroid-based angles
         frame_group["left_centroid_deg"][:] = frame_left_centroid
         frame_group["left_centroid_deg_smoothed"][:] = frame_left_centroid_smoothed
@@ -1699,7 +2213,7 @@ def run(args: argparse.Namespace) -> None:
             "schema_version": EYE_ANGLE_RUN_SCHEMA_VERSION,
             "method": EYE_ANGLE_METHOD,
             "row_axis": EYE_ANGLE_ROW_AXIS,
-            "report_version": "1.4",
+            "report_version": "2.0",
             "reason_code_map": REASON_CODE_MAP,
             "source_eye_geometry_stage": eye_geometry.stage_group,
             "source_eye_geometry_run": eye_geometry.run_name,
@@ -1709,6 +2223,10 @@ def run(args: argparse.Namespace) -> None:
             "source_refined_subject_masks_run": eye_geometry.source_refined_subject_run,
             "eye_angle_output_schema": _eye_angle_output_schema(),
             **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
+            **build_keypoint_body_frame_contract_attrs(
+                source_refined_keypoints_run=keypoint_run_name,
+                coordinate_space=BODY_FRAME_COORDINATE_SPACE_ROI,
+            ),
             "fps": float(fps) if fps else None,
             "num_detections": int(total_detections),
             "num_frames": int(num_frames),
@@ -1724,11 +2242,15 @@ def run(args: argparse.Namespace) -> None:
             "valid_frame_fraction": float(frame_valid.sum() / num_frames) if num_frames else 0.0,
             "circularity_reject_ratio": float(ELLIPSE_CIRCULARITY_THRESHOLD),
             **_eye_angle_definition_attrs(),
+            "schema_migration_note": (
+                "v3 resolves signed eye angles through support/body_frame so axis "
+                "orientation disambiguation is separate from biological convergence polarity."
+            ),
             "angle_smoothing_method": "moving_average",
             "angle_smoothing_window_detections": int(detection_smooth_window) if detection_smooth_window else None,
             "angle_smoothing_window_frames": int(frame_smooth_window) if frame_smooth_window else None,
             "angle_smoothing_window_requested": int(smoothing_window_param) if smoothing_window_param else None,
-            # Centroid-based angles (paper-comparable)
+            # Centroid-based eye-position angles are auxiliary pose context.
             "centroid_angles": True,
             "centroid_angle_definition": "atan2(rotated_eye_vector_y, rotated_eye_vector_x) in fish frame",
             "centroid_vergence_definition": "abs(left_centroid_deg) + abs(right_centroid_deg)",
@@ -1777,6 +2299,13 @@ def run(args: argparse.Namespace) -> None:
             "ellipse_major": True,
             "ellipse_minor": True,
             "ellipse_ratio": True,
+            "support_body_frame": True,
+            "support_body_frame_origin_xy": True,
+            "support_body_frame_forward_axis_xy": True,
+            "support_body_frame_left_axis_xy": True,
+            "support_body_frame_heading_deg": True,
+            "support_body_frame_valid": True,
+            "support_body_frame_failure_reason_bytes": True,
             "left_minor_signed_deg": True,
             "right_minor_signed_deg": True,
             "vergence_minor_signed_deg": True,
@@ -1807,6 +2336,98 @@ def run(args: argparse.Namespace) -> None:
             "right_minor_signed_delta_deg_smoothed": True,
             "vergence_minor_signed_delta_deg_smoothed": True,
             "version_minor_delta_deg_smoothed": True,
+            "left_gaze_deg": True,
+            "right_gaze_deg": True,
+            "left_gaze_signed_deg": True,
+            "right_gaze_signed_deg": True,
+            "vergence_gaze_deg": True,
+            "vergence_gaze_signed_deg": True,
+            "left_nasal_gaze_deg": True,
+            "right_nasal_gaze_deg": True,
+            "mean_eye_vergence_gaze_deg": True,
+            "version_gaze_deg": True,
+            "left_gaze_deg_smoothed": True,
+            "right_gaze_deg_smoothed": True,
+            "left_gaze_signed_deg_smoothed": True,
+            "right_gaze_signed_deg_smoothed": True,
+            "vergence_gaze_deg_smoothed": True,
+            "vergence_gaze_signed_deg_smoothed": True,
+            "left_nasal_gaze_deg_smoothed": True,
+            "right_nasal_gaze_deg_smoothed": True,
+            "mean_eye_vergence_gaze_deg_smoothed": True,
+            "version_gaze_deg_smoothed": True,
+            "left_gaze_delta_deg": True,
+            "right_gaze_delta_deg": True,
+            "left_gaze_signed_delta_deg": True,
+            "right_gaze_signed_delta_deg": True,
+            "vergence_gaze_delta_deg": True,
+            "vergence_gaze_signed_delta_deg": True,
+            "left_nasal_gaze_delta_deg": True,
+            "right_nasal_gaze_delta_deg": True,
+            "mean_eye_vergence_gaze_delta_deg": True,
+            "version_gaze_delta_deg": True,
+            "left_gaze_delta_deg_smoothed": True,
+            "right_gaze_delta_deg_smoothed": True,
+            "left_gaze_signed_delta_deg_smoothed": True,
+            "right_gaze_signed_delta_deg_smoothed": True,
+            "vergence_gaze_delta_deg_smoothed": True,
+            "vergence_gaze_signed_delta_deg_smoothed": True,
+            "left_nasal_gaze_delta_deg_smoothed": True,
+            "right_nasal_gaze_delta_deg_smoothed": True,
+            "mean_eye_vergence_gaze_delta_deg_smoothed": True,
+            "version_gaze_delta_deg_smoothed": True,
+            "left_gaze_speed_deg_s": bool(fps),
+            "right_gaze_speed_deg_s": bool(fps),
+            "vergence_gaze_speed_deg_s": bool(fps),
+            "vergence_gaze_signed_speed_deg_s": bool(fps),
+            "mean_eye_vergence_gaze_speed_deg_s": bool(fps),
+            "version_gaze_speed_deg_s": bool(fps),
+            "left_gaze_accel_deg_s2": bool(fps),
+            "right_gaze_accel_deg_s2": bool(fps),
+            "vergence_gaze_accel_deg_s2": bool(fps),
+            "vergence_gaze_signed_accel_deg_s2": bool(fps),
+            "mean_eye_vergence_gaze_accel_deg_s2": bool(fps),
+            "version_gaze_accel_deg_s2": bool(fps),
+            "frame_left_gaze_deg": True,
+            "frame_right_gaze_deg": True,
+            "frame_left_gaze_signed_deg": True,
+            "frame_right_gaze_signed_deg": True,
+            "frame_vergence_gaze_deg": True,
+            "frame_vergence_gaze_signed_deg": True,
+            "frame_left_nasal_gaze_deg": True,
+            "frame_right_nasal_gaze_deg": True,
+            "frame_mean_eye_vergence_gaze_deg": True,
+            "frame_version_gaze_deg": True,
+            "frame_left_gaze_deg_smoothed": True,
+            "frame_right_gaze_deg_smoothed": True,
+            "frame_left_gaze_signed_deg_smoothed": True,
+            "frame_right_gaze_signed_deg_smoothed": True,
+            "frame_vergence_gaze_deg_smoothed": True,
+            "frame_vergence_gaze_signed_deg_smoothed": True,
+            "frame_left_nasal_gaze_deg_smoothed": True,
+            "frame_right_nasal_gaze_deg_smoothed": True,
+            "frame_mean_eye_vergence_gaze_deg_smoothed": True,
+            "frame_version_gaze_deg_smoothed": True,
+            "frame_left_gaze_delta_deg": True,
+            "frame_right_gaze_delta_deg": True,
+            "frame_left_gaze_signed_delta_deg": True,
+            "frame_right_gaze_signed_delta_deg": True,
+            "frame_vergence_gaze_delta_deg": True,
+            "frame_vergence_gaze_signed_delta_deg": True,
+            "frame_left_nasal_gaze_delta_deg": True,
+            "frame_right_nasal_gaze_delta_deg": True,
+            "frame_mean_eye_vergence_gaze_delta_deg": True,
+            "frame_version_gaze_delta_deg": True,
+            "frame_left_gaze_delta_deg_smoothed": True,
+            "frame_right_gaze_delta_deg_smoothed": True,
+            "frame_left_gaze_signed_delta_deg_smoothed": True,
+            "frame_right_gaze_signed_delta_deg_smoothed": True,
+            "frame_vergence_gaze_delta_deg_smoothed": True,
+            "frame_vergence_gaze_signed_delta_deg_smoothed": True,
+            "frame_left_nasal_gaze_delta_deg_smoothed": True,
+            "frame_right_nasal_gaze_delta_deg_smoothed": True,
+            "frame_mean_eye_vergence_gaze_delta_deg_smoothed": True,
+            "frame_version_gaze_delta_deg_smoothed": True,
             "frame_left_deg_smoothed": True,
             "frame_right_deg_smoothed": True,
             "frame_vergence_deg_smoothed": True,
@@ -1830,7 +2451,7 @@ def run(args: argparse.Namespace) -> None:
             "frame_version_minor_delta_deg_smoothed": True,
             "frame_version_minor_deg": True,
             "frame_version_minor_deg_smoothed": True,
-            # Centroid-based angles (paper-comparable)
+            # Centroid-based eye-position angles
             "left_centroid_deg": True,
             "right_centroid_deg": True,
             "vergence_centroid_deg": True,

@@ -13,13 +13,19 @@ from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
     resolve_eye_geometry_source,
 )
+from fisheye.shared.detect_reason_codec import decode_reason_bytes
+from fisheye.shared.plot_artifacts import PNG_ARTIFACT_SCHEMA_ID
 from fisheye.visualization.visualize_eye_angle_overlays import (
     _load_display_masks_and_geometry,
     _resolve_keypoint_run_name as resolve_overlay_keypoint_run,
 )
 from fisheye.visualization.visualize_eye_angles import (
+    EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID,
+    EYE_ANGLE_DASHBOARD_RENDERER,
     _eye_angle_contract_metadata,
     _format_summary_lines,
+    _select_angle_variant,
+    _write_eye_angle_png_artifact,
 )
 
 
@@ -38,32 +44,52 @@ def test_eye_angle_archive_opener_uses_palette_zarr_policy(monkeypatch, tmp_path
     assert calls == [(zarr_path, "a")]
 
 
-def test_eye_angle_definition_attrs_match_nasal_positive_binocular_math() -> None:
+def test_eye_angle_definition_attrs_match_undirected_axis_vergence_math() -> None:
     attrs = _eye_angle_definition_attrs()
 
     assert attrs["signed_angles"] is True
-    assert attrs["signed_angle_convention"] == "per-eye signed angles are temporal-positive"
-    assert attrs["vergence_definition"] == "abs(vergence_signed_deg)"
-    assert attrs["vergence_signed_definition"] == "-(left_signed_deg + right_signed_deg)"
-    assert attrs["version_definition"] == "0.5*(-left_signed_deg + right_signed_deg)"
+    assert attrs["signed_angle_convention"] == "per-eye signed angles are body-frame anatomical-left-positive"
+    assert attrs["vergence_definition"] == "undirected_axis_separation(left_signed_deg, right_signed_deg)"
+    assert attrs["vergence_signed_definition"] == "same as vergence_deg for directionless ellipse axes"
+    assert attrs["version_definition"] == "0.5*(left_signed_deg + right_signed_deg)"
     assert attrs["minor_signed_angles"] is True
-    assert attrs["minor_signed_angle_convention"] == "per-eye minor signed angles are temporal-positive"
-    assert attrs["minor_vergence_definition"] == "abs(vergence_minor_signed_deg)"
-    assert attrs["minor_vergence_signed_definition"] == "-(left_minor_signed_deg + right_minor_signed_deg)"
-    assert attrs["minor_version_definition"] == "0.5*(-left_minor_signed_deg + right_minor_signed_deg)"
+    assert attrs["minor_signed_angle_convention"] == "per-eye minor signed angles are body-frame anatomical-left-positive"
+    assert attrs["minor_vergence_definition"] == "undirected_axis_separation(left_minor_signed_deg, right_minor_signed_deg)"
+    assert attrs["minor_vergence_signed_definition"] == "same as vergence_minor_deg for directionless ellipse axes"
+    assert attrs["minor_version_definition"] == "0.5*(left_minor_signed_deg + right_minor_signed_deg)"
+    assert attrs["preferred_angle_family"] == "gaze"
+    assert attrs["preferred_eye_axis"] == "ellipse_minor"
+    assert attrs["gaze_angle_source"] == "ellipse_minor"
+    assert attrs["gaze_vergence_definition"] == "undirected_axis_separation(left_gaze_signed_deg, right_gaze_signed_deg)"
+    assert attrs["gaze_vergence_signed_definition"] == "same as vergence_gaze_deg for directionless ellipse axes"
+    assert attrs["gaze_total_vergence_definition"].startswith("vergence_gaze_deg retains the v3-compatible")
+    assert attrs["nasal_gaze_definition"] == "90 - abs(outward_from_midline_gaze_axis_angle_deg)"
+    assert attrs["mean_eye_vergence_gaze_definition"] == "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)"
+    assert attrs["beast_comparable_eye_vergence"] == "mean_eye_vergence_gaze_deg"
+    assert attrs["body_frame_schema_id"] == "fish_anatomical_body_frame"
 
 
 def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
     schema = eye_angle_analysis._eye_angle_output_schema()
 
     assert schema["schema_id"] == "analysis.eye_angle_output_schema"
-    assert schema["schema_version"] == 1
+    assert schema["schema_version"] == 4
     assert schema["row_axes"]["roi"] == "keypoint_detection_rows"
     assert schema["row_axes"]["frame"] == "video_frame_rows"
     assert schema["groups"]["angles/roi"]["units"] == "deg"
     assert "left_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "left_gaze_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "vergence_gaze_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "left_nasal_gaze_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "right_nasal_gaze_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "mean_eye_vergence_gaze_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "mean_eye_vergence_gaze_speed_deg_s" in schema["groups"]["angles/roi"]["derivative_outputs"]
+    assert "left_gaze_signed_deg" in schema["groups"]["angles/frame"]["base_outputs"]
+    assert "right_gaze_signed_deg" in schema["groups"]["angles/frame"]["base_outputs"]
+    assert "mean_eye_vergence_gaze_deg" in schema["groups"]["angles/frame"]["base_outputs"]
     assert "heading_deg" in schema["groups"]["angles/roi"]["base_outputs"]
     assert "left_speed_deg_s" in schema["groups"]["angles/roi"]["derivative_outputs"]
+    assert "left_gaze_speed_deg_s" in schema["groups"]["angles/roi"]["derivative_outputs"]
     assert schema["groups"]["support"]["row_axis"] == "mixed"
     support_outputs = schema["groups"]["support"]["outputs"]
     assert {"name": "frame_time_seconds", "row_axis": "frame", "units": "s", "optional": True} in support_outputs
@@ -73,9 +99,40 @@ def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
         "valid_frame",
         "reason_codes",
     ]
-    assert schema["signed_angle_convention"] == "per-eye signed angles are temporal-positive"
-    assert schema["vergence_signed_definition"] == "-(left_signed_deg + right_signed_deg)"
+    assert schema["signed_angle_convention"] == "per-eye signed angles are body-frame anatomical-left-positive"
+    assert schema["vergence_signed_definition"] == "same as vergence_deg for directionless ellipse axes"
+    assert schema["preferred_angle_family"] == "gaze"
+    assert schema["preferred_eye_axis"] == "ellipse_minor"
+    assert schema["gaze_vergence_signed_definition"] == "same as vergence_gaze_deg for directionless ellipse axes"
+    assert schema["gaze_total_vergence_definition"].startswith("vergence_gaze_deg retains the v3-compatible")
+    assert schema["mean_eye_vergence_gaze_definition"] == "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)"
+    assert schema["beast_comparable_eye_vergence"] == "mean_eye_vergence_gaze_deg"
+    assert schema["body_frame_group"] == "support/body_frame"
     assert schema["qa_reason_codes_attr"] == "reason_code_map"
+
+
+def test_eye_angle_visualizer_minor_signed_variant_uses_signed_eye_traces() -> None:
+    roi_angles = {
+        "left_minor_signed": np.asarray([-20.0, -10.0], dtype=np.float32),
+        "left_minor_signed_smoothed": np.asarray([-18.0, -12.0], dtype=np.float32),
+        "right_minor_signed": np.asarray([15.0, 25.0], dtype=np.float32),
+        "right_minor_signed_smoothed": np.asarray([14.0, 24.0], dtype=np.float32),
+        "vergence_minor_signed": np.asarray([35.0, 35.0], dtype=np.float32),
+        "version_minor": np.asarray([-2.5, 7.5], dtype=np.float32),
+    }
+    roi_deltas = {
+        "left_minor_signed_delta_deg_smoothed": np.asarray([0.0, 6.0], dtype=np.float32),
+        "right_minor_signed_delta_deg_smoothed": np.asarray([0.0, 10.0], dtype=np.float32),
+        "vergence_minor_signed_delta_deg": np.asarray([0.0, 0.0], dtype=np.float32),
+    }
+
+    variant, label, meta = _select_angle_variant(roi_angles, roi_deltas, "minor_signed")
+
+    assert label == "Ellipse minor axis signed (smoothed)"
+    np.testing.assert_allclose(variant["left"], [-18.0, -12.0])
+    np.testing.assert_allclose(variant["right"], [14.0, 24.0])
+    assert meta["series_lookup"]["left"] == "left_minor_signed"
+    assert meta["presentation"]["signed_eye_traces"] is True
 
 
 def test_eye_angle_source_geometry_kind_maps_known_sources() -> None:
@@ -279,7 +336,7 @@ def test_eye_angle_dashboard_contract_metadata_prefers_canonical_keypoint_attr()
     metadata = _eye_angle_contract_metadata(
         {
             "schema_id": "analysis.eye_angle_runs",
-            "schema_version": 1,
+            "schema_version": 4,
             "method": "ellipse_and_centroid_eye_angles",
             "row_axis": "keypoint_detection_rows",
             "source_geometry_kind": "subject_shape_eye_geometry",
@@ -287,14 +344,19 @@ def test_eye_angle_dashboard_contract_metadata_prefers_canonical_keypoint_attr()
             "source_eye_geometry_run": "shape_001",
             "source_keypoints_run": "kp_canonical",
             "source_keypoint_run": "kp_legacy",
+            "preferred_angle_family": "gaze",
+            "preferred_eye_axis": "ellipse_minor",
+            "gaze_angle_source": "ellipse_minor",
             "eye_angle_output_schema": {"schema_id": "analysis.eye_angle_output_schema"},
         }
     )
 
     assert metadata["schema_id"] == "analysis.eye_angle_runs"
-    assert metadata["schema_version"] == 1
+    assert metadata["schema_version"] == 4
     assert metadata["source_geometry_kind"] == "subject_shape_eye_geometry"
     assert metadata["source_keypoints_run"] == "kp_canonical"
+    assert metadata["preferred_angle_family"] == "gaze"
+    assert metadata["preferred_eye_axis"] == "ellipse_minor"
     assert metadata["eye_angle_output_schema"] == {"schema_id": "analysis.eye_angle_output_schema"}
 
 
@@ -303,8 +365,10 @@ def test_eye_angle_dashboard_summary_includes_schema_and_lineage() -> None:
         {
             "run_name": "eye_angle_001",
             "schema_id": "analysis.eye_angle_runs",
-            "schema_version": 1,
+            "schema_version": 4,
             "method": "ellipse_and_centroid_eye_angles",
+            "preferred_angle_family": "gaze",
+            "preferred_eye_axis": "ellipse_minor",
             "source_geometry_kind": "subject_shape_eye_geometry",
             "source_eye_geometry_stage": "analysis/subject_shape_runs",
             "source_eye_geometry_run": "shape_001",
@@ -316,10 +380,69 @@ def test_eye_angle_dashboard_summary_includes_schema_and_lineage() -> None:
         frame_valid=None,
     )
 
-    assert "Schema: analysis.eye_angle_runs v1" in summary
+    assert "Schema: analysis.eye_angle_runs v4" in summary
     assert "Method: ellipse_and_centroid_eye_angles" in summary
+    assert "Preferred eye angle: gaze (ellipse_minor)" in summary
     assert "Eye geometry: subject_shape_eye_geometry (analysis/subject_shape_runs / shape_001)" in summary
     assert "Keypoints: kp_canonical" in summary
+
+
+def test_eye_angle_dashboard_zarr_artifact_manifest(tmp_path) -> None:
+    import zarr
+
+    zarr_path = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("eye_angle_runs")
+    parent.attrs["latest"] = "eye_angle_001"
+    run = parent.create_group("eye_angle_001")
+    attrs = {
+        "run_name": "eye_angle_001",
+        "schema_id": "analysis.eye_angle_runs",
+        "schema_version": 4,
+        "method": "ellipse_and_centroid_eye_angles",
+        "row_axis": "keypoint_detection_rows",
+        "source_geometry_kind": "subject_shape_eye_geometry",
+        "source_eye_geometry_stage": "analysis/subject_shape_runs",
+        "source_eye_geometry_run": "shape_001",
+        "source_keypoints_run": "kp_canonical",
+        "preferred_angle_family": "gaze",
+        "preferred_eye_axis": "ellipse_minor",
+        "gaze_angle_source": "ellipse_minor",
+    }
+    run.attrs.update(attrs)
+
+    artifact_path = _write_eye_angle_png_artifact(
+        zarr_path=zarr_path,
+        run_group=run,
+        attrs=attrs,
+        angle_source="ellipse",
+        variant_label="Ellipse major axis",
+        png_bytes=b"\x89PNG\r\n\x1a\nfake-png",
+        generated_at_utc="2026-04-28T00:00:00+00:00",
+        artifact_dpi=150,
+        command="test-command",
+    )
+
+    assert artifact_path == "visualizations/eye_angle_dashboard_ellipse_png"
+    artifact = run["visualizations"]["eye_angle_dashboard_ellipse_png"]
+    assert bytes(np.asarray(artifact[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
+    assert artifact.attrs["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
+    assert artifact.attrs["plot_schema_id"] == EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID
+    assert artifact.attrs["renderer"] == EYE_ANGLE_DASHBOARD_RENDERER
+    assert artifact.attrs["parameters"]["angle_source"] == "ellipse"
+    assert artifact.attrs["parameters"]["artifact_dpi"] == 150
+    assert artifact.attrs["source_paths"]["angles_roi"].endswith("/angles/roi")
+    assert artifact.attrs["source_runs"]["source_keypoints_run"] == "kp_canonical"
+    assert artifact.attrs["eye_angle_contract"]["source_geometry_kind"] == "subject_shape_eye_geometry"
+    assert artifact.attrs["eye_angle_contract"]["preferred_angle_family"] == "gaze"
+    assert artifact.attrs["provenance"]["stage"] == "eye_angle_visualization"
+    assert artifact.attrs["provenance"]["command"] == "test-command"
+    assert artifact.attrs["provenance"]["artifacts"]["png_artifact"] == artifact_path
+
+    manifest = run.attrs["visualizations"]
+    assert manifest["eye_angle_dashboard_ellipse_png"]["path"] == artifact_path
+    assert manifest["eye_angle_dashboard_ellipse_png"]["artifact_schema_id"] == PNG_ARTIFACT_SCHEMA_ID
 
 
 def test_eye_angle_overlay_draws_vectors_from_actual_subject_shape_geometry() -> None:
@@ -385,3 +508,134 @@ def test_eye_angle_chunk_uses_label_resolved_indices() -> None:
     assert bool(result.valid_frame[0])
     assert np.isfinite(result.left_deg[0])
     assert np.isfinite(result.right_deg[0])
+    assert result.left_gaze_signed_deg[0] == result.left_minor_signed_deg[0]
+    assert result.right_gaze_signed_deg[0] == result.right_minor_signed_deg[0]
+    assert result.vergence_gaze_signed_deg[0] == result.vergence_minor_signed_deg[0]
+    assert result.version_gaze_deg[0] == result.version_minor_deg[0]
+    assert result.left_gaze_deg[0] == pytest.approx(abs(result.left_minor_signed_deg[0]))
+    assert result.body_frame_valid.tolist() == [True]
+    np.testing.assert_allclose(result.body_frame_origin_xy[0], [3.0, 1.0])
+
+
+def test_eye_angle_chunk_computes_gaze_convergence_in_body_frame() -> None:
+    ellipse_params = np.asarray(
+        [
+            [
+                [2.0, -1.0, 4.0, 1.5, 110.0],  # left gaze signed -20 deg
+                [2.0, 1.0, 4.0, 1.5, 70.0],    # right gaze signed +20 deg
+            ]
+        ],
+        dtype=np.float32,
+    )
+    ellipse_success = np.asarray([[True, True]], dtype=bool)
+    keypoints_roi = np.asarray(
+        [
+            [
+                [0.0, 0.0],   # swim_bladder
+                [2.0, -1.0],  # eye_left
+                [2.0, 1.0],   # eye_right
+            ]
+        ],
+        dtype=np.float32,
+    )
+
+    result = _process_chunk(
+        ellipse_params=ellipse_params,
+        ellipse_success=ellipse_success,
+        keypoints_roi=keypoints_roi,
+        heading_deg=np.asarray([0.0], dtype=np.float32),
+        detection_success=np.asarray([True], dtype=bool),
+        keypoint_indices={
+            "swim_bladder": 0,
+            "eye_left": 1,
+            "eye_right": 2,
+        },
+    )
+
+    assert bool(result.valid_frame[0])
+    np.testing.assert_allclose(result.body_frame_forward_axis_xy[0], [1.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(result.body_frame_left_axis_xy[0], [0.0, -1.0], atol=1e-6)
+    assert result.left_gaze_signed_deg[0] == pytest.approx(-20.0, abs=1e-4)
+    assert result.right_gaze_signed_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.vergence_gaze_signed_deg[0] == pytest.approx(40.0, abs=1e-4)
+    assert result.vergence_gaze_deg[0] == pytest.approx(40.0, abs=1e-4)
+    assert result.left_nasal_gaze_deg[0] == pytest.approx(70.0, abs=1e-4)
+    assert result.right_nasal_gaze_deg[0] == pytest.approx(70.0, abs=1e-4)
+    assert result.mean_eye_vergence_gaze_deg[0] == pytest.approx(70.0, abs=1e-4)
+    assert result.version_gaze_deg[0] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_eye_angle_chunk_computes_gaze_vergence_as_undirected_axis_separation() -> None:
+    ellipse_params = np.asarray(
+        [
+            [
+                [2.0, -1.0, 4.0, 1.5, 20.0],   # left gaze signed +70 deg
+                [2.0, 1.0, 4.0, 1.5, 160.0],   # right gaze signed -70 deg
+            ]
+        ],
+        dtype=np.float32,
+    )
+    ellipse_success = np.asarray([[True, True]], dtype=bool)
+    keypoints_roi = np.asarray(
+        [
+            [
+                [0.0, 0.0],   # swim_bladder
+                [2.0, -1.0],  # eye_left
+                [2.0, 1.0],   # eye_right
+            ]
+        ],
+        dtype=np.float32,
+    )
+
+    result = _process_chunk(
+        ellipse_params=ellipse_params,
+        ellipse_success=ellipse_success,
+        keypoints_roi=keypoints_roi,
+        heading_deg=np.asarray([0.0], dtype=np.float32),
+        detection_success=np.asarray([True], dtype=bool),
+        keypoint_indices={
+            "swim_bladder": 0,
+            "eye_left": 1,
+            "eye_right": 2,
+        },
+    )
+
+    assert result.left_gaze_signed_deg[0] == pytest.approx(70.0, abs=1e-4)
+    assert result.right_gaze_signed_deg[0] == pytest.approx(-70.0, abs=1e-4)
+    assert result.vergence_gaze_deg[0] == pytest.approx(40.0, abs=1e-4)
+    assert result.vergence_gaze_signed_deg[0] == pytest.approx(40.0, abs=1e-4)
+    assert result.left_nasal_gaze_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.right_nasal_gaze_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.mean_eye_vergence_gaze_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.version_gaze_deg[0] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_eye_angle_base_writer_persists_body_frame_support_group() -> None:
+    import zarr
+
+    run = zarr.group()
+    eye_angle_analysis._prepare_base_output_arrays(run, total_detections=1, chunk_len=1)
+    result = _process_chunk(
+        ellipse_params=np.asarray([[[2.0, -1.0, 4.0, 1.5, 110.0], [2.0, 1.0, 4.0, 1.5, 70.0]]], dtype=np.float32),
+        ellipse_success=np.asarray([[True, True]], dtype=bool),
+        keypoints_roi=np.asarray([[[0.0, 0.0], [2.0, -1.0], [2.0, 1.0]]], dtype=np.float32),
+        heading_deg=np.asarray([0.0], dtype=np.float32),
+        detection_success=np.asarray([True], dtype=bool),
+        keypoint_indices={"swim_bladder": 0, "eye_left": 1, "eye_right": 2},
+    )
+
+    eye_angle_analysis._write_base_eye_angle_result(
+        run,
+        slice(0, 1),
+        result,
+        frame_indices=np.asarray([12], dtype=np.int64),
+        time_seconds=np.asarray([0.2], dtype=np.float32),
+    )
+
+    body_frame = run["support"]["body_frame"]
+    assert body_frame.attrs["body_frame_schema_id"] == "fish_anatomical_body_frame"
+    np.testing.assert_allclose(body_frame["origin_xy"][:], [[2.0, 0.0]])
+    np.testing.assert_allclose(body_frame["forward_axis_xy"][:], [[1.0, 0.0]])
+    np.testing.assert_allclose(body_frame["left_axis_xy"][:], [[0.0, -1.0]])
+    assert body_frame["valid"][:].tolist() == [True]
+    assert decode_reason_bytes(body_frame["failure_reason_bytes"][:]).tolist() == ["ok"]

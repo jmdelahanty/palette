@@ -506,6 +506,35 @@ This field is intended to support:
 It does not by itself imply manual editing; the review payload should carry the
 review method.
 
+## Strict Contract Validation
+
+Use the Crimson-facing validator before asking downstream readers to special-case
+an archive:
+
+```bash
+scripts/py -m fisheye.utils.validate_refined_subject_mask_contract <archive>.zarr
+```
+
+Default behavior is validate-only. It resolves
+`refined_subject_masks_runs.attrs["latest"]`, checks `mask_labels` /
+`available_channels` channel semantics, verifies required run arrays and
+run-level metrics, requires available component subgroups to expose
+`reason_bytes`, `mask_present`, `area_px`, and `edit_applied`, and fails when
+required review or provenance fields are missing.
+
+Backfill is explicit:
+
+```bash
+scripts/py -m fisheye.utils.validate_refined_subject_mask_contract <archive>.zarr --backfill
+```
+
+The backfill path is intentionally conservative. It may recreate
+`available_channels` from declared component availability, recreate `masks_roi`
+from component-local mask arrays when channel order is proven by `mask_labels`,
+and derive missing mask metrics or component-local mirrors from existing
+`masks_roi`. It must not split `eyes_union` into left/right eyes, invent review
+state, or fake missing component provenance.
+
 ## Review Payloads
 
 Run-level review payload:
