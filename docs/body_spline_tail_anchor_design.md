@@ -78,6 +78,48 @@ Recommended definitions:
 - `body_arclength_px`: centerline/spline arc length from the anterior endpoint
   to `tail_tip_xy`.
 
+### Tail Sampling, Width, And Curvature
+
+Tail curvature and width should be derived from a smoothed, ordered midline or
+B-spline rather than directly from raw skeleton pixels.
+
+Raw skeleton pixels are useful for discovering the centerline, but they are
+jagged and branch-prone. Curvature is a derivative-like measurement, so it is
+especially sensitive to pixel noise. The preferred workflow is:
+
+```text
+subject_body mask
+  -> skeleton or medial-axis candidate
+  -> cleaned ordered midline
+  -> oriented midline with head/tail polarity
+  -> B-spline or smoothed sampled centerline
+  -> fixed arclength samples
+  -> tangent, normal, curvature, and width profile
+```
+
+Tail sampling should use normalized arclength along the tail segment for the
+first implementation:
+
+```text
+tail_sample_s = [0.0, ..., 1.0]
+```
+
+where `0.0` is `tail_base_xy` and `1.0` is `tail_tip_xy`. This makes tail
+profiles comparable across frames even when body length or fitted sample counts
+change.
+
+At each tail sample:
+
+1. evaluate the spline or smoothed centerline position
+2. compute the local tangent direction
+3. compute the perpendicular normal direction
+4. intersect or probe the subject-body mask along the normal
+5. store the measured mask width and validity
+
+The same sampled curve should provide curvature. For B-splines, curvature should
+prefer spline derivatives. For sampled centerlines without analytic
+derivatives, curvature should use a documented finite-difference method.
+
 ## Body Frame Requirement
 
 "Caudal" is undefined until a body-frame polarity is known.
@@ -129,6 +171,12 @@ analysis/subject_shape_runs/<run>/
     tail_tip_estimator              "subject_body_centerline_posterior_endpoint"
     tail_base_definition            "body_centerline_projection_of_caudal_swim_bladder_contour_point"
     caudal_anchor_definition        "min_projection_on_body_forward_axis"
+    tail_sampling_schema_id         "analysis.subject_shape.tail_sampling"
+    tail_sampling_schema_version    1
+    tail_sample_domain              "tail_segment_normalized_arclength"
+    tail_sample_count               integer
+    curvature_method                "bspline_derivative" | "finite_difference"
+    width_profile_method            "normal_mask_intersection"
 
   body_frame/
     origin_xy
@@ -163,6 +211,16 @@ analysis/subject_shape_runs/<run>/
       tail_base_arclength_px
       tail_segment_arclength_px
       body_arclength_px
+      tail_sample_s
+      tail_sample_xy
+      tail_tangent_xy
+      tail_normal_xy
+      tail_tangent_angle_deg
+      tail_curvature_px_inv
+      tail_width_px
+      tail_width_endpoints_xy
+      tail_width_valid
+      tail_width_failure_reason_bytes
       curvature
 
   relations/
@@ -255,6 +313,40 @@ Expected failure reasons:
 - `spline_fit_failed`
 - `source_row_stale`
 
+### Stage 3: Tail Sampling, Width, And Curvature
+
+Inputs:
+
+- oriented centerline or B-spline
+- `tail_base_xy`
+- `tail_tip_xy`
+- refined subject-body mask
+
+Steps:
+
+1. Define `tail_sample_s` as fixed normalized arclength positions from tail base
+   to tail tip.
+2. Evaluate `tail_sample_xy` at each position.
+3. Compute tangent and normal vectors at each sample.
+4. Compute `tail_tangent_angle_deg` using the body-frame angle convention.
+5. Compute `tail_curvature_px_inv` from spline derivatives or documented
+   finite differences.
+6. Probe or intersect the subject-body mask along each normal vector.
+7. Store `tail_width_px`, optional width endpoints, and per-sample validity.
+8. Record all sampling, smoothing, derivative, and width-probe parameters in
+   attrs.
+
+Expected failure reasons:
+
+- `missing_tail_base`
+- `missing_tail_tip`
+- `tail_segment_too_short`
+- `tail_sample_outside_mask`
+- `tail_width_intersection_failed`
+- `tail_width_multiple_intersections`
+- `tail_curvature_failed`
+- `tail_spline_derivative_failed`
+
 ## Visualization Requirement
 
 The canary visualization should overlay:
@@ -264,6 +356,8 @@ The canary visualization should overlay:
 - caudal swim-bladder contour point
 - body-frame forward axis
 - centerline or B-spline samples
+- tail sampling points
+- tail normal width probes
 - head endpoint
 - tail base
 - tail tip
@@ -280,6 +374,7 @@ trusted analysis source.
 - [x] Define caudal swim-bladder contour anchor separately from tail tip.
 - [x] Define tail base and tail segment relative to the subject-body
   centerline/spline.
+- [x] Define tail-normalized sampling for width and curvature profiles.
 - [ ] Update `subject_shape_runs_contract.md` proposed layout with final array
   names after implementation.
 - [ ] Update `zarr_structure.md` once the writer exists.
@@ -293,6 +388,8 @@ trusted analysis source.
 - [ ] Record whether pose `tail_tip` was absent, used for validation, or used
   as an estimator input.
 - [ ] Store per-row validity arrays and stable failure reason tags.
+- [ ] Store tail-sampling parameters: sample count, domain, smoothing source,
+  curvature method, width-probe method, probe extent, and probe resolution.
 - [ ] Add optional pose-tail-to-spline-tail comparison metrics.
 
 ### Writer Implementation
@@ -305,6 +402,10 @@ trusted analysis source.
 - [ ] Implement B-spline fitting or sampled centerline output.
 - [ ] Compute `tail_tip_xy`, `tail_base_xy`, `body_arclength_px`, and
   `tail_segment_arclength_px`.
+- [ ] Add tail-normalized fixed arclength sampling.
+- [ ] Compute spline/sample tangents and normals.
+- [ ] Compute tail curvature from spline derivatives or finite differences.
+- [ ] Compute tail width profiles from normal-line mask intersections.
 - [ ] Keep outputs row-aligned to refined subject-mask rows for the first pass.
 - [ ] Do not mutate refined mask pixels or refined keypoint arrays.
 
@@ -314,6 +415,10 @@ trusted analysis source.
 - [ ] Add in-memory unit tests for semantic source separation between pose
   `tail_tip` and spline `tail_tip_xy`.
 - [ ] Add fixture tests for failure reasons on missing/ambiguous masks.
+- [ ] Add deterministic tests for tail-normalized sample positions.
+- [ ] Add tests for width-profile probing on synthetic masks with known width.
+- [ ] Add tests that curvature fails closed when derivatives are unavailable or
+  degenerate.
 - [ ] Run a canary on the feeding recording.
 - [ ] Compare spline `tail_tip_xy` against pose `tail_tip` when available.
 - [ ] Inspect persisted overlay PNGs before using outputs downstream.
@@ -324,6 +429,9 @@ trusted analysis source.
   geometry when valid.
 - [ ] Keep keypoint-only workflows using pose-schema `tail_tip`.
 - [ ] Expose tail/spline outputs in review or visualization tooling.
+- [ ] Add tail-width and curvature overlays to the subject-shape canary viewer.
+- [ ] Avoid treating tail-width/curvature profiles as behavior metrics until
+  temporal alignment and smoothing policy are explicitly chosen.
 - [ ] Avoid using spline outputs in bout/kinematics summaries until canary
   overlays and validity rates are reviewed.
 
@@ -339,6 +447,12 @@ trusted analysis source.
   with one marked preferred?
 - When both pose `tail_tip` and spline `tail_tip_xy` exist, what distance should
   trigger `tail_endpoint_disagreement`?
+- What default `tail_sample_count` is enough for curvature and width profiles:
+  10, 20, or a length-dependent value?
+- Should width profiles probe the full subject-body mask or only the caudal mask
+  segment posterior to the swim-bladder anchor?
+- Should curvature be stored in pixel inverse units only, or also calibrated
+  physical inverse units when calibration is available?
 
 ## Related Documents
 

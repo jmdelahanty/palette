@@ -163,6 +163,7 @@ analysis/subject_shape_runs/
         centerline_xy              (N, P, 2) optional
         centerline_valid           (N,) optional
         bspline_control_points_xy  (N, K, 2) optional
+        bspline_sample_xy          (N, P, 2) optional
         bspline_knots              optional
         bspline_degree             scalar attr or dataset
         bspline_valid              (N,) optional
@@ -170,7 +171,17 @@ analysis/subject_shape_runs/
         bspline_arc_length_px      (N,) optional
         axis_xy                    (N, 2) optional
         heading_rad                (N,) optional
-        curvature                  (N, P) optional
+        tail_tip_xy                (N, 2) optional
+        tail_base_xy               (N, 2) optional
+        tail_segment_arclength_px  (N,) optional
+        tail_sample_s              (K,) optional normalized tail arclength samples
+        tail_sample_xy             (N, K, 2) optional
+        tail_tangent_xy            (N, K, 2) optional
+        tail_normal_xy             (N, K, 2) optional
+        tail_curvature_px_inv      (N, K) optional
+        tail_width_px              (N, K) optional
+        tail_width_valid           (N, K) optional
+        curvature                  (N, P) optional whole-centerline curvature
         validity/
       swim_bladder/
         centroid_xy                (N, 2) optional mirror/cache
@@ -243,7 +254,7 @@ used by `refined_subject_masks_runs`, but the meaning is different:
 Use component groups for values whose primary subject is one semantic component:
 
 - `components/subject_body` for centerlines, B-splines, body length, body axis,
-  curvature, and body-shape validity.
+  curvature, tail-normalized width profiles, and body-shape validity.
 - `components/swim_bladder` for swim-bladder centroid/blob/ellipse summaries
   and component-specific validity.
 - `components/eye_left` and `components/eye_right` for analysis-facing eye
@@ -376,6 +387,8 @@ Recommended near-term approach:
 - How should the first tail-anchor/spline implementation choose between raw
   centerline samples and B-spline samples for canonical body and tail length?
   See [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md).
+- What tail sampling density and width-probe policy should become the default
+  for tail curvature and mask-width profiles?
 
 ## Related Documents
 
