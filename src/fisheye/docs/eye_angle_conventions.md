@@ -26,24 +26,23 @@ Key datasets:
 - `support/time_seconds`, `frame_indices`, `ellipse_*` expose timing metadata and ellipse diagnostics used by the visualizations.
 
 Current runs resolve eye geometry through `fisheye.shared.eye_geometry_source`.
-The canonical source is `refined_subject_masks_runs/<run>` when it contains
-`eye_left` and `eye_right` components with geometry arrays. Historical
-`refined_eye_masks_runs/<run>` data remains a compatibility fallback.
+The preferred source is `analysis/subject_shape_runs/<run>` when it contains
+`eye_left` and `eye_right` component ellipse geometry. If no subject-shape
+geometry is available, the resolver falls back to
+`refined_subject_masks_runs/<run>` with eye component geometry, then to
+historical `refined_eye_masks_runs/<run>` data as a compatibility fallback.
 
 The referenced sources are captured in run attributes:
 
 - `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
   and run used for geometry.
+- `source_subject_shape_run`: subject-shape source when analysis-facing shape
+  geometry was used.
 - `source_refined_subject_masks_run`: canonical refined-subject source when
   available.
 - `source_refined_eye_run`: compatibility refined-eye source when one was used
   or mapped.
 - `source_keypoint_run`: refined keypoint source.
-
-`analysis/subject_shape_runs` is not recorded as lineage by the current
-eye-angle writer because this stage does not read subject-shape data. If a
-future eye-angle stage consumes subject-shape summaries directly, that run
-should add an explicit source-subject-shape attribute at that point.
 
 The raw ROIs sampled by the viewer live under `keypoints_runs/<run>/roi_images`.
 
@@ -66,7 +65,7 @@ chunk boundaries.
 Angles are generated inside `fisheye.analysis.eye_angle_analysis._process_chunk`, which receives:
 
 1. Keypoint ROIs (swim bladder, left/right eye centers).
-2. Refined eye-geometry ellipse fits, preferably from `refined_subject_masks_runs`.
+2. Eye-geometry ellipse fits, preferably from `analysis/subject_shape_runs`.
 3. Heading estimates exported by the keypoint run.
 
 ### Per-eye angles

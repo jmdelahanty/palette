@@ -299,8 +299,9 @@ Recommended near-term approach:
   `analysis/subject_shape_runs` when producing a coherent body/eyes/swim shape
   run.
 - keep current eye-angle outputs in `analysis/eye_angle_runs` during migration;
-  future eye-angle writers should consume `analysis/subject_shape_runs` when
-  mask-derived eye geometry is available there.
+  eye-angle writers should consume `analysis/subject_shape_runs` when
+  mask-derived eye geometry is available there, with refined-subject and
+  refined-eye geometry retained as compatibility fallbacks.
 - do not create a separate eye-analysis authority for mask-derived eye geometry
   unless it is a downstream temporal, behavioral, or task-specific analysis.
 

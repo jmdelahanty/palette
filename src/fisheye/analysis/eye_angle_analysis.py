@@ -38,7 +38,12 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
-from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
+from fisheye.shared.eye_geometry_source import (
+    EYE_GEOMETRY_STAGE_REFINED_EYE,
+    EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
+    EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+    resolve_eye_geometry_source,
+)
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.utils.metadata import get_fps
 from fisheye.utils.system import get_git_info
@@ -564,11 +569,19 @@ def _prepare_output_arrays(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Compute head-relative eye angles and QA flags from canonical refined-subject "
-            "eye geometry, with refined-eye compatibility fallback."
+            "Compute head-relative eye angles and QA flags from subject-shape or "
+            "refined-subject eye geometry, with refined-eye compatibility fallback."
         )
     )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
+    parser.add_argument(
+        "--subject-shape-run",
+        type=str,
+        help=(
+            "analysis/subject_shape_runs/<run> providing preferred eye geometry "
+            "(default: latest subject-shape run with LR eye geometry when available)."
+        ),
+    )
     parser.add_argument(
         "--refined-eye-run",
         type=str,
@@ -674,14 +687,17 @@ def _resolve_head_keypoint_indices(kp_group: zarr.Group) -> Dict[str, int]:
 def _resolve_eye_angle_inputs(
     root: zarr.Group,
     *,
+    subject_shape_run: Optional[str],
     refined_subject_run: Optional[str],
     refined_eye_run: Optional[str],
     keypoint_run: Optional[str],
 ) -> EyeAngleInputContext:
     eye_geometry = resolve_eye_geometry_source(
         root,
+        subject_shape_run=subject_shape_run,
         refined_subject_run=refined_subject_run,
         refined_eye_run=refined_eye_run,
+        prefer_subject_shape=True,
         prefer_subject=True,
     )
 
@@ -865,6 +881,7 @@ def _process_and_write_eye_angle_chunk_groups(
 def _process_and_write_eye_angle_chunk(
     zarr_path: str,
     *,
+    subject_shape_run: Optional[str],
     refined_subject_run: Optional[str],
     refined_eye_run: Optional[str],
     keypoint_run: Optional[str],
@@ -877,6 +894,7 @@ def _process_and_write_eye_angle_chunk(
     root = open_zarr_root(zarr_path, mode="a")
     context = _resolve_eye_angle_inputs(
         root,
+        subject_shape_run=subject_shape_run,
         refined_subject_run=refined_subject_run,
         refined_eye_run=refined_eye_run,
         keypoint_run=keypoint_run,
@@ -970,6 +988,7 @@ def run(args: argparse.Namespace) -> None:
     scheduler_key = _normalize_scheduler(args.scheduler)
     context = _resolve_eye_angle_inputs(
         root,
+        subject_shape_run=args.subject_shape_run,
         refined_subject_run=args.refined_subject_run,
         refined_eye_run=args.refined_eye_run,
         keypoint_run=args.keypoint_run,
@@ -1018,12 +1037,18 @@ def run(args: argparse.Namespace) -> None:
     if backend == DASK_WORKER_EXECUTION_BACKEND:
         worker_zarr_path = str(args.zarr_path.expanduser().resolve())
         worker_refined_subject_run = (
-            eye_geometry.run_name if eye_geometry.stage_group == "refined_subject_masks_runs" else None
+            eye_geometry.run_name if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT else None
         )
-        worker_refined_eye_run = eye_geometry.run_name if eye_geometry.stage_group == "refined_eye_masks_runs" else None
+        worker_refined_eye_run = (
+            eye_geometry.run_name if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_REFINED_EYE else None
+        )
+        worker_subject_shape_run = (
+            eye_geometry.run_name if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_SUBJECT_SHAPE else None
+        )
         tasks = [
             delayed(_process_and_write_eye_angle_chunk)(
                 worker_zarr_path,
+                subject_shape_run=worker_subject_shape_run,
                 refined_subject_run=worker_refined_subject_run,
                 refined_eye_run=worker_refined_eye_run,
                 keypoint_run=keypoint_run_name,
@@ -1558,6 +1583,7 @@ def run(args: argparse.Namespace) -> None:
             "reason_code_map": REASON_CODE_MAP,
             "source_eye_geometry_stage": eye_geometry.stage_group,
             "source_eye_geometry_run": eye_geometry.run_name,
+            "source_subject_shape_run": eye_geometry.source_subject_shape_run,
             "source_refined_eye_run": eye_geometry.source_refined_eye_run,
             "source_refined_subject_masks_run": eye_geometry.source_refined_subject_run,
             **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
@@ -1598,6 +1624,7 @@ def run(args: argparse.Namespace) -> None:
             "zarr_path": str(args.zarr_path),
             "eye_geometry_stage": eye_geometry.stage_group,
             "eye_geometry_run": eye_geometry.run_name,
+            "subject_shape_run": eye_geometry.source_subject_shape_run,
             "refined_eye_run": eye_geometry.source_refined_eye_run,
             "refined_subject_run": eye_geometry.source_refined_subject_run,
             "keypoint_run": keypoint_run_name,

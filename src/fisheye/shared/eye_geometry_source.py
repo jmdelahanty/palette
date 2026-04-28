@@ -1,4 +1,4 @@
-"""Resolve canonical eye-geometry arrays with legacy refined-eye fallback."""
+"""Resolve eye-geometry arrays across subject-shape and compatibility sources."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .refined_subject_eye_geometry import EYE_COMPONENTS
 
 EYE_GEOMETRY_STAGE_REFINED_SUBJECT = "refined_subject_masks_runs"
 EYE_GEOMETRY_STAGE_REFINED_EYE = "refined_eye_masks_runs"
+EYE_GEOMETRY_STAGE_SUBJECT_SHAPE = "analysis/subject_shape_runs"
 
 
 def _normalize_text(value: object) -> Optional[str]:
@@ -223,13 +224,14 @@ class EyeGeometrySource:
     run_name: str
     group_path: str
     group: zarr.Group
-    masks_roi: Any
+    masks_roi: Optional[Any]
     ellipse_params: Any
     ellipse_success: Any
     eye_separation: Optional[Any]
     lineage_attrs: Mapping[str, object]
     source_refined_eye_run: Optional[str] = None
     source_refined_subject_run: Optional[str] = None
+    source_subject_shape_run: Optional[str] = None
 
 
 def _has_subject_eye_geometry(group: zarr.Group) -> bool:
@@ -248,6 +250,24 @@ def _has_subject_eye_geometry(group: zarr.Group) -> bool:
         if not _contains(group, f"components/{component}/geometry/ellipse_success"):
             return False
     return _contains(group, "relations/eye_pair/metrics/separation_px")
+
+
+def _has_subject_shape_eye_geometry(group: zarr.Group) -> bool:
+    arrays: list[Any] = []
+    for component in EYE_COMPONENTS:
+        params = _group_get(group, f"components/{component}/ellipse_params")
+        success = _group_get(group, f"components/{component}/ellipse_success")
+        if params is None or success is None:
+            return False
+        param_shape = _shape(params)
+        success_shape = _shape(success)
+        if len(param_shape) < 2 or len(success_shape) != 1 or param_shape[0] != success_shape[0]:
+            return False
+        arrays.extend([params, success])
+    if _shape(arrays[0]) != _shape(arrays[2]) or _shape(arrays[1]) != _shape(arrays[3]):
+        return False
+    separation = _group_get(group, "relations/eye_pair/separation_px")
+    return separation is not None and _shape(separation)[:1] == _shape(arrays[1])[:1]
 
 
 def _find_subject_run_for_refined_eye(root: zarr.Group, refined_eye_run: str) -> tuple[Optional[str], Optional[zarr.Group]]:
@@ -295,6 +315,24 @@ def _find_latest_subject_eye_geometry(root: zarr.Group) -> tuple[Optional[str], 
     for name in reversed(_group_names(parent)):
         group = _group_get(parent, name)
         if group is not None and _has_subject_eye_geometry(group):
+            return name, group
+    return None, None
+
+
+def _find_latest_subject_shape_eye_geometry(root: zarr.Group) -> tuple[Optional[str], Optional[zarr.Group]]:
+    parent = _group_get(root, EYE_GEOMETRY_STAGE_SUBJECT_SHAPE)
+    if parent is None:
+        return None, None
+
+    latest = _normalize_text(parent.attrs.get("latest"))
+    if latest:
+        latest_group = _group_get(parent, latest)
+        if latest_group is not None and _has_subject_shape_eye_geometry(latest_group):
+            return latest, latest_group
+
+    for name in reversed(_group_names(parent)):
+        group = _group_get(parent, name)
+        if group is not None and _has_subject_shape_eye_geometry(group):
             return name, group
     return None, None
 
@@ -348,6 +386,37 @@ def _build_subject_source(
     )
 
 
+def _build_subject_shape_source(run_name: str, group: zarr.Group) -> EyeGeometrySource:
+    if not _has_subject_shape_eye_geometry(group):
+        raise ValueError(f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{run_name} missing analysis eye geometry.")
+    ellipse_params = StackedComponentArray(
+        [
+            group["components/eye_left/ellipse_params"],
+            group["components/eye_right/ellipse_params"],
+        ]
+    )
+    ellipse_success = StackedComponentArray(
+        [
+            group["components/eye_left/ellipse_success"],
+            group["components/eye_right/ellipse_success"],
+        ]
+    )
+    return EyeGeometrySource(
+        stage_group=EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+        run_name=run_name,
+        group_path=f"{EYE_GEOMETRY_STAGE_SUBJECT_SHAPE}/{run_name}",
+        group=group,
+        masks_roi=None,
+        ellipse_params=ellipse_params,
+        ellipse_success=ellipse_success,
+        eye_separation=group["relations/eye_pair/separation_px"],
+        lineage_attrs=dict(group.attrs),
+        source_refined_eye_run=_normalize_text(group.attrs.get("source_refined_eye_masks_run")),
+        source_refined_subject_run=_normalize_text(group.attrs.get("source_refined_subject_masks_run")),
+        source_subject_shape_run=run_name,
+    )
+
+
 def _build_refined_eye_source(run_name: str, group: zarr.Group) -> EyeGeometrySource:
     for dataset in ("masks_roi", "ellipse_params", "ellipse_success"):
         if dataset not in group:
@@ -370,16 +439,29 @@ def _build_refined_eye_source(run_name: str, group: zarr.Group) -> EyeGeometrySo
 def resolve_eye_geometry_source(
     root: zarr.Group,
     *,
+    subject_shape_run: Optional[str] = None,
     refined_subject_run: Optional[str] = None,
     refined_eye_run: Optional[str] = None,
+    prefer_subject_shape: bool = False,
     prefer_subject: bool = True,
 ) -> EyeGeometrySource:
     """Resolve the active eye geometry source.
 
-    Current archives should read canonical geometry from
-    ``refined_subject_masks_runs/<run>``. Historical archives can still fall
-    back to ``refined_eye_masks_runs/<run>``.
+    Callers that only need analysis-facing geometry can opt into
+    ``analysis/subject_shape_runs/<run>`` preference. Callers that need mask
+    pixels should keep the default refined-subject/refined-eye behavior.
     """
+
+    if subject_shape_run:
+        run_name, group = _resolve_run_group(
+            root,
+            EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
+            subject_shape_run,
+            fallback_to_latest=True,
+        )
+        if run_name is None or group is None:
+            raise ValueError(f"Subject-shape run not found: {subject_shape_run}.")
+        return _build_subject_shape_source(run_name, group)
 
     if refined_subject_run:
         run_name, group = _resolve_run_group(
@@ -436,6 +518,11 @@ def resolve_eye_geometry_source(
                 )
         return _build_refined_eye_source(eye_name, eye_group)
 
+    if prefer_subject_shape:
+        shape_name, shape_group = _find_latest_subject_shape_eye_geometry(root)
+        if shape_name is not None and shape_group is not None:
+            return _build_subject_shape_source(shape_name, shape_group)
+
     if prefer_subject:
         subject_name, subject_group = _find_latest_subject_eye_geometry(root)
         if subject_name is not None and subject_group is not None:
@@ -472,6 +559,9 @@ def resolve_source_keypoints_run_for_eye_geometry(source: EyeGeometrySource) -> 
 
 __all__ = [
     "ChannelSelectionArray",
+    "EYE_GEOMETRY_STAGE_REFINED_EYE",
+    "EYE_GEOMETRY_STAGE_REFINED_SUBJECT",
+    "EYE_GEOMETRY_STAGE_SUBJECT_SHAPE",
     "EyeGeometrySource",
     "StackedComponentArray",
     "resolve_eye_geometry_source",

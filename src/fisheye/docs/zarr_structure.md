@@ -1448,6 +1448,10 @@ Eye angle analysis results:
 - Per-ROI and per-frame eye-angle metrics
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
+- Preferred eye geometry source is `analysis/subject_shape_runs/<run>` when it
+  has left/right eye ellipse geometry. Run attrs record
+  `source_subject_shape_run`, `source_refined_subject_masks_run`, and
+  `source_refined_eye_run` as applicable.
 
 ### `analysis/subject_shape_runs/`
 
