@@ -49,10 +49,10 @@ from .subject_shape_spline import (
 )
 
 SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
-SUBJECT_SHAPE_SCHEMA_VERSION = 1
+SUBJECT_SHAPE_SCHEMA_VERSION = 3
 SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID = "analysis.subject_shape.source_refined_subject_masks_v1"
-SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v4"
-SUBJECT_SHAPE_METHOD_VERSION = 4
+SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v8"
+SUBJECT_SHAPE_METHOD_VERSION = 8
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
 COMPONENT_ORDER = ("subject_body", "swim_bladder", "eye_left", "eye_right")
 ELLIPSE_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
@@ -63,9 +63,20 @@ BODY_FRAME_SCHEMA_VERSION = 1
 BODY_FRAME_ESTIMATOR = "mask_component_axis"
 TAIL_GEOMETRY_SCHEMA_ID = "analysis.subject_shape.tail_geometry"
 TAIL_GEOMETRY_SCHEMA_VERSION = 1
+SNOUT_TIP_METHOD = "subject_body_contour_max_forward_projection_v1"
 TAIL_ANCHOR_METHOD = "caudal_swim_bladder_contour_min_forward_projection_v1"
-CENTERLINE_METHOD = "skeleton_longest_endpoint_path_v1"
+CENTERLINE_METHOD = "snout_anchored_skeleton_longest_endpoint_path_v1"
+CENTERLINE_SKELETON_METHOD = "skeleton_longest_endpoint_path_v1"
+CENTERLINE_SNOUT_EXTENSION_METHOD = "prepend_mask_path_to_body_frame_guided_join_v1"
+CENTERLINE_SNOUT_JOIN_METHOD = "body_frame_lateral_min_head_region_v1"
+CENTERLINE_HEAD_ENDPOINT_SEMANTICS = "validated_snout_tip"
 CENTERLINE_SAMPLE_COUNT = 64
+CENTERLINE_SNOUT_CHECK_METHOD = "head_endpoint_to_snout_distance_v1"
+CENTERLINE_REACHES_SNOUT_THRESHOLD_PX = 5.0
+CENTERLINE_SNOUT_JOIN_MAX_ARCLENGTH_PX = 64.0
+CENTERLINE_SNOUT_EXTENSION_MAX_DISTANCE_PX = 48.0
+CENTERLINE_SNOUT_EXTENSION_MAX_LENGTH_RATIO = 3.0
+CENTERLINE_SNOUT_EXTENSION_MAX_EXTRA_PX = 24.0
 TAIL_SAMPLE_COUNT = DEFAULT_TAIL_SAMPLE_COUNT
 REASON_BYTES_WIDTH = 64
 SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
@@ -117,6 +128,13 @@ class SourceBodyMaskQcBatch:
 
 
 @dataclass(frozen=True)
+class SnoutTipBatch:
+    point_xy: np.ndarray
+    valid: np.ndarray
+    failure_reason_bytes: np.ndarray
+
+
+@dataclass(frozen=True)
 class CenterlineBatch:
     centerline_xy: np.ndarray
     centerline_valid: np.ndarray
@@ -129,6 +147,13 @@ class CenterlineBatch:
     tail_base_failure_reason_bytes: np.ndarray
     tail_segment_arclength_px: np.ndarray
     body_arclength_px: np.ndarray
+
+
+@dataclass(frozen=True)
+class CenterlineSnoutCheckBatch:
+    distance_px: np.ndarray
+    reaches_snout: np.ndarray
+    reason_bytes: np.ndarray
 
 
 def _utc_now() -> str:
@@ -346,8 +371,25 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
     if component_name == "subject_body":
         component_group.attrs["principal_axis_method"] = "pca_mask_pixels_v1"
         component_group.attrs["principal_axis_semantics"] = "unoriented_principal_axis_in_roi_xy"
+        component_group.attrs["snout_tip_semantic_label"] = "snout_tip"
+        component_group.attrs["snout_tip_estimator"] = SNOUT_TIP_METHOD
+        component_group.attrs["snout_tip_estimator_version"] = 1
         component_group.attrs["centerline_method"] = CENTERLINE_METHOD
+        component_group.attrs["centerline_skeleton_method"] = CENTERLINE_SKELETON_METHOD
+        component_group.attrs["centerline_snout_extension_method"] = CENTERLINE_SNOUT_EXTENSION_METHOD
+        component_group.attrs["centerline_snout_join_method"] = CENTERLINE_SNOUT_JOIN_METHOD
+        component_group.attrs["head_endpoint_semantics"] = CENTERLINE_HEAD_ENDPOINT_SEMANTICS
         component_group.attrs["centerline_sample_count"] = CENTERLINE_SAMPLE_COUNT
+        component_group.attrs["centerline_snout_check_method"] = CENTERLINE_SNOUT_CHECK_METHOD
+        component_group.attrs["centerline_reaches_snout_threshold_px"] = CENTERLINE_REACHES_SNOUT_THRESHOLD_PX
+        component_group.attrs["centerline_snout_join_max_arclength_px"] = CENTERLINE_SNOUT_JOIN_MAX_ARCLENGTH_PX
+        component_group.attrs["centerline_snout_extension_max_distance_px"] = (
+            CENTERLINE_SNOUT_EXTENSION_MAX_DISTANCE_PX
+        )
+        component_group.attrs["centerline_snout_extension_max_length_ratio"] = (
+            CENTERLINE_SNOUT_EXTENSION_MAX_LENGTH_RATIO
+        )
+        component_group.attrs["centerline_snout_extension_max_extra_px"] = CENTERLINE_SNOUT_EXTENSION_MAX_EXTRA_PX
         component_group.attrs["bspline_method"] = BSPLINE_METHOD
         component_group.attrs["bspline_degree"] = DEFAULT_BSPLINE_DEGREE
         component_group.attrs["bspline_fit_mode"] = "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing"
@@ -401,6 +443,22 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
         _create_array(
             component_group,
             "centerline_failure_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+        _create_array(
+            component_group,
+            "head_endpoint_to_snout_distance_px",
+            shape=(total_rows,),
+            dtype=np.float32,
+            chunks=chunks_1d,
+            fill_value=np.nan,
+        )
+        _create_array(component_group, "centerline_reaches_snout", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "centerline_snout_check_reason_bytes",
             shape=(total_rows, REASON_BYTES_WIDTH),
             dtype=np.uint8,
             chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
@@ -519,6 +577,22 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
         _create_array(
             component_group,
             "source_mask_qc_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+        _create_array(
+            component_group,
+            "snout_tip_xy",
+            shape=(total_rows, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_lastdim(total_rows, 2),
+            fill_value=np.nan,
+        )
+        _create_array(component_group, "snout_tip_valid", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "snout_tip_failure_reason_bytes",
             shape=(total_rows, REASON_BYTES_WIDTH),
             dtype=np.uint8,
             chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
@@ -1019,9 +1093,22 @@ def _prepare_subject_shape_run(
             else None,
             "tail_geometry_schema_id": TAIL_GEOMETRY_SCHEMA_ID,
             "tail_geometry_schema_version": TAIL_GEOMETRY_SCHEMA_VERSION,
+            "snout_tip_semantic_label": "snout_tip",
+            "snout_tip_estimator": SNOUT_TIP_METHOD,
+            "snout_tip_estimator_version": 1,
             "tail_anchor_method": TAIL_ANCHOR_METHOD,
             "centerline_method": CENTERLINE_METHOD,
+            "centerline_skeleton_method": CENTERLINE_SKELETON_METHOD,
+            "centerline_snout_extension_method": CENTERLINE_SNOUT_EXTENSION_METHOD,
+            "centerline_snout_join_method": CENTERLINE_SNOUT_JOIN_METHOD,
+            "head_endpoint_semantics": CENTERLINE_HEAD_ENDPOINT_SEMANTICS,
             "centerline_sample_count": CENTERLINE_SAMPLE_COUNT,
+            "centerline_snout_check_method": CENTERLINE_SNOUT_CHECK_METHOD,
+            "centerline_reaches_snout_threshold_px": CENTERLINE_REACHES_SNOUT_THRESHOLD_PX,
+            "centerline_snout_join_max_arclength_px": CENTERLINE_SNOUT_JOIN_MAX_ARCLENGTH_PX,
+            "centerline_snout_extension_max_distance_px": CENTERLINE_SNOUT_EXTENSION_MAX_DISTANCE_PX,
+            "centerline_snout_extension_max_length_ratio": CENTERLINE_SNOUT_EXTENSION_MAX_LENGTH_RATIO,
+            "centerline_snout_extension_max_extra_px": CENTERLINE_SNOUT_EXTENSION_MAX_EXTRA_PX,
             "bspline_method": BSPLINE_METHOD,
             "bspline_degree": DEFAULT_BSPLINE_DEGREE,
             "bspline_fit_mode": "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing",
@@ -1416,6 +1503,76 @@ def _write_caudal_anchor_batch(run_group: zarr.Group, row_slice: slice, batch: C
     group["caudal_contour_failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
 
 
+def _compute_snout_tip_batch(
+    body_masks: np.ndarray,
+    body_frame: BodyFrameBatch,
+    *,
+    source_body_qc: SourceBodyMaskQcBatch | None = None,
+    projection_tolerance_px: float = 1.0,
+) -> SnoutTipBatch:
+    masks_bool = np.asarray(body_masks, dtype=np.uint8) > 0
+    row_count = int(masks_bool.shape[0])
+    point_xy = np.full((row_count, 2), np.nan, dtype=np.float32)
+    valid = np.zeros((row_count,), dtype=bool)
+    reasons = ["missing_subject_body_mask"] * row_count
+    for row_idx in range(row_count):
+        if source_body_qc is not None and bool(source_body_qc.severe_qc_failure[row_idx]):
+            reasons[row_idx] = "source_body_mask_qc_failed"
+            continue
+        if not bool(body_frame.valid[row_idx]):
+            reasons[row_idx] = "missing_body_frame"
+            continue
+        mask = masks_bool[row_idx]
+        if int(np.count_nonzero(mask)) == 0:
+            reasons[row_idx] = "missing_subject_body_mask"
+            continue
+        if _single_component_count(mask) != 1:
+            reasons[row_idx] = "fragmented_subject_body_mask"
+            continue
+        contour_xy = _contour_points_xy(mask)
+        if contour_xy is None or int(contour_xy.shape[0]) == 0:
+            reasons[row_idx] = "missing_subject_body_contour"
+            continue
+        origin = body_frame.origin_xy[row_idx].astype(np.float64)
+        forward = body_frame.forward_axis_xy[row_idx].astype(np.float64)
+        left = body_frame.left_axis_xy[row_idx].astype(np.float64)
+        projections = (contour_xy - origin[None, :]) @ forward
+        if not np.any(np.isfinite(projections)):
+            reasons[row_idx] = "rostral_projection_failed"
+            continue
+        max_projection = float(np.nanmax(projections))
+        near_rostral = np.isfinite(projections) & (projections >= max_projection - float(projection_tolerance_px))
+        candidates = contour_xy[near_rostral]
+        if int(candidates.shape[0]) == 0:
+            reasons[row_idx] = "rostral_projection_failed"
+            continue
+        if left.shape == (2,) and np.all(np.isfinite(left)):
+            lateral = np.abs((candidates - origin[None, :]) @ left)
+            chosen_idx = int(np.nanargmin(lateral)) if np.any(np.isfinite(lateral)) else 0
+        else:
+            chosen_idx = 0
+        point_xy[row_idx] = candidates[chosen_idx].astype(np.float32)
+        valid[row_idx] = True
+        reasons[row_idx] = "ok"
+    return SnoutTipBatch(
+        point_xy=point_xy,
+        valid=valid,
+        failure_reason_bytes=_encode_reasons(reasons),
+    )
+
+
+def _write_snout_tip_batch(run_group: zarr.Group, row_slice: slice, batch: SnoutTipBatch) -> None:
+    components = run_group.get("components")
+    if components is None or "subject_body" not in components:
+        return
+    group = components["subject_body"]
+    if "snout_tip_xy" not in group:
+        return
+    group["snout_tip_xy"][row_slice, :] = batch.point_xy
+    group["snout_tip_valid"][row_slice] = batch.valid
+    group["snout_tip_failure_reason_bytes"][row_slice, :] = batch.failure_reason_bytes
+
+
 def _skeleton_neighbors(coords_yx: np.ndarray) -> list[list[tuple[int, float]]]:
     index_by_coord = {(int(y), int(x)): int(idx) for idx, (y, x) in enumerate(coords_yx)}
     neighbors: list[list[tuple[int, float]]] = [[] for _ in range(int(coords_yx.shape[0]))]
@@ -1529,6 +1686,209 @@ def _resample_polyline(points_xy: np.ndarray, sample_count: int) -> tuple[Option
     return np.stack([x, y], axis=1), total
 
 
+def _mask_contains_point_near(mask: np.ndarray, point_xy: np.ndarray, *, radius_px: int = 1) -> bool:
+    mask_bool = np.asarray(mask, dtype=bool)
+    point = np.asarray(point_xy, dtype=np.float64)
+    if point.shape != (2,) or not np.all(np.isfinite(point)):
+        return False
+    height, width = mask_bool.shape
+    x = int(round(float(point[0])))
+    y = int(round(float(point[1])))
+    radius = max(0, int(radius_px))
+    y0 = max(0, y - radius)
+    y1 = min(int(height), y + radius + 1)
+    x0 = max(0, x - radius)
+    x1 = min(int(width), x + radius + 1)
+    if y0 >= y1 or x0 >= x1:
+        return False
+    return bool(np.any(mask_bool[y0:y1, x0:x1]))
+
+
+def _straight_segment_supported_by_mask(
+    mask: np.ndarray,
+    start_xy: np.ndarray,
+    end_xy: np.ndarray,
+    *,
+    sample_count: int = 32,
+    radius_px: int = 2,
+) -> bool:
+    start = np.asarray(start_xy, dtype=np.float64)
+    end = np.asarray(end_xy, dtype=np.float64)
+    if start.shape != (2,) or end.shape != (2,) or not (np.all(np.isfinite(start)) and np.all(np.isfinite(end))):
+        return False
+    count = max(2, int(sample_count))
+    for fraction in np.linspace(0.0, 1.0, count, dtype=np.float64):
+        point = start + (end - start) * float(fraction)
+        if not _mask_contains_point_near(mask, point, radius_px=radius_px):
+            return False
+    return True
+
+
+def _nearest_mask_pixel_yx(mask: np.ndarray, point_xy: np.ndarray, *, radius_px: int = 4) -> Optional[np.ndarray]:
+    mask_bool = np.asarray(mask, dtype=bool)
+    point = np.asarray(point_xy, dtype=np.float64)
+    if point.shape != (2,) or not np.all(np.isfinite(point)):
+        return None
+    height, width = mask_bool.shape
+    x = int(round(float(point[0])))
+    y = int(round(float(point[1])))
+    radius = max(0, int(radius_px))
+    y0 = max(0, y - radius)
+    y1 = min(int(height), y + radius + 1)
+    x0 = max(0, x - radius)
+    x1 = min(int(width), x + radius + 1)
+    if y0 >= y1 or x0 >= x1:
+        return None
+    coords = np.argwhere(mask_bool[y0:y1, x0:x1])
+    if int(coords.shape[0]) == 0:
+        return None
+    coords[:, 0] += y0
+    coords[:, 1] += x0
+    coords_xy = np.stack([coords[:, 1], coords[:, 0]], axis=1).astype(np.float64)
+    distances = np.linalg.norm(coords_xy - point.reshape(1, 2), axis=1)
+    return coords[int(np.argmin(distances))].astype(np.int64)
+
+
+def _shortest_mask_path_xy(mask: np.ndarray, start_yx: np.ndarray, end_yx: np.ndarray, *, margin_px: int) -> Optional[np.ndarray]:
+    mask_bool = np.asarray(mask, dtype=bool)
+    start = np.asarray(start_yx, dtype=np.int64).reshape(2)
+    end = np.asarray(end_yx, dtype=np.int64).reshape(2)
+    height, width = mask_bool.shape
+    margin = max(0, int(margin_px))
+    y0 = max(0, int(min(start[0], end[0])) - margin)
+    y1 = min(int(height), int(max(start[0], end[0])) + margin + 1)
+    x0 = max(0, int(min(start[1], end[1])) - margin)
+    x1 = min(int(width), int(max(start[1], end[1])) + margin + 1)
+    if y0 >= y1 or x0 >= x1:
+        return None
+    local = mask_bool[y0:y1, x0:x1]
+    start_local = (int(start[0] - y0), int(start[1] - x0))
+    end_local = (int(end[0] - y0), int(end[1] - x0))
+    if not (local[start_local] and local[end_local]):
+        return None
+
+    dist = np.full(local.shape, np.inf, dtype=np.float64)
+    prev_y = np.full(local.shape, -1, dtype=np.int32)
+    prev_x = np.full(local.shape, -1, dtype=np.int32)
+    dist[start_local] = 0.0
+    heap: list[tuple[float, int, int]] = [(0.0, int(start_local[0]), int(start_local[1]))]
+    neighbor_steps = (
+        (-1, -1, math.sqrt(2.0)),
+        (-1, 0, 1.0),
+        (-1, 1, math.sqrt(2.0)),
+        (0, -1, 1.0),
+        (0, 1, 1.0),
+        (1, -1, math.sqrt(2.0)),
+        (1, 0, 1.0),
+        (1, 1, math.sqrt(2.0)),
+    )
+    while heap:
+        current_dist, y, x = heapq.heappop(heap)
+        if current_dist > float(dist[y, x]):
+            continue
+        if (y, x) == end_local:
+            break
+        for dy, dx, weight in neighbor_steps:
+            yy = y + dy
+            xx = x + dx
+            if yy < 0 or yy >= local.shape[0] or xx < 0 or xx >= local.shape[1] or not bool(local[yy, xx]):
+                continue
+            next_dist = current_dist + float(weight)
+            if next_dist < float(dist[yy, xx]):
+                dist[yy, xx] = next_dist
+                prev_y[yy, xx] = y
+                prev_x[yy, xx] = x
+                heapq.heappush(heap, (next_dist, yy, xx))
+    if not np.isfinite(dist[end_local]):
+        return None
+
+    coords: list[tuple[int, int]] = []
+    y, x = end_local
+    seen: set[tuple[int, int]] = set()
+    while True:
+        if (y, x) in seen:
+            return None
+        seen.add((y, x))
+        coords.append((y + y0, x + x0))
+        if (y, x) == start_local:
+            break
+        py = int(prev_y[y, x])
+        px = int(prev_x[y, x])
+        if py < 0 or px < 0:
+            return None
+        y, x = py, px
+    coords.reverse()
+    coords_yx = np.asarray(coords, dtype=np.float64)
+    return np.stack([coords_yx[:, 1], coords_yx[:, 0]], axis=1)
+
+
+def _snout_join_index(
+    path_xy: np.ndarray,
+    body_frame_origin_xy: np.ndarray,
+    body_frame_left_axis_xy: np.ndarray,
+    *,
+    max_arclength_px: float = CENTERLINE_SNOUT_JOIN_MAX_ARCLENGTH_PX,
+) -> int:
+    path = np.asarray(path_xy, dtype=np.float64)
+    if path.ndim != 2 or path.shape[1] != 2 or int(path.shape[0]) < 2:
+        return 0
+    origin = np.asarray(body_frame_origin_xy, dtype=np.float64)
+    left = np.asarray(body_frame_left_axis_xy, dtype=np.float64)
+    if origin.shape != (2,) or left.shape != (2,) or not (np.all(np.isfinite(origin)) and np.all(np.isfinite(left))):
+        return 0
+    cumulative, _total = _polyline_arclength(path)
+    eligible = np.flatnonzero(cumulative <= float(max_arclength_px))
+    eligible = eligible[eligible < int(path.shape[0]) - 1]
+    if int(eligible.shape[0]) == 0:
+        return 0
+    lateral = np.abs((path[eligible] - origin.reshape(1, 2)) @ left)
+    if not np.any(np.isfinite(lateral)):
+        return 0
+    score = lateral + 0.02 * cumulative[eligible]
+    return int(eligible[int(np.nanargmin(score))])
+
+
+def _snout_bridge_path_xy(
+    mask: np.ndarray,
+    snout_xy: np.ndarray,
+    skeleton_head_xy: np.ndarray,
+    *,
+    max_distance_px: float = CENTERLINE_SNOUT_EXTENSION_MAX_DISTANCE_PX,
+    max_length_ratio: float = CENTERLINE_SNOUT_EXTENSION_MAX_LENGTH_RATIO,
+    max_extra_px: float = CENTERLINE_SNOUT_EXTENSION_MAX_EXTRA_PX,
+) -> tuple[Optional[np.ndarray], str]:
+    snout = np.asarray(snout_xy, dtype=np.float64)
+    head = np.asarray(skeleton_head_xy, dtype=np.float64)
+    if snout.shape != (2,) or head.shape != (2,) or not (np.all(np.isfinite(snout)) and np.all(np.isfinite(head))):
+        return None, "missing_snout_tip"
+    straight_distance = float(np.linalg.norm(head - snout))
+    if straight_distance <= 1e-6:
+        return snout.reshape(1, 2), "ok"
+    if straight_distance > float(max_distance_px):
+        return None, "snout_extension_too_long"
+    if _straight_segment_supported_by_mask(mask, snout, head, sample_count=32, radius_px=2):
+        return np.vstack([snout.reshape(1, 2), head.reshape(1, 2)]), "ok"
+    start_yx = _nearest_mask_pixel_yx(mask, snout, radius_px=4)
+    end_yx = _nearest_mask_pixel_yx(mask, head, radius_px=2)
+    if start_yx is None or end_yx is None:
+        return None, "snout_extension_endpoint_outside_mask"
+    margin_px = int(math.ceil(max(8.0, min(24.0, straight_distance * 0.75))))
+    mask_path = _shortest_mask_path_xy(mask, start_yx, end_yx, margin_px=margin_px)
+    if mask_path is None or int(mask_path.shape[0]) == 0:
+        return None, "snout_extension_no_mask_path"
+    bridge = np.vstack([snout.reshape(1, 2), mask_path, head.reshape(1, 2)])
+    keep = [0]
+    for idx in range(1, int(bridge.shape[0])):
+        if float(np.linalg.norm(bridge[idx] - bridge[keep[-1]])) > 1e-6:
+            keep.append(idx)
+    bridge = bridge[np.asarray(keep, dtype=np.int64)]
+    _cumulative, bridge_length = _polyline_arclength(bridge)
+    max_allowed = max(straight_distance * float(max_length_ratio), straight_distance + float(max_extra_px))
+    if bridge_length > max_allowed:
+        return None, "snout_extension_path_too_indirect"
+    return bridge, "ok"
+
+
 def _project_point_to_polyline(point_xy: np.ndarray, polyline_xy: np.ndarray) -> tuple[Optional[np.ndarray], float]:
     point = np.asarray(point_xy, dtype=np.float64).reshape(2)
     polyline = np.asarray(polyline_xy, dtype=np.float64)
@@ -1560,6 +1920,7 @@ def _compute_centerline_batch(
     body_frame: BodyFrameBatch,
     caudal_anchor: CaudalAnchorBatch,
     *,
+    snout_tip: Optional[SnoutTipBatch] = None,
     source_body_qc: Optional[SourceBodyMaskQcBatch] = None,
     sample_count: int = CENTERLINE_SAMPLE_COUNT,
 ) -> CenterlineBatch:
@@ -1605,6 +1966,30 @@ def _compute_centerline_batch(
             continue
         if first_projection < last_projection:
             path_xy = path_xy[::-1]
+        if snout_tip is None or not bool(snout_tip.valid[row_idx]):
+            reason = "missing_snout_tip"
+            if snout_tip is not None:
+                decoded = str(_decode_reason_rows(snout_tip.failure_reason_bytes[row_idx : row_idx + 1])[0] or "")
+                if decoded and decoded != "ok":
+                    reason = decoded
+            centerline_reasons[row_idx] = reason
+            tail_base_reasons[row_idx] = "missing_centerline"
+            continue
+        snout_xy = np.asarray(snout_tip.point_xy[row_idx], dtype=np.float64)
+        if snout_xy.shape != (2,) or not np.all(np.isfinite(snout_xy)):
+            centerline_reasons[row_idx] = "missing_snout_tip"
+            tail_base_reasons[row_idx] = "missing_centerline"
+            continue
+        join_idx = _snout_join_index(path_xy, origin, body_frame.left_axis_xy[row_idx].astype(np.float64))
+        bridge_xy, bridge_reason = _snout_bridge_path_xy(masks_bool[row_idx], snout_xy, path_xy[join_idx])
+        if bridge_xy is None:
+            centerline_reasons[row_idx] = bridge_reason
+            tail_base_reasons[row_idx] = "missing_centerline"
+            continue
+        if int(bridge_xy.shape[0]) <= 1:
+            path_xy[0] = snout_xy
+        else:
+            path_xy = np.vstack([bridge_xy, path_xy[join_idx + 1 :]])
         sampled, total_length = _resample_polyline(path_xy, int(sample_count))
         if sampled is None or total_length <= 1e-6:
             centerline_reasons[row_idx] = "centerline_order_failed"
@@ -1667,6 +2052,58 @@ def _write_centerline_batch(run_group: zarr.Group, row_slice: slice, batch: Cent
     group["tail_base_failure_reason_bytes"][row_slice, :] = batch.tail_base_failure_reason_bytes
     group["tail_segment_arclength_px"][row_slice] = batch.tail_segment_arclength_px
     group["body_arclength_px"][row_slice] = batch.body_arclength_px
+
+
+def _compute_centerline_snout_check_batch(
+    snout_tip: SnoutTipBatch,
+    centerline: CenterlineBatch,
+    *,
+    threshold_px: float = CENTERLINE_REACHES_SNOUT_THRESHOLD_PX,
+) -> CenterlineSnoutCheckBatch:
+    row_count = int(centerline.centerline_valid.shape[0])
+    distance_px = np.full((row_count,), np.nan, dtype=np.float32)
+    reaches_snout = np.zeros((row_count,), dtype=bool)
+    reasons = ["missing_snout_tip"] * row_count
+    for row_idx in range(row_count):
+        if not bool(snout_tip.valid[row_idx]):
+            reasons[row_idx] = "missing_snout_tip"
+            continue
+        if not bool(centerline.centerline_valid[row_idx]):
+            reasons[row_idx] = "missing_centerline"
+            continue
+        head = np.asarray(centerline.head_endpoint_xy[row_idx], dtype=np.float64)
+        snout = np.asarray(snout_tip.point_xy[row_idx], dtype=np.float64)
+        if head.shape != (2,) or snout.shape != (2,) or not (np.all(np.isfinite(head)) and np.all(np.isfinite(snout))):
+            reasons[row_idx] = "missing_head_endpoint"
+            continue
+        distance = float(np.linalg.norm(head - snout))
+        distance_px[row_idx] = np.float32(distance)
+        if distance <= float(threshold_px):
+            reaches_snout[row_idx] = True
+            reasons[row_idx] = "ok"
+        else:
+            reasons[row_idx] = "centerline_does_not_reach_snout"
+    return CenterlineSnoutCheckBatch(
+        distance_px=distance_px,
+        reaches_snout=reaches_snout,
+        reason_bytes=_encode_reasons(reasons),
+    )
+
+
+def _write_centerline_snout_check_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: CenterlineSnoutCheckBatch,
+) -> None:
+    components = run_group.get("components")
+    if components is None or "subject_body" not in components:
+        return
+    group = components["subject_body"]
+    if "head_endpoint_to_snout_distance_px" not in group:
+        return
+    group["head_endpoint_to_snout_distance_px"][row_slice] = batch.distance_px
+    group["centerline_reaches_snout"][row_slice] = batch.reaches_snout
+    group["centerline_snout_check_reason_bytes"][row_slice, :] = batch.reason_bytes
 
 
 def _write_subject_body_spline_batch(
@@ -1824,6 +2261,18 @@ def _process_and_write_subject_shape_chunk_groups(
         chunk_timing["write_body_frame_seconds"] = float(time.perf_counter() - phase_start)
         rows_with_component["body_frame_valid"] = int(np.count_nonzero(body_frame.valid))
 
+    snout_tip: Optional[SnoutTipBatch] = None
+    if body_frame is not None and "subject_body" in component_masks_by_name:
+        phase_start = time.perf_counter()
+        snout_tip = _compute_snout_tip_batch(
+            component_masks_by_name["subject_body"],
+            body_frame,
+            source_body_qc=source_body_qc,
+        )
+        _write_snout_tip_batch(run_group, row_slice, snout_tip)
+        chunk_timing["write_snout_tip_seconds"] = float(time.perf_counter() - phase_start)
+        rows_with_component["snout_tip_valid"] = int(np.count_nonzero(snout_tip.valid))
+
     caudal_anchor: Optional[CaudalAnchorBatch] = None
     if body_frame is not None and "swim_bladder" in component_masks_by_name:
         phase_start = time.perf_counter()
@@ -1838,6 +2287,7 @@ def _process_and_write_subject_shape_chunk_groups(
             component_masks_by_name["subject_body"],
             body_frame,
             caudal_anchor,
+            snout_tip=snout_tip,
             source_body_qc=source_body_qc,
             sample_count=CENTERLINE_SAMPLE_COUNT,
         )
@@ -1845,6 +2295,13 @@ def _process_and_write_subject_shape_chunk_groups(
         chunk_timing["write_centerline_seconds"] = float(time.perf_counter() - phase_start)
         rows_with_component["centerline_valid"] = int(np.count_nonzero(centerline.centerline_valid))
         rows_with_component["tail_base_valid"] = int(np.count_nonzero(centerline.tail_base_valid))
+
+        if snout_tip is not None:
+            phase_start = time.perf_counter()
+            snout_check = _compute_centerline_snout_check_batch(snout_tip, centerline)
+            _write_centerline_snout_check_batch(run_group, row_slice, snout_check)
+            chunk_timing["write_centerline_snout_check_seconds"] = float(time.perf_counter() - phase_start)
+            rows_with_component["centerline_reaches_snout"] = int(np.count_nonzero(snout_check.reaches_snout))
 
         phase_start = time.perf_counter()
         spline = fit_subject_body_spline_batch(

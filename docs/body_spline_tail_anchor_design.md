@@ -258,6 +258,12 @@ analysis/subject_shape_runs/<run>/
       caudal_contour_failure_reason_bytes
 
     subject_body/
+      snout_tip_xy
+      snout_tip_valid
+      snout_tip_failure_reason_bytes
+      head_endpoint_to_snout_distance_px
+      centerline_reaches_snout
+      centerline_snout_check_reason_bytes
       centerline_xy
       centerline_valid
       centerline_failure_reason_bytes
@@ -359,18 +365,41 @@ Steps:
 1. Extract a subject-body skeleton or medial-axis centerline candidate.
 2. Prune branches and choose the primary head-tail path.
 3. Orient the path using body-frame polarity.
-4. Fit a B-spline or sampled centerline model.
-5. Define `head_endpoint_xy` as the anterior endpoint.
-6. Define `tail_tip_xy` as the posterior endpoint.
-7. Project the caudal swim-bladder contour point onto the oriented centerline.
-8. Define `tail_base_xy` at that projection or nearest valid centerline point.
-9. Compute body arclength, tail-segment arclength, and optional curvature.
-10. Write validity and failure reasons instead of inventing values.
+4. Estimate `snout_tip_xy` from the subject-body contour using the body-frame
+   forward axis.
+5. Extend the oriented centerline candidate to the validated `snout_tip_xy`
+   before resampling or fitting.
+6. Fit a B-spline or sampled centerline model.
+7. Define `head_endpoint_xy` as the validated snout-anchored anterior endpoint.
+8. Define `tail_tip_xy` as the posterior endpoint.
+9. Project the caudal swim-bladder contour point onto the oriented centerline.
+10. Define `tail_base_xy` at that projection or nearest valid centerline point.
+11. Compute body arclength, tail-segment arclength, and optional curvature.
+12. Write validity and failure reasons instead of inventing values.
+
+Current schema v3/method v8 runs estimate `snout_tip_xy` from the subject-body
+contour point with maximum projection along the body-frame forward axis. The
+writer then prepends a bounded mask-path snout-to-medial-skeleton segment
+before resampling the centerline. The skeleton join point is selected from the
+medial head region using body-frame lateral coordinates so head-side skeleton
+branches do not pull the spline into off-axis mask offshoots. `head_endpoint_xy`
+therefore means the semantic rostral/nasal endpoint for rows where
+`centerline_valid = true`.
+
+The writer still records `head_endpoint_to_snout_distance_px`,
+`centerline_reaches_snout`, and `centerline_snout_check_reason_bytes` as an
+invariant check. Older schema v2/method v5 runs used those fields as an
+intermediate audit because their `head_endpoint_xy` could stop near the eyes.
 
 Expected failure reasons:
 
 - `body_centerline_fit_failed`
 - `body_centerline_branch_ambiguous`
+- `rostral_projection_failed`
+- `centerline_does_not_reach_snout`
+- `snout_extension_too_long`
+- `snout_extension_no_mask_path`
+- `snout_extension_path_too_indirect`
 - `tail_endpoint_ambiguous`
 - `tail_base_projection_failed`
 - `tail_tip_outside_body_mask`

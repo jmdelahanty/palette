@@ -354,6 +354,97 @@ def _plot_centerline(ax: plt.Axes, centerline_xy: object, *, valid: bool) -> Non
     ax.plot(arr[:, 0], arr[:, 1], color=color, linewidth=2.0, label="centerline")
 
 
+def _plot_polyline(
+    ax: plt.Axes,
+    xy: object,
+    *,
+    label: str,
+    color: str,
+    linewidth: float = 2.0,
+    linestyle: str = "-",
+    alpha: float = 1.0,
+) -> bool:
+    arr = np.asarray(xy, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        return False
+    finite = np.all(np.isfinite(arr), axis=1)
+    if int(np.count_nonzero(finite)) < 2:
+        return False
+    arr = arr[finite]
+    ax.plot(
+        arr[:, 0],
+        arr[:, 1],
+        color=color,
+        linewidth=float(linewidth),
+        linestyle=linestyle,
+        alpha=float(alpha),
+        label=label,
+    )
+    return True
+
+
+def _scatter_points(
+    ax: plt.Axes,
+    xy: object,
+    *,
+    label: str,
+    color: str,
+    marker: str = "o",
+    size: float = 18.0,
+    alpha: float = 1.0,
+) -> bool:
+    arr = np.asarray(xy, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        return False
+    finite = np.all(np.isfinite(arr), axis=1)
+    if int(np.count_nonzero(finite)) < 1:
+        return False
+    arr = arr[finite]
+    kwargs = {
+        "c": color,
+        "marker": marker,
+        "s": float(size),
+        "label": label,
+        "alpha": float(alpha),
+        "linewidths": 0.5,
+    }
+    if marker not in {"x", "+", "|", "_"}:
+        kwargs["edgecolors"] = "black"
+    ax.scatter(arr[:, 0], arr[:, 1], **kwargs)
+    return True
+
+
+def _plot_tail_normals(
+    ax: plt.Axes,
+    tail_sample_xy: object,
+    tail_normal_xy: object,
+    *,
+    length_px: float = 5.0,
+) -> bool:
+    points = np.asarray(tail_sample_xy, dtype=np.float64)
+    normals = np.asarray(tail_normal_xy, dtype=np.float64)
+    if points.ndim != 2 or normals.ndim != 2 or points.shape != normals.shape or points.shape[1] != 2:
+        return False
+    finite = np.all(np.isfinite(points), axis=1) & np.all(np.isfinite(normals), axis=1)
+    if int(np.count_nonzero(finite)) < 1:
+        return False
+    points = points[finite]
+    normals = normals[finite]
+    half = float(length_px) / 2.0
+    for idx, (point, normal) in enumerate(zip(points, normals)):
+        start = point - normal * half
+        stop = point + normal * half
+        ax.plot(
+            [start[0], stop[0]],
+            [start[1], stop[1]],
+            color="#ffca28",
+            linewidth=0.7,
+            alpha=0.85,
+            label="tail normals" if idx == 0 else "_nolegend_",
+        )
+    return True
+
+
 def _scatter_skeleton_points(
     ax: plt.Axes,
     coords_yx: np.ndarray,
@@ -446,6 +537,10 @@ def render_subject_shape_overlay(
     show_skeleton: bool = False,
     skeleton_style: SkeletonStyle = "underlay",
     skeleton_offset_px: float = 1.5,
+    show_bspline: bool = False,
+    show_tail_samples: bool = False,
+    show_tail_normals: bool = False,
+    show_spline_control_points: bool = False,
 ) -> plt.Figure:
     row = int(row)
     if contour_source not in CONTOUR_SOURCE_CHOICES:
@@ -520,7 +615,59 @@ def render_subject_shape_overlay(
         _row_value(shape, "components/subject_body/centerline_xy", row, None),
         valid=centerline_valid,
     )
+    bspline_drawn = False
+    control_points_drawn = False
+    tail_samples_drawn = False
+    tail_normals_drawn = False
+    if show_bspline:
+        bspline_drawn = _plot_polyline(
+            ax,
+            _row_value(shape, "components/subject_body/bspline_sample_xy", row, None),
+            label="B-spline sample",
+            color="#ff1744",
+            linewidth=1.8,
+            linestyle="-",
+            alpha=0.9,
+        )
+    if show_spline_control_points:
+        control_points_drawn = _scatter_points(
+            ax,
+            _row_value(shape, "components/subject_body/bspline_control_points_xy", row, None),
+            label="B-spline control points",
+            color="#ff80ab",
+            marker="D",
+            size=22.0,
+            alpha=0.85,
+        )
+    if show_tail_samples:
+        tail_samples_drawn = _scatter_points(
+            ax,
+            _row_value(shape, "components/subject_body/tail_sample_xy", row, None),
+            label="tail samples",
+            color="#18ffff",
+            marker="o",
+            size=16.0,
+            alpha=0.9,
+        )
+    if show_tail_normals:
+        tail_normals_drawn = _plot_tail_normals(
+            ax,
+            _row_value(shape, "components/subject_body/tail_sample_xy", row, None),
+            _row_value(shape, "components/subject_body/tail_normal_xy", row, None),
+        )
     _plot_body_frame(ax, shape, row)
+    snout_array = _get_array_or_none(shape, "components/subject_body/snout_tip_xy")
+    snout_xy = _row_value(shape, "components/subject_body/snout_tip_xy", row, None) if snout_array is not None else None
+    head_xy = _row_value(shape, "components/subject_body/head_endpoint_xy", row, None)
+    if snout_array is not None:
+        _plot_point(
+            ax,
+            snout_xy,
+            color="#ff6d00",
+            marker="o",
+            label="snout tip",
+            size=90,
+        )
     _plot_point(
         ax,
         _row_value(shape, "components/swim_bladder/caudal_contour_point_xy", row, None),
@@ -529,13 +676,23 @@ def render_subject_shape_overlay(
         label="caudal swim anchor",
         size=110,
     )
-    _plot_point(
-        ax,
-        _row_value(shape, "components/subject_body/head_endpoint_xy", row, None),
-        color="#00e676",
-        marker="o",
-        label="head endpoint",
+    snout_arr = np.asarray(snout_xy, dtype=np.float64) if snout_xy is not None else np.asarray([], dtype=np.float64)
+    head_arr = np.asarray(head_xy, dtype=np.float64) if head_xy is not None else np.asarray([], dtype=np.float64)
+    head_overlaps_snout = (
+        snout_arr.shape == (2,)
+        and head_arr.shape == (2,)
+        and np.all(np.isfinite(snout_arr))
+        and np.all(np.isfinite(head_arr))
+        and float(np.linalg.norm(head_arr - snout_arr)) <= 1e-4
     )
+    if not head_overlaps_snout:
+        _plot_point(
+            ax,
+            head_xy,
+            color="#00e676",
+            marker="o",
+            label="head endpoint",
+        )
     _plot_point(
         ax,
         _row_value(shape, "components/subject_body/tail_base_xy", row, None),
@@ -554,30 +711,72 @@ def render_subject_shape_overlay(
 
     frame = _row_value(shape, "row_index/frame_indices", row, None)
     body_reason = _decode_reason(_row_value(shape, "components/subject_body/centerline_failure_reason_bytes", row, []))
+    snout_reason = _decode_reason(_row_value(shape, "components/subject_body/snout_tip_failure_reason_bytes", row, []))
+    snout_check_reason = _decode_reason(
+        _row_value(shape, "components/subject_body/centerline_snout_check_reason_bytes", row, [])
+    )
     tail_reason = _decode_reason(_row_value(shape, "components/subject_body/tail_base_failure_reason_bytes", row, []))
+    bspline_reason = _decode_reason(_row_value(shape, "components/subject_body/bspline_failure_reason_bytes", row, []))
+    tail_sample_reason = _decode_reason(_row_value(shape, "components/subject_body/tail_sample_failure_reason_bytes", row, []))
     anchor_reason = _decode_reason(
         _row_value(shape, "components/swim_bladder/caudal_contour_failure_reason_bytes", row, [])
     )
     body_len = _row_value(shape, "components/subject_body/body_arclength_px", row, np.nan)
     tail_len = _row_value(shape, "components/subject_body/tail_segment_arclength_px", row, np.nan)
+    bspline_len = _row_value(shape, "components/subject_body/bspline_arc_length_px", row, np.nan)
+    snout_distance = _row_value(shape, "components/subject_body/head_endpoint_to_snout_distance_px", row, np.nan)
     title = f"Subject shape overlay | row {row}"
     if frame is not None:
         title += f" | frame {int(frame)}"
     ax.set_title(title)
-    text = "\n".join(
+    text_lines = [
+        f"shape: {ctx.shape_run_name}",
+        f"refined: {ctx.refined_run_name}",
+        f"background: {base_source}",
+        f"contours: {contour_source}",
+        f"skeleton: {bool(show_skeleton)} ({skeleton_style})",
+        f"centerline: {centerline_valid} ({body_reason or 'n/a'})",
+    ]
+    if show_bspline or show_spline_control_points:
+        text_lines.extend(
+            [
+                f"bspline: {bool(_row_value(shape, 'components/subject_body/bspline_valid', row, False))} "
+                f"({bspline_reason or 'unavailable'})",
+                f"bspline_drawn: {bspline_drawn} control_points: {control_points_drawn}",
+            ]
+        )
+    if show_tail_samples or show_tail_normals:
+        text_lines.extend(
+            [
+                f"tail_samples: {bool(_row_value(shape, 'components/subject_body/tail_sample_valid', row, False))} "
+                f"({tail_sample_reason or 'unavailable'})",
+                f"tail_samples_drawn: {tail_samples_drawn} tail_normals_drawn: {tail_normals_drawn}",
+            ]
+        )
+    if snout_array is not None:
+        text_lines.append(
+            f"snout_tip: {bool(_row_value(shape, 'components/subject_body/snout_tip_valid', row, False))} "
+            f"({snout_reason or 'n/a'})"
+        )
+    if _get_array_or_none(shape, "components/subject_body/head_endpoint_to_snout_distance_px") is not None:
+        reaches = bool(_row_value(shape, "components/subject_body/centerline_reaches_snout", row, False))
+        distance_text = f"{float(snout_distance):.2f}" if np.isfinite(float(snout_distance)) else "n/a"
+        text_lines.append(
+            f"head_to_snout_px: {distance_text} reaches_snout: {reaches} ({snout_check_reason or 'n/a'})"
+        )
+    text_lines.extend(
         [
-            f"shape: {ctx.shape_run_name}",
-            f"refined: {ctx.refined_run_name}",
-            f"background: {base_source}",
-            f"contours: {contour_source}",
-            f"skeleton: {bool(show_skeleton)} ({skeleton_style})",
-            f"centerline: {centerline_valid} ({body_reason or 'n/a'})",
             f"tail_base: {bool(_row_value(shape, 'components/subject_body/tail_base_valid', row, False))} ({tail_reason or 'n/a'})",
             f"caudal_anchor: {bool(_row_value(shape, 'components/swim_bladder/caudal_contour_valid', row, False))} ({anchor_reason or 'n/a'})",
             f"body_len_px: {float(body_len):.2f}" if np.isfinite(float(body_len)) else "body_len_px: n/a",
-            f"tail_len_px: {float(tail_len):.2f}" if np.isfinite(float(tail_len)) else "tail_len_px: n/a",
         ]
     )
+    if show_bspline or show_spline_control_points:
+        text_lines.append(
+            f"bspline_len_px: {float(bspline_len):.2f}" if np.isfinite(float(bspline_len)) else "bspline_len_px: n/a"
+        )
+    text_lines.append(f"tail_len_px: {float(tail_len):.2f}" if np.isfinite(float(tail_len)) else "tail_len_px: n/a")
+    text = "\n".join(text_lines)
     ax.text(
         0.02,
         0.02,
@@ -618,6 +817,10 @@ def export_subject_shape_overlays(
     show_skeleton: bool = False,
     skeleton_style: SkeletonStyle = "underlay",
     skeleton_offset_px: float = 1.5,
+    show_bspline: bool = False,
+    show_tail_samples: bool = False,
+    show_tail_normals: bool = False,
+    show_spline_control_points: bool = False,
 ) -> list[Path]:
     ctx = open_subject_shape_overlay_context(
         zarr_path,
@@ -636,6 +839,10 @@ def export_subject_shape_overlays(
             show_skeleton=show_skeleton,
             skeleton_style=skeleton_style,
             skeleton_offset_px=float(skeleton_offset_px),
+            show_bspline=show_bspline,
+            show_tail_samples=show_tail_samples,
+            show_tail_normals=show_tail_normals,
+            show_spline_control_points=show_spline_control_points,
         )
         out = output_dir / f"subject_shape_overlay_{ctx.shape_run_name}_row_{int(row):06d}.png"
         fig.savefig(out, dpi=int(dpi), bbox_inches="tight")
@@ -699,6 +906,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1.5,
         help="Pixel offset used by --skeleton-style offset.",
     )
+    parser.add_argument(
+        "--show-bspline",
+        action="store_true",
+        help="Draw components/subject_body/bspline_sample_xy when present.",
+    )
+    parser.add_argument(
+        "--show-spline-control-points",
+        action="store_true",
+        help="Draw components/subject_body/bspline_control_points_xy when present.",
+    )
+    parser.add_argument(
+        "--show-tail-samples",
+        action="store_true",
+        help="Draw components/subject_body/tail_sample_xy when present.",
+    )
+    parser.add_argument(
+        "--show-tail-normals",
+        action="store_true",
+        help="Draw tail normals from components/subject_body/tail_normal_xy when present.",
+    )
     return parser
 
 
@@ -718,6 +945,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         show_skeleton=bool(args.show_skeleton),
         skeleton_style=args.skeleton_style,
         skeleton_offset_px=float(args.skeleton_offset_px),
+        show_bspline=bool(args.show_bspline),
+        show_tail_samples=bool(args.show_tail_samples),
+        show_tail_normals=bool(args.show_tail_normals),
+        show_spline_control_points=bool(args.show_spline_control_points),
     )
     for path in paths:
         print(path)

@@ -165,7 +165,7 @@ analysis/subject_shape_runs/
   <run_id>/
     attrs:
       schema_id                    "analysis.subject_shape_runs"
-      schema_version               1
+      schema_version               3
       source_refined_subject_masks_run
       source_mask_labels
       source_mask_label_schema_id
@@ -204,6 +204,12 @@ analysis/subject_shape_runs/
         source_mask_qc_severe_failure (N,) optional bool
         source_mask_qc_requires_review (N,) optional bool
         source_mask_qc_reason_bytes (N, width) optional uint8 utf8-null-terminated tags
+        snout_tip_xy               (N, 2) optional semantic rostral/nasal landmark
+        snout_tip_valid            (N,) optional
+        snout_tip_failure_reason_bytes (N, width) optional
+        head_endpoint_to_snout_distance_px (N,) optional
+        centerline_reaches_snout   (N,) optional
+        centerline_snout_check_reason_bytes (N, width) optional
         centerline_xy              (N, P, 2) optional
         centerline_valid           (N,) optional
         bspline_control_points_xy  (N, K, 2) optional
@@ -354,6 +360,11 @@ Keypoint-only datasets remain valid. A writer may materialize a body frame from
 available. Mask/spline estimators should preserve keypoint or mask-component
 anchors for head/tail polarity and anatomical left/right resolution.
 
+The body-frame origin is estimator-defined. In the current mask-component
+estimator it is the eye-pair midpoint, which is useful for polarity but is not
+the most rostral/nasal point of the animal. Consumers should not treat
+`body_frame/origin_xy` as `snout_tip`.
+
 See [body_frame_contract.md](body_frame_contract.md).
 
 ## Component And Relation Organization
@@ -370,7 +381,8 @@ used by `refined_subject_masks_runs`, but the meaning is different:
 Use component groups for values whose primary subject is one semantic component:
 
 - `components/subject_body` for centerlines, B-splines, body length, body axis,
-  curvature, tail-normalized width profiles, and body-shape validity.
+  curvature, rostral/snout landmarks, tail-normalized width profiles, and
+  body-shape validity.
 - `components/swim_bladder` for swim-bladder centroid/blob/ellipse summaries
   and component-specific validity.
 - `components/eye_left` and `components/eye_right` for analysis-facing eye
@@ -426,6 +438,82 @@ Minimum recommended B-spline provenance:
 - head/tail polarity source if the spline is oriented
 - per-row validity/failure reason
 
+## Rostral/Snout Landmark Policy
+
+`snout_tip` is a semantic anatomical landmark for the most rostral/nasal point
+of the fish. Some pose schemas may include a keypoint named `snout_tip`,
+`nose_tip`, or an equivalent marker. Subject-shape runs may also estimate this
+point from the body mask.
+
+Recommended mask-derived estimator:
+
+```text
+subject_body contour
+  -> body-frame forward-axis projection
+  -> maximum forward-coordinate contour point
+  -> snout_tip_xy
+```
+
+Recommended fields:
+
+- `components/subject_body/snout_tip_xy`
+- `components/subject_body/snout_tip_valid`
+- `components/subject_body/snout_tip_failure_reason_bytes`
+- `components/subject_body/head_endpoint_to_snout_distance_px`
+- `components/subject_body/centerline_reaches_snout`
+- `components/subject_body/centerline_snout_check_reason_bytes`
+
+Important distinctions:
+
+- `body_frame/origin_xy` may be an eye-pair midpoint or another
+  estimator-defined origin; it is not automatically the snout.
+- In schema v3+, `head_endpoint_xy` is the snout-anchored anterior endpoint for
+  valid centerlines.
+- In schema v2/v5 archives, `head_endpoint_xy` was the anterior endpoint of the
+  skeleton-derived centerline estimator and could stop short of the rostral
+  contour.
+- `snout_tip_xy` should be the preferred semantic rostral endpoint when present.
+- pose/keypoint `snout_tip` should stay in the pose/keypoint run; comparisons
+  against mask-derived `snout_tip_xy` should be stored as comparison metrics,
+  not by overwriting either source.
+
+Adding these arrays is backward-compatible for consumers that feature-detect
+optional arrays, but a writer that makes them first-class subject-shape outputs
+should bump `method_version` and should bump `schema_version` when the presence
+or semantics of snout fields become part of the declared schema contract.
+
+Current implementation:
+
+- `schema_version = 3`
+- `method = "subject_shape_from_refined_masks_v8"`
+- `method_version = 8`
+- `snout_tip_estimator = "subject_body_contour_max_forward_projection_v1"`
+- `centerline_method = "snout_anchored_skeleton_longest_endpoint_path_v1"`
+- `centerline_skeleton_method = "skeleton_longest_endpoint_path_v1"`
+- `centerline_snout_extension_method = "prepend_mask_path_to_body_frame_guided_join_v1"`
+- `centerline_snout_join_method = "body_frame_lateral_min_head_region_v1"`
+- `head_endpoint_semantics = "validated_snout_tip"`
+- `centerline_snout_check_method = "head_endpoint_to_snout_distance_v1"`
+
+The v8/schema-v3 writer makes the semantic change explicit:
+`head_endpoint_xy` is written as the validated `snout_tip_xy` for every row with
+`centerline_valid = true`. The centerline/spline is generated by prepending a
+bounded mask-path snout-to-skeleton segment before resampling. The skeleton
+join point is selected from the medial head region using body-frame lateral
+coordinates, rather than blindly using the first skeleton endpoint, because
+head-side skeleton branches can pull the spline into off-axis mask offshoots.
+This avoids rejecting normal curved/rounded head masks just because a straight
+chord from the snout to the skeleton endpoint briefly leaves the body, while
+also avoiding branch endpoints that are not on the body midline. If the snout is
+missing, the bridge is too long, or no bounded mask path can be found, the
+centerline fails closed instead of writing a legacy head endpoint under the new
+schema.
+
+Older v5/schema-v2 runs did not redefine `head_endpoint_xy`; they wrote
+`head_endpoint_to_snout_distance_px` and `centerline_reaches_snout` as an
+intermediate QC bridge so the semantic gap could be audited before this schema
+bump.
+
 ## Body Length Policy
 
 Palette should distinguish approximate mask-QC long-axis measurements from
@@ -444,6 +532,8 @@ Canonical body length should live in `analysis/subject_shape_runs`:
 
 - `centerline_arc_length_px` when derived from a validated centerline
 - `bspline_arc_length_px` when derived from a validated body B-spline
+- future `snout_to_tail_arclength_px` or equivalent when a validated
+  `snout_tip_xy` is used to extend or validate the anterior endpoint
 
 Required semantics:
 
@@ -455,6 +545,9 @@ Required semantics:
   validity/failure reason
 - if both an approximate long-axis metric and a spline/centerline length exist,
   downstream biological analyses should prefer the spline/centerline length
+- if `head_endpoint_xy` and `snout_tip_xy` disagree, consumers should not assume
+  body length is snout-to-tail unless the run explicitly declares that estimator
+  and validity status
 
 ## Subject-Shape Length QC
 

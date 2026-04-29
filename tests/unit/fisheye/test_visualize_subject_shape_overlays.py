@@ -123,6 +123,7 @@ def test_render_subject_shape_overlay_from_mask_background(tmp_path: Path, monke
     assert "Subject shape overlay" in fig.axes[0].get_title()
     labels = [collection.get_label() for collection in fig.axes[0].collections]
     assert "body skeleton" in labels
+    assert "snout tip" in labels
     fig.canvas.draw()
     plt.close(fig)
 
@@ -165,6 +166,60 @@ def test_render_subject_shape_overlay_can_offset_skeleton(tmp_path: Path, monkey
 
     labels = [collection.get_label() for collection in fig.axes[0].collections]
     assert "body skeleton offset" in labels
+    fig.canvas.draw()
+    plt.close(fig)
+
+
+def test_render_subject_shape_overlay_can_draw_spline_layers(tmp_path: Path, monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    zarr_path = tmp_path / "shape.zarr"
+    root = _build_refined_root(zarr_path)
+    subject_shape_runs.write_subject_shape_run_group(
+        root,
+        zarr_path=zarr_path,
+        refined_run="refined_001",
+        run_name="shape_001",
+    )
+    body = root["analysis"]["subject_shape_runs"]["shape_001"]["components"]["subject_body"]
+    body["bspline_sample_xy"][0, :, :] = np.nan
+    body["bspline_sample_xy"][0, :4, :] = np.asarray(
+        [[10.0, 4.0], [10.0, 8.0], [10.0, 12.0], [10.0, 16.0]],
+        dtype=np.float32,
+    )
+    body["bspline_control_points_xy"][0, :, :] = np.nan
+    body["bspline_control_points_xy"][0, :3, :] = np.asarray(
+        [[10.0, 4.0], [11.0, 10.0], [10.0, 16.0]],
+        dtype=np.float32,
+    )
+    body["tail_sample_xy"][0, :, :] = np.nan
+    body["tail_sample_xy"][0, :3, :] = np.asarray(
+        [[10.0, 10.0], [10.0, 13.0], [10.0, 16.0]],
+        dtype=np.float32,
+    )
+    body["tail_normal_xy"][0, :, :] = np.nan
+    body["tail_normal_xy"][0, :3, :] = np.asarray(
+        [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
+        dtype=np.float32,
+    )
+    body["bspline_valid"][0] = True
+    body["tail_sample_valid"][0] = True
+
+    ctx = open_subject_shape_overlay_context(zarr_path, shape_run="shape_001", use_crop_images=False)
+    fig = render_subject_shape_overlay(
+        ctx,
+        row=0,
+        show_bspline=True,
+        show_spline_control_points=True,
+        show_tail_samples=True,
+        show_tail_normals=True,
+    )
+
+    line_labels = [line.get_label() for line in fig.axes[0].lines]
+    collection_labels = [collection.get_label() for collection in fig.axes[0].collections]
+    assert "B-spline sample" in line_labels
+    assert "tail normals" in line_labels
+    assert "B-spline control points" in collection_labels
+    assert "tail samples" in collection_labels
     fig.canvas.draw()
     plt.close(fig)
 

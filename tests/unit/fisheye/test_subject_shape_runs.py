@@ -80,6 +80,42 @@ def _build_refined_root(store_path: Path | None = None) -> zarr.Group:
     return root
 
 
+def test_snout_bridge_path_can_follow_curved_mask_corridor() -> None:
+    mask = np.zeros((32, 32), dtype=bool)
+    mask[6:10, 5:22] = True
+    mask[6:23, 18:22] = True
+
+    bridge, reason = mod._snout_bridge_path_xy(mask, np.asarray([5.0, 7.0]), np.asarray([20.0, 21.0]))
+
+    assert reason == "ok"
+    assert bridge is not None
+    np.testing.assert_allclose(bridge[0], np.asarray([5.0, 7.0]), atol=1e-5)
+    np.testing.assert_allclose(bridge[-1], np.asarray([20.0, 21.0]), atol=1e-5)
+    assert bridge.shape[0] > 2
+
+
+def test_snout_join_prefers_medial_head_region_over_branch_endpoint() -> None:
+    path = np.asarray(
+        [
+            [269.0, 225.0],
+            [269.0, 229.0],
+            [269.0, 233.0],
+            [269.0, 237.0],
+            [270.0, 246.0],
+            [268.0, 250.0],
+            [260.0, 260.0],
+        ],
+        dtype=np.float64,
+    )
+    origin = np.asarray([271.0, 247.0], dtype=np.float64)
+    left = np.asarray([-0.624, -0.782], dtype=np.float64)
+
+    selected = mod._snout_join_index(path, origin, left)
+
+    assert selected > 0
+    assert abs(float(np.dot(path[selected] - origin, left))) < abs(float(np.dot(path[0] - origin, left)))
+
+
 def _add_component_row_revisions(root: zarr.Group, revisions: dict[str, list[int]]) -> None:
     run = root["refined_subject_masks_runs"]["refined_001"]
     components = run.require_group("components")
@@ -103,6 +139,16 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     run = root["analysis"]["subject_shape_runs"]["shape_001"]
     assert root["analysis"]["subject_shape_runs"].attrs["latest"] == "shape_001"
     assert run.attrs["schema_id"] == "analysis.subject_shape_runs"
+    assert run.attrs["schema_version"] == 3
+    assert run.attrs["method"] == "subject_shape_from_refined_masks_v8"
+    assert run.attrs["method_version"] == 8
+    assert run.attrs["snout_tip_estimator"] == "subject_body_contour_max_forward_projection_v1"
+    assert run.attrs["centerline_method"] == "snout_anchored_skeleton_longest_endpoint_path_v1"
+    assert run.attrs["centerline_skeleton_method"] == "skeleton_longest_endpoint_path_v1"
+    assert run.attrs["centerline_snout_extension_method"] == "prepend_mask_path_to_body_frame_guided_join_v1"
+    assert run.attrs["centerline_snout_join_method"] == "body_frame_lateral_min_head_region_v1"
+    assert run.attrs["head_endpoint_semantics"] == "validated_snout_tip"
+    assert run.attrs["centerline_snout_check_method"] == "head_endpoint_to_snout_distance_v1"
     assert run.attrs["source_refined_subject_masks_run"] == "refined_001"
     assert run.attrs["component_names"] == ["subject_body", "swim_bladder", "eye_left", "eye_right"]
     assert run["row_index"]["frame_indices"][:].tolist() == [10, 11, 12]
@@ -146,14 +192,31 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert np.all(np.isfinite(caudal))
     assert np.all(caudal[:, 1] > 10.0)
 
-    assert body.attrs["centerline_method"] == "skeleton_longest_endpoint_path_v1"
+    assert body.attrs["centerline_method"] == "snout_anchored_skeleton_longest_endpoint_path_v1"
+    assert body.attrs["centerline_skeleton_method"] == "skeleton_longest_endpoint_path_v1"
+    assert body.attrs["centerline_snout_extension_method"] == "prepend_mask_path_to_body_frame_guided_join_v1"
+    assert body.attrs["centerline_snout_join_method"] == "body_frame_lateral_min_head_region_v1"
+    assert body.attrs["head_endpoint_semantics"] == "validated_snout_tip"
+    assert body.attrs["snout_tip_estimator"] == "subject_body_contour_max_forward_projection_v1"
+    assert body.attrs["centerline_snout_check_method"] == "head_endpoint_to_snout_distance_v1"
     assert body.attrs["bspline_method"] == "centerline_scipy_splprep_v1"
     assert body.attrs["bspline_fit_mode"] == "interpolating"
+    assert body["snout_tip_valid"][:].tolist() == [True, True, True]
+    snout = np.asarray(body["snout_tip_xy"][:], dtype=np.float32)
+    assert np.all(np.isfinite(snout))
     assert body["centerline_valid"][:].tolist() == [True, True, True]
     centerline = np.asarray(body["centerline_xy"][:], dtype=np.float32)
     assert centerline.shape == (3, mod.CENTERLINE_SAMPLE_COUNT, 2)
     head = np.asarray(body["head_endpoint_xy"][:], dtype=np.float32)
     tail = np.asarray(body["tail_tip_xy"][:], dtype=np.float32)
+    np.testing.assert_allclose(head, snout, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(body["head_endpoint_to_snout_distance_px"][:], dtype=np.float32),
+        np.zeros((3,), dtype=np.float32),
+        atol=1e-5,
+    )
+    assert body["centerline_reaches_snout"][:].tolist() == [True, True, True]
+    assert _decode_reason_row(body["centerline_snout_check_reason_bytes"][0]) == "ok"
     assert np.all(head[:, 1] < tail[:, 1])
     assert body["tail_base_valid"][:].tolist() == [True, True, True]
     assert np.all(np.asarray(body["body_arclength_px"][:], dtype=np.float32) > 0)
@@ -231,6 +294,10 @@ def test_subject_shape_tail_geometry_fails_closed_for_fragmented_body(monkeypatc
     )
 
     body = root["analysis"]["subject_shape_runs"]["shape_fragmented"]["components"]["subject_body"]
+    assert body["snout_tip_valid"][:].tolist() == [True, False, True]
+    assert _decode_reason_row(body["snout_tip_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
+    assert body["centerline_reaches_snout"][:].tolist() == [True, False, True]
+    assert _decode_reason_row(body["centerline_snout_check_reason_bytes"][1]) == "missing_snout_tip"
     assert body["centerline_valid"][:].tolist() == [True, False, True]
     assert _decode_reason_row(body["centerline_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
     assert body["bspline_valid"][:].tolist() == [True, False, True]
@@ -258,6 +325,10 @@ def test_subject_shape_tail_geometry_fails_closed_for_source_body_qc(monkeypatch
     body = root["analysis"]["subject_shape_runs"]["shape_source_body_qc"]["components"]["subject_body"]
     assert body["source_mask_qc_available"][:].tolist() == [True, True, True]
     assert bool(np.asarray(body["source_mask_qc_severe_failure"][1], dtype=bool)) is True
+    assert body["snout_tip_valid"][:].tolist() == [True, False, True]
+    assert _decode_reason_row(body["snout_tip_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
+    assert body["centerline_reaches_snout"][:].tolist() == [True, False, True]
+    assert _decode_reason_row(body["centerline_snout_check_reason_bytes"][1]) == "missing_snout_tip"
     assert body["centerline_valid"][:].tolist() == [True, False, True]
     assert _decode_reason_row(body["centerline_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
     assert _decode_reason_row(body["tail_base_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"

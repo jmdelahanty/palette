@@ -172,6 +172,12 @@ analysis/subject_shape_runs/<run>/
 
 Writers may omit optional arrays they cannot validate.
 
+The body-frame origin is estimator-defined. For the current
+`mask_component_axis` estimator, `origin_xy` is the eye-pair midpoint. That
+origin is not the same as a rostral/nasal `snout_tip` landmark. Consumers that
+need true snout-to-tail geometry should read the subject-shape snout/head/tail
+fields, not infer the snout from `body_frame/origin_xy`.
+
 ## Recommended Metadata Shape
 
 Run attrs should include a machine-readable contract payload when practical:
@@ -190,6 +196,7 @@ Run attrs should include a machine-readable contract payload when practical:
   "semantic_anchors": {
     "forward_from": "swim_bladder",
     "forward_to": ["eye_left", "eye_right"],
+    "optional_rostral_anchor": "snout_tip",
     "left_reference": "eye_left",
     "right_reference": "eye_right"
   },

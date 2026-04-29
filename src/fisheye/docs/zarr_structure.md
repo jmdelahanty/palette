@@ -1546,7 +1546,25 @@ Current centerline/tail-anchor arrays:
 - `components/subject_body/centerline_valid`: `(N,)` centerline validity.
 - `components/subject_body/centerline_failure_reason_bytes`: `(N, width)`
   stable reason tags.
-- `components/subject_body/head_endpoint_xy`: `(N, 2)` anterior endpoint.
+- `components/subject_body/snout_tip_xy`: `(N, 2)` semantic rostral/nasal
+  landmark, distinct from body-frame origin and centerline head endpoint.
+- `components/subject_body/snout_tip_valid`: `(N,)` validity for
+  `snout_tip_xy`.
+- `components/subject_body/snout_tip_failure_reason_bytes`: `(N, width)`
+  stable reason tags for rostral/snout estimation.
+- `components/subject_body/head_endpoint_to_snout_distance_px`: `(N,)`
+  Euclidean distance between `head_endpoint_xy` and `snout_tip_xy`. In current
+  schema v3/method v8 runs this should be approximately zero for valid
+  centerlines because `head_endpoint_xy` is snout-anchored.
+- `components/subject_body/centerline_reaches_snout`: `(N,)` true when
+  `head_endpoint_to_snout_distance_px` is within the run's declared threshold.
+- `components/subject_body/centerline_snout_check_reason_bytes`: `(N, width)`
+  reason tags for the intermediate centerline-to-snout check.
+- `components/subject_body/head_endpoint_xy`: `(N, 2)` anterior endpoint of
+  the selected centerline/spline estimator. In current schema v3/method v8 runs
+  this is the validated `snout_tip_xy` for rows with `centerline_valid = true`.
+  Older schema v2/method v5 runs may have a skeleton-derived endpoint that does
+  not reach the semantic snout.
 - `components/subject_body/tail_tip_xy`: `(N, 2)` posterior centerline
   endpoint; source-specific measurement of semantic `tail_tip`.
 - `components/subject_body/tail_base_xy`: `(N, 2)` centerline projection of
