@@ -31,6 +31,7 @@ from ..shared.provenance_attrs import (
     resolve_assignment_keypoints_run,
     resolve_source_keypoints_run,
 )
+from ..shared.refined_subject_component_contours import refresh_component_contour_rows_from_masks
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
 from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
@@ -2216,6 +2217,12 @@ def _apply_refined_subject_roi_rows(
             roi_indices=normalized_rows,
             edited_masks_batch=edited_batch,
             component_updates=component_updates,
+        )
+        refresh_component_contour_rows_from_masks(
+            run_group,
+            component_name,
+            normalized_rows,
+            reason=f"{update_mode}_refined_subject_mask_edit",
         )
 
     updated_at_utc = _finalize_refined_subject_apply(refined, updated_components=normalized_components)

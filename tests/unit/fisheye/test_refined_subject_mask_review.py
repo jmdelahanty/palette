@@ -745,6 +745,18 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     assert swim_reasons is not None
     assert body_reasons[0] == "manual_correction"
     assert swim_reasons[0] == "manual_correction"
+    body_contours = body_group["contours"]
+    swim_contours = swim_group["contours"]
+    assert body_contours.attrs["cache_coverage"] == "partial_row_updates"
+    assert swim_contours.attrs["cache_coverage"] == "partial_row_updates"
+    assert int(body_contours["ptr"][0]) == -1
+    assert int(body_contours["len"][0]) == 0
+    assert int(swim_contours["ptr"][0]) == 0
+    assert int(swim_contours["len"][0]) > 0
+    assert int(body_group["row_revision"][0]) == 1
+    assert int(swim_group["row_revision"][0]) == 1
+    assert int(body_group["row_revision"][1]) == 0
+    assert int(swim_group["row_revision"][1]) == 0
     np.testing.assert_allclose(
         np.asarray(body_group["metrics/largest_component_fraction"][0], dtype=np.float32),
         np.float32(0.0),

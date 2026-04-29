@@ -220,6 +220,46 @@ The old contour points become orphaned cache data. That is acceptable for
 row-local editing. A later compaction command can rebuild packed contour arrays
 if storage overhead becomes meaningful.
 
+### Row-Local Update Tracking
+
+Each component group may carry row-local revision arrays:
+
+```text
+components/<component>/
+  attrs:
+    row_update_schema_id            "refined_subject_component_row_updates_v1"
+    last_row_update_at_utc
+    last_row_update_reason
+  row_revision                      (N,) int64
+  row_updated_at_utc_bytes          (N, 40) uint8
+  row_update_reason_bytes           (N, 128) uint8
+```
+
+`row_revision[row]` increments whenever Palette explicitly refreshes
+mask-local caches for that row/component after a mask edit or source sync. A
+downstream analysis run that consumes refined masks should record the source
+run plus the relevant row revisions if it wants row-local drift detection.
+
+This row revision is not a biological identity and not a replacement for
+stable row IDs. It is only a cache/source-change generation for one semantic
+component row.
+
+If a contour cache is created by row-local updates before a full contour
+backfill exists, the contour group should be marked as partial:
+
+```text
+components/<component>/contours.attrs["cache_coverage"] = "partial_row_updates"
+```
+
+Full rebuild/backfill writers should mark:
+
+```text
+components/<component>/contours.attrs["cache_coverage"] = "full_indexed_rows"
+```
+
+Readers must still treat `ptr[row] = -1` and `len[row] = 0` as "no persisted
+contour for this row" and fall back to `masks_roi` when needed.
+
 ### Contour Method Policy
 
 Different algorithms produce different contour points. The contour method must
@@ -503,12 +543,12 @@ scripts/py -m fisheye.utils.backfill_refined_subject_component_contours \
 - Implemented: finalizers and metric-refresh commands can opt into full
   body/swim contour cache refresh with `--write-component-contours`.
 - Implemented: component contour cache refresh is explicit and defaults off.
-- Open: manual-edit save paths should regenerate component-local caches for
-  edited rows/components rather than rewriting the full cache.
+- Implemented: manual-edit save paths regenerate component-local contour rows
+  using append-only row updates and increment per-component `row_revision`.
 - Existing: metric refresh already updates scalar mask-local metrics and QC
   reason tags.
-- Add a source-revision or update-log mechanism so downstream analysis can
-  detect row-local source changes.
+- Implemented: component groups can carry row-local revision/timestamp/reason
+  arrays so downstream analysis can detect row-local source changes.
 
 Example finalization with contours:
 
