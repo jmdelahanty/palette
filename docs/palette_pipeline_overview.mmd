@@ -1,0 +1,45 @@
+flowchart TD
+  H5[(Experiment H5)]
+  VID[(Camera video)]
+  IMPORT["Import recording<br/>raw_video + stimulus_runs"]
+
+  DET["Fish detection<br/>detect_runs"]
+  CROP["ROI crop generation<br/>crop_runs"]
+  POSE["Pose / keypoints<br/>keypoints_runs"]
+  MASKS["Subject mask generation<br/>subject_mask_runs"]
+  COMPONENTS["Refined mask components<br/>subject_body<br/>eye_left + eye_right<br/>swim_bladder"]
+
+  TRACK["Track kinematics<br/>analysis/track_kinematics_runs"]
+  EYE["Eye / body geometry<br/>analysis/subject_shape_runs<br/>analysis/eye_angle_runs"]
+  BOUTS["Swim bouts<br/>analysis/swim_bout_runs"]
+  STIM["Stimulus response<br/>analysis/stimulus_response_runs"]
+  HEAT["Spatial summaries / heatmaps<br/>plot_training_heatmaps_zarr"]
+
+  TRAIN["Training exports<br/>detect / pose / mask datasets"]
+
+  H5 --> IMPORT
+  VID --> IMPORT
+
+  IMPORT --> DET
+  DET -->|"detect_quality + refine_detect<br/>refined_detect_runs/instances"| CROP
+
+  CROP --> POSE
+  POSE -->|"refine_keypoints<br/>refined_keypoints_runs"| TRACK
+  POSE -->|"refine_keypoints<br/>refined_keypoints_runs"| MASKS
+
+  CROP --> MASKS
+  POSE -->|"refined keypoint lineage<br/>left/right eye assignment"| COMPONENTS
+  MASKS -->|"finalize_subject_masks<br/>refined_subject_masks_runs"| COMPONENTS
+  COMPONENTS --> EYE
+  MASKS -->|"finalize_subject_masks<br/>refined_subject_masks_runs"| TRAIN
+
+  DET -->|"arena assignment / tracking<br/>arena_assignment_runs + tracking_runs"| TRACK
+  CROP -->|"reviewed crops + refined labels"| TRAIN
+  POSE -->|"reviewed refined_keypoints_runs"| TRAIN
+
+  TRACK --> BOUTS
+  TRACK --> HEAT
+  TRACK --> STIM
+  IMPORT -->|"stimulus protocol/events<br/>analysis/stimulus_runs"| STIM
+  BOUTS --> STIM
+  EYE --> STIM
