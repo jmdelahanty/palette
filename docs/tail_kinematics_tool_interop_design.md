@@ -35,6 +35,7 @@ The interoperability layer should therefore be:
 
 ```text
 Palette canonical source data
+  -> Palette tail-kinematics run
   -> Palette tail-posture view/export
   -> external method/classifier
   -> Palette classifier or imported-analysis run
@@ -258,10 +259,11 @@ tail_posture_view/
   tail_curvature                      (N, K) optional
 ```
 
-This does not need to be a permanent run family immediately. It can start as an
-exporter or in-memory adapter. If multiple downstream tools begin consuming it,
-then persisting `analysis/tail_posture_views/<run>` or
-`analysis/tail_posture_runs/<run>` becomes justified.
+This does not need to be the primary permanent run family. Palette-native
+behavior-facing tail metrics should live in
+`analysis/tail_kinematics_runs/<run>` first, then tool-ready views can be
+generated from those arrays plus the source subject-shape geometry. See
+[tail_kinematics_run_design.md](tail_kinematics_run_design.md).
 
 ### External Classification Outputs
 
@@ -311,12 +313,20 @@ Megabouts is the most natural first adapter because it expects already-tracked
 tail and trajectory arrays. Palette can provide these from `subject_shape_runs`
 or keypoint-derived tail posture.
 
+Megabouts compatibility does not mean Megabouts owns Palette's tail schema.
+Palette should compute reusable tail primitives first, then map them into a
+Megabouts-compatible view or export. Megabouts-derived classifications should
+return as imported classifier outputs with source refs, not as mutations to
+Palette-native tail metrics.
+
 Initial adapter responsibilities:
 
 - resolve frame/time base and FPS
 - resolve calibrated units when available
 - produce `head_x`, `head_y`, `head_yaw`
 - produce `tail_x`, `tail_y` or `tail_angle`
+- map Palette's signed body-frame tail angles into Megabouts' expected
+  convention, with the conversion recorded in the export manifest
 - map invalid Palette rows to `NaN` values or a no-tracking mask
 - record exact source refs and conversion parameters
 
@@ -381,6 +391,8 @@ This belongs downstream of current `bout_kinematics_runs`,
   defines the mask/spline-derived tail geometry and tail landmark conventions.
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md) defines
   where interpreted mask-derived shape geometry lives.
+- [tail_kinematics_run_design.md](tail_kinematics_run_design.md) defines the
+  first Palette-native tail-angle, tail-deflection, and curvature metric run.
 - [pose_kinematics_run_design.md](pose_kinematics_run_design.md) defines where
   keypoint/skeleton-derived geometry should live.
 - [bout_kinematics_run_design.md](bout_kinematics_run_design.md) defines
@@ -402,16 +414,30 @@ behavior-analysis packages.
 
 ### Palette Geometry
 
-- [ ] Finish mask-derived tail sampling arrays in `subject_shape_runs`.
-- [ ] Add a validated B-spline method, with sampled-centerline fallback if
+- [x] Finish first mask-derived tail sampling arrays in `subject_shape_runs`.
+- [x] Add a validated B-spline method, with sampled-centerline fallback if
   spline fitting fails.
-- [ ] Add tail tangent, curvature, and width-profile outputs.
-- [ ] Add overlay visualization for tail samples, tangents, normals, and
-  curvature/width validity.
+- [x] Add tail tangent and curvature outputs.
+- [x] Add overlay visualization for tail samples, tangents, normals, and
+  B-spline review.
+- [ ] Add width-profile outputs.
+- [ ] Add persisted summary plots for subject-shape tail validity and length
+  distributions.
+
+### Palette Tail Kinematics
+
+- [x] Define a dedicated `analysis/tail_kinematics_runs` design.
+- [ ] Implement frame-level tail angles, tail-tip angles, lateral deflections,
+  and curvature summaries from subject-shape tail samples.
+- [ ] Add tests for angle convention, left/right sign, straight-tail zero angle,
+  and invalid-row propagation.
+- [ ] Add visualization artifacts and Marimo loading after the run schema
+  stabilizes.
 
 ### Tool-Ready View
 
-- [ ] Define exact `tail_posture_view` fields after first canary.
+- [ ] Define exact `tail_posture_view` or `tool_views/megabouts` fields after
+  first tail-kinematics canary.
 - [ ] Implement a read-only exporter from `subject_shape_runs`.
 - [ ] Implement a keypoint-derived exporter from `pose_kinematics_runs` or
   refined keypoints when tail labels exist.

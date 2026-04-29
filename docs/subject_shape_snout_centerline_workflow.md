@@ -323,5 +323,7 @@ Recommended next slices:
    `analysis/subject_shape_runs/<run>/visualizations`.
 4. Add tail-angle time-series and bout-aligned tail features from
    `tail_sample_xy`, `tail_tangent_xy`, and `tail_curvature_px_inv`.
+   The first frame-level metric surface is specified in
+   [tail_kinematics_run_design.md](tail_kinematics_run_design.md).
 5. Add a Crimson read contract for subject-shape overlays after the current
    arrays stabilize.

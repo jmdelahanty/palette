@@ -57,6 +57,7 @@ The default rule is:
 | Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape and shared body-frame surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
+| Tail kinematics | ordered tail geometry from `analysis/subject_shape_runs` or future keypoint-derived tail posture | none; derived deterministic analysis layer | planned `analysis/tail_kinematics_runs/<run>` for body-frame tail angles, lateral deflections, and curvature summaries; Megabouts/ZebraZoom/Stytra views are adapters | tail traces must reference exact geometry source and record angle/sign/unit conventions |
 | Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"` and v4 output schema | current runs prefer subject-shape eye geometry when available, expose explicit gaze/minor-axis arrays plus BEAST-comparable mean per-eye vergence, and record exact geometry/keypoint/body-frame lineage |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
@@ -231,6 +232,7 @@ When reviewing new pipeline work, ask:
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [body_frame_contract.md](body_frame_contract.md)
 - [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [tail_kinematics_run_design.md](tail_kinematics_run_design.md)
 - [tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md)
 - [repo_wide_staleness_checklist.md](repo_wide_staleness_checklist.md)
 - [repo_wide_staleness_gap_matrix.md](repo_wide_staleness_gap_matrix.md)

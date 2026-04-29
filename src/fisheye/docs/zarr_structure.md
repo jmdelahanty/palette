@@ -1628,6 +1628,65 @@ derived-run contract is documented in `docs/derived_analysis_run_contract.md`.
 Shared fish-relative frame semantics are documented in
 `docs/body_frame_contract.md`.
 
+### `analysis/tail_kinematics_runs/`
+
+Frame-level tail-angle, tail-deflection, and tail-curvature metrics derived
+from an exact ordered tail-geometry source, usually
+`analysis/subject_shape_runs/<run>/components/subject_body`.
+
+This run family is behavior-facing. It should consume subject-shape geometry
+and write derived traces, but it should not mutate subject-shape geometry,
+refined masks, swim-bout segmentations, or classifier outputs. The first design
+contract is documented in `docs/tail_kinematics_run_design.md`.
+
+**Structure**: `analysis/tail_kinematics_runs/<run_name>/`
+
+Expected run attrs:
+
+- `schema_id`: `"analysis.tail_kinematics_runs"`
+- `schema_version`: initial design is `1`
+- `method`: e.g. `"tail_metrics_from_subject_shape"`
+- `method_version`
+- `row_axis`: `"roi_rows"`
+- `source_subject_shape_run`
+- `source_refined_subject_masks_run`
+- `source_tail_geometry_kind`: e.g. `"subject_shape_tail_samples"`
+- `body_frame_convention`
+- `tail_angle_reference_axis`: `"caudal_axis=-forward_axis"`
+- `tail_angle_positive_direction`: `"anatomical_left"`
+- `tail_sample_domain`: `"tail_segment_normalized_arclength"`
+- `tail_sample_count`
+
+Expected arrays:
+
+- `frame_index`: `(N,)`
+- `time_s`: `(N,)` optional
+- `valid`: `(N,)`
+- `failure_reason_bytes`: `(N, width)`
+- `tail_sample_s`: `(K,)`
+- `tail_angle_rad`: `(N, K)` signed body-frame tail tangent angle.
+- `tail_angle_deg`: `(N, K)` optional plotting mirror.
+- `tail_tip_angle_rad`: `(N,)`
+- `tail_tip_angle_deg`: `(N,)` optional plotting mirror.
+- `tail_lateral_deflection_px`: `(N, K)` signed lateral displacement from
+  `tail_base_xy` along the body-frame anatomical-left axis.
+- `tail_tip_lateral_deflection_px`: `(N,)`
+- `tail_lateral_deflection_mm`: `(N, K)` optional when calibrated.
+- `max_abs_tail_angle_rad`: `(N,)`
+- `max_abs_tail_angle_deg`: `(N,)` optional plotting mirror.
+- `tail_angle_rms_rad`: `(N,)`
+- `integrated_abs_tail_angle_rad`: `(N,)`
+- `tail_curvature_px_inv`: `(N, K)` mirrored or converted from the selected
+  subject-shape geometry source with source attrs.
+- `max_abs_tail_curvature_px_inv`: `(N,)`
+- `integrated_abs_tail_curvature`: `(N,)`
+
+Tool-specific views, such as Megabouts-ready arrays, may be generated on demand
+or stored under `tool_views/<tool_name>/` with explicit source attrs and export
+hashes. Third-party classifier labels should land in a separate
+`analysis/bout_classification_runs/<run>` family rather than overwriting
+Palette-native tail traces.
+
 ### `analysis/stimulus_response_runs/`
 
 Per-step behavioral metrics across stimulus types. Consumes identity-resolved
