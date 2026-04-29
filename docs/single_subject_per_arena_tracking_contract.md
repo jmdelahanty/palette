@@ -298,6 +298,13 @@ Near-term migration can keep the implementation simple:
 That gives the current one-fish-per-dish workflow the right semantics before
 any multi-subject tracker exists.
 
+This is also the recommended implementation boundary for near-term
+subject-mask and subject-shape work. Palette should keep building the
+single-fish-per-dish workflow while preserving contracts that allow multiple
+rows per frame and future `multi_subject_within_arena` tracking. New mask,
+shape, QC, and viewer code should not hardcode one row per frame, even if the
+current tracker emits at most one real track per occupied arena.
+
 ## Bottom Line
 
 For the current operating mode, the correct model is:

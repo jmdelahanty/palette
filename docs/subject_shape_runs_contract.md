@@ -226,6 +226,12 @@ analysis/subject_shape_runs/
 This layout is intentionally permissive. The first implementation should write
 only the arrays it can validate.
 
+For realtime viewers such as Crimson, subject-shape runs may add
+non-authoritative `frame_index/` and `track_index/` lookup groups so consumers
+can resolve rows by frame or track without scanning all row-aligned arrays. The
+canonical shape arrays remain sparse and row-aligned. See
+[realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md).
+
 ## Body Frame Placement
 
 `analysis/subject_shape_runs/<run>/body_frame/` is the preferred shared
@@ -394,6 +400,14 @@ Recommended near-term approach:
 - do not create a separate eye-analysis authority for mask-derived eye geometry
   unless it is a downstream temporal, behavioral, or task-specific analysis.
 
+Near-term subject-shape implementations may target single-fish-per-dish data,
+but the contract should remain sparse and row-aligned. Writers and viewers
+should allow multiple rows with the same `frame_index`, should not encode
+identity in component channels, and should only add `row_index/track_ids` or
+track indexes after joining against one exact `tracking_runs/<run>` source.
+This preserves a path to future multi-subject tracking without blocking current
+body QC, centerline, tail-anchor, and spline work.
+
 ## Open Questions
 
 - Which body centerline method is the first supported implementation?
@@ -413,6 +427,7 @@ Recommended near-term approach:
 - [body_frame_contract.md](body_frame_contract.md)
 - [current_pipeline_contract.md](current_pipeline_contract.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
+- [realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md)
 - [refined_subject_masks_runs_contract.md](refined_subject_masks_runs_contract.md)
 - [subject_mask_refinement_todo.md](subject_mask_refinement_todo.md)
 - [pose_kinematics_run_design.md](pose_kinematics_run_design.md)

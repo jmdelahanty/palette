@@ -95,6 +95,12 @@ Required source refs when biological identity is used:
 - any refined source run whose rows were sampled into the track
 - coordinate-space and calibration inputs when measurements have physical units
 
+Realtime consumers should not be forced to scan sparse row arrays for every
+displayed frame. Row-aligned and track-aligned analysis runs may add
+`frame_index/` and `track_index/` lookup groups as non-authoritative
+accelerators. See
+[`realtime_sparse_row_index_contract.md`](realtime_sparse_row_index_contract.md).
+
 ## Validity And Failure State
 
 Derived arrays should prefer explicit validity over implicit sentinel values.
