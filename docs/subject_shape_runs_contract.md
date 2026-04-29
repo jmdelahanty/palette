@@ -9,6 +9,10 @@ Purpose: define the downstream deterministic analysis layer for biological
 shape, pose, and cross-component relationships derived from canonical refined
 subject masks.
 
+For the boundary between refined-mask-local geometry caches and downstream
+analysis products, see
+[refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md).
+
 ## Scope
 
 `analysis/subject_shape_runs/<run>` is the home for interpreted shape

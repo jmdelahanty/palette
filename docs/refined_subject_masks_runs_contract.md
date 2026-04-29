@@ -9,6 +9,9 @@ Purpose: define the runtime/storage contract for editable, refined
 subject-mask artifacts that hold canonical component masks for body, swim
 bladder, and modern left/right eye refinement under the same component model.
 
+For the contour/cache ownership and row-local edit propagation policy, see
+[refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md).
+
 ## Scope
 
 - Define `refined_subject_masks_runs/<run>` as the canonical refined/editable

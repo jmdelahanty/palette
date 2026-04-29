@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,6 +17,8 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 
 DEFAULT_OUTPUT_DIR = Path("/tmp/palette_subject_shape_overlays")
+ContourSource = Literal["mask", "persisted", "auto", "compare"]
+CONTOUR_SOURCE_CHOICES: tuple[str, ...] = ("mask", "persisted", "auto", "compare")
 
 
 @dataclass(frozen=True)
@@ -172,14 +174,150 @@ def _base_image(ctx: SubjectShapeOverlayContext, row: int, subject_body: np.ndar
     raise ValueError("No crop image or subject-body mask available for overlay background.")
 
 
-def _plot_contours(ax: plt.Axes, mask: np.ndarray | None, *, color: str, linewidth: float, label: str) -> None:
+def _plot_contours(
+    ax: plt.Axes,
+    mask: np.ndarray | None,
+    *,
+    color: str,
+    linewidth: float,
+    label: str,
+    linestyle: str = "-",
+    alpha: float = 1.0,
+) -> None:
     if mask is None or not np.any(mask):
         return
     for contour in find_contours(np.asarray(mask, dtype=np.float32), level=0.5):
         if int(contour.shape[0]) < 2:
             continue
-        ax.plot(contour[:, 1], contour[:, 0], color=color, linewidth=linewidth, label=label)
+        ax.plot(
+            contour[:, 1],
+            contour[:, 0],
+            color=color,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            alpha=alpha,
+            label=label,
+        )
         label = "_nolegend_"
+
+
+def _persisted_contour_for(ctx: SubjectShapeOverlayContext, row: int, component: str) -> np.ndarray | None:
+    contours_group = _get_array_or_none(ctx.refined_group, f"components/{component}/contours")
+    if not isinstance(contours_group, zarr.Group):
+        return None
+    ptr_arr = contours_group.get("ptr")
+    len_arr = contours_group.get("len")
+    points_arr = contours_group.get("points_xy")
+    if ptr_arr is None or len_arr is None or points_arr is None:
+        return None
+    row = int(row)
+    if row < 0 or row >= int(ptr_arr.shape[0]) or row >= int(len_arr.shape[0]):
+        return None
+    try:
+        start = int(ptr_arr[row])
+        length = int(len_arr[row])
+    except Exception:
+        return None
+    if start < 0 or length <= 1:
+        return None
+    try:
+        points = np.asarray(points_arr[start : start + length], dtype=np.float32).reshape(-1, 2)
+    except Exception:
+        return None
+    if int(points.shape[0]) < 2 or not np.all(np.isfinite(points)):
+        return None
+    return points
+
+
+def _plot_contour_points(
+    ax: plt.Axes,
+    points_xy: np.ndarray | None,
+    *,
+    color: str,
+    linewidth: float,
+    label: str,
+    linestyle: str = "--",
+    alpha: float = 1.0,
+) -> None:
+    if points_xy is None:
+        return
+    points = np.asarray(points_xy, dtype=np.float32).reshape(-1, 2)
+    if int(points.shape[0]) < 2:
+        return
+    ax.plot(
+        points[:, 0],
+        points[:, 1],
+        color=color,
+        linewidth=linewidth,
+        linestyle=linestyle,
+        alpha=alpha,
+        label=label,
+    )
+
+
+def _plot_component_contour(
+    ax: plt.Axes,
+    ctx: SubjectShapeOverlayContext,
+    *,
+    row: int,
+    component: str,
+    mask: np.ndarray | None,
+    color: str,
+    linewidth: float,
+    label: str,
+    contour_source: ContourSource,
+) -> None:
+    persisted = None
+    if contour_source in {"persisted", "auto", "compare"}:
+        persisted = _persisted_contour_for(ctx, row, component)
+
+    if contour_source == "mask":
+        _plot_contours(ax, mask, color=color, linewidth=linewidth, label=label)
+        return
+
+    if contour_source == "persisted":
+        _plot_contour_points(
+            ax,
+            persisted,
+            color=color,
+            linewidth=linewidth,
+            label=f"{label} persisted",
+        )
+        return
+
+    if contour_source == "auto":
+        if persisted is not None:
+            _plot_contour_points(
+                ax,
+                persisted,
+                color=color,
+                linewidth=linewidth,
+                label=f"{label} persisted",
+            )
+        else:
+            _plot_contours(ax, mask, color=color, linewidth=linewidth, label=label)
+        return
+
+    if contour_source == "compare":
+        _plot_contours(
+            ax,
+            mask,
+            color=color,
+            linewidth=max(0.8, linewidth * 0.8),
+            label=f"{label} from mask",
+            alpha=0.65,
+        )
+        _plot_contour_points(
+            ax,
+            persisted,
+            color=color,
+            linewidth=max(1.2, linewidth),
+            label=f"{label} persisted",
+            linestyle="--",
+        )
+        return
+
+    raise ValueError(f"Unsupported contour_source: {contour_source!r}")
 
 
 def _plot_point(
@@ -231,8 +369,11 @@ def render_subject_shape_overlay(
     *,
     row: int,
     figsize: tuple[float, float] = (7.0, 7.0),
+    contour_source: ContourSource = "mask",
 ) -> plt.Figure:
     row = int(row)
+    if contour_source not in CONTOUR_SOURCE_CHOICES:
+        raise ValueError(f"contour_source must be one of {CONTOUR_SOURCE_CHOICES}; got {contour_source!r}")
     body = _mask_for(ctx, row, "subject_body")
     swim = _mask_for(ctx, row, "swim_bladder")
     eye_left = _mask_for(ctx, row, "eye_left")
@@ -241,10 +382,50 @@ def render_subject_shape_overlay(
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.imshow(base, cmap="gray", interpolation="nearest")
-    _plot_contours(ax, body, color="white", linewidth=1.2, label="body contour")
-    _plot_contours(ax, swim, color="#00bcd4", linewidth=1.5, label="swim bladder")
-    _plot_contours(ax, eye_left, color="#ef5350", linewidth=1.2, label="eye left")
-    _plot_contours(ax, eye_right, color="#42a5f5", linewidth=1.2, label="eye right")
+    _plot_component_contour(
+        ax,
+        ctx,
+        row=row,
+        component="subject_body",
+        mask=body,
+        color="white",
+        linewidth=1.2,
+        label="body contour",
+        contour_source=contour_source,
+    )
+    _plot_component_contour(
+        ax,
+        ctx,
+        row=row,
+        component="swim_bladder",
+        mask=swim,
+        color="#00bcd4",
+        linewidth=1.5,
+        label="swim bladder",
+        contour_source=contour_source,
+    )
+    _plot_component_contour(
+        ax,
+        ctx,
+        row=row,
+        component="eye_left",
+        mask=eye_left,
+        color="#ef5350",
+        linewidth=1.2,
+        label="eye left",
+        contour_source=contour_source,
+    )
+    _plot_component_contour(
+        ax,
+        ctx,
+        row=row,
+        component="eye_right",
+        mask=eye_right,
+        color="#42a5f5",
+        linewidth=1.2,
+        label="eye right",
+        contour_source=contour_source,
+    )
 
     shape = ctx.shape_group
     centerline_valid = bool(_row_value(shape, "components/subject_body/centerline_valid", row, False))
@@ -302,6 +483,7 @@ def render_subject_shape_overlay(
             f"shape: {ctx.shape_run_name}",
             f"refined: {ctx.refined_run_name}",
             f"background: {base_source}",
+            f"contours: {contour_source}",
             f"centerline: {centerline_valid} ({body_reason or 'n/a'})",
             f"tail_base: {bool(_row_value(shape, 'components/subject_body/tail_base_valid', row, False))} ({tail_reason or 'n/a'})",
             f"caudal_anchor: {bool(_row_value(shape, 'components/swim_bladder/caudal_contour_valid', row, False))} ({anchor_reason or 'n/a'})",
@@ -345,6 +527,7 @@ def export_subject_shape_overlays(
     rows: Sequence[int] = (0,),
     use_crop_images: bool = True,
     dpi: int = 160,
+    contour_source: ContourSource = "mask",
 ) -> list[Path]:
     ctx = open_subject_shape_overlay_context(
         zarr_path,
@@ -356,7 +539,7 @@ def export_subject_shape_overlays(
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for row in rows:
-        fig = render_subject_shape_overlay(ctx, row=int(row))
+        fig = render_subject_shape_overlay(ctx, row=int(row), contour_source=contour_source)
         out = output_dir / f"subject_shape_overlay_{ctx.shape_run_name}_row_{int(row):06d}.png"
         fig.savefig(out, dpi=int(dpi), bbox_inches="tight")
         plt.close(fig)
@@ -388,6 +571,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--count", type=int, default=6, help="Number of sequential rows when --rows is omitted.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--dpi", type=int, default=160)
+    parser.add_argument(
+        "--contour-source",
+        choices=CONTOUR_SOURCE_CHOICES,
+        default="mask",
+        help=(
+            "Contour rendering source: mask computes boundaries from masks_roi; persisted draws "
+            "components/<component>/contours; auto prefers persisted and falls back to mask; "
+            "compare draws both."
+        ),
+    )
     return parser
 
 
@@ -403,6 +596,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rows=rows,
         use_crop_images=not bool(args.no_crop_images),
         dpi=int(args.dpi),
+        contour_source=args.contour_source,
     )
     for path in paths:
         print(path)

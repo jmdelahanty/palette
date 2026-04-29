@@ -82,6 +82,29 @@ def _build_refined_root(store_path: Path) -> zarr.Group:
     return root
 
 
+def _add_persisted_eye_left_contours(root: zarr.Group) -> None:
+    run = root["refined_subject_masks_runs"]["refined_001"]
+    contours = run.require_group("components").require_group("eye_left").require_group("contours")
+    contours.attrs["contour_schema_id"] = "component_contours_v1"
+    contours.attrs["coordinate_space"] = "roi_pixels"
+    contours.create_array("ptr", data=np.asarray([0, -1], dtype=np.int64), overwrite=True)
+    contours.create_array("len", data=np.asarray([5, 0], dtype=np.int32), overwrite=True)
+    contours.create_array(
+        "points_xy",
+        data=np.asarray(
+            [
+                [5.0, 5.0],
+                [9.0, 5.0],
+                [9.0, 9.0],
+                [5.0, 9.0],
+                [5.0, 5.0],
+            ],
+            dtype=np.float32,
+        ),
+        overwrite=True,
+    )
+
+
 def test_render_subject_shape_overlay_from_mask_background(tmp_path: Path, monkeypatch) -> None:
     _patch_provenance(monkeypatch)
     zarr_path = tmp_path / "shape.zarr"
@@ -98,6 +121,54 @@ def test_render_subject_shape_overlay_from_mask_background(tmp_path: Path, monke
 
     assert fig.axes
     assert "Subject shape overlay" in fig.axes[0].get_title()
+    fig.canvas.draw()
+    plt.close(fig)
+
+
+def test_render_subject_shape_overlay_can_draw_persisted_eye_contours(tmp_path: Path, monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    zarr_path = tmp_path / "shape.zarr"
+    root = _build_refined_root(zarr_path)
+    _add_persisted_eye_left_contours(root)
+    subject_shape_runs.write_subject_shape_run_group(
+        root,
+        zarr_path=zarr_path,
+        refined_run="refined_001",
+        run_name="shape_001",
+    )
+
+    ctx = open_subject_shape_overlay_context(zarr_path, shape_run="shape_001", use_crop_images=False)
+    fig = render_subject_shape_overlay(ctx, row=0, contour_source="persisted")
+
+    labels = [line.get_label() for line in fig.axes[0].lines]
+    assert "eye left persisted" in labels
+    assert "body contour" not in labels
+    fig.canvas.draw()
+    plt.close(fig)
+
+
+def test_render_subject_shape_overlay_compare_draws_mask_and_persisted_contours(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    zarr_path = tmp_path / "shape.zarr"
+    root = _build_refined_root(zarr_path)
+    _add_persisted_eye_left_contours(root)
+    subject_shape_runs.write_subject_shape_run_group(
+        root,
+        zarr_path=zarr_path,
+        refined_run="refined_001",
+        run_name="shape_001",
+    )
+
+    ctx = open_subject_shape_overlay_context(zarr_path, shape_run="shape_001", use_crop_images=False)
+    fig = render_subject_shape_overlay(ctx, row=0, contour_source="compare")
+
+    labels = [line.get_label() for line in fig.axes[0].lines]
+    assert "eye left from mask" in labels
+    assert "eye left persisted" in labels
+    assert "body contour from mask" in labels
     fig.canvas.draw()
     plt.close(fig)
 
@@ -120,6 +191,7 @@ def test_export_subject_shape_overlay_png(tmp_path: Path, monkeypatch) -> None:
         rows=[0, 1],
         use_crop_images=False,
         dpi=80,
+        contour_source="auto",
     )
 
     assert len(paths) == 2

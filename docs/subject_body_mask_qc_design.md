@@ -9,6 +9,9 @@ Purpose: define mask-level quality checks for `subject_body` refined masks
 before downstream centerline, tail-anchor, spline, or body-frame analyses trust
 those masks.
 
+For the broader contour/cache and row-local propagation policy, see
+[refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md).
+
 ## Problem
 
 Some recordings contain arena artifacts that can be included in the predicted
