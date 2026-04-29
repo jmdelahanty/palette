@@ -12,6 +12,8 @@ subject masks.
 For the boundary between refined-mask-local geometry caches and downstream
 analysis products, see
 [refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md).
+For the current snout-anchored centerline and B-spline workflow runbook, see
+[subject_shape_snout_centerline_workflow.md](subject_shape_snout_centerline_workflow.md).
 For the user-facing conventions around `caudal_contour_point_xy`,
 `tail_base_xy`, `tail_tip_xy`, and `centerline_xy`, see
 [subject_shape_landmark_conventions.md](subject_shape_landmark_conventions.md).
