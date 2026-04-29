@@ -79,6 +79,7 @@ from .assemble_refined_subject_masks import (
     _resolve_subject_keypoint_group,
 )
 from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
+from ..shared.refined_subject_component_contours import write_refined_subject_component_contours
 from .subject_eye_assignment import EYES_UNION_ASSIGNMENT_METHOD, assign_eyes_union_to_lr
 from .subject_mask_finalization import (
     ComponentFinalizationPolicy,
@@ -90,6 +91,7 @@ SMART_FINALIZE_SUBJECT_MASKS_METHOD = "smart_finalize_subject_masks_v1"
 _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_smart_finalize_subject_masks"
 _RAW_EYE_UNION_COMPONENT = "eyes_union"
 _EYE_COMPONENTS = ("eye_left", "eye_right")
+_COMPONENT_CONTOUR_COMPONENTS = ("subject_body", "swim_bladder")
 _FINALIZABLE_RAW_COMPONENTS = ("subject_body", "swim_bladder", _RAW_EYE_UNION_COMPONENT)
 _METRIC_LEVELS = ("cheap", "full")
 _SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
@@ -206,6 +208,28 @@ def _normalize_execution_backend(execution_backend: object) -> str:
             f"{', '.join(_EXECUTION_BACKENDS)}."
         )
     return backend
+
+
+def _component_contour_targets(component_names: Sequence[str]) -> list[str]:
+    requested = {str(component) for component in component_names}
+    return [component for component in _COMPONENT_CONTOUR_COMPONENTS if component in requested]
+
+
+def _summaries_to_json_safe(summaries: Sequence[object]) -> list[dict[str, object]]:
+    payload: list[dict[str, object]] = []
+    for summary in summaries:
+        payload.append(
+            {
+                "component": str(getattr(summary, "component", "")),
+                "status": str(getattr(summary, "status", "")),
+                "reason": getattr(summary, "reason", None),
+                "roi_count": int(getattr(summary, "roi_count", 0) or 0),
+                "contour_count": int(getattr(summary, "contour_count", 0) or 0),
+                "point_count": int(getattr(summary, "point_count", 0) or 0),
+                "existing": bool(getattr(summary, "existing", False)),
+            }
+        )
+    return payload
 
 
 def _json_safe(value: object) -> object:
@@ -1567,6 +1591,7 @@ def refresh_refined_subject_mask_metrics_run(
     chunk_size: int = 256,
     refresh_reason_tags: bool = True,
     write_eye_geometry: bool = False,
+    write_component_contours: bool = False,
     execution_backend: str = _SERIAL_EXECUTION_BACKEND,
     scheduler: str = "single-threaded",
     num_workers: Optional[int] = None,
@@ -1608,6 +1633,7 @@ def refresh_refined_subject_mask_metrics_run(
     refreshed_components: list[str] = []
     reason_labels_by_component: dict[str, np.ndarray] = {}
     rows_with_component_by_component: dict[str, int] = {}
+    contour_summaries: list[dict[str, object]] = []
 
     for component_name, component_idx in component_indices:
         component_group = _ensure_refined_component_metric_shell(
@@ -1711,6 +1737,27 @@ def refresh_refined_subject_mask_metrics_run(
         write_refined_subject_eye_geometry(run_group)
         run_group.attrs["eye_geometry_status"] = "computed"
 
+    if write_component_contours:
+        contour_components = _component_contour_targets([name for name, _idx in component_indices])
+        if contour_components:
+            with timing.phase("write_component_contours"):
+                contour_summaries = _summaries_to_json_safe(
+                    write_refined_subject_component_contours(
+                        run_group,
+                        components=contour_components,
+                        source_mask_run=run_name,
+                        chunk_rois=max(1, min(256, total_rows)),
+                        overwrite=True,
+                    )
+                )
+            run_group.attrs["component_contours_status"] = "computed"
+            run_group.attrs["component_contours_components"] = list(contour_components)
+            run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
+            run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
+        else:
+            run_group.attrs["component_contours_status"] = "deferred"
+            run_group.attrs["component_contours_deferred_reason"] = "no_subject_body_or_swim_bladder_components_selected"
+
     refreshed_at = _utc_now()
     duration_seconds = float(time.perf_counter() - stage_start)
     timing_summary = timing.summary(total_rows=total_rows, duration_seconds=duration_seconds)
@@ -1740,6 +1787,8 @@ def refresh_refined_subject_mask_metrics_run(
         "chunk_count": len(chunk_ranges),
         "refresh_reason_tags": bool(refresh_reason_tags),
         "write_eye_geometry": bool(write_eye_geometry),
+        "write_component_contours": bool(write_component_contours),
+        "component_contours": contour_summaries,
         "review_counts": review_counts,
         "duration_seconds": duration_seconds,
         "timing_summary": dict(_json_safe(timing_summary)),
@@ -1756,6 +1805,7 @@ def refresh_refined_subject_mask_metrics(
     chunk_size: int = 256,
     refresh_reason_tags: bool = True,
     write_eye_geometry: bool = False,
+    write_component_contours: bool = False,
     execution_backend: str = _SERIAL_EXECUTION_BACKEND,
     scheduler: str = "single-threaded",
     num_workers: Optional[int] = None,
@@ -1770,6 +1820,7 @@ def refresh_refined_subject_mask_metrics(
         chunk_size=chunk_size,
         refresh_reason_tags=refresh_reason_tags,
         write_eye_geometry=write_eye_geometry,
+        write_component_contours=write_component_contours,
         execution_backend=execution_backend,
         scheduler=scheduler,
         num_workers=num_workers,
@@ -1978,6 +2029,7 @@ def finalize_subject_mask_run(
     chunk_size: int = 256,
     metric_level: str = "cheap",
     write_eye_geometry: bool = False,
+    write_component_contours: bool = False,
     execution_backend: str = _SERIAL_EXECUTION_BACKEND,
     scheduler: str = "single-threaded",
     num_workers: Optional[int] = None,
@@ -2040,6 +2092,7 @@ def finalize_subject_mask_run(
         "chunk_count": len(_row_chunks(int(source.masks_roi.shape[0]), max(1, int(chunk_size)))),
         "metric_level": metric_level,
         "write_eye_geometry": bool(write_eye_geometry),
+        "write_component_contours": bool(write_component_contours),
         **dask_metadata,
         "source_surface_kind": source.mask_surface_kind,
     }
@@ -2093,6 +2146,7 @@ def finalize_subject_mask_run(
         "finalization_semantics": "smart_probability_to_refined_candidate",
         "component_metric_level": metric_level,
         "eye_geometry_requested": bool(write_eye_geometry),
+        "component_contours_requested": bool(write_component_contours),
         **dask_metadata,
         "source_input_subject_mask_run": source.run_name,
         "source_component_runs": {
@@ -2119,6 +2173,7 @@ def finalize_subject_mask_run(
         "chunk_count": int(len(chunk_ranges)),
         "component_metric_level": metric_level,
         "eye_geometry_requested": bool(write_eye_geometry),
+        "component_contours_requested": bool(write_component_contours),
         **dask_metadata,
     }
     if eye_assignment_context is not None:
@@ -2351,6 +2406,28 @@ def finalize_subject_mask_run(
         run_group.attrs["eye_geometry_status"] = "deferred"
         run_group.attrs["eye_geometry_deferred_reason"] = "write_eye_geometry=false"
 
+    contour_summaries: list[dict[str, object]] = []
+    if write_component_contours:
+        contour_components = _component_contour_targets(component_names)
+        if contour_components:
+            with timing.phase("write_component_contours"):
+                contour_summaries = _summaries_to_json_safe(
+                    write_refined_subject_component_contours(
+                        run_group,
+                        components=contour_components,
+                        source_mask_run=target_run,
+                        chunk_rois=max(1, min(256, total_rows)),
+                        overwrite=True,
+                    )
+                )
+            run_group.attrs["component_contours_status"] = "computed"
+            run_group.attrs["component_contours_components"] = list(contour_components)
+            run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
+            run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
+        else:
+            run_group.attrs["component_contours_status"] = "deferred"
+            run_group.attrs["component_contours_deferred_reason"] = "no_subject_body_or_swim_bladder_components_selected"
+
     duration_seconds = float(time.perf_counter() - stage_start)
     timing_summary = timing.summary(total_rows=total_rows, duration_seconds=duration_seconds)
     timing_summary.update(dask_metadata)
@@ -2368,6 +2445,7 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_chunk_count"] = int(len(chunk_ranges))
     run_group.attrs["smart_finalizer_metric_level"] = metric_level
     run_group.attrs["smart_finalizer_write_eye_geometry"] = bool(write_eye_geometry)
+    run_group.attrs["smart_finalizer_write_component_contours"] = bool(write_component_contours)
     run_group.attrs["smart_finalizer_execution_backend"] = execution_backend
     run_group.attrs["dask_execution_enabled"] = execution_backend == _DASK_WORKER_EXECUTION_BACKEND
     run_group.attrs["dask_scheduler"] = scheduler_key
@@ -2386,6 +2464,8 @@ def finalize_subject_mask_run(
             "timing_summary": dict(_json_safe(timing_summary)),
             "metric_level": metric_level,
             "write_eye_geometry": bool(write_eye_geometry),
+            "write_component_contours": bool(write_component_contours),
+            "component_contours": contour_summaries,
             "review_counts": review_counts,
             "eyes_union_assignment_summary": (
                 dict(_json_safe(eyes_union_assignment_summary))
@@ -2406,6 +2486,7 @@ def finalize_subject_masks(
     chunk_size: int = 256,
     metric_level: str = "cheap",
     write_eye_geometry: bool = False,
+    write_component_contours: bool = False,
     execution_backend: str = _SERIAL_EXECUTION_BACKEND,
     scheduler: str = "single-threaded",
     num_workers: Optional[int] = None,
@@ -2425,6 +2506,7 @@ def finalize_subject_masks(
         chunk_size=chunk_size,
         metric_level=metric_level,
         write_eye_geometry=write_eye_geometry,
+        write_component_contours=write_component_contours,
         execution_backend=execution_backend,
         scheduler=scheduler,
         num_workers=num_workers,
@@ -2497,6 +2579,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also compute refined eye geometry/ellipse relations during finalization.",
     )
     parser.add_argument(
+        "--write-component-contours",
+        action="store_true",
+        help="Also compute body/swim component contour caches during finalization.",
+    )
+    parser.add_argument(
         "--execution-backend",
         choices=_EXECUTION_BACKENDS,
         default=_SERIAL_EXECUTION_BACKEND,
@@ -2544,6 +2631,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         chunk_size=int(args.chunk_size),
         metric_level=args.metric_level,
         write_eye_geometry=bool(args.write_eye_geometry),
+        write_component_contours=bool(args.write_component_contours),
         execution_backend=args.execution_backend,
         scheduler=args.scheduler,
         num_workers=args.num_workers,

@@ -64,6 +64,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Also refresh refined-subject eye ellipse/eye-pair geometry when both eye components are selected.",
     )
     parser.add_argument(
+        "--write-component-contours",
+        action="store_true",
+        help="Also refresh body/swim component contour caches for selected components.",
+    )
+    parser.add_argument(
         "--execution-backend",
         choices=_EXECUTION_BACKENDS,
         default=_SERIAL_EXECUTION_BACKEND,
@@ -95,6 +100,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         chunk_size=int(args.chunk_size),
         refresh_reason_tags=not bool(args.no_refresh_reason_tags),
         write_eye_geometry=bool(args.write_eye_geometry),
+        write_component_contours=bool(args.write_component_contours),
         execution_backend=args.execution_backend,
         scheduler=args.scheduler,
         num_workers=args.num_workers,

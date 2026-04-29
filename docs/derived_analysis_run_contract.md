@@ -37,6 +37,10 @@ Use `analysis/<analysis_type>_runs/<run>` for:
 Derived analysis runs must not edit source authority arrays. If their source
 changes, the derived run should be marked stale, superseded, or regenerated.
 
+For future cross-recording Parquet/Arrow exports built from derived analysis
+runs, see
+[cross_recording_analytics_export_design.md](cross_recording_analytics_export_design.md).
+
 ## Required Run Attributes
 
 Every current analysis writer should record:

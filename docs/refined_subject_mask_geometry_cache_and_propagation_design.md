@@ -120,8 +120,9 @@ As of 2026-04-29:
 - `eye_left` and `eye_right` have persisted component contours using packed
   variable-length arrays under:
   `components/eye_left/contours/` and `components/eye_right/contours/`.
-- `subject_body` and `swim_bladder` do not yet have persisted full contour
-  arrays in the refined subject-mask run.
+- `subject_body` and `swim_bladder` contours are not assumed on existing
+  archives. They can be added with the component-contour backfill command; the
+  feeding canary refined run has been backfilled for validation.
 - Subject-shape overlays currently compute body, swim-bladder, and eye display
   contours from `masks_roi` at render time by default, and expose
   `mask`/`persisted`/`auto`/`compare` contour-source modes for audit.
@@ -132,6 +133,8 @@ As of 2026-04-29:
   default writer for every refined subject-mask run.
 - The docs already reserve `components/<component>/contours/` as the correct
   location for component contour caches.
+- A generic component contour helper and dry-run/apply backfill command exist:
+  `scripts/py -m fisheye.utils.backfill_refined_subject_component_contours`.
 
 This means the contact-sheet overlay command:
 
@@ -240,6 +243,35 @@ coordinate_space = "roi_pixels"
 
 This is enough for visualization, simple mask QC, and future Crimson overlays.
 Hole/nested-boundary support should be a separate schema extension if needed.
+
+### Contour Size And Simplification
+
+Full-resolution contours can look surprisingly large in point count. For the
+feeding canary, the first body/swim contour backfill produced roughly:
+
+- `subject_body`: 8.75 million `(x, y)` points, about 70 MB as float32
+- `swim_bladder`: 1.11 million `(x, y)` points, about 9 MB as float32
+
+This is small compared with dense `masks_roi` storage for the same recording,
+but it is still not free across many recordings.
+
+Current policy:
+
+- Keep the first persisted contours full-resolution.
+- Treat contours as caches derived from canonical masks.
+- Do not simplify by default until a consumer need or storage pressure is
+  demonstrated.
+
+Future option:
+
+- Add a simplification parameter such as `simplify_tolerance_px`.
+- Record the simplification method in attrs, for example
+  `simplification_method = "douglas_peucker"` and
+  `simplify_tolerance_px = 0.5`.
+- Keep full masks canonical so simplified contours never become the only
+  representation of the refined shape.
+- Prefer simplified contours for visualization and realtime consumers if full
+  contour transfer becomes a bottleneck.
 
 ## Visualization Policy
 
@@ -432,29 +464,68 @@ mask viewing.
 
 ### Phase 2. Generic Component Contour Utility
 
-- Generalize the existing eye contour writer/reader into a component-neutral
+- Implemented: generalize the existing eye contour writer into a component-neutral
   helper.
-- Preserve the packed `ptr`, `len`, `points_xy` layout.
-- Require method, coordinate-space, component, and source attrs.
-- Add tests for empty masks, single contour masks, edited row append updates,
-  and missing component channels.
+- Implemented: preserve the packed `ptr`, `len`, `points_xy` layout.
+- Implemented: require method, coordinate-space, component, and source attrs.
+- Implemented: add tests for missing component channels and conservative
+  write/skip behavior.
+- Open: add row-local append-update tests when the manual edit-save path uses
+  the helper.
 
 ### Phase 3. Body And Swim-Bladder Contour Backfill
 
-- Add a conservative backfill command for `subject_body` and `swim_bladder`.
-- Use declared `mask_labels`, not hardcoded channel indexes.
-- Do not invent missing components.
-- Do not edit mask pixels.
-- Write contours only when the component mask is present and method attrs can
+- Implemented: add a conservative backfill command for `subject_body` and
+  `swim_bladder`.
+- Implemented: use declared `mask_labels`, not hardcoded channel indexes.
+- Implemented: do not invent missing components.
+- Implemented: do not edit mask pixels.
+- Implemented: write contours only when the component mask is present and method attrs can
   be recorded.
+
+Example dry-run:
+
+```bash
+scripts/py -m fisheye.utils.backfill_refined_subject_component_contours \
+  /path/to/recording_analysis.zarr
+```
+
+Example apply:
+
+```bash
+scripts/py -m fisheye.utils.backfill_refined_subject_component_contours \
+  /path/to/recording_analysis.zarr \
+  --apply
+```
 
 ### Phase 4. Refinement/Finalization Integration
 
-- Make finalizers and manual-edit save paths regenerate component-local caches
-  for edited rows/components.
-- Include contours, scalar metrics, and QC where implemented.
+- Implemented: finalizers and metric-refresh commands can opt into full
+  body/swim contour cache refresh with `--write-component-contours`.
+- Implemented: component contour cache refresh is explicit and defaults off.
+- Open: manual-edit save paths should regenerate component-local caches for
+  edited rows/components rather than rewriting the full cache.
+- Existing: metric refresh already updates scalar mask-local metrics and QC
+  reason tags.
 - Add a source-revision or update-log mechanism so downstream analysis can
   detect row-local source changes.
+
+Example finalization with contours:
+
+```bash
+scripts/py -m fisheye.refinement.finalize_subject_masks \
+  /path/to/recording_analysis.zarr \
+  --write-component-contours
+```
+
+Example metrics/QC refresh with contours:
+
+```bash
+scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics \
+  /path/to/recording_analysis.zarr \
+  --components subject_body swim_bladder \
+  --write-component-contours
+```
 
 ### Phase 5. Downstream Staleness And Targeted Recompute
 

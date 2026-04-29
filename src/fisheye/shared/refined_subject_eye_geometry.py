@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 
 from ..refinement.refine_eye_masks import _measure_mask
+from .refined_subject_component_contours import write_component_contours
 
 EYE_COMPONENTS = ("eye_left", "eye_right")
 EYE_GEOMETRY_SCHEMA_ID = "refined_subject_eye_geometry_v1"
@@ -43,47 +44,6 @@ def _eye_geometry_should_update(updated_components: Optional[Sequence[str]]) -> 
 
 def _write_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tuple[int, ...]) -> None:
     group.create_array(name, data=data, chunks=chunks, overwrite=True)
-
-
-def _write_component_contours(
-    component_group: zarr.Group,
-    contours_by_row: Sequence[np.ndarray | None],
-    *,
-    chunk_rois: int,
-) -> None:
-    total_rois = int(len(contours_by_row))
-    ptr = np.full((total_rois,), -1, dtype=np.int64)
-    length = np.zeros((total_rois,), dtype=np.int32)
-    point_chunks: list[np.ndarray] = []
-    offset = 0
-
-    for row_idx, contour in enumerate(contours_by_row):
-        if contour is None:
-            continue
-        points = np.asarray(contour, dtype=np.float32).reshape(-1, 2)
-        if int(points.shape[0]) <= 0:
-            continue
-        ptr[int(row_idx)] = np.int64(offset)
-        length[int(row_idx)] = np.int32(points.shape[0])
-        point_chunks.append(points)
-        offset += int(points.shape[0])
-
-    points_xy = (
-        np.concatenate(point_chunks, axis=0).astype(np.float32, copy=False)
-        if point_chunks
-        else np.zeros((1, 2), dtype=np.float32)
-    )
-    contours_group = component_group.require_group("contours")
-    contours_group.attrs["contour_schema_id"] = "component_contours_v1"
-    contours_group.attrs["points_placeholder_when_empty"] = True
-    _write_array(contours_group, "ptr", ptr, chunks=(chunk_rois,))
-    _write_array(contours_group, "len", length, chunks=(chunk_rois,))
-    _write_array(
-        contours_group,
-        "points_xy",
-        points_xy,
-        chunks=(max(1, min(4096, int(points_xy.shape[0]))), 2),
-    )
 
 
 def write_refined_subject_eye_geometry(
@@ -156,7 +116,14 @@ def write_refined_subject_eye_geometry(
             ellipse_success[:, eye_idx],
             chunks=(chunk_rois,),
         )
-        _write_component_contours(component_group, contours[component_name], chunk_rois=chunk_rois)
+        write_component_contours(
+            component_group,
+            contours[component_name],
+            chunk_rois=chunk_rois,
+            component=component_name,
+            source_mask_label_schema_id=str(refined_group.attrs.get("label_schema_id") or ""),
+            min_points=1,
+        )
 
     relation_metrics = refined_group.require_group("relations").require_group("eye_pair").require_group("metrics")
     relation_metrics.attrs["relation_schema_id"] = EYE_PAIR_RELATION_SCHEMA_ID

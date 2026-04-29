@@ -216,6 +216,35 @@ def test_finalize_subject_mask_run_can_write_full_metrics_and_eye_geometry(monke
     assert run["components/subject_body/metrics"].attrs["metric_level"] == "full"
 
 
+def test_finalize_subject_mask_run_can_write_body_and_swim_contours(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_contours_001",
+        chunk_size=1,
+        write_component_contours=True,
+    )
+
+    assert summary["write_component_contours"] is True
+    assert [item["component"] for item in summary["component_contours"]] == ["subject_body", "swim_bladder"]
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_contours_001"]
+    assert run.attrs["component_contours_status"] == "computed"
+    assert run.attrs["smart_finalizer_write_component_contours"] is True
+    assert run.attrs["component_contours_components"] == ["subject_body", "swim_bladder"]
+    for component in ("subject_body", "swim_bladder"):
+        contours = run[f"components/{component}/contours"]
+        assert contours.attrs["schema_id"] == "component_contours_v1"
+        assert contours.attrs["source_component"] == component
+        assert contours.attrs["source_mask_run"] == "refined_subject_masks_smart_contours_001"
+        assert tuple(contours["ptr"].shape) == (2,)
+        assert tuple(contours["len"].shape) == (2,)
+        assert contours["points_xy"].shape[1] == 2
+        assert np.all(np.asarray(contours["len"][:], dtype=np.int32) > 0)
+
+
 def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()
@@ -364,6 +393,47 @@ def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypa
     assert np.count_nonzero(masks[:, labels.index("eye_right")]) > 0
     assert np.count_nonzero(masks[:, labels.index("swim_bladder")]) > 0
     assert "dask_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+
+
+def test_refresh_refined_subject_mask_metrics_can_refresh_component_contours(monkeypatch, tmp_path: Path) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+    mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_001",
+        chunk_size=1,
+        write_component_contours=True,
+    )
+    root = zarr.open_group(str(zarr_path), mode="a")
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
+    labels = list(run.attrs["mask_labels"])
+    body_idx = labels.index("subject_body")
+    original_len = np.asarray(run["components/subject_body/contours/len"][:], dtype=np.int32).copy()
+
+    edited_body = np.zeros((10, 10), dtype=np.uint8)
+    edited_body[1:4, 1:4] = 1
+    run["masks_roi"][0, body_idx] = edited_body
+
+    summary = mod.refresh_refined_subject_mask_metrics(
+        zarr_path,
+        refined_run="refined_subject_masks_smart_001",
+        components=["subject_body"],
+        chunk_size=1,
+        metric_level="cheap",
+        write_component_contours=True,
+    )
+
+    assert summary["write_component_contours"] is True
+    assert summary["component_contours"][0]["component"] == "subject_body"
+    assert summary["component_contours"][0]["status"] == "written"
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
+    refreshed_len = np.asarray(run["components/subject_body/contours/len"][:], dtype=np.int32)
+    assert int(refreshed_len[0]) != int(original_len[0])
+    assert int(refreshed_len[0]) > 0
+    assert run.attrs["component_contours_status"] == "computed"
 
 
 def test_finalize_subject_mask_run_dry_run_and_overwrite_guard(monkeypatch) -> None:

@@ -12,6 +12,9 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - Major analysis run types should expose a run-local PNG summary writer; static
   plot snapshots and future interactive plot specs should follow
   `docs/plot_visualization_artifact_contract.md`.
+- Cross-recording metric exports should be regenerated columnar views, not
+  archive authorities. See
+  [cross_recording_analytics_export_design.md](cross_recording_analytics_export_design.md).
 
 ## Storage Matrix
 
