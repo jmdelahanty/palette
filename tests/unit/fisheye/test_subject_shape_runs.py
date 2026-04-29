@@ -6,6 +6,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis import subject_shape_runs as mod
+from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
 
 
 def _patch_provenance(monkeypatch) -> None:
@@ -146,6 +147,8 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert np.all(caudal[:, 1] > 10.0)
 
     assert body.attrs["centerline_method"] == "skeleton_longest_endpoint_path_v1"
+    assert body.attrs["bspline_method"] == "centerline_scipy_splprep_v1"
+    assert body.attrs["bspline_fit_mode"] == "interpolating"
     assert body["centerline_valid"][:].tolist() == [True, True, True]
     centerline = np.asarray(body["centerline_xy"][:], dtype=np.float32)
     assert centerline.shape == (3, mod.CENTERLINE_SAMPLE_COUNT, 2)
@@ -155,6 +158,16 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert body["tail_base_valid"][:].tolist() == [True, True, True]
     assert np.all(np.asarray(body["body_arclength_px"][:], dtype=np.float32) > 0)
     assert np.all(np.asarray(body["tail_segment_arclength_px"][:], dtype=np.float32) >= 0)
+    assert body["bspline_valid"][:].tolist() == [True, True, True]
+    assert body["tail_sample_valid"][:].tolist() == [False, False, False]
+    assert _decode_reason_row(body["tail_sample_failure_reason_bytes"][0]) == "tail_segment_too_short"
+    assert np.asarray(body["bspline_sample_xy"][:], dtype=np.float32).shape == (3, mod.CENTERLINE_SAMPLE_COUNT, 2)
+    assert np.asarray(body["tail_sample_xy"][:], dtype=np.float32).shape == (3, mod.TAIL_SAMPLE_COUNT, 2)
+    np.testing.assert_allclose(
+        np.asarray(body["tail_sample_s"][:], dtype=np.float32),
+        np.linspace(0.0, 1.0, mod.TAIL_SAMPLE_COUNT, dtype=np.float32),
+    )
+    assert np.all(np.asarray(body["bspline_arc_length_px"][:], dtype=np.float32) > 0)
     assert run.attrs["provenance"]["stage"] == "analysis.subject_shape_runs"
 
 
@@ -220,6 +233,37 @@ def test_subject_shape_tail_geometry_fails_closed_for_fragmented_body(monkeypatc
     body = root["analysis"]["subject_shape_runs"]["shape_fragmented"]["components"]["subject_body"]
     assert body["centerline_valid"][:].tolist() == [True, False, True]
     assert _decode_reason_row(body["centerline_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
+    assert body["bspline_valid"][:].tolist() == [True, False, True]
+    assert _decode_reason_row(body["bspline_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
+
+
+def test_subject_shape_tail_geometry_fails_closed_for_source_body_qc(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_refined_root()
+    refined = root["refined_subject_masks_runs"]["refined_001"]
+    masks = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    masks[1, 0, 7:9, 0:16] = 1
+    masks[1, 0, 10:12, 0:16] = 1
+    refined["masks_roi"][:] = masks
+    write_subject_body_mask_qc_group(root, refined_run="refined_001", chunk_size=2)
+    assert bool(np.asarray(refined["components/subject_body/qc/severe_qc_failure"][1], dtype=bool)) is True
+
+    mod.write_subject_shape_run_group(
+        root,
+        refined_run="refined_001",
+        run_name="shape_source_body_qc",
+        chunk_size=2,
+    )
+
+    body = root["analysis"]["subject_shape_runs"]["shape_source_body_qc"]["components"]["subject_body"]
+    assert body["source_mask_qc_available"][:].tolist() == [True, True, True]
+    assert bool(np.asarray(body["source_mask_qc_severe_failure"][1], dtype=bool)) is True
+    assert body["centerline_valid"][:].tolist() == [True, False, True]
+    assert _decode_reason_row(body["centerline_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
+    assert _decode_reason_row(body["tail_base_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
+    assert body["bspline_valid"][:].tolist() == [True, False, True]
+    assert _decode_reason_row(body["bspline_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
+    assert _decode_reason_row(body["tail_sample_failure_reason_bytes"][1]) == "source_body_mask_qc_failed"
 
 
 def test_subject_shape_run_records_and_audits_source_row_revisions(monkeypatch) -> None:

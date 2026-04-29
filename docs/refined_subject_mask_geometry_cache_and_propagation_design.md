@@ -396,6 +396,53 @@ If an operator edits one `subject_body` mask row to remove a dish scratch:
 The mask edit should not silently rewrite eye-angle, kinematic, bout, or plot
 artifacts.
 
+## External Editor Writeback Boundary
+
+External consumers such as Crimson should not be required to clone Palette at a
+fixed workstation path. The stable integration boundary is a Palette-owned
+writeback tool or service that accepts an edited mask payload and owns the full
+archive mutation.
+
+This is a save/writeback boundary only. Crimson, Paintera, notebooks, and any
+future editor may use different painting implementations, preview data
+structures, undo stacks, and UI flows. Palette only requires that the save
+request identify the target refined run, row, component, and final 2D binary
+mask payload.
+
+Current command-style helper:
+
+```bash
+palette-write-refined-subject-mask-edit \
+  --zarr-path <analysis.zarr> \
+  --refined-run <run> \
+  --component-name <subject_body|swim_bladder|eye_left|eye_right> \
+  --roi-index <row> \
+  --mask-path <binary-mask.npy|png|raw> \
+  --reason crimson_refined_subject_mask_edit \
+  --validate
+```
+
+Inside a source checkout, the equivalent dev launcher is:
+
+```bash
+scripts/palette-write-refined-subject-mask-edit ...
+```
+
+The command writes exactly one `masks_roi[row, channel]` payload, resolves the
+channel from `mask_labels`, checks `available_channels`, recomputes the
+component-local metrics and reason state, refreshes the same-row component
+contour cache, increments the component row revision when pixels changed, and
+prints a JSON summary on stdout.
+
+The older two-step bridge remains a development fallback only:
+
+1. external editor writes pixels directly
+2. `sync_refined_subject_mask_metadata` reconciles metadata
+
+That split is not the durable Crimson contract because a failed sync can leave
+temporary pixel/metadata drift. Production UI code should call a configured
+Palette writeback command or service, not a hardcoded local clone path.
+
 ## Canonical Input Boundary
 
 For downstream analysis, the canonical input is the approved or selected
@@ -576,7 +623,9 @@ scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics \
 
 ### Phase 6. Scalar Topology QC
 
-- Implement `components/subject_body/qc/` scalar topology metrics.
+- Implemented initial `components/subject_body/qc/` scalar topology metrics
+  with `subject_body_mask_qc_v1` and the
+  `scripts/backfill_subject_body_mask_qc` wrapper.
 - Add equivalent lightweight QC for `swim_bladder` where useful.
 - Keep full skeleton graphs out of default refined-mask runs until needed by a
   specific analysis contract.

@@ -402,5 +402,6 @@ interpretation.
 - [bout_kinematics_run_design.md](bout_kinematics_run_design.md)
 - [swim_bout_peak_event_detector_design.md](swim_bout_peak_event_detector_design.md)
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
+- [tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md)
 - [raw_vs_smoothed_metrics_behavioral_geometry.md](raw_vs_smoothed_metrics_behavioral_geometry.md)
 - [src/fisheye/docs/eye_angle_conventions.md](../src/fisheye/docs/eye_angle_conventions.md)

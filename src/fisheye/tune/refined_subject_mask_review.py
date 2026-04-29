@@ -106,6 +106,8 @@ DEFAULT_RUN_METHOD = "refined_subject_mask_manual_review_v1"
 REFINED_SUBJECT_STAGE_NAME = "refine_subject_masks"
 REFINED_SUBJECT_SYNC_METHOD = "sync_refined_subject_mask_metadata"
 REFINED_SUBJECT_SOURCE_UPDATE_METHOD = "check_refined_subject_source_updates"
+REFINED_SUBJECT_WRITEBACK_METHOD = "palette_write_refined_subject_mask_edit"
+DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON = "crimson_refined_subject_mask_edit"
 DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID = "subject_body_v1"
 DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE = "body_core"
 DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY = "excluded_or_unresolved"
@@ -204,6 +206,16 @@ class RefinedSubjectComponentSeed:
     source_payload: Mapping[str, object]
     reason_labels: Optional[np.ndarray] = None
     source_masks: Optional[np.ndarray] = None
+
+
+@dataclass(frozen=True)
+class _RefinedSubjectApplyContext:
+    source: SourceSubjectMaskRun
+    refined: RefinedSubjectMaskRun
+    component_sources: dict[str, SourceSubjectMaskRun]
+    component_name: str
+    comp_idx: int
+    component_group: zarr.Group
 
 
 @dataclass(frozen=True)
@@ -2182,6 +2194,7 @@ def _apply_refined_subject_roi_rows(
     component_names: Optional[Sequence[str]] = None,
     update_mode: str = "interactive",
     update_method: Optional[str] = None,
+    update_reason: Optional[str] = None,
 ) -> tuple[int, ...]:
     if component_sources is None:
         if source is None:
@@ -2222,7 +2235,7 @@ def _apply_refined_subject_roi_rows(
             run_group,
             component_name,
             normalized_rows,
-            reason=f"{update_mode}_refined_subject_mask_edit",
+            reason=str(update_reason or f"{update_mode}_refined_subject_mask_edit"),
         )
 
     updated_at_utc = _finalize_refined_subject_apply(refined, updated_components=normalized_components)
@@ -2401,6 +2414,187 @@ def _draw_summary_lines(
             1,
         )
     return output
+
+
+def _resolve_refined_subject_apply_context(
+    zarr_path: str | Path,
+    *,
+    refined_run: str,
+    component_name: str,
+    source_subject_mask_run: Optional[str] = None,
+) -> _RefinedSubjectApplyContext:
+    root = open_zarr_root(zarr_path, mode="a")
+    refined_parent = root.get("refined_subject_masks_runs")
+    if refined_parent is None or str(refined_run) not in refined_parent:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
+
+    existing_run = refined_parent[str(refined_run)]
+    labels_raw = existing_run.attrs.get("mask_labels")
+    if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
+
+    normalized_component = _normalize_component_name(component_name)
+    if normalized_component is None:
+        raise ValueError("component_name is required.")
+    if normalized_component not in tuple(str(item) for item in labels_raw):
+        raise RuntimeError(
+            f"Component '{normalized_component}' not available in refined_subject_masks_runs/{refined_run}."
+        )
+
+    resolved_source_run = source_subject_mask_run or str(existing_run.attrs.get("source_subject_mask_run") or "")
+    if not resolved_source_run:
+        raise RuntimeError(
+            f"refined_subject_masks_runs/{refined_run} is missing source_subject_mask_run and no override was provided."
+        )
+
+    source, refined = prepare_refined_subject_run(
+        root,
+        subject_run=resolved_source_run,
+        refined_run=str(refined_run),
+        components=tuple(str(item) for item in labels_raw),
+    )
+    if refined.run_name != str(refined_run):
+        raise RuntimeError(f"Resolved refined run mismatch: expected {refined_run}, got {refined.run_name}.")
+    if source.run_name != str(resolved_source_run):
+        raise RuntimeError(
+            f"Resolved source subject-mask run mismatch: expected {resolved_source_run}, got {source.run_name}."
+        )
+    _primary_source, component_sources = _load_refined_component_source_runs(root, refined, default_source=source)
+
+    comp_idx = int(refined.component_to_index[normalized_component])
+    available_arr = refined.group.get("available_channels")
+    if available_arr is not None:
+        available = np.asarray(available_arr[:], dtype=bool).reshape(-1)
+        if comp_idx >= int(available.shape[0]) or not bool(available[comp_idx]):
+            raise RuntimeError(
+                f"Component '{normalized_component}' is marked unavailable in refined_subject_masks_runs/{refined_run}."
+            )
+
+    component_group = refined.group.require_group("components").require_group(normalized_component)
+    return _RefinedSubjectApplyContext(
+        source=source,
+        refined=refined,
+        component_sources=component_sources,
+        component_name=normalized_component,
+        comp_idx=comp_idx,
+        component_group=component_group,
+    )
+
+
+def _read_component_row_revision(component_group: zarr.Group, roi_idx: int) -> int:
+    revision_arr = component_group.get("row_revision")
+    if revision_arr is None:
+        return 0
+    return int(np.asarray(revision_arr[int(roi_idx)], dtype=np.int64))
+
+
+def _read_component_contour_len(component_group: zarr.Group, roi_idx: int) -> int:
+    contours = component_group.get("contours")
+    if not isinstance(contours, zarr.Group) or "len" not in contours:
+        return 0
+    return int(np.asarray(contours["len"][int(roi_idx)], dtype=np.int32))
+
+
+def _validate_refined_subject_mask_edit_row(
+    *,
+    run_group: zarr.Group,
+    component_group: zarr.Group,
+    comp_idx: int,
+    roi_idx: int,
+    mask: np.ndarray,
+) -> None:
+    binary = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
+    expected_area = float(np.count_nonzero(binary))
+    expected_present = bool(expected_area > 0.0)
+    metrics = run_group["metrics"]
+    actual_present = bool(np.asarray(metrics["mask_present"][int(roi_idx), int(comp_idx)], dtype=bool))
+    actual_area = float(np.asarray(metrics["area_px"][int(roi_idx), int(comp_idx)], dtype=np.float32))
+    component_present = bool(np.asarray(component_group["mask_present"][int(roi_idx)], dtype=bool))
+    component_area = float(np.asarray(component_group["area_px"][int(roi_idx)], dtype=np.float32))
+    if actual_present != expected_present or component_present != expected_present:
+        raise RuntimeError(
+            f"Post-write validation failed for row {int(roi_idx)}: mask_present does not match mask pixels."
+        )
+    if not np.isclose(actual_area, expected_area) or not np.isclose(component_area, expected_area):
+        raise RuntimeError(
+            f"Post-write validation failed for row {int(roi_idx)}: area_px does not match mask pixels."
+        )
+
+
+def write_refined_subject_mask_edit(
+    zarr_path: str | Path,
+    *,
+    refined_run: str,
+    component_name: str,
+    roi_index: int,
+    mask: np.ndarray,
+    reason: str = DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON,
+    source_subject_mask_run: Optional[str] = None,
+    validate: bool = False,
+) -> dict[str, object]:
+    """Write one refined subject-mask row/component and refresh Palette-owned metadata."""
+
+    context = _resolve_refined_subject_apply_context(
+        zarr_path,
+        refined_run=refined_run,
+        component_name=component_name,
+        source_subject_mask_run=source_subject_mask_run,
+    )
+    run_group = context.refined.group
+    total_rois = int(run_group["masks_roi"].shape[0])
+    normalized_rows = _normalize_roi_indices([int(roi_index)], total_rois)
+    roi_idx = int(normalized_rows[0])
+    expected_mask_shape = tuple(int(dim) for dim in run_group["masks_roi"].shape[2:])
+    binary_mask = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
+    if tuple(binary_mask.shape) != expected_mask_shape:
+        raise ValueError(f"mask shape mismatch: expected {expected_mask_shape}, got {tuple(binary_mask.shape)}")
+
+    row_revision_before = _read_component_row_revision(context.component_group, roi_idx)
+    current_stack = np.asarray(run_group["masks_roi"][roi_idx], dtype=np.uint8)
+    previous_mask = np.asarray(current_stack[context.comp_idx], dtype=np.uint8)
+    mask_changed = not np.array_equal(previous_mask, binary_mask)
+    if mask_changed:
+        edited_stack = current_stack.copy()
+        edited_stack[context.comp_idx] = binary_mask
+        _apply_refined_subject_roi_rows(
+            component_sources=context.component_sources,
+            refined=context.refined,
+            roi_indices=(roi_idx,),
+            edited_masks_batch=edited_stack,
+            component_names=(context.component_name,),
+            update_mode="external_writeback",
+            update_method=REFINED_SUBJECT_WRITEBACK_METHOD,
+            update_reason=str(reason or DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON),
+        )
+
+    if validate:
+        _validate_refined_subject_mask_edit_row(
+            run_group=run_group,
+            component_group=context.component_group,
+            comp_idx=context.comp_idx,
+            roi_idx=roi_idx,
+            mask=binary_mask,
+        )
+
+    row_revision_after = _read_component_row_revision(context.component_group, roi_idx)
+    edit_applied = bool(np.asarray(run_group["edit_applied"][roi_idx, context.comp_idx], dtype=bool))
+    return {
+        "ok": True,
+        "status": "updated" if mask_changed else "noop",
+        "zarr_path": str(Path(zarr_path)),
+        "refined_run": context.refined.run_name,
+        "source_subject_mask_run": context.source.run_name,
+        "roi_index": roi_idx,
+        "component_name": context.component_name,
+        "row_revision_before": int(row_revision_before),
+        "row_revision_after": int(row_revision_after),
+        "edit_applied": edit_applied,
+        "mask_changed": bool(mask_changed),
+        "contour_points": int(_read_component_contour_len(context.component_group, roi_idx)),
+        "updated_at_utc": str(run_group.attrs.get("updated_at_utc") or ""),
+        "reason": str(reason or DEFAULT_REFINED_SUBJECT_WRITEBACK_REASON),
+        "validated": bool(validate),
+    }
 
 
 def sync_refined_subject_mask_metadata(

@@ -30,18 +30,29 @@ except ImportError:  # pragma: no cover - depends on optional dependency
     HAVE_DISTRIBUTED = False
 
 from ..refinement.refine_eye_masks import _measure_mask
+from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..tune.refined_subject_mask_review import _compute_geometry_metrics, _compute_mask_metrics
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
+from .subject_shape_spline import (
+    BSPLINE_METHOD,
+    DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+    DEFAULT_BSPLINE_DEGREE,
+    DEFAULT_BSPLINE_SMOOTHING,
+    DEFAULT_TAIL_SAMPLE_COUNT,
+    SubjectBodySplineBatch,
+    fit_subject_body_spline_batch,
+    tail_sample_positions,
+)
 
 SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
 SUBJECT_SHAPE_SCHEMA_VERSION = 1
 SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID = "analysis.subject_shape.source_refined_subject_masks_v1"
-SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v2"
-SUBJECT_SHAPE_METHOD_VERSION = 2
+SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v4"
+SUBJECT_SHAPE_METHOD_VERSION = 4
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
 COMPONENT_ORDER = ("subject_body", "swim_bladder", "eye_left", "eye_right")
 ELLIPSE_COMPONENTS = ("swim_bladder", "eye_left", "eye_right")
@@ -55,6 +66,7 @@ TAIL_GEOMETRY_SCHEMA_VERSION = 1
 TAIL_ANCHOR_METHOD = "caudal_swim_bladder_contour_min_forward_projection_v1"
 CENTERLINE_METHOD = "skeleton_longest_endpoint_path_v1"
 CENTERLINE_SAMPLE_COUNT = 64
+TAIL_SAMPLE_COUNT = DEFAULT_TAIL_SAMPLE_COUNT
 REASON_BYTES_WIDTH = 64
 SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
 EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
@@ -94,6 +106,14 @@ class CaudalAnchorBatch:
     projection_px: np.ndarray
     valid: np.ndarray
     failure_reason_bytes: np.ndarray
+
+
+@dataclass(frozen=True)
+class SourceBodyMaskQcBatch:
+    available: np.ndarray
+    severe_qc_failure: np.ndarray
+    requires_review: np.ndarray
+    reason_bytes: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -328,10 +348,20 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
         component_group.attrs["principal_axis_semantics"] = "unoriented_principal_axis_in_roi_xy"
         component_group.attrs["centerline_method"] = CENTERLINE_METHOD
         component_group.attrs["centerline_sample_count"] = CENTERLINE_SAMPLE_COUNT
+        component_group.attrs["bspline_method"] = BSPLINE_METHOD
+        component_group.attrs["bspline_degree"] = DEFAULT_BSPLINE_DEGREE
+        component_group.attrs["bspline_fit_mode"] = "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing"
+        component_group.attrs["bspline_smoothing"] = DEFAULT_BSPLINE_SMOOTHING
+        component_group.attrs["bspline_arclength_sample_count"] = DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT
+        component_group.attrs["tail_sample_domain"] = "tail_segment_normalized_arclength"
+        component_group.attrs["tail_sample_count"] = TAIL_SAMPLE_COUNT
         component_group.attrs["tail_tip_semantic_label"] = "tail_tip"
         component_group.attrs["tail_tip_estimator"] = "subject_body_centerline_posterior_endpoint"
         component_group.attrs["tail_base_definition"] = (
             "body_centerline_projection_of_caudal_swim_bladder_contour_point"
+        )
+        component_group.attrs["source_mask_qc_semantics"] = (
+            "snapshot of refined_subject_masks_runs/<run>/components/subject_body/qc at shape-run creation time"
         )
         _set_reason_bytes_attrs(component_group)
         _create_array(
@@ -371,6 +401,124 @@ def _prepare_component_group(run_group: zarr.Group, component_name: str, *, tota
         _create_array(
             component_group,
             "centerline_failure_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+        _create_array(
+            component_group,
+            "bspline_control_points_xy",
+            shape=(total_rows, CENTERLINE_SAMPLE_COUNT, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_3d(total_rows, CENTERLINE_SAMPLE_COUNT, 2),
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "bspline_knots",
+            shape=(total_rows, CENTERLINE_SAMPLE_COUNT + DEFAULT_BSPLINE_DEGREE + 1),
+            dtype=np.float32,
+            chunks=_metric_chunks_lastdim(total_rows, CENTERLINE_SAMPLE_COUNT + DEFAULT_BSPLINE_DEGREE + 1),
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "bspline_degree_used",
+            shape=(total_rows,),
+            dtype=np.int16,
+            chunks=chunks_1d,
+            fill_value=-1,
+        )
+        _create_array(
+            component_group,
+            "bspline_sample_xy",
+            shape=(total_rows, CENTERLINE_SAMPLE_COUNT, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_3d(total_rows, CENTERLINE_SAMPLE_COUNT, 2),
+            fill_value=np.nan,
+        )
+        _create_array(component_group, "bspline_valid", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "bspline_failure_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+        _create_array(
+            component_group,
+            "bspline_arc_length_px",
+            shape=(total_rows,),
+            dtype=np.float32,
+            chunks=chunks_1d,
+            fill_value=np.nan,
+        )
+        if "tail_sample_s" in component_group:
+            del component_group["tail_sample_s"]
+        component_group.create_array(
+            "tail_sample_s",
+            data=tail_sample_positions(TAIL_SAMPLE_COUNT),
+            chunks=(TAIL_SAMPLE_COUNT,),
+            overwrite=True,
+        )
+        _create_array(
+            component_group,
+            "tail_sample_xy",
+            shape=(total_rows, TAIL_SAMPLE_COUNT, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_3d(total_rows, TAIL_SAMPLE_COUNT, 2),
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "tail_tangent_xy",
+            shape=(total_rows, TAIL_SAMPLE_COUNT, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_3d(total_rows, TAIL_SAMPLE_COUNT, 2),
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "tail_normal_xy",
+            shape=(total_rows, TAIL_SAMPLE_COUNT, 2),
+            dtype=np.float32,
+            chunks=_metric_chunks_3d(total_rows, TAIL_SAMPLE_COUNT, 2),
+            fill_value=np.nan,
+        )
+        _create_array(
+            component_group,
+            "tail_curvature_px_inv",
+            shape=(total_rows, TAIL_SAMPLE_COUNT),
+            dtype=np.float32,
+            chunks=_metric_chunks_lastdim(total_rows, TAIL_SAMPLE_COUNT),
+            fill_value=np.nan,
+        )
+        _create_array(component_group, "tail_sample_valid", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "tail_sample_failure_reason_bytes",
+            shape=(total_rows, REASON_BYTES_WIDTH),
+            dtype=np.uint8,
+            chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
+        )
+        _create_array(component_group, "source_mask_qc_available", shape=(total_rows,), dtype=bool, chunks=chunks_1d)
+        _create_array(
+            component_group,
+            "source_mask_qc_severe_failure",
+            shape=(total_rows,),
+            dtype=bool,
+            chunks=chunks_1d,
+        )
+        _create_array(
+            component_group,
+            "source_mask_qc_requires_review",
+            shape=(total_rows,),
+            dtype=bool,
+            chunks=chunks_1d,
+        )
+        _create_array(
+            component_group,
+            "source_mask_qc_reason_bytes",
             shape=(total_rows, REASON_BYTES_WIDTH),
             dtype=np.uint8,
             chunks=_metric_chunks_lastdim(total_rows, REASON_BYTES_WIDTH),
@@ -817,6 +965,16 @@ def _prepare_subject_shape_run(
         "refined_subject_masks": f"refined_subject_masks_runs/{refined_run_name}",
         "refined_subject_masks_masks_roi": f"refined_subject_masks_runs/{refined_run_name}/masks_roi",
     }
+    source_components_group = refined_group.get("components")
+    source_body_qc_available = bool(
+        source_components_group is not None
+        and "subject_body" in source_components_group
+        and "qc" in source_components_group["subject_body"]
+    )
+    if source_body_qc_available:
+        source_refs["source_body_mask_qc"] = (
+            f"refined_subject_masks_runs/{refined_run_name}/components/subject_body/qc"
+        )
     if "source_subject_mask_run" in refined_group.attrs:
         source_refs["source_subject_mask_run"] = str(refined_group.attrs["source_subject_mask_run"])
 
@@ -834,6 +992,12 @@ def _prepare_subject_shape_run(
             "source_mask_labels": source_labels,
             "source_mask_label_schema_id": refined_group.attrs.get("label_schema_id"),
             "source_mask_geometry_schema_id": refined_group.attrs.get("component_metrics_schema_id"),
+            "source_body_mask_qc_available": bool(source_body_qc_available),
+            "source_body_mask_qc_schema_id": (
+                refined_group["components"]["subject_body"]["qc"].attrs.get("schema_id")
+                if source_body_qc_available
+                else None
+            ),
             "source_component_review_states": _component_review_states(refined_group, components),
             "source_refs": source_refs,
             "component_names": list(components),
@@ -858,6 +1022,13 @@ def _prepare_subject_shape_run(
             "tail_anchor_method": TAIL_ANCHOR_METHOD,
             "centerline_method": CENTERLINE_METHOD,
             "centerline_sample_count": CENTERLINE_SAMPLE_COUNT,
+            "bspline_method": BSPLINE_METHOD,
+            "bspline_degree": DEFAULT_BSPLINE_DEGREE,
+            "bspline_fit_mode": "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing",
+            "bspline_smoothing": DEFAULT_BSPLINE_SMOOTHING,
+            "bspline_arclength_sample_count": DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+            "tail_sample_count": TAIL_SAMPLE_COUNT,
+            "tail_sample_domain": "tail_segment_normalized_arclength",
             "chunk_size": max(1, int(chunk_size)),
             "chunk_count": len(_row_chunks(total_rows, max(1, int(chunk_size)))),
             **dask_metadata,
@@ -902,6 +1073,13 @@ def _prepare_subject_shape_run(
             "tail_anchor_method": TAIL_ANCHOR_METHOD,
             "centerline_method": CENTERLINE_METHOD,
             "centerline_sample_count": CENTERLINE_SAMPLE_COUNT,
+            "bspline_method": BSPLINE_METHOD,
+            "bspline_degree": DEFAULT_BSPLINE_DEGREE,
+            "bspline_fit_mode": "interpolating" if DEFAULT_BSPLINE_SMOOTHING == 0.0 else "smoothing",
+            "bspline_smoothing": DEFAULT_BSPLINE_SMOOTHING,
+            "bspline_arclength_sample_count": DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+            "tail_sample_count": TAIL_SAMPLE_COUNT,
+            "tail_sample_domain": "tail_segment_normalized_arclength",
             "chunk_size": max(1, int(chunk_size)),
         },
         inputs={
@@ -1019,6 +1197,67 @@ def _write_component_batch(
     if component_name in ELLIPSE_COMPONENTS:
         group["ellipse_params"][row_slice, :] = batch.ellipse_params
         group["ellipse_success"][row_slice] = batch.ellipse_success
+
+
+def _decode_reason_rows(reason_bytes: np.ndarray) -> np.ndarray:
+    data = np.asarray(reason_bytes, dtype=np.uint8)
+    if data.ndim != 2:
+        return np.full((int(data.shape[0]) if data.ndim else 0,), "", dtype=object)
+    try:
+        return decode_reason_bytes(data)
+    except Exception:
+        labels: list[str] = []
+        for row in data:
+            labels.append(bytes(np.asarray(row, dtype=np.uint8)).split(b"\0", 1)[0].decode("utf-8", "ignore"))
+        return np.asarray(labels, dtype=object)
+
+
+def _read_source_body_mask_qc_batch(refined_group: zarr.Group, row_slice: slice) -> SourceBodyMaskQcBatch:
+    row_count = int(row_slice.stop or 0) - int(row_slice.start or 0)
+    available = np.zeros((row_count,), dtype=bool)
+    severe = np.zeros((row_count,), dtype=bool)
+    requires = np.zeros((row_count,), dtype=bool)
+    reason_labels = np.full((row_count,), "not_available", dtype=object)
+
+    components = refined_group.get("components")
+    body_group = components.get("subject_body") if components is not None else None
+    qc_group = body_group.get("qc") if body_group is not None else None
+    if qc_group is not None:
+        available[:] = True
+        if "severe_qc_failure" in qc_group:
+            severe[:] = np.asarray(qc_group["severe_qc_failure"][row_slice], dtype=bool)
+        if "requires_review" in qc_group:
+            requires[:] = np.asarray(qc_group["requires_review"][row_slice], dtype=bool)
+        if "reason_bytes" in qc_group:
+            reason_labels[:] = _decode_reason_rows(np.asarray(qc_group["reason_bytes"][row_slice], dtype=np.uint8))
+        elif "reason" in qc_group:
+            reason_labels[:] = np.asarray(qc_group["reason"][row_slice], dtype=object)
+        else:
+            reason_labels[:] = np.where(requires, "requires_review", "ok")
+
+    return SourceBodyMaskQcBatch(
+        available=available,
+        severe_qc_failure=severe,
+        requires_review=requires,
+        reason_bytes=_encode_reasons(reason_labels),
+    )
+
+
+def _write_source_body_mask_qc_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: SourceBodyMaskQcBatch,
+) -> None:
+    components = run_group.get("components")
+    if components is None or "subject_body" not in components:
+        return
+    group = components["subject_body"]
+    if "source_mask_qc_available" not in group:
+        return
+    group["source_mask_qc_available"][row_slice] = batch.available
+    group["source_mask_qc_severe_failure"][row_slice] = batch.severe_qc_failure
+    group["source_mask_qc_requires_review"][row_slice] = batch.requires_review
+    group["source_mask_qc_reason_bytes"][row_slice, :] = batch.reason_bytes
 
 
 def _unit_vector_xy(vector: np.ndarray) -> Optional[np.ndarray]:
@@ -1321,6 +1560,7 @@ def _compute_centerline_batch(
     body_frame: BodyFrameBatch,
     caudal_anchor: CaudalAnchorBatch,
     *,
+    source_body_qc: Optional[SourceBodyMaskQcBatch] = None,
     sample_count: int = CENTERLINE_SAMPLE_COUNT,
 ) -> CenterlineBatch:
     masks_bool = np.asarray(body_masks, dtype=np.uint8) > 0
@@ -1338,6 +1578,10 @@ def _compute_centerline_batch(
     body_arclength_px = np.full((row_count,), np.nan, dtype=np.float32)
 
     for row_idx in range(row_count):
+        if source_body_qc is not None and bool(source_body_qc.severe_qc_failure[row_idx]):
+            centerline_reasons[row_idx] = "source_body_mask_qc_failed"
+            tail_base_reasons[row_idx] = "source_body_mask_qc_failed"
+            continue
         if not bool(body_frame.valid[row_idx]):
             centerline_reasons[row_idx] = "missing_body_frame"
             tail_base_reasons[row_idx] = "missing_body_frame"
@@ -1423,6 +1667,32 @@ def _write_centerline_batch(run_group: zarr.Group, row_slice: slice, batch: Cent
     group["tail_base_failure_reason_bytes"][row_slice, :] = batch.tail_base_failure_reason_bytes
     group["tail_segment_arclength_px"][row_slice] = batch.tail_segment_arclength_px
     group["body_arclength_px"][row_slice] = batch.body_arclength_px
+
+
+def _write_subject_body_spline_batch(
+    run_group: zarr.Group,
+    row_slice: slice,
+    batch: SubjectBodySplineBatch,
+) -> None:
+    components = run_group.get("components")
+    if components is None or "subject_body" not in components:
+        return
+    group = components["subject_body"]
+    if "bspline_sample_xy" not in group:
+        return
+    group["bspline_control_points_xy"][row_slice, :, :] = batch.bspline_control_points_xy
+    group["bspline_knots"][row_slice, :] = batch.bspline_knots
+    group["bspline_degree_used"][row_slice] = batch.bspline_degree_used
+    group["bspline_sample_xy"][row_slice, :, :] = batch.bspline_sample_xy
+    group["bspline_valid"][row_slice] = batch.bspline_valid
+    group["bspline_failure_reason_bytes"][row_slice, :] = _encode_reasons(batch.bspline_failure_reasons)
+    group["bspline_arc_length_px"][row_slice] = batch.bspline_arc_length_px
+    group["tail_sample_xy"][row_slice, :, :] = batch.tail_sample_xy
+    group["tail_tangent_xy"][row_slice, :, :] = batch.tail_tangent_xy
+    group["tail_normal_xy"][row_slice, :, :] = batch.tail_normal_xy
+    group["tail_curvature_px_inv"][row_slice, :] = batch.tail_curvature_px_inv
+    group["tail_sample_valid"][row_slice] = batch.tail_sample_valid
+    group["tail_sample_failure_reason_bytes"][row_slice, :] = _encode_reasons(batch.tail_sample_failure_reasons)
 
 
 def _angle_between_unoriented_axes(axis_a: np.ndarray, axis_b: np.ndarray) -> float:
@@ -1528,6 +1798,7 @@ def _process_and_write_subject_shape_chunk_groups(
     batches: dict[str, ComponentBatch] = {}
     component_masks_by_name: dict[str, np.ndarray] = {}
     rows_with_component: dict[str, int] = {}
+    source_body_qc: SourceBodyMaskQcBatch | None = None
     for component_name, component_idx in component_indices:
         phase_start = time.perf_counter()
         component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
@@ -1536,6 +1807,12 @@ def _process_and_write_subject_shape_chunk_groups(
         batches[str(component_name)] = batch
         if str(component_name) in {"subject_body", "swim_bladder"}:
             component_masks_by_name[str(component_name)] = component_masks
+        if str(component_name) == "subject_body":
+            source_body_qc = _read_source_body_mask_qc_batch(refined_group, row_slice)
+            _write_source_body_mask_qc_batch(run_group, row_slice, source_body_qc)
+            rows_with_component["source_body_mask_qc_severe"] = int(
+                np.count_nonzero(source_body_qc.severe_qc_failure)
+            )
         rows_with_component[str(component_name)] = int(np.count_nonzero(batch.mask_present))
         chunk_timing[f"write_{component_name}_seconds"] = float(time.perf_counter() - phase_start)
 
@@ -1561,12 +1838,32 @@ def _process_and_write_subject_shape_chunk_groups(
             component_masks_by_name["subject_body"],
             body_frame,
             caudal_anchor,
+            source_body_qc=source_body_qc,
             sample_count=CENTERLINE_SAMPLE_COUNT,
         )
         _write_centerline_batch(run_group, row_slice, centerline)
         chunk_timing["write_centerline_seconds"] = float(time.perf_counter() - phase_start)
         rows_with_component["centerline_valid"] = int(np.count_nonzero(centerline.centerline_valid))
         rows_with_component["tail_base_valid"] = int(np.count_nonzero(centerline.tail_base_valid))
+
+        phase_start = time.perf_counter()
+        spline = fit_subject_body_spline_batch(
+            centerline.centerline_xy,
+            centerline.centerline_valid,
+            centerline.tail_base_valid,
+            centerline.tail_base_arclength_px,
+            centerline_failure_reasons=_decode_reason_rows(centerline.centerline_failure_reason_bytes),
+            tail_base_failure_reasons=_decode_reason_rows(centerline.tail_base_failure_reason_bytes),
+            centerline_sample_count=CENTERLINE_SAMPLE_COUNT,
+            tail_sample_count=TAIL_SAMPLE_COUNT,
+            degree=DEFAULT_BSPLINE_DEGREE,
+            smoothing=DEFAULT_BSPLINE_SMOOTHING,
+            arclength_sample_count=DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
+        )
+        _write_subject_body_spline_batch(run_group, row_slice, spline)
+        chunk_timing["write_subject_body_spline_seconds"] = float(time.perf_counter() - phase_start)
+        rows_with_component["bspline_valid"] = int(np.count_nonzero(spline.bspline_valid))
+        rows_with_component["tail_sample_valid"] = int(np.count_nonzero(spline.tail_sample_valid))
 
     phase_start = time.perf_counter()
     _write_relations(run_group, row_slice, batches)

@@ -1,8 +1,8 @@
 # Subject Body Mask QC Design
 <!-- contract-meta
-version: 1
-status: draft
-last_verified: 2026-04-28
+version: 2
+status: implemented-initial
+last_verified: 2026-04-29
 -->
 
 Purpose: define mask-level quality checks for `subject_body` refined masks
@@ -102,6 +102,17 @@ For the dish-scratch/cross failure, the expected tags are usually
 `branched_body_mask`, `excess_body_skeleton_endpoints`, and potentially
 `thin_attached_artifact`.
 
+A row may carry multiple reason tags. The current compact encoding is a
+null-terminated UTF-8 string in `reason_bytes` with `|` as the delimiter, for
+example:
+
+```text
+branched_body_mask|excess_body_skeleton_endpoints|thin_attached_artifact
+```
+
+Consumers should split on `|` when they need individual tags. A single selected
+tag may still be used for display, but it should not erase the full tag set.
+
 ## Storage
 
 Mask-level QC should live with the refined mask component, not inside
@@ -139,6 +150,27 @@ Existing component-local arrays such as `mask_present`, `area_px`,
 `edit_applied`, and review status remain valid. This QC group is an additive
 review and downstream-gating surface.
 
+Initial implementation:
+
+- helper/module: `fisheye.refinement.subject_body_mask_qc`
+- method: `subject_body_mask_qc_v1`
+- CLI wrapper: `scripts/backfill_subject_body_mask_qc`
+- installed console entry point:
+  `palette-backfill-subject-body-mask-qc`
+- default skeleton severe thresholds are intentionally conservative but not
+  hypersensitive: more than 4 endpoints, more than 6 branchpoint pixels, or a
+  thin-spur score above 8. Milder skeleton irregularity should remain a review
+  tuning problem, not an automatic geometry-blocking failure.
+
+Example:
+
+```bash
+scripts/backfill_subject_body_mask_qc /path/to/recording_analysis.zarr \
+  --refined-run <refined_subject_masks_run> \
+  --chunk-size 256 \
+  --json
+```
+
 ## Review And Approval Semantics
 
 QC flags should not automatically approve or reject a refined mask. They should
@@ -173,16 +205,16 @@ Recommended behavior:
 
 ## Implementation Checklist
 
-- [ ] Add a deterministic subject-body mask QC helper that computes the initial
+- [x] Add a deterministic subject-body mask QC helper that computes the initial
       metrics from `refined_subject_masks_runs/<run>/masks_roi`.
-- [ ] Persist the additive `components/subject_body/qc/` group.
-- [ ] Add reason-byte encoding consistent with other refined-mask review
+- [x] Persist the additive `components/subject_body/qc/` group.
+- [x] Add reason-byte encoding consistent with other refined-mask review
       arrays.
-- [ ] Add unit tests for connected good fish masks, fragmented masks, and
+- [x] Add unit tests for connected good fish masks, fragmented masks, and
       attached cross/spur masks.
-- [ ] Add a CLI/backfill command that can run QC on existing refined-subject
+- [x] Add a CLI/backfill command that can run QC on existing refined-subject
       runs without rewriting mask pixels.
-- [ ] Update subject-shape writers to consume severe source-mask QC failures
+- [x] Update subject-shape writers to consume severe source-mask QC failures
       once the QC group exists.
 - [ ] Surface `requires_review` and reason tags in mask review and overlay
       tooling.

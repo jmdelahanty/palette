@@ -11,7 +11,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from skimage.measure import find_contours
+from skimage.morphology import skeletonize
 
+from fisheye.analysis.subject_shape_runs import _longest_skeleton_endpoint_path_xy
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -19,6 +21,8 @@ from fisheye.utils.zarr_io import open_zarr_root
 DEFAULT_OUTPUT_DIR = Path("/tmp/palette_subject_shape_overlays")
 ContourSource = Literal["mask", "persisted", "auto", "compare"]
 CONTOUR_SOURCE_CHOICES: tuple[str, ...] = ("mask", "persisted", "auto", "compare")
+SkeletonStyle = Literal["underlay", "offset", "branches"]
+SKELETON_STYLE_CHOICES: tuple[str, ...] = ("underlay", "offset", "branches")
 
 
 @dataclass(frozen=True)
@@ -350,6 +354,75 @@ def _plot_centerline(ax: plt.Axes, centerline_xy: object, *, valid: bool) -> Non
     ax.plot(arr[:, 0], arr[:, 1], color=color, linewidth=2.0, label="centerline")
 
 
+def _scatter_skeleton_points(
+    ax: plt.Axes,
+    coords_yx: np.ndarray,
+    *,
+    label: str,
+    alpha: float,
+    size: float,
+    offset_xy: tuple[float, float] = (0.0, 0.0),
+) -> None:
+    if int(coords_yx.shape[0]) == 0:
+        return
+    ax.scatter(
+        coords_yx[:, 1] + float(offset_xy[0]),
+        coords_yx[:, 0] + float(offset_xy[1]),
+        c="#ff2bd6",
+        s=float(size),
+        marker="s",
+        linewidths=0,
+        alpha=float(alpha),
+        label=label,
+    )
+
+
+def _plot_skeleton(
+    ax: plt.Axes,
+    mask: np.ndarray | None,
+    *,
+    skeleton_style: SkeletonStyle = "underlay",
+    skeleton_offset_px: float = 1.5,
+) -> None:
+    if mask is None or not np.any(mask):
+        return
+    if skeleton_style not in SKELETON_STYLE_CHOICES:
+        raise ValueError(f"skeleton_style must be one of {SKELETON_STYLE_CHOICES}; got {skeleton_style!r}")
+    skeleton = skeletonize(np.asarray(mask, dtype=bool))
+    coords_yx = np.argwhere(skeleton)
+    if int(coords_yx.shape[0]) == 0:
+        return
+    if skeleton_style == "underlay":
+        _scatter_skeleton_points(ax, coords_yx, label="body skeleton", alpha=0.78, size=4.0)
+        return
+    if skeleton_style == "offset":
+        _scatter_skeleton_points(
+            ax,
+            coords_yx,
+            label="body skeleton offset",
+            alpha=0.78,
+            size=4.0,
+            offset_xy=(float(skeleton_offset_px), float(skeleton_offset_px)),
+        )
+        return
+
+    path_xy, _reason = _longest_skeleton_endpoint_path_xy(np.asarray(mask, dtype=bool))
+    if path_xy is None:
+        _scatter_skeleton_points(ax, coords_yx, label="body skeleton branches unavailable", alpha=0.78, size=4.0)
+        return
+    selected_yx = {
+        (int(round(float(y))), int(round(float(x))))
+        for x, y in np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)
+        if np.isfinite(x) and np.isfinite(y)
+    }
+    unused = np.asarray(
+        [(int(y), int(x)) for y, x in coords_yx if (int(y), int(x)) not in selected_yx],
+        dtype=np.int64,
+    ).reshape(-1, 2)
+    _scatter_skeleton_points(ax, coords_yx, label="body skeleton all", alpha=0.18, size=3.0)
+    _scatter_skeleton_points(ax, unused, label="unused skeleton branches", alpha=0.9, size=5.0)
+
+
 def _plot_body_frame(ax: plt.Axes, shape_group: zarr.Group, row: int) -> None:
     valid = bool(_row_value(shape_group, "body_frame/valid", row, False))
     if not valid:
@@ -370,10 +443,15 @@ def render_subject_shape_overlay(
     row: int,
     figsize: tuple[float, float] = (7.0, 7.0),
     contour_source: ContourSource = "mask",
+    show_skeleton: bool = False,
+    skeleton_style: SkeletonStyle = "underlay",
+    skeleton_offset_px: float = 1.5,
 ) -> plt.Figure:
     row = int(row)
     if contour_source not in CONTOUR_SOURCE_CHOICES:
         raise ValueError(f"contour_source must be one of {CONTOUR_SOURCE_CHOICES}; got {contour_source!r}")
+    if skeleton_style not in SKELETON_STYLE_CHOICES:
+        raise ValueError(f"skeleton_style must be one of {SKELETON_STYLE_CHOICES}; got {skeleton_style!r}")
     body = _mask_for(ctx, row, "subject_body")
     swim = _mask_for(ctx, row, "swim_bladder")
     eye_left = _mask_for(ctx, row, "eye_left")
@@ -426,6 +504,14 @@ def render_subject_shape_overlay(
         label="eye right",
         contour_source=contour_source,
     )
+
+    if show_skeleton:
+        _plot_skeleton(
+            ax,
+            body,
+            skeleton_style=skeleton_style,
+            skeleton_offset_px=float(skeleton_offset_px),
+        )
 
     shape = ctx.shape_group
     centerline_valid = bool(_row_value(shape, "components/subject_body/centerline_valid", row, False))
@@ -484,6 +570,7 @@ def render_subject_shape_overlay(
             f"refined: {ctx.refined_run_name}",
             f"background: {base_source}",
             f"contours: {contour_source}",
+            f"skeleton: {bool(show_skeleton)} ({skeleton_style})",
             f"centerline: {centerline_valid} ({body_reason or 'n/a'})",
             f"tail_base: {bool(_row_value(shape, 'components/subject_body/tail_base_valid', row, False))} ({tail_reason or 'n/a'})",
             f"caudal_anchor: {bool(_row_value(shape, 'components/swim_bladder/caudal_contour_valid', row, False))} ({anchor_reason or 'n/a'})",
@@ -528,6 +615,9 @@ def export_subject_shape_overlays(
     use_crop_images: bool = True,
     dpi: int = 160,
     contour_source: ContourSource = "mask",
+    show_skeleton: bool = False,
+    skeleton_style: SkeletonStyle = "underlay",
+    skeleton_offset_px: float = 1.5,
 ) -> list[Path]:
     ctx = open_subject_shape_overlay_context(
         zarr_path,
@@ -539,7 +629,14 @@ def export_subject_shape_overlays(
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for row in rows:
-        fig = render_subject_shape_overlay(ctx, row=int(row), contour_source=contour_source)
+        fig = render_subject_shape_overlay(
+            ctx,
+            row=int(row),
+            contour_source=contour_source,
+            show_skeleton=show_skeleton,
+            skeleton_style=skeleton_style,
+            skeleton_offset_px=float(skeleton_offset_px),
+        )
         out = output_dir / f"subject_shape_overlay_{ctx.shape_run_name}_row_{int(row):06d}.png"
         fig.savefig(out, dpi=int(dpi), bbox_inches="tight")
         plt.close(fig)
@@ -581,6 +678,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "compare draws both."
         ),
     )
+    parser.add_argument(
+        "--show-skeleton",
+        action="store_true",
+        help="Recompute and overlay subject-body skeleton pixels from masks_roi for debug review.",
+    )
+    parser.add_argument(
+        "--skeleton-style",
+        choices=SKELETON_STYLE_CHOICES,
+        default="underlay",
+        help=(
+            "Skeleton rendering mode: underlay draws raw skeleton beneath centerline; "
+            "offset shifts skeleton points for overlap inspection; branches highlights "
+            "skeleton pixels not selected by the longest-path centerline."
+        ),
+    )
+    parser.add_argument(
+        "--skeleton-offset-px",
+        type=float,
+        default=1.5,
+        help="Pixel offset used by --skeleton-style offset.",
+    )
     return parser
 
 
@@ -597,6 +715,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         use_crop_images=not bool(args.no_crop_images),
         dpi=int(args.dpi),
         contour_source=args.contour_source,
+        show_skeleton=bool(args.show_skeleton),
+        skeleton_style=args.skeleton_style,
+        skeleton_offset_px=float(args.skeleton_offset_px),
     )
     for path in paths:
         print(path)

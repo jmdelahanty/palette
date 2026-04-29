@@ -10,6 +10,7 @@ import zarr
 from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.tune import refined_subject_mask_review as review_mod
 from fisheye.utils import sync_refined_subject_mask_metadata as cli_mod
+from fisheye.utils import write_refined_subject_mask_edit as write_cli_mod
 
 os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
@@ -423,3 +424,112 @@ def test_sync_refined_subject_mask_metadata_cli_can_check_source_updates(tmp_pat
     assert payload["status"] == "updated"
     assert payload["auto_synced_roi_count"] == 1
     assert payload["stale_marked_roi_count"] == 0
+
+
+def test_write_refined_subject_mask_edit_owns_pixels_and_metadata(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited_mask = np.zeros((8, 8), dtype=np.uint8)
+    edited_mask[2:5, 2:5] = 1
+    summary = review_mod.write_refined_subject_mask_edit(
+        zarr_path,
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_index=0,
+        mask=edited_mask,
+        reason="crimson_refined_subject_mask_edit",
+        validate=True,
+    )
+
+    assert summary["ok"] is True
+    assert summary["status"] == "updated"
+    assert summary["roi_index"] == 0
+    assert summary["component_name"] == "subject_body"
+    assert summary["row_revision_before"] == 0
+    assert summary["row_revision_after"] == 1
+    assert summary["edit_applied"] is True
+    assert summary["mask_changed"] is True
+    assert summary["contour_points"] > 0
+    assert summary["updated_at_utc"]
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][0, 0], dtype=np.uint8), edited_mask)
+    assert float(np.asarray(run["metrics/area_px"][0, 0], dtype=np.float32)) == 9.0
+    assert bool(np.asarray(run["metrics/mask_present"][0, 0], dtype=bool)) is True
+    body_group = run["components"]["subject_body"]
+    assert body_group.attrs["last_row_update_reason"] == "crimson_refined_subject_mask_edit"
+    assert body_group["contours"]["len"][0] == summary["contour_points"]
+    assert body_group["provenance"].attrs["last_update_method"] == review_mod.REFINED_SUBJECT_WRITEBACK_METHOD
+
+
+def test_write_refined_subject_mask_edit_cli_emits_json_and_noops_same_pixels(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    mask_path = tmp_path / "body.npy"
+    edited_mask = np.zeros((8, 8), dtype=np.uint8)
+    edited_mask[3:6, 3:6] = 1
+    np.save(mask_path, edited_mask)
+
+    rc = write_cli_mod.main(
+        [
+            "--zarr-path",
+            str(zarr_path),
+            "--refined-run",
+            "refined_subject_masks_001",
+            "--component-name",
+            "subject_body",
+            "--roi-index",
+            "0",
+            "--mask-path",
+            str(mask_path),
+            "--validate",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["ok"] is True
+    assert payload["status"] == "updated"
+    assert payload["row_revision_before"] == 0
+    assert payload["row_revision_after"] == 1
+    assert payload["mask_path"] == str(mask_path)
+
+    rc = write_cli_mod.main(
+        [
+            "--zarr-path",
+            str(zarr_path),
+            "--refined-run",
+            "refined_subject_masks_001",
+            "--component-name",
+            "subject_body",
+            "--roi-index",
+            "0",
+            "--mask-path",
+            str(mask_path),
+            "--validate",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "noop"
+    assert payload["row_revision_before"] == 1
+    assert payload["row_revision_after"] == 1

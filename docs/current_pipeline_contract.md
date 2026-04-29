@@ -204,6 +204,9 @@ desired design:
   `analysis/eye_angle_runs` now consumes it when available. Body
   centerline/B-spline support, materialized `body_frame/` outputs, and
   additional downstream consumers are still open.
+- Subject-shape length stability QC is defined as a downstream analysis layer,
+  but body/tail length distribution summaries, temporal delta flags, and
+  multi-reason length-QC tags are not yet implemented.
 
 ## Review Checklist
 
@@ -228,6 +231,7 @@ When reviewing new pipeline work, ask:
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [body_frame_contract.md](body_frame_contract.md)
 - [body_spline_tail_anchor_design.md](body_spline_tail_anchor_design.md)
+- [tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md)
 - [repo_wide_staleness_checklist.md](repo_wide_staleness_checklist.md)
 - [repo_wide_staleness_gap_matrix.md](repo_wide_staleness_gap_matrix.md)
 - [refined_detect_row_identity_contract.md](refined_detect_row_identity_contract.md)

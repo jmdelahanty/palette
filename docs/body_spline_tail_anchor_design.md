@@ -9,6 +9,12 @@ Purpose: define how Palette should represent mask/spline-derived tail geometry
 without confusing it with pose-schema keypoints that may also use the semantic
 label `tail_tip`.
 
+For a shorter user-facing explanation of the current stored landmarks, see
+[subject_shape_landmark_conventions.md](subject_shape_landmark_conventions.md).
+For the adapter layer that should make Palette tail geometry usable by Stytra,
+ZebraZoom, Megabouts, and BEAST-style classifiers, see
+[tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md).
+
 ## Design Decision
 
 Palette should separate anatomical meaning from measurement source.
@@ -80,8 +86,9 @@ Recommended definitions:
 
 ### Tail Sampling, Width, And Curvature
 
-Tail curvature and width should be derived from a smoothed, ordered midline or
-B-spline rather than directly from raw skeleton pixels.
+Tail curvature and width should be derived from an ordered midline function,
+preferably a B-spline when the fit is valid, rather than directly from raw
+skeleton pixels.
 
 Raw skeleton pixels are useful for discovering the centerline, but they are
 jagged and branch-prone. Curvature is a derivative-like measurement, so it is
@@ -92,10 +99,18 @@ subject_body mask
   -> skeleton or medial-axis candidate
   -> cleaned ordered midline
   -> oriented midline with head/tail polarity
-  -> B-spline or smoothed sampled centerline
+  -> B-spline fitted function or sampled-centerline fallback
   -> fixed arclength samples
   -> tangent, normal, curvature, and width profile
 ```
+
+A B-spline should be treated as the fitted continuous geometry model for the
+body/tail centerline. Smoothing is only one configurable policy of that fit, not
+the definition of the spline itself. A spline writer may choose an interpolating
+fit that follows the ordered centerline closely, or a regularized/smoothing fit
+that trades exact point agreement for a more stable derivative. That choice must
+be recorded explicitly because it affects tangents, curvature, body length, and
+tail angles.
 
 Tail sampling should use normalized arclength along the tail segment for the
 first implementation:
@@ -110,7 +125,8 @@ change.
 
 At each tail sample:
 
-1. evaluate the spline or smoothed centerline position
+1. evaluate the B-spline function, or the sampled-centerline fallback, at the
+   selected arclength
 2. compute the local tangent direction
 3. compute the perpendicular normal direction
 4. intersect or probe the subject-body mask along the normal
@@ -155,10 +171,43 @@ dish scratch attached to the fish, the body mask itself should be flagged by
 the refined-mask QC layer before subject-shape geometry is trusted.
 
 See [subject_body_mask_qc_design.md](subject_body_mask_qc_design.md) for the
-mask-level QC contract. Subject-shape writers should still run fail-closed
-geometry checks, but severe source-mask QC failures should propagate into
-centerline, spline, and tail-anchor validity rather than being silently fixed by
-choosing a different skeleton branch.
+mask-level QC contract. The initial implementation writes
+`components/subject_body/qc` with `subject_body_mask_qc_v1`; subject-shape
+writers snapshot those flags into `components/subject_body/source_mask_qc_*`
+and mark centerline/tail-base geometry invalid with
+`source_body_mask_qc_failed` when source QC is severe. Future spline writers
+should follow the same fail-closed rule rather than silently choosing a
+different skeleton branch.
+
+## Length Stability QC
+
+Centerline and B-spline writers should treat body and tail length as
+interpreted shape measurements. They are useful for quality control because a
+short recording should not contain abrupt biological body-length changes.
+
+The expected pattern is:
+
+```text
+body/tail centerline or B-spline
+  -> body and tail arclength arrays
+  -> recording-local length distribution summaries
+  -> gap-aware per-row temporal deltas
+  -> transparent reason tags for rows that need review
+```
+
+This QC should live under
+`analysis/subject_shape_runs/<run>/components/subject_body` because it depends
+on the selected geometry model, tail-base definition, and body-frame polarity.
+It should not mutate `refined_subject_masks_runs` and it should not repair
+missing tail pixels automatically.
+
+Rows may carry multiple length-QC reasons, such as
+`tail_length_low_outlier|temporal_tail_length_drop`. A future scalar quality
+score may be useful for sorting review queues, but the authoritative record
+should remain the explicit reason tags and the underlying numeric metrics.
+
+See
+[subject_shape_runs_contract.md](subject_shape_runs_contract.md#subject-shape-length-qc).
 
 ## Proposed Storage
 
@@ -421,6 +470,8 @@ renderer after canary review.
 - [ ] Store tail-sampling parameters: sample count, domain, smoothing source,
   curvature method, width-probe method, probe extent, and probe resolution.
 - [ ] Add optional pose-tail-to-spline-tail comparison metrics.
+- [x] Keep B-spline fitting math in helper functions rather than embedding it
+  directly in the Zarr writer.
 
 ### Writer Implementation
 
@@ -429,12 +480,12 @@ renderer after canary review.
 - [ ] Implement body-frame projection for contour points.
 - [ ] Implement centerline extraction from subject-body masks.
 - [ ] Implement centerline orientation from body-frame polarity.
-- [ ] Implement B-spline fitting or sampled centerline output.
+- [x] Implement initial B-spline fitting from ordered sampled centerlines.
 - [ ] Compute `tail_tip_xy`, `tail_base_xy`, `body_arclength_px`, and
   `tail_segment_arclength_px`.
-- [ ] Add tail-normalized fixed arclength sampling.
-- [ ] Compute spline/sample tangents and normals.
-- [ ] Compute tail curvature from spline derivatives or finite differences.
+- [x] Add tail-normalized fixed arclength sampling.
+- [x] Compute spline/sample tangents and normals.
+- [x] Compute tail curvature from spline derivatives or finite differences.
 - [ ] Compute tail width profiles from normal-line mask intersections.
 - [ ] Keep outputs row-aligned to refined subject-mask rows for the first pass.
 - [ ] Do not mutate refined mask pixels or refined keypoint arrays.
@@ -446,6 +497,7 @@ renderer after canary review.
   `tail_tip` and spline `tail_tip_xy`.
 - [ ] Add fixture tests for failure reasons on missing/ambiguous masks.
 - [ ] Add deterministic tests for tail-normalized sample positions.
+- [ ] Add length-distribution summaries and gap-aware body/tail length QC tags.
 - [ ] Add tests for width-profile probing on synthetic masks with known width.
 - [ ] Add tests that curvature fails closed when derivatives are unavailable or
   degenerate.
@@ -460,6 +512,7 @@ renderer after canary review.
 - [ ] Keep keypoint-only workflows using pose-schema `tail_tip`.
 - [ ] Expose tail/spline outputs in review or visualization tooling.
 - [ ] Add tail-width and curvature overlays to the subject-shape canary viewer.
+- [ ] Add a tool-ready tail-posture export/view for external classifiers.
 - [ ] Avoid treating tail-width/curvature profiles as behavior metrics until
   temporal alignment and smoothing policy are explicitly chosen.
 - [ ] Avoid using spline outputs in bout/kinematics summaries until canary
@@ -490,5 +543,6 @@ renderer after canary review.
 - [body_frame_contract.md](body_frame_contract.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
 - [derived_metrics_schema_contract.md](derived_metrics_schema_contract.md)
+- [tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md)
 - [analytics_math_primer.md](analytics_math_primer.md)
 - [current_pipeline_contract.md](current_pipeline_contract.md)

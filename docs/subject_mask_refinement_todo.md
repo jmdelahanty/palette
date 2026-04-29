@@ -1063,6 +1063,10 @@ This means the registry should eventually answer questions like:
 - [x] Add a refinement-side refresh path for mask-local body/swim/eye metrics and
       generated `needs_review_metric_*` reason tags.
   See `scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics`.
+- [x] Add subject-body mask-local QC for skeleton/topology artifacts before
+      downstream centerline or spline stages trust a body mask.
+  See `scripts/backfill_subject_body_mask_qc` and
+  [subject_body_mask_qc_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_body_mask_qc_design.md).
 - [x] Implement the first `analysis/subject_shape_runs` writer.
   See `scripts/py -m fisheye.analysis.subject_shape_runs`.
 - [x] Route the first downstream eye-angle analysis consumer through
@@ -1118,6 +1122,10 @@ implemented for the current U-Net design:
   component provenance, review-triage counts, and Dask execution metadata
 - refined-subject eye geometry can be written during finalization or backfilled
   afterward with `fisheye.utils.backfill_refined_subject_eye_geometry`
+- subject-body mask QC writes
+  `components/subject_body/qc` with `subject_body_mask_qc_v1`, and
+  subject-shape runs fail closed on severe source mask QC with
+  `source_body_mask_qc_failed`
 
 Real canary evidence:
 
@@ -1133,6 +1141,9 @@ Real canary evidence:
   `["subject_body", "eye_left", "eye_right", "swim_bladder"]`
 - eye geometry status:
   `computed`, with valid eye-pair separation on `19233 / 19235` rows
+- subject-body mask QC canary:
+  `components/subject_body/qc`, `subject_body_mask_qc_v1`,
+  `requires_review_count=1360 / 19235`, `severe_qc_failure_count=1360 / 19235`
 - first subject-shape run:
   `analysis/subject_shape_runs/subject_shape_smart_finalizer_canary_2026-04-26`
 - subject-shape execution:
@@ -1141,6 +1152,10 @@ Real canary evidence:
 - subject-shape component coverage:
   `subject_body=19235`, `swim_bladder=19235`, `eye_left=19234`,
   `eye_right=19234`
+- source-QC-aware subject-shape canary:
+  `analysis/subject_shape_runs/subject_shape_centerline_qc_canary_20260429`,
+  `centerline_valid=17874 / 19235`, `tail_base_valid=17874 / 19235`,
+  `source_body_mask_qc_severe=1360`
 - eye-angle schema canary:
   `analysis/eye_angle_runs/eye_angle_subject_shape_schema_v2_canary_20260428`
   *(historical v2 canary; current writer schema is v4 with `support/body_frame`

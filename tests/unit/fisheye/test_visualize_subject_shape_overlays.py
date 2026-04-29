@@ -117,10 +117,12 @@ def test_render_subject_shape_overlay_from_mask_background(tmp_path: Path, monke
     )
 
     ctx = open_subject_shape_overlay_context(zarr_path, shape_run="shape_001", use_crop_images=False)
-    fig = render_subject_shape_overlay(ctx, row=0)
+    fig = render_subject_shape_overlay(ctx, row=0, show_skeleton=True)
 
     assert fig.axes
     assert "Subject shape overlay" in fig.axes[0].get_title()
+    labels = [collection.get_label() for collection in fig.axes[0].collections]
+    assert "body skeleton" in labels
     fig.canvas.draw()
     plt.close(fig)
 
@@ -143,6 +145,56 @@ def test_render_subject_shape_overlay_can_draw_persisted_eye_contours(tmp_path: 
     labels = [line.get_label() for line in fig.axes[0].lines]
     assert "eye left persisted" in labels
     assert "body contour" not in labels
+    fig.canvas.draw()
+    plt.close(fig)
+
+
+def test_render_subject_shape_overlay_can_offset_skeleton(tmp_path: Path, monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    zarr_path = tmp_path / "shape.zarr"
+    root = _build_refined_root(zarr_path)
+    subject_shape_runs.write_subject_shape_run_group(
+        root,
+        zarr_path=zarr_path,
+        refined_run="refined_001",
+        run_name="shape_001",
+    )
+
+    ctx = open_subject_shape_overlay_context(zarr_path, shape_run="shape_001", use_crop_images=False)
+    fig = render_subject_shape_overlay(ctx, row=0, show_skeleton=True, skeleton_style="offset")
+
+    labels = [collection.get_label() for collection in fig.axes[0].collections]
+    assert "body skeleton offset" in labels
+    fig.canvas.draw()
+    plt.close(fig)
+
+
+def test_render_subject_shape_overlay_can_highlight_unused_skeleton_branches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_provenance(monkeypatch)
+    zarr_path = tmp_path / "shape.zarr"
+    root = _build_refined_root(zarr_path)
+    refined = root["refined_subject_masks_runs"]["refined_001"]
+    masks = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    masks[0, 0] = 0
+    masks[0, 0, 3:17, 10] = 1
+    masks[0, 0, 10, 10:18] = 1
+    refined["masks_roi"][:] = masks
+    subject_shape_runs.write_subject_shape_run_group(
+        root,
+        zarr_path=zarr_path,
+        refined_run="refined_001",
+        run_name="shape_001",
+    )
+
+    ctx = open_subject_shape_overlay_context(zarr_path, shape_run="shape_001", use_crop_images=False)
+    fig = render_subject_shape_overlay(ctx, row=0, show_skeleton=True, skeleton_style="branches")
+
+    labels = [collection.get_label() for collection in fig.axes[0].collections]
+    assert "body skeleton all" in labels
+    assert "unused skeleton branches" in labels
     fig.canvas.draw()
     plt.close(fig)
 
@@ -192,6 +244,7 @@ def test_export_subject_shape_overlay_png(tmp_path: Path, monkeypatch) -> None:
         use_crop_images=False,
         dpi=80,
         contour_source="auto",
+        show_skeleton=True,
     )
 
     assert len(paths) == 2

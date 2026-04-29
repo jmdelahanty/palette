@@ -12,6 +12,12 @@ subject masks.
 For the boundary between refined-mask-local geometry caches and downstream
 analysis products, see
 [refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md).
+For the user-facing conventions around `caudal_contour_point_xy`,
+`tail_base_xy`, `tail_tip_xy`, and `centerline_xy`, see
+[subject_shape_landmark_conventions.md](subject_shape_landmark_conventions.md).
+For future interoperability with Stytra, ZebraZoom, Megabouts, and
+BEAST-style classifiers, see
+[tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md).
 
 ## Scope
 
@@ -66,6 +72,8 @@ Use `analysis/subject_shape_runs/<run>` for interpreted biology:
   immediate mask-local QC
 - eye angles relative to body/head heading
 - temporally smoothed or track-aligned shape metrics
+- tool-ready tail-posture exports may consume these arrays, but should not make
+  third-party tool formats canonical Palette storage
 
 Practical test:
 
@@ -79,9 +87,16 @@ Mask-quality prerequisite:
 
 - `subject_body` mask-local QC belongs with `refined_subject_masks_runs`; see
   [subject_body_mask_qc_design.md](subject_body_mask_qc_design.md).
-- Subject-shape writers should fail closed or mark warnings when source
-  mask-level QC indicates a severe or review-required body mask, but
-  `analysis/subject_shape_runs` should not be the primary authority for whether
+- Current subject-shape writers snapshot source body-mask QC into
+  `components/subject_body/source_mask_qc_*` arrays when
+  `components/subject_body/qc` is available on the refined source run.
+- Current centerline/tail-base writers fail closed with
+  `source_body_mask_qc_failed` when source QC marks
+  `severe_qc_failure[row] == true`.
+- Review-required but non-severe source mask QC is propagated as a warning
+  snapshot; it does not by itself prevent candidate geometry from being
+  computed.
+- `analysis/subject_shape_runs` should not be the primary authority for whether
   the refined mask pixels are plausible.
 
 ## Non-Goals
@@ -185,13 +200,19 @@ analysis/subject_shape_runs/
       subject_body/
         centroid_xy                (N, 2) optional mirror/cache
         contour_ref                optional references into refined mask contours
+        source_mask_qc_available   (N,) optional bool snapshot from refined mask QC
+        source_mask_qc_severe_failure (N,) optional bool
+        source_mask_qc_requires_review (N,) optional bool
+        source_mask_qc_reason_bytes (N, width) optional uint8 utf8-null-terminated tags
         centerline_xy              (N, P, 2) optional
         centerline_valid           (N,) optional
         bspline_control_points_xy  (N, K, 2) optional
         bspline_sample_xy          (N, P, 2) optional
         bspline_knots              optional
-        bspline_degree             scalar attr or dataset
+        bspline_degree             scalar attr
+        bspline_degree_used        (N,) optional row-level degree used, -1 when invalid
         bspline_valid              (N,) optional
+        bspline_failure_reason_bytes (N, width) optional
         centerline_arc_length_px   (N,) optional
         bspline_arc_length_px      (N,) optional
         axis_xy                    (N, 2) optional
@@ -208,10 +229,27 @@ analysis/subject_shape_runs/
         tail_tangent_xy            (N, K, 2) optional
         tail_normal_xy             (N, K, 2) optional
         tail_curvature_px_inv      (N, K) optional
+        tail_sample_valid          (N,) optional
+        tail_sample_failure_reason_bytes (N, width) optional
         tail_width_px              (N, K) optional
         tail_width_valid           (N, K) optional
         curvature                  (N, P) optional whole-centerline curvature
         validity/
+        quality/
+          preferred_body_length_px (N,) optional selected centerline/spline length
+          preferred_tail_length_px (N,) optional selected tail-segment length
+          tail_to_body_length_ratio (N,) optional
+          body_length_delta_px     (N,) optional gap-aware temporal delta
+          body_length_delta_fraction (N,) optional
+          tail_length_delta_px     (N,) optional gap-aware temporal delta
+          tail_length_delta_fraction (N,) optional
+          body_length_robust_z     (N,) optional recording-local robust z score
+          tail_length_robust_z     (N,) optional recording-local robust z score
+          tail_to_body_ratio_robust_z (N,) optional
+          length_qc_flags          (N,) optional bool
+          length_qc_severity       (N,) optional uint8 enum
+          length_qc_reason_bytes   (N, width) optional pipe-delimited stable tags
+          summaries/               optional run-level quantiles/MAD/histograms
       swim_bladder/
         centroid_xy                (N, 2) optional mirror/cache
         ellipse_params             (N, 5) optional
@@ -359,9 +397,10 @@ The canonical body B-spline fit belongs in
 
 Reasoning:
 
-- a B-spline is a fitted model, not just a direct mask primitive
-- its output depends on smoothing, knot count, parameterization, resampling, and
-  failure policy
+- a B-spline is a fitted continuous curve model, not just a direct mask
+  primitive
+- its output depends on degree, knot count, parameterization, interpolation
+  versus smoothing/regularization policy, resampling, and failure policy
 - if the spline is used as a body coordinate frame, it also depends on anatomical
   polarity or heading source
 - recomputing or improving the fit should create or update a derived analysis
@@ -381,7 +420,9 @@ Minimum recommended B-spline provenance:
 - spline method/version
 - spline degree
 - knot/parameterization policy
-- smoothing or regularization parameters
+- interpolation versus smoothing/regularization mode
+- smoothing or regularization parameters, including an explicit no-smoothing
+  value when the spline is interpolating
 - head/tail polarity source if the spline is oriented
 - per-row validity/failure reason
 
@@ -414,6 +455,90 @@ Required semantics:
   validity/failure reason
 - if both an approximate long-axis metric and a spline/centerline length exist,
   downstream biological analyses should prefer the spline/centerline length
+
+## Subject-Shape Length QC
+
+Length stability is a downstream subject-shape QC problem, not a refined-mask
+approval rule.
+
+Reasoning:
+
+- biological body length should be nearly stable within a short recording
+- tail-segment length should be stable enough that sudden drops are strong
+  evidence for a clipped/truncated tail mask, failed centerline, or bad spline
+  endpoint
+- the absolute value depends on the selected centerline/spline estimator, so
+  this QC belongs with `analysis/subject_shape_runs`
+- refined masks remain canonical; length QC should never silently extend or
+  repair mask pixels
+
+Recommended row-local metrics:
+
+- `preferred_body_length_px`: selected canonical body length for this method,
+  preferring a valid B-spline arc length when present, otherwise a validated
+  centerline arc length
+- `preferred_tail_length_px`: selected tail-segment length from tail base to
+  tail tip using the same geometry model as the body length
+- `tail_to_body_length_ratio`: dimensionless tail-length sanity check
+- `body_length_delta_px` and `body_length_delta_fraction`: gap-aware temporal
+  change from the nearest prior valid row in the same track or single-fish row
+  sequence
+- `tail_length_delta_px` and `tail_length_delta_fraction`: equivalent
+  tail-segment change metrics
+- robust recording-local scores such as `body_length_robust_z`,
+  `tail_length_robust_z`, and `tail_to_body_ratio_robust_z`
+
+Recommended run-level summaries:
+
+- valid count, invalid count, and reason counts
+- median, MAD, min, max, and quantiles such as q01, q05, q25, q75, q95, q99
+- optional histogram bin edges/counts for body length, tail length, and
+  tail/body ratio
+
+Temporal deltas must be gap-aware. Near-term single-fish-per-dish runs may
+compute deltas in row order when `row_axis` is frame-aligned and one subject is
+present. Multi-subject or sparse-track runs must compute deltas within a
+declared `track_id`/`track_index` grouping and must not compare different
+subjects or bridge long gaps as though they were adjacent frames.
+
+Recommended length-QC reason tags:
+
+- `ok`
+- `source_mask_qc_failed`
+- `centerline_invalid`
+- `bspline_invalid`
+- `tail_sample_invalid`
+- `body_length_missing`
+- `tail_length_missing`
+- `body_length_low_outlier`
+- `body_length_high_outlier`
+- `tail_length_low_outlier`
+- `tail_length_high_outlier`
+- `tail_to_body_ratio_low`
+- `tail_to_body_ratio_high`
+- `temporal_body_length_drop`
+- `temporal_body_length_jump`
+- `temporal_tail_length_drop`
+- `temporal_tail_length_jump`
+- `track_gap`
+- `insufficient_baseline`
+
+A single row may have multiple reason tags. The recommended primary encoding is
+a null-terminated UTF-8 string in `length_qc_reason_bytes`, using `|` as the
+stable delimiter, for example:
+
+```text
+tail_length_low_outlier|temporal_tail_length_drop
+```
+
+The delimited reason string is the compact audit trail. Writers may also expose
+boolean convenience arrays for high-volume consumers, but those arrays must be
+derived from the same tags and must not introduce a second source of truth.
+
+Do not start with an opaque scalar QC score as the authority. If a future writer
+adds `length_qc_score`, it should be a convenience value derived from explicit
+reason tags, source validity, and documented weights. Consumers that need to
+explain or review a frame should use the reason tags.
 
 ## Relationship To Existing Analysis Runs
 

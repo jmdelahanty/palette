@@ -203,7 +203,49 @@ Current scope:
 - component-scoped sync using the existing Palette refined-subject review
   semantics
 - no new run-level `reason` / `reason_bytes` reconciliation beyond what the
-  current Palette review code already owns
+  refined-subject apply path already computes
+
+This hook is a development bridge for editors that already wrote pixels into
+`masks_roi`. It is intentionally not the preferred long-term integration
+boundary for Crimson-style editors.
+
+### Shared Refined-Subject Mask Writeback Helper
+
+This helper is Palette's shared save boundary, not a Paintera or Crimson
+painting contract. Paintera and Crimson can keep completely separate editor UI,
+paint tools, preview state, and in-memory mask representations. The shared
+contract starts only when an editor has produced a final 2D binary mask payload
+for one refined row/component.
+
+For consumers that can hand Palette that edited mask payload, prefer the
+single-command helper:
+
+```bash
+palette-write-refined-subject-mask-edit \
+  --zarr-path <analysis.zarr> \
+  --refined-run <run> \
+  --component-name <subject_body|swim_bladder|eye_left|eye_right> \
+  --roi-index <row> \
+  --mask-path <binary-mask.npy|png|raw> \
+  --reason <editor>_refined_subject_mask_edit \
+  --validate
+```
+
+Inside a Palette source checkout, use:
+
+```bash
+scripts/palette-write-refined-subject-mask-edit ...
+```
+
+This command owns the pixel write and metadata reconciliation in one Palette
+process. It resolves channels from `mask_labels`, respects
+`available_channels`, updates row-local metrics/reasons/contours/revisions, and
+emits a JSON response for callers.
+
+For Crimson specifically, the expected architecture remains Crimson-owned
+painting plus a writeback client abstraction. The UI should not depend on
+Paintera code or on this Paintera workflow document; it should call the same
+Palette writeback command or a future Palette service only at save time.
 
 ## SAM3 Canary Results
 
