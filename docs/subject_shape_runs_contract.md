@@ -121,6 +121,9 @@ An `analysis/subject_shape_runs/<run>` writer should record:
 - `source_mask_labels`
 - `source_mask_label_schema_id`
 - `source_mask_geometry_schema_id` when mask-local geometry was consumed
+- `source_refined_subject_masks/row_revision` when available, so row-local
+  refined-mask edits can be detected without silently mutating this analysis
+  run
 - method name and method version
 - parameter/config hash or serialized config
 - creation timestamp
@@ -160,6 +163,15 @@ analysis/subject_shape_runs/
       frame_indices                (N,)
       detection_indices            (N,) optional
       source_refined_row_ids        (N,) optional
+    source_refined_subject_masks/
+      attrs:
+        schema_id                   "analysis.subject_shape.source_refined_subject_masks_v1"
+        source_stage                "refined_subject_masks_runs"
+        source_run                  "<refined run>"
+        component_names             list[str]
+        row_revision_semantics      description
+      row_revision                  (N, C) int64 per-component source generation
+      row_revision_available        (C,) bool; false means source had no revision array
     body_frame/                     optional shared fish anatomical frame
       origin_xy                     (N, 2)
       forward_axis_xy               (N, 2)
@@ -235,6 +247,45 @@ non-authoritative `frame_index/` and `track_index/` lookup groups so consumers
 can resolve rows by frame or track without scanning all row-aligned arrays. The
 canonical shape arrays remain sparse and row-aligned. See
 [realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md).
+
+## Source Revision And Staleness
+
+Subject-shape runs are downstream analysis products. They should not silently
+change when a refined mask row is manually edited.
+
+When the source refined run exposes
+`refined_subject_masks_runs/<run>/components/<component>/row_revision`, the
+subject-shape writer should copy those values into:
+
+```text
+analysis/subject_shape_runs/<run>/source_refined_subject_masks/row_revision
+```
+
+Column order is declared by
+`source_refined_subject_masks.attrs["component_names"]`. If an older refined
+run has no row-revision array for a component, the copied values should be zero
+and `row_revision_available[component]` should be false.
+
+Validation should compare the copied revisions to current refined-mask
+component revisions:
+
+- equal revisions mean the subject-shape row is current with respect to that
+  component
+- changed revisions mean the subject-shape row is stale/source-drifted
+- missing current revisions on older archives mean revision-based drift
+  detection is unavailable for that component, not that the masks are approved
+
+The initial operator command is:
+
+```bash
+scripts/py -m fisheye.analysis.subject_shape_runs /path/to/analysis.zarr \
+  --audit-source-revisions \
+  --shape-run <subject_shape_run>
+```
+
+This audit is read-only. Stale rows should be recomputed by an explicit
+subject-shape recompute command, not by automatic propagation from the mask edit
+save path.
 
 ## Body Frame Placement
 

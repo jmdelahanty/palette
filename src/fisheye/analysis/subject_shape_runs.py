@@ -39,6 +39,7 @@ from ..utils.zarr_io import open_zarr_root
 
 SUBJECT_SHAPE_SCHEMA_ID = "analysis.subject_shape_runs"
 SUBJECT_SHAPE_SCHEMA_VERSION = 1
+SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID = "analysis.subject_shape.source_refined_subject_masks_v1"
 SUBJECT_SHAPE_METHOD = "subject_shape_from_refined_masks_v2"
 SUBJECT_SHAPE_METHOD_VERSION = 2
 SUBJECT_SHAPE_STAGE_NAME = "analysis.subject_shape_runs"
@@ -582,6 +583,173 @@ def _prepare_relation_groups(run_group: zarr.Group, components: Sequence[str], *
     return tuple(relation_names)
 
 
+def _read_refined_component_row_revision(
+    refined_group: zarr.Group,
+    component_name: str,
+    *,
+    total_rows: int,
+) -> tuple[np.ndarray, bool]:
+    components_group = refined_group.get("components")
+    if not isinstance(components_group, zarr.Group):
+        return np.zeros((int(total_rows),), dtype=np.int64), False
+    component_group = components_group.get(str(component_name))
+    if not isinstance(component_group, zarr.Group):
+        return np.zeros((int(total_rows),), dtype=np.int64), False
+    revision = component_group.get("row_revision")
+    if revision is None:
+        return np.zeros((int(total_rows),), dtype=np.int64), False
+    if tuple(revision.shape) != (int(total_rows),):
+        raise ValueError(
+            f"{component_group.name}/row_revision shape mismatch: expected {(int(total_rows),)}, "
+            f"got {tuple(revision.shape)}"
+        )
+    return np.asarray(revision[:], dtype=np.int64), True
+
+
+def _write_source_refined_subject_mask_revisions(
+    run_group: zarr.Group,
+    refined_group: zarr.Group,
+    *,
+    refined_run_name: str,
+    components: Sequence[str],
+    total_rows: int,
+) -> None:
+    source_group = run_group.require_group("source_refined_subject_masks")
+    component_names = [str(component) for component in components]
+    component_count = int(len(component_names))
+    row_revision = np.zeros((int(total_rows), component_count), dtype=np.int64)
+    revision_available = np.zeros((component_count,), dtype=bool)
+    for component_idx, component_name in enumerate(component_names):
+        values, available = _read_refined_component_row_revision(
+            refined_group,
+            component_name,
+            total_rows=int(total_rows),
+        )
+        row_revision[:, int(component_idx)] = values
+        revision_available[int(component_idx)] = bool(available)
+
+    source_group.attrs.update(
+        {
+            "schema_id": SOURCE_REFINED_SUBJECT_MASKS_SCHEMA_ID,
+            "schema_version": 1,
+            "source_stage": "refined_subject_masks_runs",
+            "source_run": str(refined_run_name),
+            "source_path": f"refined_subject_masks_runs/{refined_run_name}",
+            "component_names": component_names,
+            "row_revision_semantics": (
+                "per-component refined mask row-local generation copied at subject-shape run creation"
+            ),
+        }
+    )
+    _create_array(
+        source_group,
+        "row_revision",
+        shape=(int(total_rows), component_count),
+        dtype=np.int64,
+        chunks=(refined_subject_mask_metric_row_chunk(total_rows), max(1, component_count)),
+    )
+    source_group["row_revision"][:, :] = row_revision
+    _create_array(
+        source_group,
+        "row_revision_available",
+        shape=(component_count,),
+        dtype=bool,
+        chunks=(max(1, component_count),),
+    )
+    source_group["row_revision_available"][:] = revision_available
+
+
+def audit_subject_shape_source_revisions_group(
+    root: zarr.Group,
+    *,
+    shape_run: Optional[str] = None,
+    refined_run: Optional[str] = None,
+) -> dict[str, object]:
+    """Compare stored subject-shape source row revisions against current refined masks."""
+
+    parent = root.get("analysis/subject_shape_runs")
+    if not isinstance(parent, zarr.Group):
+        return {"status": "unknown", "reason": "missing_subject_shape_runs"}
+    shape_run_name = str(shape_run or parent.attrs.get("latest") or "")
+    if not shape_run_name:
+        return {"status": "unknown", "reason": "missing_shape_run"}
+    if shape_run_name not in parent:
+        return {"status": "unknown", "reason": f"shape_run_not_found:{shape_run_name}", "shape_run": shape_run_name}
+    shape_group = parent[shape_run_name]
+    source_group = shape_group.get("source_refined_subject_masks")
+    if not isinstance(source_group, zarr.Group):
+        return {"status": "unknown", "reason": "missing_source_revision_group", "shape_run": shape_run_name}
+    stored_revision_arr = source_group.get("row_revision")
+    if stored_revision_arr is None:
+        return {"status": "unknown", "reason": "missing_stored_row_revision", "shape_run": shape_run_name}
+
+    source_run_name = str(refined_run or source_group.attrs.get("source_run") or shape_group.attrs.get("source_refined_subject_masks_run") or "")
+    if not source_run_name:
+        return {"status": "unknown", "reason": "missing_source_refined_run", "shape_run": shape_run_name}
+    refined_parent = root.get("refined_subject_masks_runs")
+    if not isinstance(refined_parent, zarr.Group) or source_run_name not in refined_parent:
+        return {
+            "status": "unknown",
+            "reason": f"source_refined_run_not_found:{source_run_name}",
+            "shape_run": shape_run_name,
+            "source_refined_subject_masks_run": source_run_name,
+        }
+
+    refined_group = refined_parent[source_run_name]
+    stored_revision = np.asarray(stored_revision_arr[:], dtype=np.int64)
+    if stored_revision.ndim != 2:
+        return {"status": "unknown", "reason": "stored_row_revision_shape_invalid", "shape_run": shape_run_name}
+    total_rows = int(stored_revision.shape[0])
+    component_names = [str(value) for value in (source_group.attrs.get("component_names") or [])]
+    if not component_names:
+        component_names = [str(value) for value in (shape_group.attrs.get("component_names") or [])]
+    if int(stored_revision.shape[1]) != len(component_names):
+        return {
+            "status": "unknown",
+            "reason": "component_count_mismatch",
+            "shape_run": shape_run_name,
+            "stored_component_count": int(stored_revision.shape[1]),
+            "component_name_count": int(len(component_names)),
+        }
+
+    stale_rows_by_component: dict[str, list[int]] = {}
+    unavailable_components: list[str] = []
+    for component_idx, component_name in enumerate(component_names):
+        try:
+            current_revision, available = _read_refined_component_row_revision(
+                refined_group,
+                component_name,
+                total_rows=total_rows,
+            )
+        except ValueError as exc:
+            return {
+                "status": "unknown",
+                "reason": str(exc),
+                "shape_run": shape_run_name,
+                "source_refined_subject_masks_run": source_run_name,
+            }
+        if not available:
+            unavailable_components.append(component_name)
+            current_revision = np.zeros((total_rows,), dtype=np.int64)
+        changed = np.flatnonzero(current_revision != stored_revision[:, int(component_idx)])
+        if int(changed.size) > 0:
+            stale_rows_by_component[component_name] = [int(value) for value in changed.tolist()]
+
+    stale_rows = sorted({row for rows in stale_rows_by_component.values() for row in rows})
+    status = "stale" if stale_rows else "current"
+    return {
+        "status": status,
+        "shape_run": shape_run_name,
+        "source_refined_subject_masks_run": source_run_name,
+        "component_names": component_names,
+        "stale_row_count": int(len(stale_rows)),
+        "stale_rows": stale_rows,
+        "stale_component_count": int(len(stale_rows_by_component)),
+        "stale_rows_by_component": stale_rows_by_component,
+        "revision_unavailable_components": unavailable_components,
+    }
+
+
 def _prepare_subject_shape_run(
     root: zarr.Group,
     *,
@@ -627,6 +795,13 @@ def _prepare_subject_shape_run(
     relation_names = _prepare_relation_groups(run_group, components, total_rows=total_rows)
     if set(BODY_FRAME_COMPONENTS).issubset(set(components)):
         _prepare_body_frame_group(run_group, total_rows=total_rows)
+    _write_source_refined_subject_mask_revisions(
+        run_group,
+        refined_group,
+        refined_run_name=refined_run_name,
+        components=components,
+        total_rows=total_rows,
+    )
 
     created = _utc_now()
     dask_metadata = {
@@ -1620,6 +1795,16 @@ def write_subject_shape_run(
     )
 
 
+def audit_subject_shape_source_revisions(
+    zarr_path: str | Path,
+    *,
+    shape_run: Optional[str] = None,
+    refined_run: Optional[str] = None,
+) -> dict[str, object]:
+    root = open_zarr_root(zarr_path, mode="r")
+    return dict(_json_safe(audit_subject_shape_source_revisions_group(root, shape_run=shape_run, refined_run=refined_run)))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Write analysis/subject_shape_runs from refined subject-mask components."
@@ -1627,6 +1812,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("zarr_path", type=Path, help="Palette zarr archive.")
     parser.add_argument("--refined-run", help="refined_subject_masks_runs/<run> to consume; defaults to latest.")
     parser.add_argument("--run-name", help="Target analysis/subject_shape_runs/<run>; defaults to timestamped name.")
+    parser.add_argument("--shape-run", help="Existing analysis/subject_shape_runs/<run> for audit commands.")
+    parser.add_argument(
+        "--audit-source-revisions",
+        action="store_true",
+        help="Read-only check for refined subject-mask row_revision drift in an existing subject-shape run.",
+    )
     parser.add_argument(
         "--components",
         nargs="+",
@@ -1672,6 +1863,14 @@ def _parse_components(values: Optional[Sequence[str]], repeated: Optional[Sequen
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if bool(args.audit_source_revisions):
+        summary = audit_subject_shape_source_revisions(
+            args.zarr_path,
+            shape_run=args.shape_run or args.run_name,
+            refined_run=args.refined_run,
+        )
+        print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
+        return 0
     summary = write_subject_shape_run(
         args.zarr_path,
         refined_run=args.refined_run,

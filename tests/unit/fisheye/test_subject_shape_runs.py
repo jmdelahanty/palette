@@ -79,6 +79,14 @@ def _build_refined_root(store_path: Path | None = None) -> zarr.Group:
     return root
 
 
+def _add_component_row_revisions(root: zarr.Group, revisions: dict[str, list[int]]) -> None:
+    run = root["refined_subject_masks_runs"]["refined_001"]
+    components = run.require_group("components")
+    for component_name, values in revisions.items():
+        component = components.require_group(component_name)
+        component.create_array("row_revision", data=np.asarray(values, dtype=np.int64), overwrite=True)
+
+
 def test_write_subject_shape_run_group_creates_coherent_components_and_relations(monkeypatch) -> None:
     _patch_provenance(monkeypatch)
     root = _build_refined_root()
@@ -98,6 +106,18 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     assert run.attrs["component_names"] == ["subject_body", "swim_bladder", "eye_left", "eye_right"]
     assert run["row_index"]["frame_indices"][:].tolist() == [10, 11, 12]
     assert run["row_index"]["source_refined_row_ids"][:].tolist() == [100, 101, 102]
+    source_revisions = run["source_refined_subject_masks"]
+    assert source_revisions.attrs["schema_id"] == "analysis.subject_shape.source_refined_subject_masks_v1"
+    assert source_revisions.attrs["source_run"] == "refined_001"
+    assert source_revisions.attrs["component_names"] == ["subject_body", "swim_bladder", "eye_left", "eye_right"]
+    np.testing.assert_array_equal(
+        np.asarray(source_revisions["row_revision"][:], dtype=np.int64),
+        np.zeros((3, 4), dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(source_revisions["row_revision_available"][:], dtype=bool),
+        np.asarray([False, False, False, False], dtype=bool),
+    )
 
     body = run["components"]["subject_body"]
     assert body["mask_present"][:].tolist() == [True, True, True]
@@ -200,3 +220,50 @@ def test_subject_shape_tail_geometry_fails_closed_for_fragmented_body(monkeypatc
     body = root["analysis"]["subject_shape_runs"]["shape_fragmented"]["components"]["subject_body"]
     assert body["centerline_valid"][:].tolist() == [True, False, True]
     assert _decode_reason_row(body["centerline_failure_reason_bytes"][1]) == "fragmented_subject_body_mask"
+
+
+def test_subject_shape_run_records_and_audits_source_row_revisions(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_refined_root()
+    _add_component_row_revisions(
+        root,
+        {
+            "subject_body": [0, 2, 0],
+            "swim_bladder": [0, 0, 1],
+        },
+    )
+
+    mod.write_subject_shape_run_group(
+        root,
+        refined_run="refined_001",
+        run_name="shape_revisions",
+        chunk_size=2,
+    )
+
+    run = root["analysis"]["subject_shape_runs"]["shape_revisions"]
+    source_revisions = run["source_refined_subject_masks"]
+    np.testing.assert_array_equal(
+        np.asarray(source_revisions["row_revision"][:], dtype=np.int64),
+        np.asarray(
+            [
+                [0, 0, 0, 0],
+                [2, 0, 0, 0],
+                [0, 1, 0, 0],
+            ],
+            dtype=np.int64,
+        ),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(source_revisions["row_revision_available"][:], dtype=bool),
+        np.asarray([True, True, False, False], dtype=bool),
+    )
+    assert mod.audit_subject_shape_source_revisions_group(root, shape_run="shape_revisions")["status"] == "current"
+
+    refined = root["refined_subject_masks_runs"]["refined_001"]
+    refined["components/subject_body/row_revision"][1] = np.int64(3)
+    audit = mod.audit_subject_shape_source_revisions_group(root, shape_run="shape_revisions")
+
+    assert audit["status"] == "stale"
+    assert audit["stale_row_count"] == 1
+    assert audit["stale_rows"] == [1]
+    assert audit["stale_rows_by_component"] == {"subject_body": [1]}
