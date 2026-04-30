@@ -179,6 +179,33 @@ the selected physical speed source within the physical-active search window.
 The causal exponential/convolved detector response should not be used for these
 physical estimator fields.
 
+### Deferred Detector-Response Diagnostics
+
+A future optional sibling surface may store detector-response summaries:
+
+```text
+bout_kinematics_runs/<run>/detector_response/per_bout_metrics/
+```
+
+That surface would be diagnostic, not the primary physical estimator. It would
+summarize the exact detector signal declared by the source swim-bout candidate,
+for example `speed_exponential_mm`, and would keep response-derived quantities
+clearly labeled:
+
+- `response_peak_value`
+- `response_area`
+- `response_width_s`
+- `response_duration_s`
+- `response_rise_time_s`
+- `response_decay_time_s`
+
+This can be useful for QA, method comparison, and classifier features. It should
+not write fields named as physical quantities such as `path_length_mm` or
+`mean_speed_mm_s` unless the field name explicitly says it is a detector
+response proxy. The source detector metadata already declares the transform
+family and parameters, so this deferred surface should reference that metadata
+rather than duplicating it ad hoc.
+
 ## Within-Bout Heading Metrics
 
 Net reorientation is not enough for high-speed recordings or bouts where the
@@ -560,6 +587,18 @@ and should be plotted on a fixed `[-180, 180]` degree x-axis. Within-bout range,
 peak-to-peak, path length, and standard deviation are nonnegative excursion
 metrics and may legitimately exceed 180 degrees, so they should use independent
 positive axes.
+
+The writer should persist a separate physical movement visualization pair under
+`visualizations/`:
+
+- `bout_movement_summary_track_<id>_png`
+- `bout_movement_summary_track_<id>_interactive`
+
+This plot spec uses `palette.plot_spec.bout_movement_summary.v1` and should
+focus on `movement/per_bout_metrics`, including detector duration, physical
+active duration, interpolated physical active duration, physical path length,
+mean speed, and peak speed. Keeping this separate from the heading plot avoids
+mixing physical movement units with angular units.
 
 When the run contains `eye_gaze/per_bout_metrics`, the writer should also persist
 a separate eye-gaze visualization pair under `visualizations/`:

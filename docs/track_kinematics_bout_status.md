@@ -151,6 +151,95 @@ And one cumulative path-distance series:
 These are stored in both pixel and millimeter space when calibration is
 available.
 
+Acceleration is now explicitly source-speed-scoped. Each track writes:
+
+```text
+tracks/id_<track>/
+  speed_derivatives/
+    speed_raw/
+      acceleration_px
+      acceleration_mm
+      smoothed_acceleration_px
+      smoothed_acceleration_mm
+    speed_filtered/
+      ...
+    speed_smoothed/
+      ...
+    speed_averaged/
+      ...
+```
+
+Each child group records the source speed array, derivative method, time-delta
+array, and post-smoothing parameters. Undefined derivative samples, including
+the first sample and transitions involving NaN source speed values, remain NaN.
+The historical flat arrays
+`acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`, and
+`smoothed_acceleration_mm` remain as compatibility aliases for
+`speed_derivatives/speed_smoothed/*`, but new consumers should read from
+`speed_derivatives/<level>/` so the upstream trace is explicit.
+
+### Proposed v2 Movement Layout
+
+The current layout is a transitional v1 shape: speed arrays remain flat for
+compatibility, and source-scoped derivatives are grouped separately. If we
+decide to make a cleaner track-kinematics schema break before more consumers
+depend on the transitional paths, the preferred v2 target is:
+
+```text
+tracks/id_<track>/
+  movement/
+    speed/
+      raw/
+        px
+        mm
+        frame_path_distance_px
+        frame_path_distance_mm
+        acceleration_px
+        acceleration_mm
+        smoothed_acceleration_px
+        smoothed_acceleration_mm
+      filtered/
+        px
+        mm
+        frame_path_distance_px
+        frame_path_distance_mm
+        acceleration_px
+        acceleration_mm
+        smoothed_acceleration_px
+        smoothed_acceleration_mm
+      smoothed/
+        px
+        mm
+        frame_path_distance_px
+        frame_path_distance_mm
+        acceleration_px
+        acceleration_mm
+        smoothed_acceleration_px
+        smoothed_acceleration_mm
+      averaged/
+        px
+        mm
+        acceleration_px
+        acceleration_mm
+        smoothed_acceleration_px
+        smoothed_acceleration_mm
+```
+
+The v2 read rule should be:
+
+- readers prefer `movement/speed/<level>/...`
+- readers fall back to `speed_derivatives/<level>/...` plus flat
+  `speed_<level>_*` arrays for v1 runs
+- readers fall back to the historical flat `acceleration_*` arrays only for
+  legacy runs that predate source-scoped acceleration
+
+This avoids teaching new consumers that speed values and their derivatives live
+in unrelated top-level namespaces. It also keeps all source-speed-specific
+products together, which should make Crimson, Marimo, and future Parquet exports
+easier to reason about. The migration should happen before broad consumer
+adoption if we choose this direction; otherwise the current v1 transitional
+layout becomes the de facto contract.
+
 This schema is intentionally strict after the path-distance cleanup: current
 consumers expect `frame_path_distance_*` and `cumulative_path_distance_*`, not
 the earlier `displacement_*` or `cumulative_distance_*` names. Existing canary

@@ -315,6 +315,17 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     assert b"net_heading_change_histograms" in spec_payload
     assert b"within_bout_heading_histograms" in spec_payload
 
+    movement_png = visualizations["bout_movement_summary_track_0_png"]
+    assert bytes(np.asarray(movement_png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
+    assert movement_png.attrs["plot_schema_id"] == "palette.plot_spec.bout_movement_summary.v1"
+    assert movement_png.attrs["parameters"]["physical_active"]["measurement_signal_level"] == "speed_filtered"
+    movement_spec = visualizations["bout_movement_summary_track_0_interactive"]
+    assert movement_spec.attrs["snapshot_artifact"] == "bout_movement_summary_track_0_png"
+    assert movement_spec.attrs["plot_schema_id"] == "palette.plot_spec.bout_movement_summary.v1"
+    movement_payload = np.asarray(movement_spec["spec_json"][:], dtype=np.uint8).tobytes()
+    assert b"bout_physical_movement_histograms" in movement_payload
+    assert b"physical_active_peak_speed_mm_s" in movement_payload
+
 
 def test_compute_and_save_bout_kinematics_rejects_exponential_physical_source(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)

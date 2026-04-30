@@ -255,6 +255,13 @@ attrs. Metric metadata should identify only the metric source role
 (`detector_start_end`, `detector_core`, or `physical_active`), plus any
 metric-specific threshold/interpolation parameters.
 
+An optional future `detector_response/per_bout_metrics` subgroup may summarize
+the detector response itself, for example peak value, response area, response
+width, rise time, or decay time for `speed_exponential`. That surface should be
+diagnostic and should reference the source swim-bout detector metadata rather
+than pretending the response trace is measured fish motion. Physical movement
+estimates remain under `movement/per_bout_metrics`.
+
 `analysis/bout_kinematics_runs/<run>/<heading_level>/per_bout_metrics/` is the
 linked measurement surface. It should store downstream per-bout biological
 measurements computed from one exact swim-bout candidate and one exact

@@ -54,8 +54,9 @@ Initial coverage targets:
   path, position density, validity overlays, and optional swim-bout overlays.
 - `swim_bout_runs`: detection signal, thresholds/parameters, selected bout
   boundaries, bout duration/distance summaries, and interbout intervals.
-- `bout_kinematics_runs`: heading-change, angular-speed, within-bout, and
-  pre/post/interbout summaries.
+- `bout_kinematics_runs`: physical-active movement, heading-change,
+  angular-speed, within-bout, pre/post/interbout, and optional eye-gaze
+  summaries.
 - `stimulus_response_runs`: stimulus-aligned response summaries and per-step /
   per-fish aggregate diagnostics.
 

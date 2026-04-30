@@ -70,6 +70,16 @@ KEYPOINT_USABILITY_DATASET_CANDIDATES = (
     "source_success",
 )
 
+SPEED_DERIVATIVE_LEVELS = (
+    "speed_raw",
+    "speed_filtered",
+    "speed_smoothed",
+    "speed_averaged",
+)
+SPEED_DERIVATIVES_SCHEMA_ID = "palette.track_speed_derivatives.v1"
+SPEED_DERIVATIVE_SCHEMA_ID = "palette.track_speed_derivative.v1"
+DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL = "speed_smoothed"
+
 
 @dataclass
 class KeypointResolution:
@@ -647,6 +657,94 @@ def _compute_heading_turning(
     return delta_heading, angular_velocity, angular_speed
 
 
+def _smooth_acceleration_trace(acceleration_px: np.ndarray, window: int) -> np.ndarray:
+    """Return a centered moving average of acceleration, ignoring NaNs."""
+
+    acceleration = np.asarray(acceleration_px, dtype=np.float64)
+    if window <= 1 or acceleration.size == 0:
+        return acceleration.copy()
+
+    kernel = np.ones(window, dtype=np.float64)
+    val_mask = np.isfinite(acceleration).astype(np.float64)
+    accel_values = np.nan_to_num(acceleration, nan=0.0, copy=True)
+    sum_values = np.convolve(accel_values, kernel, mode="same")
+    count_values = np.convolve(val_mask, kernel, mode="same")
+    smoothed = np.full_like(acceleration, np.nan)
+    valid = count_values > 0
+    smoothed[valid] = sum_values[valid] / count_values[valid]
+    return smoothed
+
+
+def _compute_speed_derivative(
+    speed_px: np.ndarray,
+    delta_seconds_full: np.ndarray,
+    *,
+    pixel_to_mm: Optional[float],
+    smooth_seconds: float,
+    fps: float,
+) -> Dict[str, np.ndarray | int | float | str]:
+    """Differentiate one named speed trace and return its acceleration arrays."""
+
+    speed = np.asarray(speed_px, dtype=np.float64)
+    delta_seconds = np.asarray(delta_seconds_full, dtype=np.float64)
+    acceleration_px = np.full(speed.shape, np.nan, dtype=np.float64)
+
+    if speed.size >= 2:
+        delta_speed_px = speed[1:] - speed[:-1]
+        delta_t = delta_seconds[1:]
+        valid = (delta_t > 0) & np.isfinite(delta_speed_px)
+        accel_vals = np.full(delta_speed_px.shape, np.nan, dtype=np.float64)
+        accel_vals[valid] = delta_speed_px[valid] / delta_t[valid]
+        acceleration_px[1:] = accel_vals
+
+    if pixel_to_mm is not None and np.isfinite(pixel_to_mm):
+        acceleration_mm = acceleration_px * pixel_to_mm
+    else:
+        acceleration_mm = _nan_array(acceleration_px.shape, dtype=np.float64)
+
+    post_window = max(1, int(round(fps * smooth_seconds)))
+    smoothed_acceleration_px = _smooth_acceleration_trace(acceleration_px, post_window)
+    if pixel_to_mm is not None and np.isfinite(pixel_to_mm):
+        smoothed_acceleration_mm = smoothed_acceleration_px * pixel_to_mm
+    else:
+        smoothed_acceleration_mm = _nan_array(smoothed_acceleration_px.shape, dtype=np.float64)
+
+    return {
+        "acceleration_px": acceleration_px,
+        "acceleration_mm": acceleration_mm,
+        "smoothed_acceleration_px": smoothed_acceleration_px,
+        "smoothed_acceleration_mm": smoothed_acceleration_mm,
+        "derivative_method": "first_difference",
+        "post_smoothing_method": "moving_average",
+        "post_smoothing_alignment": "centered",
+        "post_smoothing_window_frames": int(post_window),
+        "post_smoothing_window_s": float(smooth_seconds),
+    }
+
+
+def _compute_speed_derivatives(
+    speed_by_level_px: Dict[str, np.ndarray],
+    delta_seconds_full: np.ndarray,
+    *,
+    pixel_to_mm: Optional[float],
+    smooth_seconds: float,
+    fps: float,
+) -> Dict[str, Dict[str, np.ndarray | int | float | str]]:
+    """Return acceleration derivatives for every persisted speed level."""
+
+    return {
+        level: _compute_speed_derivative(
+            speed_by_level_px[level],
+            delta_seconds_full,
+            pixel_to_mm=pixel_to_mm,
+            smooth_seconds=smooth_seconds,
+            fps=fps,
+        )
+        for level in SPEED_DERIVATIVE_LEVELS
+        if level in speed_by_level_px
+    }
+
+
 def build_track_datasets(
     track_ids: np.ndarray,
     frames: np.ndarray,
@@ -663,7 +761,7 @@ def build_track_datasets(
     smoothing_method: str = "moving_average",
     smoothing_alignment: str = "centered",
     savgol_polyorder: int = 3,
-) -> Tuple[Dict[int, Dict[str, np.ndarray]], List[Dict[str, float]]]:
+) -> Tuple[Dict[int, Dict[str, Any]], List[Dict[str, float]]]:
     """Assemble per-track data arrays and summary statistics.
 
     Optionally applies hysteresis filtering to remove micro-jitter during speed computation.
@@ -771,39 +869,23 @@ def build_track_datasets(
         if track_frames.size >= 2:
             delta_seconds_full[1:] = np.diff(track_frames) / fps
 
-        # Acceleration from smoothed speed profile
-        acceleration_px = np.full(speed_smoothed_px.shape, np.nan, dtype=np.float64)
-        acceleration_mm = np.full(speed_smoothed_px.shape, np.nan, dtype=np.float64)
-
-        if speed_smoothed_px.size >= 2:
-            delta_speed_px = speed_smoothed_px[1:] - speed_smoothed_px[:-1]
-            delta_t = delta_seconds_full[1:]
-            valid = (delta_t > 0) & np.isfinite(delta_speed_px)
-            accel_vals = np.full(delta_speed_px.shape, np.nan, dtype=np.float64)
-            accel_vals[valid] = delta_speed_px[valid] / delta_t[valid]
-            acceleration_px[1:] = accel_vals
-            if pixel_to_mm_val is not None and np.isfinite(pixel_to_mm_val):
-                acceleration_mm[1:] = accel_vals * pixel_to_mm_val
-
-        accel_window = max(1, int(round(fps * smooth_seconds)))
-        if accel_window > 1 and acceleration_px.size > 0:
-            kernel = np.ones(accel_window, dtype=np.float64)
-            val_mask = np.isfinite(acceleration_px).astype(np.float64)
-            accel_values = np.nan_to_num(acceleration_px, nan=0.0, copy=False)
-            sum_values = np.convolve(accel_values, kernel, mode="same")
-            count_values = np.convolve(val_mask, kernel, mode="same")
-            smoothed_accel_px = np.full_like(acceleration_px, np.nan)
-            valid = count_values > 0
-            smoothed_accel_px[valid] = sum_values[valid] / count_values[valid]
-        else:
-            smoothed_accel_px = acceleration_px.copy()
-
-        if pixel_to_mm_val is not None and np.isfinite(pixel_to_mm_val):
-            smoothed_accel_mm = smoothed_accel_px * pixel_to_mm_val
-            accel_mm = acceleration_mm
-        else:
-            smoothed_accel_mm = _nan_array(smoothed_accel_px.shape)
-            accel_mm = _nan_array(acceleration_px.shape)
+        speed_derivatives = _compute_speed_derivatives(
+            {
+                "speed_raw": speed_raw_px,
+                "speed_filtered": speed_filtered_px,
+                "speed_smoothed": speed_smoothed_px,
+                "speed_averaged": speed_averaged_px,
+            },
+            delta_seconds_full,
+            pixel_to_mm=pixel_to_mm_val,
+            smooth_seconds=smooth_seconds,
+            fps=fps,
+        )
+        default_speed_derivative = speed_derivatives[DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL]
+        acceleration_px = np.asarray(default_speed_derivative["acceleration_px"], dtype=np.float64)
+        accel_mm = np.asarray(default_speed_derivative["acceleration_mm"], dtype=np.float64)
+        smoothed_accel_px = np.asarray(default_speed_derivative["smoothed_acceleration_px"], dtype=np.float64)
+        smoothed_accel_mm = np.asarray(default_speed_derivative["smoothed_acceleration_mm"], dtype=np.float64)
 
         heading_window = max(1, int(round(fps * smooth_seconds)))
         if heading_window > 1 and heading_rad.size > 0:
@@ -897,6 +979,7 @@ def build_track_datasets(
             "acceleration_mm": _float32(accel_mm),
             "smoothed_acceleration_px": _float32(smoothed_accel_px),
             "smoothed_acceleration_mm": _float32(smoothed_accel_mm),
+            "speed_derivatives": speed_derivatives,
             "frame_path_distance_raw_px": _float32(frame_path_distance_raw_px),
             "frame_path_distance_raw_mm": _float32(frame_path_distance_raw_mm),
             "frame_path_distance_filtered_px": _float32(frame_path_distance_filtered_px),
@@ -1068,7 +1151,7 @@ def build_track_datasets(
 
 def save_track_kinematics_tracks(
     run_group: zarr.Group,
-    tracks: Dict[int, Dict[str, np.ndarray]],
+    tracks: Dict[int, Dict[str, Any]],
     summaries: List[Dict[str, float]],
     *,
     track_id_to_arena_id: Optional[Dict[int, int]] = None,
@@ -1171,6 +1254,13 @@ def save_track_kinematics_tracks(
         subgroup.create_array("acceleration_mm", data=data["acceleration_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_acceleration_px", data=data["smoothed_acceleration_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_acceleration_mm", data=data["smoothed_acceleration_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.attrs["legacy_acceleration_source_speed_level"] = DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL
+        subgroup.attrs["speed_derivatives_schema_id"] = SPEED_DERIVATIVES_SCHEMA_ID
+        _write_speed_derivative_groups(
+            subgroup,
+            data["speed_derivatives"],
+            chunks=base_chunk,
+        )
         subgroup.create_array(
             "frame_path_distance_raw_px",
             data=data["frame_path_distance_raw_px"],
@@ -1266,6 +1356,80 @@ def save_track_kinematics_tracks(
 
     run_group.attrs["track_manifest"] = manifest
     return ordered_ids
+
+
+def _write_speed_derivative_groups(
+    track_group: zarr.Group,
+    derivatives: Dict[str, Dict[str, Any]],
+    *,
+    chunks: Tuple[int, ...],
+) -> None:
+    """Write speed-derived acceleration arrays grouped by source speed level."""
+
+    parent = track_group.create_group("speed_derivatives")
+    parent.attrs.update(
+        {
+            "schema_id": SPEED_DERIVATIVES_SCHEMA_ID,
+            "speed_levels": list(SPEED_DERIVATIVE_LEVELS),
+            "default_source_speed_level": DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL,
+            "compatibility_alias_arrays": {
+                "acceleration_px": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_px",
+                "acceleration_mm": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/acceleration_mm",
+                "smoothed_acceleration_px": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/smoothed_acceleration_px",
+                "smoothed_acceleration_mm": f"speed_derivatives/{DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL}/smoothed_acceleration_mm",
+            },
+        }
+    )
+
+    for level in SPEED_DERIVATIVE_LEVELS:
+        if level not in derivatives:
+            continue
+
+        level_group = parent.create_group(level)
+        item = derivatives[level]
+        level_group.attrs.update(
+            {
+                "schema_id": SPEED_DERIVATIVE_SCHEMA_ID,
+                "source_speed_level": level,
+                "source_speed_px_array": f"../../{level}_px",
+                "source_speed_mm_array": f"../../{level}_mm",
+                "time_delta_array": "../../delta_seconds",
+                "derivative_method": str(item.get("derivative_method", "first_difference")),
+                "post_smoothing_method": str(item.get("post_smoothing_method", "moving_average")),
+                "post_smoothing_alignment": str(item.get("post_smoothing_alignment", "centered")),
+                "post_smoothing_window_frames": int(item.get("post_smoothing_window_frames", 1)),
+                "post_smoothing_window_s": float(item.get("post_smoothing_window_s", 0.0)),
+                "interpretation": (
+                    "Framewise time derivative of the named source speed trace. "
+                    "Use this group, not the legacy flat acceleration arrays, when "
+                    "the source speed semantics matter."
+                ),
+            }
+        )
+        level_group.create_array(
+            "acceleration_px",
+            data=_float32(np.asarray(item["acceleration_px"])),
+            chunks=chunks,
+            overwrite=True,
+        )
+        level_group.create_array(
+            "acceleration_mm",
+            data=_float32(np.asarray(item["acceleration_mm"])),
+            chunks=chunks,
+            overwrite=True,
+        )
+        level_group.create_array(
+            "smoothed_acceleration_px",
+            data=_float32(np.asarray(item["smoothed_acceleration_px"])),
+            chunks=chunks,
+            overwrite=True,
+        )
+        level_group.create_array(
+            "smoothed_acceleration_mm",
+            data=_float32(np.asarray(item["smoothed_acceleration_mm"])),
+            chunks=chunks,
+            overwrite=True,
+        )
 
 
 def _write_run_array(group: zarr.Group, name: str, data: np.ndarray) -> None:

@@ -1195,11 +1195,28 @@ Each track stores the ordered samples for that ID:
 - `speed_filtered_px`, `speed_filtered_mm`: Speed after hysteresis filtering
 - `speed_smoothed_px`, `speed_smoothed_mm`: Speed after temporal smoothing
 - `speed_averaged_px`, `speed_averaged_mm`: Optional longer-window averaged speed
+- `speed_derivatives/`: Preferred acceleration hierarchy. Each child group is
+  keyed by source speed level: `speed_raw`, `speed_filtered`,
+  `speed_smoothed`, `speed_averaged`.
+  - `speed_derivatives/<level>/acceleration_px`, `acceleration_mm`: Framewise
+    first difference of the named source speed trace divided by `delta_seconds`.
+    Undefined samples, including the first sample and transitions involving
+    NaN source speed values, remain NaN.
+  - `speed_derivatives/<level>/smoothed_acceleration_px`,
+    `smoothed_acceleration_mm`: Centered moving-average smoothing applied after
+    differentiation.
+  - Child attrs include `source_speed_level`, `source_speed_px_array`,
+    `source_speed_mm_array`, `time_delta_array`, `derivative_method`,
+    `post_smoothing_method`, `post_smoothing_alignment`,
+    `post_smoothing_window_frames`, and `post_smoothing_window_s`.
 - `heading_degrees`, `heading_radians`, `delta_heading_degrees`, `angular_velocity_deg_s`
 - `angular_velocity_raw_deg_s`, `angular_speed_raw_deg_s`
 - `delta_heading_smoothed_degrees`, `angular_velocity_smoothed_deg_s`, `angular_speed_smoothed_deg_s`
 - `smoothed_heading_degrees`, `smoothed_heading_radians`
-- `acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`, `smoothed_acceleration_mm`
+- `acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`,
+  `smoothed_acceleration_mm`: Compatibility aliases for
+  `speed_derivatives/speed_smoothed/*`. New consumers should read the explicit
+  derivative group so the source speed trace is unambiguous.
 - `frame_path_distance_raw_px`, `frame_path_distance_raw_mm`: Gap-aware pre-hysteresis frame path-distance increments
 - `frame_path_distance_filtered_px`, `frame_path_distance_filtered_mm`: Gap-aware hysteresis-filtered frame path-distance increments
 - `frame_path_distance_smoothed_px`, `frame_path_distance_smoothed_mm`: Gap-aware temporally smoothed frame path-distance increments
@@ -1207,6 +1224,28 @@ Each track stores the ordered samples for that ID:
 - `second_indices`, `speed_per_second_px`, `speed_per_second_mm`, `heading_per_second_degrees`, `heading_per_second_resultant`
 - `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
 - `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `path_length_mm`, `net_displacement_mm`, `mean_speed_mm_s`, `peak_detection_signal_mm_s`, `peak_physical_speed_mm_s`, …) with subgroup attrs recording the source swim-bout run. Treat this as a convenience mirror; `analysis/swim_bout_runs` remains the authoritative segmentation surface.
+
+**Proposed v2 movement layout**:
+The current flat speed arrays plus `speed_derivatives/` hierarchy are the v1
+transition contract. A future schema bump should consider grouping speed values,
+path-distance increments, and speed-derived acceleration together:
+
+```text
+tracks/id_<track>/movement/speed/<raw|filtered|smoothed|averaged>/
+  px
+  mm
+  frame_path_distance_px        # where defined for this level
+  frame_path_distance_mm        # where defined for this level
+  acceleration_px
+  acceleration_mm
+  smoothed_acceleration_px
+  smoothed_acceleration_mm
+```
+
+New reader code should be prepared to prefer `movement/speed/<level>/...` once
+available, then fall back to the v1 `speed_derivatives/<level>/...` and flat
+speed arrays, then fall back to historical flat acceleration arrays only for
+older archives.
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
@@ -1446,6 +1485,17 @@ heading_raw/per_bout_metrics/
 These runs must not mutate `analysis/swim_bout_runs`; they are independently
 recomputable derived analyses linked to immutable segmentation candidates. See
 `docs/bout_kinematics_run_design.md`.
+
+When visualization artifacts are requested, `visualizations/` may contain:
+
+- `bout_movement_summary_track_<id>_png` and
+  `bout_movement_summary_track_<id>_interactive` for physical movement
+  histograms from `movement/per_bout_metrics`
+- `bout_kinematics_summary_track_<id>_png` and
+  `bout_kinematics_summary_track_<id>_interactive` for heading/turning
+  histograms
+- `bout_eye_gaze_summary_track_<id>_png` and
+  `bout_eye_gaze_summary_track_<id>_interactive` when `eye_gaze` is enabled
 
 ### `analysis/refined_online_runs/`
 

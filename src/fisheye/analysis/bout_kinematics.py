@@ -36,9 +36,11 @@ METHOD = "heading_window_and_within_bout_metrics"
 METHOD_VERSION = "bout_kinematics.v7"
 BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_kinematics_summary.v1"
 BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_eye_gaze_summary.v1"
+BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_movement_summary.v1"
 BOUT_KINEMATICS_PLOT_RENDERER = "matplotlib_static_plotly_spec.v1"
 BOUT_KINEMATICS_PNG_PREFIX = "bout_kinematics_summary"
 BOUT_EYE_GAZE_PNG_PREFIX = "bout_eye_gaze_summary"
+BOUT_MOVEMENT_PNG_PREFIX = "bout_movement_summary"
 
 HEADING_LEVEL_TO_ARRAY = {
     "heading_smoothed": "smoothed_heading_degrees",
@@ -1675,6 +1677,44 @@ def _plot_bout_eye_gaze_summary(
     return _png_bytes_from_figure(fig, dpi=150)
 
 
+def _plot_bout_movement_summary(
+    *,
+    metrics: np.ndarray,
+    source_speed_level: str,
+    bins: int,
+) -> bytes:
+    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
+    axes_flat = axes.ravel()
+    metric_specs = [
+        ("detector_duration_s", "Detector duration (s)", None),
+        ("physical_active_duration_s", "Physical active duration (s)", None),
+        ("physical_active_duration_s_interpolated", "Physical active duration interpolated (s)", None),
+        ("physical_active_path_length_mm", "Physical active path length (mm)", None),
+        ("physical_active_mean_speed_mm_s", "Physical active mean speed (mm/s)", None),
+        ("physical_active_peak_speed_mm_s", "Physical active peak speed (mm/s)", None),
+    ]
+    for ax, (field, label, xlim) in zip(axes_flat, metric_specs):
+        values = _safe_metric_values(metrics, field)
+        if values.size:
+            ax.hist(values, bins=int(bins), alpha=0.72, color="#1f77b4")
+        else:
+            ax.text(0.5, 0.5, "No values", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(label)
+        ax.set_xlabel(label)
+        ax.set_ylabel("Bout count")
+        ax.grid(alpha=0.25)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+
+    n_bouts = int(len(metrics))
+    fig.suptitle(
+        f"Bout physical movement summaries ({source_speed_level}, {n_bouts} bouts)",
+        fontsize=14,
+    )
+    fig.tight_layout()
+    return _png_bytes_from_figure(fig, dpi=150)
+
+
 def _build_bout_kinematics_interactive_spec(
     *,
     run_name: str,
@@ -1892,6 +1932,197 @@ def _build_bout_eye_gaze_interactive_spec(
     }
 
 
+def _build_bout_movement_interactive_spec(
+    *,
+    run_name: str,
+    source_refs: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    bins: int,
+) -> dict[str, Any]:
+    base = f"analysis/bout_kinematics_runs/{run_name}/movement/per_bout_metrics"
+    source_paths: dict[str, str] = {
+        "run": f"analysis/bout_kinematics_runs/{run_name}",
+        "movement.per_bout_metrics": base,
+    }
+    for field in (
+        "bout_id",
+        "source_start_frame",
+        "source_end_frame",
+        "source_core_start_frame",
+        "source_core_end_frame",
+        "detector_duration_s",
+        "detector_observed_duration_s",
+        "detector_core_duration_s",
+        "physical_active_start_frame",
+        "physical_active_end_frame",
+        "physical_active_start_time_s",
+        "physical_active_end_time_s",
+        "physical_active_duration_s",
+        "physical_active_observed_duration_s",
+        "physical_active_start_time_s_interpolated",
+        "physical_active_end_time_s_interpolated",
+        "physical_active_duration_s_interpolated",
+        "physical_active_start_time_interpolated_valid",
+        "physical_active_end_time_interpolated_valid",
+        "physical_active_valid_transition_fraction",
+        "physical_active_path_length_mm",
+        "physical_active_path_length_px",
+        "physical_active_mean_speed_mm_s",
+        "physical_active_peak_speed_mm_s",
+        "physical_active_valid",
+    ):
+        source_paths[f"movement.{field}"] = f"{base}/{field}"
+
+    return {
+        "schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+        "title": "Bout physical movement summaries",
+        "run_name": run_name,
+        "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+        "source_refs": dict(source_refs),
+        "source_paths": source_paths,
+        "parameters": dict(parameters),
+        "analysis_level": MOVEMENT_LEVEL,
+        "panels": [
+            {
+                "id": "bout_physical_movement_histograms",
+                "kind": "facet_histogram",
+                "metrics": [
+                    "detector_duration_s",
+                    "physical_active_duration_s",
+                    "physical_active_duration_s_interpolated",
+                    "physical_active_path_length_mm",
+                    "physical_active_mean_speed_mm_s",
+                    "physical_active_peak_speed_mm_s",
+                ],
+                "bins": int(bins),
+            },
+            {
+                "id": "physical_active_validity",
+                "kind": "validity_summary",
+                "metrics": [
+                    "physical_active_valid",
+                    "physical_active_valid_transition_fraction",
+                ],
+            },
+        ],
+    }
+
+
+def write_bout_movement_visualization_artifacts(
+    *,
+    zarr_path: Path,
+    run_group: zarr.Group,
+    run_name: str,
+    movement_metrics: np.ndarray,
+    source_refs: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    source_speed_level: str,
+    bins: int,
+    artifact_dpi: int,
+    command: Optional[str],
+) -> None:
+    png_artifact_name = f"{BOUT_MOVEMENT_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_png"
+    spec_artifact_name = f"{BOUT_MOVEMENT_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_interactive"
+    source_paths = {
+        "run": f"analysis/bout_kinematics_runs/{run_name}",
+        "movement.per_bout_metrics": (
+            f"analysis/bout_kinematics_runs/{run_name}/movement/per_bout_metrics"
+        ),
+    }
+    source_runs = {
+        "bout_kinematics": run_name,
+        "track_kinematics": source_refs.get("source_track_kinematics_run"),
+        "swim_bout": source_refs.get("source_swim_bout_run"),
+        "swim_bout_speed_level": source_refs.get("source_swim_bout_speed_level"),
+    }
+    plot_parameters = {
+        "bins": int(bins),
+        "artifact_dpi": int(artifact_dpi),
+        "analysis_level": MOVEMENT_LEVEL,
+        "physical_active": parameters.get("physical_active", {}),
+    }
+    signature = _artifact_signature(
+        {
+            "schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+            "run_name": run_name,
+            "source_refs": source_refs,
+            "parameters": plot_parameters,
+        }
+    )
+    created_at_utc = datetime.now(timezone.utc).isoformat()
+    env_info = get_environment_info(disk_path=str(zarr_path), capture_env_vars=False)
+    provenance = build_stage_provenance(
+        stage="bout_movement_visualization",
+        created_at_utc=created_at_utc,
+        parameters={
+            **plot_parameters,
+            "plot_schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+            "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+        },
+        inputs={
+            "zarr_path": str(zarr_path),
+            "source_refs": dict(source_refs),
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+        },
+        command=command,
+        version=BOUT_KINEMATICS_PLOT_RENDERER,
+        git=get_git_info(),
+        environment=env_info.get("environment"),
+        platform=env_info.get("platform"),
+        artifacts={
+            "png_artifact": f"visualizations/{png_artifact_name}",
+            "interactive_artifact": f"visualizations/{spec_artifact_name}",
+            "artifact_signature": signature,
+        },
+    )
+    png_bytes = _plot_bout_movement_summary(
+        metrics=movement_metrics,
+        source_speed_level=source_speed_level,
+        bins=bins,
+    )
+    write_png_visualization_artifact(
+        run_group,
+        png_artifact_name,
+        png_bytes,
+        description="Bout physical movement summary PNG",
+        created_by="fisheye.analysis.bout_kinematics",
+        artifact_signature=signature,
+        created_at_utc=created_at_utc,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=plot_parameters,
+        extra_attrs={
+            "plot_schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+            "provenance": provenance,
+        },
+    )
+    spec = _build_bout_movement_interactive_spec(
+        run_name=run_name,
+        source_refs=source_refs,
+        parameters=parameters,
+        bins=bins,
+    )
+    write_interactive_plot_spec_artifact(
+        run_group,
+        spec_artifact_name,
+        spec,
+        description="Bout physical movement interactive plot spec",
+        created_by="fisheye.analysis.bout_kinematics",
+        renderer=BOUT_KINEMATICS_PLOT_RENDERER,
+        artifact_signature=signature,
+        created_at_utc=created_at_utc,
+        snapshot_artifact=png_artifact_name,
+        source_paths=source_paths,
+        source_runs=source_runs,
+        parameters=plot_parameters,
+        extra_attrs={
+            "plot_schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+            "provenance": provenance,
+        },
+    )
+
+
 def write_bout_eye_gaze_visualization_artifacts(
     *,
     zarr_path: Path,
@@ -2015,6 +2246,7 @@ def write_bout_kinematics_visualization_artifacts(
     run_group: zarr.Group,
     run_name: str,
     metrics_by_level: Mapping[str, np.ndarray],
+    movement_metrics: np.ndarray,
     eye_gaze_metrics: Optional[np.ndarray],
     source_refs: Mapping[str, Any],
     parameters: Mapping[str, Any],
@@ -2027,6 +2259,18 @@ def write_bout_kinematics_visualization_artifacts(
 ) -> None:
     png_artifact_name = f"{BOUT_KINEMATICS_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_png"
     spec_artifact_name = f"{BOUT_KINEMATICS_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_interactive"
+    write_bout_movement_visualization_artifacts(
+        zarr_path=zarr_path,
+        run_group=run_group,
+        run_name=run_name,
+        movement_metrics=movement_metrics,
+        source_refs=source_refs,
+        parameters=parameters,
+        source_speed_level=source_speed_level,
+        bins=int(bins),
+        artifact_dpi=int(artifact_dpi),
+        command=command,
+    )
     source_paths = {
         "run": f"analysis/bout_kinematics_runs/{run_name}",
         **{
@@ -2654,6 +2898,7 @@ def compute_and_save_bout_kinematics(
             run_group=run_group,
             run_name=str(run_name),
             metrics_by_level=metrics_by_level,
+            movement_metrics=movement_metrics,
             eye_gaze_metrics=eye_gaze_metrics,
             source_refs=source_refs,
             parameters=parameters,

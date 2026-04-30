@@ -370,6 +370,64 @@ def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
     )
 
 
+def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> None:
+    track_ids = np.array([0, 0, 0], dtype=np.int64)
+    frames = np.array([0, 1, 2], dtype=np.int64)
+    positions_px = np.array([[0.0, 0.0], [1.0, 0.0], [3.0, 0.0]], dtype=np.float32)
+    headings_deg = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    keypoint_success = np.array([True, True, True], dtype=bool)
+
+    tracks, summaries = mod.build_track_datasets(
+        track_ids=track_ids,
+        frames=frames,
+        positions_px=positions_px,
+        headings_deg=headings_deg,
+        keypoint_success=keypoint_success,
+        detection_source=None,
+        fps=1.0,
+        smooth_seconds=1.0,
+        pixel_to_mm=2.0,
+    )
+
+    run_group = _FakeGroup()
+    mod.save_track_kinematics_tracks(run_group, tracks, summaries)
+
+    subgroup = run_group["tracks"]["id_0"]
+    derivatives = subgroup["speed_derivatives"]
+    assert derivatives.attrs["schema_id"] == "palette.track_speed_derivatives.v1"
+    assert derivatives.attrs["default_source_speed_level"] == "speed_smoothed"
+
+    expected_accel_px = np.array([np.nan, np.nan, 1.0], dtype=np.float32)
+    expected_accel_mm = np.array([np.nan, np.nan, 2.0], dtype=np.float32)
+    for level in ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged"):
+        level_group = derivatives[level]
+        assert level_group.attrs["schema_id"] == "palette.track_speed_derivative.v1"
+        assert level_group.attrs["source_speed_level"] == level
+        assert level_group.attrs["source_speed_px_array"] == f"../../{level}_px"
+        assert level_group.attrs["time_delta_array"] == "../../delta_seconds"
+        np.testing.assert_allclose(
+            level_group["acceleration_px"][:],
+            expected_accel_px,
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            level_group["acceleration_mm"][:],
+            expected_accel_mm,
+            equal_nan=True,
+        )
+
+    np.testing.assert_allclose(
+        subgroup["acceleration_px"][:],
+        derivatives["speed_smoothed"]["acceleration_px"][:],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        subgroup["smoothed_acceleration_mm"][:],
+        derivatives["speed_smoothed"]["smoothed_acceleration_mm"][:],
+        equal_nan=True,
+    )
+
+
 def _quiet_console() -> Console:
     return Console(file=io.StringIO(), force_terminal=False, width=120)
 

@@ -166,6 +166,23 @@ For onset-sensitive bout detection, `speed_filtered` or causal smoothing is
 usually safer than centered smoothing because centered smoothing can leak future
 motion backward in time.
 
+Acceleration should always be interpreted relative to its source speed trace.
+Current track-kinematics runs therefore expose
+`speed_derivatives/<speed_level>/acceleration_*` and
+`speed_derivatives/<speed_level>/smoothed_acceleration_*`. For example,
+`speed_derivatives/speed_filtered/acceleration_mm` is the derivative of
+`speed_filtered_mm`, while `speed_derivatives/speed_smoothed/acceleration_mm`
+is the derivative of `speed_smoothed_mm`. The older flat
+`acceleration_*` arrays are compatibility aliases for the `speed_smoothed`
+derivative and should not be treated as source-agnostic acceleration.
+
+For a future track-kinematics schema bump, the cleaner target is to group each
+speed trace with its derived quantities under
+`movement/speed/<raw|filtered|smoothed|averaged>/`. That would make the source
+trace, path-distance increment, and acceleration products co-located instead of
+split across flat speed arrays and a derivative sibling group. New consumers
+should be designed so they can prefer this v2 layout when it appears.
+
 ## Swim Bouts
 
 `analysis/swim_bout_runs` stores bout segmentation candidates. These candidates
