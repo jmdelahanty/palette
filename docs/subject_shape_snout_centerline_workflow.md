@@ -307,9 +307,11 @@ Consumers should:
 - B-spline fitting is currently interpolating (`smoothing = 0.0`), so it follows
   the resampled centerline closely. If the centerline is noisy, the spline will
   be noisy too.
-- Tail samples are geometric outputs, not yet a behavioral classifier. They are
-  intended to support future Stytra, ZebraZoom, Megabouts, or Palette-native
-  tail-analysis adapters.
+- Tail samples in this subject-shape run are geometric outputs, not yet the
+  low-dimensional behavioral tail-angle vector. The default behavior-facing
+  tail-angle representation should be derived later in
+  `analysis/tail_kinematics_runs` with its own sample count, currently planned
+  as `K=10`.
 
 ## Next Work
 

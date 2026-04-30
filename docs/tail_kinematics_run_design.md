@@ -51,6 +51,8 @@ segmentations, or external classifier outputs.
 The first implementation should require a valid subject-shape run with:
 
 ```text
+components/subject_body/bspline_sample_xy
+components/subject_body/bspline_valid
 components/subject_body/tail_sample_s
 components/subject_body/tail_sample_xy
 components/subject_body/tail_tangent_xy
@@ -64,8 +66,10 @@ body_frame/valid
 ```
 
 Rows should be valid only when the source row has a valid body frame and valid
-tail samples. Source failures should propagate into
-`failure_reason_bytes` rather than being silently interpolated.
+tail geometry. Preferred v1 behavior is to resample from valid B-spline/tail
+geometry into the lower-dimensional `tail_angle_sample_*` surface. Source
+failures should propagate into `failure_reason_bytes` rather than being
+silently interpolated.
 
 ## Coordinate And Sign Convention
 
@@ -99,6 +103,36 @@ This convention should be recorded in attrs, not inferred from array names.
 Degree arrays are useful for plotting, but the mathematical convention should
 be defined once in radians.
 
+## Sampling Dimensionality
+
+Tail kinematics should be lower-dimensional than the dense subject-shape
+geometry surface.
+
+Subject-shape runs may store:
+
+- dense `bspline_sample_xy` for whole-body geometry and visualization
+- compact `bspline_control_points_xy`
+- subject-shape `tail_sample_xy` geometry samples, currently schema-v3
+  geometry outputs
+- dense or moderately dense curvature samples for geometry/QC
+
+Tail-kinematics runs should store behavior-facing tail samples separately. The
+default should be:
+
+```text
+tail_angle_sample_count = 10
+tail_angle_sample_s = linspace(0.0, 1.0, 10)
+```
+
+where `0.0` is the tail base and `1.0` is the tail tip. These samples are the
+markers that should drive the default tail-angle/deflection vectors shown to
+users and exported to Megabouts-like adapters. A method may use a different
+sample count, but it must record it explicitly.
+
+This split avoids using hundreds of dense spline evaluation points as a
+behavior feature vector while preserving dense geometry for measurements that
+need it.
+
 ## Frame-Level Metric Set
 
 The initial run should expose one trace group for the selected geometry source:
@@ -113,13 +147,14 @@ analysis/tail_kinematics_runs/<run>/
     row_axis                          "roi_rows"
     source_subject_shape_run
     source_refined_subject_masks_run
-    source_tail_geometry_kind         "subject_shape_tail_samples"
+    source_tail_geometry_kind         "subject_shape_bspline_tail_resample"
     body_frame_convention
     tail_angle_reference_axis         "caudal_axis=-forward_axis"
     tail_angle_positive_direction     "anatomical_left"
     tail_angle_units_primary          "rad"
     tail_sample_domain                "tail_segment_normalized_arclength"
-    tail_sample_count
+    tail_angle_sample_count           10 by default
+    source_geometry_tail_sample_count optional
     curvature_source                  "subject_shape.tail_curvature_px_inv"
     created_at_utc
 
@@ -128,7 +163,8 @@ analysis/tail_kinematics_runs/<run>/
   valid                               (N,)
   failure_reason_bytes                (N, width)
 
-  tail_sample_s                       (K,)
+  tail_angle_sample_s                 (K,)
+  tail_angle_sample_xy                (N, K, 2)
   tail_angle_rad                      (N, K)
   tail_angle_deg                      (N, K) optional plotting mirror
   tail_tip_angle_rad                  (N,)
@@ -148,22 +184,44 @@ analysis/tail_kinematics_runs/<run>/
   tail_curvature_px_inv               (N, K)
   max_abs_tail_curvature_px_inv       (N,)
   integrated_abs_tail_curvature       (N,)
+
+  source_refined_subject_masks/       optional copied source-revision snapshot
+    row_revision                      (N, C)
+    row_revision_available            (C,)
 ```
 
-`tail_lateral_deflection_px` should be computed from each tail sample relative
-to the tail base in body-frame coordinates:
+`tail_lateral_deflection_px` should be computed from each behavior-facing tail
+angle sample relative to the tail base in body-frame coordinates:
 
 ```text
 tail_lateral_deflection_px =
-  dot(tail_sample_xy - tail_base_xy, left_axis_xy)
+  dot(tail_angle_sample_xy - tail_base_xy, left_axis_xy)
 ```
 
 This is a signed spatial deflection, not an angle. It is useful because some
 users reason about tail-tip displacement more naturally than tangent angle.
 
 `integrated_abs_tail_angle_rad` should integrate over normalized tail arclength
-using `tail_sample_s`; it is a compact "how bent is the tail now?" scalar, not
-a frequency or movement classifier.
+using `tail_angle_sample_s`; it is a compact "how bent is the tail now?" scalar,
+not a frequency or movement classifier.
+
+If the source subject-shape run has
+`source_refined_subject_masks/row_revision`, the tail-kinematics writer should
+copy that snapshot into its own `source_refined_subject_masks/` group. The tail
+run is still downstream of the subject-shape run, but this copied revision table
+keeps the refined-mask lineage auditable even if a consumer only has the tail
+run selected.
+
+Schema policy:
+
+- `analysis.tail_kinematics_runs` schema v1 should define this low-dimensional
+  `tail_angle_sample_*` behavior-facing surface before the first implementation
+  ships.
+- Existing `analysis.subject_shape_runs` schema v3 does not need to change if
+  tail kinematics resamples from valid subject-shape geometry.
+- If subject-shape itself changes the meaning or default dimensionality of
+  `components/subject_body/tail_sample_xy`, then subject-shape should bump to
+  schema v4 and a new subject-shape method version.
 
 ## What Not To Add Yet
 
@@ -315,11 +373,15 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
 
 ## Implementation Checklist
 
-- [ ] Implement `analysis/tail_kinematics_runs` writer from subject-shape tail
+- [x] Implement `analysis/tail_kinematics_runs` writer that resamples valid
+  subject-shape tail geometry into default `K=10` behavior-facing tail-angle
   samples.
-- [ ] Add unit tests for sign convention, straight-tail zero angle, left/right
+- [x] Add unit tests for sign convention, straight-tail zero angle, left/right
   sign, and invalid-row propagation.
-- [ ] Run the writer on the feeding canary subject-shape run.
+- [x] Run the writer on the feeding canary subject-shape run:
+  `tail_kinematics_k10_canary_20260430` from
+  `subject_shape_v3_snout_medialjoin_canary_20260429` wrote 17,495 valid rows
+  and 1,740 invalid rows from 19,235 ROI rows.
 - [ ] Persist PNG summaries for tail angles, tail-tip deflection, curvature,
   and validity/failure reasons.
 - [ ] Add tail traces to the Marimo kinematics explorer after the Zarr schema
@@ -333,13 +395,13 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
 
 ## Open Questions
 
-- Should v1 store both radians and degrees, or store radians canonically and
-  let plotting code convert to degrees?
-- Should tail-angle arrays use one angle per tail sample `(K)` or one angle per
-  segment `(K - 1)`? The first implementation can use sample tangents `(K)`
-  because `subject_shape_runs` already stores `tail_tangent_xy`.
-- Should curvature be mirrored into `tail_kinematics_runs`, or referenced from
-  `subject_shape_runs` only? Mirroring is convenient and small; referencing is
-  cleaner. The first implementation can mirror with explicit source attrs.
+- Resolved for v1: store radians canonically and also write degree mirrors for
+  plotting/review convenience. Radians remain the primary units.
+- Should Megabouts export use Palette's native tangent-angle samples `(K=10)`
+  directly or convert to a segment-angle representation `(K - 1)`? Palette's
+  native v1 should use tangent angles at `tail_angle_sample_s`; adapters can
+  convert if a tool expects segment angles.
+- Resolved for v1: mirror curvature into `tail_kinematics_runs` at the same
+  low-dimensional `tail_angle_sample_s` positions and record the source in attrs.
 - Should the first Megabouts integration persist a Zarr tool view or only write
   external export files plus a manifest?

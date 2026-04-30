@@ -112,8 +112,21 @@ that trades exact point agreement for a more stable derivative. That choice must
 be recorded explicitly because it affects tangents, curvature, body length, and
 tail angles.
 
-Tail sampling should use normalized arclength along the tail segment for the
-first implementation:
+Subject-shape runs may evaluate the B-spline densely for geometry operations.
+That dense evaluation is not the same as a low-dimensional behavioral tail-angle
+representation:
+
+- `bspline_sample_xy` is a dense whole-body curve evaluation used for geometry,
+  arclength, projections, curvature review, and continuous-line visualization.
+- `bspline_control_points_xy` stores the compact spline control points.
+- `tail_sample_xy` in current subject-shape schema v3 is a geometry sample of
+  the tail segment, currently denser than the intended behavior-facing
+  tail-angle vector.
+- low-dimensional tail-angle samples, defaulting to `K=10`, should live in
+  `analysis/tail_kinematics_runs`, not replace the dense subject-shape geometry
+  surface.
+
+Tail geometry sampling should use normalized arclength along the tail segment:
 
 ```text
 tail_sample_s = [0.0, ..., 1.0]
@@ -135,6 +148,19 @@ At each tail sample:
 The same sampled curve should provide curvature. For B-splines, curvature should
 prefer spline derivatives. For sampled centerlines without analytic
 derivatives, curvature should use a documented finite-difference method.
+
+Schema policy:
+
+- Keeping dense `bspline_sample_xy`, B-spline control points, and current
+  subject-shape `tail_sample_xy` geometry samples in schema v3 does not require
+  a subject-shape schema bump.
+- If a future writer changes the meaning or default dimensionality of
+  `components/subject_body/tail_sample_xy` from geometry sampling to
+  behavior-facing `K=10` tail-angle sampling, it should bump
+  `analysis.subject_shape_runs` to schema v4 and bump the subject-shape method
+  version.
+- The preferred near-term path is to leave subject-shape geometry unchanged and
+  add low-dimensional behavior samples in `analysis/tail_kinematics_runs`.
 
 ## Body Frame Requirement
 
@@ -559,8 +585,9 @@ renderer after canary review.
   with one marked preferred?
 - When both pose `tail_tip` and spline `tail_tip_xy` exist, what distance should
   trigger `tail_endpoint_disagreement`?
-- What default `tail_sample_count` is enough for curvature and width profiles:
-  10, 20, or a length-dependent value?
+- What default subject-shape geometry `tail_sample_count` is enough for
+  curvature and width profiles: current fixed count, 20, or a length-dependent
+  value?
 - Should width profiles probe the full subject-body mask or only the caudal mask
   segment posterior to the swim-bladder anchor?
 - Should curvature be stored in pixel inverse units only, or also calibrated

@@ -11,6 +11,8 @@ bladder, and modern left/right eye refinement under the same component model.
 
 For the contour/cache ownership and row-local edit propagation policy, see
 [refined_subject_mask_geometry_cache_and_propagation_design.md](refined_subject_mask_geometry_cache_and_propagation_design.md).
+For stable row identity, frame lookup indexes, and optional track identity, see
+[realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md).
 
 ## Scope
 
@@ -115,6 +117,50 @@ Writers must always persist:
 - `available_channels`
 
 Readers must never infer component meaning from channel index alone.
+
+## Row Identity And Frame Lookup
+
+`refined_subject_masks_runs/<run>` is sparse and row-aligned:
+
+```text
+one row = one refined subject instance
+channels = semantic mask components for that instance
+```
+
+Do not use physical row position as durable identity. Physical row order is an
+array layout detail and may change when rows are sorted, compacted, migrated,
+or late-appended.
+
+Writers should preserve stable logical row identity when available:
+
+- copy `source_refined_row_ids` from upstream refined-detect/crop lineage when
+  a refined subject-mask row corresponds to an existing refined detection row
+- preserve row IDs across row-local mask edits
+- allocate new non-reused row IDs when a truly new subject instance row is
+  added in a future manual-add or multi-subject workflow
+
+The current near-term single-fish runs may rely on copied
+`source_refined_row_ids`, but future subject-mask authoring needs an explicit
+subject-row ID field for rows that are not backed by a refined-detect row.
+
+For interactive viewing, writers should add a `frame_index/` lookup cache when
+the run is large:
+
+```text
+frame_index/frame_numbers
+frame_index/row_start
+frame_index/row_count
+frame_index/row_indices
+```
+
+This lets consumers find all rows for a frame without assuming rows are stored
+in frame order. A late-appended row for frame `101` is safe when this index is
+rebuilt or updated, because frame `101` resolves through the index rather than
+through physical array locality.
+
+`track_id` is a separate optional biological/temporal identity. It should only
+be written when a run has joined against an exact tracking source, and it must
+not replace stable row identity for edits or stale downstream recomputation.
 
 ## Evolution Policy
 

@@ -288,11 +288,40 @@ analysis/subject_shape_runs/
 This layout is intentionally permissive. The first implementation should write
 only the arrays it can validate.
 
+Current schema v3 tail samples are subject-shape geometry samples. They are
+used to support geometry review, width/curvature profiles, and downstream
+resampling. They should not be assumed to be the final low-dimensional
+behavioral tail-angle vector.
+
+The low-dimensional behavior-facing representation should be written by
+`analysis/tail_kinematics_runs`, defaulting to approximately `K=10` normalized
+tail samples unless a method records a different value. That run can evaluate
+the valid B-spline/tail geometry at its own `tail_angle_sample_s` positions and
+record exact sampling/count conventions.
+
+Schema bump rule:
+
+- Do not bump subject-shape schema solely because a downstream
+  `tail_kinematics_runs` writer derives `K=10` behavior samples from existing
+  schema-v3 geometry.
+- Do bump `analysis.subject_shape_runs` to schema v4, and bump the
+  subject-shape method version, if this run family changes the semantics,
+  default dimensionality, or intended role of `tail_sample_xy` itself.
+
 For realtime viewers such as Crimson, subject-shape runs may add
 non-authoritative `frame_index/` and `track_index/` lookup groups so consumers
 can resolve rows by frame or track without scanning all row-aligned arrays. The
 canonical shape arrays remain sparse and row-aligned. See
 [realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md).
+
+The canonical row-to-frame mapping is `row_index/frame_indices`, not a
+root-level `frame_indices` array. Current canary runs may have
+`analysis/subject_shape_runs/<run>/row_index/frame_indices` without
+`analysis/subject_shape_runs/<run>/frame_indices`. Consumers should use
+`row_index/frame_indices[row]` for direct row-to-video seeking. A future
+top-level `frame_index` alias or CSR-style `frame_index/` cache may be added
+for convenience, but it must remain a derived lookup over the same stable row
+axis.
 
 ## Source Revision And Staleness
 
@@ -332,6 +361,43 @@ scripts/py -m fisheye.analysis.subject_shape_runs /path/to/analysis.zarr \
 This audit is read-only. Stale rows should be recomputed by an explicit
 subject-shape recompute command, not by automatic propagation from the mask edit
 save path.
+
+## Row Identity, Frame Lookup, And Track Identity
+
+`analysis/subject_shape_runs/<run>` is row-aligned to the selected refined
+subject-mask source. It should preserve the source row lineage under
+`row_index/` when available:
+
+```text
+row_index/frame_indices
+row_index/detection_indices
+row_index/source_refined_row_ids
+row_index/source_detect_row_index
+```
+
+Those arrays answer lineage questions, not fast viewer lookup questions. For
+interactive display, large subject-shape runs should also include the optional
+CSR-style `frame_index/` cache described in
+[realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md).
+That cache maps a displayed frame to the physical subject-shape rows that
+should be drawn.
+
+Do not treat missing root-level `frame_indices` as missing lineage if
+`row_index/frame_indices` exists.
+
+Subject-shape rows should not treat `track_id` as primary identity. Track IDs
+are optional temporal/biological identity assignments from an exact tracking
+source. They are useful for grouping shape rows by animal, but they do not
+replace stable row lineage for stale detection or row-local recomputation after
+mask edits.
+
+The intended relationship is:
+
+```text
+source row ID / subject row ID -> row-local source identity and stale repair
+frame_index/                   -> fast frame-to-row lookup for viewers
+track_id                       -> optional animal-over-time grouping
+```
 
 ## Body Frame Placement
 

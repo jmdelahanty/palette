@@ -36,6 +36,65 @@ without scanning every row:
 - Which rows belong to track `k`?
 - Which mask and shape rows line up with a selected detection row?
 
+## Three Distinct Identifiers
+
+Future multi-subject workflows need three separate concepts. They are related,
+but they are not interchangeable.
+
+### Stable Row ID
+
+A stable row ID is artifact identity:
+
+```text
+"which stored subject instance row is this?"
+```
+
+It is used for edits, stale detection, row-local recomputation, provenance, and
+joins across downstream artifacts. It must survive row reordering and late
+append operations. It is not a biological identity.
+
+Examples:
+
+- `refined_detect_runs/<run>/instances/refined_row_ids`
+- `source_refined_row_ids` copied into crop/keypoint/mask/shape runs when the
+  source can preserve refined-detect row identity
+- future `subject_row_ids` or equivalent row IDs for refined subject-mask rows
+  that are not backed by a refined-detect row
+
+### Frame Index
+
+A frame index is a lookup accelerator:
+
+```text
+"which physical rows should I draw for frame t?"
+```
+
+It is not identity. It is a CSR-style index from frame number to physical row
+indices in the current run. It makes late-appended rows safe for viewers because
+frame `101` can resolve to row `1200`, row `1201`, and row `300000` without
+assuming physical array order is sorted by frame.
+
+### Track ID
+
+A track ID is biological or temporal identity:
+
+```text
+"which animal over time does this row belong to?"
+```
+
+It is optional and should only be present when a run has consumed one exact
+tracking source. Track IDs may be absent, provisional, split, merged, or
+reassigned by a new tracker run. They help group rows by animal, but they do
+not replace stable row IDs for edit propagation or stale detection.
+
+The intended model is:
+
+```text
+stable row ID  = artifact instance identity
+frame_index/   = fast frame-to-row lookup
+track_id       = optional biological/temporal identity
+```
+
 ## Design Rule
 
 Canonical storage should remain sparse and row-aligned. Realtime viewers should

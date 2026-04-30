@@ -1517,6 +1517,12 @@ Expected row-aligned index group:
 - `row_index/detection_indices` when available
 - `row_index/source_refined_row_ids` when available
 
+`row_index/frame_indices` is the canonical subject-shape row-to-frame mapping.
+Do not require a root-level `frame_indices` array for subject-shape runs; current
+canary runs may omit that compatibility shortcut. Realtime viewers may add or
+consume a derived top-level `frame_index` alias or CSR-style `frame_index/`
+lookup cache, but those are convenience surfaces over the stable row axis.
+
 Expected body-frame group when materialized:
 
 - `body_frame/origin_xy`: `(N, 2)` anatomical frame origin in ROI or image pixels
@@ -1584,6 +1590,13 @@ Current centerline/tail-anchor arrays:
 - `components/swim_bladder/caudal_contour_valid`: `(N,)` caudal-anchor
   validity.
 
+`components/subject_body/bspline_sample_xy` and
+`components/subject_body/tail_sample_xy` are subject-shape geometry outputs.
+They may be denser than the behavior-facing representation used for tail-angle
+analysis. Low-dimensional tail-angle vectors, currently planned with default
+`K=10`, belong in `analysis/tail_kinematics_runs` as
+`tail_angle_sample_*` arrays.
+
 Expected relation groups:
 
 - `relations/eye_pair/`: cross-eye metrics such as separation.
@@ -1650,12 +1663,14 @@ Expected run attrs:
 - `row_axis`: `"roi_rows"`
 - `source_subject_shape_run`
 - `source_refined_subject_masks_run`
-- `source_tail_geometry_kind`: e.g. `"subject_shape_tail_samples"`
+- `source_tail_geometry_kind`: e.g. `"subject_shape_bspline_tail_resample"`
 - `body_frame_convention`
 - `tail_angle_reference_axis`: `"caudal_axis=-forward_axis"`
 - `tail_angle_positive_direction`: `"anatomical_left"`
 - `tail_sample_domain`: `"tail_segment_normalized_arclength"`
-- `tail_sample_count`
+- `tail_angle_sample_count`: default `10`
+- `source_geometry_tail_sample_count`: optional count from the source
+  subject-shape geometry
 
 Expected arrays:
 
@@ -1663,7 +1678,10 @@ Expected arrays:
 - `time_s`: `(N,)` optional
 - `valid`: `(N,)`
 - `failure_reason_bytes`: `(N, width)`
-- `tail_sample_s`: `(K,)`
+- `tail_angle_sample_s`: `(K,)` low-dimensional normalized tail positions used
+  for behavior-facing tail-angle vectors.
+- `tail_angle_sample_xy`: `(N, K, 2)` evaluated positions at
+  `tail_angle_sample_s`.
 - `tail_angle_rad`: `(N, K)` signed body-frame tail tangent angle.
 - `tail_angle_deg`: `(N, K)` optional plotting mirror.
 - `tail_tip_angle_rad`: `(N,)`
@@ -1681,11 +1699,22 @@ Expected arrays:
 - `max_abs_tail_curvature_px_inv`: `(N,)`
 - `integrated_abs_tail_curvature`: `(N,)`
 
+When available from the source subject-shape run, the writer should also copy
+`source_refined_subject_masks/row_revision` and
+`source_refined_subject_masks/row_revision_available` into the tail run so
+refined-mask lineage remains auditable from the selected tail-kinematics
+surface.
+
 Tool-specific views, such as Megabouts-ready arrays, may be generated on demand
 or stored under `tool_views/<tool_name>/` with explicit source attrs and export
 hashes. Third-party classifier labels should land in a separate
 `analysis/bout_classification_runs/<run>` family rather than overwriting
 Palette-native tail traces.
+
+Dense whole-body B-spline samples, B-spline control points, and geometry/QC
+tail samples remain in `analysis/subject_shape_runs`. The tail-kinematics
+surface intentionally defaults to a lower-dimensional `K=10` behavior vector
+for plotting, bout summaries, and Megabouts-like adapters.
 
 ### `analysis/stimulus_response_runs/`
 
