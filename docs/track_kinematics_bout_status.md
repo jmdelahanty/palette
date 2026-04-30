@@ -239,6 +239,21 @@ the response trace used for segmentation. New bout tables distinguish
 `peak_detection_signal_mm_s` from `peak_physical_speed_mm_s` so transformed
 detector responses do not silently redefine biological speed metrics.
 
+The detector/estimator split should be interpreted strictly:
+
+- `speed_exponential` is a detector response used to find or review event
+  boundaries.
+- physical movement summaries should use the declared `movement_metric_source`
+  arrays, currently the filtered path-distance/speed arrays for exponential
+  candidates.
+- `duration_s` and `observed_duration_s` remain detector-window durations. This
+  is the remaining estimator gap: they can be broadened by a transformed
+  detector tail and should not be treated as separately measured physical
+  active-motion duration.
+- if we need physical active duration, the next schema should compute it in a
+  measurement surface by applying an explicit active-motion policy to
+  `speed_filtered`, while preserving detector-window duration separately.
+
 Candidate `tau` values should eventually be grounded from data, not selected by
 name alone. A practical future calibration is:
 

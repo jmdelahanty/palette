@@ -218,6 +218,32 @@ Peak/event detection is a separate segmentation family, not a hidden extension
 of threshold gap merging. See
 [`swim_bout_peak_event_detector_design.md`](swim_bout_peak_event_detector_design.md).
 
+Detector signals and measurement sources must remain separate. A subgroup such
+as `speed_exponential` may use a transformed detector response to define bout
+boundaries, but physical movement summaries should declare and consume their
+measurement source, for example `movement_metric_source_level="filtered"` with
+`frame_path_distance_filtered_*` arrays. Existing fields follow this split by
+separating `peak_detection_signal_mm_s` from `peak_physical_speed_mm_s`.
+
+The boundary-duration fields are still detector-boundary measurements.
+`duration_s`, `observed_duration_s`, and `core_duration_*` describe the stored
+bout window/core chosen by the detector and boundary policy. This is the known
+remaining estimator gap for transformed detector signals: those fields should
+not be silently reinterpreted as physical active duration when the detector
+signal is transformed or broadened. If an analysis needs physical active
+duration, it should write an explicit measurement-window output and preserve the
+detector-window duration separately.
+
+Future schema bumps should make the detector-vs-estimator split first-class,
+but keep it lean to avoid drift. Prefer grouped metadata such as
+`detection_signal = {array_path, transform, transform_params}` and
+`movement_estimator = {signal_array_path, path_distance_array_path,
+position_array_path, validity_array_paths}` over many duplicated level/array
+attrs. Metric metadata should identify only the metric source role
+(`detector_boundary` or `physical_estimator`) and boundary policy
+(`detector_start_end`, `detector_core`, or `physical_active`), plus any
+metric-specific threshold/interpolation parameters.
+
 `analysis/bout_kinematics_runs/<run>/<heading_level>/per_bout_metrics/` is the
 linked measurement surface. It should store downstream per-bout biological
 measurements computed from one exact swim-bout candidate and one exact

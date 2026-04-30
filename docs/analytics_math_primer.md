@@ -209,6 +209,29 @@ This is a detector response trace, not a replacement for measured fish speed.
 Longer `tau` values broaden the response and extend the decay tail. Shorter
 `tau` values track the source speed more closely.
 
+### Detector vs Estimator
+
+Bout segmentation has two distinct jobs:
+
+- the detector finds event windows from a selected speed-like signal
+- the estimator measures physical quantities from the least-distorting movement
+  source available, usually `speed_filtered` and its matching
+  `frame_path_distance_filtered_*` arrays
+
+The causal exponential response is a detector signal. Its peak height, onset,
+and decay shape depend on `tau`, so it should not be interpreted as measured
+fish speed. When an exponential candidate is useful for finding bouts, physical
+fields such as path length, net displacement, mean speed, and physical peak
+speed should still be measured from the declared movement source inside the
+detected window.
+
+The remaining open bug class is duration. `duration_s` in `swim_bout_runs` is
+the duration of the stored detector boundary. If the detector signal has a long
+tail, that duration can be a detector-envelope duration rather than physical
+active-motion duration. A stricter physical duration should be computed with an
+explicit measurement policy, for example by slicing near the detector-defined
+bout and re-detecting first/last above-baseline samples on `speed_filtered`.
+
 ## Eye Angles
 
 `analysis/eye_angle_runs` stores eye geometry interpreted in the fish body

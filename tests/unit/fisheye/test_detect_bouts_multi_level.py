@@ -363,6 +363,47 @@ def test_detect_and_save_bouts_writes_peak_event_metadata(tmp_path: Path) -> Non
     assert "peak_prominence_mm_s" in peak_events.attrs["field_names"]
 
 
+def test_exponential_candidate_uses_filtered_source_for_physical_metrics(tmp_path: Path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="r+")
+    track = root["analysis"]["track_kinematics_runs"]["offline"]["tk_1"]["tracks"]["id_0"]
+    track["transition_valid"][:] = np.asarray([False, *([True] * 11)], dtype=bool)
+
+    run_name = detect_and_save_bouts(
+        zarr_path=zarr_path,
+        run_name="bouts_exponential_metric_guard",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        method="threshold",
+        threshold_mm=1.0,
+        min_bout_duration_s=0.01,
+        min_gap_duration_s=0.01,
+        default_level="exponential",
+        exponential_tau_s=0.05,
+        exponential_source_level="filtered",
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    track = root["analysis"]["track_kinematics_runs"]["offline"]["tk_1"]["tracks"]["id_0"]
+    level = root["analysis"]["swim_bout_runs"][run_name]["speed_exponential"]
+    assert level.attrs["detection_signal_transform_type"] == "convolution"
+    assert level.attrs["detection_signal_is_primary_physical_speed"] is False
+    assert level.attrs["movement_metric_source_level"] == "filtered"
+
+    bouts = level["bouts"]
+    assert bouts["bout_id"].shape == (1,)
+    start = int(bouts["start_frame"][0])
+    end = int(bouts["end_frame"][0])
+    window = slice(start, end + 1)
+    transition_valid = np.asarray(track["transition_valid"][window], dtype=bool)
+    filtered_path = np.asarray(track["frame_path_distance_filtered_mm"][window], dtype=np.float64)
+    filtered_speed = np.asarray(track["speed_filtered_mm"][window], dtype=np.float64)
+
+    np.testing.assert_allclose(bouts["path_length_mm"][:], [float(np.sum(filtered_path[transition_valid]))])
+    np.testing.assert_allclose(bouts["peak_physical_speed_mm_s"][:], [float(np.nanmax(filtered_speed))])
+    assert float(bouts["peak_detection_signal_mm_s"][0]) != float(bouts["peak_physical_speed_mm_s"][0])
+
+
 def test_causal_exponential_speed_response_resets_on_gap() -> None:
     speed = np.asarray([0.0, 10.0, 0.0, 10.0], dtype=np.float32)
     frames = np.asarray([0, 1, 2, 10], dtype=np.int64)
