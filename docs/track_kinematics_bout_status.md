@@ -247,12 +247,14 @@ The detector/estimator split should be interpreted strictly:
   arrays, currently the filtered path-distance/speed arrays for exponential
   candidates.
 - `duration_s` and `observed_duration_s` remain detector-window durations. This
-  is the remaining estimator gap: they can be broadened by a transformed
-  detector tail and should not be treated as separately measured physical
-  active-motion duration.
-- if we need physical active duration, the next schema should compute it in a
-  measurement surface by applying an explicit active-motion policy to
-  `speed_filtered`, while preserving detector-window duration separately.
+  detector-window meaning is intentional: they can be broadened by a
+  transformed detector tail and should not be treated as separately measured
+  physical active-motion duration.
+- physical active duration now belongs in
+  `analysis/bout_kinematics_runs/<run>/movement/per_bout_metrics/`, which
+  applies an explicit active-motion policy to a declared physical speed source
+  such as `speed_filtered`, while preserving detector-window duration
+  separately.
 
 Candidate `tau` values should eventually be grounded from data, not selected by
 name alone. A practical future calibration is:

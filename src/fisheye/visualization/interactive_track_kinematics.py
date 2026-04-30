@@ -1129,6 +1129,8 @@ def discover_bout_kinematics_run_options(
         parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
         pre_post_mode = parameters.get("pre_post_mode")
         n_rows_by_level = {}
+        if "movement" in run_group:
+            n_rows_by_level["movement"] = _columnar_row_count(run_group["movement"], "per_bout_metrics")
         for level in heading_levels:
             n_rows_by_level[level] = (
                 _columnar_row_count(run_group[level], "per_bout_metrics")
@@ -1145,6 +1147,8 @@ def discover_bout_kinematics_run_options(
             f"headings {', '.join(level.replace('heading_', '') for level in heading_levels)}",
             f"source {speed_level_key.replace('speed_', '')}",
         ]
+        if n_rows_by_level.get("movement", 0) > 0:
+            label_parts.append("movement")
         if has_eye_gaze:
             label_parts.append("eye gaze")
         if is_latest:
@@ -1522,6 +1526,8 @@ def load_bout_kinematics_records(
         levels = tuple(str(level) for level in run_group.attrs.get("heading_levels", []))
         if not levels:
             levels = tuple(level for level in ("heading_smoothed", "heading_raw") if level in run_group)
+        if "movement" in run_group:
+            levels = ("movement", *levels)
         if "eye_gaze" in run_group:
             levels = (*levels, "eye_gaze")
 

@@ -1437,10 +1437,10 @@ def _(
     _figure_t0 = time.perf_counter()
 
     _metric_specs = [
-        (filtered_swim_bout_df, "duration_s", "Bout duration (s)"),
-        (filtered_swim_bout_df, "observed_duration_s", "Observed bout duration (s)"),
-        (filtered_swim_bout_df, "path_length_mm", "Bout path length (mm)"),
-        (filtered_swim_bout_df, "net_displacement_mm", "Bout net displacement (mm)"),
+        (filtered_swim_bout_df, "duration_s", "Detector-window duration (s)"),
+        (filtered_swim_bout_df, "observed_duration_s", "Detector observed duration (s)"),
+        (filtered_swim_bout_df, "path_length_mm", "Segmentation-window path length (mm)"),
+        (filtered_swim_bout_df, "net_displacement_mm", "Segmentation-window net displacement (mm)"),
         (filtered_inter_bout_interval_df, "interval_s", "Inter-bout interval (s)"),
     ]
     histogram_frames = []
@@ -1460,7 +1460,7 @@ def _(
             facet_col="metric",
             facet_col_wrap=2,
             nbins=int(histogram_bins.value),
-            title="Bout Metric Histograms",
+            title="Swim-Bout Segmentation Histograms",
             labels={"value": "Value", "count": "Count"},
             opacity=0.82,
         )
@@ -1480,6 +1480,69 @@ def _(
     )
     histogram_plot
     return (histogram_df,)
+
+
+@app.cell
+def _(bout_kinematics_df, histogram_bins, np, pd, px, time, write_perf_event):
+    _figure_t0 = time.perf_counter()
+    _movement_df = (
+        bout_kinematics_df[bout_kinematics_df["analysis_level"] == "movement"].copy()
+        if "analysis_level" in bout_kinematics_df
+        else pd.DataFrame()
+    )
+    _metric_specs = [
+        ("physical_active_duration_s", "Physical active duration (s)"),
+        ("physical_active_duration_s_interpolated", "Physical active duration interpolated (s)"),
+        ("physical_active_path_length_mm", "Physical active path length (mm)"),
+        ("physical_active_mean_speed_mm_s", "Physical active mean speed (mm/s)"),
+        ("physical_active_peak_speed_mm_s", "Physical active peak speed (mm/s)"),
+        ("detector_duration_s", "Copied detector duration (s)"),
+    ]
+    _frames = []
+    for _column, _label in _metric_specs:
+        if _column not in _movement_df:
+            continue
+        _values = _movement_df[_column].to_numpy(dtype=float, copy=False)
+        _values = _values[np.isfinite(_values)]
+        if _values.size:
+            _frames.append(pd.DataFrame({"metric": _label, "value": _values}))
+
+    if _frames:
+        bout_movement_histogram_df = pd.concat(_frames, ignore_index=True)
+        bout_movement_histogram_plot = px.histogram(
+            bout_movement_histogram_df,
+            x="value",
+            facet_col="metric",
+            facet_col_wrap=2,
+            nbins=int(histogram_bins.value),
+            title="Bout Physical Movement Histograms",
+            labels={"value": "Value", "count": "Bout count"},
+            opacity=0.82,
+        )
+        bout_movement_histogram_plot.update_xaxes(matches=None)
+        bout_movement_histogram_plot.update_yaxes(matches=None)
+        bout_movement_histogram_plot.update_layout(
+            height=860,
+            margin=dict(l=40, r=20, t=70, b=40),
+            showlegend=False,
+        )
+    else:
+        bout_movement_histogram_df = pd.DataFrame(columns=["metric", "value"])
+        bout_movement_histogram_plot = "No physical movement metrics available for the selected bout-kinematics candidate."
+
+    write_perf_event(
+        "build_bout_movement_histograms",
+        time.perf_counter() - _figure_t0,
+        n_histogram_rows=len(bout_movement_histogram_df),
+        n_histogram_metrics=(
+            int(bout_movement_histogram_df["metric"].nunique())
+            if len(bout_movement_histogram_df)
+            else 0
+        ),
+        bins=int(histogram_bins.value),
+    )
+    bout_movement_histogram_plot
+    return (bout_movement_histogram_df,)
 
 
 @app.cell

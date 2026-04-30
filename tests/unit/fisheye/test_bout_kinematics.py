@@ -51,6 +51,24 @@ def _make_archive(tmp_path: Path) -> Path:
         "positions_mm",
         np.column_stack([frames.astype(np.float32) * 0.1, frames.astype(np.float32) * 0.05]),
     )
+    _write_array(
+        track,
+        "speed_filtered_mm",
+        np.asarray([0.0, 0.0, 0.0, 0.2, 3.0, 0.2, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
+    _write_array(
+        track,
+        "frame_path_distance_filtered_mm",
+        np.asarray([0.0, 0.0, 0.0, 0.02, 0.30, 0.02, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
+    _write_array(
+        track,
+        "frame_path_distance_filtered_px",
+        np.asarray([0.0, 0.0, 0.0, 0.2, 3.0, 0.2, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
+    delta_seconds = np.zeros(frames.size, dtype=np.float32)
+    delta_seconds[1:] = 0.1
+    _write_array(track, "delta_seconds", delta_seconds)
     _write_array(track, "transition_valid", np.asarray([False, *([True] * 9)], dtype=bool))
     _write_array(track, "sample_valid", np.ones(10, dtype=bool))
 
@@ -121,6 +139,8 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
         speed_level="filtered",
         pre_window_s=0.2,
         post_window_s=0.2,
+        physical_active_threshold_mm_s=0.1,
+        physical_active_boundary_margin_s=0.1,
         write_visualizations=True,
         visualization_bins=8,
         overwrite=False,
@@ -132,8 +152,8 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
 
     assert parent.attrs["latest"] == "bout_kinematics_1"
     assert run.attrs["schema_id"] == "analysis.bout_kinematics_runs"
-    assert run.attrs["schema_version"] == 6
-    assert run.attrs["method_version"] == "bout_kinematics.v6"
+    assert run.attrs["schema_version"] == 7
+    assert run.attrs["method_version"] == "bout_kinematics.v7"
     assert run.attrs["default_heading_level"] == "heading_smoothed"
     assert run.attrs["source_swim_bout_run"] == "bouts_1"
     assert run.attrs["source_swim_bout_speed_level"] == "speed_filtered"
@@ -148,6 +168,16 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     ]
     assert run.attrs["parameters"]["source_peak_event_fields"] == []
     assert run.attrs["parameters"]["eye_gaze"]["enabled"] is False
+    assert run.attrs["parameters"]["physical_active"] == {
+        "enabled": True,
+        "boundary_policy": "physical_active",
+        "boundary_constraint": "search_with_margin",
+        "boundary_margin_s": 0.1,
+        "resolved_boundary_margin_frames": 1,
+        "threshold_mm_s": 0.1,
+        "measurement_signal_level": "speed_filtered",
+        "measurement_signal_array": "speed_filtered_mm",
+    }
     assert run.attrs["source_refs"]["zarr_path"] == str(zarr_path)
     assert run.attrs["source_refs"]["source_track_id"] == 0
     assert run.attrs["source_refs"]["source_heading_arrays"] == {
@@ -161,7 +191,19 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
         "positions_mm": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/positions_mm",
         "positions_px": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/positions_px",
     }
+    assert run.attrs["source_refs"]["source_movement_arrays"] == {
+        "physical_active_speed": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/speed_filtered_mm",
+        "physical_active_path_distance_mm": (
+            "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/"
+            "frame_path_distance_filtered_mm"
+        ),
+        "physical_active_path_distance_px": (
+            "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/"
+            "frame_path_distance_filtered_px"
+        ),
+    }
     assert run.attrs["source_refs"]["source_validity_arrays"] == {
+        "delta_seconds": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/delta_seconds",
         "transition_valid": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/transition_valid",
         "sample_valid": "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/sample_valid",
     }
@@ -170,6 +212,29 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     assert run.attrs["provenance"]["inputs"]["source_heading_arrays"] == run.attrs["source_refs"][
         "source_heading_arrays"
     ]
+
+    assert run.attrs["analysis_levels"] == ["movement", "heading_smoothed", "heading_raw"]
+    movement = run["movement"]["per_bout_metrics"]
+    movement_records, _ = load_structured_dataset(run["movement"], "per_bout_metrics")
+    assert movement.attrs["schema_id"] == "analysis.bout_kinematics_runs.movement.per_bout_metrics"
+    assert movement.attrs["physical_active_boundary_policy"] == "physical_active"
+    assert movement.attrs["physical_active_boundary_constraint"] == "search_with_margin"
+    assert movement.attrs["physical_active_signal_level"] == "speed_filtered"
+    assert movement["physical_active_start_frame"][:].tolist() == [3]
+    assert movement["physical_active_end_frame"][:].tolist() == [5]
+    np.testing.assert_allclose(movement["physical_active_duration_s"][:], [0.3])
+    np.testing.assert_allclose(movement["physical_active_observed_duration_s"][:], [0.3])
+    np.testing.assert_allclose(movement["physical_active_start_time_s_interpolated"][:], [0.25])
+    np.testing.assert_allclose(movement["physical_active_end_time_s_interpolated"][:], [0.55])
+    np.testing.assert_allclose(movement["physical_active_duration_s_interpolated"][:], [0.30])
+    np.testing.assert_allclose(movement["physical_active_path_length_mm"][:], [0.34])
+    np.testing.assert_allclose(movement["physical_active_path_length_px"][:], [3.4])
+    np.testing.assert_allclose(movement["physical_active_mean_speed_mm_s"][:], [0.34 / 0.3])
+    np.testing.assert_allclose(movement["physical_active_peak_speed_mm_s"][:], [3.0])
+    assert movement["physical_active_valid"][:].tolist() == [True]
+    assert movement_records["physical_active_boundary_policy_bytes"].tolist() == [b"physical_active"]
+    assert movement_records["physical_active_boundary_constraint_bytes"].tolist() == [b"search_with_margin"]
+    assert movement_records["failure_reason_bytes"].tolist() == [b"ok"]
 
     smoothed = run["heading_smoothed"]["per_bout_metrics"]
     smoothed_records, _ = load_structured_dataset(run["heading_smoothed"], "per_bout_metrics")
@@ -251,6 +316,20 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     assert b"within_bout_heading_histograms" in spec_payload
 
 
+def test_compute_and_save_bout_kinematics_rejects_exponential_physical_source(tmp_path: Path) -> None:
+    zarr_path = _make_archive(tmp_path)
+
+    with pytest.raises(ValueError, match="Unsupported physical_active_signal_level"):
+        compute_and_save_bout_kinematics(
+            zarr_path,
+            run_name="bad_physical_source",
+            track_kinematics_run="tk_1",
+            track_id=0,
+            swim_bout_run="bouts_1",
+            physical_active_signal_level="exponential",
+        )
+
+
 def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
     tmp_path: Path,
 ) -> None:
@@ -277,8 +356,8 @@ def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
     )
 
     run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
-    assert run.attrs["schema_version"] == 6
-    assert run.attrs["analysis_levels"] == ["heading_smoothed", "eye_gaze"]
+    assert run.attrs["schema_version"] == 7
+    assert run.attrs["analysis_levels"] == ["movement", "heading_smoothed", "eye_gaze"]
     assert run.attrs["parameters"]["eye_gaze"] == {
         "enabled": True,
         "eye_angle_run": "eye_1",

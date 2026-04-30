@@ -225,12 +225,16 @@ fields such as path length, net displacement, mean speed, and physical peak
 speed should still be measured from the declared movement source inside the
 detected window.
 
-The remaining open bug class is duration. `duration_s` in `swim_bout_runs` is
-the duration of the stored detector boundary. If the detector signal has a long
-tail, that duration can be a detector-envelope duration rather than physical
-active-motion duration. A stricter physical duration should be computed with an
-explicit measurement policy, for example by slicing near the detector-defined
-bout and re-detecting first/last above-baseline samples on `speed_filtered`.
+Duration has the same detector-vs-estimator split. `duration_s` in
+`swim_bout_runs` is the duration of the stored detector boundary. If the
+detector signal has a long tail, that duration can be a detector-envelope
+duration rather than physical active-motion duration.
+
+Schema v7 `bout_kinematics_runs` writes this stricter physical duration under
+`movement/per_bout_metrics/`. It preserves detector-window duration in
+`detector_*` fields and measures physical active duration by slicing near the
+detector-defined bout and finding first/last above-threshold samples on a
+declared physical speed source, usually `speed_filtered`.
 
 ## Eye Angles
 

@@ -160,7 +160,10 @@ Existing analysis outputs already follow this direction:
   identity-resolved movement outputs.
 - `analysis/bout_kinematics_runs/<run>` stores per-bout heading and movement
   metrics derived from an exact swim-bout segmentation candidate without
-  mutating that segmentation artifact. Schema v6 may also include an optional
+  mutating that segmentation artifact. Schema v7 includes
+  `movement/per_bout_metrics` for physical-active movement summaries measured
+  from a declared physical speed source, while preserving source
+  detector-window durations. It may also include an optional
   `eye_gaze/per_bout_metrics` subgroup with pre/post/within-bout eye-gaze and
   vergence summaries linked to an exact `analysis/eye_angle_runs/<run>` source.
 - `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
@@ -225,28 +228,32 @@ measurement source, for example `movement_metric_source_level="filtered"` with
 `frame_path_distance_filtered_*` arrays. Existing fields follow this split by
 separating `peak_detection_signal_mm_s` from `peak_physical_speed_mm_s`.
 
-The boundary-duration fields are still detector-boundary measurements.
-`duration_s`, `observed_duration_s`, and `core_duration_*` describe the stored
-bout window/core chosen by the detector and boundary policy. This is the known
-remaining estimator gap for transformed detector signals: those fields should
-not be silently reinterpreted as physical active duration when the detector
-signal is transformed or broadened. If an analysis needs physical active
-duration, it should write an explicit measurement-window output and preserve the
-detector-window duration separately.
+The boundary-duration fields in `swim_bout_runs` are still detector-boundary
+measurements. `duration_s`, `observed_duration_s`, and `core_duration_*`
+describe the stored bout window/core chosen by the detector and boundary
+policy. They should not be silently reinterpreted as physical active duration
+when the detector signal is transformed or broadened.
 
-Future schema bumps should make the detector-vs-estimator split first-class,
-but keep it lean to avoid drift. Prefer grouped metadata such as
-`detection_signal = {array_path, transform, transform_params}` and
-`movement_estimator = {signal_array_path, path_distance_array_path,
+Schema v7 makes the detector-vs-estimator split first-class in
+`analysis/bout_kinematics_runs/<run>/movement/per_bout_metrics/`. That table
+copies detector-window duration fields into `detector_*` columns and writes
+separate physical-estimator columns such as `physical_active_duration_s`,
+`physical_active_duration_s_interpolated`,
+`physical_active_path_length_mm`, `physical_active_mean_speed_mm_s`, and
+`physical_active_peak_speed_mm_s`. The physical estimator records
+`physical_active_boundary_policy="physical_active"` and keeps the boundary
+search constraint as a separate enum, currently `clip_to_detector`,
+`search_with_margin`, or `allow_extension`, with an explicit margin parameter
+when applicable.
+
+Future schema bumps should keep this split lean to avoid drift. Prefer grouped
+metadata such as `detection_signal = {array_path, transform, transform_params}`
+and `movement_estimator = {signal_array_path, path_distance_array_path,
 position_array_path, validity_array_paths}` over many duplicated level/array
 attrs. Metric metadata should identify only the metric source role
 (`detector_boundary` or `physical_estimator`) and boundary policy
 (`detector_start_end`, `detector_core`, or `physical_active`), plus any
-metric-specific threshold/interpolation parameters. For `physical_active`, keep
-the boundary search constraint as a separate enum rather than encoding it into
-the policy name. For example, use
-`boundary_constraint="clip_to_detector"`, `"search_with_margin"`, or
-`"allow_extension"`, with an explicit margin parameter when applicable.
+metric-specific threshold/interpolation parameters.
 
 `analysis/bout_kinematics_runs/<run>/<heading_level>/per_bout_metrics/` is the
 linked measurement surface. It should store downstream per-bout biological

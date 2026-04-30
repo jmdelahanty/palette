@@ -184,6 +184,10 @@ Possible columns:
 - position columns: `pre_position_x_mm`, `pre_position_y_mm`,
   `post_position_x_mm`, `post_position_y_mm`,
   `net_displacement_mm`
+- physical movement columns: `detector_duration_s`,
+  `physical_active_duration_s`, `physical_active_path_length_mm`,
+  `physical_active_mean_speed_mm_s`, `physical_active_peak_speed_mm_s`,
+  `physical_active_boundary_policy`, `physical_active_boundary_constraint`
 - optional eye-gaze columns: `pre_vergence_deg`, `post_vergence_deg`,
   `within_bout_vergence_range_deg`
 - validity columns: `valid`, `coverage_fraction`, `failure_reason`

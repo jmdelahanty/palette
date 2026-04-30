@@ -22,13 +22,15 @@ This layer should consume:
 - one exact `analysis/track_kinematics_runs/<scope>/<run>` source
 - one exact `analysis/swim_bout_runs/<run>/<speed_level>` source
 - a declared heading source from the track-kinematics run
+- a declared physical movement source from the track-kinematics run
 - explicit pre-bout and post-bout window parameters
 
 It should produce per-bout metrics such as net heading change, within-bout
-heading excursion, within-bout heading path length, and optional within-bout
-dominant frequency. When explicitly enabled, it should also join frame-level
-eye-gaze outputs from an exact `analysis/eye_angle_runs/<run>` source and
-write bout-aligned eye summaries without mutating either source run.
+heading excursion, within-bout heading path length, physical active-motion
+duration, physical path length, and optional within-bout dominant frequency.
+When explicitly enabled, it should also join frame-level eye-gaze outputs from
+an exact `analysis/eye_angle_runs/<run>` source and write bout-aligned eye
+summaries without mutating either source run.
 
 ## Use-Case Boundary
 
@@ -48,6 +50,17 @@ when the question is about measurements derived from a frozen bout candidate:
 - what stable pre/post position displacement the bout produced
 - how much within-bout heading excursion or oscillation occurred
 - which heading source, pre/post epoch policy, and measurement parameters were
+  used
+
+Use `analysis/bout_kinematics_runs/<run>/movement/per_bout_metrics/` when the
+question is about physical movement measured for those same frozen bout rows:
+
+- what detector-window duration was inherited from the source bout candidate
+- what physical active-motion duration was measured from a declared physical
+  speed source
+- what path length, mean speed, and peak speed were measured from that physical
+  source
+- which boundary policy, boundary constraint, threshold, and search margin were
   used
 
 Use `analysis/bout_kinematics_runs/<run>/eye_gaze/per_bout_metrics/` when the
@@ -115,13 +128,64 @@ the last bout has no following interbout epoch. The initial policy should mark
 those sides invalid by default rather than inventing archive-edge epochs. Edge
 handling can be added later as an explicit parameter if needed.
 
+## Physical Movement Metrics
+
+`swim_bout_runs` stores detector outputs. Its `duration_s`,
+`observed_duration_s`, and `core_duration_s` fields describe the event window
+chosen by the detector and its boundary policy. Those fields are intentionally
+preserved when the detector uses a transformed response such as
+`speed_exponential`, even if that response has a broader tail than measured
+fish motion.
+
+`bout_kinematics_runs/<run>/movement/per_bout_metrics/` is the first-class
+physical estimator layer. It measures physical active motion from a declared
+track-kinematics speed source, currently one of:
+
+- `speed_raw_mm`
+- `speed_filtered_mm`
+- `speed_smoothed_mm`
+
+The default is `speed_filtered_mm`, because it suppresses sub-threshold jitter
+without using the causal exponential detector response as if it were measured
+speed.
+
+The physical-active policy is factored into two concepts:
+
+- `physical_active_boundary_policy = "physical_active"`: the metric measures
+  first/last above-threshold samples on the physical speed source.
+- `physical_active_boundary_constraint`: how far the measurement search may
+  move relative to the detector window. Current values are
+  `clip_to_detector`, `search_with_margin`, and `allow_extension`.
+
+For `search_with_margin`, the writer records both the requested
+`physical_active_boundary_margin_s` and the resolved frame count. The search is
+bounded by adjacent source bouts so one source bout cannot consume samples that
+belong to a neighboring source bout.
+
+The movement table preserves both detector and physical-estimator duration:
+
+- `detector_duration_s`, `detector_observed_duration_s`, and
+  `detector_core_duration_s` copy source detector-boundary durations.
+- `physical_active_duration_s` is the sampled first-to-last active-frame
+  duration on the physical speed source.
+- `physical_active_duration_s_interpolated` is the optional threshold-crossing
+  duration estimated between adjacent samples when both boundaries are valid.
+- `physical_active_observed_duration_s` sums valid transition durations across
+  the active sampled span.
+
+Physical path length and mean speed are computed from the matching
+`frame_path_distance_<level>_*` arrays when present. Peak speed is measured from
+the selected physical speed source within the physical-active search window.
+The causal exponential/convolved detector response should not be used for these
+physical estimator fields.
+
 ## Within-Bout Heading Metrics
 
 Net reorientation is not enough for high-speed recordings or bouts where the
 head oscillates during the swim. A fish may have near-zero net heading change
 while still exhibiting meaningful within-bout head wiggle.
 
-The first schema should therefore include both net and within-bout metrics:
+The schema should therefore include both net and within-bout metrics:
 
 ```text
 per_bout_metrics/
@@ -283,9 +347,9 @@ The run should record `default_heading_level = "heading_smoothed"`.
 analysis/bout_kinematics_runs/<run_name>/
   attrs:
     schema_id: "analysis.bout_kinematics_runs"
-    schema_version: 6
+    schema_version: 7
     method: "heading_window_and_within_bout_metrics"
-    method_version: "bout_kinematics.v6"
+    method_version: "bout_kinematics.v7"
     created_at_utc
     row_axis: "swim_bout_rows"
     source_refs:
@@ -300,6 +364,14 @@ analysis/bout_kinematics_runs/<run_name>/
       source_heading_arrays:
         heading_smoothed: <track path>/smoothed_heading_degrees
         heading_raw: <track path>/heading_degrees
+      source_movement_arrays:
+        physical_active_speed: <track path>/speed_filtered_mm
+        physical_active_path_distance_mm: <track path>/frame_path_distance_filtered_mm
+        physical_active_path_distance_px: <track path>/frame_path_distance_filtered_px
+      source_validity_arrays:
+        delta_seconds: <track path>/delta_seconds
+        transition_valid: <track path>/transition_valid
+        sample_valid: <track path>/sample_valid
       source_eye_angle_run                      optional, when eye_gaze is enabled
       source_eye_angle_path                     optional
       source_eye_angle_schema_version           optional
@@ -316,6 +388,15 @@ analysis/bout_kinematics_runs/<run_name>/
       within_window: "bout_start_end" | "core_start_end"
       heading_units: "degrees"
       heading_unwrap_policy
+      physical_active:
+        enabled: true
+        boundary_policy: "physical_active"
+        boundary_constraint: "search_with_margin"
+        boundary_margin_s
+        resolved_boundary_margin_frames
+        threshold_mm_s
+        measurement_signal_level: "speed_filtered"
+        measurement_signal_array: "speed_filtered_mm"
       source_interpolated_threshold_fields
       source_peak_event_fields
       zero_crossing_derivative_threshold_deg_s
@@ -342,6 +423,40 @@ analysis/bout_kinematics_runs/<run_name>/
       source_start_frame
       source_end_frame
       ...
+  movement/
+    per_bout_metrics/
+      bout_id
+      source_start_frame
+      source_end_frame
+      source_core_start_frame
+      source_core_end_frame
+      detector_duration_s
+      detector_observed_duration_s
+      detector_core_duration_s
+      physical_active_start_frame
+      physical_active_end_frame
+      physical_active_start_time_s
+      physical_active_end_time_s
+      physical_active_duration_s
+      physical_active_observed_duration_s
+      physical_active_start_time_s_interpolated
+      physical_active_end_time_s_interpolated
+      physical_active_duration_s_interpolated
+      physical_active_start_time_interpolated_valid
+      physical_active_end_time_interpolated_valid
+      physical_active_sample_count
+      physical_active_valid_transition_count
+      physical_active_valid_transition_fraction
+      physical_active_path_length_mm
+      physical_active_path_length_px
+      physical_active_mean_speed_mm_s
+      physical_active_peak_speed_mm_s
+      physical_active_threshold_mm_s
+      physical_active_boundary_margin_s
+      physical_active_boundary_policy_bytes
+      physical_active_boundary_constraint_bytes
+      physical_active_valid
+      failure_reason_bytes
   eye_gaze/                                    optional
     per_bout_metrics/
       bout_id

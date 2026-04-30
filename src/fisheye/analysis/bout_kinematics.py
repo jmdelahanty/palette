@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,9 +31,9 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 
 SCHEMA_ID = "analysis.bout_kinematics_runs"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 METHOD = "heading_window_and_within_bout_metrics"
-METHOD_VERSION = "bout_kinematics.v6"
+METHOD_VERSION = "bout_kinematics.v7"
 BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_kinematics_summary.v1"
 BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID = "palette.plot_spec.bout_eye_gaze_summary.v1"
 BOUT_KINEMATICS_PLOT_RENDERER = "matplotlib_static_plotly_spec.v1"
@@ -51,7 +52,15 @@ HEADING_LEVEL_ALIASES = {
 WITHIN_WINDOWS = ("bout_start_end", "core_start_end")
 PRE_POST_MODES = ("fixed_window", "interbout_epoch")
 EYE_GAZE_LEVEL = "eye_gaze"
+MOVEMENT_LEVEL = "movement"
 EYE_ANGLE_FAMILIES = ("gaze",)
+PHYSICAL_ACTIVE_BOUNDARY_POLICY = "physical_active"
+PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS = (
+    "clip_to_detector",
+    "search_with_margin",
+    "allow_extension",
+)
+PHYSICAL_ACTIVE_SPEED_LEVELS = ("speed_raw", "speed_filtered", "speed_smoothed")
 
 
 def normalize_heading_level(value: str) -> str:
@@ -178,6 +187,45 @@ def _eye_gaze_metrics_dtype() -> np.dtype:
             ("pre_eye_sample_count", "i4"),
             ("post_eye_sample_count", "i4"),
             ("within_eye_sample_count", "i4"),
+            ("failure_reason_bytes", "S256"),
+        ]
+    )
+
+
+def _movement_metrics_dtype() -> np.dtype:
+    return np.dtype(
+        [
+            ("bout_id", "i4"),
+            ("source_start_frame", "i8"),
+            ("source_end_frame", "i8"),
+            ("source_core_start_frame", "i8"),
+            ("source_core_end_frame", "i8"),
+            ("detector_duration_s", "f8"),
+            ("detector_observed_duration_s", "f8"),
+            ("detector_core_duration_s", "f8"),
+            ("physical_active_start_frame", "i8"),
+            ("physical_active_end_frame", "i8"),
+            ("physical_active_start_time_s", "f8"),
+            ("physical_active_end_time_s", "f8"),
+            ("physical_active_duration_s", "f8"),
+            ("physical_active_observed_duration_s", "f8"),
+            ("physical_active_start_time_s_interpolated", "f8"),
+            ("physical_active_end_time_s_interpolated", "f8"),
+            ("physical_active_duration_s_interpolated", "f8"),
+            ("physical_active_start_time_interpolated_valid", "?"),
+            ("physical_active_end_time_interpolated_valid", "?"),
+            ("physical_active_sample_count", "i4"),
+            ("physical_active_valid_transition_count", "i4"),
+            ("physical_active_valid_transition_fraction", "f8"),
+            ("physical_active_path_length_mm", "f8"),
+            ("physical_active_path_length_px", "f8"),
+            ("physical_active_mean_speed_mm_s", "f8"),
+            ("physical_active_peak_speed_mm_s", "f8"),
+            ("physical_active_threshold_mm_s", "f8"),
+            ("physical_active_boundary_margin_s", "f8"),
+            ("physical_active_boundary_policy_bytes", "S64"),
+            ("physical_active_boundary_constraint_bytes", "S64"),
+            ("physical_active_valid", "?"),
             ("failure_reason_bytes", "S256"),
         ]
     )
@@ -404,6 +452,81 @@ def _distance_2d(x0: float, y0: float, x1: float, y1: float) -> float:
     if not np.isfinite(values).all():
         return float("nan")
     return float(np.hypot(float(x1) - float(x0), float(y1) - float(y0)))
+
+
+def _speed_level_suffix(level: str) -> str:
+    normalized = normalize_speed_level(level)
+    if normalized == "speed_exponential":
+        raise ValueError("Physical movement estimators cannot use speed_exponential.")
+    return normalized.removeprefix("speed_")
+
+
+def _threshold_crossing_time_from_samples(
+    *,
+    values: np.ndarray,
+    times: np.ndarray,
+    threshold: float,
+    below_idx: int,
+    above_idx: int,
+) -> tuple[float, bool]:
+    if below_idx < 0 or above_idx < 0 or below_idx >= values.size or above_idx >= values.size:
+        return float("nan"), False
+    if abs(int(above_idx) - int(below_idx)) != 1:
+        return float("nan"), False
+    below_value = float(values[below_idx])
+    above_value = float(values[above_idx])
+    below_time = float(times[below_idx])
+    above_time = float(times[above_idx])
+    if not (
+        np.isfinite(below_value)
+        and np.isfinite(above_value)
+        and np.isfinite(below_time)
+        and np.isfinite(above_time)
+    ):
+        return float("nan"), False
+    if below_value == above_value:
+        return float("nan"), False
+    threshold = float(threshold)
+    lower = min(below_value, above_value)
+    upper = max(below_value, above_value)
+    if threshold < lower or threshold > upper:
+        return float("nan"), False
+    fraction = (threshold - below_value) / (above_value - below_value)
+    if not np.isfinite(fraction):
+        return float("nan"), False
+    fraction = float(np.clip(fraction, 0.0, 1.0))
+    return below_time + fraction * (above_time - below_time), True
+
+
+def _physical_search_bounds(
+    *,
+    start_idx: int,
+    end_idx: int,
+    previous_end_idx: int,
+    next_start_idx: int,
+    sample_count: int,
+    margin_frames: int,
+    boundary_constraint: str,
+) -> tuple[int, int]:
+    if boundary_constraint == "clip_to_detector":
+        return int(start_idx), int(end_idx)
+    if boundary_constraint == "search_with_margin":
+        left = int(start_idx) - int(margin_frames)
+        right = int(end_idx) + int(margin_frames)
+    elif boundary_constraint == "allow_extension":
+        left = 0
+        right = int(sample_count) - 1
+    else:
+        expected = ", ".join(PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS)
+        raise ValueError(f"Unsupported physical active boundary constraint {boundary_constraint!r}; expected one of: {expected}")
+
+    if previous_end_idx >= 0:
+        left = max(left, int(previous_end_idx) + 1)
+    if next_start_idx >= 0:
+        right = min(right, int(next_start_idx) - 1)
+    left = max(0, min(int(left), int(sample_count) - 1))
+    right = max(0, min(int(right), int(sample_count) - 1))
+    return left, right
 
 
 def _resolve_track_run(
@@ -657,6 +780,236 @@ def _eye_epoch_stats(
         "converged_fraction": converged_fraction,
         "reason": None,
     }
+
+
+def _build_metrics_for_movement(
+    *,
+    bouts: np.ndarray,
+    frames: np.ndarray,
+    times: np.ndarray,
+    physical_speed_mm: np.ndarray,
+    fps: float,
+    threshold_mm_s: float,
+    boundary_constraint: str,
+    boundary_margin_frames: int,
+    boundary_margin_s: float,
+    delta_seconds: Optional[np.ndarray],
+    transition_valid: Optional[np.ndarray],
+    sample_valid: Optional[np.ndarray],
+    path_distance_mm: Optional[np.ndarray],
+    path_distance_px: Optional[np.ndarray],
+) -> np.ndarray:
+    metrics = np.zeros(len(bouts), dtype=_movement_metrics_dtype())
+    if len(metrics) == 0:
+        return metrics
+
+    speed = np.asarray(physical_speed_mm, dtype=np.float64)
+    frame_values = np.asarray(frames, dtype=np.int64)
+    time_values = np.asarray(times, dtype=np.float64)
+    if speed.shape[0] != frame_values.shape[0] or time_values.shape[0] != frame_values.shape[0]:
+        raise ValueError("Physical speed, frames, and times must have matching lengths.")
+    if boundary_constraint not in PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS:
+        expected = ", ".join(PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS)
+        raise ValueError(f"Unsupported physical active boundary constraint {boundary_constraint!r}; expected one of: {expected}")
+
+    if delta_seconds is None:
+        delta_seconds_arr = np.zeros(frame_values.shape[0], dtype=np.float64)
+        if frame_values.shape[0] > 1:
+            delta = np.diff(time_values)
+            delta_seconds_arr[1:] = np.where(np.isfinite(delta) & (delta > 0), delta, 0.0)
+    else:
+        delta_seconds_arr = np.asarray(delta_seconds, dtype=np.float64)
+        if delta_seconds_arr.shape[0] != frame_values.shape[0]:
+            raise ValueError("delta_seconds length must match frames length.")
+
+    transition_mask = (
+        np.asarray(transition_valid, dtype=bool)
+        if transition_valid is not None
+        else np.ones(frame_values.shape[0], dtype=bool)
+    )
+    sample_mask = (
+        np.asarray(sample_valid, dtype=bool)
+        if sample_valid is not None
+        else np.ones(frame_values.shape[0], dtype=bool)
+    )
+    if transition_mask.shape[0] != frame_values.shape[0] or sample_mask.shape[0] != frame_values.shape[0]:
+        raise ValueError("Validity arrays must match frames length.")
+
+    path_mm = None if path_distance_mm is None else np.asarray(path_distance_mm, dtype=np.float64)
+    path_px = None if path_distance_px is None else np.asarray(path_distance_px, dtype=np.float64)
+    if path_mm is not None and path_mm.shape[0] != frame_values.shape[0]:
+        raise ValueError("path_distance_mm length must match frames length.")
+    if path_px is not None and path_px.shape[0] != frame_values.shape[0]:
+        raise ValueError("path_distance_px length must match frames length.")
+
+    frame_to_index = {int(frame): idx for idx, frame in enumerate(frame_values)}
+    start_frames = np.asarray(bouts["start_frame"], dtype=np.int64)
+    end_frames = np.asarray(bouts["end_frame"], dtype=np.int64)
+    bout_ids = (
+        np.asarray(bouts["bout_id"], dtype=np.int32)
+        if "bout_id" in (bouts.dtype.names or ())
+        else np.arange(1, len(bouts) + 1, dtype=np.int32)
+    )
+    core_starts = _field_or_default(bouts, "core_start_frame", -1).astype(np.int64)
+    core_ends = _field_or_default(bouts, "core_end_frame", -1).astype(np.int64)
+    detector_duration_s = _float_field_or_nan(bouts, "duration_s")
+    detector_observed_duration_s = _float_field_or_nan(bouts, "observed_duration_s")
+    detector_core_duration_s = _float_field_or_nan(bouts, "core_duration_s")
+
+    sorted_rows = np.argsort(start_frames)
+    previous_end_indices = np.full(len(bouts), -1, dtype=np.int64)
+    next_start_indices = np.full(len(bouts), -1, dtype=np.int64)
+    for order_idx, row_idx in enumerate(sorted_rows):
+        if order_idx > 0:
+            previous_row = int(sorted_rows[order_idx - 1])
+            previous_end_indices[int(row_idx)] = int(frame_to_index.get(int(end_frames[previous_row]), -1))
+        if order_idx + 1 < len(sorted_rows):
+            next_row = int(sorted_rows[order_idx + 1])
+            next_start_indices[int(row_idx)] = int(frame_to_index.get(int(start_frames[next_row]), -1))
+
+    threshold = float(threshold_mm_s)
+    if threshold < 0:
+        raise ValueError("physical_active_threshold_mm_s must be >= 0.")
+
+    for row_idx, (bout_id, start_frame, end_frame, core_start, core_end) in enumerate(
+        zip(bout_ids, start_frames, end_frames, core_starts, core_ends)
+    ):
+        reasons: list[str] = []
+        metrics[row_idx]["bout_id"] = int(bout_id)
+        metrics[row_idx]["source_start_frame"] = int(start_frame)
+        metrics[row_idx]["source_end_frame"] = int(end_frame)
+        metrics[row_idx]["source_core_start_frame"] = int(core_start)
+        metrics[row_idx]["source_core_end_frame"] = int(core_end)
+        metrics[row_idx]["detector_duration_s"] = float(detector_duration_s[row_idx])
+        metrics[row_idx]["detector_observed_duration_s"] = float(detector_observed_duration_s[row_idx])
+        metrics[row_idx]["detector_core_duration_s"] = float(detector_core_duration_s[row_idx])
+        metrics[row_idx]["physical_active_start_frame"] = -1
+        metrics[row_idx]["physical_active_end_frame"] = -1
+        metrics[row_idx]["physical_active_threshold_mm_s"] = threshold
+        metrics[row_idx]["physical_active_boundary_margin_s"] = float(boundary_margin_s)
+        metrics[row_idx]["physical_active_boundary_policy_bytes"] = PHYSICAL_ACTIVE_BOUNDARY_POLICY.encode("utf-8")
+        metrics[row_idx]["physical_active_boundary_constraint_bytes"] = str(boundary_constraint).encode("utf-8")
+        for field in (
+            "physical_active_start_time_s",
+            "physical_active_end_time_s",
+            "physical_active_duration_s",
+            "physical_active_observed_duration_s",
+            "physical_active_start_time_s_interpolated",
+            "physical_active_end_time_s_interpolated",
+            "physical_active_duration_s_interpolated",
+            "physical_active_valid_transition_fraction",
+            "physical_active_path_length_mm",
+            "physical_active_path_length_px",
+            "physical_active_mean_speed_mm_s",
+            "physical_active_peak_speed_mm_s",
+        ):
+            metrics[row_idx][field] = float("nan")
+
+        start_idx = frame_to_index.get(int(start_frame))
+        end_idx = frame_to_index.get(int(end_frame))
+        if start_idx is None or end_idx is None or end_idx < start_idx:
+            reasons.append("source_bout_missing")
+            metrics[row_idx]["failure_reason_bytes"] = ";".join(reasons).encode("utf-8")
+            continue
+
+        search_start, search_end = _physical_search_bounds(
+            start_idx=start_idx,
+            end_idx=end_idx,
+            previous_end_idx=int(previous_end_indices[row_idx]),
+            next_start_idx=int(next_start_indices[row_idx]),
+            sample_count=frame_values.shape[0],
+            margin_frames=int(boundary_margin_frames),
+            boundary_constraint=boundary_constraint,
+        )
+        if search_end < search_start:
+            reasons.append("physical_active_search_window_invalid")
+            metrics[row_idx]["failure_reason_bytes"] = ";".join(reasons).encode("utf-8")
+            continue
+
+        search_slice = slice(search_start, search_end + 1)
+        active_mask = (
+            np.isfinite(speed[search_slice])
+            & sample_mask[search_slice]
+            & (speed[search_slice] > threshold)
+        )
+        active_offsets = np.flatnonzero(active_mask)
+        if active_offsets.size == 0:
+            reasons.append("no_physical_active_samples")
+            metrics[row_idx]["failure_reason_bytes"] = ";".join(reasons).encode("utf-8")
+            continue
+
+        active_start_idx = int(search_start + active_offsets[0])
+        active_end_idx = int(search_start + active_offsets[-1])
+        active_span = slice(active_start_idx, active_end_idx + 1)
+        span_transition_valid = transition_mask[active_span]
+        span_valid_count = int(np.count_nonzero(span_transition_valid))
+        span_count = int(active_end_idx - active_start_idx + 1)
+        valid_fraction = float(span_valid_count / span_count) if span_count > 0 else float("nan")
+
+        metrics[row_idx]["physical_active_start_frame"] = int(frame_values[active_start_idx])
+        metrics[row_idx]["physical_active_end_frame"] = int(frame_values[active_end_idx])
+        metrics[row_idx]["physical_active_start_time_s"] = float(time_values[active_start_idx])
+        metrics[row_idx]["physical_active_end_time_s"] = float(time_values[active_end_idx])
+        metrics[row_idx]["physical_active_duration_s"] = (
+            float((int(frame_values[active_end_idx]) - int(frame_values[active_start_idx]) + 1) / float(fps))
+            if fps > 0
+            else float("nan")
+        )
+        metrics[row_idx]["physical_active_observed_duration_s"] = float(
+            np.sum(delta_seconds_arr[active_span][span_transition_valid])
+        )
+        metrics[row_idx]["physical_active_sample_count"] = int(active_offsets.size)
+        metrics[row_idx]["physical_active_valid_transition_count"] = span_valid_count
+        metrics[row_idx]["physical_active_valid_transition_fraction"] = valid_fraction
+        if path_mm is not None:
+            metrics[row_idx]["physical_active_path_length_mm"] = float(
+                np.sum(path_mm[active_span][span_transition_valid])
+            )
+        if path_px is not None:
+            metrics[row_idx]["physical_active_path_length_px"] = float(
+                np.sum(path_px[active_span][span_transition_valid])
+            )
+        observed_duration = float(metrics[row_idx]["physical_active_observed_duration_s"])
+        path_length_mm = float(metrics[row_idx]["physical_active_path_length_mm"])
+        metrics[row_idx]["physical_active_mean_speed_mm_s"] = (
+            path_length_mm / observed_duration
+            if observed_duration > 0 and np.isfinite(path_length_mm)
+            else float("nan")
+        )
+        active_speed_values = speed[search_slice][active_mask]
+        metrics[row_idx]["physical_active_peak_speed_mm_s"] = float(np.max(active_speed_values))
+
+        start_time_interp, start_interp_valid = _threshold_crossing_time_from_samples(
+            values=speed,
+            times=time_values,
+            threshold=threshold,
+            below_idx=active_start_idx - 1,
+            above_idx=active_start_idx,
+        )
+        end_time_interp, end_interp_valid = _threshold_crossing_time_from_samples(
+            values=speed,
+            times=time_values,
+            threshold=threshold,
+            below_idx=active_end_idx + 1,
+            above_idx=active_end_idx,
+        )
+        metrics[row_idx]["physical_active_start_time_s_interpolated"] = start_time_interp
+        metrics[row_idx]["physical_active_end_time_s_interpolated"] = end_time_interp
+        metrics[row_idx]["physical_active_start_time_interpolated_valid"] = start_interp_valid
+        metrics[row_idx]["physical_active_end_time_interpolated_valid"] = end_interp_valid
+        if start_interp_valid and end_interp_valid and end_time_interp >= start_time_interp:
+            metrics[row_idx]["physical_active_duration_s_interpolated"] = float(
+                end_time_interp - start_time_interp
+            )
+
+        if span_valid_count != span_count:
+            reasons.append("physical_active_contains_gap")
+        metrics[row_idx]["physical_active_valid"] = len(reasons) == 0
+        metrics[row_idx]["failure_reason_bytes"] = (
+            ";".join(reasons).encode("utf-8") if reasons else b"ok"
+        )
+
+    return metrics
 
 
 def _build_metrics_for_eye_gaze(
@@ -1809,6 +2162,10 @@ def compute_and_save_bout_kinematics(
     pre_window_s: float = 0.05,
     post_window_s: float = 0.05,
     within_window: str = "bout_start_end",
+    physical_active_signal_level: str = "filtered",
+    physical_active_threshold_mm_s: float = 0.01,
+    physical_active_boundary_constraint: str = "search_with_margin",
+    physical_active_boundary_margin_s: float = 0.05,
     zero_crossing_derivative_threshold_deg_s: float = 0.0,
     dominant_frequency: bool = False,
     dominant_frequency_min_samples: int = 8,
@@ -1837,11 +2194,29 @@ def compute_and_save_bout_kinematics(
     if str(eye_angle_family).strip() not in EYE_ANGLE_FAMILIES:
         expected = ", ".join(EYE_ANGLE_FAMILIES)
         raise ValueError(f"Unsupported eye_angle_family {eye_angle_family!r}; expected one of: {expected}")
+    if physical_active_boundary_constraint not in PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS:
+        expected = ", ".join(PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS)
+        raise ValueError(
+            f"Unsupported physical_active_boundary_constraint {physical_active_boundary_constraint!r}; "
+            f"expected one of: {expected}"
+        )
+    if float(physical_active_threshold_mm_s) < 0:
+        raise ValueError("physical_active_threshold_mm_s must be >= 0.")
+    if float(physical_active_boundary_margin_s) < 0:
+        raise ValueError("physical_active_boundary_margin_s must be >= 0.")
 
     default_heading_level = normalize_heading_level(default_heading_level)
     normalized_heading_levels = tuple(dict.fromkeys(normalize_heading_level(level) for level in heading_levels))
     if default_heading_level not in normalized_heading_levels:
         normalized_heading_levels = (default_heading_level, *normalized_heading_levels)
+    physical_active_level = normalize_speed_level(physical_active_signal_level)
+    if physical_active_level not in PHYSICAL_ACTIVE_SPEED_LEVELS:
+        expected = ", ".join(level.removeprefix("speed_") for level in PHYSICAL_ACTIVE_SPEED_LEVELS)
+        raise ValueError(
+            f"Unsupported physical_active_signal_level {physical_active_signal_level!r}; "
+            f"expected one of: {expected}"
+        )
+    physical_active_suffix = _speed_level_suffix(physical_active_level)
 
     zarr_path = Path(zarr_path)
     root = open_zarr_root(zarr_path, mode="r+")
@@ -1866,7 +2241,12 @@ def compute_and_save_bout_kinematics(
         raise ValueError(f"Track kinematics run {track_run_path} has invalid fps={fps!r}.")
     positions_mm = None
     positions_px = None
+    physical_speed_mm = None
+    physical_path_distance_mm = None
+    physical_path_distance_px = None
+    delta_seconds = None
     source_position_arrays: dict[str, str] = {}
+    source_movement_arrays: dict[str, str] = {}
     source_validity_arrays: dict[str, str] = {}
     transition_valid = None
     sample_valid = None
@@ -1884,6 +2264,50 @@ def compute_and_save_bout_kinematics(
                 f"positions_px shape {positions_px.shape} does not match expected {(frames.shape[0], 2)}."
             )
         source_position_arrays["positions_px"] = f"{track_run_path}/tracks/id_{int(track_id)}/positions_px"
+    physical_speed_array = f"speed_{physical_active_suffix}_mm"
+    if physical_speed_array not in track_group:
+        raise ValueError(
+            f"Physical active speed source {physical_speed_array!r} not found in "
+            f"{track_run_path}/tracks/id_{track_id}."
+        )
+    physical_speed_mm = np.asarray(track_group[physical_speed_array][:], dtype=np.float64)
+    if physical_speed_mm.shape[0] != frames.shape[0]:
+        raise ValueError(
+            f"Physical active speed source {physical_speed_array!r} length "
+            f"{physical_speed_mm.shape[0]} does not match frames length {frames.shape[0]}."
+        )
+    source_movement_arrays["physical_active_speed"] = (
+        f"{track_run_path}/tracks/id_{int(track_id)}/{physical_speed_array}"
+    )
+    path_distance_mm_array = f"frame_path_distance_{physical_active_suffix}_mm"
+    path_distance_px_array = f"frame_path_distance_{physical_active_suffix}_px"
+    if path_distance_mm_array in track_group:
+        physical_path_distance_mm = np.asarray(track_group[path_distance_mm_array][:], dtype=np.float64)
+        if physical_path_distance_mm.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"{path_distance_mm_array!r} length {physical_path_distance_mm.shape[0]} "
+                f"does not match frames length {frames.shape[0]}."
+            )
+        source_movement_arrays["physical_active_path_distance_mm"] = (
+            f"{track_run_path}/tracks/id_{int(track_id)}/{path_distance_mm_array}"
+        )
+    if path_distance_px_array in track_group:
+        physical_path_distance_px = np.asarray(track_group[path_distance_px_array][:], dtype=np.float64)
+        if physical_path_distance_px.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"{path_distance_px_array!r} length {physical_path_distance_px.shape[0]} "
+                f"does not match frames length {frames.shape[0]}."
+            )
+        source_movement_arrays["physical_active_path_distance_px"] = (
+            f"{track_run_path}/tracks/id_{int(track_id)}/{path_distance_px_array}"
+        )
+    if "delta_seconds" in track_group:
+        delta_seconds = np.asarray(track_group["delta_seconds"][:], dtype=np.float64)
+        if delta_seconds.shape[0] != frames.shape[0]:
+            raise ValueError(
+                f"delta_seconds length {delta_seconds.shape[0]} does not match frames length {frames.shape[0]}."
+            )
+        source_validity_arrays["delta_seconds"] = f"{track_run_path}/tracks/id_{int(track_id)}/delta_seconds"
     if "transition_valid" in track_group:
         transition_valid = np.asarray(track_group["transition_valid"][:], dtype=bool)
         if transition_valid.shape[0] != frames.shape[0]:
@@ -1901,6 +2325,10 @@ def compute_and_save_bout_kinematics(
 
     pre_window_frames = max(1, int(round(float(pre_window_s) * fps)))
     post_window_frames = max(1, int(round(float(post_window_s) * fps)))
+    physical_active_boundary_margin_frames = max(
+        0,
+        int(math.ceil(float(physical_active_boundary_margin_s) * fps - 1e-9)),
+    )
     source_heading_arrays = {
         heading_level: f"{track_run_path}/tracks/id_{int(track_id)}/{HEADING_LEVEL_TO_ARRAY[heading_level]}"
         for heading_level in normalized_heading_levels
@@ -1972,6 +2400,7 @@ def compute_and_save_bout_kinematics(
         "source_track_id": int(track_id),
         "source_heading_arrays": source_heading_arrays,
         "source_position_arrays": source_position_arrays,
+        "source_movement_arrays": source_movement_arrays,
         "source_validity_arrays": source_validity_arrays,
     }
     if peak_events is not None:
@@ -2009,6 +2438,16 @@ def compute_and_save_bout_kinematics(
         "within_window": within_window,
         "heading_units": "degrees",
         "heading_unwrap_policy": "numpy.unwrap_contiguous_window",
+        "physical_active": {
+            "enabled": True,
+            "boundary_policy": PHYSICAL_ACTIVE_BOUNDARY_POLICY,
+            "boundary_constraint": physical_active_boundary_constraint,
+            "boundary_margin_s": float(physical_active_boundary_margin_s),
+            "resolved_boundary_margin_frames": int(physical_active_boundary_margin_frames),
+            "threshold_mm_s": float(physical_active_threshold_mm_s),
+            "measurement_signal_level": physical_active_level,
+            "measurement_signal_array": physical_speed_array,
+        },
         "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
         "source_peak_event_fields": source_peak_event_fields,
         "zero_crossing_derivative_threshold_deg_s": float(zero_crossing_derivative_threshold_deg_s),
@@ -2040,6 +2479,54 @@ def compute_and_save_bout_kinematics(
     run_group.attrs["source_swim_bout_speed_level"] = source_speed_level
     run_group.attrs["source_track_kinematics_run"] = track_run_name
     run_group.attrs["default_heading_level"] = default_heading_level
+
+    movement_group = run_group.create_group(MOVEMENT_LEVEL)
+    movement_group.attrs["analysis_level"] = MOVEMENT_LEVEL
+    movement_group.attrs["source_swim_bout_path"] = swim_level_path
+    movement_group.attrs["physical_active_boundary_policy"] = PHYSICAL_ACTIVE_BOUNDARY_POLICY
+    movement_group.attrs["physical_active_boundary_constraint"] = physical_active_boundary_constraint
+    movement_group.attrs["physical_active_boundary_margin_s"] = float(physical_active_boundary_margin_s)
+    movement_group.attrs["physical_active_boundary_margin_frames"] = int(physical_active_boundary_margin_frames)
+    movement_group.attrs["physical_active_threshold_mm_s"] = float(physical_active_threshold_mm_s)
+    movement_group.attrs["physical_active_signal_level"] = physical_active_level
+    movement_group.attrs["physical_active_signal_array"] = physical_speed_array
+    movement_metrics = _build_metrics_for_movement(
+        bouts=bouts,
+        frames=frames,
+        times=times,
+        physical_speed_mm=physical_speed_mm,
+        fps=fps,
+        threshold_mm_s=float(physical_active_threshold_mm_s),
+        boundary_constraint=physical_active_boundary_constraint,
+        boundary_margin_frames=int(physical_active_boundary_margin_frames),
+        boundary_margin_s=float(physical_active_boundary_margin_s),
+        delta_seconds=delta_seconds,
+        transition_valid=transition_valid,
+        sample_valid=sample_valid,
+        path_distance_mm=physical_path_distance_mm,
+        path_distance_px=physical_path_distance_px,
+    )
+    write_columnar_dataset(
+        movement_group,
+        "per_bout_metrics",
+        movement_metrics,
+        attrs={
+            "schema_id": f"{SCHEMA_ID}.movement.per_bout_metrics",
+            "schema_version": SCHEMA_VERSION,
+            "analysis_level": MOVEMENT_LEVEL,
+            "source_bout_count": int(len(bouts)),
+            "source_bout_field_names": source_bout_field_names,
+            "physical_active_boundary_policy": PHYSICAL_ACTIVE_BOUNDARY_POLICY,
+            "physical_active_boundary_constraint": physical_active_boundary_constraint,
+            "physical_active_boundary_margin_s": float(physical_active_boundary_margin_s),
+            "physical_active_boundary_margin_frames": int(physical_active_boundary_margin_frames),
+            "physical_active_threshold_mm_s": float(physical_active_threshold_mm_s),
+            "physical_active_signal_level": physical_active_level,
+            "physical_active_signal_array": physical_speed_array,
+            "source_movement_arrays": source_movement_arrays,
+            "source_validity_arrays": source_validity_arrays,
+        },
+    )
 
     written_levels: list[str] = []
     metrics_by_level: dict[str, np.ndarray] = {}
@@ -2094,7 +2581,7 @@ def compute_and_save_bout_kinematics(
         written_levels.append(heading_level)
         metrics_by_level[heading_level] = metrics
 
-    written_analysis_levels = list(written_levels)
+    written_analysis_levels = [MOVEMENT_LEVEL, *written_levels]
     eye_gaze_metrics: Optional[np.ndarray] = None
     if include_eye_gaze:
         if eye_series is None:
@@ -2208,6 +2695,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--pre-window-s", type=float, default=0.05)
     parser.add_argument("--post-window-s", type=float, default=0.05)
     parser.add_argument("--within-window", choices=WITHIN_WINDOWS, default="bout_start_end")
+    parser.add_argument(
+        "--physical-active-signal-level",
+        choices=tuple(level.removeprefix("speed_") for level in PHYSICAL_ACTIVE_SPEED_LEVELS),
+        default="filtered",
+        help="Physical speed source for active-duration measurement (default: filtered).",
+    )
+    parser.add_argument(
+        "--physical-active-threshold-mm-s",
+        type=float,
+        default=0.01,
+        help="Threshold on the physical speed source for active-duration measurement (default: 0.01).",
+    )
+    parser.add_argument(
+        "--physical-active-boundary-constraint",
+        choices=PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS,
+        default="search_with_margin",
+        help="How physical-active boundaries may relate to detector boundaries.",
+    )
+    parser.add_argument(
+        "--physical-active-boundary-margin-s",
+        type=float,
+        default=0.05,
+        help="Search margin around detector boundaries when using search_with_margin (default: 0.05).",
+    )
     parser.add_argument("--zero-crossing-derivative-threshold-deg-s", type=float, default=0.0)
     parser.add_argument("--dominant-frequency", action="store_true", help="Compute optional dominant frequency.")
     parser.add_argument("--dominant-frequency-min-samples", type=int, default=8)
@@ -2253,6 +2764,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         pre_window_s=args.pre_window_s,
         post_window_s=args.post_window_s,
         within_window=args.within_window,
+        physical_active_signal_level=args.physical_active_signal_level,
+        physical_active_threshold_mm_s=args.physical_active_threshold_mm_s,
+        physical_active_boundary_constraint=args.physical_active_boundary_constraint,
+        physical_active_boundary_margin_s=args.physical_active_boundary_margin_s,
         zero_crossing_derivative_threshold_deg_s=args.zero_crossing_derivative_threshold_deg_s,
         dominant_frequency=args.dominant_frequency,
         dominant_frequency_min_samples=args.dominant_frequency_min_samples,

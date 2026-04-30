@@ -1324,8 +1324,8 @@ here; those belong in linked `analysis/bout_kinematics_runs` outputs.
 
 ### `analysis/bout_kinematics_runs/`
 
-Per-bout heading metrics linked to an exact track-kinematics run and swim-bout
-segmentation candidate.
+Per-bout movement, heading, and optional eye-gaze metrics linked to an exact
+track-kinematics run and swim-bout segmentation candidate.
 
 Use this surface for downstream per-bout biological measurements after a bout
 candidate has been selected. The primary table is `per_bout_metrics/`, aligned
@@ -1336,9 +1336,9 @@ the measurement logic used.
 
 **Run Attributes**:
 - `schema_id`: `"analysis.bout_kinematics_runs"`
-- `schema_version`: Current schema is `5`
+- `schema_version`: Current schema is `7`
 - `method`: `"heading_window_and_within_bout_metrics"`
-- `method_version`: Current implementation is `"bout_kinematics.v5"`
+- `method_version`: Current implementation is `"bout_kinematics.v7"`
 - `row_axis`: `"swim_bout_rows"`
 - `source_track_kinematics_run`, `source_track_id`
 - `source_swim_bout_run`, `source_swim_bout_speed_level`
@@ -1346,9 +1346,53 @@ the measurement logic used.
   including `zarr_path`, `source_heading_arrays`, and optional
   `source_peak_events_path`
 - `parameters`: Heading levels, `pre_post_mode`, fixed pre/post windows,
-  within-bout window policy, copied source boundary field lists, and optional
-  dominant-frequency settings
+  within-bout window policy, physical-active measurement policy, copied source
+  boundary field lists, and optional dominant-frequency settings
 - `default_heading_level`: Usually `heading_smoothed`
+
+**Movement group**:
+
+```text
+movement/per_bout_metrics/
+```
+
+`movement/per_bout_metrics/` is stored in columnar form and is aligned to the
+source swim-bout rows. It is the physical movement estimator layer; it preserves
+source detector-window durations and writes separate active-motion measurements
+from a declared physical speed source, usually `speed_filtered_mm`.
+
+Key fields include:
+
+- `bout_id`, `source_start_frame`, `source_end_frame`,
+  `source_core_start_frame`, `source_core_end_frame`
+- copied detector-boundary durations: `detector_duration_s`,
+  `detector_observed_duration_s`, `detector_core_duration_s`
+- physical active sampled boundaries: `physical_active_start_frame`,
+  `physical_active_end_frame`, `physical_active_start_time_s`,
+  `physical_active_end_time_s`, `physical_active_duration_s`
+- optional interpolated threshold-crossing boundaries:
+  `physical_active_start_time_s_interpolated`,
+  `physical_active_end_time_s_interpolated`,
+  `physical_active_duration_s_interpolated`,
+  `physical_active_start_time_interpolated_valid`, and
+  `physical_active_end_time_interpolated_valid`
+- physical movement summaries: `physical_active_observed_duration_s`,
+  `physical_active_path_length_mm`, `physical_active_path_length_px`,
+  `physical_active_mean_speed_mm_s`, and
+  `physical_active_peak_speed_mm_s`
+- policy/provenance fields: `physical_active_threshold_mm_s`,
+  `physical_active_boundary_margin_s`,
+  `physical_active_boundary_policy_bytes`, and
+  `physical_active_boundary_constraint_bytes`
+- validity fields: `physical_active_valid`,
+  `physical_active_valid_transition_count`,
+  `physical_active_valid_transition_fraction`, and `failure_reason_bytes`
+
+The movement group attrs record
+`physical_active_boundary_policy="physical_active"`,
+`physical_active_boundary_constraint`, `physical_active_threshold_mm_s`,
+`physical_active_boundary_margin_s`, `physical_active_signal_level`, and
+`physical_active_signal_array`.
 
 **Heading-level groups**:
 
