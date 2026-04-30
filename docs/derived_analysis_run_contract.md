@@ -242,7 +242,11 @@ position_array_path, validity_array_paths}` over many duplicated level/array
 attrs. Metric metadata should identify only the metric source role
 (`detector_boundary` or `physical_estimator`) and boundary policy
 (`detector_start_end`, `detector_core`, or `physical_active`), plus any
-metric-specific threshold/interpolation parameters.
+metric-specific threshold/interpolation parameters. For `physical_active`, keep
+the boundary search constraint as a separate enum rather than encoding it into
+the policy name. For example, use
+`boundary_constraint="clip_to_detector"`, `"search_with_margin"`, or
+`"allow_extension"`, with an explicit margin parameter when applicable.
 
 `analysis/bout_kinematics_runs/<run>/<heading_level>/per_bout_metrics/` is the
 linked measurement surface. It should store downstream per-bout biological
