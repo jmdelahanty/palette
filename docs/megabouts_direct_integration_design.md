@@ -554,6 +554,55 @@ classifier call. A successful dry run means the Palette-side source surfaces are
 resolvable and shaped correctly; it does not mean Megabouts labels have been
 computed.
 
+#### Implemented Classifier Execution Adapter
+
+Palette also includes an optional Megabouts execution wrapper:
+
+```bash
+scripts/py -m fisheye.analysis.megabouts_classifier <analysis.zarr> \
+  --tail-posture-view-run latest \
+  --track-kinematics-run latest \
+  --track-scope offline \
+  --track-id 0 \
+  --swim-bout-run latest \
+  --speed-level default \
+  --megabouts-repo ~/gitrepos/megabouts \
+  --run-name megabouts_classifier_canary
+```
+
+The command is dependency-gated: it imports Megabouts only when not run with
+`--dry-run`, and Megabouts remains outside Palette's required dependency set.
+When Megabouts is unavailable, the dependency-free readiness command above is
+still the correct validation path.
+
+For local development, prefer `--megabouts-repo ~/gitrepos/megabouts` or
+`MEGABOUTS_REPO=~/gitrepos/megabouts` before installing Megabouts into
+`palette-py311`. The Megabouts project currently pins `numpy==1.26.4`, so a
+normal install can mutate or downgrade the Palette environment. The direct-repo
+path records the source checkout path and git commit in run provenance without
+changing dependencies.
+
+The adapter uses `skip_invalid_windows` as the initial invalid-window policy:
+
+- valid Palette windows are passed to `BoutClassifier.run_classification`
+- invalid Palette windows are not passed to Megabouts
+- every source swim-bout row is still written to the result table
+- skipped rows have `classified=false`, `valid=false`, sentinel classifier
+  fields, and the Palette coverage/failure reason that made the window
+  ineligible
+
+The persisted run family is:
+
+```text
+analysis/bout_classification_runs/<run>/
+  attrs["latest"] on the parent
+  per_bout/ as a columnar table with one row per source swim-bout row
+```
+
+This preserves source row identity and keeps classifier labels separate from
+`swim_bout_runs`, `tail_posture_view_runs`, `track_kinematics_runs`, and
+`bout_kinematics_runs`.
+
 ### Deferred Mode: Megabouts Preprocessing And Segmentation Comparison
 
 Goal: compare Megabouts tail-vigor or trajectory-vigor segmentation against
@@ -649,6 +698,8 @@ per_bout/sign
 per_bout/probability
 per_bout/tail_valid_fraction
 per_bout/traj_valid_fraction
+per_bout/source_window_valid
+per_bout/classified
 per_bout/valid
 per_bout/failure_reason_bytes
 ```
@@ -734,15 +785,16 @@ attrs.
 
 1. Done: implement the convention audit and `analysis/tail_posture_view_runs`
    using 11 ordered tail keypoints from Palette subject-shape geometry.
-2. Write a read-only adapter module that resolves one Palette recording,
+2. Done: write a read-only adapter module that resolves one Palette recording,
    tail-posture-view run, track-kinematics run, track id, and swim-bout
    candidate.
-3. Implement dry-run array construction for Palette-selected bout windows:
+3. Done: implement dry-run array construction for Palette-selected bout windows:
    `tail_array`, `traj_array`, invalid masks, coverage summaries, and config
    provenance.
-4. Run `BoutClassifier` against Palette-defined bouts only.
-5. Define and implement `analysis/bout_classification_runs` for classifier
-   labels, confidence, source refs, and adapter provenance.
+4. Done: run `BoutClassifier` against Palette-defined valid windows only.
+5. Done: define and implement `analysis/bout_classification_runs` for
+   classifier labels, confidence, source refs, invalid-window skips, and
+   adapter provenance.
 6. Optionally add a `tail_kinematics_runs` K=11 candidate for Palette-native
    review. Treat this as a comparison run, not a prerequisite for the adapter.
 7. Defer Megabouts preprocessing/segmentation comparison until classifier-only
