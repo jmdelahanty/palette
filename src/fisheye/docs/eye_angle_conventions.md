@@ -1,6 +1,6 @@
 # Eye-Angle Metrics: Data Layout and Computation
 
-This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and refined eye geometry. It reflects the v5 eye-angle run schema and v6 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, and BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
+This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and refined eye geometry. It reflects the v5 eye-angle run schema and v7 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, and a machine-readable variant schema classifies those surfaces for UI selection. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
 
 ## Where the data lives
 
@@ -50,9 +50,14 @@ The referenced sources are captured in run attributes:
 - `row_axis = "keypoint_detection_rows"`: ROI outputs are row-aligned to the
   refined keypoint/eye-geometry detection rows.
 - `eye_angle_output_schema`: machine-readable summary of output groups,
-  row axes, units, suffix conventions, derivative outputs, and QA reason-code
-  linkage. Output schema v6 adds Bianco/Engert-style eye-frame fields while
-  leaving the run schema and v5 method semantics intact.
+  row axes, units, suffix conventions, derivative outputs, QA reason-code
+  linkage, and `variant_schema`. Output schema v6 adds Bianco/Engert-style
+  eye-frame fields, and output schema v7 adds the UI-facing representation
+  registry while leaving the run schema and v5 method semantics intact.
+- `eye_angle_variant_schema`: mirror of
+  `eye_angle_output_schema.variant_schema`. Consumers can use it to present
+  selectable `eye_frame`, `gaze`, `nasal_gaze`, `major`, `centroid`, and
+  `legacy` angle representations without hardcoding field-name groups.
 - `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
   and run used for geometry.
 - `source_geometry_kind`: normalized geometry role, one of
@@ -75,12 +80,15 @@ Schema boundary:
 - `schema_id` / `schema_version` identify the run family contract.
 - `eye_angle_output_schema` describes the current output layout, units, suffix
   conventions, derivative arrays, reason-code links, and mixed support row
-  axes. It is not a replacement for source lineage attrs.
+  axes. Its nested `variant_schema` describes UI-selectable angle
+  representations. It is not a replacement for source lineage attrs.
 - `source_geometry_kind` records which eye-geometry authority was actually
   consumed so readers do not have to infer semantics from path names alone.
 - `preferred_angle_family = "gaze"` and `preferred_eye_axis = "ellipse_major"`
   tell readers that the run's canonical orientation axis is major-axis based
-  while the gaze family remains the preferred biological viewing surface.
+  while the gaze family remains the historical preferred biological viewing
+  surface. UI angle-trace selectors should use
+  `eye_angle_variant_schema.default_representation` instead.
 
 Body-frame boundary:
 

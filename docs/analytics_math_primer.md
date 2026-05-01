@@ -256,7 +256,8 @@ declared physical speed source, usually `speed_filtered`.
 ## Eye Angles
 
 `analysis/eye_angle_runs` stores eye geometry interpreted in the fish body
-frame. Current v5 runs with output schema v6 prefer the gaze family:
+frame. Current v5 run attrs retain the gaze family as the historical preferred
+biological viewing surface:
 
 ```text
 preferred_angle_family = "gaze"
@@ -267,6 +268,11 @@ gaze_angle_source      = "ellipse_minor_derived_from_resolved_major_axis"
 This means the canonical eye-orientation axis is the resolved ellipse major
 axis. The apparent look/gaze axis is the perpendicular minor-axis direction
 derived from that resolved major axis, rather than independently disambiguated.
+Output schema v7 also includes `eye_angle_variant_schema`, which lets UI
+consumers choose between eye-frame, gaze, nasal-gaze, major-axis, centroid, and
+legacy representations without hardcoding field groups. For UI angle-trace
+selectors, use `eye_angle_variant_schema.default_representation` rather than
+inferring a default from `preferred_angle_family`.
 
 Canonical orientation fields:
 

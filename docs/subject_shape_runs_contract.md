@@ -725,7 +725,9 @@ gaze plus
 `mean_eye_vergence_gaze_deg` for Johnson/BEAST-style comparisons. Output
 schema v6 adds `left_eye_angle_deg`, `right_eye_angle_deg`, and
 `vergence_eye_angle_deg` for Bianco/Engert-style nasal-positive eye-frame
-angles.
+angles. Output schema v7 adds `eye_angle_variant_schema` so UI consumers can
+select among eye-frame, gaze, nasal-gaze, major-axis, centroid, and legacy
+representations from metadata.
 
 `analysis/subject_shape_runs` should not force every specialized metric to move
 immediately. It defines the mask-derived shape layer that can later feed or

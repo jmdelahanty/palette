@@ -86,7 +86,9 @@ DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
 EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
 EYE_ANGLE_RUN_SCHEMA_VERSION = 5
 EYE_ANGLE_OUTPUT_SCHEMA_ID = "analysis.eye_angle_output_schema"
-EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 6
+EYE_ANGLE_OUTPUT_SCHEMA_VERSION = 7
+EYE_ANGLE_VARIANT_SCHEMA_ID = "analysis.eye_angle_variant_schema"
+EYE_ANGLE_VARIANT_SCHEMA_VERSION = 1
 EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
 EYE_ANGLE_METHOD_VERSION = "eye_angle_analysis.v5"
 EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
@@ -222,6 +224,171 @@ def _source_geometry_kind(stage_group: str) -> str:
     }.get(str(stage_group), "unknown_eye_geometry")
 
 
+def _eye_angle_variant_schema() -> Dict[str, object]:
+    """Return a UI-friendly registry of eye-angle representations.
+
+    This is intentionally descriptive rather than executable. UIs can use the
+    representation metadata to group selectable traces without hardcoding every
+    field-name convention.
+    """
+
+    representations: Dict[str, Dict[str, object]] = {
+        "major": {
+            "display_name": "Canonical major-axis orientation",
+            "role": "canonical_geometry",
+            "axis": "ellipse_major",
+            "coordinate_frame": "fish_body_frame",
+            "units": "deg",
+            "sign_convention": "positive_anatomical_left",
+            "derived_from": "resolved_ellipse_major_axis",
+            "preferred_for": ["geometry", "provenance", "derived_conventions"],
+            "primary_roi_fields": ["left_major_signed_deg", "right_major_signed_deg"],
+            "aggregate_roi_fields": ["vergence_major_signed_deg", "version_major_deg"],
+            "default_plot_fields": ["left_major_signed_deg", "right_major_signed_deg"],
+            "frame_fields": ["vergence_major_signed_deg", "version_major_deg"],
+        },
+        "eye_frame": {
+            "display_name": "Bianco/Engert eye-frame angles",
+            "role": "biological_presentation",
+            "axis": "ellipse_major",
+            "coordinate_frame": "per_eye_nasal_positive",
+            "units": "deg",
+            "sign_convention": "positive_nasal_for_each_eye",
+            "derived_from": "major",
+            "left_transform": "-left_major_signed_deg",
+            "right_transform": "right_major_signed_deg",
+            "preferred_for": ["paper_style_per_eye_angles", "signed_convergence"],
+            "primary_roi_fields": ["left_eye_angle_deg", "right_eye_angle_deg"],
+            "aggregate_roi_fields": ["vergence_eye_angle_deg"],
+            "default_plot_fields": [
+                "left_eye_angle_deg_smoothed",
+                "right_eye_angle_deg_smoothed",
+                "vergence_eye_angle_deg_smoothed",
+            ],
+            "frame_fields": ["left_eye_angle_deg", "right_eye_angle_deg", "vergence_eye_angle_deg"],
+        },
+        "gaze": {
+            "display_name": "Gaze direction",
+            "role": "gaze_direction",
+            "axis": "ellipse_minor_derived_from_resolved_major_axis",
+            "coordinate_frame": "fish_body_frame",
+            "units": "deg",
+            "sign_convention": "positive_anatomical_left",
+            "derived_from": "major",
+            "left_transform": "wrap(left_major_signed_deg + 90 deg)",
+            "right_transform": "wrap(right_major_signed_deg - 90 deg)",
+            "preferred_for": ["ray_drawing", "body_frame_gaze_direction", "gaze_qc"],
+            "primary_roi_fields": ["left_gaze_signed_deg", "right_gaze_signed_deg"],
+            "unsigned_roi_fields": ["left_gaze_deg", "right_gaze_deg"],
+            "vector_roi_fields": ["left_gaze_xy", "right_gaze_xy"],
+            "aggregate_roi_fields": ["vergence_gaze_deg", "version_gaze_deg"],
+            "default_plot_fields": ["left_gaze_signed_deg_smoothed", "right_gaze_signed_deg_smoothed"],
+            "frame_fields": ["left_gaze_signed_deg", "right_gaze_signed_deg", "vergence_gaze_deg"],
+        },
+        "nasal_gaze": {
+            "display_name": "BEAST/Johnson nasal-gaze convergence",
+            "role": "compatibility_analysis",
+            "axis": "gaze_nasal_transform",
+            "coordinate_frame": "per_eye_nasal_positive",
+            "units": "deg",
+            "sign_convention": "larger_is_more_nasal",
+            "derived_from": "gaze",
+            "left_transform": "90 - abs(left_gaze_signed_deg)",
+            "right_transform": "90 - abs(right_gaze_signed_deg)",
+            "preferred_for": ["beast_johnson_mean_eye_vergence_plots"],
+            "primary_roi_fields": ["left_nasal_gaze_deg", "right_nasal_gaze_deg"],
+            "aggregate_roi_fields": ["mean_eye_vergence_gaze_deg"],
+            "default_plot_fields": [
+                "left_nasal_gaze_deg_smoothed",
+                "right_nasal_gaze_deg_smoothed",
+                "mean_eye_vergence_gaze_deg_smoothed",
+            ],
+            "frame_fields": ["left_nasal_gaze_deg", "right_nasal_gaze_deg", "mean_eye_vergence_gaze_deg"],
+        },
+        "centroid": {
+            "display_name": "Centroid-position diagnostics",
+            "role": "diagnostic_pose_context",
+            "axis": "eye_centroid_position",
+            "coordinate_frame": "fish_body_frame",
+            "units": "deg",
+            "sign_convention": "positive_anatomical_left",
+            "derived_from": "eye_centroid_positions",
+            "preferred_for": ["pose_diagnostics", "covariates"],
+            "primary_roi_fields": ["left_centroid_deg", "right_centroid_deg"],
+            "aggregate_roi_fields": ["vergence_centroid_deg"],
+            "default_plot_fields": ["left_centroid_deg_smoothed", "right_centroid_deg_smoothed"],
+            "frame_fields": ["left_centroid_deg", "right_centroid_deg", "vergence_centroid_deg"],
+        },
+        "legacy": {
+            "display_name": "Legacy compatibility aliases",
+            "role": "compatibility_alias",
+            "axis": "mixed_legacy",
+            "coordinate_frame": "fish_body_frame",
+            "units": "deg",
+            "sign_convention": "see_alias_target",
+            "derived_from": "major_or_gaze",
+            "preferred_for": ["old_readers_only"],
+            "primary_roi_fields": [
+                "left_deg",
+                "right_deg",
+                "left_signed_deg",
+                "right_signed_deg",
+                "left_minor_signed_deg",
+                "right_minor_signed_deg",
+            ],
+            "aggregate_roi_fields": [
+                "vergence_deg",
+                "vergence_signed_deg",
+                "version_deg",
+                "vergence_minor_signed_deg",
+                "version_minor_deg",
+            ],
+            "alias_targets": {
+                "left_signed_deg": "left_major_signed_deg",
+                "right_signed_deg": "right_major_signed_deg",
+                "left_minor_signed_deg": "left_gaze_signed_deg",
+                "right_minor_signed_deg": "right_gaze_signed_deg",
+                "vergence_minor_signed_deg": "vergence_gaze_deg",
+                "version_minor_deg": "version_gaze_deg",
+            },
+        },
+    }
+
+    fields: Dict[str, Dict[str, object]] = {}
+    for key, representation in representations.items():
+        for group_name in (
+            "primary_roi_fields",
+            "aggregate_roi_fields",
+            "unsigned_roi_fields",
+            "vector_roi_fields",
+        ):
+            for field in representation.get(group_name, []):
+                fields[str(field)] = {
+                    "representation": key,
+                    "field_role": group_name.removesuffix("_fields"),
+                    "display_name": representation["display_name"],
+                    "units": representation.get("units"),
+                }
+        for field in representation.get("default_plot_fields", []):
+            fields.setdefault(str(field), {
+                "representation": key,
+                "field_role": "default_plot",
+                "display_name": representation["display_name"],
+                "units": representation.get("units"),
+            })
+            fields[str(field)]["default_plot"] = True
+
+    return {
+        "schema_id": EYE_ANGLE_VARIANT_SCHEMA_ID,
+        "schema_version": EYE_ANGLE_VARIANT_SCHEMA_VERSION,
+        "purpose": "classify eye-angle arrays into UI-selectable representations",
+        "default_representation": "eye_frame",
+        "representation_order": ["eye_frame", "gaze", "nasal_gaze", "major", "centroid", "legacy"],
+        "representations": representations,
+        "fields": fields,
+    }
+
+
 def _eye_angle_output_schema() -> Dict[str, object]:
     """Return a machine-readable schema for eye-angle output arrays."""
 
@@ -336,6 +503,7 @@ def _eye_angle_output_schema() -> Dict[str, object]:
     return {
         "schema_id": EYE_ANGLE_OUTPUT_SCHEMA_ID,
         "schema_version": EYE_ANGLE_OUTPUT_SCHEMA_VERSION,
+        "variant_schema": _eye_angle_variant_schema(),
         "row_axes": {
             "roi": EYE_ANGLE_ROW_AXIS,
             "frame": "video_frame_rows",
@@ -2594,6 +2762,7 @@ def run(args: argparse.Namespace) -> None:
             "source_refined_eye_run": eye_geometry.source_refined_eye_run,
             "source_refined_subject_masks_run": eye_geometry.source_refined_subject_run,
             "eye_angle_output_schema": _eye_angle_output_schema(),
+            "eye_angle_variant_schema": _eye_angle_variant_schema(),
             **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
             **build_keypoint_body_frame_contract_attrs(
                 source_refined_keypoints_run=keypoint_run_name,

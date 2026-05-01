@@ -58,7 +58,7 @@ The default rule is:
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape and shared body-frame surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
 | Tail kinematics | ordered tail geometry from `analysis/subject_shape_runs` or future keypoint-derived tail posture | none; derived deterministic analysis layer | planned `analysis/tail_kinematics_runs/<run>` for body-frame tail angles, lateral deflections, and curvature summaries; Megabouts/ZebraZoom/Stytra views are adapters | tail traces must reference exact geometry source and record angle/sign/unit conventions |
-| Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"` and v4 output schema | current runs prefer subject-shape eye geometry when available, expose explicit gaze/minor-axis arrays plus BEAST-comparable mean per-eye vergence, and record exact geometry/keypoint/body-frame lineage |
+| Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"`, run schema v5, and output schema v7 | current runs prefer subject-shape eye geometry when available, use resolved major-axis orientation as canonical, derive gaze/minor-axis arrays plus BEAST/Bianco-compatible surfaces, expose `eye_angle_variant_schema` for UI representation selection, and record exact geometry/keypoint/body-frame lineage |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
 ## Mask-Specific Rules
@@ -117,9 +117,13 @@ Current rules:
   left/right eye ellipse geometry is present, records
   `source_geometry_kind`, and writes `schema_id = "analysis.eye_angle_runs"`
   plus `eye_angle_output_schema` to describe its current output groups. Schema
-  v4 makes `preferred_angle_family="gaze"`,
-  `preferred_eye_axis="ellipse_minor"`, and `support/body_frame/` explicit;
-  legacy major/minor arrays are retained for compatibility and QA. It also
+  v5 makes `preferred_angle_family="gaze"`,
+  `preferred_eye_axis="ellipse_major"`, and `support/body_frame/` explicit.
+  The major axis is canonical, while gaze/minor direction is derived from the
+  resolved major axis; legacy major/minor arrays are retained for compatibility
+  and QA. Output schema v7 adds `eye_angle_variant_schema` so marimo, Crimson,
+  and other readers can select eye-frame, gaze, nasal-gaze, major-axis,
+  centroid, or legacy representations from metadata. It also
   keeps `vergence_gaze_deg` as the v3-compatible total/axis-separation
   aggregate while adding `mean_eye_vergence_gaze_deg` for Johnson/BEAST-style
   mean per-eye convergence.

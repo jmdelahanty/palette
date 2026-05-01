@@ -1550,7 +1550,9 @@ Eye angle analysis results:
   `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
   machine-readable output groups, units, suffixes, derivative arrays, and QA
-  reason-code linkage.
+  reason-code linkage. Output schema v7 also includes
+  `variant_schema`, mirrored as `eye_angle_variant_schema` in run attrs, for
+  UI-selectable angle representations.
 - Schema v5 exposes canonical major-axis arrays:
   `left_major_signed_deg`, `right_major_signed_deg`,
   `vergence_major_signed_deg`, and `version_major_deg`. The major axis is
@@ -1565,6 +1567,10 @@ Eye angle analysis results:
   `vergence_eye_angle_deg = left_eye_angle_deg + right_eye_angle_deg`.
   Positive `vergence_eye_angle_deg` means convergence; negative means
   divergence.
+- Output schema v7 adds `eye_angle_variant_schema`, which groups fields into
+  UI-facing representations: `eye_frame`, `gaze`, `nasal_gaze`, `major`,
+  `centroid`, and `legacy`. UIs should prefer this registry over hardcoded
+  angle-field lists when offering representation selectors.
 - Schema v5 exposes explicit gaze arrays derived from the resolved major axis:
   `left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`,
   `right_gaze_signed_deg`, `vergence_gaze_deg`,
@@ -1579,6 +1585,10 @@ Eye angle analysis results:
 - Run attrs include `preferred_angle_family = "gaze"`,
   `preferred_eye_axis = "ellipse_major"`, and
   `gaze_angle_source = "ellipse_minor_derived_from_resolved_major_axis"`.
+  `preferred_angle_family` is the historical preferred biological viewing
+  surface; UI selectors should use
+  `eye_angle_variant_schema.default_representation` for angle-representation
+  defaults.
 - Schema v5 materializes keypoint-derived body-frame support arrays under
   `support/body_frame/` so signed eye angles are anatomical-left-positive and
   convergence polarity is not conflated with ellipse-axis orientation

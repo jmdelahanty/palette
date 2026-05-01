@@ -79,7 +79,30 @@ def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
     schema = eye_angle_analysis._eye_angle_output_schema()
 
     assert schema["schema_id"] == "analysis.eye_angle_output_schema"
-    assert schema["schema_version"] == 6
+    assert schema["schema_version"] == 7
+    assert schema["variant_schema"]["schema_id"] == "analysis.eye_angle_variant_schema"
+    assert schema["variant_schema"]["schema_version"] == 1
+    assert schema["variant_schema"]["default_representation"] == "eye_frame"
+    assert schema["variant_schema"]["representation_order"] == [
+        "eye_frame",
+        "gaze",
+        "nasal_gaze",
+        "major",
+        "centroid",
+        "legacy",
+    ]
+    representations = schema["variant_schema"]["representations"]
+    assert representations["major"]["role"] == "canonical_geometry"
+    assert representations["eye_frame"]["role"] == "biological_presentation"
+    assert representations["eye_frame"]["primary_roi_fields"] == ["left_eye_angle_deg", "right_eye_angle_deg"]
+    assert representations["eye_frame"]["aggregate_roi_fields"] == ["vergence_eye_angle_deg"]
+    assert representations["gaze"]["vector_roi_fields"] == ["left_gaze_xy", "right_gaze_xy"]
+    assert representations["nasal_gaze"]["aggregate_roi_fields"] == ["mean_eye_vergence_gaze_deg"]
+    assert representations["legacy"]["alias_targets"]["left_minor_signed_deg"] == "left_gaze_signed_deg"
+    fields = schema["variant_schema"]["fields"]
+    assert fields["left_eye_angle_deg"]["representation"] == "eye_frame"
+    assert fields["left_gaze_xy"]["representation"] == "gaze"
+    assert fields["mean_eye_vergence_gaze_deg"]["representation"] == "nasal_gaze"
     assert schema["row_axes"]["roi"] == "keypoint_detection_rows"
     assert schema["row_axes"]["frame"] == "video_frame_rows"
     assert schema["groups"]["angles/roi"]["units"] == "deg"

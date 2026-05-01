@@ -2,14 +2,16 @@
 <!-- eye-angle-variants-meta
 status: draft
 last_verified: 2026-04-30
-schema_context: analysis.eye_angle_runs v5, analysis.eye_angle_output_schema v6
+schema_context: analysis.eye_angle_runs v5, analysis.eye_angle_output_schema v7
 -->
 
 This document explains the eye-angle arrays currently written by
 `analysis/eye_angle_runs/<run>`. It is a naming and interpretation guide for
 users and downstream consumers. The storage contract remains
 `src/fisheye/docs/eye_angle_conventions.md` and the run metadata stored in
-`eye_angle_output_schema`.
+`eye_angle_output_schema`. Output schema v7 also embeds
+`eye_angle_variant_schema`, a machine-readable representation registry that UIs
+can use to offer these variants without hardcoding Palette field names.
 
 ## Short Answer
 
@@ -27,6 +29,87 @@ Use these first:
 For plots, prefer the `_smoothed` variant when available. For event-aligned or
 bout-level analysis, use the exact eye-angle run as a source and write derived
 summaries into `analysis/bout_kinematics_runs`, not back into the eye-angle run.
+
+## Why These Feel Redundant
+
+Most eye-angle arrays are not independent measurements. They are different
+presentations of the same resolved ellipse geometry.
+
+The core measurement is:
+
+```text
+fitted eye ellipse
+  -> resolved major axis
+  -> derived minor/gaze axis
+```
+
+Palette stores several views because different readers ask different biological
+or visualization questions:
+
+| View | Derived from | Why it exists |
+| --- | --- | --- |
+| Major-axis orientation | resolved ellipse major axis | canonical geometry and provenance |
+| Bianco/Engert eye angle | major-axis orientation with per-eye sign flip | paper-style nasal-positive per-eye angle |
+| Gaze direction | 90 deg rotation from major axis | draw/interpret where the eye points |
+| BEAST/Johnson mean vergence | nasal-gaze transform from gaze angle | comparable mean per-eye convergence trace |
+| Legacy names | current major/gaze fields | keep old readers working |
+
+So the redundancy is intentional. The goal is not to imply that every field is a
+separate biological signal. The goal is to make the major common conventions
+explicit so downstream code does not keep re-deriving sign flips, gaze axes, or
+compatibility aliases at use sites.
+
+The simplest rule:
+
+```text
+Use *_major_* when you want canonical geometry.
+Use *_eye_angle_* when you want Bianco/Engert nasal-positive eye angles.
+Use *_gaze_* or *_gaze_xy when you want where the eye points.
+Use mean_eye_vergence_gaze_deg for Johnson/BEAST-style mean convergence.
+```
+
+## Machine-Readable Representation Schema
+
+Every v7 eye-angle output schema includes:
+
+```text
+eye_angle_output_schema.variant_schema
+```
+
+The same registry is also mirrored at run attrs key
+`eye_angle_variant_schema`. It is intended for UI clients such as marimo and
+Crimson, not for recomputing the angles.
+
+Important keys:
+
+| Key | Meaning |
+| --- | --- |
+| `default_representation` | Recommended initial UI choice, currently `eye_frame` |
+| `representation_order` | Stable display order for selectors |
+| `representations` | Per-representation metadata, fields, roles, transforms, and defaults |
+| `fields` | Reverse lookup from field name to representation and field role |
+
+Current selectable representations:
+
+| Representation | UI label | Use |
+| --- | --- | --- |
+| `eye_frame` | Bianco/Engert eye-frame angles | paper-style nasal-positive per-eye angles and signed convergence |
+| `gaze` | Gaze direction | body-frame gaze traces and ray overlays |
+| `nasal_gaze` | BEAST/Johnson nasal-gaze convergence | Johnson/BEAST-style mean per-eye vergence plots |
+| `major` | Canonical major-axis orientation | canonical ellipse geometry and provenance |
+| `centroid` | Centroid-position diagnostics | pose context and diagnostics |
+| `legacy` | Legacy compatibility aliases | old readers only |
+
+For selectors, prefer the representation registry over filename heuristics:
+
+```text
+selected_representation = variant_schema.default_representation
+plot_fields = variant_schema.representations[selected_representation].default_plot_fields
+```
+
+For per-field tooltips or table grouping, use `variant_schema.fields`. For
+example, `left_eye_angle_deg` maps to `eye_frame`, while `left_gaze_xy` maps to
+`gaze`.
 
 ## Coordinate Frame
 
@@ -265,8 +348,9 @@ Common suffixes:
 | `_delta_deg_smoothed` | delta computed from the smoothed measurement |
 
 Some older/gaze families also expose speed and acceleration derivatives such as
-`left_gaze_speed_deg_s` and `left_gaze_accel_deg_s2`. The eye-frame v6 fields
-currently expose base, smoothed, delta, and frame variants.
+`left_gaze_speed_deg_s` and `left_gaze_accel_deg_s2`. The eye-frame fields added
+in output schema v6 currently expose base, smoothed, delta, and frame variants;
+output schema v7 adds representation metadata but no additional angle arrays.
 
 ## QA Fields
 

@@ -185,6 +185,10 @@ Existing analysis outputs already follow this direction:
   `left_eye_angle_deg`, `right_eye_angle_deg`, and
   `vergence_eye_angle_deg`, with per-eye nasal-positive signs and signed
   vergence where positive means convergence and negative means divergence.
+  Output schema v7 adds `eye_angle_variant_schema`, mirrored in run attrs, so
+  marimo, Crimson, and other consumers can present selectable angle
+  representations (`eye_frame`, `gaze`, `nasal_gaze`, `major`, `centroid`,
+  `legacy`) from metadata rather than hardcoded field lists.
   Eye-angle writers should prefer `analysis/subject_shape_runs/<run>` eye
   geometry when a coherent body/eyes/swim shape run exists, and preserve
   refined-subject/refined-eye fallbacks as explicit lineage. Current v5 runs

@@ -1158,8 +1158,8 @@ Real canary evidence:
   `source_body_mask_qc_severe=1360`
 - eye-angle schema canary:
   `analysis/eye_angle_runs/eye_angle_subject_shape_schema_v2_canary_20260428`
-  *(historical v2 canary; current writer schema is v4 with `support/body_frame`
-  and BEAST-comparable mean per-eye vergence)*
+  *(historical v2 canary; current writer schema is v5 with `support/body_frame`,
+  canonical major-axis orientation, and BEAST-comparable mean per-eye vergence)*
 - eye-angle schema canary source geometry:
   `source_geometry_kind=subject_shape_eye_geometry`,
   `schema_id=analysis.eye_angle_runs`, `schema_version=2` for that historical run,
@@ -1175,10 +1175,24 @@ Real canary evidence:
   `vergence_gaze_deg` defined as the smaller angle between the two
   directionless eye-axis lines, `mean_eye_vergence_gaze_deg` added as the
   Johnson/BEAST-comparable mean per-eye convergence field,
+  *(historical v4 canary; v5 re-derivation will update `preferred_eye_axis` to
+  `ellipse_major` and derive gaze from the resolved major axis)*
   `valid_detection_fraction=19233 / 19235`
 - current eye-angle v4 canary values:
   `median(mean_eye_vergence_gaze_deg)=16.979 deg`,
   `median(vergence_gaze_deg)=33.937 deg`
+- current v7 eye-angle variant-schema canary:
+  `analysis/eye_angle_runs/eye_angle_variant_schema_v7_canary_20260501`
+- current v7 eye-angle canary source geometry:
+  `source_geometry_kind=subject_shape_eye_geometry`,
+  `source_eye_geometry_run=subject_shape_v3_snout_medialjoin_canary_20260429`,
+  `schema_id=analysis.eye_angle_runs`, `schema_version=5`,
+  `eye_angle_output_schema.schema_version=7`,
+  `eye_angle_variant_schema.schema_version=1`,
+  `eye_angle_variant_schema.default_representation=eye_frame`,
+  `eye_angle_variant_schema.representation_order=eye_frame,gaze,nasal_gaze,major,centroid,legacy`,
+  `preferred_eye_axis=ellipse_major`,
+  `valid_detection_fraction=19233 / 19235`
 
 Remaining work is no longer open-ended architecture. It is operational hardening:
 
