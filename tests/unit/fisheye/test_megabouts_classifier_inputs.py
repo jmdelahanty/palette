@@ -106,11 +106,29 @@ def test_build_megabouts_classifier_input_pack_resolves_sources_and_shapes() -> 
         [True, True, True, True],
         [True, False, True, True],
     ]
+    assert pack.traj_reference_valid.tolist() == [True, True]
+    theta0 = 0.1
+    offsets = np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32)
+    np.testing.assert_allclose(
+        pack.traj_array[0, 0, :],
+        np.cos(theta0) * offsets + np.sin(theta0) * offsets,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        pack.traj_array[0, 1, :],
+        -np.sin(theta0) * offsets + np.cos(theta0) * offsets,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(pack.traj_array[0, 2, :], [0.0, 0.1, 0.2, 0.3], rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(pack.tail_valid_fraction, [0.75, 1.0])
     np.testing.assert_allclose(pack.traj_valid_fraction, [1.0, 0.75])
     assert pack.valid_bout.tolist() == [True, True]
     assert pack.failure_reason.tolist() == ["ok", "ok"]
     assert pack.parameters["window_policy"] == "start_frame_fixed_duration"
+    assert pack.parameters["traj_alignment"] == "onset_translation_rotation"
+    assert pack.parameters["traj_reference_index"] == 0
     assert pack.parameters["calls_megabouts"] is False
     assert pack.source_refs["tail_angle_rad"].endswith("/tail_angle_rad")
 
@@ -188,3 +206,25 @@ def test_build_megabouts_classifier_input_pack_rejects_windows_too_long_for_mega
 
     with pytest.raises(ValueError, match="capped at 140 frames"):
         build_megabouts_classifier_input_pack(root, bout_duration_frames=141)
+
+
+def test_build_megabouts_classifier_input_pack_rejects_invalid_trajectory_reference() -> None:
+    root = _build_root()
+    level = root["analysis/swim_bout_runs/bouts_001/speed_filtered"]
+    bouts = np.asarray(
+        [(31, 5, 7)],
+        dtype=[("bout_id", "i4"), ("start_frame", "i8"), ("end_frame", "i8")],
+    )
+    write_columnar_dataset(level, "bouts", bouts)
+
+    pack = build_megabouts_classifier_input_pack(
+        root,
+        bout_duration_frames=3,
+        min_tail_valid_fraction=0.5,
+        min_traj_valid_fraction=0.5,
+        max_consecutive_invalid_frames=2,
+    )
+
+    assert pack.traj_reference_valid.tolist() == [False]
+    assert pack.valid_bout.tolist() == [False]
+    assert pack.failure_reason.tolist() == ["traj_reference_invalid"]

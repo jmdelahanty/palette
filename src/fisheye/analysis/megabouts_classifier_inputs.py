@@ -23,6 +23,8 @@ DEFAULT_MIN_TAIL_VALID_FRACTION = 0.90
 DEFAULT_MIN_TRAJ_VALID_FRACTION = 0.90
 DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES = 2
 DEFAULT_HEADING_SOURCE = "smoothed_heading_radians"
+DEFAULT_ALIGN_TRAJ_TO_ONSET = True
+DEFAULT_TRAJ_REFERENCE_INDEX = 0
 MEGABOUTS_TAIL_SEGMENT_COUNT = 10
 MEGABOUTS_MAX_CLASSIFIER_WINDOW_FRAMES = 140
 
@@ -39,6 +41,7 @@ class MegaboutsClassifierInputPack:
     traj_array: np.ndarray
     tail_valid: np.ndarray
     traj_valid: np.ndarray
+    traj_reference_valid: np.ndarray
     source_bout_id: np.ndarray
     source_start_frame: np.ndarray
     source_end_frame: np.ndarray
@@ -189,6 +192,46 @@ def _max_consecutive_false(mask: np.ndarray) -> int:
     return int(max_run)
 
 
+def _align_traj_array_to_reference(
+    traj_array: np.ndarray,
+    traj_valid: np.ndarray,
+    *,
+    reference_index: int = DEFAULT_TRAJ_REFERENCE_INDEX,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Translate and rotate trajectory windows into a per-bout onset frame.
+
+    Megabouts' full-tracking classifier expects trajectory channels extracted
+    with its segmentation helper's default alignment: x/y are relative to the
+    reference sample and rotated by the negative reference heading, while
+    heading is expressed relative to that same sample.
+    """
+
+    traj = np.asarray(traj_array, dtype=np.float32).copy()
+    valid = np.asarray(traj_valid, dtype=bool)
+    if traj.ndim != 3 or traj.shape[1] != 3:
+        raise ValueError(f"traj_array must have shape (n_bouts, 3, window), got {traj.shape}.")
+    if valid.shape != (traj.shape[0], traj.shape[2]):
+        raise ValueError(f"traj_valid shape {valid.shape} does not match traj_array shape {traj.shape}.")
+    ref = int(reference_index)
+    if ref < 0 or ref >= traj.shape[2]:
+        raise ValueError(f"trajectory reference index {ref} is outside window length {traj.shape[2]}.")
+
+    reference_valid = valid[:, ref] & np.all(np.isfinite(traj[:, :, ref]), axis=1)
+    for bout_idx in np.flatnonzero(reference_valid).tolist():
+        x0 = float(traj[bout_idx, 0, ref])
+        y0 = float(traj[bout_idx, 1, ref])
+        theta0 = float(traj[bout_idx, 2, ref])
+        dx = traj[bout_idx, 0, :] - x0
+        dy = traj[bout_idx, 1, :] - y0
+        cos_t = math.cos(theta0)
+        sin_t = math.sin(theta0)
+        traj[bout_idx, 0, :] = cos_t * dx + sin_t * dy
+        traj[bout_idx, 1, :] = -sin_t * dx + cos_t * dy
+        traj[bout_idx, 2, :] = traj[bout_idx, 2, :] - theta0
+
+    return traj, reference_valid.astype(bool, copy=False)
+
+
 def _decode_reason_value(value: Any) -> str:
     if isinstance(value, bytes):
         return value.split(b"\x00", 1)[0].decode("utf-8", "replace")
@@ -295,6 +338,8 @@ def build_megabouts_classifier_input_pack(
     min_tail_valid_fraction: float = DEFAULT_MIN_TAIL_VALID_FRACTION,
     min_traj_valid_fraction: float = DEFAULT_MIN_TRAJ_VALID_FRACTION,
     max_consecutive_invalid_frames: int = DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES,
+    align_traj_to_onset: bool = DEFAULT_ALIGN_TRAJ_TO_ONSET,
+    traj_reference_index: int = DEFAULT_TRAJ_REFERENCE_INDEX,
 ) -> MegaboutsClassifierInputPack:
     """Build fixed-window arrays for optional Megabouts classification.
 
@@ -303,7 +348,9 @@ def build_megabouts_classifier_input_pack(
 
     - ``tail_array`` has shape ``(n_bouts, 10, window_frames)``.
     - ``traj_array`` has shape ``(n_bouts, 3, window_frames)`` with channels
-      ``x_mm``, ``y_mm``, and selected heading/yaw in radians.
+      ``x_mm``, ``y_mm``, and selected heading/yaw in radians. By default,
+      these channels are translated/rotated into the onset body frame to match
+      Megabouts' classifier-facing trajectory extraction.
     """
 
     posture, posture_name, posture_path = _resolve_tail_posture_view_run(root, tail_posture_view_run)
@@ -390,6 +437,22 @@ def build_megabouts_classifier_input_pack(
                     traj_array[bout_idx, :, sample_idx] = values
                     traj_valid[bout_idx, sample_idx] = True
 
+    if bool(align_traj_to_onset):
+        traj_array, traj_reference_valid = _align_traj_array_to_reference(
+            traj_array,
+            traj_valid,
+            reference_index=int(traj_reference_index),
+        )
+    else:
+        ref = int(traj_reference_index)
+        if ref < 0 or ref >= int(window_frames):
+            raise ValueError(f"trajectory reference index {ref} is outside window length {window_frames}.")
+        traj_reference_valid = (
+            traj_valid[:, ref] & np.all(np.isfinite(traj_array[:, :, ref]), axis=1)
+            if n_bouts
+            else np.asarray([], dtype=bool)
+        )
+
     tail_fraction = np.mean(tail_valid, axis=1).astype(np.float32, copy=False) if n_bouts else np.asarray([], dtype=np.float32)
     traj_fraction = np.mean(traj_valid, axis=1).astype(np.float32, copy=False) if n_bouts else np.asarray([], dtype=np.float32)
     max_tail_invalid = np.asarray([_max_consecutive_false(row) for row in tail_valid], dtype=np.int32)
@@ -400,6 +463,7 @@ def build_megabouts_classifier_input_pack(
         & (traj_fraction >= float(min_traj_valid_fraction))
         & (max_tail_invalid <= int(max_consecutive_invalid_frames))
         & (max_traj_invalid <= int(max_consecutive_invalid_frames))
+        & traj_reference_valid
     )
     reasons = np.full((n_bouts,), "ok", dtype=object)
     for idx in range(n_bouts):
@@ -414,6 +478,8 @@ def build_megabouts_classifier_input_pack(
             failures.append("tail_consecutive_invalid_exceeds_threshold")
         if int(max_traj_invalid[idx]) > int(max_consecutive_invalid_frames):
             failures.append("traj_consecutive_invalid_exceeds_threshold")
+        if not bool(traj_reference_valid[idx]):
+            failures.append("traj_reference_invalid")
         reasons[idx] = "|".join(failures) if failures else "invalid"
 
     source_refs = {
@@ -439,6 +505,9 @@ def build_megabouts_classifier_input_pack(
         "bout_duration_s": float(window_frames) / float(fps),
         "bout_duration_frames": int(window_frames),
         "window_policy": "start_frame_fixed_duration",
+        "traj_alignment": "onset_translation_rotation" if bool(align_traj_to_onset) else "none",
+        "traj_reference_index": int(traj_reference_index),
+        "requires_traj_reference_valid": True,
         "tail_array_shape": list(tail_array.shape),
         "traj_array_shape": list(traj_array.shape),
         "min_tail_valid_fraction": float(min_tail_valid_fraction),
@@ -452,6 +521,7 @@ def build_megabouts_classifier_input_pack(
         traj_array=traj_array,
         tail_valid=tail_valid,
         traj_valid=traj_valid,
+        traj_reference_valid=traj_reference_valid,
         source_bout_id=bout_ids,
         source_start_frame=start_frames,
         source_end_frame=end_frames,
@@ -486,6 +556,9 @@ def summarize_input_pack(pack: MegaboutsClassifierInputPack) -> dict[str, object
         "invalid_bout_count": int(n_bouts - valid_count),
         "tail_array_shape": list(pack.tail_array.shape),
         "traj_array_shape": list(pack.traj_array.shape),
+        "traj_alignment": pack.parameters.get("traj_alignment"),
+        "traj_reference_index": pack.parameters.get("traj_reference_index"),
+        "traj_reference_valid_count": int(np.count_nonzero(pack.traj_reference_valid)),
         "tail_valid_fraction_min": float(np.nanmin(pack.tail_valid_fraction)) if n_bouts else math.nan,
         "tail_valid_fraction_mean": float(np.nanmean(pack.tail_valid_fraction)) if n_bouts else math.nan,
         "traj_valid_fraction_min": float(np.nanmin(pack.traj_valid_fraction)) if n_bouts else math.nan,
@@ -686,6 +759,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-traj-valid-fraction", type=float, default=DEFAULT_MIN_TRAJ_VALID_FRACTION)
     parser.add_argument("--max-consecutive-invalid-frames", type=int, default=DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES)
     parser.add_argument(
+        "--no-align-traj-to-onset",
+        action="store_true",
+        help="Disable Megabouts-style onset-frame translation/rotation for trajectory windows.",
+    )
+    parser.add_argument("--traj-reference-index", type=int, default=DEFAULT_TRAJ_REFERENCE_INDEX)
+    parser.add_argument(
         "--diagnose-invalid-windows",
         action="store_true",
         help="Emit detailed invalid-window cause report instead of the compact dry-run summary.",
@@ -711,6 +790,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "min_tail_valid_fraction": float(args.min_tail_valid_fraction),
         "min_traj_valid_fraction": float(args.min_traj_valid_fraction),
         "max_consecutive_invalid_frames": int(args.max_consecutive_invalid_frames),
+        "align_traj_to_onset": not bool(args.no_align_traj_to_onset),
+        "traj_reference_index": int(args.traj_reference_index),
     }
     if args.diagnose_invalid_windows:
         summary = diagnose_megabouts_classifier_invalid_windows(

@@ -586,6 +586,9 @@ The adapter uses `skip_invalid_windows` as the initial invalid-window policy:
 
 - valid Palette windows are passed to `BoutClassifier.run_classification`
 - invalid Palette windows are not passed to Megabouts
+- trajectory windows are translated to the bout-onset point and rotated into
+  the bout-onset heading frame before classification, matching Megabouts'
+  classifier-facing `extract_traj_array(..., align=True)` convention
 - every source swim-bout row is still written to the result table
 - skipped rows have `classified=false`, `valid=false`, sentinel classifier
   fields, and the Palette coverage/failure reason that made the window
@@ -632,6 +635,11 @@ Adapter policy:
 - Invalid tail frames: set all Megabouts tail-angle channels to `NaN`.
 - Invalid trajectory frames: set `head_x`, `head_y`, and/or `head_yaw` to
   `NaN`.
+- Valid trajectory windows are represented in an onset-local coordinate frame:
+  `x/y` are relative to the first classifier sample and rotated by negative
+  onset heading, and `head_yaw` is relative to onset heading.
+- Reject or mark invalid any bout whose trajectory reference sample is missing
+  or non-finite, because onset-frame alignment cannot be computed safely.
 - Do not replace invalid Palette frames with zeros before calling Megabouts.
 - Let Megabouts create `no_tracking`, but preserve the original Palette
   invalidity mask separately.

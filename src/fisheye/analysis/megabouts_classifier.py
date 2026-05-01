@@ -19,10 +19,12 @@ import zarr
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.analysis.megabouts_classifier_inputs import (
     DEFAULT_BOUT_DURATION_S,
+    DEFAULT_ALIGN_TRAJ_TO_ONSET,
     DEFAULT_HEADING_SOURCE,
     DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES,
     DEFAULT_MIN_TAIL_VALID_FRACTION,
     DEFAULT_MIN_TRAJ_VALID_FRACTION,
+    DEFAULT_TRAJ_REFERENCE_INDEX,
     MegaboutsClassifierInputPack,
     build_megabouts_classifier_input_pack,
     summarize_input_pack,
@@ -500,6 +502,8 @@ def run_megabouts_classifier(
     min_tail_valid_fraction: float = DEFAULT_MIN_TAIL_VALID_FRACTION,
     min_traj_valid_fraction: float = DEFAULT_MIN_TRAJ_VALID_FRACTION,
     max_consecutive_invalid_frames: int = DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES,
+    align_traj_to_onset: bool = DEFAULT_ALIGN_TRAJ_TO_ONSET,
+    traj_reference_index: int = DEFAULT_TRAJ_REFERENCE_INDEX,
     exclude_cs: bool = False,
     device: str = "auto",
     megabouts_repo: Optional[str | Path] = None,
@@ -523,6 +527,8 @@ def run_megabouts_classifier(
         min_tail_valid_fraction=min_tail_valid_fraction,
         min_traj_valid_fraction=min_traj_valid_fraction,
         max_consecutive_invalid_frames=max_consecutive_invalid_frames,
+        align_traj_to_onset=align_traj_to_onset,
+        traj_reference_index=traj_reference_index,
     )
     if dry_run:
         summary = summarize_input_pack(pack)
@@ -561,9 +567,16 @@ def run_megabouts_classifier(
         "source_refs": pack.source_refs,
         "parameters": {
             **pack.parameters,
+            "adapter_method": ADAPTER_METHOD,
+            "adapter_method_version": ADAPTER_METHOD_VERSION,
+            "calls_megabouts": True,
+            "classifier_family": CLASSIFIER_FAMILY,
+            "classifier_name": CLASSIFIER_NAME,
             "exclude_capture_swims": bool(exclude_cs),
             "device": str(device),
             "megabouts_repo": None if megabouts_repo is None else str(megabouts_repo),
+            "align_traj_to_onset": bool(align_traj_to_onset),
+            "traj_reference_index": int(traj_reference_index),
         },
         **_runtime_attrs(result.runtime),
     }
@@ -589,6 +602,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-tail-valid-fraction", type=float, default=DEFAULT_MIN_TAIL_VALID_FRACTION)
     parser.add_argument("--min-traj-valid-fraction", type=float, default=DEFAULT_MIN_TRAJ_VALID_FRACTION)
     parser.add_argument("--max-consecutive-invalid-frames", type=int, default=DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES)
+    parser.add_argument(
+        "--no-align-traj-to-onset",
+        action="store_true",
+        help="Disable Megabouts-style onset-frame translation/rotation for trajectory windows.",
+    )
+    parser.add_argument("--traj-reference-index", type=int, default=DEFAULT_TRAJ_REFERENCE_INDEX)
     parser.add_argument("--exclude-CS", action="store_true", help="Pass exclude_CS=True to Megabouts.")
     parser.add_argument("--device", default="auto", help="Megabouts torch device: auto, cpu, cuda, cuda:0, etc.")
     parser.add_argument(
@@ -621,6 +640,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         min_tail_valid_fraction=float(args.min_tail_valid_fraction),
         min_traj_valid_fraction=float(args.min_traj_valid_fraction),
         max_consecutive_invalid_frames=int(args.max_consecutive_invalid_frames),
+        align_traj_to_onset=not bool(args.no_align_traj_to_onset),
+        traj_reference_index=int(args.traj_reference_index),
         exclude_cs=bool(args.exclude_CS),
         device=str(args.device),
         megabouts_repo=args.megabouts_repo,
