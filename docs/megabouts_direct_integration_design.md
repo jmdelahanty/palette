@@ -9,6 +9,9 @@ Purpose: define how Palette should call Megabouts directly from Palette Zarr
 arrays without making Megabouts preprocessing, segmentation, or classifier
 schemas canonical.
 
+For the generic stored output contract, see
+[bout_classification_runs_contract.md](bout_classification_runs_contract.md).
+
 This document is based on a source-code audit of the local fork at:
 
 ```text

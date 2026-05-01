@@ -156,7 +156,12 @@ def test_write_megabouts_classification_run_persists_columnar_per_bout_table() -
     run = parent["megabouts_classifier_test"]
     assert run.attrs["schema_id"] == "analysis.bout_classification_runs"
     assert run.attrs["classifier_family"] == "megabouts"
+    assert run.attrs["classifier_version"] == "fake-0"
+    assert run.attrs["adapter_method"] == "palette_megabouts_direct_classifier"
     assert run.attrs["invalid_window_policy"] == "skip_invalid_windows"
+    assert run.attrs["trajectory_conversion"]["alignment"] == "onset_translation_rotation"
+    assert run.attrs["tail_angle_conversion"]["convention"] == "megabouts_cumulative_segment_angle"
+    assert run.attrs["invalid_frame_policy"]["policy"] == "skip_invalid_windows"
     assert run.attrs["source_bout_count"] == 2
     assert run.attrs["classified_bout_count"] == 1
     persisted = read_columnar_dataset(run["per_bout"])

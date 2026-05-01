@@ -17,6 +17,11 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.analysis.bout_classification_runs import (
+    BOUT_CLASSIFICATION_SCHEMA_ID,
+    BOUT_CLASSIFICATION_SCHEMA_VERSION,
+    PER_BOUT_SCHEMA_ID,
+)
 from fisheye.analysis.megabouts_classifier_inputs import (
     DEFAULT_BOUT_DURATION_S,
     DEFAULT_ALIGN_TRAJ_TO_ONSET,
@@ -33,8 +38,8 @@ from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
-SCHEMA_ID = "analysis.bout_classification_runs"
-SCHEMA_VERSION = 1
+SCHEMA_ID = BOUT_CLASSIFICATION_SCHEMA_ID
+SCHEMA_VERSION = BOUT_CLASSIFICATION_SCHEMA_VERSION
 ADAPTER_METHOD = "palette_megabouts_direct_classifier"
 ADAPTER_METHOD_VERSION = 1
 CLASSIFIER_FAMILY = "megabouts"
@@ -160,11 +165,13 @@ def _load_megabouts_runtime(megabouts_repo: Optional[str | Path] = None) -> Mega
 def _runtime_attrs(runtime: Optional[MegaboutsRuntime]) -> dict[str, object]:
     if runtime is None:
         return {
+            "classifier_version": None,
             "megabouts_package_version": None,
             "megabouts_package_path": None,
             "megabouts_category_labels": [],
         }
     return {
+        "classifier_version": runtime.package_version,
         "megabouts_package_version": runtime.package_version,
         "megabouts_package_path": runtime.package_path,
         "megabouts_source_repo": runtime.source_repo,
@@ -422,16 +429,44 @@ def write_megabouts_classification_run(
         "valid_source_window_count": int(np.count_nonzero(pack.valid_bout)),
         "invalid_source_window_count": int(table.shape[0] - np.count_nonzero(pack.valid_bout)),
     }
+    tail_angle_conversion = {
+        "source_array": source_refs.get("tail_angle_rad"),
+        "source_valid_array": source_refs.get("tail_valid"),
+        "convention": "megabouts_cumulative_segment_angle",
+        "channels": int(pack.tail_array.shape[1]),
+        "units": "radians",
+    }
+    trajectory_conversion = {
+        "source_positions_array": source_refs.get("positions_mm"),
+        "source_heading_array": source_refs.get("heading"),
+        "source_valid_array": source_refs.get("sample_valid"),
+        "channels": ["x_mm", "y_mm", "heading_radians"],
+        "alignment": pack.parameters.get("traj_alignment"),
+        "reference_index": pack.parameters.get("traj_reference_index"),
+        "heading_reference": "classifier_window_reference_sample",
+    }
+    invalid_frame_policy = {
+        "policy": INVALID_WINDOW_POLICY,
+        "min_tail_valid_fraction": pack.parameters.get("min_tail_valid_fraction"),
+        "min_traj_valid_fraction": pack.parameters.get("min_traj_valid_fraction"),
+        "max_consecutive_invalid_frames": pack.parameters.get("max_consecutive_invalid_frames"),
+        "requires_traj_reference_valid": pack.parameters.get("requires_traj_reference_valid"),
+    }
     attrs = {
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
         "method": ADAPTER_METHOD,
         "method_version": ADAPTER_METHOD_VERSION,
+        "adapter_method": ADAPTER_METHOD,
+        "adapter_method_version": ADAPTER_METHOD_VERSION,
         "classifier_family": CLASSIFIER_FAMILY,
         "classifier_name": CLASSIFIER_NAME,
         "source_mode": SOURCE_MODE,
         "row_axis": "swim_bout_rows",
         "invalid_window_policy": INVALID_WINDOW_POLICY,
+        "tail_angle_conversion": _json_safe(tail_angle_conversion),
+        "trajectory_conversion": _json_safe(trajectory_conversion),
+        "invalid_frame_policy": _json_safe(invalid_frame_policy),
         "source_refs": _json_safe(source_refs),
         "parameters": _json_safe(parameters),
         "source_bout_count": int(table.shape[0]),
@@ -448,7 +483,7 @@ def write_megabouts_classification_run(
         "per_bout",
         table,
         attrs={
-            "schema_id": f"{SCHEMA_ID}.per_bout",
+            "schema_id": PER_BOUT_SCHEMA_ID,
             "schema_version": SCHEMA_VERSION,
             "storage_semantics": "one row per source swim-bout row",
             "invalid_window_policy": INVALID_WINDOW_POLICY,
