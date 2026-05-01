@@ -95,6 +95,39 @@ stored as:
 Tools differ in exact convention, so Palette must record the convention, units,
 orientation, sample count, and source geometry.
 
+### Native Versus Tool-Specific Tail Angles
+
+Palette's native `analysis/tail_kinematics_runs/<run>/tail_angle_rad` is a
+behavior-facing body-frame tangent representation. Each channel answers:
+
+```text
+At this normalized tail position, what is the local tail tangent angle relative
+to the fish's caudal body axis?
+```
+
+Megabouts' `tail_angle` is different. Given ordered tail keypoints, Megabouts
+computes cumulative signed segment angles. Each channel answers:
+
+```text
+After walking from tail base through this segment, what cumulative bend has
+accumulated relative to the body-to-tail-base vector?
+```
+
+These are related geometric summaries of the same tail curve, but they are not
+the same dataset:
+
+- Palette samples local tangent directions on a subject-shape curve or spline.
+- Megabouts samples discrete keypoint-to-keypoint segment directions.
+- Palette references its anatomical body frame.
+- Megabouts references the vector from head to the first tail point, then
+  accumulates relative segment rotations.
+- Palette's default native run currently has `K=10` angle samples.
+- Megabouts keypoint input uses `K=11` ordered keypoints to produce `K=10`
+  cumulative segment-angle channels.
+
+Therefore, tool-specific angles should be generated as adapter views rather
+than by redefining Palette's native `tail_angle_rad`.
+
 ## What The Existing Literature And Tools Do
 
 ### Stytra
@@ -175,6 +208,30 @@ Sources:
 Palette's direct in-memory integration plan is documented in
 [megabouts_direct_integration_design.md](megabouts_direct_integration_design.md).
 
+#### Dependency And Attribution Policy
+
+Palette should interoperate with Megabouts without requiring Megabouts for the
+default Palette install. The default output should be a
+Megabouts-compatible posture view derived from Palette geometry. Actual
+Megabouts preprocessing and classification should be optional third-party
+execution.
+
+This distinction matters because Megabouts is distributed under a
+non-commercial research and academic-use license. Palette should not copy or
+vendor Megabouts source code or model weights. If Palette calls Megabouts APIs,
+the derived run must record the package version or checkout commit, the
+non-commercial license, and the citation:
+
+```text
+Jouary et al., "Megabouts: a flexible pipeline for zebrafish locomotion
+analysis", bioRxiv, doi:10.1101/2024.09.14.613078
+```
+
+Palette-native preprocessing can use standard operations such as interpolation,
+PCA denoising, Savitzky-Golay smoothing, baseline subtraction, and vigor
+estimation, but that method must be named and attributed as Palette-native
+unless it directly calls Megabouts.
+
 ### BEAST / Johnson-Style Analyses
 
 BEAST-style behavior modeling treats larval behavior as sequences of bouts and
@@ -234,13 +291,16 @@ estimators. They should not overwrite each other.
 ### Tool-Ready Tail Posture View
 
 To interoperate with external tools, Palette should provide a tool-ready view or
-export with the following logical fields:
+export with the following logical fields. The future persistent family should be
+tool-neutral so Megabouts, ZebraZoom, Stytra, and other methods can each have
+their own convention-specific view:
 
 ```text
-tail_posture_view/
+analysis/tail_posture_view_runs/<run>/
   attrs:
-    schema_id                         "analysis.tail_posture_view"
+    schema_id                         "analysis.tail_posture_view_runs"
     schema_version                    1
+    view_family                       "megabouts" | "zebrazoom" | "stytra" | "palette_native"
     source_estimator_family           "subject_shape" | "pose_keypoints" | "external_import"
     source_run
     source_component_or_labels
@@ -273,8 +333,10 @@ tail_posture_view/
 This does not need to be the primary permanent run family. Palette-native
 behavior-facing tail metrics should live in
 `analysis/tail_kinematics_runs/<run>` first, then tool-ready views can be
-generated from those arrays plus the source subject-shape geometry. See
-[tail_kinematics_run_design.md](tail_kinematics_run_design.md).
+generated from those arrays plus the source subject-shape geometry. For tools
+whose angle semantics differ from Palette's native tangent angles, the view
+should derive directly from the source ordered curve/keypoints and record that
+conversion. See [tail_kinematics_run_design.md](tail_kinematics_run_design.md).
 
 ### External Classification Outputs
 
@@ -315,6 +377,38 @@ analysis/bout_classification_runs/<run>/
 The classifier run may store compact method-specific features, but it should
 not duplicate dense video, masks, or full tail-posture arrays unless required
 for reproducibility and explicitly named as an export artifact.
+
+### Tail Posture Preprocessing Runs
+
+Preprocessing is an algorithmic transform and should be separate from
+tool-compatible posture views. This lets users compare different preprocessing
+methods without regenerating geometry or classifier labels.
+
+Recommended future shape:
+
+```text
+analysis/tail_posture_preprocessing_runs/<run>/
+  attrs:
+    schema_id                         "analysis.tail_posture_preprocessing_runs"
+    schema_version                    1
+    preprocessing_family              "palette_standard_tail_preprocessing" | "megabouts"
+    source_tail_posture_view_run
+    config_json
+    api_entrypoint                    optional
+    package_version                   optional
+    package_git_commit                optional
+    license                           optional
+    citation                          optional
+
+  frame_index
+  angle_raw_rad
+  angle_processed_rad
+  angle_baseline_rad
+  tail_vigor
+  no_tracking
+  valid
+  failure_reason_bytes
+```
 
 ## Adapter Strategy
 

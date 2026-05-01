@@ -302,8 +302,17 @@ Palette-native inputs for Megabouts can be generated from:
 - `analysis/track_kinematics_runs` for `head_x`, `head_y`, `head_yaw`,
   position, and trajectory.
 - `analysis/subject_shape_runs` for `tail_x`, `tail_y`.
-- `analysis/tail_kinematics_runs` for `tail_angle`.
+- `analysis/tail_kinematics_runs` for Palette-native tangent-angle review
+  and comparison.
 - `analysis/swim_bout_runs` when using Palette-selected bout windows.
+
+Megabouts-compatible `tail_angle` should not be assumed to be Palette
+`tail_angle_rad`. Palette `tail_angle_rad` is a local body-frame tangent angle
+sampled along the tail. Megabouts `tail_angle` is a cumulative segment-angle
+trace derived from ordered keypoints. The first Megabouts adapter should
+therefore derive its `tail_angle` from `K=11` subject-shape tail keypoints via
+Megabouts' own keypoint conversion, then compare it against Palette
+`tail_angle_rad` only as an audit.
 
 The preferred first step is an export or view, not duplicated permanent arrays:
 
@@ -315,7 +324,8 @@ Palette sources
 ```
 
 If we persist a Megabouts-ready view inside Zarr, it should be clearly marked as
-a tool view:
+a tool view. For one-off compatibility this could be nested under the source
+run:
 
 ```text
 analysis/tail_kinematics_runs/<run>/tool_views/megabouts/
@@ -339,8 +349,29 @@ analysis/tail_kinematics_runs/<run>/tool_views/megabouts/
   tracking_valid
 ```
 
+For multiple external tools, prefer promoting the same concept to a sibling run
+family:
+
+```text
+analysis/tail_posture_view_runs/<run>/
+  attrs:
+    view_family                       "megabouts"
+    source_subject_shape_run
+    source_tail_kinematics_run        optional comparison source
+    keypoint_count                    11
+    angle_count                       10
+    angle_convention                  "megabouts_cumulative_segment_angle"
+
+  frame_index
+  tail_keypoints_xy                   (N, 11, 2)
+  tail_angle_rad                      (N, 10)
+  valid
+  failure_reason_bytes
+```
+
 This view is a compatibility artifact. It should be regenerated from Palette
-sources when needed.
+sources when needed and should not redefine Palette's native tail-kinematics
+schema.
 
 Megabouts outputs should land in classifier/import runs:
 

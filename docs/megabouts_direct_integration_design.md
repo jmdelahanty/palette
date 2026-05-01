@@ -37,6 +37,64 @@ should be an adapter that:
 Parquet exports remain useful later for cross-recording grouped analytics.
 They should not be required for direct runtime integration.
 
+### Dependency Boundary And User Experience
+
+Palette should be Megabouts-compatible, not Megabouts-dependent.
+
+The default Palette installation should be able to produce Megabouts-compatible
+tail posture views without requiring users to install or maintain Megabouts:
+
+```text
+Palette install
+  -> subject-shape tail geometry
+  -> megabouts-compatible tail posture view
+  -> visualization/export/review
+```
+
+Actual Megabouts execution should be optional:
+
+```text
+optional Megabouts install
+  -> Megabouts preprocessing/classifier execution
+  -> Palette derived output runs with Megabouts provenance
+```
+
+Do not make Megabouts a required Palette dependency. Do not vendor Megabouts
+source code or model weights into Palette. Commands that require Megabouts
+should fail gracefully with an install/configuration message and should record
+the Megabouts package version or checkout commit when they run.
+
+If Palette implements a native preprocessing method using standard signal
+processing operations, it should be named as a Palette method, for example
+`palette_standard_tail_preprocessing`, not `megabouts`, unless it actually
+calls Megabouts APIs.
+
+### License And Attribution Boundary
+
+The local Megabouts checkout is distributed under a non-commercial research and
+academic-use license, not a permissive MIT/BSD/Apache-style license. The local
+`pyproject.toml` classifies it as `License :: Other/Proprietary License`, and
+`LICENSE.md` restricts use and derivative works to internal non-commercial
+research and academic use.
+
+Practical policy:
+
+- Calling Megabouts as an optional installed dependency is acceptable for
+  non-commercial academic workflows when the run records attribution and
+  version/provenance.
+- Copying, vendoring, or close-porting Megabouts source code into Palette should
+  be avoided unless the project explicitly accepts the derivative-work/license
+  implications.
+- Independently implementing standard preprocessing operations in Palette is
+  allowed as a Palette-native method, but it should not be described as
+  Megabouts unless it calls Megabouts.
+- Any publication or run report using Megabouts-derived outputs should cite
+  Jouary et al., "Megabouts: a flexible pipeline for zebrafish locomotion
+  analysis", bioRxiv, doi:10.1101/2024.09.14.613078.
+- If a workflow involves fee-for-service, industry collaboration, or other
+  commercial rights, the license question should be reviewed outside Palette
+  development before using Megabouts.
+
 ### Current Direction
 
 The first implementation target is classifier-only integration:
@@ -134,6 +192,11 @@ They may be related, but they are not safe to treat as identical until a
 recording-level convention audit confirms sign, offset, coordinate handedness,
 and segment placement.
 
+The current canary audit supports that separation: direct sign is better than
+sign-flipped, but residuals remain large enough that the first classifier
+adapter should derive Megabouts angles from K=11 keypoints instead of passing
+Palette `tail_angle_rad` directly.
+
 Palette's current behavior-facing `analysis/tail_kinematics_runs` default is
 `K=10` angle samples. That default should remain valid. It is reasonable to
 try a `K=11` behavior-facing tail-kinematics candidate for review, especially
@@ -145,6 +208,27 @@ For the first Megabouts classifier adapter, prefer deriving Megabouts
 `tail_angle` from `K=11` keypoints via Megabouts' own conversion. Do not pass
 Palette `tail_angle_rad` directly as Megabouts `tail_angle` until the convention
 audit proves the mapping is safe.
+
+If these arrays are persisted before classification, they should be persisted
+as a tool-specific posture view, not as a replacement `tail_kinematics_runs`
+output:
+
+```text
+analysis/tail_posture_view_runs/<run>/
+  attrs:
+    view_family                       "megabouts"
+    source_subject_shape_run
+    source_tail_kinematics_run        optional comparison source
+    keypoint_count                    11
+    angle_count                       10
+    angle_convention                  "megabouts_cumulative_segment_angle"
+
+  frame_index
+  tail_keypoints_xy                   (N, 11, 2)
+  tail_angle_rad                      (N, 10)
+  valid
+  failure_reason_bytes
+```
 
 ### Preprocessing
 
@@ -178,6 +262,50 @@ computes axial/lateral/yaw speed, and computes a trajectory activity signal.
 Important Palette implication: invalid Palette frames should enter Megabouts as
 NaNs, not zeros. Megabouts will zero-fill only after it has recorded
 `no_tracking`.
+
+Palette should distinguish three preprocessing cases:
+
+```text
+megabouts_compatible_posture_view
+  Clean geometric adapter. No Megabouts dependency required.
+
+palette_standard_tail_preprocessing
+  Palette-native standard signal-processing implementation. No Megabouts
+  dependency required. Must not be labeled as Megabouts output.
+
+megabouts_tail_preprocessing
+  Optional third-party execution that directly calls Megabouts APIs. Requires
+  Megabouts to be installed/configured and records license/citation/version
+  provenance.
+```
+
+If Megabouts preprocessing outputs are persisted, use a separate run family so
+different preprocessing configs can be compared without regenerating the
+geometric posture view:
+
+```text
+analysis/tail_posture_preprocessing_runs/<run>/
+  attrs:
+    schema_id                         "analysis.tail_posture_preprocessing_runs"
+    schema_version                    1
+    preprocessing_family              "megabouts" | "palette_standard_tail_preprocessing"
+    source_tail_posture_view_run
+    config_json
+    api_entrypoint                    optional, for third-party calls
+    package_version                   optional
+    package_git_commit                optional
+    license                           optional
+    citation                          optional
+
+  frame_index
+  angle_raw_rad
+  angle_processed_rad
+  angle_baseline_rad
+  tail_vigor
+  no_tracking
+  valid
+  failure_reason_bytes
+```
 
 ### Segmentation And Classification
 
