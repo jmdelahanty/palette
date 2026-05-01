@@ -185,7 +185,12 @@ def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: 
     assert data.position_unit == "mm"
     assert "speed_smoothed_mm" in data.series
     assert "smoothed_acceleration_mm" in data.series
+    assert "speed_filtered_acceleration_mm" in data.series
+    assert "speed_filtered_smoothed_acceleration_mm" in data.series
     assert "angular_speed_smoothed_deg_s" in data.series
+    np.testing.assert_allclose(data.series["smoothed_acceleration_mm"], np.full(6, 0.35))
+    np.testing.assert_allclose(data.series["speed_filtered_acceleration_mm"], np.full(6, 0.2))
+    np.testing.assert_allclose(data.series["speed_filtered_smoothed_acceleration_mm"], np.full(6, 0.25))
     assert data.source_paths["time_seconds"].endswith("/tracks/id_0/time_seconds")
     assert data.validity_source == "track_validity"
     assert data.validity_labels.tolist() == ["transition:frame_gap", "sample:keypoint_failed"]

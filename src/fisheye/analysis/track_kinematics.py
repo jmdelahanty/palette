@@ -79,6 +79,15 @@ SPEED_DERIVATIVE_LEVELS = (
 SPEED_DERIVATIVES_SCHEMA_ID = "palette.track_speed_derivatives.v1"
 SPEED_DERIVATIVE_SCHEMA_ID = "palette.track_speed_derivative.v1"
 DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL = "speed_smoothed"
+MOVEMENT_SCHEMA_ID = "palette.track_movement.v2"
+MOVEMENT_SPEED_SCHEMA_ID = "palette.track_movement_speed.v2"
+MOVEMENT_SPEED_LEVEL_SCHEMA_ID = "palette.track_movement_speed_level.v2"
+MOVEMENT_SPEED_LEVEL_NAMES = {
+    "speed_raw": "raw",
+    "speed_filtered": "filtered",
+    "speed_smoothed": "smoothed",
+    "speed_averaged": "averaged",
+}
 
 
 @dataclass
@@ -1261,6 +1270,11 @@ def save_track_kinematics_tracks(
             data["speed_derivatives"],
             chunks=base_chunk,
         )
+        _write_movement_speed_groups(
+            subgroup,
+            data,
+            chunks=base_chunk,
+        )
         subgroup.create_array(
             "frame_path_distance_raw_px",
             data=data["frame_path_distance_raw_px"],
@@ -1356,6 +1370,108 @@ def save_track_kinematics_tracks(
 
     run_group.attrs["track_manifest"] = manifest
     return ordered_ids
+
+
+def _write_movement_speed_groups(
+    track_group: zarr.Group,
+    data: Dict[str, Any],
+    *,
+    chunks: Tuple[int, ...],
+) -> None:
+    """Write the grouped v2 movement/speed layout alongside flat v1 arrays."""
+
+    movement = track_group.create_group("movement")
+    movement.attrs.update(
+        {
+            "schema_id": MOVEMENT_SCHEMA_ID,
+            "layout": "movement/speed/<level>",
+            "compatibility_flat_arrays": True,
+            "compatibility_speed_derivatives": True,
+        }
+    )
+    speed_parent = movement.create_group("speed")
+    speed_parent.attrs.update(
+        {
+            "schema_id": MOVEMENT_SPEED_SCHEMA_ID,
+            "levels": list(MOVEMENT_SPEED_LEVEL_NAMES.values()),
+            "source_level_names": dict(MOVEMENT_SPEED_LEVEL_NAMES),
+            "preferred_read_contract": "movement/speed/<level>",
+        }
+    )
+
+    path_distance_by_level = {
+        "speed_raw": ("frame_path_distance_raw_px", "frame_path_distance_raw_mm"),
+        "speed_filtered": ("frame_path_distance_filtered_px", "frame_path_distance_filtered_mm"),
+        "speed_smoothed": ("frame_path_distance_smoothed_px", "frame_path_distance_smoothed_mm"),
+    }
+    derivatives = data["speed_derivatives"]
+
+    for source_level, group_name in MOVEMENT_SPEED_LEVEL_NAMES.items():
+        level_group = speed_parent.create_group(group_name)
+        derivative = derivatives[source_level]
+        flat_px_key = f"{source_level}_px"
+        flat_mm_key = f"{source_level}_mm"
+        level_group.attrs.update(
+            {
+                "schema_id": MOVEMENT_SPEED_LEVEL_SCHEMA_ID,
+                "source_speed_level": source_level,
+                "level": group_name,
+                "units_px": "px/s",
+                "units_mm": "mm/s",
+                "flat_speed_px_array": f"../../../{flat_px_key}",
+                "flat_speed_mm_array": f"../../../{flat_mm_key}",
+                "time_delta_array": "../../../delta_seconds",
+                "derivative_method": str(derivative.get("derivative_method", "first_difference")),
+                "post_smoothing_method": str(derivative.get("post_smoothing_method", "moving_average")),
+                "post_smoothing_alignment": str(derivative.get("post_smoothing_alignment", "centered")),
+                "post_smoothing_window_frames": int(derivative.get("post_smoothing_window_frames", 1)),
+                "post_smoothing_window_s": float(derivative.get("post_smoothing_window_s", 0.0)),
+            }
+        )
+        level_group.create_array("px", data=data[flat_px_key], chunks=chunks, overwrite=True)
+        level_group.create_array("mm", data=data[flat_mm_key], chunks=chunks, overwrite=True)
+        level_group.create_array(
+            "acceleration_px",
+            data=_float32(np.asarray(derivative["acceleration_px"])),
+            chunks=chunks,
+            overwrite=True,
+        )
+        level_group.create_array(
+            "acceleration_mm",
+            data=_float32(np.asarray(derivative["acceleration_mm"])),
+            chunks=chunks,
+            overwrite=True,
+        )
+        level_group.create_array(
+            "smoothed_acceleration_px",
+            data=_float32(np.asarray(derivative["smoothed_acceleration_px"])),
+            chunks=chunks,
+            overwrite=True,
+        )
+        level_group.create_array(
+            "smoothed_acceleration_mm",
+            data=_float32(np.asarray(derivative["smoothed_acceleration_mm"])),
+            chunks=chunks,
+            overwrite=True,
+        )
+
+        path_keys = path_distance_by_level.get(source_level)
+        if path_keys is not None:
+            path_px_key, path_mm_key = path_keys
+            level_group.attrs["flat_frame_path_distance_px_array"] = f"../../../{path_px_key}"
+            level_group.attrs["flat_frame_path_distance_mm_array"] = f"../../../{path_mm_key}"
+            level_group.create_array(
+                "frame_path_distance_px",
+                data=data[path_px_key],
+                chunks=chunks,
+                overwrite=True,
+            )
+            level_group.create_array(
+                "frame_path_distance_mm",
+                data=data[path_mm_key],
+                chunks=chunks,
+                overwrite=True,
+            )
 
 
 def _write_speed_derivative_groups(

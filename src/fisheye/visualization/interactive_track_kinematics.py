@@ -208,11 +208,60 @@ def _load_track_array(
     values = _load_array(root, source_paths, key)
     if values is not None:
         return values
+    movement_path = _movement_speed_path_for_track_key(run_path, track_id, key)
+    if movement_path is not None:
+        try:
+            return np.asarray(root[movement_path][:])
+        except Exception:
+            pass
     direct_path = _join_path(run_path, "tracks", f"id_{int(track_id)}", key)
     try:
         return np.asarray(root[direct_path][:])
     except Exception:
         return None
+
+
+def _movement_speed_path_for_track_key(
+    run_path: str,
+    track_id: int,
+    key: str,
+) -> Optional[str]:
+    """Return the v2 movement/speed path for a legacy logical series key."""
+
+    level_by_prefix = {
+        "speed_raw": "raw",
+        "speed_filtered": "filtered",
+        "speed_smoothed": "smoothed",
+        "speed_averaged": "averaged",
+    }
+    for prefix, level in level_by_prefix.items():
+        if key == f"{prefix}_px":
+            return _join_path(run_path, "tracks", f"id_{int(track_id)}", "movement", "speed", level, "px")
+        if key == f"{prefix}_mm":
+            return _join_path(run_path, "tracks", f"id_{int(track_id)}", "movement", "speed", level, "mm")
+        for suffix in (
+            "acceleration_px",
+            "acceleration_mm",
+            "smoothed_acceleration_px",
+            "smoothed_acceleration_mm",
+            "frame_path_distance_px",
+            "frame_path_distance_mm",
+        ):
+            if key == f"{prefix}_{suffix}":
+                return _join_path(
+                    run_path,
+                    "tracks",
+                    f"id_{int(track_id)}",
+                    "movement",
+                    "speed",
+                    level,
+                    suffix,
+                )
+
+    if key in {"acceleration_px", "acceleration_mm", "smoothed_acceleration_px", "smoothed_acceleration_mm"}:
+        return _join_path(run_path, "tracks", f"id_{int(track_id)}", "movement", "speed", "smoothed", key)
+
+    return None
 
 
 def _load_track_attrs(
@@ -1355,6 +1404,28 @@ def _collect_series(
         "acceleration_px",
         "smoothed_acceleration_mm",
         "smoothed_acceleration_px",
+        "speed_raw_acceleration_mm",
+        "speed_raw_acceleration_px",
+        "speed_raw_smoothed_acceleration_mm",
+        "speed_raw_smoothed_acceleration_px",
+        "speed_filtered_acceleration_mm",
+        "speed_filtered_acceleration_px",
+        "speed_filtered_smoothed_acceleration_mm",
+        "speed_filtered_smoothed_acceleration_px",
+        "speed_smoothed_acceleration_mm",
+        "speed_smoothed_acceleration_px",
+        "speed_smoothed_smoothed_acceleration_mm",
+        "speed_smoothed_smoothed_acceleration_px",
+        "speed_averaged_acceleration_mm",
+        "speed_averaged_acceleration_px",
+        "speed_averaged_smoothed_acceleration_mm",
+        "speed_averaged_smoothed_acceleration_px",
+        "speed_raw_frame_path_distance_mm",
+        "speed_raw_frame_path_distance_px",
+        "speed_filtered_frame_path_distance_mm",
+        "speed_filtered_frame_path_distance_px",
+        "speed_smoothed_frame_path_distance_mm",
+        "speed_smoothed_frame_path_distance_px",
         "delta_heading_degrees",
         "angular_velocity_deg_s",
         "angular_velocity_raw_deg_s",

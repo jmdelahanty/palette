@@ -68,6 +68,22 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     _write_track_array(track, "smoothed_acceleration_mm", np.zeros(n, dtype=np.float32))
     _write_track_array(track, "cumulative_path_distance_px", np.cumsum(speed_px).astype(np.float32))
     _write_track_array(track, "cumulative_path_distance_mm", np.cumsum(speed_mm).astype(np.float32))
+    movement_speed = track.create_group("movement").create_group("speed")
+    for idx, level in enumerate(("raw", "filtered", "smoothed", "averaged"), start=1):
+        level_group = movement_speed.create_group(level)
+        acceleration_px = np.full(n, float(idx), dtype=np.float32)
+        acceleration_mm = acceleration_px * 0.1
+        smoothed_acceleration_px = acceleration_px + 0.5
+        smoothed_acceleration_mm = smoothed_acceleration_px * 0.1
+        _write_track_array(level_group, "px", speed_px)
+        _write_track_array(level_group, "mm", speed_mm)
+        _write_track_array(level_group, "acceleration_px", acceleration_px)
+        _write_track_array(level_group, "acceleration_mm", acceleration_mm)
+        _write_track_array(level_group, "smoothed_acceleration_px", smoothed_acceleration_px)
+        _write_track_array(level_group, "smoothed_acceleration_mm", smoothed_acceleration_mm)
+        if level != "averaged":
+            _write_track_array(level_group, "frame_path_distance_px", speed_px)
+            _write_track_array(level_group, "frame_path_distance_mm", speed_mm)
     _write_track_array(track, "transition_valid", np.asarray([False, True, False, True, True, True], dtype=bool))
     _write_track_array(track, "transition_reason_code", np.asarray([1, 0, 2, 0, 0, 0], dtype=np.int16))
     _write_track_array(track, "sample_valid", np.asarray([True, True, True, False, True, True], dtype=bool))
@@ -120,8 +136,17 @@ def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_pat
     assert spec["schema_id"] == mod.TRACK_KINEMATICS_PLOT_SPEC_SCHEMA_ID
     assert spec["track_id"] == 0
     assert spec["source_paths"]["positions_mm"].endswith("/tracks/id_0/positions_mm")
+    assert spec["source_paths"]["speed_smoothed_mm"].endswith(
+        "/tracks/id_0/movement/speed/smoothed/mm"
+    )
     assert spec["source_paths"]["smoothed_acceleration_mm"].endswith(
-        "/tracks/id_0/smoothed_acceleration_mm"
+        "/tracks/id_0/movement/speed/smoothed/smoothed_acceleration_mm"
+    )
+    assert spec["source_paths"]["speed_filtered_acceleration_mm"].endswith(
+        "/tracks/id_0/movement/speed/filtered/acceleration_mm"
+    )
+    assert spec["source_paths"]["speed_filtered_frame_path_distance_mm"].endswith(
+        "/tracks/id_0/movement/speed/filtered/frame_path_distance_mm"
     )
     assert spec["source_paths"]["angular_speed_smoothed_deg_s"].endswith(
         "/tracks/id_0/angular_speed_smoothed_deg_s"

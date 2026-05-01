@@ -1195,7 +1195,12 @@ Each track stores the ordered samples for that ID:
 - `speed_filtered_px`, `speed_filtered_mm`: Speed after hysteresis filtering
 - `speed_smoothed_px`, `speed_smoothed_mm`: Speed after temporal smoothing
 - `speed_averaged_px`, `speed_averaged_mm`: Optional longer-window averaged speed
-- `speed_derivatives/`: Preferred acceleration hierarchy. Each child group is
+- `movement/speed/<raw|filtered|smoothed|averaged>/`: Preferred v2 grouped
+  movement layout. Each level stores `px`, `mm`, `acceleration_px`,
+  `acceleration_mm`, `smoothed_acceleration_px`,
+  `smoothed_acceleration_mm`, and, where defined for that level,
+  `frame_path_distance_px` and `frame_path_distance_mm`.
+- `speed_derivatives/`: Transitional source-scoped acceleration mirror. Each child group is
   keyed by source speed level: `speed_raw`, `speed_filtered`,
   `speed_smoothed`, `speed_averaged`.
   - `speed_derivatives/<level>/acceleration_px`, `acceleration_mm`: Framewise
@@ -1215,8 +1220,9 @@ Each track stores the ordered samples for that ID:
 - `smoothed_heading_degrees`, `smoothed_heading_radians`
 - `acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`,
   `smoothed_acceleration_mm`: Compatibility aliases for
-  `speed_derivatives/speed_smoothed/*`. New consumers should read the explicit
-  derivative group so the source speed trace is unambiguous.
+  `movement/speed/smoothed/*` and `speed_derivatives/speed_smoothed/*`. New
+  consumers should read the grouped movement layout so the source speed trace
+  is unambiguous.
 - `frame_path_distance_raw_px`, `frame_path_distance_raw_mm`: Gap-aware pre-hysteresis frame path-distance increments
 - `frame_path_distance_filtered_px`, `frame_path_distance_filtered_mm`: Gap-aware hysteresis-filtered frame path-distance increments
 - `frame_path_distance_smoothed_px`, `frame_path_distance_smoothed_mm`: Gap-aware temporally smoothed frame path-distance increments
@@ -1225,10 +1231,10 @@ Each track stores the ordered samples for that ID:
 - `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
 - `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `path_length_mm`, `net_displacement_mm`, `mean_speed_mm_s`, `peak_detection_signal_mm_s`, `peak_physical_speed_mm_s`, …) with subgroup attrs recording the source swim-bout run. Treat this as a convenience mirror; `analysis/swim_bout_runs` remains the authoritative segmentation surface.
 
-**Proposed v2 movement layout**:
-The current flat speed arrays plus `speed_derivatives/` hierarchy are the v1
-transition contract. A future schema bump should consider grouping speed values,
-path-distance increments, and speed-derived acceleration together:
+**Preferred v2 movement layout**:
+The flat speed arrays plus `speed_derivatives/` hierarchy are retained for
+compatibility. New runs also group speed values, path-distance increments, and
+speed-derived acceleration together:
 
 ```text
 tracks/id_<track>/movement/speed/<raw|filtered|smoothed|averaged>/
@@ -1242,10 +1248,9 @@ tracks/id_<track>/movement/speed/<raw|filtered|smoothed|averaged>/
   smoothed_acceleration_mm
 ```
 
-New reader code should be prepared to prefer `movement/speed/<level>/...` once
-available, then fall back to the v1 `speed_derivatives/<level>/...` and flat
-speed arrays, then fall back to historical flat acceleration arrays only for
-older archives.
+New reader code should prefer `movement/speed/<level>/...`, then fall back to
+the v1 `speed_derivatives/<level>/...` and flat speed arrays, then fall back to
+historical flat acceleration arrays only for older archives.
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
@@ -1293,6 +1298,23 @@ to define that subgroup's bout boundaries. `peak_physical_speed_mm_s` is the
 maximum of the declared physical movement source inside the same boundaries.
 For identity levels these can be equal; for transformed detector signals they
 are intentionally distinct.
+
+**Source-speed selection rule**:
+`analysis/swim_bout_runs` is a separate event-candidate surface, not a child of
+`track_kinematics_runs/.../movement/speed`. Viewers should connect the two by
+matching lineage metadata. Given a selected track-kinematics run, `track_id`,
+and speed source, a compatible swim-bout subgroup must either:
+
+- directly represent that speed level, for example selected `filtered` speed
+  maps to subgroup `speed_filtered`, or
+- represent a transformed detector signal whose attrs point back to that
+  selected speed source, for example `speed_exponential` with
+  `detection_signal_source_level="filtered"`.
+
+Consumers should auto-select direct matches first and present transformed
+matches as additional candidates. They should not auto-use a bout subgroup whose
+detector source points at a different speed trace than the one selected by the
+operator.
 
 Duration parameters are operator-facing seconds by default, but bout
 segmentation is frame-discrete. New runs resolve positive second durations with

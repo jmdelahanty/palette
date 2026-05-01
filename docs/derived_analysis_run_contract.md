@@ -239,6 +239,16 @@ measurement source, for example `movement_metric_source_level="filtered"` with
 `frame_path_distance_filtered_*` arrays. Existing fields follow this split by
 separating `peak_detection_signal_mm_s` from `peak_physical_speed_mm_s`.
 
+This separation also defines viewer behavior. Selecting a speed trace in a UI
+should not imply that bout candidates are stored inside that speed group.
+Instead, the UI should discover `analysis/swim_bout_runs` candidates linked to
+the same track-kinematics run and `track_id`, then filter speed-level subgroups
+by source metadata. Direct candidates match the selected speed level itself;
+transformed candidates are compatible only when their detector-source metadata
+points back to the selected speed source. This lets a viewer auto-show or
+auto-use bout segmentations for the selected speed trace while preserving
+`swim_bout_runs` as an independently versioned event-candidate family.
+
 The boundary-duration fields in `swim_bout_runs` are still detector-boundary
 measurements. `duration_s`, `observed_duration_s`, and `core_duration_*`
 describe the stored bout window/core chosen by the detector and boundary

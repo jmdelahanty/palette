@@ -680,6 +680,44 @@ def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.
         "run": run_path,
         "track": track_path,
     }
+    movement_speed_levels = {
+        "raw": "speed_raw",
+        "filtered": "speed_filtered",
+        "smoothed": "speed_smoothed",
+        "averaged": "speed_averaged",
+    }
+    movement = track_group.get("movement")
+    speed_parent = movement.get("speed") if movement is not None else None
+    if speed_parent is not None:
+        for level_name, flat_prefix in movement_speed_levels.items():
+            if level_name not in speed_parent:
+                continue
+            level_group = speed_parent[level_name]
+            movement_path = f"{track_path}/movement/speed/{level_name}"
+            for unit in ("px", "mm"):
+                if unit in level_group:
+                    source_paths[f"{flat_prefix}_{unit}"] = f"{movement_path}/{unit}"
+                accel_key = f"acceleration_{unit}"
+                if accel_key in level_group:
+                    if level_name == "smoothed":
+                        source_paths[accel_key] = f"{movement_path}/{accel_key}"
+                    source_paths[f"{flat_prefix}_{accel_key}"] = f"{movement_path}/{accel_key}"
+                smooth_accel_key = f"smoothed_acceleration_{unit}"
+                if smooth_accel_key in level_group:
+                    if level_name == "smoothed":
+                        source_paths[smooth_accel_key] = f"{movement_path}/{smooth_accel_key}"
+                    source_paths[f"{flat_prefix}_{smooth_accel_key}"] = (
+                        f"{movement_path}/{smooth_accel_key}"
+                    )
+                path_key = f"frame_path_distance_{unit}"
+                if path_key in level_group:
+                    source_paths[f"{flat_prefix}_{path_key}"] = (
+                        f"{movement_path}/{path_key}"
+                    )
+                    source_paths[f"frame_path_distance_{level_name}_{unit}"] = (
+                        f"{movement_path}/{path_key}"
+                    )
+
     track_arrays = (
         "time_seconds",
         "frame_indices",
@@ -713,7 +751,7 @@ def _track_source_paths(run_name: str, track_group: zarr.Group, run_group: zarr.
         "transition_reason_code",
     )
     for name in track_arrays:
-        if name in track_group:
+        if name in track_group and name not in source_paths:
             source_paths[name] = f"{track_path}/{name}"
 
     run_arrays = (

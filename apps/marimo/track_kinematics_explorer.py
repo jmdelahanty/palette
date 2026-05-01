@@ -283,7 +283,12 @@ def _(initial_run_path, mo, track_options):
         value=_selected_default,
         label="Track kinematics run",
     )
-    track_picker
+    mo.vstack(
+        [
+            mo.md("### Analysis Selection"),
+            track_picker,
+        ]
+    )
     return track_label_to_option, track_picker
 
 
@@ -845,13 +850,106 @@ def _(
         },
     ]
     selected_summary_df = pd.DataFrame(_selected_summary_rows)
+    selected_analysis_tree = {
+        "archive": str(data.zarr_path),
+        "track_kinematics": {
+            "run": selected_track.run_name,
+            "run_path": selected_track.run_path,
+            "scope": selected_track.run_scope,
+            "track_id": int(selected_track.track_id),
+            "latest": bool(selected_track.is_latest),
+            "artifact": {
+                "name": data.artifact_name,
+                "renderer": data.attrs.get("renderer", "unknown"),
+                "schema_id": data.spec.get("schema_id", "unknown"),
+            },
+            "speed_selection": {
+                "selected_level": selected_speed_level or "artifact/default",
+                "position_unit": data.position_unit,
+                "available_speed_series": [
+                    _column
+                    for _column in sorted(data.series)
+                    if _column.startswith("speed_")
+                    and (_column.endswith("_mm") or _column.endswith("_px"))
+                ],
+                "available_derivative_series": [
+                    _column
+                    for _column in sorted(data.series)
+                    if "acceleration" in _column
+                ],
+            },
+        },
+        "swim_bout_candidate": (
+            {
+                "run": selected_swim_bout.run_name,
+                "label": selected_swim_bout.label,
+                "latest": bool(selected_swim_bout.is_latest),
+                "selected_speed_level": selected_swim_bout.speed_level,
+                "default_level": selected_swim_bout.default_level,
+                "source_track_kinematics_run": selected_swim_bout.source_track_kinematics_run,
+                "track_id": selected_swim_bout.track_id,
+                "detection_method": selected_swim_bout.detection_method,
+                "threshold_mm_s": selected_swim_bout.threshold_mm,
+                "exponential_tau_s": selected_swim_bout.exponential_tau_s,
+                "exponential_source_level": selected_swim_bout.exponential_source_level,
+                "n_bouts_by_level": dict(selected_swim_bout.n_bouts_by_level),
+                "loaded_overlay": {
+                    "label": data.swim_bout_label,
+                    "source": data.swim_bout_source,
+                    "rows": int(data.swim_bouts.shape[0]),
+                },
+            }
+            if selected_swim_bout
+            else None
+        ),
+        "bout_kinematics_candidate": (
+            {
+                "run": selected_bout_kinematics.run_name,
+                "label": selected_bout_kinematics.label,
+                "latest": bool(selected_bout_kinematics.is_latest),
+                "source_track_kinematics_run": selected_bout_kinematics.source_track_kinematics_run,
+                "source_track_id": selected_bout_kinematics.source_track_id,
+                "source_swim_bout_run": selected_bout_kinematics.source_swim_bout_run,
+                "source_swim_bout_speed_level": selected_bout_kinematics.source_swim_bout_speed_level,
+                "pre_post_mode": selected_bout_kinematics.pre_post_mode,
+                "default_heading_level": selected_bout_kinematics.default_heading_level,
+                "heading_levels": list(selected_bout_kinematics.heading_levels),
+                "n_rows_by_level": dict(selected_bout_kinematics.n_rows_by_level),
+                "loaded_rows": int(len(bout_kinematics_df)),
+                "attrs": dict(bout_kinematics_attrs),
+            }
+            if selected_bout_kinematics
+            else None
+        ),
+        "eye_angle_run": (
+            {
+                "run": selected_eye_angle.run_name,
+                "run_path": selected_eye_angle.run_path,
+                "label": selected_eye_angle.label,
+                "latest": bool(selected_eye_angle.is_latest),
+                "schema_version": selected_eye_angle.schema_version,
+                "preferred_angle_family": selected_eye_angle.preferred_angle_family,
+                "preferred_eye_axis": selected_eye_angle.preferred_eye_axis,
+                "declared_row_axis": selected_eye_angle.row_axis,
+                "loaded_row_axis": eye_angle_row_axis,
+                "selected_representation": selected_eye_angle_representation,
+                "declared_rows": int(selected_eye_angle.n_rows),
+                "loaded_rows": int(len(eye_angle_df)),
+                "attrs": dict(eye_angle_attrs),
+            }
+            if selected_eye_angle
+            else None
+        ),
+    }
     mo.vstack(
         [
             mo.md("### Selected Candidate Details"),
             mo.ui.table(selected_summary_df, selection=None),
+            mo.md("### Selected Analysis Tree"),
+            mo.tree(selected_analysis_tree),
         ]
     )
-    return (selected_summary_df,)
+    return selected_analysis_tree, selected_summary_df
 
 
 @app.cell
@@ -934,9 +1032,24 @@ def _(
         if "acceleration" in _column.lower()
         and timeseries_df[_column].notna().any()
     ]
+    _accel_level = _level
+    if _accel_level == "exponential" and selected_swim_bout is not None:
+        _accel_level = str(selected_swim_bout.exponential_source_level or "filtered").removeprefix("speed_")
+    _source_acceleration_candidates = (
+        f"speed_{_accel_level}_smoothed_acceleration_mm",
+        f"speed_{_accel_level}_acceleration_mm",
+        f"speed_{_accel_level}_smoothed_acceleration_px",
+        f"speed_{_accel_level}_acceleration_px",
+    ) if _accel_level else ()
     _default_acceleration_columns = [
         _column
-        for _column in ("smoothed_acceleration_mm", "smoothed_acceleration_px", "acceleration_mm", "acceleration_px")
+        for _column in (
+            *_source_acceleration_candidates,
+            "smoothed_acceleration_mm",
+            "smoothed_acceleration_px",
+            "acceleration_mm",
+            "acceleration_px",
+        )
         if _column in _acceleration_columns
     ][:1]
     acceleration_series_picker = mo.ui.multiselect(

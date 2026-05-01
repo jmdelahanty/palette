@@ -394,17 +394,28 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
 
     subgroup = run_group["tracks"]["id_0"]
     derivatives = subgroup["speed_derivatives"]
+    movement_speed = subgroup["movement"]["speed"]
     assert derivatives.attrs["schema_id"] == "palette.track_speed_derivatives.v1"
     assert derivatives.attrs["default_source_speed_level"] == "speed_smoothed"
+    assert subgroup["movement"].attrs["schema_id"] == "palette.track_movement.v2"
+    assert movement_speed.attrs["schema_id"] == "palette.track_movement_speed.v2"
 
     expected_accel_px = np.array([np.nan, np.nan, 1.0], dtype=np.float32)
     expected_accel_mm = np.array([np.nan, np.nan, 2.0], dtype=np.float32)
-    for level in ("speed_raw", "speed_filtered", "speed_smoothed", "speed_averaged"):
+    for level, movement_level in (
+        ("speed_raw", "raw"),
+        ("speed_filtered", "filtered"),
+        ("speed_smoothed", "smoothed"),
+        ("speed_averaged", "averaged"),
+    ):
         level_group = derivatives[level]
+        movement_group = movement_speed[movement_level]
         assert level_group.attrs["schema_id"] == "palette.track_speed_derivative.v1"
         assert level_group.attrs["source_speed_level"] == level
         assert level_group.attrs["source_speed_px_array"] == f"../../{level}_px"
         assert level_group.attrs["time_delta_array"] == "../../delta_seconds"
+        assert movement_group.attrs["schema_id"] == "palette.track_movement_speed_level.v2"
+        assert movement_group.attrs["source_speed_level"] == level
         np.testing.assert_allclose(
             level_group["acceleration_px"][:],
             expected_accel_px,
@@ -413,6 +424,11 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
         np.testing.assert_allclose(
             level_group["acceleration_mm"][:],
             expected_accel_mm,
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            movement_group["acceleration_px"][:],
+            level_group["acceleration_px"][:],
             equal_nan=True,
         )
 
@@ -424,6 +440,16 @@ def test_save_track_kinematics_tracks_persists_speed_derivative_hierarchy() -> N
     np.testing.assert_allclose(
         subgroup["smoothed_acceleration_mm"][:],
         derivatives["speed_smoothed"]["smoothed_acceleration_mm"][:],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        movement_speed["smoothed"]["mm"][:],
+        subgroup["speed_smoothed_mm"][:],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        movement_speed["filtered"]["frame_path_distance_mm"][:],
+        subgroup["frame_path_distance_filtered_mm"][:],
         equal_nan=True,
     )
 
