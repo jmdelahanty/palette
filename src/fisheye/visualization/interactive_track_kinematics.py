@@ -726,6 +726,8 @@ def discover_eye_angle_run_options(zarr_path: Path | str) -> list[EyeAngleRunOpt
         n_rows = _first_array_length(
             roi_group,
             (
+                "vergence_eye_angle_deg",
+                "left_eye_angle_deg",
                 "mean_eye_vergence_gaze_deg",
                 "left_gaze_signed_deg",
                 "left_minor_signed_deg",
@@ -770,6 +772,20 @@ def discover_eye_angle_run_options(zarr_path: Path | str) -> list[EyeAngleRunOpt
 
 
 _EYE_ANGLE_TIMESERIES_COLUMNS: tuple[str, ...] = (
+    "left_eye_angle_deg",
+    "left_eye_angle_deg_smoothed",
+    "right_eye_angle_deg",
+    "right_eye_angle_deg_smoothed",
+    "vergence_eye_angle_deg",
+    "vergence_eye_angle_deg_smoothed",
+    "left_major_signed_deg",
+    "left_major_signed_deg_smoothed",
+    "right_major_signed_deg",
+    "right_major_signed_deg_smoothed",
+    "vergence_major_signed_deg",
+    "vergence_major_signed_deg_smoothed",
+    "version_major_deg",
+    "version_major_deg_smoothed",
     "left_gaze_signed_deg",
     "left_gaze_signed_deg_smoothed",
     "right_gaze_signed_deg",
@@ -850,6 +866,10 @@ def load_eye_angle_timeseries_data(
         _first_array_length(
             frame_group,
             (
+                "vergence_eye_angle_deg",
+                "vergence_eye_angle_deg_smoothed",
+                "left_eye_angle_deg",
+                "left_eye_angle_deg_smoothed",
                 "mean_eye_vergence_gaze_deg",
                 "mean_eye_vergence_gaze_deg_smoothed",
                 "left_gaze_signed_deg",
@@ -874,6 +894,8 @@ def load_eye_angle_timeseries_data(
         row_count = _first_array_length(
             roi_group,
             (
+                "vergence_eye_angle_deg",
+                "left_eye_angle_deg",
                 "mean_eye_vergence_gaze_deg",
                 "left_gaze_signed_deg",
                 "left_minor_signed_deg",

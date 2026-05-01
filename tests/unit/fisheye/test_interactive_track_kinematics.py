@@ -125,6 +125,12 @@ def _add_eye_angle_run(zarr_path: Path) -> None:
             "preferred_eye_axis": "ellipse_minor",
             "row_axis": "keypoint_detection_rows",
             "fps": 200.0,
+            "eye_angle_variant_schema": {
+                "schema_id": "analysis.eye_angle_variant_schema",
+                "schema_version": 1,
+                "default_representation": "eye_frame",
+                "representation_order": ["eye_frame", "gaze", "nasal_gaze"],
+            },
         }
     )
     angles = run.create_group("angles")
@@ -141,10 +147,19 @@ def _add_eye_angle_run(zarr_path: Path) -> None:
 
     roi.create_array("left_minor_signed_deg", data=np.asarray([-20.0, -10.0, -5.0], dtype=np.float32))
     roi.create_array("left_minor_signed_deg_smoothed", data=np.asarray([-18.0, -12.0, -6.0], dtype=np.float32))
+    roi.create_array("left_eye_angle_deg", data=np.asarray([20.0, 10.0, 5.0], dtype=np.float32))
+    roi.create_array("left_eye_angle_deg_smoothed", data=np.asarray([18.0, 12.0, 6.0], dtype=np.float32))
+    roi.create_array("right_eye_angle_deg", data=np.asarray([15.0, 12.0, 10.0], dtype=np.float32))
+    roi.create_array("right_eye_angle_deg_smoothed", data=np.asarray([14.0, 11.0, 9.0], dtype=np.float32))
+    roi.create_array("vergence_eye_angle_deg", data=np.asarray([35.0, 22.0, 15.0], dtype=np.float32))
+    roi.create_array("vergence_eye_angle_deg_smoothed", data=np.asarray([32.0, 23.0, 15.0], dtype=np.float32))
     roi.create_array("left_gaze_signed_deg", data=np.asarray([-20.0, -10.0, -5.0], dtype=np.float32))
     roi.create_array("left_nasal_gaze_deg_smoothed", data=np.asarray([70.0, 80.0, 85.0], dtype=np.float32))
     roi.create_array("mean_eye_vergence_gaze_deg_smoothed", data=np.asarray([30.0, 31.0, 32.0], dtype=np.float32))
 
+    frame.create_array("left_eye_angle_deg_smoothed", data=np.asarray([18.0, 12.0, 6.0, 4.0], dtype=np.float32))
+    frame.create_array("right_eye_angle_deg_smoothed", data=np.asarray([14.0, 11.0, 9.0, 7.0], dtype=np.float32))
+    frame.create_array("vergence_eye_angle_deg_smoothed", data=np.asarray([32.0, 23.0, 15.0, 11.0], dtype=np.float32))
     frame.create_array("left_gaze_signed_deg_smoothed", data=np.asarray([-18.0, -12.0, -6.0, -4.0], dtype=np.float32))
     frame.create_array("right_gaze_signed_deg_smoothed", data=np.asarray([12.0, 10.0, 8.0, 6.0], dtype=np.float32))
     frame.create_array("mean_eye_vergence_gaze_deg_smoothed", data=np.asarray([30.0, 31.0, 32.0, 33.0], dtype=np.float32))
@@ -301,9 +316,12 @@ def test_discover_and_load_eye_angle_timeseries(tmp_path: Path) -> None:
     assert frame_data.run_name == "eye_angle_1"
     assert frame_data.row_axis == "frame"
     assert frame_data.dataframe["time_s"].tolist() == [0.0, 0.005, 0.010, 0.015]
+    assert "vergence_eye_angle_deg_smoothed" in frame_data.dataframe
+    assert "left_eye_angle_deg_smoothed" in frame_data.dataframe
     assert "mean_eye_vergence_gaze_deg_smoothed" in frame_data.dataframe
     assert "left_gaze_signed_deg_smoothed" in frame_data.dataframe
     assert "left_minor_signed_deg" not in frame_data.dataframe
+    np.testing.assert_allclose(frame_data.dataframe["vergence_eye_angle_deg_smoothed"], [32.0, 23.0, 15.0, 11.0])
     assert frame_data.dataframe["valid_frame"].tolist() == [True, True, True, False]
 
     roi_data = load_eye_angle_timeseries_data(
@@ -314,6 +332,8 @@ def test_discover_and_load_eye_angle_timeseries(tmp_path: Path) -> None:
 
     assert roi_data.row_axis == "roi"
     assert roi_data.dataframe["frame_index"].tolist() == [0, 1, 2]
+    np.testing.assert_allclose(roi_data.dataframe["left_eye_angle_deg"], [20.0, 10.0, 5.0])
+    np.testing.assert_allclose(roi_data.dataframe["vergence_eye_angle_deg"], [35.0, 22.0, 15.0])
     np.testing.assert_allclose(roi_data.dataframe["left_minor_signed_deg"], [-20.0, -10.0, -5.0])
     assert roi_data.dataframe["valid_frame"].tolist() == [True, True, False]
 

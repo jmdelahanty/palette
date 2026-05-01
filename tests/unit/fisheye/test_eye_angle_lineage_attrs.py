@@ -22,6 +22,7 @@ from fisheye.visualization.visualize_eye_angle_overlays import (
 from fisheye.visualization.visualize_eye_angles import (
     EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID,
     EYE_ANGLE_DASHBOARD_RENDERER,
+    _default_angle_source,
     _eye_angle_contract_metadata,
     _format_summary_lines,
     _select_angle_variant,
@@ -183,6 +184,46 @@ def test_eye_angle_visualizer_minor_signed_variant_uses_signed_eye_traces() -> N
     np.testing.assert_allclose(variant["right"], [14.0, 24.0])
     assert meta["series_lookup"]["left"] == "left_minor_signed"
     assert meta["presentation"]["signed_eye_traces"] is True
+
+
+def test_eye_angle_visualizer_eye_frame_variant_uses_bianco_angles() -> None:
+    roi_angles = {
+        "left_eye_angle": np.asarray([20.0, 22.0], dtype=np.float32),
+        "left_eye_angle_smoothed": np.asarray([19.0, 21.0], dtype=np.float32),
+        "right_eye_angle": np.asarray([18.0, 20.0], dtype=np.float32),
+        "right_eye_angle_smoothed": np.asarray([17.0, 19.0], dtype=np.float32),
+        "vergence_eye_angle": np.asarray([38.0, 42.0], dtype=np.float32),
+        "vergence_eye_angle_smoothed": np.asarray([36.0, 40.0], dtype=np.float32),
+    }
+    roi_deltas = {
+        "left_eye_angle_smoothed": np.asarray([0.0, 2.0], dtype=np.float32),
+        "right_eye_angle_smoothed": np.asarray([0.0, 2.0], dtype=np.float32),
+        "vergence_eye_angle_smoothed": np.asarray([0.0, 4.0], dtype=np.float32),
+    }
+
+    variant, label, meta = _select_angle_variant(roi_angles, roi_deltas, "eye_frame")
+
+    assert label == "Eye-frame nasal-positive angles (Bianco/Engert) (smoothed)"
+    np.testing.assert_allclose(variant["left"], [19.0, 21.0])
+    np.testing.assert_allclose(variant["right"], [17.0, 19.0])
+    np.testing.assert_allclose(variant["vergence"], [36.0, 40.0])
+    assert meta["series_lookup"]["left"] == "left_eye_angle"
+    assert meta["series_lookup"]["vergence"] == "vergence_eye_angle"
+    np.testing.assert_allclose(meta["deltas"]["left_eye_angle"], [0.0, 2.0])
+    assert meta["presentation"]["signed_eye_traces"] is True
+    assert meta["presentation"]["signed_y_range"] == (-185.0, 185.0)
+    assert meta["presentation"]["vergence_y_range"] == (-185.0, 185.0)
+
+
+def test_eye_angle_dashboard_default_source_uses_variant_schema() -> None:
+    assert _default_angle_source(
+        {
+            "eye_angle_variant_schema": {
+                "default_representation": "eye_frame",
+            }
+        }
+    ) == "eye_frame"
+    assert _default_angle_source({}) == "gaze"
 
 
 def test_eye_angle_source_geometry_kind_maps_known_sources() -> None:

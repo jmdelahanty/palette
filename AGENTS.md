@@ -32,6 +32,7 @@
 ## Outside-Sandbox Validation Notes
 
 - CUDA/GPU visibility may be unavailable in Codex sandbox even when available outside it.
+- Run `scripts/py -m marimo check ...` outside the Codex sandbox by default. In the sandbox, marimo's checker can hang before diagnostics because its async filesystem path uses `asyncio.to_thread`; outside-sandbox execution has been observed to return normally.
 - For CUDA checks, run outside the sandbox with `scripts/py` rather than `conda activate`, for example:
   `scripts/py -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'`
 - Real-zarr training/export/inference smokes should run outside the sandbox with escalation, especially when they use CUDA or touch `/nvme1`.

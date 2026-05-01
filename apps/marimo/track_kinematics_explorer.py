@@ -11,6 +11,7 @@ Optional selectors:
     --run-path analysis/track_kinematics_runs/offline/<run>
     --swim-bout-run <run-name>
     --speed-level filtered
+    --eye-angle-representation eye_frame
     --performance-log /tmp/palette_track_kinematics_explorer_perf.jsonl
 """
 
@@ -165,6 +166,7 @@ def _(
     initial_swim_bout_run = cli_args.get("swim-bout-run")
     initial_speed_level = cli_args.get("speed-level")
     initial_eye_angle_run = cli_args.get("eye-angle-run")
+    initial_eye_angle_representation = cli_args.get("eye-angle-representation")
     performance_log_raw = cli_args.get(
         "performance-log",
         "/tmp/palette_track_kinematics_explorer_perf.jsonl",
@@ -241,6 +243,7 @@ def _(
     return (
         artifact,
         eye_angle_options,
+        initial_eye_angle_representation,
         initial_eye_angle_run,
         initial_run_path,
         initial_speed_level,
@@ -363,11 +366,130 @@ def _(
 
 
 @app.cell
+def _(eye_angle_attrs, eye_angle_df, initial_eye_angle_representation, mo):
+    _REPRESENTATION_DEFAULT_COLUMNS = {
+        "eye_frame": [
+            "vergence_eye_angle_deg_smoothed",
+            "left_eye_angle_deg_smoothed",
+            "right_eye_angle_deg_smoothed",
+            "vergence_eye_angle_deg",
+            "left_eye_angle_deg",
+            "right_eye_angle_deg",
+        ],
+        "gaze": [
+            "left_gaze_signed_deg_smoothed",
+            "right_gaze_signed_deg_smoothed",
+            "vergence_gaze_signed_deg_smoothed",
+            "left_gaze_signed_deg",
+            "right_gaze_signed_deg",
+            "vergence_gaze_signed_deg",
+        ],
+        "nasal_gaze": [
+            "mean_eye_vergence_gaze_deg_smoothed",
+            "left_nasal_gaze_deg_smoothed",
+            "right_nasal_gaze_deg_smoothed",
+            "mean_eye_vergence_gaze_deg",
+            "left_nasal_gaze_deg",
+            "right_nasal_gaze_deg",
+        ],
+        "major": [
+            "left_major_signed_deg_smoothed",
+            "right_major_signed_deg_smoothed",
+            "vergence_major_signed_deg_smoothed",
+            "version_major_deg_smoothed",
+            "left_major_signed_deg",
+            "right_major_signed_deg",
+            "vergence_major_signed_deg",
+            "version_major_deg",
+        ],
+        "centroid": [
+            "left_centroid_deg_smoothed",
+            "right_centroid_deg_smoothed",
+            "vergence_centroid_deg_smoothed",
+            "left_centroid_deg",
+            "right_centroid_deg",
+            "vergence_centroid_deg",
+        ],
+        "legacy": [
+            "left_minor_signed_deg_smoothed",
+            "right_minor_signed_deg_smoothed",
+            "vergence_minor_signed_deg_smoothed",
+            "left_minor_signed_deg",
+            "right_minor_signed_deg",
+            "vergence_minor_signed_deg",
+        ],
+    }
+    _REPRESENTATION_LABELS = {
+        "eye_frame": "Eye frame (Bianco/Engert nasal-positive)",
+        "gaze": "Gaze axis (body-frame rays)",
+        "nasal_gaze": "Nasal gaze (BEAST/Johnson comparable)",
+        "major": "Major axis (canonical body frame)",
+        "centroid": "Centroid position",
+        "legacy": "Legacy minor aliases",
+    }
+
+    def _variant_schema():
+        _schema = eye_angle_attrs.get("eye_angle_variant_schema", {})
+        if not isinstance(_schema, dict):
+            _output_schema = eye_angle_attrs.get("eye_angle_output_schema", {})
+            _schema = _output_schema.get("variant_schema", {}) if isinstance(_output_schema, dict) else {}
+        return _schema if isinstance(_schema, dict) else {}
+
+    def _has_representation(_representation):
+        return any(
+            _column in eye_angle_df.columns and eye_angle_df[_column].notna().any()
+            for _column in _REPRESENTATION_DEFAULT_COLUMNS.get(_representation, [])
+        )
+
+    _schema = _variant_schema()
+    _schema_order = _schema.get("representation_order", [])
+    _order = [
+        _representation
+        for _representation in _schema_order
+        if _representation in _REPRESENTATION_DEFAULT_COLUMNS
+    ]
+    for _fallback in ("eye_frame", "gaze", "nasal_gaze", "major", "centroid", "legacy"):
+        if _fallback not in _order:
+            _order.append(_fallback)
+    _available_representations = [
+        _representation for _representation in _order if _has_representation(_representation)
+    ]
+    if not _available_representations:
+        _available_representations = ["eye_frame"]
+    eye_angle_representation_label_to_value = {
+        _REPRESENTATION_LABELS.get(_representation, _representation): _representation
+        for _representation in _available_representations
+    }
+    _default_representation = str(
+        initial_eye_angle_representation
+        or _schema.get("default_representation")
+        or _available_representations[0]
+    )
+    if _default_representation not in _available_representations:
+        _default_representation = _available_representations[0]
+    _default_label = next(
+        _label
+        for _label, _representation in eye_angle_representation_label_to_value.items()
+        if _representation == _default_representation
+    )
+    eye_angle_representation_picker = mo.ui.dropdown(
+        options=list(eye_angle_representation_label_to_value),
+        value=_default_label,
+        label="Eye-angle representation",
+    )
+    eye_angle_representation_picker
+    return (
+        eye_angle_representation_label_to_value,
+        eye_angle_representation_picker,
+    )
+
+
+@app.cell
 def _(
     discover_swim_bout_run_options,
-    time,
     track_label_to_option,
     track_picker,
+    time,
     write_perf_event,
     zarr_path,
 ):
@@ -560,6 +682,7 @@ def _(
     pd,
     performance_log_path,
     performance_session_id,
+    selected_eye_angle_representation,
     selected_speed_level,
     selected_swim_bout,
     selected_track,
@@ -585,6 +708,8 @@ def _(
         **Bout Kinematics:** `{selected_bout_kinematics.label if selected_bout_kinematics else "none"}`
 
         **Eye Angles:** `{selected_eye_angle.label if selected_eye_angle else "none"}`
+
+        **Eye-Angle Representation:** `{selected_eye_angle_representation}`
 
         **Speed Level:** `{selected_speed_level or "artifact/default"}`
 
@@ -710,6 +835,11 @@ def _(
         },
         {
             "surface": "eye_angle",
+            "field": "representation",
+            "value": selected_eye_angle_representation,
+        },
+        {
+            "surface": "eye_angle",
             "field": "rows_loaded",
             "value": len(eye_angle_df),
         },
@@ -756,7 +886,18 @@ def _(
 
 
 @app.cell
-def _(data, eye_angle_df, mo, np, selected_speed_level, selected_swim_bout, swim_bout_df, timeseries_df):
+def _(
+    data,
+    eye_angle_df,
+    eye_angle_representation_label_to_value,
+    eye_angle_representation_picker,
+    mo,
+    np,
+    selected_speed_level,
+    selected_swim_bout,
+    swim_bout_df,
+    timeseries_df,
+):
     _speed_columns = [
         _column
         for _column in timeseries_df.columns
@@ -835,17 +976,68 @@ def _(data, eye_angle_df, mo, np, selected_speed_level, selected_swim_bout, swim
         if _column not in {"time_s", "frame_index", "row_index", "valid_frame", "valid_left", "valid_right"}
         and eye_angle_df[_column].notna().any()
     ]
-    _default_eye_angle_columns = [
-        _column
-        for _column in (
+    selected_eye_angle_representation = eye_angle_representation_label_to_value.get(
+        eye_angle_representation_picker.value,
+        "eye_frame",
+    )
+    _eye_angle_representation_defaults = {
+        "eye_frame": [
+            "vergence_eye_angle_deg_smoothed",
+            "left_eye_angle_deg_smoothed",
+            "right_eye_angle_deg_smoothed",
+            "vergence_eye_angle_deg",
+            "left_eye_angle_deg",
+            "right_eye_angle_deg",
+        ],
+        "gaze": [
+            "left_gaze_signed_deg_smoothed",
+            "right_gaze_signed_deg_smoothed",
+            "vergence_gaze_signed_deg_smoothed",
+            "left_gaze_signed_deg",
+            "right_gaze_signed_deg",
+            "vergence_gaze_signed_deg",
+        ],
+        "nasal_gaze": [
             "mean_eye_vergence_gaze_deg_smoothed",
             "left_nasal_gaze_deg_smoothed",
             "right_nasal_gaze_deg_smoothed",
-            "left_gaze_signed_deg_smoothed",
-            "right_gaze_signed_deg_smoothed",
-        )
+            "mean_eye_vergence_gaze_deg",
+            "left_nasal_gaze_deg",
+            "right_nasal_gaze_deg",
+        ],
+        "major": [
+            "left_major_signed_deg_smoothed",
+            "right_major_signed_deg_smoothed",
+            "vergence_major_signed_deg_smoothed",
+            "version_major_deg_smoothed",
+            "left_major_signed_deg",
+            "right_major_signed_deg",
+            "vergence_major_signed_deg",
+            "version_major_deg",
+        ],
+        "centroid": [
+            "left_centroid_deg_smoothed",
+            "right_centroid_deg_smoothed",
+            "vergence_centroid_deg_smoothed",
+            "left_centroid_deg",
+            "right_centroid_deg",
+            "vergence_centroid_deg",
+        ],
+        "legacy": [
+            "left_minor_signed_deg_smoothed",
+            "right_minor_signed_deg_smoothed",
+            "vergence_minor_signed_deg_smoothed",
+            "left_minor_signed_deg",
+            "right_minor_signed_deg",
+            "vergence_minor_signed_deg",
+        ],
+    }
+    _preferred_eye_angle_columns = [
+        _column
+        for _column in _eye_angle_representation_defaults.get(selected_eye_angle_representation, [])
         if _column in _eye_angle_columns
-    ][:3]
+    ]
+    _default_eye_angle_columns = _preferred_eye_angle_columns[:3]
     if not _default_eye_angle_columns:
         _default_eye_angle_columns = _eye_angle_columns[:3]
     eye_angle_series_picker = mo.ui.multiselect(
@@ -940,6 +1132,7 @@ def _(data, eye_angle_df, mo, np, selected_speed_level, selected_swim_bout, swim
         acceleration_series_picker,
         eye_angle_series_picker,
         histogram_bins,
+        selected_eye_angle_representation,
         show_invalid_intervals,
         show_swim_bouts,
         speed_series_picker,
@@ -1336,6 +1529,7 @@ def _(
     go,
     mo,
     selected_eye_angle,
+    selected_eye_angle_representation,
     show_invalid_intervals,
     show_swim_bouts,
     swim_bout_boundary_mode,
@@ -1394,7 +1588,7 @@ def _(
             )
             _rendered_eye_traces += 1
         _eye_title = (
-            f"Eye-Angle Traces ({eye_angle_data.run_name}; {eye_angle_row_axis} rows)"
+            f"Eye-Angle Traces ({eye_angle_data.run_name}; {eye_angle_row_axis} rows; {selected_eye_angle_representation})"
             if eye_angle_data is not None
             else "Eye-Angle Traces"
         )
@@ -1417,9 +1611,72 @@ def _(
         n_visible_validity_intervals=len(filtered_validity_df),
         swim_bout_overlay_renderer=_eye_bout_overlay_renderer,
         validity_overlay_renderer=_eye_validity_overlay_renderer,
+        representation=selected_eye_angle_representation,
     )
     eye_angle_plot_output
     return
+
+
+@app.cell
+def _(
+    eye_angle_series_picker,
+    filtered_eye_angle_df,
+    histogram_bins,
+    np,
+    pd,
+    px,
+    selected_eye_angle,
+    selected_eye_angle_representation,
+    time,
+    write_perf_event,
+):
+    _figure_t0 = time.perf_counter()
+    _frames = []
+    if selected_eye_angle is not None and len(filtered_eye_angle_df):
+        for _eye_column in eye_angle_series_picker.value:
+            if _eye_column not in filtered_eye_angle_df:
+                continue
+            _values = filtered_eye_angle_df[_eye_column].to_numpy(dtype=float, copy=False)
+            _values = _values[np.isfinite(_values)]
+            if _values.size:
+                _frames.append(pd.DataFrame({"metric": _eye_column, "angle_deg": _values}))
+    if _frames:
+        eye_angle_histogram_df = pd.concat(_frames, ignore_index=True)
+        eye_angle_histogram_plot = px.histogram(
+            eye_angle_histogram_df,
+            x="angle_deg",
+            facet_col="metric",
+            facet_col_wrap=2,
+            nbins=int(histogram_bins.value),
+            title=f"Eye-Angle Distributions ({selected_eye_angle_representation})",
+            labels={"angle_deg": "Angle (deg)", "count": "Count"},
+            opacity=0.82,
+        )
+        eye_angle_histogram_plot.update_xaxes(matches=None)
+        eye_angle_histogram_plot.update_yaxes(matches=None)
+        eye_angle_histogram_plot.update_layout(
+            height=620,
+            margin=dict(l=40, r=20, t=70, b=40),
+            showlegend=False,
+        )
+    else:
+        eye_angle_histogram_df = pd.DataFrame(columns=["metric", "angle_deg"])
+        eye_angle_histogram_plot = "No eye-angle histogram values available for the selected run/window."
+    write_perf_event(
+        "build_eye_angle_histograms",
+        time.perf_counter() - _figure_t0,
+        selected_eye_angle_run=selected_eye_angle.run_name if selected_eye_angle is not None else None,
+        representation=selected_eye_angle_representation,
+        n_histogram_rows=len(eye_angle_histogram_df),
+        n_histogram_metrics=(
+            int(eye_angle_histogram_df["metric"].nunique())
+            if len(eye_angle_histogram_df)
+            else 0
+        ),
+        bins=int(histogram_bins.value),
+    )
+    eye_angle_histogram_plot
+    return (eye_angle_histogram_df,)
 
 
 @app.cell

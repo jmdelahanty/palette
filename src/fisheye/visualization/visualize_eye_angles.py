@@ -44,6 +44,16 @@ MAX_TIMELINE_POINTS = 8000
 SCATTER_DECIMATE = 10
 EYE_ANGLE_DASHBOARD_PLOT_SCHEMA_ID = "palette.plot_spec.eye_angle_dashboard.v1"
 EYE_ANGLE_DASHBOARD_RENDERER = "palette-eye-angle-dashboard-v1"
+EYE_ANGLE_DASHBOARD_SOURCES = (
+    "eye_frame",
+    "gaze",
+    "nasal_gaze",
+    "major",
+    "ellipse",
+    "minor",
+    "minor_signed",
+    "centroid",
+)
 
 
 def _serialize_xmp(payload: Dict[str, object]) -> str:
@@ -126,6 +136,20 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_signed_smoothed": _maybe("vergence_signed_deg_smoothed"),
         "version": _maybe("version_deg"),
         "version_smoothed": _maybe("version_deg_smoothed"),
+        "left_major_signed": _maybe("left_major_signed_deg"),
+        "left_major_signed_smoothed": _maybe("left_major_signed_deg_smoothed"),
+        "right_major_signed": _maybe("right_major_signed_deg"),
+        "right_major_signed_smoothed": _maybe("right_major_signed_deg_smoothed"),
+        "vergence_major_signed": _maybe("vergence_major_signed_deg"),
+        "vergence_major_signed_smoothed": _maybe("vergence_major_signed_deg_smoothed"),
+        "version_major": _maybe("version_major_deg"),
+        "version_major_smoothed": _maybe("version_major_deg_smoothed"),
+        "left_eye_angle": _maybe("left_eye_angle_deg"),
+        "left_eye_angle_smoothed": _maybe("left_eye_angle_deg_smoothed"),
+        "right_eye_angle": _maybe("right_eye_angle_deg"),
+        "right_eye_angle_smoothed": _maybe("right_eye_angle_deg_smoothed"),
+        "vergence_eye_angle": _maybe("vergence_eye_angle_deg"),
+        "vergence_eye_angle_smoothed": _maybe("vergence_eye_angle_deg_smoothed"),
         "left_minor_signed": _maybe("left_minor_signed_deg"),
         "left_minor_signed_smoothed": _maybe("left_minor_signed_deg_smoothed"),
         "right_minor_signed": _maybe("right_minor_signed_deg"),
@@ -183,6 +207,20 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_signed_smoothed": _maybe("vergence_signed_delta_deg_smoothed"),
         "version": _maybe("version_delta_deg"),
         "version_smoothed": _maybe("version_delta_deg_smoothed"),
+        "left_major_signed": _maybe("left_major_signed_delta_deg"),
+        "left_major_signed_smoothed": _maybe("left_major_signed_delta_deg_smoothed"),
+        "right_major_signed": _maybe("right_major_signed_delta_deg"),
+        "right_major_signed_smoothed": _maybe("right_major_signed_delta_deg_smoothed"),
+        "vergence_major_signed": _maybe("vergence_major_signed_delta_deg"),
+        "vergence_major_signed_smoothed": _maybe("vergence_major_signed_delta_deg_smoothed"),
+        "version_major": _maybe("version_major_delta_deg"),
+        "version_major_smoothed": _maybe("version_major_delta_deg_smoothed"),
+        "left_eye_angle": _maybe("left_eye_angle_delta_deg"),
+        "left_eye_angle_smoothed": _maybe("left_eye_angle_delta_deg_smoothed"),
+        "right_eye_angle": _maybe("right_eye_angle_delta_deg"),
+        "right_eye_angle_smoothed": _maybe("right_eye_angle_delta_deg_smoothed"),
+        "vergence_eye_angle": _maybe("vergence_eye_angle_delta_deg"),
+        "vergence_eye_angle_smoothed": _maybe("vergence_eye_angle_delta_deg_smoothed"),
         "left_minor_signed": _maybe("left_minor_signed_delta_deg"),
         "left_minor_signed_smoothed": _maybe("left_minor_signed_delta_deg_smoothed"),
         "right_minor_signed": _maybe("right_minor_signed_delta_deg"),
@@ -241,6 +279,20 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_data["vergence_smoothed"] = _frame_maybe("vergence_deg_smoothed")
         frame_data["vergence_signed"] = _frame_maybe("vergence_signed_deg")
         frame_data["vergence_signed_smoothed"] = _frame_maybe("vergence_signed_deg_smoothed")
+        frame_data["left_major_signed"] = _frame_maybe("left_major_signed_deg")
+        frame_data["left_major_signed_smoothed"] = _frame_maybe("left_major_signed_deg_smoothed")
+        frame_data["right_major_signed"] = _frame_maybe("right_major_signed_deg")
+        frame_data["right_major_signed_smoothed"] = _frame_maybe("right_major_signed_deg_smoothed")
+        frame_data["vergence_major_signed"] = _frame_maybe("vergence_major_signed_deg")
+        frame_data["vergence_major_signed_smoothed"] = _frame_maybe("vergence_major_signed_deg_smoothed")
+        frame_data["version_major"] = _frame_maybe("version_major_deg")
+        frame_data["version_major_smoothed"] = _frame_maybe("version_major_deg_smoothed")
+        frame_data["left_eye_angle"] = _frame_maybe("left_eye_angle_deg")
+        frame_data["left_eye_angle_smoothed"] = _frame_maybe("left_eye_angle_deg_smoothed")
+        frame_data["right_eye_angle"] = _frame_maybe("right_eye_angle_deg")
+        frame_data["right_eye_angle_smoothed"] = _frame_maybe("right_eye_angle_deg_smoothed")
+        frame_data["vergence_eye_angle"] = _frame_maybe("vergence_eye_angle_deg")
+        frame_data["vergence_eye_angle_smoothed"] = _frame_maybe("vergence_eye_angle_deg_smoothed")
         frame_data["vergence_minor_signed"] = _frame_maybe("vergence_minor_signed_deg")
         frame_data["vergence_minor_signed_smoothed"] = _frame_maybe("vergence_minor_signed_deg_smoothed")
         frame_data["version"] = _frame_maybe("version_deg")
@@ -275,6 +327,20 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_deltas["vergence_smoothed"] = _frame_maybe("vergence_delta_deg_smoothed")
         frame_deltas["vergence_signed"] = _frame_maybe("vergence_signed_delta_deg")
         frame_deltas["vergence_signed_smoothed"] = _frame_maybe("vergence_signed_delta_deg_smoothed")
+        frame_deltas["left_major_signed"] = _frame_maybe("left_major_signed_delta_deg")
+        frame_deltas["left_major_signed_smoothed"] = _frame_maybe("left_major_signed_delta_deg_smoothed")
+        frame_deltas["right_major_signed"] = _frame_maybe("right_major_signed_delta_deg")
+        frame_deltas["right_major_signed_smoothed"] = _frame_maybe("right_major_signed_delta_deg_smoothed")
+        frame_deltas["vergence_major_signed"] = _frame_maybe("vergence_major_signed_delta_deg")
+        frame_deltas["vergence_major_signed_smoothed"] = _frame_maybe("vergence_major_signed_delta_deg_smoothed")
+        frame_deltas["version_major"] = _frame_maybe("version_major_delta_deg")
+        frame_deltas["version_major_smoothed"] = _frame_maybe("version_major_delta_deg_smoothed")
+        frame_deltas["left_eye_angle"] = _frame_maybe("left_eye_angle_delta_deg")
+        frame_deltas["left_eye_angle_smoothed"] = _frame_maybe("left_eye_angle_delta_deg_smoothed")
+        frame_deltas["right_eye_angle"] = _frame_maybe("right_eye_angle_delta_deg")
+        frame_deltas["right_eye_angle_smoothed"] = _frame_maybe("right_eye_angle_delta_deg_smoothed")
+        frame_deltas["vergence_eye_angle"] = _frame_maybe("vergence_eye_angle_delta_deg")
+        frame_deltas["vergence_eye_angle_smoothed"] = _frame_maybe("vergence_eye_angle_delta_deg_smoothed")
         frame_deltas["vergence_minor_signed"] = _frame_maybe("vergence_minor_signed_delta_deg")
         frame_deltas["vergence_minor_signed_smoothed"] = _frame_maybe("vergence_minor_signed_delta_deg_smoothed")
         frame_deltas["version"] = _frame_maybe("version_delta_deg")
@@ -369,6 +435,19 @@ def _artifact_signature(payload: Mapping[str, Any]) -> str:
 
 def _eye_angle_dashboard_artifact_name(angle_source: str) -> str:
     return f"eye_angle_dashboard_{angle_source}_png"
+
+
+def _default_angle_source(attrs: Mapping[str, object]) -> str:
+    variant_schema = attrs.get("eye_angle_variant_schema")
+    if not isinstance(variant_schema, Mapping):
+        output_schema = attrs.get("eye_angle_output_schema")
+        if isinstance(output_schema, Mapping):
+            variant_schema = output_schema.get("variant_schema")
+    if isinstance(variant_schema, Mapping):
+        default = variant_schema.get("default_representation")
+        if isinstance(default, str) and default in EYE_ANGLE_DASHBOARD_SOURCES:
+            return default
+    return "gaze"
 
 
 def _eye_angle_source_paths(run_name: str) -> Dict[str, str]:
@@ -606,7 +685,82 @@ def _select_angle_variant(
         return arr  # may be None if not required
 
     source = source.lower()
-    if source == "ellipse":
+    if source == "eye_frame":
+        left_eye = _pick("left_eye_angle")
+        right_eye = _pick("right_eye_angle")
+        vergence_eye = _pick("vergence_eye_angle")
+        variant = {
+            "left": left_eye,
+            "right": right_eye,
+            "vergence": vergence_eye,
+            "left_signed": left_eye,
+            "right_signed": right_eye,
+            "vergence_signed": vergence_eye,
+            "version": _pick("version_major", required=False),
+        }
+        series_lookup.update(
+            {
+                "left": "left_eye_angle",
+                "right": "right_eye_angle",
+                "vergence": "vergence_eye_angle",
+                "left_signed": "left_eye_angle",
+                "right_signed": "right_eye_angle",
+                "vergence_signed": "vergence_eye_angle",
+                "version": "version_major",
+            }
+        )
+        label = "Eye-frame nasal-positive angles (Bianco/Engert)"
+    elif source == "major":
+        left_major = _pick("left_major_signed")
+        right_major = _pick("right_major_signed")
+        vergence_major = _pick("vergence_major_signed")
+        variant = {
+            "left": left_major,
+            "right": right_major,
+            "vergence": vergence_major,
+            "left_signed": left_major,
+            "right_signed": right_major,
+            "vergence_signed": vergence_major,
+            "version": _pick("version_major", required=False),
+        }
+        series_lookup.update(
+            {
+                "left": "left_major_signed",
+                "right": "right_major_signed",
+                "vergence": "vergence_major_signed",
+                "left_signed": "left_major_signed",
+                "right_signed": "right_major_signed",
+                "vergence_signed": "vergence_major_signed",
+                "version": "version_major",
+            }
+        )
+        label = "Canonical body-frame major axis"
+    elif source == "nasal_gaze":
+        left_nasal = _pick("left_nasal_gaze")
+        right_nasal = _pick("right_nasal_gaze")
+        mean_vergence = _pick("mean_eye_vergence_gaze")
+        variant = {
+            "left": left_nasal,
+            "right": right_nasal,
+            "vergence": mean_vergence,
+            "left_signed": left_nasal,
+            "right_signed": right_nasal,
+            "vergence_signed": mean_vergence,
+            "version": _pick("version_gaze", required=False),
+        }
+        series_lookup.update(
+            {
+                "left": "left_nasal_gaze",
+                "right": "right_nasal_gaze",
+                "vergence": "mean_eye_vergence_gaze",
+                "left_signed": "left_nasal_gaze",
+                "right_signed": "right_nasal_gaze",
+                "vergence_signed": "mean_eye_vergence_gaze",
+                "version": "version_gaze",
+            }
+        )
+        label = "Nasal-gaze angles (BEAST/Johnson comparable)"
+    elif source == "ellipse":
         variant = {
             "left": _pick("left"),
             "right": _pick("right"),
@@ -779,7 +933,11 @@ def _select_angle_variant(
         "deltas": deltas,
         "smoothed": smoothed_flags,
         "series_lookup": series_lookup,
-        "presentation": {"signed_eye_traces": source == "minor_signed"},
+        "presentation": {
+            "signed_eye_traces": source in {"eye_frame", "major", "minor_signed"},
+            "signed_y_range": (-185.0, 185.0) if source in {"eye_frame", "major"} else (-95.0, 95.0),
+            "vergence_y_range": (-185.0, 185.0) if source in {"eye_frame", "major"} else None,
+        },
     }
 
     return variant, label, variant_meta
@@ -864,6 +1022,16 @@ def _plot_eye_angle_dashboard(
     signed_eye_traces = bool(
         isinstance(presentation, dict) and presentation.get("signed_eye_traces")
     )
+    signed_y_range = (
+        tuple(presentation.get("signed_y_range", (-95.0, 95.0)))
+        if isinstance(presentation, dict)
+        else (-95.0, 95.0)
+    )
+    vergence_y_range = (
+        tuple(presentation["vergence_y_range"])
+        if isinstance(presentation, dict) and presentation.get("vergence_y_range") is not None
+        else None
+    )
 
     fps = attrs.get("fps")
     time_axis_raw = support.get("time_seconds")
@@ -924,7 +1092,7 @@ def _plot_eye_angle_dashboard(
     ax_left.set_title("Left Eye Over Time")
     ax_left.set_xlabel(time_label)
     ax_left.set_ylabel("Signed Angle (deg)" if signed_eye_traces else "Angle (deg)")
-    ax_left.set_ylim((-95, 95) if signed_eye_traces else (-5, 185))
+    ax_left.set_ylim(signed_y_range if signed_eye_traces else (-5, 185))
     ax_left.grid(alpha=0.2)
 
     ax_right = fig.add_subplot(gs[0, 1])
@@ -935,7 +1103,7 @@ def _plot_eye_angle_dashboard(
     ax_right.set_title("Right Eye Over Time")
     ax_right.set_xlabel(time_label)
     ax_right.set_ylabel("Signed Angle (deg)" if signed_eye_traces else "Angle (deg)")
-    ax_right.set_ylim((-95, 95) if signed_eye_traces else (-5, 185))
+    ax_right.set_ylim(signed_y_range if signed_eye_traces else (-5, 185))
     ax_right.grid(alpha=0.2)
 
     ax_vergence = fig.add_subplot(gs[0, 2])
@@ -951,7 +1119,7 @@ def _plot_eye_angle_dashboard(
     ax_vergence.set_title("Vergence Over Time")
     ax_vergence.set_xlabel(time_label)
     ax_vergence.set_ylabel("Angle (deg)")
-    ax_vergence.set_ylim(-5, 185)
+    ax_vergence.set_ylim(vergence_y_range or (-5, 185))
     if np.isfinite(threshold):
         ax_vergence.axhline(threshold, color="#d62728", linestyle="--", linewidth=1.0, label=f"threshold ≈ {threshold:.1f}°")
         plotted_series = True
@@ -1169,7 +1337,12 @@ def _plot_eye_angle_dashboard(
     ax_summary.text(0.0, 0.95, summary_text, ha="left", va="top", fontsize=10, family="monospace")
 
     ax_hex = fig.add_subplot(gs[4, :])
-    if vergence_signed_valid.size and version_valid.size and (np.isfinite(vergence_signed_valid) & np.isfinite(version_valid)).any():
+    if (
+        isinstance(vergence_signed, np.ndarray)
+        and isinstance(version, np.ndarray)
+        and vergence_signed.shape == version.shape
+        and (np.isfinite(vergence_signed) & np.isfinite(version)).any()
+    ):
         mask_hex = np.isfinite(vergence_signed) & np.isfinite(version)
         verg_valid = vergence_signed[mask_hex]
         vers_valid = version[mask_hex]
@@ -1264,17 +1437,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--angle-source",
-        choices=["gaze", "ellipse", "minor", "minor_signed", "centroid"],
-        default="gaze",
+        choices=["auto", *EYE_ANGLE_DASHBOARD_SOURCES],
+        default="auto",
         help=(
             "Which angle series to treat as primary "
-            "(default: gaze, the ellipse-minor axis; use minor_signed for left/right_minor_signed_deg)."
+            "(default: auto, using the run's default representation; v7 defaults to eye_frame)."
         ),
     )
     parser.add_argument(
         "--all-variants",
         action="store_true",
-        help="Render dashboards for every angle variant (gaze, ellipse, minor, minor_signed, centroid).",
+        help="Render dashboards for every angle variant (eye_frame, gaze, nasal_gaze, major, ellipse, minor, minor_signed, centroid).",
     )
     parser.add_argument(
         "--title",
@@ -1325,9 +1498,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Loaded eye angle run '{attrs['run_name']}' from {args.zarr_path}")
 
     requested_sources = (
-        ["gaze", "ellipse", "minor", "minor_signed", "centroid"]
+        list(EYE_ANGLE_DASHBOARD_SOURCES)
         if args.all_variants
-        else [args.angle_source]
+        else [_default_angle_source(attrs) if args.angle_source == "auto" else args.angle_source]
     )
 
     figs: List[plt.Figure] = []
