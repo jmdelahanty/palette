@@ -7,8 +7,17 @@ import zarr
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.analysis.megabouts_classifier_inputs import (
     build_megabouts_classifier_input_pack,
+    diagnose_input_pack_invalid_windows,
     summarize_input_pack,
 )
+
+
+def _reason_bytes(values: list[str], width: int = 32) -> np.ndarray:
+    out = np.zeros((len(values), width), dtype=np.uint8)
+    for idx, value in enumerate(values):
+        encoded = value.encode("utf-8")[:width]
+        out[idx, : len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
+    return out
 
 
 def _build_root() -> zarr.Group:
@@ -24,6 +33,11 @@ def _build_root() -> zarr.Group:
     posture.create_array(
         "valid",
         data=np.asarray([True, True, False, True, True, True, True, True], dtype=bool),
+        overwrite=True,
+    )
+    posture.create_array(
+        "failure_reason_bytes",
+        data=_reason_bytes(["ok", "ok", "source_body_mask_qc_failed", "ok", "ok", "ok", "ok", "ok"]),
         overwrite=True,
     )
     tail_angle = np.arange(8 * 10, dtype=np.float32).reshape(8, 10) / 100.0
@@ -45,6 +59,11 @@ def _build_root() -> zarr.Group:
     track.create_array(
         "sample_valid",
         data=np.asarray([True, True, True, True, True, False, True, True], dtype=bool),
+        overwrite=True,
+    )
+    track.create_array(
+        "reason_bytes",
+        data=_reason_bytes(["ok", "ok", "ok", "ok", "ok", "track_gap", "ok", "ok"]),
         overwrite=True,
     )
 
@@ -109,6 +128,27 @@ def test_build_megabouts_classifier_input_pack_reports_invalid_coverage() -> Non
         "tail_valid_fraction_below_threshold": 1,
         "traj_valid_fraction_below_threshold": 1,
     }
+
+
+def test_diagnose_input_pack_invalid_windows_reports_source_causes() -> None:
+    root = _build_root()
+    pack = build_megabouts_classifier_input_pack(root, bout_duration_frames=4)
+
+    report = diagnose_input_pack_invalid_windows(root, pack, max_examples=1)
+
+    assert report["diagnostic"] == "megabouts_classifier_invalid_windows"
+    assert report["mutates_archive"] is False
+    assert report["calls_megabouts"] is False
+    assert report["invalid_bout_count"] == 2
+    assert report["tail_frame_issue_counts_across_invalid_windows"] == {"posture_valid_false": 1}
+    assert report["traj_frame_issue_counts_across_invalid_windows"] == {"track_sample_valid_false": 1}
+    assert report["posture_failure_reason_counts_across_invalid_frames"] == {"source_body_mask_qc_failed": 1}
+    assert report["track_failure_reason_counts_across_invalid_frames"] == {"track_gap": 1}
+    assert len(report["examples"]) == 1
+    example = report["examples"][0]
+    assert example["bout_index"] == 0
+    assert example["invalid_posture_frames"] == [2]
+    assert example["missing_track_frames"] == []
 
 
 def test_build_megabouts_classifier_input_pack_can_resolve_time_only_bouts() -> None:

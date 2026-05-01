@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -186,6 +187,29 @@ def _max_consecutive_false(mask: np.ndarray) -> int:
             current += 1
             max_run = max(max_run, current)
     return int(max_run)
+
+
+def _decode_reason_value(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.split(b"\x00", 1)[0].decode("utf-8", "replace")
+    if isinstance(value, str):
+        return value
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        item = arr.item()
+        if isinstance(item, bytes):
+            return item.split(b"\x00", 1)[0].decode("utf-8", "replace")
+        return str(item)
+    if arr.dtype.kind in {"S", "U", "O"}:
+        return str(arr.reshape(-1)[0])
+    return bytes(arr.astype(np.uint8, copy=False).tolist()).split(b"\x00", 1)[0].decode("utf-8", "replace")
+
+
+def _load_reason_array(group: zarr.Group, names: Sequence[str]) -> Optional[np.ndarray]:
+    for name in names:
+        if name in group:
+            return np.asarray(group[name][:])
+    return None
 
 
 def _resolve_start_frames(bouts: np.ndarray, fps: float) -> np.ndarray:
@@ -473,6 +497,150 @@ def summarize_input_pack(pack: MegaboutsClassifierInputPack) -> dict[str, object
     return dict(_json_safe(summary))
 
 
+def diagnose_input_pack_invalid_windows(
+    root: zarr.Group,
+    pack: MegaboutsClassifierInputPack,
+    *,
+    max_examples: int = 12,
+) -> dict[str, object]:
+    """Explain invalid classifier windows without mutating the archive."""
+
+    posture = root[pack.source_refs["tail_posture_view_run"]]
+    posture_frames = np.asarray(_require_array(posture, "frame_index")[:], dtype=np.int64)
+    posture_valid = np.asarray(_require_array(posture, "valid")[:], dtype=bool)
+    tail_angle = np.asarray(_require_array(posture, "tail_angle_rad")[:], dtype=np.float32)
+    posture_reasons = _load_reason_array(posture, ("failure_reason_bytes", "reason_bytes"))
+    posture_lookup = _frame_to_index(posture_frames)
+
+    track = root[pack.source_refs["track_group"]]
+    track_frames = np.asarray(_require_array(track, "frame_indices")[:], dtype=np.int64)
+    positions_mm = np.asarray(_require_array(track, "positions_mm")[:], dtype=np.float32)
+    heading_path = pack.source_refs["heading"].split("/")[-1]
+    heading = np.asarray(_require_array(track, heading_path)[:], dtype=np.float32)
+    if "sample_valid" in track:
+        track_valid = np.asarray(track["sample_valid"][:], dtype=bool)
+    else:
+        track_valid = np.ones((track_frames.shape[0],), dtype=bool)
+    track_reasons = _load_reason_array(track, ("failure_reason_bytes", "reason_bytes"))
+    track_lookup = _frame_to_index(track_frames)
+
+    invalid_idxs = np.flatnonzero(~pack.valid_bout)
+    failure_reason_counts = Counter(str(pack.failure_reason[idx]) for idx in invalid_idxs.tolist())
+    tail_issue_counts: Counter[str] = Counter()
+    traj_issue_counts: Counter[str] = Counter()
+    posture_reason_counts: Counter[str] = Counter()
+    track_reason_counts: Counter[str] = Counter()
+    examples: list[dict[str, object]] = []
+
+    for bout_idx in invalid_idxs.tolist():
+        window_frames = list(range(int(pack.window_start_frame[bout_idx]), int(pack.window_end_frame[bout_idx]) + 1))
+        missing_posture_frames: list[int] = []
+        invalid_posture_frames: list[int] = []
+        nonfinite_tail_frames: list[int] = []
+        missing_track_frames: list[int] = []
+        invalid_track_frames: list[int] = []
+        nonfinite_traj_frames: list[int] = []
+        valid_tail_frames: list[int] = []
+        valid_traj_frames: list[int] = []
+
+        for frame in window_frames:
+            posture_idx = posture_lookup.get(int(frame))
+            if posture_idx is None:
+                missing_posture_frames.append(int(frame))
+                tail_issue_counts["missing_posture_frame"] += 1
+            elif not bool(posture_valid[posture_idx]):
+                invalid_posture_frames.append(int(frame))
+                tail_issue_counts["posture_valid_false"] += 1
+                if posture_reasons is not None:
+                    posture_reason_counts[_decode_reason_value(posture_reasons[posture_idx]) or "<empty>"] += 1
+            elif not np.all(np.isfinite(tail_angle[posture_idx])):
+                nonfinite_tail_frames.append(int(frame))
+                tail_issue_counts["nonfinite_tail_angle"] += 1
+            else:
+                valid_tail_frames.append(int(frame))
+
+            track_idx = track_lookup.get(int(frame))
+            if track_idx is None:
+                missing_track_frames.append(int(frame))
+                traj_issue_counts["missing_track_frame"] += 1
+            elif not bool(track_valid[track_idx]):
+                invalid_track_frames.append(int(frame))
+                traj_issue_counts["track_sample_valid_false"] += 1
+                if track_reasons is not None:
+                    track_reason_counts[_decode_reason_value(track_reasons[track_idx]) or "<empty>"] += 1
+            else:
+                values = np.asarray([positions_mm[track_idx, 0], positions_mm[track_idx, 1], heading[track_idx]])
+                if not np.all(np.isfinite(values)):
+                    nonfinite_traj_frames.append(int(frame))
+                    traj_issue_counts["nonfinite_traj"] += 1
+                else:
+                    valid_traj_frames.append(int(frame))
+
+        if len(examples) < int(max_examples):
+            examples.append(
+                {
+                    "bout_index": int(bout_idx),
+                    "source_bout_id": int(pack.source_bout_id[bout_idx]),
+                    "failure_reason": str(pack.failure_reason[bout_idx]),
+                    "source_window": [
+                        int(pack.source_start_frame[bout_idx]),
+                        int(pack.source_end_frame[bout_idx]),
+                    ],
+                    "classifier_window": [
+                        int(pack.window_start_frame[bout_idx]),
+                        int(pack.window_end_frame[bout_idx]),
+                    ],
+                    "tail_valid_fraction": float(pack.tail_valid_fraction[bout_idx]),
+                    "traj_valid_fraction": float(pack.traj_valid_fraction[bout_idx]),
+                    "max_consecutive_tail_invalid": int(pack.max_consecutive_tail_invalid[bout_idx]),
+                    "max_consecutive_traj_invalid": int(pack.max_consecutive_traj_invalid[bout_idx]),
+                    "missing_posture_frames": missing_posture_frames,
+                    "invalid_posture_frames": invalid_posture_frames,
+                    "nonfinite_tail_frames": nonfinite_tail_frames,
+                    "missing_track_frames": missing_track_frames,
+                    "invalid_track_frames": invalid_track_frames,
+                    "nonfinite_traj_frames": nonfinite_traj_frames,
+                    "valid_tail_frames": valid_tail_frames,
+                    "valid_traj_frames": valid_traj_frames,
+                }
+            )
+
+    invalid_tail_fraction = pack.tail_valid_fraction[invalid_idxs]
+    invalid_traj_fraction = pack.traj_valid_fraction[invalid_idxs]
+    result = {
+        "status": "ok",
+        "diagnostic": "megabouts_classifier_invalid_windows",
+        "mutates_archive": False,
+        "calls_megabouts": False,
+        "n_bouts": int(pack.valid_bout.shape[0]),
+        "valid_bout_count": int(np.count_nonzero(pack.valid_bout)),
+        "invalid_bout_count": int(invalid_idxs.shape[0]),
+        "failure_reason_counts": dict(failure_reason_counts),
+        "tail_frame_issue_counts_across_invalid_windows": dict(tail_issue_counts),
+        "traj_frame_issue_counts_across_invalid_windows": dict(traj_issue_counts),
+        "posture_failure_reason_counts_across_invalid_frames": dict(posture_reason_counts),
+        "track_failure_reason_counts_across_invalid_frames": dict(track_reason_counts),
+        "invalid_tail_fraction_quantiles": {
+            "min": float(np.min(invalid_tail_fraction)) if invalid_tail_fraction.size else math.nan,
+            "p25": float(np.quantile(invalid_tail_fraction, 0.25)) if invalid_tail_fraction.size else math.nan,
+            "median": float(np.median(invalid_tail_fraction)) if invalid_tail_fraction.size else math.nan,
+            "p75": float(np.quantile(invalid_tail_fraction, 0.75)) if invalid_tail_fraction.size else math.nan,
+            "max": float(np.max(invalid_tail_fraction)) if invalid_tail_fraction.size else math.nan,
+        },
+        "invalid_traj_fraction_quantiles": {
+            "min": float(np.min(invalid_traj_fraction)) if invalid_traj_fraction.size else math.nan,
+            "p25": float(np.quantile(invalid_traj_fraction, 0.25)) if invalid_traj_fraction.size else math.nan,
+            "median": float(np.median(invalid_traj_fraction)) if invalid_traj_fraction.size else math.nan,
+            "p75": float(np.quantile(invalid_traj_fraction, 0.75)) if invalid_traj_fraction.size else math.nan,
+            "max": float(np.max(invalid_traj_fraction)) if invalid_traj_fraction.size else math.nan,
+        },
+        "source_refs": pack.source_refs,
+        "parameters": pack.parameters,
+        "examples": examples,
+    }
+    return dict(_json_safe(result))
+
+
 def build_megabouts_classifier_input_pack_from_zarr(
     zarr_path: str | Path,
     **kwargs: object,
@@ -487,6 +655,17 @@ def dry_run_megabouts_classifier_inputs(
 ) -> dict[str, object]:
     pack = build_megabouts_classifier_input_pack_from_zarr(zarr_path, **kwargs)
     return summarize_input_pack(pack)
+
+
+def diagnose_megabouts_classifier_invalid_windows(
+    zarr_path: str | Path,
+    *,
+    max_examples: int = 12,
+    **kwargs: object,
+) -> dict[str, object]:
+    root = open_zarr_root(zarr_path, mode="r")
+    pack = build_megabouts_classifier_input_pack(root, **kwargs)
+    return diagnose_input_pack_invalid_windows(root, pack, max_examples=max_examples)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -506,6 +685,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-tail-valid-fraction", type=float, default=DEFAULT_MIN_TAIL_VALID_FRACTION)
     parser.add_argument("--min-traj-valid-fraction", type=float, default=DEFAULT_MIN_TRAJ_VALID_FRACTION)
     parser.add_argument("--max-consecutive-invalid-frames", type=int, default=DEFAULT_MAX_CONSECUTIVE_INVALID_FRAMES)
+    parser.add_argument(
+        "--diagnose-invalid-windows",
+        action="store_true",
+        help="Emit detailed invalid-window cause report instead of the compact dry-run summary.",
+    )
+    parser.add_argument("--max-examples", type=int, default=12, help="Maximum invalid-window examples in diagnostics.")
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser
 
@@ -513,21 +698,28 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    summary = dry_run_megabouts_classifier_inputs(
-        args.zarr_path,
-        tail_posture_view_run=args.tail_posture_view_run,
-        track_kinematics_run=args.track_kinematics_run,
-        track_scope=args.track_scope,
-        track_id=int(args.track_id),
-        swim_bout_run=args.swim_bout_run,
-        speed_level=args.speed_level,
-        heading_source=args.heading_source,
-        bout_duration_s=float(args.bout_duration_s),
-        bout_duration_frames=args.bout_duration_frames,
-        min_tail_valid_fraction=float(args.min_tail_valid_fraction),
-        min_traj_valid_fraction=float(args.min_traj_valid_fraction),
-        max_consecutive_invalid_frames=int(args.max_consecutive_invalid_frames),
-    )
+    kwargs = {
+        "tail_posture_view_run": args.tail_posture_view_run,
+        "track_kinematics_run": args.track_kinematics_run,
+        "track_scope": args.track_scope,
+        "track_id": int(args.track_id),
+        "swim_bout_run": args.swim_bout_run,
+        "speed_level": args.speed_level,
+        "heading_source": args.heading_source,
+        "bout_duration_s": float(args.bout_duration_s),
+        "bout_duration_frames": args.bout_duration_frames,
+        "min_tail_valid_fraction": float(args.min_tail_valid_fraction),
+        "min_traj_valid_fraction": float(args.min_traj_valid_fraction),
+        "max_consecutive_invalid_frames": int(args.max_consecutive_invalid_frames),
+    }
+    if args.diagnose_invalid_windows:
+        summary = diagnose_megabouts_classifier_invalid_windows(
+            args.zarr_path,
+            max_examples=int(args.max_examples),
+            **kwargs,
+        )
+    else:
+        summary = dry_run_megabouts_classifier_inputs(args.zarr_path, **kwargs)
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0
 

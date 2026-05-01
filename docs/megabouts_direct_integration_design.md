@@ -537,6 +537,18 @@ This command resolves the exact Palette source runs, builds the in-memory
 prints a JSON summary. It does not import Megabouts, call Megabouts, write
 classifier labels, or mutate the Zarr archive.
 
+To explain invalid classifier windows, add:
+
+```bash
+--diagnose-invalid-windows --max-examples 12
+```
+
+The diagnostic report categorizes each invalid window into missing posture
+frames, invalid posture rows, non-finite tail angles, missing track frames,
+invalid track samples, and non-finite trajectory samples. When reason-byte
+arrays are available, it also reports decoded posture/track failure reason
+counts and bounded example windows.
+
 Use this dry run before implementing or executing the optional Megabouts
 classifier call. A successful dry run means the Palette-side source surfaces are
 resolvable and shaped correctly; it does not mean Megabouts labels have been
