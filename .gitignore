@@ -32,3 +32,6 @@ retune_frame_flags*
 # Local extracted/reference PNGs
 /*.png
 /src/fisheye/utils/*.png
+
+# Generated Manim render outputs
+media/
