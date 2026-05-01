@@ -27,7 +27,9 @@ External packages should be treated as methods or adapters:
 - Stytra-like and ZebraZoom-like methods can extract or import tail tracking
   points and tail angles.
 - Megabouts can consume Palette-derived tail keypoints, tail angles,
-  trajectory, and bout windows for preprocessing and classification.
+  trajectory, and bout windows for preprocessing and classification. The first
+  Palette target is classifier-only: Palette supplies the bout windows and
+  Megabouts classifies them.
 - BEAST/Johnson-style analyses can consume bout-aligned tail-shape, heading,
   and eye-gaze arrays.
 
@@ -158,11 +160,20 @@ Palette arrays to:
 - `mm_per_unit`
 - optional bout onset/offset windows
 
+For Megabouts keypoint input, Palette should provide 11 ordered tail keypoints
+from tail base / swim-bladder side to tail tip. Megabouts converts those into
+10 cumulative tail-angle segments. This is distinct from Palette's current
+`analysis/tail_kinematics_runs` default `K=10` behavior-facing tail-angle
+samples, though a K=11 Palette candidate is a reasonable comparison target.
+
 Sources:
 
 - <https://megabouts.ai/api/tracking_data.html>
 - <https://megabouts.ai/api/preprocessing.html>
 - <https://megabouts.ai/api/segmentation.html>
+
+Palette's direct in-memory integration plan is documented in
+[megabouts_direct_integration_design.md](megabouts_direct_integration_design.md).
 
 ### BEAST / Johnson-Style Analyses
 
@@ -324,15 +335,18 @@ Initial adapter responsibilities:
 - resolve frame/time base and FPS
 - resolve calibrated units when available
 - produce `head_x`, `head_y`, `head_yaw`
-- produce `tail_x`, `tail_y` or `tail_angle`
+- produce `tail_x`, `tail_y` with 11 ordered tail keypoints for Megabouts
+  keypoint input, or produce a separately audited Megabouts-compatible
+  `tail_angle`
 - map Palette's signed body-frame tail angles into Megabouts' expected
   convention, with the conversion recorded in the export manifest
 - map invalid Palette rows to `NaN` values or a no-tracking mask
 - record exact source refs and conversion parameters
 
-The first implementation can be export-only. Running Megabouts classification
-inside Palette should remain optional because it introduces a third-party
-runtime dependency and model/version concerns.
+The first implementation should be a read-only classifier adapter over
+Palette-selected `analysis/swim_bout_runs` windows. File exports remain useful
+for debugging and cross-tool inspection, but they should not be required for
+the initial Palette-to-Megabouts path.
 
 ### ZebraZoom Adapter
 
@@ -438,6 +452,11 @@ behavior-analysis packages.
 
 - [ ] Define exact `tail_posture_view` or `tool_views/megabouts` fields after
   first tail-kinematics canary.
+- [ ] Run the direct Megabouts convention audit from
+  [megabouts_direct_integration_design.md](megabouts_direct_integration_design.md)
+  before treating Palette `tail_angle_rad` as Megabouts-compatible.
+- [ ] Prototype classifier-only Megabouts integration using Palette
+  `swim_bout_runs` windows and K=11 Megabouts tail keypoints.
 - [ ] Implement a read-only exporter from `subject_shape_runs`.
 - [ ] Implement a keypoint-derived exporter from `pose_kinematics_runs` or
   refined keypoints when tail labels exist.
@@ -446,9 +465,9 @@ behavior-analysis packages.
 
 ### External Tool Adapters
 
-- [ ] Prototype Megabouts export using Palette canary data.
-- [ ] Decide whether Megabouts should run inside Palette or remain a separate
-  optional command.
+- [ ] Prototype Megabouts classifier-only execution using Palette canary data.
+- [ ] Decide whether Megabouts should run as an installed optional dependency,
+  an explicitly configured command, or both.
 - [ ] Define ZebraZoom import/export mapping after inspecting real output files.
 - [ ] Define Stytra import mapping if acquisition or online tracking emits
   Stytra tail traces.
@@ -463,6 +482,13 @@ behavior-analysis packages.
 - [ ] Add comparison tooling to evaluate multiple classifier candidates on the
   same source bouts.
 
+## Resolved Initial Direction
+
+The first `analysis/bout_classification_runs` implementation should depend on
+existing Palette `swim_bout_runs`. Future tool-segmented candidates may write
+their own bout boundaries into classifier/import runs for comparison, but they
+should not replace Palette swim-bout candidates by default.
+
 ## Open Questions
 
 - Should the tool-ready posture view be persisted as a run or generated on
@@ -470,9 +496,6 @@ behavior-analysis packages.
 - Should Palette's first tail-angle convention match Megabouts exactly, or
   should Palette store both its native convention and a Megabouts-compatible
   exported convention?
-- Should `analysis/bout_classification_runs` depend on existing
-  `swim_bout_runs`, or should tools that segment their own bouts write their
-  own bout boundaries into the classifier/import run?
 - How should classifier confidence be normalized across tools that expose
   different score semantics?
 - What minimum canary review should be required before a tail-posture source is

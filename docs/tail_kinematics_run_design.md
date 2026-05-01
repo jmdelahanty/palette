@@ -125,9 +125,16 @@ tail_angle_sample_s = linspace(0.0, 1.0, 10)
 ```
 
 where `0.0` is the tail base and `1.0` is the tail tip. These samples are the
-markers that should drive the default tail-angle/deflection vectors shown to
-users and exported to Megabouts-like adapters. A method may use a different
-sample count, but it must record it explicitly.
+markers that should drive the default Palette tail-angle/deflection vectors
+shown to users and used by Palette-native summaries. External adapters may use
+a different sample count, but they must record it explicitly.
+
+Megabouts keypoint input uses a related but different count: 11 ordered
+tail-curve points produce 10 Megabouts cumulative angle segments. Palette may
+therefore generate a K=11 tail-kinematics candidate for comparison or adapter
+symmetry, but the Megabouts adapter can also resample directly from
+`subject_shape_runs` without changing Palette's default K=10 behavior-facing
+tail-angle surface.
 
 This split avoids using hundreds of dense spline evaluation points as a
 behavior feature vector while preserving dense geometry for measurements that
