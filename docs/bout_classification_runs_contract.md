@@ -216,3 +216,29 @@ Palette-prepared fixed windows." They are FPS-aware because Palette passes the
 resolved source FPS into Megabouts config objects and records the resulting
 window frame count, but they do not imply that full Megabouts preprocessing or
 Megabouts segmentation was used.
+
+To compare that default path against Megabouts' own preprocessing without
+writing a classifier run, use the read-only diagnostic:
+
+```bash
+scripts/py -m fisheye.analysis.megabouts_preprocessing_comparison <analysis.zarr> \
+  --tail-posture-view-run latest \
+  --track-kinematics-run latest \
+  --track-scope offline \
+  --track-id 0 \
+  --swim-bout-run latest \
+  --speed-level default \
+  --megabouts-repo ~/gitrepos/megabouts
+```
+
+This diagnostic reports input similarity for the same source swim-bout windows.
+It only becomes a classifier-output comparison when `--classify` is provided.
+
+Current policy: the default Megabouts adapter should remain
+`classifier_input_mode="palette_prepared_fixed_windows"` and
+`megabouts_preprocessing=false`. A future Megabouts-preprocessed adapter mode is
+allowed, but it must be opt-in and must record
+`classifier_input_mode="megabouts_preprocessed_full_timeseries"` plus source
+invalidity/coverage metadata. Megabouts preprocessing can rescue windows through
+interpolation, so those rescued classifier rows must not be conflated with
+strict Palette-valid rows.

@@ -677,7 +677,7 @@ Megabouts/import run or a dedicated comparison run. They should not replace
 `analysis/swim_bout_runs` unless Palette explicitly imports them as a new
 segmentation candidate with full provenance.
 
-### Planned Mode: Megabouts Preprocessing Input Comparison
+### Implemented Diagnostic: Megabouts Preprocessing Input Comparison
 
 Before adopting any Megabouts preprocessing path, compare it against the
 current Palette-prepared classifier inputs under controlled conditions.
@@ -700,10 +700,73 @@ Path A: Palette-prepared input
   -> tail_array, traj_array
 
 Path B: Megabouts-preprocessed input
-  Palette-exported/translated posture + trajectory time series
-  Megabouts tail/traj preprocessing
+  Palette posture + trajectory time series converted to dense DataFrames
+  Megabouts TailPreprocessing and TrajPreprocessing over the full time series
   -> tail_array, traj_array sampled over the same Palette bout windows
 ```
+
+Palette provides a read-only implementation:
+
+```bash
+scripts/py -m fisheye.analysis.megabouts_preprocessing_comparison <analysis.zarr> \
+  --tail-posture-view-run latest \
+  --track-kinematics-run latest \
+  --track-scope offline \
+  --track-id 0 \
+  --swim-bout-run latest \
+  --speed-level default \
+  --megabouts-repo ~/gitrepos/megabouts
+```
+
+The default report calls Megabouts preprocessing only. It does not run the
+classifier and does not write to the archive. Add `--classify` to run the same
+Megabouts classifier on both input packs and compare label agreement.
+
+Dependency note: this diagnostic imports Megabouts' preprocessing modules, so
+it requires the full preprocessing dependency set such as `pybaselines`. That
+is stricter than classifier-only mode, which can work from a local Megabouts
+checkout when only the classifier/runtime dependencies are available.
+
+Implementation details:
+
+- Palette path A uses persisted `tail_posture_view_runs/<run>/tail_angle_rad`
+  plus selected `track_kinematics_runs` positions/headings sampled directly
+  into fixed windows.
+- Megabouts path B builds dense frame-indexed DataFrames with columns
+  `angle_0..angle_9` and `x`, `y`, `yaw`, propagating invalid Palette frames as
+  NaNs.
+- Megabouts path B uses `TailPreprocessingResult.angle_smooth` and
+  `TrajPreprocessingResult.x_smooth`, `y_smooth`, `yaw_smooth`, matching the
+  local Megabouts freely-swimming pipeline.
+- Both paths are sampled over the same Palette `window_start_frame` and fixed
+  duration, then trajectories are translated/rotated into the onset frame using
+  the same alignment rule.
+
+Feeding-canary result on `2026-01-28T23-15-10Z_arena_2_Feeding`:
+
+```text
+source bouts                                  512
+Palette-prepared valid windows               396
+Megabouts-preprocessed valid windows          490
+common valid windows compared                 396
+
+tail angle comparison on common windows:
+  overall corr                                0.993
+  RMSE                                       0.045 rad
+  mean absolute difference                    0.032 rad
+
+trajectory comparison on common windows:
+  x/y onset-aligned corr                      ~0.997
+  x/y RMSE                                   ~0.06 mm
+  yaw circular mean absolute difference       0.027 rad (~1.6 deg)
+```
+
+Interpretation: the two input paths are close on windows that Palette already
+accepts. Megabouts preprocessing rescues additional windows because it
+interpolates or fills some missing tail samples. That is useful as an explicit
+comparison/rescue mode, but it should not silently relax Palette's canonical
+validity gate because many rejected Palette frames correspond to known source
+mask or shape problems.
 
 Do not initially compare against Megabouts' own segmentation windows, because
 that would mix preprocessing differences with segmentation differences. A
@@ -733,6 +796,13 @@ expected to be byte-identical. Megabouts preprocessing includes its own
 baseline correction, smoothing, and interpolation choices. A discrepancy is a
 diagnostic signal, not automatically evidence that Palette should replace its
 canonical inputs.
+
+Policy decision: Palette's default classifier adapter remains strict and uses
+Palette-prepared fixed windows. Megabouts preprocessing may be exposed as an
+explicit optional mode with provenance, for example
+`classifier_input_mode="megabouts_preprocessed_full_timeseries"`, but it should
+not become the default until rescued windows have been reviewed and the effect
+on classifier labels is quantified.
 
 If persisted, preprocessing comparison outputs should remain separate from
 classifier-label runs, for example:
@@ -782,6 +852,10 @@ Adapter policy:
   invalidity mask separately.
 - Reject or mark invalid any bout whose valid coverage is below a configured
   threshold.
+- A Megabouts-preprocessed mode may interpolate/fill through Palette-invalid
+  frames, but any rescued bout should remain traceable to the original Palette
+  invalidity mask and should be distinguishable from strict Palette-valid
+  windows in provenance and review surfaces.
 
 Recommended initial thresholds:
 
@@ -945,8 +1019,8 @@ attrs.
    adapter provenance.
 6. Optionally add a `tail_kinematics_runs` K=11 candidate for Palette-native
    review. Treat this as a comparison run, not a prerequisite for the adapter.
-7. Next: document and implement the same-window Megabouts preprocessing input
-   comparison. This should compare Palette-prepared inputs to
+7. Done: document and implement the read-only same-window Megabouts
+   preprocessing input comparison. This compares Palette-prepared inputs to
    Megabouts-preprocessed inputs before comparing full Megabouts segmentation.
 8. Defer full Megabouts preprocessing/segmentation comparison until
    classifier-only integration and same-window input comparison both have
