@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-28
+last_verified: 2026-05-01
 -->
 
 Purpose: define how Palette should represent mask/spline-derived tail geometry
@@ -235,10 +235,11 @@ should remain the explicit reason tags and the underlying numeric metrics.
 See
 [subject_shape_runs_contract.md](subject_shape_runs_contract.md#subject-shape-length-qc).
 
-## Proposed Storage
+## Storage
 
-The first implementation should extend `analysis/subject_shape_runs/<run>` with
-optional arrays. Writers should omit arrays they cannot validate.
+Current schema v3/method v8 subject-shape runs extend
+`analysis/subject_shape_runs/<run>` with optional arrays. Writers should omit
+arrays they cannot validate.
 
 ```text
 analysis/subject_shape_runs/<run>/

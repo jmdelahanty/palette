@@ -27,9 +27,9 @@ This note is meant to answer:
 
 Related notes:
 
-- [preferred_detect_crop_phase1_manual_promotion_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_manual_promotion_design.md)
-- [preferred_detect_crop_phase1_schema_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_schema_checklist.md)
-- [preferred_detect_crop_phase1_module_plan.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_module_plan.md)
+- [preferred_detect_crop_phase1_manual_promotion_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_manual_promotion_design.md)
+- [preferred_detect_crop_phase1_schema_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_schema_checklist.md)
+- [preferred_detect_crop_phase1_module_plan.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_module_plan.md)
 - [repo_wide_staleness_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_policy.md)
 - [repo_wide_staleness_workflow_edge_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/repo_wide_staleness_workflow_edge_checklist.md)
 - [crop_live_view_vs_materialized_stream_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crop_live_view_vs_materialized_stream_design.md)

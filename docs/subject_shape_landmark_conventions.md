@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-29
+last_verified: 2026-05-01
 -->
 
 Purpose: explain the landmark conventions used by
@@ -263,7 +263,7 @@ Use `tail_base_xy` for:
 
 - tail-segment length
 - tail-normalized sampling
-- future tail curvature
+- tail curvature
 - future tail width profiles
 
 Related fields:

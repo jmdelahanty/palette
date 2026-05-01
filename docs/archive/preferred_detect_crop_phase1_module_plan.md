@@ -22,8 +22,8 @@ plan:
 
 This note is deliberately implementation-oriented. It is the bridge between:
 
-- [preferred_detect_crop_phase1_manual_promotion_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_manual_promotion_design.md)
-- [preferred_detect_crop_phase1_schema_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_schema_checklist.md)
+- [preferred_detect_crop_phase1_manual_promotion_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_manual_promotion_design.md)
+- [preferred_detect_crop_phase1_schema_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_schema_checklist.md)
 
 ## Short Answer
 
@@ -363,7 +363,7 @@ incremental addition rather than a hard dependency.
 ### Docs to update
 
 - [crimson_detect_bbox_read_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crimson_detect_bbox_read_contract.md)
-- [preferred_detect_crop_phase1_manual_promotion_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_manual_promotion_design.md)
+- [preferred_detect_crop_phase1_manual_promotion_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_manual_promotion_design.md)
 
 ### Phase-1 read rule
 

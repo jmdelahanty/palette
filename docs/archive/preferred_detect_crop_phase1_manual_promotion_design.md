@@ -27,9 +27,9 @@ It is meant to answer one concrete need:
 
 Related notes:
 
-- [preferred_detect_crop_phase1_schema_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_schema_checklist.md)
-- [preferred_detect_crop_phase1_module_plan.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_phase1_module_plan.md)
-- [preferred_detect_crop_runs_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_runs_design.md)
+- [preferred_detect_crop_phase1_schema_checklist.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_schema_checklist.md)
+- [preferred_detect_crop_phase1_module_plan.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_phase1_module_plan.md)
+- [preferred_detect_crop_runs_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_runs_design.md)
 - [track_identity_target_architecture.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/track_identity_target_architecture.md)
 - [crimson_detect_bbox_read_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crimson_detect_bbox_read_contract.md)
 - [crimson_refined_detect_manual_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/crimson_refined_detect_manual_contract.md)

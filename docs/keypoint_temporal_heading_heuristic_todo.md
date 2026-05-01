@@ -29,7 +29,7 @@ Related notes:
 
 - [keypoint_heading_validity_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_heading_validity_todo.md)
 - [keypoint_quality_registry_workflow.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/keypoint_quality_registry_workflow.md)
-- [preferred_detect_crop_runs_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/preferred_detect_crop_runs_design.md)
+- [preferred_detect_crop_runs_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/preferred_detect_crop_runs_design.md)
 
 ## Short Answer
 

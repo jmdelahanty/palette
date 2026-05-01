@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-28
+last_verified: 2026-05-01
 -->
 
 Purpose: define the shared storage and provenance contract for deterministic
@@ -195,8 +195,9 @@ Existing analysis outputs already follow this direction:
   materialize keypoint-derived `support/body_frame/` arrays and future writers
   should prefer shared `analysis/subject_shape_runs/<run>/body_frame/` when
   available.
-- `analysis/stimulus_response_runs/<run>` is the planned stimulus-aware
-  downstream consumer.
+- `analysis/stimulus_response_runs/<run>` is the implemented stimulus-aware
+  downstream consumer for protocol-step summaries and stimulus-specific
+  adapters.
 
 New analysis families should follow the same `analysis/<analysis_type>_runs`
 placement unless there is a clear reason they are an authority rather than a

@@ -2,7 +2,7 @@
 
 Date anchored: 2026-03-06
 
-Last reviewed: 2026-04-28
+Last reviewed: 2026-05-01
 
 Purpose: summarize the current state of Palette's analysis and post-detection
 workflows, identify which repository docs are current versus aspirational or
@@ -158,14 +158,14 @@ The current analysis modules are still specialized:
 This is useful, but it is not yet a unified framework for "post-detection
 analysis by stimulus type."
 
-### Multi-stimulus support is designed, not implemented
+### Multi-stimulus support has an implemented substrate
 
-The best unification design in the repo is:
+The general unification design in the repo is:
 
 - [stimulus_response_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/stimulus_response_run_design.md)
 
-That document proposes a general `analysis/stimulus_response_runs/<run>/`
-layout that:
+That document defines the implemented
+`analysis/stimulus_response_runs/<run>/` layout, which:
 
 - consumes movement as the identity-resolved source of truth
 - computes base per-step metrics for all stimulus types
@@ -232,7 +232,7 @@ if read as statements about current importer behavior.
 
 ### Superseded narrow design
 
-- [base_analysis_moving_grating_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/base_analysis_moving_grating_design.md)
+- [base_analysis_moving_grating_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/archive/base_analysis_moving_grating_design.md)
 
 This is explicitly narrower and is effectively superseded by
 `stimulus_response_run_design.md`.

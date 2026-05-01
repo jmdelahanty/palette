@@ -3,7 +3,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-04-28
+last_verified: 2026-05-01
 -->
 
 Purpose: define the current operator-facing source-of-truth contract for Palette
@@ -57,7 +57,7 @@ The default rule is:
 | Refined eye masks | `eye_masks_runs/<run>` or projected subject-mask sources | `refined_subject_masks_runs/<run>` for current eye review | `refined_eye_masks_runs/<run>` is historical or derived compatibility layout | active eye geometry/export should prefer refined subject-mask eye components and fall back to refined-eye only for historical archives |
 | Swim bladder | raw probability surfaces in `subject_mask_runs/<run>` | `refined_subject_masks_runs/<run>/components/swim_bladder` | coarse thresholded swim-bladder masks are compatibility/refinement caches | refined subject-mask swim-bladder component state |
 | Subject shape | refined subject-mask component masks and optional mask-local geometry | none; derived deterministic analysis layer | `analysis/subject_shape_runs/<run>` as the coherent body/eyes/swim shape and shared body-frame surface; specialized downstream analysis runs may consume it | shape outputs must reference exact refined-mask source and any heading/keypoint/track inputs |
-| Tail kinematics | ordered tail geometry from `analysis/subject_shape_runs` or future keypoint-derived tail posture | none; derived deterministic analysis layer | planned `analysis/tail_kinematics_runs/<run>` for body-frame tail angles, lateral deflections, and curvature summaries; Megabouts/ZebraZoom/Stytra views are adapters | tail traces must reference exact geometry source and record angle/sign/unit conventions |
+| Tail kinematics | ordered tail geometry from `analysis/subject_shape_runs` or future keypoint-derived tail posture | none; derived deterministic analysis layer | `analysis/tail_kinematics_runs/<run>` for body-frame tail angles, lateral deflections, and curvature summaries; Megabouts/ZebraZoom/Stytra views are adapters | tail traces must reference exact geometry source and record angle/sign/unit conventions |
 | Eye angles | refined keypoints plus eye geometry from subject-shape/refined-subject/refined-eye sources | none; specialized deterministic analysis layer | `analysis/eye_angle_runs/<run>` with `schema_id = "analysis.eye_angle_runs"`, run schema v5, and output schema v7 | current runs prefer subject-shape eye geometry when available, use resolved major-axis orientation as canonical, derive gaze/minor-axis arrays plus BEAST/Bianco-compatible surfaces, expose `eye_angle_variant_schema` for UI representation selection, and record exact geometry/keypoint/body-frame lineage |
 | Arena assignment/tracking | selected detect/refined lineage outputs | tracking QC/status metadata | older raw-detect-aligned assignments | assignment/tracking rows whose source lineage matches the selected detect/refined state |
 
@@ -205,10 +205,11 @@ desired design:
   triage state, not training approval.
 - Temporal QC for abrupt area/centroid/component-count changes is planned as a
   second pass that flags rows without overwriting spatial masks.
-- `analysis/subject_shape_runs` has a first coherent body/eyes/swim writer, and
-  `analysis/eye_angle_runs` now consumes it when available. Body
-  centerline/B-spline support, materialized `body_frame/` outputs, and
-  additional downstream consumers are still open.
+- `analysis/subject_shape_runs` has a coherent body/eyes/swim writer with
+  materialized `body_frame/`, snout-anchored centerline, B-spline, and tail
+  geometry outputs. `analysis/eye_angle_runs` and
+  `analysis/tail_kinematics_runs` now consume those surfaces when available;
+  additional downstream consumers remain open.
 - Subject-shape length stability QC is defined as a downstream analysis layer,
   but body/tail length distribution summaries, temporal delta flags, and
   multi-reason length-QC tags are not yet implemented.

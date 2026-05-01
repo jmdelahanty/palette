@@ -129,9 +129,9 @@ After detection you will typically see the following folders appear alongside `d
 
 | Group                  | Produced by                            | Purpose |
 | ---------------------- | -------------------------------------- | ------- |
-| `detect_quality_runs/` | `python -m fisheye.refinement.detect_quality` | Stores per-frame and per-detection quality labels. |
-| `refined_detect_runs/` | `python -m fisheye.refinement.refine_detect` | Canonical curated detect runs with sparse `instances/` rows and `source_detections/` audit data. |
-| `tracking_runs/`       | `python -m fisheye.tracking.arena_assignment` | Tracking outputs derived from arena assignment for the current single-subject-per-arena workflow. |
+| `detect_quality_runs/` | `scripts/py -m fisheye.refinement.detect_quality` | Stores per-frame and per-detection quality labels. |
+| `refined_detect_runs/` | `scripts/py -m fisheye.refinement.refine_detect` | Canonical curated detect runs with sparse `instances/` rows and `source_detections/` audit data. |
+| `tracking_runs/`       | `scripts/py -m fisheye.tracking.arena_assignment` | Tracking outputs derived from arena assignment for the current single-subject-per-arena workflow. |
 
 Each of these records the source detection run in their attributes (e.g. `source_detect_run`) so the lineage always points back to one of the `detect_runs/<run>` entries described above.
 

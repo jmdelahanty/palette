@@ -68,10 +68,10 @@ Example:
 ## Workflow
 1) Acquisition writes H5 root attributes with session context fields.
 2) Import or update the Zarr mirror:
-   - `python -m fisheye.analysis.import_stimulus_to_zarr /path/to/session.zarr --h5 /path/to/stimulus.h5`
+   - `scripts/py -m fisheye.analysis.import_stimulus_to_zarr /path/to/session.zarr --h5 /path/to/stimulus.h5`
 3) Verify the mirror:
-   - `python src/zarr_inspector.py /path/to/session.zarr`
-   - `python -m fisheye.diagnostics.inspect_session_context /path/to/session.zarr`
+   - `scripts/py src/zarr_inspector.py /path/to/session.zarr`
+   - `scripts/py -m fisheye.diagnostics.inspect_session_context /path/to/session.zarr`
 4) Register the dataset (optional but recommended):
-   - `python -m fisheye.registry.scan /path/to/session.zarr`
-   - `python -m fisheye.registry.status --list-issues`
+   - `scripts/py -m fisheye.registry.scan /path/to/session.zarr`
+   - `scripts/py -m fisheye.registry.status --list-issues`

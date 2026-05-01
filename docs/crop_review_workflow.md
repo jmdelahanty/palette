@@ -9,7 +9,7 @@ Registry-backed crop review/status planning is tracked in:
 ## Quick review (single recording)
 
 ```
-python -m fisheye.visualization.visualize_crops /path/to/recording.zarr
+scripts/py -m fisheye.visualization.visualize_crops /path/to/recording.zarr
 ```
 
 Keys:
@@ -23,7 +23,7 @@ Keys:
 ## Batch review
 
 ```
-python -m fisheye.utils.review_crops /nvme1/recordings --recursive
+scripts/py -m fisheye.utils.review_crops /nvme1/recordings --recursive
 ```
 
 Use `--file-list` to review a specific subset.
@@ -36,7 +36,7 @@ each launched viewer.
 To collect crops missing approval into a file list:
 
 ```
-python -m fisheye.utils.generate_review_list /nvme1/recordings \
+scripts/py -m fisheye.utils.generate_review_list /nvme1/recordings \
   --recursive \
   --stage crop \
   --review-state missing \
@@ -50,7 +50,7 @@ set `--crop-run-status any`.
 ## Keypoint review (batch)
 
 ```
-python -m fisheye.utils.review_keypoints_batch /nvme1/recordings --recursive --manual
+scripts/py -m fisheye.utils.review_keypoints_batch /nvme1/recordings --recursive --manual
 ```
 
 Use `--retune` or `--audit` to switch modes.

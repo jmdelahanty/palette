@@ -1,8 +1,8 @@
 # Tail Kinematics Run Design
 <!-- contract-meta
 version: 1
-status: draft
-last_verified: 2026-04-29
+status: active
+last_verified: 2026-05-01
 -->
 
 Purpose: define the first Palette-native tail-angle, tail-deflection, and
@@ -12,13 +12,13 @@ non-canonical.
 
 ## Design Decision
 
-Palette should add a dedicated frame-level run family:
+Palette has a dedicated frame-level run family:
 
 ```text
 analysis/tail_kinematics_runs/<run>
 ```
 
-This run should consume an exact tail-geometry source, usually:
+This run consumes an exact tail-geometry source, usually:
 
 ```text
 analysis/subject_shape_runs/<shape_run>/components/subject_body/
@@ -48,7 +48,7 @@ segmentations, or external classifier outputs.
 
 ## Source Requirements
 
-The first implementation should require a valid subject-shape run with:
+The current implementation requires a valid subject-shape run with:
 
 ```text
 components/subject_body/bspline_sample_xy
@@ -65,10 +65,10 @@ body_frame/left_axis_xy
 body_frame/valid
 ```
 
-Rows should be valid only when the source row has a valid body frame and valid
-tail geometry. Preferred v1 behavior is to resample from valid B-spline/tail
-geometry into the lower-dimensional `tail_angle_sample_*` surface. Source
-failures should propagate into `failure_reason_bytes` rather than being
+Rows are valid only when the source row has a valid body frame and valid tail
+geometry. The v1 behavior resamples from valid B-spline/tail geometry into the
+lower-dimensional `tail_angle_sample_*` surface. Source failures propagate into
+`failure_reason_bytes` rather than being
 silently interpolated.
 
 ## Coordinate And Sign Convention
@@ -116,8 +116,8 @@ Subject-shape runs may store:
   geometry outputs
 - dense or moderately dense curvature samples for geometry/QC
 
-Tail-kinematics runs should store behavior-facing tail samples separately. The
-default should be:
+Tail-kinematics runs store behavior-facing tail samples separately. The default
+is:
 
 ```text
 tail_angle_sample_count = 10
@@ -135,7 +135,7 @@ need it.
 
 ## Frame-Level Metric Set
 
-The initial run should expose one trace group for the selected geometry source:
+The current run exposes one trace group for the selected geometry source:
 
 ```text
 analysis/tail_kinematics_runs/<run>/

@@ -50,7 +50,7 @@ Registry location:
 
 Setting the env var (examples):
 - One-off command:
-  - PALETTE_REGISTRY_PATH=/nvme1/palette_registry.sqlite python -m fisheye.registry.status
+  - PALETTE_REGISTRY_PATH=/nvme1/palette_registry.sqlite scripts/py -m fisheye.registry.status
 - Current shell session:
   - export PALETTE_REGISTRY_PATH=/nvme1/palette_registry.sqlite
 - Persist for bash:
@@ -58,8 +58,8 @@ Setting the env var (examples):
   - source ~/.bashrc
 
 CLI:
-- Scan datasets: python -m fisheye.registry.scan /path/to/zarr_root --recursive
-- Coverage report: python -m fisheye.registry.status --list-issues
+- Scan datasets: `scripts/py -m fisheye.registry.scan /path/to/zarr_root --recursive`
+- Coverage report: `scripts/py -m fisheye.registry.status --list-issues`
 
 Registry behavior:
 - Missing/moved Zarrs are marked status=missing, not deleted.
@@ -92,7 +92,7 @@ Registry integration:
 - train_detection: pass --log-registry [--manifest <manifest.json>].
 
 Standalone export (existing run):
-- python -m fisheye.training.export_detection /path/to/run --export-trt --trtexec /usr/local/TensorRT-10.0.1.6/bin/trtexec
+- `scripts/py -m fisheye.training.export_detection /path/to/run --export-trt --trtexec /usr/local/TensorRT-10.0.1.6/bin/trtexec`
 - Reuse an existing ONNX: add --onnx-path /path/to/model.onnx (skips ONNX export)
 
 ## Maintenance and Auditing

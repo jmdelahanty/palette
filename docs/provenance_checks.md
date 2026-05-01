@@ -2,9 +2,9 @@
 
 This document describes the provenance diagnostics provided by:
 
-- `python -m fisheye.diagnostics.check_provenance_capture`
-- `python -m fisheye.diagnostics.check_provenance_consistency`
-- `python -m fisheye.diagnostics.check_full_provenance`
+- `scripts/py -m fisheye.diagnostics.check_provenance_capture`
+- `scripts/py -m fisheye.diagnostics.check_provenance_consistency`
+- `scripts/py -m fisheye.diagnostics.check_full_provenance`
 
 Contract reference: `docs/provenance_contract_draft.md`.
 Boundary guidance: `docs/pipeline_metadata_boundaries.md`.
@@ -20,13 +20,13 @@ expected minimal fields (timestamp, parameters, inputs).
 Example:
 
 ```bash
-python -m fisheye.diagnostics.check_provenance_capture /nvme1/recordings --recursive
+scripts/py -m fisheye.diagnostics.check_provenance_capture /nvme1/recordings --recursive
 ```
 
 Optional subject metadata validation:
 
 ```bash
-python -m fisheye.diagnostics.check_provenance_capture /nvme1/recordings --recursive --check-subject-metadata
+scripts/py -m fisheye.diagnostics.check_provenance_capture /nvme1/recordings --recursive --check-subject-metadata
 ```
 
 What it checks per stage (latest run by default):
@@ -78,7 +78,7 @@ This is primarily about counts and lineage, not metadata completeness.
 Example:
 
 ```bash
-python -m fisheye.diagnostics.check_provenance_consistency /path/to/recording.zarr
+scripts/py -m fisheye.diagnostics.check_provenance_consistency /path/to/recording.zarr
 ```
 
 What it checks:
@@ -101,7 +101,7 @@ need a full report for a single recording or for debugging inconsistent metadata
 Example:
 
 ```bash
-python -m fisheye.diagnostics.check_full_provenance /path/to/recording.zarr
+scripts/py -m fisheye.diagnostics.check_full_provenance /path/to/recording.zarr
 ```
 
 ## Subject metadata schema (summary)

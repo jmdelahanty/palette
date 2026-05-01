@@ -24,7 +24,7 @@ This note records recent changes around keypoint retuning so future agents can f
 ## Retune flow
 1. Run `refine_keypoints` to create a refined run and `failure_indices`.
 2. Launch retune mode (review entrypoint):
-   - `python -m fisheye.tune.keypoint_review /path/to.zarr --retune`
+   - `scripts/py -m fisheye.tune.keypoint_review /path/to.zarr --retune`
    - target a run with `--refined-run refined_keypoints_YYYY-MM-DD_HH-MM-SS`
 3. Use sliders to adjust thresholds. Actions:
    - `e`: evaluate a sample (default 300) of failures.
@@ -38,7 +38,7 @@ manual correction so coverage reflects the current refined state.
 
 ## Deprecations
 Legacy entrypoints for retune/manual review have been removed. Use
-`python -m fisheye.tune.keypoint_review --retune|--manual` instead.
+`scripts/py -m fisheye.tune.keypoint_review --retune|--manual` instead.
 
 ## Metadata and arrays
 - `refined_keypoints_runs/<run>/retune_id` stores the parameter set label for each ROI.

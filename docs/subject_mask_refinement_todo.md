@@ -1072,8 +1072,10 @@ This means the registry should eventually answer questions like:
 - [x] Route the first downstream eye-angle analysis consumer through
       `analysis/subject_shape_runs` when available, with refined-subject and
       refined-eye compatibility fallbacks.
-- [ ] Include body B-spline fit support in the first body-shape writer or define
-      it as the first follow-up slice.
+- [x] Include body B-spline fit support in the first body-shape writer.
+  Current `fisheye.analysis.subject_shape_runs` schema v3/method v8 writes
+  snout-anchored centerlines, B-spline samples/control points, tail samples,
+  tangents, normals, curvature, and body/tail arclength metrics.
 
 ## Phase 5: Eye Unification Path
 
@@ -1199,8 +1201,8 @@ Remaining work is no longer open-ended architecture. It is operational hardening
 - visual inspection and component approval of smart-finalized candidates
 - temporal QC as a second pass that flags suspicious rows without changing masks
 - faster/chunked eye-geometry backfill if this becomes a frequent full-run task
-- body B-spline/centerline support and downstream subject-shape consumers beyond
-  the first eye-angle consumer
+- additional downstream subject-shape consumers beyond the current eye-angle
+  and tail-kinematics consumers
 - complete subject/refined-subject stale repair parity with the eye-mask
   precedent
 - top-level segmentation orchestration in `core/pipeline.py` so operators do not

@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-29
+last_verified: 2026-05-01
 -->
 
 Purpose: define how Palette should make its Zarr datastores compatible with
@@ -427,9 +427,9 @@ behavior-analysis packages.
 ### Palette Tail Kinematics
 
 - [x] Define a dedicated `analysis/tail_kinematics_runs` design.
-- [ ] Implement frame-level tail angles, tail-tip angles, lateral deflections,
+- [x] Implement frame-level tail angles, tail-tip angles, lateral deflections,
   and curvature summaries from subject-shape tail samples.
-- [ ] Add tests for angle convention, left/right sign, straight-tail zero angle,
+- [x] Add tests for angle convention, left/right sign, straight-tail zero angle,
   and invalid-row propagation.
 - [ ] Add visualization artifacts and Marimo loading after the run schema
   stabilizes.
@@ -467,7 +467,7 @@ behavior-analysis packages.
 
 - Should the tool-ready posture view be persisted as a run or generated on
   demand from `subject_shape_runs` and `pose_kinematics_runs`?
-- Should Palette’s first tail-angle convention match Megabouts exactly, or
+- Should Palette's first tail-angle convention match Megabouts exactly, or
   should Palette store both its native convention and a Megabouts-compatible
   exported convention?
 - Should `analysis/bout_classification_runs` depend on existing

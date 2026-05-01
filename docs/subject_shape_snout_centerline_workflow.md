@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-04-29
+last_verified: 2026-05-01
 -->
 
 Purpose: document the current subject-shape workflow produced by Palette for
@@ -307,11 +307,10 @@ Consumers should:
 - B-spline fitting is currently interpolating (`smoothing = 0.0`), so it follows
   the resampled centerline closely. If the centerline is noisy, the spline will
   be noisy too.
-- Tail samples in this subject-shape run are geometric outputs, not yet the
-  low-dimensional behavioral tail-angle vector. The default behavior-facing
-  tail-angle representation should be derived later in
-  `analysis/tail_kinematics_runs` with its own sample count, currently planned
-  as `K=10`.
+- Tail samples in this subject-shape run are geometric outputs, not the
+  low-dimensional behavioral tail-angle vector. The behavior-facing
+  representation is derived in `analysis/tail_kinematics_runs` with its own
+  sample count, currently defaulting to `K=10`.
 
 ## Next Work
 
@@ -323,9 +322,6 @@ Recommended next slices:
    are mask/QC failures or threshold tuning cases.
 3. Add persisted visualization artifacts under
    `analysis/subject_shape_runs/<run>/visualizations`.
-4. Add tail-angle time-series and bout-aligned tail features from
-   `tail_sample_xy`, `tail_tangent_xy`, and `tail_curvature_px_inv`.
-   The first frame-level metric surface is specified in
-   [tail_kinematics_run_design.md](tail_kinematics_run_design.md).
-5. Add a Crimson read contract for subject-shape overlays after the current
-   arrays stabilize.
+4. Add persisted PNG summaries for tail angles, tail-tip deflection,
+   curvature, and validity/failure reasons in `analysis/tail_kinematics_runs`.
+5. Add bout-aligned tail summaries under `analysis/bout_kinematics_runs`.

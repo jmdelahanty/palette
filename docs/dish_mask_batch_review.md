@@ -21,17 +21,17 @@ This workflow is for propagating a tuned dish mask across many recordings and th
 
 1) **Tune one representative recording**
 ```bash
-python -m fisheye.tune.mask_tuner /nvme1/recordings/<recording>/zarr/<recording>.zarr
+scripts/py -m fisheye.tune.mask_tuner /nvme1/recordings/<recording>/zarr/<recording>.zarr
 ```
 
 2) **Backfill chamber (older recordings only)**
 ```bash
-python src/fisheye/utils/backfill_experimental_chamber.py /nvme1/recordings --recursive --apply
+scripts/py -m fisheye.utils.backfill_experimental_chamber /nvme1/recordings --recursive --apply
 ```
 
 3) **Batch apply dish mask by chamber**
 ```bash
-python src/fisheye/utils/apply_dish_mask_by_chamber.py /nvme1/recordings \
+scripts/py -m fisheye.utils.apply_dish_mask_by_chamber /nvme1/recordings \
   --recursive \
   --source /nvme1/recordings/<recording>/zarr/<recording>.zarr \
   --apply
@@ -39,7 +39,7 @@ python src/fisheye/utils/apply_dish_mask_by_chamber.py /nvme1/recordings \
 
 4) **Manual review / correction**
 ```bash
-python src/fisheye/utils/review_dish_masks.py /nvme1/recordings \
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
   --recursive \
   --chamber cedar
 ```
@@ -72,10 +72,10 @@ python src/fisheye/utils/review_dish_masks.py /nvme1/recordings \
 Examples:
 ```bash
 # Only those that already have masks (verification pass)
-python src/fisheye/utils/review_dish_masks.py /nvme1/recordings --recursive --only-present
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-present
 
 # Only missing masks (fix pass)
-python src/fisheye/utils/review_dish_masks.py /nvme1/recordings --recursive --only-missing
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-missing
 ```
 
 ## Notes / best practices

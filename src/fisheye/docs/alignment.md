@@ -157,7 +157,7 @@ Each `import_stimulus_to_zarr` run creates an **independent, timestamped group**
 
 2. **Import stimulus data**:
    ```bash
-   python -m fisheye.analysis.import_stimulus_to_zarr /path/to/archive.zarr
+   scripts/py -m fisheye.analysis.import_stimulus_to_zarr /path/to/archive.zarr
    ```
    - Auto-detects the matching `.h5` file
    - Creates timestamped run under `analysis/stimulus_runs/`
@@ -206,19 +206,19 @@ Use these scripts to identify if your dataset has the issue:
 
 1. **`count_h5_chaser_states.py`** - Count and validate chaser states
    ```bash
-   python -m fisheye.diagnostics.count_h5_chaser_states /path/to/stimulus.h5
+   scripts/py -m fisheye.diagnostics.count_h5_chaser_states /path/to/stimulus.h5
    ```
    Look for: "Regular 2:1 spacing detected" or gaps in frame sequence
 
 2. **`analyze_h5_frame_spacing.py`** - Analyze frame spacing patterns
    ```bash
-   python -m fisheye.diagnostics.analyze_h5_frame_spacing /path/to/stimulus.h5
+   scripts/py -m fisheye.diagnostics.analyze_h5_frame_spacing /path/to/stimulus.h5
    ```
    Look for: Dominant spacing of 2 instead of 1
 
 3. **`diagnose_camera_chaser_mapping.py`** - Diagnose mapping failures
    ```bash
-   python -m fisheye.diagnostics.diagnose_camera_chaser_mapping /path/to/archive.zarr
+   scripts/py -m fisheye.diagnostics.diagnose_camera_chaser_mapping /path/to/archive.zarr
    ```
    Look for: ~50% failed mappings with reason "stimulus frame not in chaser_states"
 
@@ -235,12 +235,12 @@ cp /path/to/stimulus.h5 /path/to/stimulus.h5.original
 
 **Dry run** (preview changes without modifying):
 ```bash
-python -m fisheye.diagnostics.fix_h5_chaser_frame_numbers /path/to/stimulus.h5 --dry-run
+scripts/py -m fisheye.diagnostics.fix_h5_chaser_frame_numbers /path/to/stimulus.h5 --dry-run
 ```
 
 **Apply fix** (modifies both chaser_states and frame_metadata):
 ```bash
-python -m fisheye.diagnostics.fix_h5_chaser_frame_numbers /path/to/stimulus.h5 --fix-all
+scripts/py -m fisheye.diagnostics.fix_h5_chaser_frame_numbers /path/to/stimulus.h5 --fix-all
 ```
 
 The script will:
@@ -257,7 +257,7 @@ Options:
 
 #### Step 3: Re-import to Zarr
 ```bash
-python -m fisheye.analysis.import_stimulus_to_zarr /path/to/archive.zarr
+scripts/py -m fisheye.analysis.import_stimulus_to_zarr /path/to/archive.zarr
 ```
 
 This creates a new timestamped run with corrected frame mappings.
@@ -266,19 +266,19 @@ This creates a new timestamped run with corrected frame mappings.
 
 **Check mapping success rate**:
 ```bash
-python -m fisheye.diagnostics.diagnose_camera_chaser_mapping /path/to/archive.zarr
+scripts/py -m fisheye.diagnostics.diagnose_camera_chaser_mapping /path/to/archive.zarr
 ```
 Should show: ~100% successful mappings (down from ~50%)
 
 **Visualize alignment**:
 ```bash
-python -m fisheye.diagnostics.plot_chaser_alignment /path/to/archive.zarr
+scripts/py -m fisheye.diagnostics.plot_chaser_alignment /path/to/archive.zarr
 ```
 Should show: Significant reduction in red dots (missing samples)
 
 **Check chaser positions**:
 ```bash
-python -m fisheye.diagnostics.check_h5_chaser_positions /path/to/stimulus.h5
+scripts/py -m fisheye.diagnostics.check_h5_chaser_positions /path/to/stimulus.h5
 ```
 Should show: Positions varying over time
 

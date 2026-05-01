@@ -24,8 +24,9 @@ automation) — the main difference is where `palette-crimson` edits originate.
 - The contracts repo has 3 keypoint contracts (`keypoint_read.md`,
   `keypoint_review_acceptance.md`, `keypoint_manual_write.md`) that only exist
   there — palette has no copies.
-- The contracts repo has `zarr_alignment.md` which is byte-identical to
-  palette's `crimson_palette_zarr_alignment_todo.md`.
+- The contracts repo has `zarr_alignment.md` which was historically
+  byte-identical to Palette's now-archived
+  `docs/archive/crimson_palette_zarr_alignment_todo.md`.
 - The `palette-answer-consumer` workflow can currently edit `palette-crimson/`
   in the contracts repo, which conflicts with palette-as-author.
 
@@ -54,9 +55,10 @@ automation) — the main difference is where `palette-crimson` edits originate.
     `docs/palette-crimson/detect_review_acceptance.md`
   - `docs/crimson_refined_detect_manual_contract.md` →
     `docs/palette-crimson/refined_detect_manual.md`
-- [ ] Move zarr alignment doc:
-  - `docs/crimson_palette_zarr_alignment_todo.md` →
-    `docs/palette-crimson/zarr_alignment.md`
+- [ ] Decide whether the archived zarr alignment note should be replaced by a
+      current Palette-owned `docs/palette-crimson/zarr_alignment.md` contract:
+  - historical source:
+    `docs/archive/crimson_palette_zarr_alignment_todo.md`
 - [ ] Keep `contract-meta` blocks in all moved files (they already have them).
 
 ### 1b. Import keypoint contracts from contracts repo
@@ -86,7 +88,7 @@ automation) — the main difference is where `palette-crimson` edits originate.
   - `crimson_detect_bbox_read_contract`
   - `crimson_detect_review_acceptance_contract`
   - `crimson_refined_detect_manual_contract`
-  - `crimson_palette_zarr_alignment_todo`
+  - `crimson_palette_zarr_alignment_todo` (archived historical note)
 - [ ] Update `scripts/check_contract_freshness.py` if it hardcodes contract
       paths (check the scan directory and glob patterns).
 - [ ] Update any `CLAUDE.md` or agent instruction files that reference old

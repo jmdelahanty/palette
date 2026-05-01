@@ -1739,9 +1739,8 @@ Current centerline/tail-anchor arrays:
 `components/subject_body/bspline_sample_xy` and
 `components/subject_body/tail_sample_xy` are subject-shape geometry outputs.
 They may be denser than the behavior-facing representation used for tail-angle
-analysis. Low-dimensional tail-angle vectors, currently planned with default
-`K=10`, belong in `analysis/tail_kinematics_runs` as
-`tail_angle_sample_*` arrays.
+analysis. Low-dimensional tail-angle vectors, currently defaulting to `K=10`,
+belong in `analysis/tail_kinematics_runs` as `tail_angle_sample_*` arrays.
 
 Expected relation groups:
 
@@ -1778,14 +1777,15 @@ canonical outputs:
 The first writer is `fisheye.analysis.subject_shape_runs`. It writes
 row-aligned body/eyes/swim component summaries, body principal-axis estimates,
 eye/swim ellipse summaries, eye-pair relations, swim/eye-to-body relations,
-mask-component body-frame arrays, caudal swim-bladder contour anchors, and a
-conservative skeleton-derived subject-body centerline with head/tail endpoints
-using serial or Dask worker-chunk execution. B-spline fitting, tail curvature,
-and mask-width profiles remain follow-up derived-shape methods. The storage and provenance
-contract is documented in `docs/subject_shape_runs_contract.md`; the shared
-derived-run contract is documented in `docs/derived_analysis_run_contract.md`.
-Shared fish-relative frame semantics are documented in
-`docs/body_frame_contract.md`.
+mask-component body-frame arrays, caudal swim-bladder contour anchors,
+snout-anchored subject-body centerlines, B-spline samples/control points,
+tail-segment samples/tangents/normals/curvature, and body/tail length metrics
+using serial or Dask worker-chunk execution. Mask-width profiles and richer
+shape-QC summaries remain follow-up derived-shape methods. The storage and
+provenance contract is documented in `docs/subject_shape_runs_contract.md`; the
+shared derived-run contract is documented in
+`docs/derived_analysis_run_contract.md`. Shared fish-relative frame semantics
+are documented in `docs/body_frame_contract.md`.
 
 ### `analysis/tail_kinematics_runs/`
 

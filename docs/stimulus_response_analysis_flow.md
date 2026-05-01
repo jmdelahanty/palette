@@ -202,7 +202,7 @@ One read gives the full chain from biological metric to source video.
 ## Usage
 
 ```bash
-python -m fisheye.analysis.stimulus_response <zarr_path> \
+scripts/py -m fisheye.analysis.stimulus_response <zarr_path> \
     --track-kinematics-type offline \
     --moving-threshold-mm-s 2.0 \
     --camera-to-projector-offset-deg 0.0 \

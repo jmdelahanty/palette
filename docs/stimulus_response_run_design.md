@@ -1,8 +1,8 @@
 # Stimulus Response Run Design
 
-Supersedes the storage layout and identity model from
-`base_analysis_moving_grating_design.md`. Metric definitions from that doc
-are preserved and expanded here.
+Supersedes the storage layout and identity model from the archived
+`docs/archive/base_analysis_moving_grating_design.md`. Metric definitions from
+that doc are preserved and expanded here.
 
 ## Goal
 
