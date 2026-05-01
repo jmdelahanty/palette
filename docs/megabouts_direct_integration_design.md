@@ -101,9 +101,10 @@ The first implementation target is classifier-only integration:
 
 - Palette remains the source of truth for refined masks, subject shape, tail
   geometry, track kinematics, and swim-bout windows.
-- The adapter resamples Palette tail geometry to Megabouts-style `K=11`
-  ordered tail keypoints, then lets Megabouts compute its `K=10` cumulative
-  tail-angle channels.
+- The implemented `analysis/tail_posture_view_runs` writer resamples Palette
+  tail geometry to Megabouts-style `K=11` ordered tail keypoints and writes
+  `K=10` cumulative tail-angle channels using a Palette-owned compatibility
+  implementation.
 - Palette-selected `analysis/swim_bout_runs` define the bout windows that are
   sliced into classifier arrays.
 - Megabouts is used as a bout classifier over those fixed arrays, not as the
@@ -204,31 +205,53 @@ because it makes the sampled markers look similar to Megabouts keypoint input.
 If `K=11` is used this way, it should be recorded as an explicit candidate
 parameter, not silently treated as a schema replacement.
 
-For the first Megabouts classifier adapter, prefer deriving Megabouts
-`tail_angle` from `K=11` keypoints via Megabouts' own conversion. Do not pass
-Palette `tail_angle_rad` directly as Megabouts `tail_angle` until the convention
-audit proves the mapping is safe.
+For the first Megabouts classifier adapter, use
+`analysis/tail_posture_view_runs/<run>/tail_angle_rad` rather than Palette
+native `analysis/tail_kinematics_runs/<run>/tail_angle_rad`. The posture view
+derives Megabouts-compatible `tail_angle` from `K=11` keypoints and records the
+algorithm boundary in attrs. Do not pass Palette native `tail_angle_rad`
+directly as Megabouts `tail_angle` until the convention audit proves the
+mapping is safe.
 
-If these arrays are persisted before classification, they should be persisted
-as a tool-specific posture view, not as a replacement `tail_kinematics_runs`
-output:
+These arrays are persisted as a tool-specific posture view, not as a
+replacement `tail_kinematics_runs` output:
 
 ```text
 analysis/tail_posture_view_runs/<run>/
   attrs:
-    view_family                       "megabouts"
+    schema_id                         "analysis.tail_posture_view_runs"
+    schema_version                    1
+    method                            "tail_posture_view_from_subject_shape"
+    method_version                    1
+    view_family                       "megabouts_compatible"
+    compatible_tool                   "megabouts"
+    dependency_policy                 "no_megabouts_dependency_required"
     source_subject_shape_run
+    source_subject_shape_path
+    source_refined_subject_masks_run
     source_tail_kinematics_run        optional comparison source
+    source_tail_geometry_kind         "subject_shape_tail_curve_resample"
+    head_source                       "head_endpoint_xy" | "snout_tip_xy"
     keypoint_count                    11
     angle_count                       10
     angle_convention                  "megabouts_cumulative_segment_angle"
+    keypoint_order                    "tail_base_to_tail_tip"
+    algorithm_provenance
 
   frame_index
-  tail_keypoints_xy                   (N, 11, 2)
-  tail_angle_rad                      (N, 10)
+  row_index/                          copied source lineage when available
   valid
   failure_reason_bytes
+  head_xy                             (N, 2)
+  head_yaw_rad                        (N,)
+  tail_keypoints_xy                   (N, 11, 2)
+  tail_angle_rad                      (N, 10)
+  tail_angle_deg                      (N, 10)
 ```
+
+The feeding canary run
+`tail_posture_view_megabouts_compatible_canary_20260501` wrote 17,495 valid
+rows and 1,740 invalid rows from 19,235 ROI rows in about 4.2 seconds.
 
 ### Preprocessing
 
@@ -450,17 +473,17 @@ Inputs:
 
 Procedure:
 
-1. Resample Palette tail geometry to 11 Megabouts keypoints from tail base to
-   tail tip.
+1. Resample Palette tail geometry to 11 Megabouts-style keypoints from tail
+   base to tail tip.
 2. Use a head point in the same coordinate frame, preferably
    `head_endpoint_xy` or `snout_tip_xy`.
-3. Call Megabouts `compute_angles_from_keypoints`.
-4. Compare Megabouts cumulative segment angles to Palette `tail_angle_rad`.
+3. Compute Megabouts-compatible cumulative segment angles from those keypoints.
+4. Compare cumulative segment angles to Palette `tail_angle_rad`.
 5. Report sign, offset, correlation, residuals, and frames where the mapping
    fails.
 
-Output: a scratch report first. Do not write production Zarr outputs until the
-mapping is understood.
+Output: completed as a convention audit and implemented as
+`analysis/tail_posture_view_runs` for the first subject-shape-derived view.
 
 ### Phase 1 Target: Palette Bout Windows With Megabouts Classifier
 
@@ -470,9 +493,8 @@ segmentation as the bout-definition authority.
 Inputs:
 
 - exact Palette `analysis/swim_bout_runs/<run>/<speed_level>/bouts`
-- Megabouts-compatible tail angle time series, preferably computed from
-  Palette-derived 11-point tail keypoints via Megabouts'
-  `compute_angles_from_keypoints`
+- Megabouts-compatible tail angle time series from
+  `analysis/tail_posture_view_runs/<run>/tail_angle_rad`
 - `head_x/head_y`: preferably calibrated mm positions from
   `track_kinematics_runs/.../positions_mm`, or a documented subject-shape
   head point only if it is converted into the same global coordinate system
@@ -482,17 +504,14 @@ Inputs:
 Procedure:
 
 1. Resolve source Palette runs and verify row/frame mapping.
-2. Resample the source subject-shape tail curve to 11 ordered Megabouts
-   keypoints from tail base to tail tip.
-3. Use Megabouts' keypoint-to-angle conversion to build the 10-channel
-   cumulative tail-angle trace.
-4. Slice Palette-selected bout windows from `analysis/swim_bout_runs`.
-5. Build fixed-duration `tail_array` with shape
+2. Read the source posture view and reject rows where `valid == false`.
+3. Slice Palette-selected bout windows from `analysis/swim_bout_runs`.
+4. Build fixed-duration `tail_array` with shape
    `(n_bouts, 10, bout_duration_frames)`.
-6. Build fixed-duration `traj_array` with shape
+5. Build fixed-duration `traj_array` with shape
    `(n_bouts, 3, bout_duration_frames)`.
-7. Use `BoutClassifier.run_classification(tail_array=..., traj_array=...)`.
-8. Store labels in a Palette classifier/import run with a source reference to
+6. Use `BoutClassifier.run_classification(tail_array=..., traj_array=...)`.
+7. Store labels in a Palette classifier/import run with a source reference to
    the exact Palette bout candidate.
 
 This mode is useful for comparing classifier labels across Palette bout
@@ -676,10 +695,11 @@ attrs.
 
 ## Recommended Implementation Plan
 
-1. Write a read-only adapter module that resolves one Palette recording,
-   subject-shape run, track-kinematics run, track id, and swim-bout candidate.
-2. Implement the convention audit using 11 ordered tail keypoints from Palette
-   subject-shape geometry and Megabouts' own keypoint-to-angle conversion.
+1. Done: implement the convention audit and `analysis/tail_posture_view_runs`
+   using 11 ordered tail keypoints from Palette subject-shape geometry.
+2. Write a read-only adapter module that resolves one Palette recording,
+   tail-posture-view run, track-kinematics run, track id, and swim-bout
+   candidate.
 3. Implement dry-run array construction for Palette-selected bout windows:
    `tail_array`, `traj_array`, invalid masks, coverage summaries, and config
    provenance.

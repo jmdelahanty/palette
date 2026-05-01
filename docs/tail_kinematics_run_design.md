@@ -314,64 +314,77 @@ therefore derive its `tail_angle` from `K=11` subject-shape tail keypoints via
 Megabouts' own keypoint conversion, then compare it against Palette
 `tail_angle_rad` only as an audit.
 
-The preferred first step is an export or view, not duplicated permanent arrays:
+The implemented first step is a derived view, not duplicated permanent arrays
+inside the native tail-kinematics run:
 
 ```text
 Palette sources
-  -> Megabouts adapter/export manifest
+  -> analysis/tail_posture_view_runs/<run>
   -> Megabouts runtime
   -> imported/classifier output run
 ```
 
-If we persist a Megabouts-ready view inside Zarr, it should be clearly marked as
-a tool view. For one-off compatibility this could be nested under the source
-run:
+`analysis/tail_posture_view_runs` is a compatibility artifact. It is
+regenerated from Palette sources when needed and does not redefine Palette's
+native `analysis/tail_kinematics_runs` schema.
 
-```text
-analysis/tail_kinematics_runs/<run>/tool_views/megabouts/
-  attrs:
-    tool_name                         "megabouts"
-    tool_version
-    source_tail_kinematics_run
-    source_subject_shape_run
-    source_track_kinematics_run
-    fps
-    units_xy
-    invalid_row_policy                "nan"
-    export_hash
-
-  head_x
-  head_y
-  head_yaw
-  tail_x
-  tail_y
-  tail_angle
-  tracking_valid
-```
-
-For multiple external tools, prefer promoting the same concept to a sibling run
-family:
+Current v1 structure:
 
 ```text
 analysis/tail_posture_view_runs/<run>/
   attrs:
-    view_family                       "megabouts"
+    schema_id                         "analysis.tail_posture_view_runs"
+    schema_version                    1
+    method                            "tail_posture_view_from_subject_shape"
+    method_version                    1
+    row_axis                          "roi_rows"
+    view_family                       "megabouts_compatible"
+    compatible_tool                   "megabouts"
+    dependency_policy                 "no_megabouts_dependency_required"
     source_subject_shape_run
+    source_subject_shape_path
+    source_refined_subject_masks_run
     source_tail_kinematics_run        optional comparison source
+    source_tail_geometry_kind         "subject_shape_tail_curve_resample"
+    head_source                       "head_endpoint_xy" | "snout_tip_xy"
     keypoint_count                    11
     angle_count                       10
     angle_convention                  "megabouts_cumulative_segment_angle"
+    keypoint_order                    "tail_base_to_tail_tip"
+    frame_index_source
+    row_lineage_copied
+    row_lineage_missing
+    algorithm_provenance
 
   frame_index
-  tail_keypoints_xy                   (N, 11, 2)
-  tail_angle_rad                      (N, 10)
+  row_index/
+    frame_indices                     copied when available
+    detection_indices                 copied when available
+    source_refined_row_ids            copied when available
+    source_detect_row_index           copied when available
   valid
   failure_reason_bytes
+  head_xy                             (N, 2)
+  head_yaw_rad                        (N,)
+  tail_keypoints_xy                   (N, 11, 2)
+  tail_angle_rad                      (N, 10)
+  tail_angle_deg                      (N, 10)
 ```
 
-This view is a compatibility artifact. It should be regenerated from Palette
-sources when needed and should not redefine Palette's native tail-kinematics
-schema.
+The first canary run was:
+
+```text
+tail_posture_view_megabouts_compatible_canary_20260501
+source_subject_shape_run: subject_shape_v3_snout_medialjoin_canary_20260429
+source_tail_kinematics_run: tail_kinematics_k10_canary_20260430
+rows: 19,235
+valid rows: 17,495
+invalid rows: 1,740
+duration: about 4.2 s
+```
+
+This run stores a Megabouts-compatible geometric view but does not run
+Megabouts preprocessing, segmentation, or classification.
 
 Megabouts outputs should land in classifier/import runs:
 
@@ -425,7 +438,9 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
 - [ ] Add tail traces to the Marimo kinematics explorer after the Zarr schema
   stabilizes.
 - [ ] Add per-bout tail summaries under `analysis/bout_kinematics_runs`.
-- [ ] Prototype a Megabouts export manifest/view from the canary.
+- [x] Prototype a Megabouts-compatible posture view from the canary:
+  `tail_posture_view_megabouts_compatible_canary_20260501` wrote 17,495 valid
+  rows and 1,740 invalid rows from 19,235 ROI rows.
 - [ ] Decide whether Megabouts execution should be Palette-owned CLI,
   user-run external tool, or both.
 - [ ] Define `analysis/bout_classification_runs` once we have first real
@@ -435,11 +450,13 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
 
 - Resolved for v1: store radians canonically and also write degree mirrors for
   plotting/review convenience. Radians remain the primary units.
-- Should Megabouts export use Palette's native tangent-angle samples `(K=10)`
-  directly or convert to a segment-angle representation `(K - 1)`? Palette's
-  native v1 should use tangent angles at `tail_angle_sample_s`; adapters can
-  convert if a tool expects segment angles.
+- Resolved for first Megabouts-compatible view: do not pass Palette native
+  tangent-angle samples directly as Megabouts `tail_angle`. Instead,
+  `analysis/tail_posture_view_runs` resamples subject-shape tail geometry to
+  `K=11` ordered tail keypoints and writes the `K=10` cumulative segment-angle
+  representation expected by Megabouts-like tooling.
 - Resolved for v1: mirror curvature into `tail_kinematics_runs` at the same
   low-dimensional `tail_angle_sample_s` positions and record the source in attrs.
-- Should the first Megabouts integration persist a Zarr tool view or only write
-  external export files plus a manifest?
+- Resolved for v1: persist a sibling `analysis/tail_posture_view_runs` family
+  rather than nesting external-tool arrays under `tail_kinematics_runs` or
+  requiring external export files.

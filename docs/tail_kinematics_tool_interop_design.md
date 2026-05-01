@@ -290,53 +290,61 @@ estimators. They should not overwrite each other.
 
 ### Tool-Ready Tail Posture View
 
-To interoperate with external tools, Palette should provide a tool-ready view or
-export with the following logical fields. The future persistent family should be
-tool-neutral so Megabouts, ZebraZoom, Stytra, and other methods can each have
-their own convention-specific view:
+To interoperate with external tools, Palette provides a tool-ready view family:
+`analysis/tail_posture_view_runs`. This family is a regenerated compatibility
+surface, not a replacement for `analysis/tail_kinematics_runs`.
+
+The v1 writer implemented in `fisheye.analysis.tail_posture_view_runs` is
+Megabouts-compatible and Palette-owned. It requires no Megabouts installation,
+does not copy Megabouts code, and records that boundary in attrs. Future
+ZebraZoom, Stytra, or Palette-native views can use the same sibling family with
+different `view_family` and convention attrs.
 
 ```text
 analysis/tail_posture_view_runs/<run>/
   attrs:
     schema_id                         "analysis.tail_posture_view_runs"
     schema_version                    1
-    view_family                       "megabouts" | "zebrazoom" | "stytra" | "palette_native"
-    source_estimator_family           "subject_shape" | "pose_keypoints" | "external_import"
-    source_run
-    source_component_or_labels
-    frame_rate_hz
-    units_xy                          "px" | "mm"
-    mm_per_unit                       optional
-    body_frame_convention
+    method                            "tail_posture_view_from_subject_shape"
+    method_version                    1
+    row_axis                          "roi_rows"
+    view_family                       "megabouts_compatible"
+    compatible_tool                   "megabouts"
+    dependency_policy                 "no_megabouts_dependency_required"
+    source_subject_shape_run
+    source_subject_shape_path
+    source_refined_subject_masks_run
+    source_tail_kinematics_run        optional comparison source
+    source_tail_geometry_kind         "subject_shape_tail_curve_resample"
+    head_source                       "head_endpoint_xy" | "snout_tip_xy"
+    keypoint_count                    11
+    angle_count                       10
+    keypoint_order                    "tail_base_to_tail_tip"
     tail_base_definition
     tail_tip_definition
-    tail_sample_domain                "tail_segment_normalized_arclength"
-    tail_sample_count
-    angle_convention
-    angle_units                       "rad" | "deg"
+    angle_convention                  "megabouts_cumulative_segment_angle"
+    angle_units_primary               "rad"
+    frame_index_source
+    algorithm_provenance
 
-  frame_indices                       (N,)
-  time_s                              (N,) optional
   valid                               (N,)
   failure_reason_bytes                (N, width)
-
-  head_x                              (N,) optional
-  head_y                              (N,) optional
-  head_yaw                            (N,) optional
-  tail_x                              (N, K)
-  tail_y                              (N, K)
-  tail_tangent_angle                  (N, K - 1) optional
-  tail_angle                          (N, K - 1) optional
-  tail_curvature                      (N, K) optional
+  frame_index                         (N,)
+  row_index/                          copied source row lineage when present
+  head_xy                             (N, 2)
+  head_yaw_rad                        (N,)
+  tail_keypoints_xy                   (N, 11, 2)
+  tail_angle_rad                      (N, 10)
+  tail_angle_deg                      (N, 10)
 ```
 
-This does not need to be the primary permanent run family. Palette-native
-behavior-facing tail metrics should live in
-`analysis/tail_kinematics_runs/<run>` first, then tool-ready views can be
-generated from those arrays plus the source subject-shape geometry. For tools
-whose angle semantics differ from Palette's native tangent angles, the view
-should derive directly from the source ordered curve/keypoints and record that
-conversion. See [tail_kinematics_run_design.md](tail_kinematics_run_design.md).
+This is not the primary canonical tail-metrics family. Palette-native
+behavior-facing tail metrics live in `analysis/tail_kinematics_runs/<run>`;
+tool-ready views are regenerated compatibility surfaces derived from those
+arrays plus source subject-shape geometry. For tools whose angle semantics
+differ from Palette's native tangent angles, the view should derive directly
+from the source ordered curve/keypoints and record that conversion. See
+[tail_kinematics_run_design.md](tail_kinematics_run_design.md).
 
 ### External Classification Outputs
 
@@ -544,18 +552,21 @@ behavior-analysis packages.
 
 ### Tool-Ready View
 
-- [ ] Define exact `tail_posture_view` or `tool_views/megabouts` fields after
+- [x] Define exact `analysis/tail_posture_view_runs` v1 fields after the
   first tail-kinematics canary.
-- [ ] Run the direct Megabouts convention audit from
+- [x] Run the direct Megabouts convention audit from
   [megabouts_direct_integration_design.md](megabouts_direct_integration_design.md)
   before treating Palette `tail_angle_rad` as Megabouts-compatible.
+- [x] Implement a read-only posture-view writer from `subject_shape_runs`.
+- [x] Run the feeding canary posture-view writer:
+  `tail_posture_view_megabouts_compatible_canary_20260501` wrote 17,495 valid
+  rows and 1,740 invalid rows from 19,235 ROI rows.
 - [ ] Prototype classifier-only Megabouts integration using Palette
   `swim_bout_runs` windows and K=11 Megabouts tail keypoints.
-- [ ] Implement a read-only exporter from `subject_shape_runs`.
 - [ ] Implement a keypoint-derived exporter from `pose_kinematics_runs` or
   refined keypoints when tail labels exist.
-- [ ] Add tests for angle convention, tail point ordering, and invalid-row
-  handling.
+- [x] Add tests for angle convention, tail point ordering, and invalid-row
+  handling for the subject-shape posture view.
 
 ### External Tool Adapters
 

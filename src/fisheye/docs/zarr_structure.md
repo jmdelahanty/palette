@@ -1851,16 +1851,71 @@ When available from the source subject-shape run, the writer should also copy
 refined-mask lineage remains auditable from the selected tail-kinematics
 surface.
 
-Tool-specific views, such as Megabouts-ready arrays, may be generated on demand
-or stored under `tool_views/<tool_name>/` with explicit source attrs and export
-hashes. Third-party classifier labels should land in a separate
-`analysis/bout_classification_runs/<run>` family rather than overwriting
-Palette-native tail traces.
+Tool-specific posture views, such as Megabouts-ready arrays, should be stored
+in `analysis/tail_posture_view_runs/<run>` with explicit source attrs. They
+should not be nested under or overwrite Palette-native tail traces. Third-party
+classifier labels should land in a separate
+`analysis/bout_classification_runs/<run>` family.
 
 Dense whole-body B-spline samples, B-spline control points, and geometry/QC
 tail samples remain in `analysis/subject_shape_runs`. The tail-kinematics
 surface intentionally defaults to a lower-dimensional `K=10` behavior vector
 for plotting, bout summaries, and Megabouts-like adapters.
+
+### `analysis/tail_posture_view_runs/`
+
+Tool-compatible tail-posture views derived from Palette source geometry. These
+runs are regenerated compatibility artifacts and are not canonical replacements
+for `analysis/tail_kinematics_runs`.
+
+**Structure**: `analysis/tail_posture_view_runs/<run_name>/`
+
+**Run Attributes**:
+
+- `schema_id`: `"analysis.tail_posture_view_runs"`
+- `schema_version`: `1`
+- `method`: e.g. `"tail_posture_view_from_subject_shape"`
+- `method_version`
+- `row_axis`: `"roi_rows"`
+- `view_family`: e.g. `"megabouts_compatible"`
+- `compatible_tool`: e.g. `"megabouts"`
+- `dependency_policy`: e.g. `"no_megabouts_dependency_required"`
+- `source_subject_shape_run`
+- `source_subject_shape_path`
+- `source_refined_subject_masks_run`
+- `source_tail_kinematics_run`: optional comparison source
+- `source_tail_geometry_kind`: e.g. `"subject_shape_tail_curve_resample"`
+- `head_source`: e.g. `"head_endpoint_xy"` or `"snout_tip_xy"`
+- `keypoint_count`: e.g. `11`
+- `angle_count`: e.g. `10`
+- `angle_convention`: e.g. `"megabouts_cumulative_segment_angle"`
+- `keypoint_order`: e.g. `"tail_base_to_tail_tip"`
+- `frame_index_source`
+- `row_lineage_copied`, `row_lineage_missing`
+- `algorithm_provenance`
+- standard stage `provenance`
+
+**Arrays**:
+
+- `frame_index`: `(N,)`
+- `valid`: `(N,)`
+- `failure_reason_bytes`: `(N, width)`
+- `head_xy`: `(N, 2)`
+- `head_yaw_rad`: `(N,)`
+- `tail_keypoints_xy`: `(N, 11, 2)` for the current Megabouts-compatible view
+- `tail_angle_rad`: `(N, 10)` canonical angle units for the current view
+- `tail_angle_deg`: `(N, 10)` plotting mirror
+
+**Groups**:
+
+- `row_index/`: copied source row-lineage arrays when available, including
+  `frame_indices`, `detection_indices`, `source_refined_row_ids`, and
+  `source_detect_row_index`.
+
+The first implemented view is `megabouts_compatible`: it resamples
+subject-shape tail geometry to 11 ordered tail keypoints and writes 10
+cumulative segment-angle channels. It records that it is a Palette-owned
+compatibility implementation and does not require or import Megabouts.
 
 ### `analysis/stimulus_response_runs/`
 
