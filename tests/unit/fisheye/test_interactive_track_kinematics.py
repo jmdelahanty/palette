@@ -9,9 +9,12 @@ from fisheye.analysis import plot_track_kinematics as plot_mod
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.visualization.interactive_track_kinematics import (
     DEFAULT_INTERACTIVE_ARTIFACT,
+    bout_classification_records_to_dataframe,
+    discover_bout_classification_run_options,
     discover_eye_angle_run_options,
     discover_swim_bout_run_options,
     discover_track_kinematics_run_options,
+    load_bout_classification_records,
     load_eye_angle_timeseries_data,
     load_track_kinematics_interactive_data,
     to_inter_bout_interval_dataframe,
@@ -169,6 +172,106 @@ def _add_eye_angle_run(zarr_path: Path) -> None:
     qa_frame.create_array("valid_frame", data=np.asarray([True, True, True, False], dtype=bool))
 
 
+def _add_bout_classification_run(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a")
+    analysis = root["analysis"] if "analysis" in root else root.create_group("analysis")
+    parent = analysis.create_group("bout_classification_runs")
+    parent.attrs["latest"] = "classifier_1"
+    run = parent.create_group("classifier_1")
+    run.attrs.update(
+        {
+            "schema_id": "analysis.bout_classification_runs",
+            "schema_version": 1,
+            "classifier_family": "megabouts",
+            "classifier_name": "megabouts_transformer",
+            "classifier_version": "test",
+            "source_mode": "palette_bouts",
+            "row_axis": "swim_bout_rows",
+            "invalid_window_policy": "skip_invalid_windows",
+            "source_bout_count": 2,
+            "classified_bout_count": 1,
+            "source_refs": {
+                "swim_bout_level": "analysis/swim_bout_runs/swim_bout_1/speed_smoothed",
+            },
+            "parameters": {
+                "swim_bout_run": "swim_bout_1",
+                "speed_level": "speed_smoothed",
+            },
+        }
+    )
+    records = np.asarray(
+        [
+            (
+                1,
+                2,
+                4,
+                2,
+                14,
+                5,
+                3,
+                0,
+                b"approach_swim",
+                0,
+                1,
+                0.8,
+                1.0,
+                1.0,
+                0,
+                0,
+                True,
+                True,
+                True,
+                b"ok",
+            ),
+            (
+                2,
+                7,
+                9,
+                7,
+                19,
+                -1,
+                -1,
+                -1,
+                b"skipped_invalid_window",
+                -1,
+                0,
+                np.nan,
+                0.3,
+                1.0,
+                8,
+                0,
+                False,
+                False,
+                False,
+                b"tail_valid_fraction_below_threshold",
+            ),
+        ],
+        dtype=[
+            ("source_bout_id", "i8"),
+            ("start_frame", "i8"),
+            ("end_frame", "i8"),
+            ("window_start_frame", "i8"),
+            ("window_end_frame", "i8"),
+            ("HB1_frame", "i8"),
+            ("HB1_offset_frames", "i8"),
+            ("category_id", "i4"),
+            ("category_label_bytes", "S64"),
+            ("subcategory_id", "i4"),
+            ("sign", "i4"),
+            ("probability", "f4"),
+            ("tail_valid_fraction", "f4"),
+            ("traj_valid_fraction", "f4"),
+            ("max_consecutive_tail_invalid", "i4"),
+            ("max_consecutive_traj_invalid", "i4"),
+            ("source_window_valid", "?"),
+            ("classified", "?"),
+            ("valid", "?"),
+            ("failure_reason_bytes", "S64"),
+        ],
+    )
+    write_columnar_dataset(run, "per_bout", records)
+
+
 def test_load_track_kinematics_interactive_data_reads_spec_and_arrays(tmp_path: Path) -> None:
     zarr_path = _make_archive_with_interactive_artifact(tmp_path)
 
@@ -301,6 +404,35 @@ def test_discover_track_and_derived_swim_bout_options(tmp_path: Path) -> None:
     assert swim_options[0].n_bouts_by_level["speed_smoothed"] == 2
     assert "smoothed" in swim_options[0].label
     assert "default" in swim_options[0].label
+
+
+def test_discover_and_load_bout_classification_options(tmp_path: Path) -> None:
+    zarr_path = _make_archive_with_interactive_artifact(tmp_path)
+    _add_hierarchical_swim_bouts(zarr_path)
+    _add_bout_classification_run(zarr_path)
+
+    options = discover_bout_classification_run_options(
+        zarr_path,
+        swim_bout_run="swim_bout_1",
+        speed_level="smoothed",
+    )
+
+    assert len(options) == 1
+    assert options[0].run_name == "classifier_1"
+    assert options[0].classifier_family == "megabouts"
+    assert options[0].source_swim_bout_run == "swim_bout_1"
+    assert options[0].source_swim_bout_speed_level == "speed_smoothed"
+    assert options[0].source_bout_count == 2
+    assert options[0].classified_bout_count == 1
+    assert options[0].skipped_bout_count == 1
+    assert options[0].is_latest is True
+
+    records, attrs = load_bout_classification_records(zarr_path, run_name="latest")
+    frame = bout_classification_records_to_dataframe(records)
+
+    assert attrs["classifier_name"] == "megabouts_transformer"
+    assert frame["category_label"].tolist() == ["approach_swim", "skipped_invalid_window"]
+    assert frame["failure_reason"].tolist() == ["ok", "tail_valid_fraction_below_threshold"]
 
 
 def test_discover_and_load_eye_angle_timeseries(tmp_path: Path) -> None:

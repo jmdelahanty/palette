@@ -109,6 +109,22 @@ class BoutKinematicsRunOption:
 
 
 @dataclass(frozen=True)
+class BoutClassificationRunOption:
+    run_name: str
+    label: str
+    classifier_family: str
+    classifier_name: str
+    classifier_version: Optional[str]
+    source_swim_bout_run: Optional[str]
+    source_swim_bout_speed_level: Optional[str]
+    source_bout_count: int
+    classified_bout_count: int
+    skipped_bout_count: int
+    is_latest: bool
+    attrs: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class _SwimBoutPayload:
     spans: np.ndarray
     records: np.ndarray
@@ -756,6 +772,80 @@ def _swim_option_label(
     return " | ".join(pieces)
 
 
+def _bout_classification_option_label(
+    *,
+    run_name: str,
+    classifier_family: str,
+    classifier_name: str,
+    classifier_version: Optional[str],
+    source_bout_count: int,
+    classified_bout_count: int,
+    skipped_bout_count: int,
+    speed_level: Optional[str],
+    is_latest: bool,
+) -> str:
+    pieces = [run_name]
+    classifier = classifier_family
+    if classifier_name:
+        classifier = f"{classifier_family}/{classifier_name}" if classifier_family else classifier_name
+    if classifier_version:
+        classifier = f"{classifier} v{classifier_version}"
+    if classifier:
+        pieces.append(classifier)
+    pieces.append(f"{classified_bout_count}/{source_bout_count} classified")
+    if skipped_bout_count:
+        pieces.append(f"{skipped_bout_count} skipped")
+    if speed_level:
+        pieces.append(f"source {speed_level.replace('speed_', '')}")
+    if is_latest:
+        pieces.append("latest")
+    return " | ".join(pieces)
+
+
+def _classification_source_from_attrs(
+    attrs: Mapping[str, Any],
+) -> tuple[Optional[str], Optional[str]]:
+    parameters = attrs.get("parameters")
+    parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
+    source_refs = attrs.get("source_refs")
+    source_refs = dict(source_refs) if isinstance(source_refs, Mapping) else {}
+
+    source_run = parameters.get("swim_bout_run")
+    source_speed = parameters.get("speed_level")
+    swim_bout_level = source_refs.get("swim_bout_level") or source_refs.get("bouts")
+    if (source_run is None or source_speed is None) and isinstance(swim_bout_level, str):
+        parts = _normalize_path(swim_bout_level).split("/")
+        try:
+            index = parts.index("swim_bout_runs")
+        except ValueError:
+            index = -1
+        if index >= 0 and len(parts) > index + 1 and source_run is None:
+            source_run = parts[index + 1]
+        if index >= 0 and len(parts) > index + 2 and source_speed is None:
+            source_speed = parts[index + 2]
+
+    source_speed_key = _speed_level_key(source_speed) if source_speed is not None else None
+    return (
+        str(source_run) if source_run is not None else None,
+        source_speed_key,
+    )
+
+
+def _classification_matches_swim_bout(
+    attrs: Mapping[str, Any],
+    *,
+    swim_bout_run: str,
+    speed_level: str,
+) -> bool:
+    source_run, source_speed = _classification_source_from_attrs(attrs)
+    if source_run is not None and str(source_run) != str(swim_bout_run):
+        return False
+    speed_level_key = _speed_level_key(speed_level)
+    if source_speed is not None and source_speed != speed_level_key:
+        return False
+    return source_run is not None or source_speed is not None
+
+
 def discover_eye_angle_run_options(zarr_path: Path | str) -> list[EyeAngleRunOption]:
     """Return available eye-angle analysis runs."""
 
@@ -1243,6 +1333,86 @@ def discover_bout_kinematics_run_options(
     return sorted(options, key=lambda item: (not item.is_latest, item.run_name))
 
 
+def discover_bout_classification_run_options(
+    zarr_path: Path | str,
+    *,
+    swim_bout_run: Optional[str],
+    speed_level: Optional[str],
+) -> list[BoutClassificationRunOption]:
+    """Return classification runs derived from the selected swim-bout candidate."""
+
+    if swim_bout_run is None or not speed_level:
+        return []
+
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    parent = root.get("analysis/bout_classification_runs")
+    if parent is None:
+        return []
+
+    latest = parent.attrs.get("latest")
+    options: list[BoutClassificationRunOption] = []
+    speed_level_key = _speed_level_key(speed_level)
+    for run_name in _group_keys(parent):
+        run_group = parent[run_name]
+        attrs = dict(run_group.attrs)
+        if not _classification_matches_swim_bout(
+            attrs,
+            swim_bout_run=str(swim_bout_run),
+            speed_level=speed_level_key,
+        ):
+            continue
+
+        source_run, source_speed = _classification_source_from_attrs(attrs)
+        source_count = _safe_int(attrs.get("source_bout_count"))
+        if source_count is None:
+            source_count = _columnar_row_count(run_group, "per_bout")
+        classified_count = _safe_int(attrs.get("classified_bout_count"))
+        if classified_count is None and "per_bout" in run_group:
+            try:
+                from fisheye.analysis.bout_classification_runs import load_bout_classification_table
+
+                records = load_bout_classification_table(run_group)
+                classified_count = int(np.count_nonzero(np.asarray(records["classified"], dtype=bool)))
+            except Exception:
+                classified_count = 0
+        if classified_count is None:
+            classified_count = 0
+        skipped_count = max(0, int(source_count) - int(classified_count))
+        classifier_family = str(attrs.get("classifier_family", "unknown"))
+        classifier_name = str(attrs.get("classifier_name", "unknown"))
+        classifier_version = attrs.get("classifier_version")
+        classifier_version_str = str(classifier_version) if classifier_version is not None else None
+        is_latest = str(latest) == str(run_name)
+        options.append(
+            BoutClassificationRunOption(
+                run_name=run_name,
+                label=_bout_classification_option_label(
+                    run_name=run_name,
+                    classifier_family=classifier_family,
+                    classifier_name=classifier_name,
+                    classifier_version=classifier_version_str,
+                    source_bout_count=int(source_count),
+                    classified_bout_count=int(classified_count),
+                    skipped_bout_count=int(skipped_count),
+                    speed_level=source_speed,
+                    is_latest=is_latest,
+                ),
+                classifier_family=classifier_family,
+                classifier_name=classifier_name,
+                classifier_version=classifier_version_str,
+                source_swim_bout_run=source_run,
+                source_swim_bout_speed_level=source_speed,
+                source_bout_count=int(source_count),
+                classified_bout_count=int(classified_count),
+                skipped_bout_count=int(skipped_count),
+                is_latest=is_latest,
+                attrs=attrs,
+            )
+        )
+
+    return sorted(options, key=lambda item: (not item.is_latest, item.run_name))
+
+
 def _run_names_match(source_run: object, spec_run: object) -> bool:
     source = _normalize_path(str(source_run))
     spec = _normalize_path(str(spec_run))
@@ -1645,6 +1815,51 @@ def bout_kinematics_records_to_dataframe(records_by_level: Mapping[str, np.ndarr
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def load_bout_classification_records(
+    zarr_path: Path | str,
+    *,
+    run_name: str,
+) -> tuple[np.ndarray, Mapping[str, Any]]:
+    """Load per-bout classification records from one analysis run."""
+
+    from fisheye.analysis.bout_classification_runs import (
+        load_bout_classification_table,
+        resolve_bout_classification_run,
+    )
+
+    root = open_zarr_root(Path(zarr_path), mode="r")
+    run_group, _resolved_name, _run_path = resolve_bout_classification_run(root, run_name)
+    return load_bout_classification_table(run_group), dict(run_group.attrs)
+
+
+def bout_classification_records_to_dataframe(records: np.ndarray) -> pd.DataFrame:
+    """Convert a bout-classification structured table to a plotting dataframe."""
+
+    frame = _structured_to_dataframe(records)
+    if frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "source_bout_id",
+                "category_label",
+                "failure_reason",
+                "classified",
+                "valid",
+                "probability",
+            ]
+        )
+    if "category_label_bytes" in frame:
+        frame["category_label"] = [
+            _decode_structured_value(value).rstrip("\x00")
+            for value in frame["category_label_bytes"]
+        ]
+    if "failure_reason_bytes" in frame:
+        frame["failure_reason"] = [
+            _decode_structured_value(value).rstrip("\x00")
+            for value in frame["failure_reason_bytes"]
+        ]
+    return frame
 
 
 def to_validity_span_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:

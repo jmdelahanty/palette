@@ -33,11 +33,14 @@ def _():
 
     from fisheye.visualization.interactive_track_kinematics import (
         DEFAULT_INTERACTIVE_ARTIFACT,
+        bout_classification_records_to_dataframe,
         bout_kinematics_records_to_dataframe,
+        discover_bout_classification_run_options,
         discover_bout_kinematics_run_options,
         discover_eye_angle_run_options,
         discover_swim_bout_run_options,
         discover_track_kinematics_run_options,
+        load_bout_classification_records,
         load_eye_angle_timeseries_data,
         load_bout_kinematics_records,
         load_track_kinematics_interactive_data,
@@ -123,13 +126,16 @@ def _():
         DEFAULT_INTERACTIVE_ARTIFACT,
         add_interval_bar_overlay,
         apply_full_width_timeseries_layout,
+        bout_classification_records_to_dataframe,
         bout_kinematics_records_to_dataframe,
+        discover_bout_classification_run_options,
         discover_bout_kinematics_run_options,
         discover_eye_angle_run_options,
         discover_swim_bout_run_options,
         discover_track_kinematics_run_options,
         go,
         json,
+        load_bout_classification_records,
         load_eye_angle_timeseries_data,
         load_bout_kinematics_records,
         load_track_kinematics_interactive_data,
@@ -640,6 +646,109 @@ def _(
 
 @app.cell
 def _(
+    discover_bout_classification_run_options,
+    selected_speed_level,
+    selected_swim_bout,
+    time,
+    write_perf_event,
+    zarr_path,
+):
+    _classification_discovery_t0 = time.perf_counter()
+    bout_classification_options = discover_bout_classification_run_options(
+        zarr_path,
+        swim_bout_run=selected_swim_bout.run_name if selected_swim_bout is not None else None,
+        speed_level=selected_speed_level,
+    )
+    write_perf_event(
+        "discover_bout_classification_options",
+        time.perf_counter() - _classification_discovery_t0,
+        zarr_path=zarr_path,
+        selected_swim_bout_run=selected_swim_bout.run_name if selected_swim_bout is not None else None,
+        selected_speed_level=selected_speed_level,
+        n_bout_classification_options=len(bout_classification_options),
+    )
+    return (bout_classification_options,)
+
+
+@app.cell
+def _(bout_classification_options, mo):
+    _classification_none_label = "No bout-classification overlay"
+    bout_classification_label_to_option = {_classification_none_label: None}
+    bout_classification_label_to_option.update(
+        {_classification_option.label: _classification_option for _classification_option in bout_classification_options}
+    )
+    _classification_default = (
+        bout_classification_options[0].label
+        if bout_classification_options
+        else _classification_none_label
+    )
+    bout_classification_picker = mo.ui.dropdown(
+        options=list(bout_classification_label_to_option),
+        value=_classification_default,
+        label="Bout-classification candidate",
+    )
+    bout_classification_picker
+    return bout_classification_label_to_option, bout_classification_picker
+
+
+@app.cell
+def _(
+    bout_classification_label_to_option,
+    bout_classification_picker,
+    bout_classification_records_to_dataframe,
+    load_bout_classification_records,
+    np,
+    pd,
+    time,
+    write_perf_event,
+    zarr_path,
+):
+    selected_bout_classification = bout_classification_label_to_option[bout_classification_picker.value]
+    _classification_load_t0 = time.perf_counter()
+    if selected_bout_classification is None:
+        bout_classification_attrs = {}
+        bout_classification_df = pd.DataFrame()
+    else:
+        _classification_records, bout_classification_attrs = load_bout_classification_records(
+            zarr_path,
+            run_name=selected_bout_classification.run_name,
+        )
+        bout_classification_df = bout_classification_records_to_dataframe(_classification_records)
+        if len(bout_classification_df):
+            bout_classification_df.insert(
+                0,
+                "source_bout_row",
+                np.arange(len(bout_classification_df), dtype=np.int64),
+            )
+    write_perf_event(
+        "load_bout_classification",
+        time.perf_counter() - _classification_load_t0,
+        selected_bout_classification_run=(
+            selected_bout_classification.run_name if selected_bout_classification is not None else None
+        ),
+        n_bout_classification_rows=len(bout_classification_df),
+    )
+    return bout_classification_attrs, bout_classification_df, selected_bout_classification
+
+
+@app.cell
+def _(bout_classification_df, mo):
+    _classification_categories = (
+        sorted(str(_classification_value) for _classification_value in bout_classification_df["category_label"].dropna().unique())
+        if "category_label" in bout_classification_df and len(bout_classification_df)
+        else []
+    )
+    bout_classification_category_picker = mo.ui.multiselect(
+        options=_classification_categories,
+        value=_classification_categories,
+        label="Classification categories",
+    )
+    bout_classification_category_picker
+    return (bout_classification_category_picker,)
+
+
+@app.cell
+def _(
     artifact,
     load_track_kinematics_interactive_data,
     selected_speed_level,
@@ -675,12 +784,15 @@ def _(
 
 @app.cell
 def _(
+    bout_classification_attrs,
+    bout_classification_df,
     bout_kinematics_attrs,
     bout_kinematics_df,
     data,
     eye_angle_attrs,
     eye_angle_df,
     eye_angle_row_axis,
+    selected_bout_classification,
     selected_bout_kinematics,
     selected_eye_angle,
     mo,
@@ -711,6 +823,8 @@ def _(
         **Selected Bout Candidate:** `{selected_swim_bout.label if selected_swim_bout else "none"}`
 
         **Bout Kinematics:** `{selected_bout_kinematics.label if selected_bout_kinematics else "none"}`
+
+        **Bout Classification:** `{selected_bout_classification.label if selected_bout_classification else "none"}`
 
         **Eye Angles:** `{selected_eye_angle.label if selected_eye_angle else "none"}`
 
@@ -812,6 +926,40 @@ def _(
             "surface": "bout_kinematics",
             "field": "schema_version",
             "value": bout_kinematics_attrs.get("schema_version", "none"),
+        },
+        {
+            "surface": "bout_classification",
+            "field": "run",
+            "value": selected_bout_classification.run_name if selected_bout_classification else "none",
+        },
+        {
+            "surface": "bout_classification",
+            "field": "classifier",
+            "value": (
+                f"{selected_bout_classification.classifier_family}/"
+                f"{selected_bout_classification.classifier_name}"
+                if selected_bout_classification
+                else "none"
+            ),
+        },
+        {
+            "surface": "bout_classification",
+            "field": "rows_loaded",
+            "value": len(bout_classification_df),
+        },
+        {
+            "surface": "bout_classification",
+            "field": "classified_rows",
+            "value": (
+                int(bout_classification_df["classified"].sum())
+                if "classified" in bout_classification_df
+                else 0
+            ),
+        },
+        {
+            "surface": "bout_classification",
+            "field": "schema_version",
+            "value": bout_classification_attrs.get("schema_version", "none"),
         },
         {
             "surface": "eye_angle",
@@ -919,6 +1067,25 @@ def _(
                 "attrs": dict(bout_kinematics_attrs),
             }
             if selected_bout_kinematics
+            else None
+        ),
+        "bout_classification_candidate": (
+            {
+                "run": selected_bout_classification.run_name,
+                "label": selected_bout_classification.label,
+                "latest": bool(selected_bout_classification.is_latest),
+                "classifier_family": selected_bout_classification.classifier_family,
+                "classifier_name": selected_bout_classification.classifier_name,
+                "classifier_version": selected_bout_classification.classifier_version,
+                "source_swim_bout_run": selected_bout_classification.source_swim_bout_run,
+                "source_swim_bout_speed_level": selected_bout_classification.source_swim_bout_speed_level,
+                "source_bout_count": int(selected_bout_classification.source_bout_count),
+                "classified_bout_count": int(selected_bout_classification.classified_bout_count),
+                "skipped_bout_count": int(selected_bout_classification.skipped_bout_count),
+                "loaded_rows": int(len(bout_classification_df)),
+                "attrs": dict(bout_classification_attrs),
+            }
+            if selected_bout_classification
             else None
         ),
         "eye_angle_run": (
@@ -1396,6 +1563,63 @@ def _(
 
 @app.cell
 def _(
+    bout_classification_category_picker,
+    bout_classification_df,
+    filtered_swim_bout_df,
+    pd,
+    time,
+    write_perf_event,
+):
+    _classification_filter_t0 = time.perf_counter()
+    if len(bout_classification_df):
+        _selected_classification_categories = set(str(_classification_category) for _classification_category in bout_classification_category_picker.value)
+        _classification_df_for_filter = bout_classification_df.copy()
+        if _selected_classification_categories and "category_label" in _classification_df_for_filter:
+            _classification_df_for_filter = _classification_df_for_filter[
+                _classification_df_for_filter["category_label"].astype(str).isin(_selected_classification_categories)
+            ].copy()
+        filtered_bout_classification_df = _classification_df_for_filter
+    else:
+        filtered_bout_classification_df = bout_classification_df
+
+    if len(filtered_swim_bout_df) and len(filtered_bout_classification_df):
+        _visible_bouts = filtered_swim_bout_df.copy()
+        _visible_bouts["source_bout_row"] = _visible_bouts.index.astype("int64")
+        _classification_columns = [
+            _classification_column
+            for _classification_column in (
+                "source_bout_row",
+                "source_bout_id",
+                "category_label",
+                "probability",
+                "classified",
+                "valid",
+                "failure_reason",
+                "tail_valid_fraction",
+                "traj_valid_fraction",
+            )
+            if _classification_column in filtered_bout_classification_df.columns
+        ]
+        classified_filtered_swim_bout_df = _visible_bouts.merge(
+            filtered_bout_classification_df[_classification_columns],
+            on="source_bout_row",
+            how="inner",
+        )
+    else:
+        classified_filtered_swim_bout_df = pd.DataFrame()
+
+    write_perf_event(
+        "filter_bout_classification",
+        time.perf_counter() - _classification_filter_t0,
+        n_classification_rows_in=len(bout_classification_df),
+        n_classification_rows_out=len(filtered_bout_classification_df),
+        n_visible_classified_bouts=len(classified_filtered_swim_bout_df),
+    )
+    return classified_filtered_swim_bout_df, filtered_bout_classification_df
+
+
+@app.cell
+def _(
     add_interval_bar_overlay,
     apply_full_width_timeseries_layout,
     data,
@@ -1473,6 +1697,172 @@ def _(
     )
     fig
     return
+
+
+@app.cell
+def _(
+    apply_full_width_timeseries_layout,
+    classified_filtered_swim_bout_df,
+    filtered_bout_classification_df,
+    filtered_timeseries_df,
+    go,
+    mo,
+    np,
+    pd,
+    px,
+    selected_bout_classification,
+    speed_series_picker,
+    swim_bout_boundary_mode,
+    swim_bout_end_col,
+    swim_bout_start_col,
+    time,
+    write_perf_event,
+):
+    _classification_figure_t0 = time.perf_counter()
+    if selected_bout_classification is None:
+        bout_classification_output = mo.md("No bout-classification run selected.")
+        bout_classification_category_counts_df = pd.DataFrame(columns=["category_label", "count"])
+    elif not len(filtered_bout_classification_df):
+        bout_classification_output = mo.md("No bout-classification rows match the selected filters.")
+        bout_classification_category_counts_df = pd.DataFrame(columns=["category_label", "count"])
+    else:
+        bout_classification_category_counts_df = (
+            filtered_bout_classification_df["category_label"]
+            .astype(str)
+            .value_counts()
+            .rename_axis("category_label")
+            .reset_index(name="count")
+        )
+        _classification_count_fig = px.bar(
+            bout_classification_category_counts_df,
+            x="category_label",
+            y="count",
+            color="category_label",
+            title="Bout Classification Counts",
+            labels={"category_label": "Category", "count": "Bout count"},
+        )
+        _classification_count_fig.update_layout(
+            height=420,
+            margin=dict(l=40, r=20, t=60, b=120),
+            showlegend=False,
+        )
+        _classification_count_fig.update_xaxes(tickangle=35)
+
+        _classification_timeline_fig = go.Figure()
+        _speed_trace_columns = [
+            _classification_speed_column
+            for _classification_speed_column in speed_series_picker.value[:1]
+            if _classification_speed_column in filtered_timeseries_df
+        ]
+        for _classification_speed_column in _speed_trace_columns:
+            _classification_timeline_fig.add_trace(
+                go.Scattergl(
+                    x=filtered_timeseries_df["time_s"],
+                    y=filtered_timeseries_df[_classification_speed_column],
+                    mode="lines",
+                    name=_classification_speed_column,
+                    line=dict(color="rgba(40, 58, 70, 0.85)", width=1.4),
+                )
+            )
+        if len(classified_filtered_swim_bout_df):
+            _palette = px.colors.qualitative.Dark24 + px.colors.qualitative.Set3
+            _categories = sorted(classified_filtered_swim_bout_df["category_label"].astype(str).unique())
+            _color_by_category = {
+                _classification_category: _palette[_classification_idx % len(_palette)]
+                for _classification_idx, _classification_category in enumerate(_categories)
+            }
+            for _classification_category in _categories:
+                _category_rows = classified_filtered_swim_bout_df[
+                    classified_filtered_swim_bout_df["category_label"].astype(str) == _classification_category
+                ]
+                _starts = _category_rows[swim_bout_start_col].to_numpy(dtype=float)
+                _ends = _category_rows[swim_bout_end_col].to_numpy(dtype=float)
+                _widths = _ends - _starts
+                _valid_widths = np.isfinite(_starts) & np.isfinite(_ends) & (_widths > 0)
+                if not _valid_widths.any():
+                    continue
+                _custom = np.stack(
+                    [
+                        _category_rows["source_bout_row"].to_numpy(dtype=object),
+                        _category_rows["probability"].to_numpy(dtype=object)
+                        if "probability" in _category_rows
+                        else np.full(len(_category_rows), np.nan, dtype=object),
+                        _category_rows["failure_reason"].to_numpy(dtype=object)
+                        if "failure_reason" in _category_rows
+                        else np.full(len(_category_rows), "", dtype=object),
+                    ],
+                    axis=1,
+                )
+                _classification_timeline_fig.add_trace(
+                    go.Bar(
+                        x=_starts[_valid_widths] + (_widths[_valid_widths] / 2.0),
+                        y=np.ones(int(np.count_nonzero(_valid_widths))),
+                        width=_widths[_valid_widths],
+                        base=np.zeros(int(np.count_nonzero(_valid_widths))),
+                        yaxis="y2",
+                        marker=dict(color=_color_by_category[_classification_category], line=dict(width=0)),
+                        opacity=0.45,
+                        customdata=_custom[_valid_widths],
+                        hovertemplate=(
+                            f"{_classification_category}<br>"
+                            "row %{customdata[0]}<br>"
+                            "probability %{customdata[1]:.3f}<br>"
+                            "%{customdata[2]}<extra></extra>"
+                        ),
+                        name=_classification_category,
+                    )
+                )
+        apply_full_width_timeseries_layout(
+            _classification_timeline_fig,
+            title=f"Bout Classification Timeline ({swim_bout_boundary_mode})",
+            yaxis_title="Speed / detection signal",
+            height=460,
+        )
+        _classification_timeline_fig.update_layout(bargap=0)
+
+        _classification_table_columns = [
+            _classification_column
+            for _classification_column in (
+                "source_bout_row",
+                "source_bout_id",
+                "category_label",
+                "probability",
+                "classified",
+                "valid",
+                "failure_reason",
+                "tail_valid_fraction",
+                "traj_valid_fraction",
+            )
+            if _classification_column in filtered_bout_classification_df.columns
+        ]
+        bout_classification_output = mo.vstack(
+            [
+                _classification_count_fig,
+                _classification_timeline_fig,
+                mo.md("### Visible Classification Rows"),
+                mo.ui.table(
+                    filtered_bout_classification_df[_classification_table_columns],
+                    selection=None,
+                    page_size=10,
+                ),
+            ]
+        )
+    write_perf_event(
+        "build_bout_classification_view",
+        time.perf_counter() - _classification_figure_t0,
+        selected_bout_classification_run=(
+            selected_bout_classification.run_name if selected_bout_classification is not None else None
+        ),
+        n_classification_rows=len(filtered_bout_classification_df),
+        n_visible_classified_bouts=len(classified_filtered_swim_bout_df),
+        n_categories=(
+            int(bout_classification_category_counts_df["category_label"].nunique())
+            if len(bout_classification_category_counts_df)
+            else 0
+        ),
+    )
+    bout_classification_output
+    return (bout_classification_category_counts_df,)
 
 
 @app.cell
@@ -2087,7 +2477,9 @@ def _(position_df, px, start_s, stop_s, time, write_perf_event):
 
 @app.cell
 def _(
+    bout_classification_df,
     bout_kinematics_df,
+    classified_filtered_swim_bout_df,
     data,
     filtered_inter_bout_interval_df,
     filtered_position_df,
@@ -2108,6 +2500,8 @@ def _(
             mo.stat(label="Inter-bout intervals", value=f"{len(inter_bout_interval_df):,}"),
             mo.stat(label="Visible intervals", value=f"{len(filtered_inter_bout_interval_df):,}"),
             mo.stat(label="Bout kinematics rows", value=f"{len(bout_kinematics_df):,}"),
+            mo.stat(label="Classified bouts", value=f"{len(bout_classification_df):,}"),
+            mo.stat(label="Visible classified", value=f"{len(classified_filtered_swim_bout_df):,}"),
             mo.stat(label="Invalid intervals", value=f"{len(validity_df):,}"),
             mo.stat(label="Visible invalid", value=f"{len(filtered_validity_df):,}"),
             mo.stat(label="Track ID", value=str(data.spec.get("track_id", "unknown"))),
@@ -2118,7 +2512,16 @@ def _(
 
 
 @app.cell
-def _(bout_kinematics_attrs, bout_kinematics_df, data, inter_bout_interval_df, mo, swim_bout_df):
+def _(
+    bout_classification_attrs,
+    bout_classification_df,
+    bout_kinematics_attrs,
+    bout_kinematics_df,
+    data,
+    inter_bout_interval_df,
+    mo,
+    swim_bout_df,
+):
     mo.accordion(
         {
             "Interactive spec": mo.tree(dict(data.spec)),
@@ -2144,6 +2547,13 @@ def _(bout_kinematics_attrs, bout_kinematics_df, data, inter_bout_interval_df, m
                     "rows": int(len(bout_kinematics_df)),
                     "columns": list(bout_kinematics_df.columns),
                     "attrs": dict(bout_kinematics_attrs),
+                }
+            ),
+            "Bout classification": mo.tree(
+                {
+                    "rows": int(len(bout_classification_df)),
+                    "columns": list(bout_classification_df.columns),
+                    "attrs": dict(bout_classification_attrs),
                 }
             ),
             "Validity overlay": mo.tree(

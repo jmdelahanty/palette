@@ -589,6 +589,14 @@ The adapter uses `skip_invalid_windows` as the initial invalid-window policy:
 
 - valid Palette windows are passed to `BoutClassifier.run_classification`
 - invalid Palette windows are not passed to Megabouts
+- the input window duration is defined in seconds, converted to frames with
+  the resolved Palette recording FPS, and then passed to Megabouts as an
+  equivalent `bout_duration_ms`
+- Megabouts receives `TrackingConfig(fps=<resolved_fps>,
+  tracking="full_tracking")` and `SegmentationConfig(fps=<resolved_fps>,
+  bout_duration_ms=<window_ms>)`
+- the local Megabouts checkout currently exposes one transformer weight file;
+  Palette does not choose a separate high-FPS vs low-FPS classifier model
 - trajectory windows are translated to the bout-onset point and rotated into
   the bout-onset heading frame before classification, matching Megabouts'
   classifier-facing `extract_traj_array(..., align=True)` convention
@@ -609,6 +617,56 @@ This preserves source row identity and keeps classifier labels separate from
 `swim_bout_runs`, `tail_posture_view_runs`, `track_kinematics_runs`, and
 `bout_kinematics_runs`.
 
+#### FPS-Aware But Not Full-Preprocessing Mode
+
+Current Palette execution mode is:
+
+```text
+Palette tail posture / track kinematics
+  -> Palette Megabouts-compatible fixed-window arrays
+  -> Megabouts BoutClassifier
+```
+
+It is not:
+
+```text
+raw tracking
+  -> full Megabouts tail/traj preprocessing
+  -> Megabouts segmentation
+  -> Megabouts classifier
+```
+
+The direct classifier adapter is still FPS-aware:
+
+- `fps` is resolved from the Palette track/swim-bout source attrs.
+- `bout_duration_s` becomes `bout_duration_frames = ceil(duration_s * fps)`.
+- Megabouts receives the same FPS through its config objects.
+- Megabouts builds its transformer time-sampling vector in milliseconds from
+  that config and masks unused positions up to the classifier's 140-frame max.
+- Megabouts converts the predicted first-half-beat time back to frame units
+  with the same FPS.
+
+For the 60 FPS feeding canary, the default 0.2 s classifier window is 12
+frames. For 700 FPS data, the same 0.2 s window would be 140 frames, matching
+the classifier's fixed maximum input length.
+
+Therefore provenance for a direct-classifier run should be interpreted as:
+
+```text
+classifier_family = "megabouts"
+classifier_name = "megabouts_transformer"
+classifier_input_mode = "palette_prepared_fixed_windows"
+megabouts_preprocessing = false
+megabouts_segmentation = false
+source_fps = <resolved Palette FPS>
+window_duration_s = <duration seconds>
+window_frames = <duration frames after FPS conversion>
+megabouts_time_sampling = true
+```
+
+This distinction matters because it separates "using the Megabouts classifier"
+from "using the full Megabouts preprocessing/segmentation pipeline."
+
 ### Deferred Mode: Megabouts Preprocessing And Segmentation Comparison
 
 Goal: compare Megabouts tail-vigor or trajectory-vigor segmentation against
@@ -618,6 +676,82 @@ Megabouts-generated onsets/offsets should be stored as a candidate in a
 Megabouts/import run or a dedicated comparison run. They should not replace
 `analysis/swim_bout_runs` unless Palette explicitly imports them as a new
 segmentation candidate with full provenance.
+
+### Planned Mode: Megabouts Preprocessing Input Comparison
+
+Before adopting any Megabouts preprocessing path, compare it against the
+current Palette-prepared classifier inputs under controlled conditions.
+
+The first comparison should hold these factors constant:
+
+- same recording
+- same Palette swim-bout rows
+- same `start_frame` / fixed-duration classifier windows
+- same FPS and window duration
+- same invalid-window thresholds
+- same classifier weights and device
+
+Only the input-preparation source should change:
+
+```text
+Path A: Palette-prepared input
+  tail_posture_view_runs/<megabouts-compatible view>
+  track_kinematics_runs/<track>
+  -> tail_array, traj_array
+
+Path B: Megabouts-preprocessed input
+  Palette-exported/translated posture + trajectory time series
+  Megabouts tail/traj preprocessing
+  -> tail_array, traj_array sampled over the same Palette bout windows
+```
+
+Do not initially compare against Megabouts' own segmentation windows, because
+that would mix preprocessing differences with segmentation differences. A
+full-pipeline comparison can come later after the same-window input comparison
+is understood.
+
+Recommended input-comparison metrics:
+
+- tail angle channel RMSE and correlation
+- per-channel sign/offset checks
+- cross-correlation lag in frames for tail channels
+- trajectory `x`, `y`, and heading/yaw RMSE after onset-frame alignment
+- missing/invalid frame disagreements
+- per-bout valid coverage differences
+
+Recommended classifier-comparison metrics:
+
+- category label agreement rate
+- per-category confusion table
+- probability deltas for matched bouts
+- first-half-beat frame deltas
+- bounded examples of high-confidence disagreements
+
+Expected result: the two paths should be broadly similar if Palette's
+Megabouts-compatible views match Megabouts conventions, but they should not be
+expected to be byte-identical. Megabouts preprocessing includes its own
+baseline correction, smoothing, and interpolation choices. A discrepancy is a
+diagnostic signal, not automatically evidence that Palette should replace its
+canonical inputs.
+
+If persisted, preprocessing comparison outputs should remain separate from
+classifier-label runs, for example:
+
+```text
+analysis/megabouts_input_comparison_runs/<run>/
+```
+
+or, if the preprocessed traces themselves are retained:
+
+```text
+analysis/tail_posture_preprocessing_runs/<run>/
+analysis/track_preprocessing_runs/<run>/
+```
+
+Those runs should include the source Palette paths, Megabouts package/source
+version, FPS, preprocessing config, alignment policy, and the exact comparison
+metrics. They should not mutate `tail_posture_view_runs`,
+`track_kinematics_runs`, or `swim_bout_runs`.
 
 ## Invalid Frame Policy
 
@@ -746,6 +880,9 @@ megabouts_tail_preprocessing_adapter
 ```
 
 This keeps preprocessing comparison independent from classifier labels.
+Classifier runs should link to preprocessing runs only when they actually
+consume those outputs. Otherwise, a direct-classifier run should explicitly
+record `megabouts_preprocessing=false`.
 
 ## K Values And Sample Counts
 
@@ -808,9 +945,13 @@ attrs.
    adapter provenance.
 6. Optionally add a `tail_kinematics_runs` K=11 candidate for Palette-native
    review. Treat this as a comparison run, not a prerequisite for the adapter.
-7. Defer Megabouts preprocessing/segmentation comparison until classifier-only
-   integration has a reviewed canary result.
-8. Add Marimo/Crimson read support for classifier labels only after the run
+7. Next: document and implement the same-window Megabouts preprocessing input
+   comparison. This should compare Palette-prepared inputs to
+   Megabouts-preprocessed inputs before comparing full Megabouts segmentation.
+8. Defer full Megabouts preprocessing/segmentation comparison until
+   classifier-only integration and same-window input comparison both have
+   reviewed canary results.
+9. Add Marimo/Crimson read support for classifier labels only after the run
    schema stabilizes.
 
 ## Open Questions

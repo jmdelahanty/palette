@@ -77,6 +77,18 @@ invalid_frame_policy              JSON-compatible invalid-window policy payload
 provenance                        Palette stage provenance payload
 ```
 
+Recommended Megabouts direct-classifier parameter/provenance fields:
+
+```text
+classifier_input_mode             "palette_prepared_fixed_windows"
+megabouts_preprocessing           false unless Megabouts preprocessing outputs were consumed
+megabouts_segmentation            false unless Megabouts segmentation outputs were consumed
+source_fps                        resolved source FPS
+window_duration_s                 classifier window duration in seconds
+window_frames                     classifier window duration in source frames
+megabouts_time_sampling           true when Megabouts receives FPS-aware time samples
+```
+
 Megabouts-specific provenance attrs may also be present:
 
 ```text
@@ -198,3 +210,9 @@ For the feeding canary, the trusted comparison candidate is:
 ```text
 analysis/bout_classification_runs/megabouts_classifier_onset_aligned_canary_20260501
 ```
+
+Interpret current Megabouts direct-adapter runs as "Megabouts classifier on
+Palette-prepared fixed windows." They are FPS-aware because Palette passes the
+resolved source FPS into Megabouts config objects and records the resulting
+window frame count, but they do not imply that full Megabouts preprocessing or
+Megabouts segmentation was used.
