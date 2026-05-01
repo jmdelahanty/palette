@@ -517,6 +517,31 @@ Procedure:
 This mode is useful for comparing classifier labels across Palette bout
 segmentation candidates.
 
+#### Implemented Readiness Check
+
+Palette now includes a read-only classifier-input dry run:
+
+```bash
+scripts/py -m fisheye.analysis.megabouts_classifier_inputs <analysis.zarr> \
+  --tail-posture-view-run latest \
+  --track-kinematics-run latest \
+  --track-scope offline \
+  --track-id 0 \
+  --swim-bout-run latest \
+  --speed-level default \
+  --json
+```
+
+This command resolves the exact Palette source runs, builds the in-memory
+`tail_array` and `traj_array` tensors, reports per-bout validity coverage, and
+prints a JSON summary. It does not import Megabouts, call Megabouts, write
+classifier labels, or mutate the Zarr archive.
+
+Use this dry run before implementing or executing the optional Megabouts
+classifier call. A successful dry run means the Palette-side source surfaces are
+resolvable and shaped correctly; it does not mean Megabouts labels have been
+computed.
+
 ### Deferred Mode: Megabouts Preprocessing And Segmentation Comparison
 
 Goal: compare Megabouts tail-vigor or trajectory-vigor segmentation against
