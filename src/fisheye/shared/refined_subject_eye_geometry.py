@@ -8,9 +8,6 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import zarr
 
-from ..refinement.refine_eye_masks import _measure_mask
-from .refined_subject_component_contours import write_component_contours
-
 EYE_COMPONENTS = ("eye_left", "eye_right")
 EYE_GEOMETRY_SCHEMA_ID = "refined_subject_eye_geometry_v1"
 EYE_PAIR_RELATION_SCHEMA_ID = "refined_subject_eye_pair_relation_v1"
@@ -44,6 +41,20 @@ def _eye_geometry_should_update(updated_components: Optional[Sequence[str]]) -> 
 
 def _write_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tuple[int, ...]) -> None:
     group.create_array(name, data=data, chunks=chunks, overwrite=True)
+
+
+def _measure_eye_mask(mask: np.ndarray):
+    """Import the legacy eye-mask measurement helper only when geometry is materialized."""
+    from ..refinement.refine_eye_masks import _measure_mask
+
+    return _measure_mask(mask)
+
+
+def _write_component_contours(*args, **kwargs):
+    """Import contour writing only when geometry is materialized."""
+    from .refined_subject_component_contours import write_component_contours
+
+    return write_component_contours(*args, **kwargs)
 
 
 def write_refined_subject_eye_geometry(
@@ -86,7 +97,7 @@ def write_refined_subject_eye_geometry(
                 contours[component_name].append(None)
                 continue
             mask = np.asarray(masks_roi[row_idx, comp_idx], dtype=np.uint8)
-            success, ellipse, centroid, contour, _failure = _measure_mask(mask)
+            success, ellipse, centroid, contour, _failure = _measure_eye_mask(mask)
             ellipse_params[row_idx, eye_idx] = np.asarray(ellipse, dtype=np.float32)
             ellipse_success[row_idx, eye_idx] = bool(success)
             centroids[row_idx, eye_idx] = np.asarray(centroid, dtype=np.float32)
@@ -116,7 +127,7 @@ def write_refined_subject_eye_geometry(
             ellipse_success[:, eye_idx],
             chunks=(chunk_rois,),
         )
-        write_component_contours(
+        _write_component_contours(
             component_group,
             contours[component_name],
             chunk_rois=chunk_rois,

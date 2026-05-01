@@ -708,20 +708,24 @@ heading/keypoint context. It remains a valid specialized analysis run, but it
 is not the first authority for mask-derived eye shape geometry in unified
 body/eyes/swim workflows.
 
-Current eye-angle v4 runs opt into `analysis/subject_shape_runs` as the
+Current eye-angle v5 runs opt into `analysis/subject_shape_runs` as the
 preferred source when left/right eye ellipse geometry is present. They record
-`schema_id = "analysis.eye_angle_runs"`, `schema_version = 4`,
+`schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
 `method = "ellipse_and_centroid_eye_angles"`,
 `row_axis = "keypoint_detection_rows"`, `source_geometry_kind`, and
 `eye_angle_output_schema` so consumers can distinguish subject-shape,
-refined-subject, and legacy refined-eye geometry sources. Schema v4 also
+refined-subject, and legacy refined-eye geometry sources. Schema v5 also
 records `preferred_angle_family = "gaze"` and
-`preferred_eye_axis = "ellipse_minor"` because the ellipse minor axis is the
-biologically preferred eye-look direction in current overhead imagery, and it
-materializes keypoint-derived `support/body_frame/` arrays for signed-angle
-polarity. It retains the v3-compatible `vergence_gaze_deg` total/axis
-separation and adds per-eye nasal gaze plus
-`mean_eye_vergence_gaze_deg` for Johnson/BEAST-style comparisons.
+`preferred_eye_axis = "ellipse_major"` because the major axis is the canonical
+eye-orientation axis. The gaze/minor direction is derived from the resolved
+major axis with eye-specific 90 degree rotations, and keypoint-derived
+`support/body_frame/` arrays define signed-angle polarity. It retains the
+v3-compatible `vergence_gaze_deg` total/axis separation and adds per-eye nasal
+gaze plus
+`mean_eye_vergence_gaze_deg` for Johnson/BEAST-style comparisons. Output
+schema v6 adds `left_eye_angle_deg`, `right_eye_angle_deg`, and
+`vergence_eye_angle_deg` for Bianco/Engert-style nasal-positive eye-frame
+angles.
 
 `analysis/subject_shape_runs` should not force every specialized metric to move
 immediately. It defines the mask-derived shape layer that can later feed or

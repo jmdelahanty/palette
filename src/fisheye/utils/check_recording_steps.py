@@ -809,7 +809,7 @@ def _extract_tracking_qc_details(details: Optional[Dict[str, object]]) -> Dict[s
 
 
 _EYE_ANGLE_RUN_SCHEMA_ID = "analysis.eye_angle_runs"
-_EYE_ANGLE_RUN_SCHEMA_VERSION = 4
+_EYE_ANGLE_RUN_SCHEMA_VERSION = 5
 _EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
 _EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
 

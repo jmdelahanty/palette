@@ -1545,27 +1545,47 @@ Eye angle analysis results:
 - Per-ROI and per-frame eye-angle metrics
 - QA masks and quality indicators
 - `reason_codes` for data quality classification
-- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 4`,
+- Run attrs: `schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
   `method = "ellipse_and_centroid_eye_angles"`,
+  `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and `eye_angle_output_schema` for
   machine-readable output groups, units, suffixes, derivative arrays, and QA
   reason-code linkage.
-- Schema v4 exposes explicit gaze arrays derived from the ellipse minor axis:
+- Schema v5 exposes canonical major-axis arrays:
+  `left_major_signed_deg`, `right_major_signed_deg`,
+  `vergence_major_signed_deg`, and `version_major_deg`. The major axis is
+  resolved into the fish forward half-plane, with `0 deg` aligned to body
+  forward and positive values toward anatomical left.
+- Output schema v6 adds Bianco/Engert-style eye-frame arrays:
+  `left_eye_angle_deg`, `right_eye_angle_deg`, and
+  `vergence_eye_angle_deg`, plus smoothed and delta variants. These are derived
+  from the canonical major-axis fields with per-eye nasal-positive signs:
+  `left_eye_angle_deg = -left_major_signed_deg`,
+  `right_eye_angle_deg = right_major_signed_deg`, and
+  `vergence_eye_angle_deg = left_eye_angle_deg + right_eye_angle_deg`.
+  Positive `vergence_eye_angle_deg` means convergence; negative means
+  divergence.
+- Schema v5 exposes explicit gaze arrays derived from the resolved major axis:
   `left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`,
   `right_gaze_signed_deg`, `vergence_gaze_deg`,
   `vergence_gaze_signed_deg`, and `version_gaze_deg`, plus smoothed, delta,
   speed, and acceleration variants where applicable. New consumers should use
-  these over legacy major-axis `left_deg` / `right_deg` fields.
-- Schema v4 retains `vergence_gaze_deg` as the v3-compatible total/axis
+  these over legacy `left_deg` / `right_deg` fields for gaze surfaces.
+- `left_gaze_xy` and `right_gaze_xy` are ROI/image-space unit vectors for
+  drawing the derived gaze direction.
+- Schema v5 retains `vergence_gaze_deg` as the v3-compatible total/axis
   separation and adds `left_nasal_gaze_deg`, `right_nasal_gaze_deg`, and
   `mean_eye_vergence_gaze_deg` for BEAST/Johnson-style mean per-eye vergence.
 - Run attrs include `preferred_angle_family = "gaze"`,
-  `preferred_eye_axis = "ellipse_minor"`, and
-  `gaze_angle_source = "ellipse_minor"`.
-- Schema v4 materializes keypoint-derived body-frame support arrays under
+  `preferred_eye_axis = "ellipse_major"`, and
+  `gaze_angle_source = "ellipse_minor_derived_from_resolved_major_axis"`.
+- Schema v5 materializes keypoint-derived body-frame support arrays under
   `support/body_frame/` so signed eye angles are anatomical-left-positive and
   convergence polarity is not conflated with ellipse-axis orientation
   disambiguation.
+- `qa/roi/*major_axis_marginal` and `qa/frame/major_axis_marginal` are
+  non-fatal warning flags for rare cases where the major axis is close to the
+  half-plane boundary used for 180 degree ambiguity resolution.
 - Preferred eye geometry source is `analysis/subject_shape_runs/<run>` when it
   has left/right eye ellipse geometry. Run attrs record
   `source_geometry_kind`, `source_subject_shape_run`,

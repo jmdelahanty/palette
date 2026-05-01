@@ -167,20 +167,27 @@ Existing analysis outputs already follow this direction:
   `eye_gaze/per_bout_metrics` subgroup with pre/post/within-bout eye-gaze and
   vergence summaries linked to an exact `analysis/eye_angle_runs/<run>` source.
 - `analysis/eye_angle_runs/<run>` stores specialized eye-angle outputs
-  interpreted relative to heading/keypoint context. Current v4 runs declare
-  `schema_id = "analysis.eye_angle_runs"`, `schema_version = 4`,
+  interpreted relative to heading/keypoint context. Current v5 runs declare
+  `schema_id = "analysis.eye_angle_runs"`, `schema_version = 5`,
   `method = "ellipse_and_centroid_eye_angles"`,
+  `method_version = "eye_angle_analysis.v5"`,
   `row_axis = "keypoint_detection_rows"`, and
   `eye_angle_output_schema` for output-group/units/suffix conventions.
-  Readers should prefer explicit `*_gaze_*` arrays derived from the
-  ellipse minor axis; legacy major/minor names remain compatibility outputs.
-  Schema v4 retains the v3-compatible total axis-separation field
+  Readers should treat explicit `*_major_*` arrays as the canonical
+  orientation fields and prefer explicit `*_gaze_*` arrays for biological gaze;
+  gaze/minor direction is derived from the resolved major axis. Legacy major
+  and minor names remain compatibility outputs. Schema v5 retains the
+  v3-compatible total axis-separation field
   `vergence_gaze_deg` and adds `left_nasal_gaze_deg`,
   `right_nasal_gaze_deg`, and BEAST/Johnson-comparable
   `mean_eye_vergence_gaze_deg`.
+  Output schema v6 additionally exposes Bianco/Engert-style eye-frame fields
+  `left_eye_angle_deg`, `right_eye_angle_deg`, and
+  `vergence_eye_angle_deg`, with per-eye nasal-positive signs and signed
+  vergence where positive means convergence and negative means divergence.
   Eye-angle writers should prefer `analysis/subject_shape_runs/<run>` eye
   geometry when a coherent body/eyes/swim shape run exists, and preserve
-  refined-subject/refined-eye fallbacks as explicit lineage. Current v4 runs
+  refined-subject/refined-eye fallbacks as explicit lineage. Current v5 runs
   materialize keypoint-derived `support/body_frame/` arrays and future writers
   should prefer shared `analysis/subject_shape_runs/<run>/body_frame/` when
   available.

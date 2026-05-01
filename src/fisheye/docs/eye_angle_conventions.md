@@ -1,6 +1,6 @@
 # Eye-Angle Metrics: Data Layout and Computation
 
-This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and refined eye geometry. It reflects the v4 eye-angle schema where the biologically preferred gaze axis is explicit, signed angles are resolved through a body-frame support contract, and BEAST/Johnson-style mean per-eye vergence is available without changing the existing total-vergence surface.
+This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and refined eye geometry. It reflects the v5 eye-angle run schema and v6 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, and BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
 
 ## Where the data lives
 
@@ -19,13 +19,17 @@ analysis/eye_angle_runs/<run>/
 
 Key datasets:
 
-- `angles/roi/left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`, `right_gaze_signed_deg`, `vergence_gaze_deg`, `vergence_gaze_signed_deg`, and `version_gaze_deg` are the preferred biological eye-angle surface. These are derived from the ellipse minor axis, which matches the apparent gaze/look direction in the current overhead fish imagery.
-- `angles/roi/left_nasal_gaze_deg`, `right_nasal_gaze_deg`, and `mean_eye_vergence_gaze_deg` are v4 BEAST/Johnson-comparable outputs. The per-eye nasal fields estimate inward/nasal rotation from the lateral eye-axis baseline, and the mean field is `0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)`.
-- `angles/roi/left_deg`, `right_deg`, `left_signed_deg`, `right_signed_deg`, `vergence_deg`, and `version_deg` are legacy major-axis ellipse outputs retained for compatibility and geometry QA.
-- `angles/roi/left_minor_signed_deg`, `right_minor_signed_deg`, `vergence_minor_signed_deg`, and `version_minor_deg` are the legacy names for the gaze-axis values. In v2, the explicit `*_gaze_*` names should be preferred by new readers.
+- `angles/roi/left_major_signed_deg` and `right_major_signed_deg` are the canonical per-eye orientation surface. They store the resolved ellipse major axis in the fish body frame, with `0 deg` aligned to the body forward axis and positive rotation toward anatomical left.
+- `angles/roi/left_eye_angle_deg`, `right_eye_angle_deg`, and `vergence_eye_angle_deg` are Bianco/Engert-style eye-frame angles derived from the canonical major-axis fields. Per-eye values are nasal-positive for each eye: `left_eye_angle_deg = -left_major_signed_deg`, `right_eye_angle_deg = right_major_signed_deg`, and `vergence_eye_angle_deg = left_eye_angle_deg + right_eye_angle_deg`. Positive vergence means convergence, negative means divergence, and zero means no convergence component.
+- `angles/roi/left_gaze_deg`, `right_gaze_deg`, `left_gaze_signed_deg`, `right_gaze_signed_deg`, `vergence_gaze_deg`, `vergence_gaze_signed_deg`, and `version_gaze_deg` are the gaze surface. These are derived by rotating the resolved major axis by eye-specific 90 degree offsets, not by independently resolving the minor-axis half-plane.
+- `angles/roi/left_gaze_xy` and `right_gaze_xy` store ROI/image-space unit vectors for the same derived gaze directions so visualizers can draw rays without re-deriving the axis.
+- `angles/roi/left_nasal_gaze_deg`, `right_nasal_gaze_deg`, and `mean_eye_vergence_gaze_deg` are BEAST/Johnson-comparable outputs. The per-eye nasal fields estimate inward/nasal rotation from the lateral eye-axis baseline, and the mean field is `0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)`.
+- `angles/roi/left_deg`, `right_deg`, `left_signed_deg`, `right_signed_deg`, `vergence_deg`, and `version_deg` are legacy major-axis outputs retained for compatibility. `left/right_signed_deg` are aliases of `left/right_major_signed_deg` in v5.
+- `angles/roi/left_minor_signed_deg`, `right_minor_signed_deg`, `vergence_minor_signed_deg`, and `version_minor_deg` are the legacy names for the gaze-axis values. The explicit `*_gaze_*` names should be preferred by new readers.
 - `angles/roi/left_centroid_deg`, `right_centroid_deg`, `vergence_centroid_deg` hold centroid-position angles in fish-frame coordinates. These are useful pose context, but they are not a replacement for ellipse-derived gaze/vergence.
 - `_delta_deg` and `_delta_deg_smoothed` arrays contain absolute frame-to-frame changes.
 - `qa/roi/valid_left`, `valid_right`, `valid_frame`, and `reason_codes` provide flags and bitmasks that explain any exclusions.
+- `qa/roi/left_major_axis_marginal`, `right_major_axis_marginal`, and `major_axis_marginal` are non-fatal warnings for the rare case where the major axis is close to the forward half-plane boundary and 180 degree ambiguity resolution is therefore less certain.
 - `support/time_seconds`, `frame_indices`, `ellipse_*` expose timing metadata and ellipse diagnostics used by the visualizations.
 
 Current runs resolve eye geometry through `fisheye.shared.eye_geometry_source`.
@@ -37,15 +41,18 @@ historical `refined_eye_masks_runs/<run>` data as a compatibility fallback.
 
 The referenced sources are captured in run attributes:
 
-- `schema_id = "analysis.eye_angle_runs"` and `schema_version = 4`: stable
+- `schema_id = "analysis.eye_angle_runs"` and `schema_version = 5`: stable
   run-level contract for this analysis product.
 - `method = "ellipse_and_centroid_eye_angles"`: the writer computes both
   ellipse-axis and centroid-position eye-angle families.
+- `method_version = "eye_angle_analysis.v5"`: gaze direction is derived from
+  the resolved major axis and is no longer clipped to +/-90 deg.
 - `row_axis = "keypoint_detection_rows"`: ROI outputs are row-aligned to the
   refined keypoint/eye-geometry detection rows.
 - `eye_angle_output_schema`: machine-readable summary of output groups,
   row axes, units, suffix conventions, derivative outputs, and QA reason-code
-  linkage.
+  linkage. Output schema v6 adds Bianco/Engert-style eye-frame fields while
+  leaving the run schema and v5 method semantics intact.
 - `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
   and run used for geometry.
 - `source_geometry_kind`: normalized geometry role, one of
@@ -71,12 +78,13 @@ Schema boundary:
   axes. It is not a replacement for source lineage attrs.
 - `source_geometry_kind` records which eye-geometry authority was actually
   consumed so readers do not have to infer semantics from path names alone.
-- `preferred_angle_family = "gaze"` and `preferred_eye_axis = "ellipse_minor"`
-  tell readers which arrays to use for biological eye orientation by default.
+- `preferred_angle_family = "gaze"` and `preferred_eye_axis = "ellipse_major"`
+  tell readers that the run's canonical orientation axis is major-axis based
+  while the gaze family remains the preferred biological viewing surface.
 
 Body-frame boundary:
 
-- Current v4 eye-angle runs materialize a keypoint-derived body-frame support
+- Current v5 eye-angle runs materialize a keypoint-derived body-frame support
   group under `support/body_frame/`.
 - Future schema updates should prefer `analysis/subject_shape_runs/<run>/body_frame/`
   when a coherent mask/spline/keypoint body frame exists and fall back to
@@ -112,11 +120,11 @@ For each detection and eye:
 1. We materialize `support/body_frame/` from the swim bladder and left/right eye keypoints. The forward axis is `swim_bladder -> midpoint(eye_left, eye_right)` and the left axis is resolved from the labeled eye pair.
 2. The ellipse major-axis direction (`theta_deg`) is converted to a unit vector. To remove the 180° axis ambiguity, the vector is flipped so it points generally forward in the body frame.
 3. The signed major-axis angle is `atan2(dot(axis, left_axis), dot(axis, forward_axis))`. Positive values point toward anatomical left. The unsigned major-axis magnitude is `abs(left/right_signed_deg)`.
-4. The minor-axis direction is produced by rotating the major axis by 90°. It is also disambiguated toward the forward half-plane before the same body-frame `atan2` computation, producing the minor/gaze per-eye signed angles.
-5. In schema v3 and later, the minor-axis family is aliased into explicit gaze names: `left_gaze_signed_deg = left_minor_signed_deg`, `right_gaze_signed_deg = right_minor_signed_deg`, `vergence_gaze_signed_deg = vergence_minor_signed_deg`, and `version_gaze_deg = version_minor_deg`.
-6. In schema v4, per-eye BEAST-comparable nasal gaze is additionally computed as `left/right_nasal_gaze_deg = 90 - abs(left/right_gaze_signed_deg)`, and `mean_eye_vergence_gaze_deg = 0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)`.
+4. The gaze/minor-axis direction is produced by rotating the resolved major axis in body-frame coordinates. For the left eye, `gaze = major + 90 deg`; for the right eye, `gaze = major - 90 deg`. The old independent minor-axis half-plane test and +/-90 deg clipping are not used in v5.
+5. The derived gaze family is aliased into explicit gaze names: `left_gaze_signed_deg = left_minor_signed_deg`, `right_gaze_signed_deg = right_minor_signed_deg`, `vergence_gaze_signed_deg = vergence_minor_signed_deg`, and `version_gaze_deg = version_minor_deg`.
+6. Per-eye BEAST-comparable nasal gaze is computed as `left/right_nasal_gaze_deg = 90 - abs(left/right_gaze_signed_deg)`, and `mean_eye_vergence_gaze_deg = 0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)`.
 
-Invalid or near-circular fits are rejected early; reason bits (`REASON_*`) mark any failure so consumers can down-weight those detections.
+Invalid or near-circular fits are rejected early; reason bits (`REASON_*`) mark any failure so consumers can down-weight those detections. Major-axis marginal rows are warnings only and do not invalidate the frame.
 
 ### Binocular aggregates
 
@@ -132,9 +140,9 @@ Once left and right signed angles are available:
 
 ### Relationship to Johnson et al. style eye tracking
 
-Johnson-style hunting analyses register the fish, fit ellipses to the eyes, and use ellipse-derived looking/vergence angles for hunting-state classification. Palette follows the same broad geometry strategy, but OpenCV-style ellipse parameters expose major/minor axes explicitly and, in current imagery, the minor axis is the axis that visually tracks where the eye is looking. Therefore schema v3 made the minor-axis family the explicit `gaze` family rather than asking readers to infer this from `minor` names.
+Johnson-style hunting analyses register the fish, fit ellipses to the eyes, and use ellipse-derived looking/vergence angles for hunting-state classification. Palette follows the same broad geometry strategy, but OpenCV-style ellipse parameters expose major/minor axes explicitly. Schema v5 stores the resolved major axis as the canonical eye orientation and derives the gaze/minor axis from it so 180 degree ambiguity is resolved on the geometrically stable axis.
 
-Schema v4 keeps those existing gaze fields and adds explicit per-eye nasal gaze plus `mean_eye_vergence_gaze_deg`. The local BEAST data examined in `/nvme1/beast_data` stores two per-eye eye-angle columns; the median of the per-frame mean is approximately half the sum, which matches the Johnson-style plots more closely than Palette's older total axis-separation field.
+Schema v5 keeps the existing gaze fields and explicit per-eye nasal gaze plus `mean_eye_vergence_gaze_deg`. The local BEAST data examined in `/nvme1/beast_data` stores two per-eye eye-angle columns; the median of the per-frame mean is approximately half the sum, which matches the Johnson-style plots more closely than Palette's older total axis-separation field.
 
 The centroid outputs are auxiliary pose-position measurements, not the Johnson-style gaze signal. They measure the *position* of each eye centroid relative to the fish's heading, rather than the *orientation* of the eye ellipse.
 

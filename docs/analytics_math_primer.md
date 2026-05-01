@@ -256,15 +256,60 @@ declared physical speed source, usually `speed_filtered`.
 ## Eye Angles
 
 `analysis/eye_angle_runs` stores eye geometry interpreted in the fish body
-frame. Current v4 runs prefer the gaze family:
+frame. Current v5 runs with output schema v6 prefer the gaze family:
 
 ```text
 preferred_angle_family = "gaze"
-preferred_eye_axis     = "ellipse_minor"
+preferred_eye_axis     = "ellipse_major"
+gaze_angle_source      = "ellipse_minor_derived_from_resolved_major_axis"
 ```
 
-This means the current imagery uses the eye ellipse minor axis as the apparent
-look/gaze axis.
+This means the canonical eye-orientation axis is the resolved ellipse major
+axis. The apparent look/gaze axis is the perpendicular minor-axis direction
+derived from that resolved major axis, rather than independently disambiguated.
+
+Canonical orientation fields:
+
+```text
+left_major_signed_deg
+right_major_signed_deg
+```
+
+Here `0 deg` means the major axis is aligned with the fish's body-forward axis,
+and positive values rotate toward anatomical left.
+
+### Bianco/Engert Eye-Frame Angles
+
+Fields:
+
+```text
+left_eye_angle_deg
+right_eye_angle_deg
+vergence_eye_angle_deg
+```
+
+These are derived from the canonical major-axis fields but use per-eye signs:
+
+```text
+left_eye_angle_deg     = -left_major_signed_deg
+right_eye_angle_deg    =  right_major_signed_deg
+vergence_eye_angle_deg = left_eye_angle_deg + right_eye_angle_deg
+```
+
+Interpretation:
+
+| Value | Meaning |
+| --- | --- |
+| positive per-eye angle | that eye is rotated nasally/inward |
+| negative per-eye angle | that eye is rotated temporally/outward |
+| positive `vergence_eye_angle_deg` | the eyes are converged |
+| negative `vergence_eye_angle_deg` | the eyes are diverged |
+| same-sign body-frame rotation of both major axes | yoked rotation, not convergence |
+
+These fields are the easiest match for Bianco/Engert-style larval zebrafish
+eye-angle plots because both eyes become positive when they converge. They are
+not a replacement for the body-frame major-axis fields; they are a biological
+presentation of the same canonical orientation measurements.
 
 ### Per-Eye Gaze Signed Angles
 
@@ -295,7 +340,7 @@ left_nasal_gaze_deg
 right_nasal_gaze_deg
 ```
 
-Current v4 definition:
+Current v5 definition:
 
 ```text
 nasal_gaze = 90 - abs(gaze_signed)
@@ -448,4 +493,5 @@ interpretation.
 - [subject_shape_runs_contract.md](subject_shape_runs_contract.md)
 - [tail_kinematics_tool_interop_design.md](tail_kinematics_tool_interop_design.md)
 - [raw_vs_smoothed_metrics_behavioral_geometry.md](raw_vs_smoothed_metrics_behavioral_geometry.md)
+- [eye_angle_variants.md](eye_angle_variants.md)
 - [src/fisheye/docs/eye_angle_conventions.md](../src/fisheye/docs/eye_angle_conventions.md)

@@ -49,17 +49,23 @@ def test_eye_angle_definition_attrs_match_undirected_axis_vergence_math() -> Non
 
     assert attrs["signed_angles"] is True
     assert attrs["signed_angle_convention"] == "per-eye signed angles are body-frame anatomical-left-positive"
+    assert attrs["canonical_eye_orientation_axis"] == "ellipse_major"
+    assert attrs["canonical_eye_orientation_arrays"] == ["left_major_signed_deg", "right_major_signed_deg"]
+    assert attrs["angle_zero"].startswith("major axis aligned")
+    assert attrs["axis_ambiguity_resolution"].startswith("ellipse major axis is resolved")
     assert attrs["vergence_definition"] == "undirected_axis_separation(left_signed_deg, right_signed_deg)"
     assert attrs["vergence_signed_definition"] == "same as vergence_deg for directionless ellipse axes"
     assert attrs["version_definition"] == "0.5*(left_signed_deg + right_signed_deg)"
+    assert attrs["major_vergence_definition"] == "undirected_axis_separation(left_major_signed_deg, right_major_signed_deg)"
     assert attrs["minor_signed_angles"] is True
-    assert attrs["minor_signed_angle_convention"] == "per-eye minor signed angles are body-frame anatomical-left-positive"
+    assert attrs["minor_signed_angle_convention"].startswith("per-eye minor/gaze signed angles")
     assert attrs["minor_vergence_definition"] == "undirected_axis_separation(left_minor_signed_deg, right_minor_signed_deg)"
     assert attrs["minor_vergence_signed_definition"] == "same as vergence_minor_deg for directionless ellipse axes"
     assert attrs["minor_version_definition"] == "0.5*(left_minor_signed_deg + right_minor_signed_deg)"
     assert attrs["preferred_angle_family"] == "gaze"
-    assert attrs["preferred_eye_axis"] == "ellipse_minor"
-    assert attrs["gaze_angle_source"] == "ellipse_minor"
+    assert attrs["preferred_eye_axis"] == "ellipse_major"
+    assert attrs["gaze_angle_source"] == "ellipse_minor_derived_from_resolved_major_axis"
+    assert attrs["gaze_angle_definition"].startswith("left/right_gaze_signed_deg are signed gaze")
     assert attrs["gaze_vergence_definition"] == "undirected_axis_separation(left_gaze_signed_deg, right_gaze_signed_deg)"
     assert attrs["gaze_vergence_signed_definition"] == "same as vergence_gaze_deg for directionless ellipse axes"
     assert attrs["gaze_total_vergence_definition"].startswith("vergence_gaze_deg retains the v3-compatible")
@@ -73,19 +79,32 @@ def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
     schema = eye_angle_analysis._eye_angle_output_schema()
 
     assert schema["schema_id"] == "analysis.eye_angle_output_schema"
-    assert schema["schema_version"] == 4
+    assert schema["schema_version"] == 6
     assert schema["row_axes"]["roi"] == "keypoint_detection_rows"
     assert schema["row_axes"]["frame"] == "video_frame_rows"
     assert schema["groups"]["angles/roi"]["units"] == "deg"
     assert "left_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "left_major_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "right_major_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "left_eye_angle_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "right_eye_angle_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "vergence_eye_angle_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "vergence_major_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert "version_major_deg" in schema["groups"]["angles/roi"]["base_outputs"]
     assert "left_gaze_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
     assert "vergence_gaze_signed_deg" in schema["groups"]["angles/roi"]["base_outputs"]
     assert "left_nasal_gaze_deg" in schema["groups"]["angles/roi"]["base_outputs"]
     assert "right_nasal_gaze_deg" in schema["groups"]["angles/roi"]["base_outputs"]
     assert "mean_eye_vergence_gaze_deg" in schema["groups"]["angles/roi"]["base_outputs"]
+    assert {"name": "left_gaze_xy", "shape": ["N", 2], "value_kind": "unit_vector_xy_roi"} in schema[
+        "groups"
+    ]["angles/roi"]["vector_outputs"]
     assert "mean_eye_vergence_gaze_speed_deg_s" in schema["groups"]["angles/roi"]["derivative_outputs"]
     assert "left_gaze_signed_deg" in schema["groups"]["angles/frame"]["base_outputs"]
     assert "right_gaze_signed_deg" in schema["groups"]["angles/frame"]["base_outputs"]
+    assert "left_eye_angle_deg" in schema["groups"]["angles/frame"]["base_outputs"]
+    assert "right_eye_angle_deg" in schema["groups"]["angles/frame"]["base_outputs"]
+    assert "vergence_eye_angle_deg" in schema["groups"]["angles/frame"]["base_outputs"]
     assert "mean_eye_vergence_gaze_deg" in schema["groups"]["angles/frame"]["base_outputs"]
     assert "heading_deg" in schema["groups"]["angles/roi"]["base_outputs"]
     assert "left_speed_deg_s" in schema["groups"]["angles/roi"]["derivative_outputs"]
@@ -98,11 +117,19 @@ def test_eye_angle_output_schema_describes_run_layout_and_conventions() -> None:
         "valid_right",
         "valid_frame",
         "reason_codes",
+        "left_major_axis_marginal",
+        "right_major_axis_marginal",
+        "major_axis_marginal",
     ]
     assert schema["signed_angle_convention"] == "per-eye signed angles are body-frame anatomical-left-positive"
+    assert schema["canonical_eye_orientation_axis"] == "ellipse_major"
     assert schema["vergence_signed_definition"] == "same as vergence_deg for directionless ellipse axes"
+    assert schema["eye_frame_angles"] is True
+    assert schema["eye_frame_angle_convention"].startswith("left/right_eye_angle_deg are eye-frame")
+    assert schema["vergence_eye_angle_definition"].startswith("vergence_eye_angle_deg = left_eye_angle_deg")
     assert schema["preferred_angle_family"] == "gaze"
-    assert schema["preferred_eye_axis"] == "ellipse_minor"
+    assert schema["preferred_eye_axis"] == "ellipse_major"
+    assert schema["gaze_angle_source"] == "ellipse_minor_derived_from_resolved_major_axis"
     assert schema["gaze_vergence_signed_definition"] == "same as vergence_gaze_deg for directionless ellipse axes"
     assert schema["gaze_total_vergence_definition"].startswith("vergence_gaze_deg retains the v3-compatible")
     assert schema["mean_eye_vergence_gaze_definition"] == "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)"
@@ -555,13 +582,15 @@ def test_eye_angle_chunk_computes_gaze_convergence_in_body_frame() -> None:
     assert bool(result.valid_frame[0])
     np.testing.assert_allclose(result.body_frame_forward_axis_xy[0], [1.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(result.body_frame_left_axis_xy[0], [0.0, -1.0], atol=1e-6)
-    assert result.left_gaze_signed_deg[0] == pytest.approx(-20.0, abs=1e-4)
-    assert result.right_gaze_signed_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.left_major_signed_deg[0] == pytest.approx(70.0, abs=1e-4)
+    assert result.right_major_signed_deg[0] == pytest.approx(-70.0, abs=1e-4)
+    assert result.left_gaze_signed_deg[0] == pytest.approx(160.0, abs=1e-4)
+    assert result.right_gaze_signed_deg[0] == pytest.approx(-160.0, abs=1e-4)
     assert result.vergence_gaze_signed_deg[0] == pytest.approx(40.0, abs=1e-4)
     assert result.vergence_gaze_deg[0] == pytest.approx(40.0, abs=1e-4)
-    assert result.left_nasal_gaze_deg[0] == pytest.approx(70.0, abs=1e-4)
-    assert result.right_nasal_gaze_deg[0] == pytest.approx(70.0, abs=1e-4)
-    assert result.mean_eye_vergence_gaze_deg[0] == pytest.approx(70.0, abs=1e-4)
+    assert result.left_nasal_gaze_deg[0] == pytest.approx(-70.0, abs=1e-4)
+    assert result.right_nasal_gaze_deg[0] == pytest.approx(-70.0, abs=1e-4)
+    assert result.mean_eye_vergence_gaze_deg[0] == pytest.approx(-70.0, abs=1e-4)
     assert result.version_gaze_deg[0] == pytest.approx(0.0, abs=1e-4)
 
 
@@ -602,6 +631,11 @@ def test_eye_angle_chunk_computes_gaze_vergence_as_undirected_axis_separation() 
 
     assert result.left_gaze_signed_deg[0] == pytest.approx(70.0, abs=1e-4)
     assert result.right_gaze_signed_deg[0] == pytest.approx(-70.0, abs=1e-4)
+    assert result.left_major_signed_deg[0] == pytest.approx(-20.0, abs=1e-4)
+    assert result.right_major_signed_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.left_eye_angle_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.right_eye_angle_deg[0] == pytest.approx(20.0, abs=1e-4)
+    assert result.vergence_eye_angle_deg[0] == pytest.approx(40.0, abs=1e-4)
     assert result.vergence_gaze_deg[0] == pytest.approx(40.0, abs=1e-4)
     assert result.vergence_gaze_signed_deg[0] == pytest.approx(40.0, abs=1e-4)
     assert result.left_nasal_gaze_deg[0] == pytest.approx(20.0, abs=1e-4)
@@ -639,3 +673,9 @@ def test_eye_angle_base_writer_persists_body_frame_support_group() -> None:
     np.testing.assert_allclose(body_frame["left_axis_xy"][:], [[0.0, -1.0]])
     assert body_frame["valid"][:].tolist() == [True]
     assert decode_reason_bytes(body_frame["failure_reason_bytes"][:]).tolist() == ["ok"]
+    assert "left_gaze_xy" in run["angles"]["roi"]
+    assert "right_gaze_xy" in run["angles"]["roi"]
+    assert "left_eye_angle_deg" in run["angles"]["roi"]
+    assert "right_eye_angle_deg" in run["angles"]["roi"]
+    assert "vergence_eye_angle_deg" in run["angles"]["roi"]
+    assert "major_axis_marginal" in run["qa"]["roi"]
