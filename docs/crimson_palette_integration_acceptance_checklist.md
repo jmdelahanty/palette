@@ -7,6 +7,7 @@ adoption of:
 
 - explicit keypoint heading metadata
 - sparse refined-detect storage
+- current track motion, swim-bout, and subject-shape-derived analysis surfaces
 
 This checklist is intentionally operator-facing. It uses known migrated archives
 and exact commands so the integration can be checked quickly after Crimson
@@ -35,9 +36,11 @@ Read these first if the expected behavior is unclear:
 - `~/gitrepos/contracts/palette-crimson/keypoint_read.md`
 - `~/gitrepos/contracts/palette-crimson/detect_bbox_read.md`
 - `~/gitrepos/contracts/palette-crimson/refined_detect_manual.md`
+- `~/gitrepos/contracts/palette-crimson/track_motion_read.md`
 - `docs/keypoint_heading_computation_contract.md`
 - `docs/refined_detect_sparse_instances_schema.md`
 - `docs/detection_refinement_workflow.md`
+- `docs/crimson_track_motion_read_contract.md`
 
 ## Test Archives
 

@@ -99,6 +99,13 @@ Current rules:
   heading remains the fallback estimator, while shared mask/spline/hybrid body
   frames should materialize under
   `analysis/subject_shape_runs/<run>/body_frame/` when available.
+- Track-level motion should come from
+  `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>`, not from
+  legacy `analysis/movement_runs` or ad hoc subject-shape-origin differencing.
+  Swim-bout event windows live in `analysis/swim_bout_runs`, while physical
+  per-bout measurements live in linked `analysis/bout_kinematics_runs`. The
+  Crimson-facing reader contract is
+  [`crimson_track_motion_read_contract.md`](./crimson_track_motion_read_contract.md).
 - Production assembly/export from `refined_subject_masks_runs` is
   approved-only by default; pending or missing component reviews require an
   explicit draft/QA override.

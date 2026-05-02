@@ -52,6 +52,9 @@ refactor:
 See:
 
 - [`pose_kinematics_run_design.md`](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)
+- [`crimson_track_motion_read_contract.md`](./crimson_track_motion_read_contract.md)
+  for the current Crimson-facing read contract for `track_kinematics_runs`,
+  `swim_bout_runs`, and `bout_kinematics_runs`.
 
 ## 2026-04-26 Review Update
 
