@@ -7,6 +7,8 @@ import zarr
 
 from fisheye.analysis.chaser_state_interpolator import read_columnar_dataset
 from fisheye.analysis.megabouts_classifier import (
+    MEGABOUTS_PREPROCESSED_INPUT_MODE,
+    PALETTE_PREPARED_INPUT_MODE,
     MegaboutsRuntime,
     build_per_bout_classification_table,
     classify_megabouts_input_pack,
@@ -158,6 +160,14 @@ def test_write_megabouts_classification_run_persists_columnar_per_bout_table() -
     assert run.attrs["classifier_family"] == "megabouts"
     assert run.attrs["classifier_version"] == "fake-0"
     assert run.attrs["adapter_method"] == "palette_megabouts_direct_classifier"
+    assert run.attrs["classifier_input_mode"] == PALETTE_PREPARED_INPUT_MODE
+    assert run.attrs["megabouts_preprocessing"] is False
+    assert run.attrs["megabouts_segmentation"] is False
+    assert run.attrs["source_fps"] == 60.0
+    assert run.attrs["window_frames"] == 4
+    assert np.isclose(run.attrs["window_duration_s"], 4.0 / 60.0)
+    assert run.attrs["megabouts_time_sampling"] is True
+    assert run.attrs["parameters"]["classifier_input_mode"] == PALETTE_PREPARED_INPUT_MODE
     assert run.attrs["invalid_window_policy"] == "skip_invalid_windows"
     assert run.attrs["trajectory_conversion"]["alignment"] == "onset_translation_rotation"
     assert run.attrs["tail_angle_conversion"]["convention"] == "megabouts_cumulative_segment_angle"
@@ -171,6 +181,42 @@ def test_write_megabouts_classification_run_persists_columnar_per_bout_table() -
         "slow2",
         "skipped_invalid_window",
     ]
+
+
+def test_write_megabouts_classification_run_preserves_preprocessed_input_mode() -> None:
+    source_root = _build_classifier_root()
+    pack = build_megabouts_classifier_input_pack(
+        source_root,
+        bout_duration_frames=4,
+        min_tail_valid_fraction=0.75,
+        min_traj_valid_fraction=0.9,
+        max_consecutive_invalid_frames=1,
+    )
+    pack = replace(
+        pack,
+        parameters={
+            **pack.parameters,
+            "classifier_input_mode": MEGABOUTS_PREPROCESSED_INPUT_MODE,
+            "megabouts_preprocessing": True,
+            "megabouts_segmentation": False,
+        },
+    )
+    result = classify_megabouts_input_pack(pack, runtime=_fake_runtime())
+    out_root = zarr.group()
+
+    write_megabouts_classification_run(
+        out_root,
+        run_name="megabouts_preprocessed_classifier_test",
+        pack=pack,
+        result=result,
+    )
+
+    run = out_root["analysis/bout_classification_runs/megabouts_preprocessed_classifier_test"]
+    assert run.attrs["classifier_input_mode"] == MEGABOUTS_PREPROCESSED_INPUT_MODE
+    assert run.attrs["megabouts_preprocessing"] is True
+    assert run.attrs["megabouts_segmentation"] is False
+    assert run.attrs["parameters"]["classifier_input_mode"] == MEGABOUTS_PREPROCESSED_INPUT_MODE
+    assert run.attrs["parameters"]["megabouts_preprocessing"] is True
 
 
 def test_classify_megabouts_input_pack_with_no_valid_windows_does_not_require_runtime() -> None:

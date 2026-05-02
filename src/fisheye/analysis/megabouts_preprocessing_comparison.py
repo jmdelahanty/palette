@@ -11,7 +11,7 @@ import argparse
 import json
 import math
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -106,6 +106,35 @@ def _runtime_attrs(runtime: MegaboutsPreprocessingRuntime) -> dict[str, object]:
         "megabouts_package_path": runtime.package_path,
         "megabouts_source_repo": runtime.source_repo,
         "megabouts_git_commit": runtime.git_commit,
+    }
+
+
+def _config_to_provenance(config: object, *, derived_fields: Sequence[str]) -> dict[str, object]:
+    """Return reproducible config values and derived frame parameters."""
+
+    if is_dataclass(config):
+        parameters = {
+            field.name: _json_safe(getattr(config, field.name))
+            for field in fields(config)
+            if not field.name.startswith("_")
+        }
+    else:
+        parameters = {
+            str(key): _json_safe(value)
+            for key, value in vars(config).items()
+            if not str(key).startswith("_")
+        }
+        if hasattr(config, "fps"):
+            parameters.setdefault("fps", _json_safe(getattr(config, "fps")))
+
+    derived = {}
+    for name in derived_fields:
+        if hasattr(config, name):
+            derived[str(name)] = _json_safe(getattr(config, name))
+    return {
+        "class": f"{config.__class__.__module__}.{config.__class__.__name__}",
+        "parameters": parameters,
+        "derived_frame_parameters": derived,
     }
 
 
@@ -290,6 +319,7 @@ def _rebuild_preprocessed_pack(
     traj_valid: np.ndarray,
     traj_reference_valid: np.ndarray,
     runtime: MegaboutsPreprocessingRuntime,
+    preprocessing_config: Optional[dict[str, object]] = None,
 ) -> MegaboutsClassifierInputPack:
     min_tail = float(source_pack.parameters.get("min_tail_valid_fraction", DEFAULT_MIN_TAIL_VALID_FRACTION))
     min_traj = float(source_pack.parameters.get("min_traj_valid_fraction", DEFAULT_MIN_TRAJ_VALID_FRACTION))
@@ -326,6 +356,7 @@ def _rebuild_preprocessed_pack(
         "megabouts_preprocessing": True,
         "megabouts_tail_trace": "TailPreprocessingResult.angle_smooth",
         "megabouts_traj_trace": "TrajPreprocessingResult.x_smooth/y_smooth/yaw_smooth",
+        "megabouts_preprocessing_config": {} if preprocessing_config is None else preprocessing_config,
         "calls_megabouts": True,
         "calls_megabouts_preprocessing": True,
         "calls_megabouts_classifier": False,
@@ -458,6 +489,25 @@ def build_megabouts_preprocessed_input_pack(
         traj_valid=traj_valid,
         traj_reference_valid=traj_reference_valid,
         runtime=resolved_runtime,
+        preprocessing_config={
+            "tail": _config_to_provenance(
+                tail_cfg,
+                derived_fields=(
+                    "limit_na",
+                    "savgol_window",
+                    "tail_speed_filter",
+                    "tail_speed_boxcar_filter",
+                ),
+            ),
+            "trajectory": _config_to_provenance(
+                traj_cfg,
+                derived_fields=(
+                    "limit_na",
+                    "robust_diff",
+                    "lag_kinematic_activity",
+                ),
+            ),
+        },
     )
 
 

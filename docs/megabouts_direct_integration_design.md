@@ -100,7 +100,60 @@ Practical policy:
 
 ### Current Direction
 
-The first implementation target is classifier-only integration:
+Palette should keep the source-of-truth and classifier-inference concerns
+separate. There are now two explicit classifier-input modes:
+
+```text
+classifier_input_mode = "palette_prepared_fixed_windows"
+  Role: strict Palette audit/QC baseline.
+  Input: persisted Palette tail-posture view and track arrays sampled directly
+         into fixed windows.
+  Validity: rejects windows according to Palette source validity and coverage.
+  Use when: checking conventions, preserving strict provenance, debugging the
+            bridge, or comparing against model-matched inference.
+
+classifier_input_mode = "megabouts_preprocessed_full_timeseries"
+  Role: model-matched inference mode for the Megabouts classifier.
+  Input: Palette-derived posture/track time series passed through Megabouts
+         TailPreprocessing and TrajPreprocessing before window sampling.
+  Validity: may rescue/interpolate through some Palette-invalid frames, but
+            must keep original Palette invalidity masks and coverage metadata.
+  Use when: the goal is to apply the Megabouts-trained classifier in the input
+            distribution it was trained on.
+```
+
+The persisted classifier writer supports both explicit modes through
+`--classifier-input-mode`. The strict Palette-prepared mode is:
+
+```bash
+scripts/py -m fisheye.analysis.megabouts_classifier <analysis.zarr> \
+  --classifier-input-mode palette_prepared_fixed_windows \
+  --tail-posture-view-run latest \
+  --track-kinematics-run latest \
+  --track-scope offline \
+  --track-id 0 \
+  --swim-bout-run latest \
+  --speed-level default \
+  --megabouts-repo ~/gitrepos/megabouts \
+  --run-name <run>
+```
+
+The model-matched Megabouts-preprocessed mode is:
+
+```bash
+scripts/py -m fisheye.analysis.megabouts_classifier <analysis.zarr> \
+  --classifier-input-mode megabouts_preprocessed_full_timeseries \
+  --tail-posture-view-run latest \
+  --track-kinematics-run latest \
+  --track-scope offline \
+  --track-id 0 \
+  --swim-bout-run latest \
+  --speed-level default \
+  --megabouts-repo ~/gitrepos/megabouts \
+  --run-name <run>
+```
+
+The strict Palette-prepared mode:
 
 - Palette remains the source of truth for refined masks, subject shape, tail
   geometry, track kinematics, and swim-bout windows.
@@ -115,9 +168,39 @@ The first implementation target is classifier-only integration:
 - Results land in a separate `analysis/bout_classification_runs` family with
   exact source refs and adapter provenance.
 
-This direction does not block later Megabouts segmentation/preprocessing
-comparisons. It only keeps those modes diagnostic until their conventions and
-effects have been reviewed against Palette outputs.
+The Megabouts-preprocessed mode writes `megabouts_preprocessing=true` because
+the classifier input tensors consumed Megabouts preprocessing outputs. This
+mode better matches the Megabouts classifier's training distribution.
+Palette-strict classification remains valuable, but it should be interpreted as
+an audit baseline rather than the model-matched biological label source.
+
+When `megabouts_preprocessing=true`, the run parameters must also include
+`megabouts_preprocessing_config` with both constructor parameters and derived
+frame-count parameters for:
+
+```text
+tail:
+  TailPreprocessingConfig
+  limit_na
+  savgol_window
+  tail_speed_filter
+  tail_speed_boxcar_filter
+
+trajectory:
+  TrajPreprocessingConfig
+  limit_na
+  robust_diff
+  lag_kinematic_activity
+```
+
+This matters because Megabouts accepts many settings in milliseconds but uses
+FPS-dependent integer frame counts internally. Persisting both levels makes the
+run reproducible without requiring a future reader to infer conversion details
+from a particular Megabouts source revision.
+
+This direction does not block later Megabouts segmentation comparisons. It only
+keeps Megabouts-generated onsets/offsets separate until their conventions and
+effects have been reviewed against Palette swim-bout candidates.
 
 ## Megabouts Source-Code Contracts
 
@@ -797,12 +880,13 @@ baseline correction, smoothing, and interpolation choices. A discrepancy is a
 diagnostic signal, not automatically evidence that Palette should replace its
 canonical inputs.
 
-Policy decision: Palette's default classifier adapter remains strict and uses
-Palette-prepared fixed windows. Megabouts preprocessing may be exposed as an
-explicit optional mode with provenance, for example
-`classifier_input_mode="megabouts_preprocessed_full_timeseries"`, but it should
-not become the default until rescued windows have been reviewed and the effect
-on classifier labels is quantified.
+Policy decision: Palette-strict inputs remain the default audit/QC baseline.
+For Megabouts classifier inference, the preferred future mode should be
+Megabouts-preprocessed full time series because that better matches the
+classifier's training distribution. That mode must be explicit in provenance
+with `classifier_input_mode="megabouts_preprocessed_full_timeseries"` and must
+distinguish strict Palette-valid windows from windows rescued by Megabouts
+interpolation.
 
 If persisted, preprocessing comparison outputs should remain separate from
 classifier-label runs, for example:

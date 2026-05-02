@@ -46,6 +46,8 @@ CLASSIFIER_FAMILY = "megabouts"
 CLASSIFIER_NAME = "megabouts_transformer"
 SOURCE_MODE = "palette_bouts"
 INVALID_WINDOW_POLICY = "skip_invalid_windows"
+PALETTE_PREPARED_INPUT_MODE = "palette_prepared_fixed_windows"
+MEGABOUTS_PREPROCESSED_INPUT_MODE = "megabouts_preprocessed_full_timeseries"
 CATEGORY_LABEL_BYTES_WIDTH = 64
 FAILURE_REASON_BYTES_WIDTH = 128
 
@@ -414,12 +416,25 @@ def write_megabouts_classification_run(
     runtime_attrs = _runtime_attrs(result.runtime)
     table = build_per_bout_classification_table(pack, result)
     source_refs = dict(pack.source_refs)
+    classifier_input_mode = str(pack.parameters.get("classifier_input_mode") or PALETTE_PREPARED_INPUT_MODE)
+    megabouts_preprocessing = bool(pack.parameters.get("megabouts_preprocessing", False))
+    megabouts_segmentation = bool(pack.parameters.get("megabouts_segmentation", False))
+    source_fps = float(pack.parameters.get("fps", math.nan))
+    window_frames = int(pack.tail_array.shape[2])
+    window_duration_s = float(pack.parameters.get("bout_duration_s", math.nan))
     parameters = {
         **dict(pack.parameters),
         "adapter_method": ADAPTER_METHOD,
         "adapter_method_version": ADAPTER_METHOD_VERSION,
         "classifier_family": CLASSIFIER_FAMILY,
         "classifier_name": CLASSIFIER_NAME,
+        "classifier_input_mode": classifier_input_mode,
+        "megabouts_preprocessing": megabouts_preprocessing,
+        "megabouts_segmentation": megabouts_segmentation,
+        "source_fps": source_fps,
+        "window_duration_s": window_duration_s,
+        "window_frames": window_frames,
+        "megabouts_time_sampling": True,
         "source_mode": SOURCE_MODE,
         "invalid_window_policy": INVALID_WINDOW_POLICY,
         "exclude_capture_swims": bool(exclude_cs),
@@ -461,6 +476,13 @@ def write_megabouts_classification_run(
         "adapter_method_version": ADAPTER_METHOD_VERSION,
         "classifier_family": CLASSIFIER_FAMILY,
         "classifier_name": CLASSIFIER_NAME,
+        "classifier_input_mode": classifier_input_mode,
+        "megabouts_preprocessing": megabouts_preprocessing,
+        "megabouts_segmentation": megabouts_segmentation,
+        "source_fps": source_fps,
+        "window_duration_s": window_duration_s,
+        "window_frames": window_frames,
+        "megabouts_time_sampling": True,
         "source_mode": SOURCE_MODE,
         "row_axis": "swim_bout_rows",
         "invalid_window_policy": INVALID_WINDOW_POLICY,
@@ -542,33 +564,73 @@ def run_megabouts_classifier(
     exclude_cs: bool = False,
     device: str = "auto",
     megabouts_repo: Optional[str | Path] = None,
+    classifier_input_mode: str = PALETTE_PREPARED_INPUT_MODE,
     dry_run: bool = False,
     command: Optional[str] = None,
 ) -> dict[str, object]:
     """Run or dry-run the optional Megabouts classifier adapter."""
 
     root = open_zarr_root(zarr_path, mode="r" if dry_run else "a")
-    pack = build_megabouts_classifier_input_pack(
-        root,
-        tail_posture_view_run=tail_posture_view_run,
-        track_kinematics_run=track_kinematics_run,
-        track_scope=track_scope,
-        track_id=track_id,
-        swim_bout_run=swim_bout_run,
-        speed_level=speed_level,
-        heading_source=heading_source,
-        bout_duration_s=bout_duration_s,
-        bout_duration_frames=bout_duration_frames,
-        min_tail_valid_fraction=min_tail_valid_fraction,
-        min_traj_valid_fraction=min_traj_valid_fraction,
-        max_consecutive_invalid_frames=max_consecutive_invalid_frames,
-        align_traj_to_onset=align_traj_to_onset,
-        traj_reference_index=traj_reference_index,
-    )
+    mode = str(classifier_input_mode or PALETTE_PREPARED_INPUT_MODE)
+    pack_kwargs = {
+        "tail_posture_view_run": tail_posture_view_run,
+        "track_kinematics_run": track_kinematics_run,
+        "track_scope": track_scope,
+        "track_id": track_id,
+        "swim_bout_run": swim_bout_run,
+        "speed_level": speed_level,
+        "heading_source": heading_source,
+        "bout_duration_s": bout_duration_s,
+        "bout_duration_frames": bout_duration_frames,
+        "min_tail_valid_fraction": min_tail_valid_fraction,
+        "min_traj_valid_fraction": min_traj_valid_fraction,
+        "max_consecutive_invalid_frames": max_consecutive_invalid_frames,
+        "align_traj_to_onset": align_traj_to_onset,
+        "traj_reference_index": traj_reference_index,
+    }
+    if mode == PALETTE_PREPARED_INPUT_MODE:
+        pack = build_megabouts_classifier_input_pack(root, **pack_kwargs)
+    elif mode == MEGABOUTS_PREPROCESSED_INPUT_MODE:
+        from fisheye.analysis.megabouts_preprocessing_comparison import (
+            build_megabouts_preprocessed_input_pack,
+        )
+
+        pack = build_megabouts_preprocessed_input_pack(
+            root,
+            megabouts_repo=megabouts_repo,
+            **pack_kwargs,
+        )
+    else:
+        raise ValueError(
+            "Unsupported classifier_input_mode "
+            f"{classifier_input_mode!r}; expected {PALETTE_PREPARED_INPUT_MODE!r} "
+            f"or {MEGABOUTS_PREPROCESSED_INPUT_MODE!r}."
+        )
     if dry_run:
         summary = summarize_input_pack(pack)
+        summary_parameters = dict(summary.get("parameters", {}))
+        summary_parameters.update(
+            {
+                "adapter_method": ADAPTER_METHOD,
+                "adapter_method_version": ADAPTER_METHOD_VERSION,
+                "classifier_family": CLASSIFIER_FAMILY,
+                "classifier_name": CLASSIFIER_NAME,
+                "classifier_input_mode": mode,
+                "megabouts_preprocessing": bool(pack.parameters.get("megabouts_preprocessing", False)),
+                "megabouts_segmentation": bool(pack.parameters.get("megabouts_segmentation", False)),
+                "source_fps": float(pack.parameters.get("fps", math.nan)),
+                "window_duration_s": float(pack.parameters.get("bout_duration_s", math.nan)),
+                "window_frames": int(pack.tail_array.shape[2]),
+                "megabouts_time_sampling": True,
+                "calls_megabouts_classifier": False,
+            }
+        )
+        summary["parameters"] = summary_parameters
         summary["would_write_run_family"] = "analysis/bout_classification_runs"
         summary["adapter_method"] = ADAPTER_METHOD
+        summary["classifier_input_mode"] = mode
+        summary["calls_megabouts_preprocessing"] = bool(pack.parameters.get("megabouts_preprocessing", False))
+        summary["calls_megabouts_classifier"] = False
         return summary
 
     result = classify_megabouts_input_pack(
@@ -594,6 +656,7 @@ def run_megabouts_classifier(
         "schema_id": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
         "adapter_method": ADAPTER_METHOD,
+        "classifier_input_mode": mode,
         "source_bout_count": n_bouts,
         "valid_source_window_count": int(np.count_nonzero(pack.valid_bout)),
         "invalid_source_window_count": int(n_bouts - np.count_nonzero(pack.valid_bout)),
@@ -650,7 +713,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional local Megabouts checkout to add to sys.path without installing it. Also supports MEGABOUTS_REPO.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Build inputs and report eligibility without importing Megabouts or writing.")
+    parser.add_argument(
+        "--classifier-input-mode",
+        default=PALETTE_PREPARED_INPUT_MODE,
+        choices=[PALETTE_PREPARED_INPUT_MODE, MEGABOUTS_PREPROCESSED_INPUT_MODE],
+        help=(
+            "Input pack mode. The Megabouts-preprocessed mode runs Megabouts "
+            "preprocessing before classification and records megabouts_preprocessing=true."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Build inputs and report eligibility without writing. In palette-prepared mode this "
+            "does not import Megabouts; in Megabouts-preprocessed mode it imports preprocessing."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Emit compact JSON.")
     return parser
 
@@ -680,6 +759,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         exclude_cs=bool(args.exclude_CS),
         device=str(args.device),
         megabouts_repo=args.megabouts_repo,
+        classifier_input_mode=str(args.classifier_input_mode),
         dry_run=bool(args.dry_run),
         command=command,
     )

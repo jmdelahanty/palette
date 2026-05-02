@@ -101,6 +101,8 @@ def test_build_megabouts_preprocessed_input_pack_uses_same_windows() -> None:
     assert preprocessed.valid_bout.tolist() == source_pack.valid_bout.tolist()
     assert preprocessed.parameters["classifier_input_mode"] == "megabouts_preprocessed_full_timeseries"
     assert preprocessed.parameters["calls_megabouts_preprocessing"] is True
+    assert preprocessed.parameters["megabouts_preprocessing_config"]["tail"]["parameters"]["fps"] == 10
+    assert preprocessed.parameters["megabouts_preprocessing_config"]["trajectory"]["parameters"]["fps"] == 10
     np.testing.assert_allclose(
         preprocessed.tail_array[0, :, 0],
         source_pack.tail_array[0, :, 0] + 0.5,

@@ -80,14 +80,45 @@ provenance                        Palette stage provenance payload
 Recommended Megabouts direct-classifier parameter/provenance fields:
 
 ```text
-classifier_input_mode             "palette_prepared_fixed_windows"
-megabouts_preprocessing           false unless Megabouts preprocessing outputs were consumed
+classifier_input_mode             "palette_prepared_fixed_windows" | "megabouts_preprocessed_full_timeseries"
+megabouts_preprocessing           true when Megabouts preprocessing outputs were consumed
 megabouts_segmentation            false unless Megabouts segmentation outputs were consumed
 source_fps                        resolved source FPS
 window_duration_s                 classifier window duration in seconds
 window_frames                     classifier window duration in source frames
 megabouts_time_sampling           true when Megabouts receives FPS-aware time samples
+megabouts_preprocessing_config    required when megabouts_preprocessing=true
 ```
+
+Mode semantics:
+
+- `palette_prepared_fixed_windows`: strict Palette audit/QC baseline. The
+  adapter samples persisted Palette posture/track arrays directly and rejects
+  windows using Palette source validity and coverage thresholds.
+- `megabouts_preprocessed_full_timeseries`: model-matched Megabouts classifier
+  inference. Palette-derived posture/track time series are first passed through
+  Megabouts preprocessing, then sampled over the same Palette swim-bout
+  windows. This can rescue windows through interpolation, so rescued rows must
+  remain distinguishable from strict Palette-valid rows.
+
+For `megabouts_preprocessed_full_timeseries`, `megabouts_preprocessing_config`
+must include both Megabouts preprocessing config families:
+
+```text
+tail:
+  class
+  parameters
+  derived_frame_parameters
+
+trajectory:
+  class
+  parameters
+  derived_frame_parameters
+```
+
+The derived frame parameters are required because Megabouts stores many
+operator-facing values in milliseconds while executing FPS-dependent integer
+frame windows.
 
 Megabouts-specific provenance attrs may also be present:
 
@@ -205,6 +236,29 @@ scripts/py -m fisheye.analysis.megabouts_classifier <analysis.zarr> \
   --run-name <run>
 ```
 
+The implemented default is the strict audit/QC baseline:
+
+```text
+--classifier-input-mode palette_prepared_fixed_windows
+```
+
+Future model-matched Megabouts classifier runs should use:
+
+```bash
+scripts/py -m fisheye.analysis.megabouts_classifier <analysis.zarr> \
+  --classifier-input-mode megabouts_preprocessed_full_timeseries \
+  --tail-posture-view-run latest \
+  --track-kinematics-run latest \
+  --track-scope offline \
+  --track-id 0 \
+  --swim-bout-run latest \
+  --speed-level default \
+  --megabouts-repo ~/gitrepos/megabouts \
+  --run-name <run>
+```
+
+That mode must write `megabouts_preprocessing=true`.
+
 For the feeding canary, the trusted comparison candidate is:
 
 ```text
@@ -234,10 +288,11 @@ scripts/py -m fisheye.analysis.megabouts_preprocessing_comparison <analysis.zarr
 This diagnostic reports input similarity for the same source swim-bout windows.
 It only becomes a classifier-output comparison when `--classify` is provided.
 
-Current policy: the default Megabouts adapter should remain
+Current policy: the implemented persisted writer produces
 `classifier_input_mode="palette_prepared_fixed_windows"` and
-`megabouts_preprocessing=false`. A future Megabouts-preprocessed adapter mode is
-allowed, but it must be opt-in and must record
+`megabouts_preprocessing=false`, which should be treated as the strict audit/QC
+baseline. A future persisted Megabouts-preprocessed mode should be the
+model-matched inference path for the Megabouts classifier, but it must record
 `classifier_input_mode="megabouts_preprocessed_full_timeseries"` plus source
 invalidity/coverage metadata. Megabouts preprocessing can rescue windows through
 interpolation, so those rescued classifier rows must not be conflated with
