@@ -21,7 +21,18 @@ Related files:
 - `tests/unit/fisheye/test_analysis_stage_arrays.py` — 10 tests
 - `src/fisheye/docs/zarr_structure.md` — updated with `stimulus_response_runs/` layout
 
-Usage:
+Canonical moving-grating downstream runner:
+
+```bash
+scripts/run_moving_grating_downstream_pipeline.sh --apply
+```
+
+The runner chains `track_kinematics`, optional `detect_bouts_multi_level`, and
+`stimulus_response` for the current moving-grating canary. It defaults to a dry
+run unless `--apply` is provided, and exposes the source Zarr, stimulus run,
+keypoint run, and output run names as flags.
+
+Direct stimulus-response usage:
 
 ```bash
 scripts/py -m fisheye.analysis.stimulus_response <zarr_path> \
