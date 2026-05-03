@@ -23,6 +23,7 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    import base64
     import json
     import marimo as mo
     import numpy as np
@@ -30,7 +31,13 @@ def _():
     import plotly.express as px
     import plotly.graph_objects as go
     import time
+    import zarr
 
+    from fisheye.analysis.plot_stimulus_response_omr import (
+        OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME,
+        OMR_SUMMARY_PNG_ARTIFACT_NAME,
+        load_omr_step_summaries,
+    )
     from fisheye.visualization.interactive_track_kinematics import (
         DEFAULT_INTERACTIVE_ARTIFACT,
         bout_classification_records_to_dataframe,
@@ -92,6 +99,15 @@ def _():
         )
         return "bar_trace"
 
+    def png_bytes_to_markdown_image(png_bytes, *, alt_text):
+        if not png_bytes:
+            return mo.md(f"*No PNG bytes available for `{alt_text}`.*")
+        encoded = base64.b64encode(bytes(png_bytes)).decode("ascii")
+        return mo.md(
+            f'<img alt="{alt_text}" src="data:image/png;base64,{encoded}" '
+            'style="max-width:100%; height:auto; border: 1px solid #ddd;" />'
+        )
+
     def apply_full_width_timeseries_layout(
         fig,
         *,
@@ -124,6 +140,8 @@ def _():
 
     return (
         DEFAULT_INTERACTIVE_ARTIFACT,
+        OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME,
+        OMR_SUMMARY_PNG_ARTIFACT_NAME,
         add_interval_bar_overlay,
         apply_full_width_timeseries_layout,
         bout_classification_records_to_dataframe,
@@ -135,6 +153,7 @@ def _():
         discover_track_kinematics_run_options,
         go,
         json,
+        load_omr_step_summaries,
         load_bout_classification_records,
         load_eye_angle_timeseries_data,
         load_bout_kinematics_records,
@@ -142,6 +161,7 @@ def _():
         mo,
         np,
         pd,
+        png_bytes_to_markdown_image,
         px,
         time,
         to_inter_bout_interval_dataframe,
@@ -149,6 +169,7 @@ def _():
         to_swim_bout_dataframe,
         to_timeseries_dataframe,
         to_validity_span_dataframe,
+        zarr,
     )
 
 
@@ -264,8 +285,6 @@ def _(
 
 @app.cell
 def _(initial_run_path, mo, track_options):
-    preferred_default_run_name = "tk_hyst4_low2_s005"
-
     def _matches_initial_run(option):
         if initial_run_path is None:
             return False
@@ -279,7 +298,7 @@ def _(initial_run_path, mo, track_options):
             (
                 option.label
                 for option in track_options
-                if option.run_name == preferred_default_run_name
+                if option.is_latest
             ),
             track_options[0].label,
         ),
@@ -1117,6 +1136,466 @@ def _(
         ]
     )
     return selected_analysis_tree, selected_summary_df
+
+
+@app.cell
+def _(mo, time, write_perf_event, zarr, zarr_path):
+    _stimulus_response_discovery_t0 = time.perf_counter()
+    _stimulus_response_options = []
+    try:
+        _root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        _parent = _root["analysis/stimulus_response_runs"]
+        _latest = str(_parent.attrs.get("latest", ""))
+        for _run_name in sorted(str(_name) for _name in _parent.group_keys()):
+            _run_group = _parent[_run_name]
+            _omr_step_count = 0
+            if "steps" in _run_group:
+                for _step_key in _run_group["steps"].group_keys():
+                    _step_group = _run_group["steps"][_step_key]
+                    if "grating" in _step_group and "omr" in _step_group["grating"]:
+                        _omr_step_count += 1
+            if _omr_step_count == 0:
+                continue
+            _provenance = _run_group.attrs.get("provenance", {})
+            _parameters = _provenance.get("parameters", {}) if isinstance(_provenance, dict) else {}
+            _offset = _parameters.get("camera_to_projector_offset_deg")
+            _source_track = str(_run_group.attrs.get("source_track_kinematics_run", "unknown"))
+            _source_bouts = str(_run_group.attrs.get("source_bout_run", "none"))
+            _label_parts = [
+                _run_name,
+                f"{_omr_step_count} OMR steps",
+                f"offset {_offset} deg" if _offset is not None else "offset unknown",
+                f"track {_source_track}",
+            ]
+            if _run_name == _latest:
+                _label_parts.append("latest")
+            _stimulus_response_options.append(
+                {
+                    "run_name": _run_name,
+                    "run_path": f"analysis/stimulus_response_runs/{_run_name}",
+                    "label": " | ".join(_label_parts),
+                    "is_latest": _run_name == _latest,
+                    "source_track_kinematics_run": _source_track,
+                    "source_bout_run": _source_bouts,
+                    "camera_to_projector_offset_deg": _offset,
+                    "n_omr_steps": _omr_step_count,
+                }
+            )
+    except Exception:
+        _stimulus_response_options = []
+    write_perf_event(
+        "discover_stimulus_response_options",
+        time.perf_counter() - _stimulus_response_discovery_t0,
+        zarr_path=zarr_path,
+        n_stimulus_response_options=len(_stimulus_response_options),
+    )
+
+    _none_label = "No stimulus-response / OMR run"
+    stimulus_response_label_to_option = {_none_label: None}
+    stimulus_response_label_to_option.update(
+        {_option["label"]: _option for _option in _stimulus_response_options}
+    )
+    _default_label = next(
+        (
+            _option["label"]
+            for _option in _stimulus_response_options
+            if _option["is_latest"]
+        ),
+        _stimulus_response_options[0]["label"] if _stimulus_response_options else _none_label,
+    )
+    stimulus_response_picker = mo.ui.dropdown(
+        options=list(stimulus_response_label_to_option),
+        value=_default_label,
+        label="Stimulus-response / OMR run",
+    )
+    mo.vstack(
+        [
+            mo.md("### Stimulus Response / OMR Selection"),
+            stimulus_response_picker,
+        ]
+    )
+    return stimulus_response_label_to_option, stimulus_response_picker
+
+
+@app.cell
+def _(
+    OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME,
+    OMR_SUMMARY_PNG_ARTIFACT_NAME,
+    load_omr_step_summaries,
+    np,
+    pd,
+    stimulus_response_label_to_option,
+    stimulus_response_picker,
+    time,
+    write_perf_event,
+    zarr,
+    zarr_path,
+):
+    selected_stimulus_response = stimulus_response_label_to_option[stimulus_response_picker.value]
+    _load_omr_t0 = time.perf_counter()
+
+    def _first_value(_mapping, _name):
+        _values = _mapping.get(_name)
+        if _values is None:
+            return np.nan
+        _array = np.asarray(_values)
+        if _array.size == 0:
+            return np.nan
+        return _array.ravel()[0].item() if hasattr(_array.ravel()[0], "item") else _array.ravel()[0]
+
+    def _read_png_artifact(_run_group, _artifact_name):
+        if "visualizations" not in _run_group:
+            return b""
+        _visualizations = _run_group["visualizations"]
+        if _artifact_name not in _visualizations:
+            return b""
+        _artifact = _visualizations[_artifact_name]
+        if not hasattr(_artifact, "shape"):
+            return b""
+        return np.asarray(_artifact[:], dtype=np.uint8).tobytes()
+
+    if selected_stimulus_response is None:
+        stimulus_response_attrs = {}
+        omr_step_df = pd.DataFrame()
+        omr_bout_df = pd.DataFrame()
+        omr_window_df = pd.DataFrame()
+        omr_early_window_df = pd.DataFrame()
+        omr_summary_png_bytes = b""
+        omr_trajectory_png_bytes = b""
+    else:
+        _root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        _run_group = _root[selected_stimulus_response["run_path"]]
+        stimulus_response_attrs = dict(_run_group.attrs)
+        _steps = load_omr_step_summaries(_run_group)
+        _step_rows = []
+        _bout_frames = []
+        _window_frames = []
+        _early_window_frames = []
+        for _step in _steps:
+            _step_rows.append(
+                {
+                    "step_index": _step.step_index,
+                    "step_name": _step.step_name,
+                    "start_frame": _step.start_frame,
+                    "end_frame": _step.end_frame,
+                    "duration_s": _step.duration_s,
+                    "stimulus_direction_deg": _step.stimulus_direction_deg,
+                    "omr_path_index": _first_value(_step.per_fish, "omr_path_index"),
+                    "omr_net_direction_index": _first_value(_step.per_fish, "omr_net_direction_index"),
+                    "bout_fraction_correct_classified": _first_value(
+                        _step.per_fish, "bout_fraction_correct_classified"
+                    ),
+                    "bout_choice_index": _first_value(_step.per_fish, "bout_choice_index"),
+                    "bout_path_index": _first_value(_step.per_fish, "bout_path_index"),
+                    "bout_fraction_correct_weighted_by_path": _first_value(
+                        _step.per_fish, "bout_fraction_correct_weighted_by_path"
+                    ),
+                    "bout_fraction_correct_weighted_by_displacement": _first_value(
+                        _step.per_fish, "bout_fraction_correct_weighted_by_displacement"
+                    ),
+                    "time_choice_index": _first_value(_step.per_fish, "time_choice_index"),
+                    "start_position_axis_norm": _first_value(_step.per_fish, "start_position_axis_norm"),
+                    "mean_position_axis_norm": _first_value(_step.per_fish, "mean_position_axis_norm"),
+                    "end_position_axis_norm": _first_value(_step.per_fish, "end_position_axis_norm"),
+                    "fraction_time_correct_side": _first_value(_step.per_fish, "fraction_time_correct_side"),
+                    "first_aligned_bout_latency_s": _first_value(
+                        _step.per_fish, "first_aligned_bout_latency_s"
+                    ),
+                    "first_opposing_bout_latency_s": _first_value(
+                        _step.per_fish, "first_opposing_bout_latency_s"
+                    ),
+                    "bout_count_correct": _first_value(_step.per_fish, "bout_count_correct"),
+                    "bout_count_opposing": _first_value(_step.per_fish, "bout_count_opposing"),
+                    "bout_count_ambiguous": _first_value(_step.per_fish, "bout_count_ambiguous"),
+                    "bout_count_total": _first_value(_step.per_fish, "bout_count_total"),
+                }
+            )
+            if _step.per_bout:
+                _bout_df = pd.DataFrame({str(_key): np.asarray(_value) for _key, _value in _step.per_bout.items()})
+                _bout_df.insert(0, "step_index", _step.step_index)
+                _bout_df.insert(1, "step_name", _step.step_name)
+                _bout_frames.append(_bout_df)
+            if _step.windows:
+                _window_df = pd.DataFrame({str(_key): np.asarray(_value) for _key, _value in _step.windows.items()})
+                _window_df.insert(0, "step_index", _step.step_index)
+                _window_df.insert(1, "step_name", _step.step_name)
+                _window_frames.append(_window_df)
+            if _step.early_windows:
+                _early_window_df = pd.DataFrame(
+                    {str(_key): np.asarray(_value) for _key, _value in _step.early_windows.items()}
+                )
+                _early_window_df.insert(0, "step_index", _step.step_index)
+                _early_window_df.insert(1, "step_name", _step.step_name)
+                _early_window_frames.append(_early_window_df)
+        omr_step_df = pd.DataFrame(_step_rows)
+        omr_bout_df = pd.concat(_bout_frames, ignore_index=True) if _bout_frames else pd.DataFrame()
+        omr_window_df = pd.concat(_window_frames, ignore_index=True) if _window_frames else pd.DataFrame()
+        omr_early_window_df = (
+            pd.concat(_early_window_frames, ignore_index=True)
+            if _early_window_frames else pd.DataFrame()
+        )
+        omr_summary_png_bytes = _read_png_artifact(_run_group, OMR_SUMMARY_PNG_ARTIFACT_NAME)
+        omr_trajectory_png_bytes = _read_png_artifact(_run_group, OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME)
+
+    write_perf_event(
+        "load_stimulus_response_omr",
+        time.perf_counter() - _load_omr_t0,
+        selected_stimulus_response_run=(
+            selected_stimulus_response["run_name"] if selected_stimulus_response is not None else None
+        ),
+        n_omr_steps=len(omr_step_df),
+        n_omr_bout_rows=len(omr_bout_df),
+        n_omr_window_rows=len(omr_window_df),
+        n_omr_early_window_rows=len(omr_early_window_df),
+        has_summary_png=bool(omr_summary_png_bytes),
+        has_trajectory_png=bool(omr_trajectory_png_bytes),
+    )
+    return (
+        omr_bout_df,
+        omr_early_window_df,
+        omr_step_df,
+        omr_summary_png_bytes,
+        omr_trajectory_png_bytes,
+        omr_window_df,
+        selected_stimulus_response,
+        stimulus_response_attrs,
+    )
+
+
+@app.cell
+def _(
+    go,
+    mo,
+    omr_bout_df,
+    omr_early_window_df,
+    omr_step_df,
+    omr_summary_png_bytes,
+    omr_trajectory_png_bytes,
+    omr_window_df,
+    pd,
+    png_bytes_to_markdown_image,
+    selected_stimulus_response,
+    stimulus_response_attrs,
+    time,
+    write_perf_event,
+):
+    _omr_view_t0 = time.perf_counter()
+    if selected_stimulus_response is None:
+        stimulus_response_omr_view = mo.md("No stimulus-response / OMR run selected.")
+    elif not len(omr_step_df):
+        stimulus_response_omr_view = mo.md("Selected stimulus-response run has no OMR step metrics.")
+    else:
+        _direction_fig = go.Figure()
+        _x = omr_step_df["step_index"].astype(str)
+        for _metric_name, _color in (
+            ("omr_path_index", "#2a9d8f"),
+            ("bout_path_index", "#43aa8b"),
+            ("bout_choice_index", "#e76f51"),
+            ("time_choice_index", "#457b9d"),
+        ):
+            if _metric_name not in omr_step_df:
+                continue
+            _direction_fig.add_trace(
+                go.Bar(
+                    x=_x,
+                    y=omr_step_df[_metric_name],
+                    name=_metric_name,
+                    marker_color=_color,
+                    customdata=omr_step_df[
+                        [
+                            "stimulus_direction_deg",
+                            "bout_count_correct",
+                            "bout_count_opposing",
+                            "bout_count_total",
+                        ]
+                    ],
+                    hovertemplate=(
+                        "step %{x}<br>"
+                        f"{_metric_name}: %{{y:.3f}}<br>"
+                        "direction: %{customdata[0]:.1f} deg<br>"
+                        "correct/opposing/total: %{customdata[1]} / %{customdata[2]} / %{customdata[3]}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+        _direction_fig.add_hline(y=0.0, line_width=1, line_color="rgba(0,0,0,0.45)")
+        _direction_fig.update_layout(
+            title="OMR Direction Metrics by Grating Step",
+            xaxis_title="Step index",
+            yaxis_title="Signed OMR metric",
+            yaxis=dict(range=[-1.05, 1.05]),
+            barmode="group",
+            height=420,
+            margin=dict(l=52, r=20, t=58, b=80),
+            legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0.0),
+        )
+
+        _position_fig = go.Figure()
+        for _metric_name, _mode in (
+            ("start_position_axis_norm", "markers+lines"),
+            ("mean_position_axis_norm", "markers+lines"),
+            ("end_position_axis_norm", "markers+lines"),
+            ("fraction_time_correct_side", "markers+lines"),
+        ):
+            if _metric_name not in omr_step_df:
+                continue
+            _position_fig.add_trace(
+                go.Scatter(
+                    x=_x,
+                    y=omr_step_df[_metric_name],
+                    mode=_mode,
+                    name=_metric_name,
+                )
+            )
+        _position_fig.add_hline(y=0.0, line_width=1, line_color="rgba(0,0,0,0.45)")
+        _position_fig.update_layout(
+            title="Arena-Axis Position and Correct-Side Occupancy",
+            xaxis_title="Step index",
+            yaxis_title="Normalized axis / fraction",
+            height=380,
+            margin=dict(l=52, r=20, t=58, b=80),
+            legend=dict(orientation="h", yanchor="top", y=-0.24, xanchor="left", x=0.0),
+        )
+
+        _table_columns = [
+            _column
+            for _column in (
+                "step_index",
+                "step_name",
+                "stimulus_direction_deg",
+                "omr_path_index",
+                "bout_path_index",
+                "bout_choice_index",
+                "time_choice_index",
+                "bout_fraction_correct_weighted_by_path",
+                "bout_fraction_correct_weighted_by_displacement",
+                "bout_fraction_correct_classified",
+                "bout_count_correct",
+                "bout_count_opposing",
+                "bout_count_ambiguous",
+                "bout_count_total",
+                "start_position_axis_norm",
+                "mean_position_axis_norm",
+                "end_position_axis_norm",
+                "fraction_time_correct_side",
+                "first_aligned_bout_latency_s",
+                "first_opposing_bout_latency_s",
+            )
+            if _column in omr_step_df
+        ]
+        _bout_columns = [
+            _column
+            for _column in (
+                "step_index",
+                "fish_id",
+                "bout_id",
+                "start_frame",
+                "end_frame",
+                "per_bout_omr_score",
+                "correct_label",
+                "bout_path_length_mm",
+                "bout_displacement_mm",
+                "parallel_displacement_mm",
+            )
+            if _column in omr_bout_df
+        ]
+        _early_window_columns = [
+            _column
+            for _column in (
+                "step_index",
+                "fish_id",
+                "window_length_s",
+                "actual_window_length_s",
+                "omr_path_index",
+                "bout_path_index",
+                "bout_fraction_correct_weighted_by_path",
+                "time_choice_index",
+                "parallel_displacement_mm",
+                "path_length_mm",
+                "n_aligned_bouts",
+                "n_opposing_bouts",
+                "n_ambiguous_bouts",
+                "coverage_fraction",
+            )
+            if _column in omr_early_window_df
+        ]
+        _provenance = stimulus_response_attrs.get("provenance", {})
+        _parameters = _provenance.get("parameters", {}) if isinstance(_provenance, dict) else {}
+        stimulus_response_omr_view = mo.vstack(
+            [
+                mo.md(
+                    f"""
+                    ## Stimulus Response / OMR Explorer
+
+                    **Run:** `{selected_stimulus_response["run_name"]}`
+
+                    **Source track:** `{selected_stimulus_response["source_track_kinematics_run"]}`
+
+                    **Source bouts:** `{selected_stimulus_response["source_bout_run"]}`
+
+                    **Direction correction:** `{_parameters.get("camera_to_projector_offset_deg", "unknown")}` deg
+                    """
+                ),
+                mo.hstack(
+                    [
+                        mo.stat(label="OMR steps", value=f"{len(omr_step_df):,}"),
+                        mo.stat(label="OMR bouts", value=f"{len(omr_bout_df):,}"),
+                        mo.stat(label="Window rows", value=f"{len(omr_window_df):,}"),
+                        mo.stat(label="Early windows", value=f"{len(omr_early_window_df):,}"),
+                    ]
+                ),
+                _direction_fig,
+                _position_fig,
+                mo.accordion(
+                    {
+                        "Step OMR metrics": mo.ui.table(
+                            omr_step_df[_table_columns],
+                            selection=None,
+                            page_size=10,
+                        ),
+                        "Per-bout OMR rows": (
+                            mo.ui.table(
+                                omr_bout_df[_bout_columns],
+                                selection=None,
+                                page_size=15,
+                            )
+                            if len(omr_bout_df)
+                            else mo.md("No per-bout OMR rows.")
+                        ),
+                        "Early-response windows": (
+                            mo.ui.table(
+                                omr_early_window_df[_early_window_columns],
+                                selection=None,
+                                page_size=15,
+                            )
+                            if len(omr_early_window_df)
+                            else mo.md("No early-response OMR windows.")
+                        ),
+                        "Persisted summary PNG": png_bytes_to_markdown_image(
+                            omr_summary_png_bytes,
+                            alt_text="OMR summary PNG",
+                        ),
+                        "Persisted trajectory PNG": png_bytes_to_markdown_image(
+                            omr_trajectory_png_bytes,
+                            alt_text="OMR bout trajectory PNG",
+                        ),
+                        "Stimulus-response attrs": mo.tree(dict(stimulus_response_attrs)),
+                    }
+                ),
+            ]
+        )
+    write_perf_event(
+        "build_stimulus_response_omr_view",
+        time.perf_counter() - _omr_view_t0,
+        selected_stimulus_response_run=(
+            selected_stimulus_response["run_name"] if selected_stimulus_response is not None else None
+        ),
+        n_omr_steps=len(omr_step_df),
+        n_omr_bout_rows=len(omr_bout_df),
+        n_omr_window_rows=len(omr_window_df),
+    )
+    stimulus_response_omr_view
+    return
 
 
 @app.cell

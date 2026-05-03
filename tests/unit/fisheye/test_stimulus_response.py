@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -16,6 +17,8 @@ from fisheye.analysis.stimulus_response import (
     LoomStepData,
     LoomTrial,
     ProtocolStep,
+    _json_safe_attr_value,
+    _resolve_omr_arena_geometry_mm,
     build_frame_annotations,
     compute_concentric_per_fish,
     compute_concentric_per_frame,
@@ -24,10 +27,12 @@ from fisheye.analysis.stimulus_response import (
     compute_grating_per_fish,
     compute_grating_per_frame,
     compute_grating_time_series,
+    compute_global_omr_metrics,
     compute_loom_per_fish,
     compute_loom_per_frame,
     compute_loom_per_trial_per_fish,
     compute_loom_time_series,
+    compute_step_omr_metrics,
     compute_step_base_metrics,
     compute_step_bout_metrics,
     load_bout_data,
@@ -35,6 +40,7 @@ from fisheye.analysis.stimulus_response import (
     parse_protocol_steps,
     reconstruct_loom_trials,
     resolve_grating_direction,
+    resolve_grating_speed_mm_s,
     resolve_loom_center_mm,
     write_stimulus_response_run,
 )
@@ -166,6 +172,65 @@ def _make_stimulus_zarr(
     stim_run.attrs["protocol_json"] = json.dumps(protocol)
 
 
+def _fixed_uint8_strings(values: list[str], width: int = 64) -> np.ndarray:
+    arr = np.zeros((len(values), width), dtype=np.uint8)
+    for idx, value in enumerate(values):
+        encoded = value.encode("utf-8")[:width]
+        arr[idx, :len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
+    return arr
+
+
+def _make_modern_stimulus_zarr(root: zarr.Group) -> None:
+    """Add modern Citrus-style columnar events and uint8 enum strings."""
+    analysis = root.require_group("analysis")
+
+    enums = analysis.require_group("enums")
+    event_enum = enums.create_group("events")
+    event_enum.create_array("id", data=np.array([11, 12], dtype=np.int32))
+    event_enum.create_array(
+        "name",
+        data=_fixed_uint8_strings(["STEP_START", "STEP_END"], width=32),
+    )
+    mode_enum = enums.create_group("stimulus_modes")
+    mode_enum.create_array("id", data=np.array([3, 4], dtype=np.int32))
+    mode_enum.create_array(
+        "name",
+        data=_fixed_uint8_strings(["MOVING_GRATING", "SOLID_BLACK"], width=32),
+    )
+
+    stim_parent = analysis.require_group("stimulus_runs")
+    stim_run = stim_parent.create_group("modern_stim")
+    stim_parent.attrs["latest"] = "modern_stim"
+
+    events = stim_run.create_group("events")
+    events.attrs["storage_layout"] = "columnar"
+    events.attrs["field_names"] = [
+        "event_type_id",
+        "current_step_index",
+        "stimulus_mode_id",
+        "camera_frame_id",
+        "name_or_context",
+        "details_json",
+    ]
+    events.create_array("event_type_id", data=np.array([11, 12, 11, 12], dtype=np.int32))
+    events.create_array("current_step_index", data=np.array([0, 0, 1, 1], dtype=np.int32))
+    events.create_array("stimulus_mode_id", data=np.array([4, 4, 3, 3], dtype=np.int32))
+    events.create_array("camera_frame_id", data=np.array([0, 50, 50, 100], dtype=np.uint64))
+    events.create_array(
+        "name_or_context",
+        data=_fixed_uint8_strings(["baseline", "baseline", "grating", "grating"], width=32),
+    )
+    events.create_array("details_json", data=_fixed_uint8_strings(["{}", "{}", "{}", "{}"], width=32))
+
+    import json
+    stim_run.attrs["protocol_json"] = json.dumps({
+        "steps": [
+            {"name": "baseline", "stimulus_mode": 4},
+            {"name": "grating_1", "stimulus_mode": 3},
+        ]
+    })
+
+
 def _make_dense_tracks(
     n_frames: int = 100,
     n_fish: int = 2,
@@ -282,6 +347,21 @@ class TestParseProtocolSteps:
         _make_stimulus_zarr(root, fps=30.0)
         steps, _, _ = parse_protocol_steps(root, fps=30.0)
         assert abs(steps[0].duration_s - 50 / 30.0) < 0.01
+
+    def test_modern_columnar_event_layout(self) -> None:
+        root = _make_kinematics_zarr(n_frames=100)
+        _make_modern_stimulus_zarr(root)
+        steps, run_name, _ = parse_protocol_steps(root, fps=30.0)
+        assert run_name == "modern_stim"
+        assert len(steps) == 2
+        assert steps[0].name == "baseline"
+        assert steps[0].stimulus_mode == "SOLID_BLACK"
+        assert steps[0].start_frame == 0
+        assert steps[0].end_frame == 50
+        assert steps[1].name == "grating_1"
+        assert steps[1].stimulus_mode == "MOVING_GRATING"
+        assert steps[1].start_frame == 50
+        assert steps[1].end_frame == 100
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +554,27 @@ class TestWriteStimulusResponseRun:
         write_stimulus_response_run(root, **kwargs)
         with pytest.raises(ValueError, match="already exists"):
             write_stimulus_response_run(root, **kwargs)
+
+    def test_overwrite_replaces_duplicate_run_name(self) -> None:
+        root = zarr.group()
+        tracks = _make_dense_tracks(n_frames=50, n_fish=1)
+        gm = compute_global_metrics(tracks, fps=30.0, moving_threshold=2.0)
+        steps = [ProtocolStep(0, "test", "SOLID_BLACK", 4, 0, 50, 50 / 30.0)]
+        sm = [compute_step_base_metrics(tracks, steps[0], fps=30.0, moving_threshold=2.0)]
+
+        kwargs = dict(
+            global_metrics=gm, steps=steps, step_metrics=sm,
+            source_kinematics_run="k", source_kinematics_type="offline",
+            source_stimulus_run="s", parameters={"version": 1}, run_name="dup",
+        )
+        write_stimulus_response_run(root, **kwargs)
+        root["analysis"]["stimulus_response_runs"]["dup"].attrs["sentinel"] = "old"
+        kwargs["parameters"] = {"version": 2}
+        write_stimulus_response_run(root, **kwargs, overwrite=True)
+
+        parent = root["analysis"]["stimulus_response_runs"]
+        assert parent.attrs["latest"] == "dup"
+        assert "sentinel" not in parent["dup"].attrs
 
 
 # ---------------------------------------------------------------------------
@@ -706,10 +807,37 @@ class TestResolveGratingDirection:
         step = _grating_step(direction_deg=270.0)
         assert resolve_grating_direction(step, offset_deg=10.0) == 280.0
 
+    def test_offset_wraps_to_camera_space_degrees(self) -> None:
+        step = _grating_step(direction_deg=180.0)
+        assert resolve_grating_direction(step, offset_deg=180.0) == 0.0
+
     def test_fallback_keys(self) -> None:
         step = ProtocolStep(0, "t", "MOVING_GRATING", 3, 0, 100, 100 / 30.0,
                             stimulus_params={"angle_degrees": 45.0})
         assert resolve_grating_direction(step) == 45.0
+
+    def test_nested_citrus_protocol_parameters(self) -> None:
+        step = ProtocolStep(
+            0,
+            "t",
+            "MOVING_GRATING",
+            3,
+            0,
+            100,
+            100 / 30.0,
+            stimulus_params={
+                "duration_seconds": 100 / 30.0,
+                "parameters": {
+                    "orientation_degrees": 180.0,
+                    "speed_mm_per_sec": 5.0,
+                    "type": "ProtocolMovingGratingParams",
+                },
+                "stimulus_mode_str": "MOVING_GRATING",
+            },
+        )
+
+        assert resolve_grating_direction(step) == 180.0
+        assert resolve_grating_speed_mm_s(step) == 5.0
 
 
 class TestComputeGratingPerFrame:
@@ -848,6 +976,268 @@ class TestComputeGratingTimeSeries:
         assert np.all(ts["fraction_following"][0] == 1.0)
 
 
+class TestComputeOMRMetrics:
+
+    def test_json_safe_attr_value_converts_nonfinite_metadata_to_null(self) -> None:
+        attrs = _json_safe_attr_value({
+            "ok": 1.0,
+            "missing": np.float64(np.nan),
+            "nested": [np.float32(np.inf), -np.inf],
+        })
+
+        assert attrs == {"ok": 1.0, "missing": None, "nested": [None, None]}
+        assert json.loads(json.dumps(attrs, allow_nan=False)) == attrs
+
+    def test_path_index_following_and_opposing(self) -> None:
+        step = _grating_step(direction_deg=90.0)
+
+        following = _make_grating_tracks(heading_deg=90.0, speed=10.0)
+        omr_follow = compute_step_omr_metrics(
+            following, step, 90.0, fps=30.0, moving_threshold_mm_s=2.0,
+        )
+        assert omr_follow.per_fish["omr_path_index"][0] > 0.99
+        assert omr_follow.per_fish["time_fraction_correct_classified"][0] == 1.0
+
+        opposing = _make_grating_tracks(heading_deg=270.0, speed=10.0)
+        omr_oppose = compute_step_omr_metrics(
+            opposing, step, 90.0, fps=30.0, moving_threshold_mm_s=2.0,
+        )
+        assert omr_oppose.per_fish["omr_path_index"][0] < -0.99
+        assert omr_oppose.per_fish["time_fraction_correct_classified"][0] == 0.0
+
+    def test_perpendicular_path_index_is_near_zero(self) -> None:
+        tracks = _make_grating_tracks(heading_deg=0.0, speed=10.0)
+        step = _grating_step(direction_deg=90.0)
+        omr = compute_step_omr_metrics(
+            tracks, step, 90.0, fps=30.0, moving_threshold_mm_s=2.0,
+        )
+        assert abs(float(omr.per_fish["omr_path_index"][0])) < 1e-5
+
+    def test_position_occupancy_and_opportunity_are_arena_normalized(self) -> None:
+        tracks = _make_grating_tracks(n_frames=31, heading_deg=90.0, speed=30.0)
+        step = _grating_step(start=0, end=31, direction_deg=90.0)
+        omr = compute_step_omr_metrics(
+            tracks,
+            step,
+            90.0,
+            fps=30.0,
+            moving_threshold_mm_s=2.0,
+            arena_center_mm=(0.0, 10.0),
+            arena_axis_extent_mm=20.0,
+            arena_geometry_source="test_arena",
+        )
+
+        pf = omr.per_fish
+        assert pf["start_position_axis_mm"][0] == pytest.approx(-10.0)
+        assert pf["end_position_axis_mm"][0] == pytest.approx(20.0)
+        assert pf["start_position_axis_norm"][0] == pytest.approx(-0.5)
+        assert pf["end_position_axis_norm"][0] == pytest.approx(1.0)
+        assert pf["available_forward_space_at_start_mm"][0] == pytest.approx(30.0)
+        assert pf["available_backward_space_at_start_mm"][0] == pytest.approx(10.0)
+        assert pf["opportunity_normalized_parallel_displacement"][0] == pytest.approx(1.0)
+        assert 0.0 < pf["fraction_time_correct_side"][0] < 1.0
+        assert omr.attrs["arena_geometry_source"] == "test_arena"
+
+    def test_arena_geometry_uses_projector_scale_for_experimental_area_center(self) -> None:
+        root = zarr.group()
+        cal = root.create_group("analysis").create_group("calibration")
+        cal.attrs.update(
+            {
+                "pixel_to_mm": 0.0187880455,
+                "pixels_per_mm_projector": 4.1693377495,
+                "experimental_area_center_x_px": 172.0,
+                "experimental_area_center_y_px": 172.0,
+                "experimental_area_radius_mm": 39.814476,
+            }
+        )
+
+        center_mm, extent_mm, source = _resolve_omr_arena_geometry_mm(
+            root,
+            stimulus_run=None,
+            direction_xy=np.array([1.0, 0.0], dtype=np.float64),
+        )
+
+        assert center_mm is not None
+        assert center_mm[0] == pytest.approx(172.0 / 4.1693377495)
+        assert center_mm[1] == pytest.approx(172.0 / 4.1693377495)
+        assert extent_mm == pytest.approx(39.814476)
+        assert "experimental_area_center_projector_px" in source
+
+    def test_bout_fraction_uses_bout_boundaries_and_physical_positions(self) -> None:
+        tracks = _make_grating_tracks(heading_deg=90.0, speed=10.0)
+        step = _grating_step(direction_deg=90.0)
+        bouts = {
+            0: [
+                BoutEntry(
+                    fish_id=0,
+                    bout_id=7,
+                    start_frame=10,
+                    end_frame=40,
+                    duration_s=1.0,
+                    mean_speed=10.0,
+                    peak_physical_speed=10.0,
+                )
+            ]
+        }
+        omr = compute_step_omr_metrics(
+            tracks,
+            step,
+            90.0,
+            fps=30.0,
+            moving_threshold_mm_s=2.0,
+            bouts_by_fish=bouts,
+        )
+        assert omr.per_fish["bout_count_total"][0] == 1
+        assert omr.per_fish["bout_count_correct"][0] == 1
+        assert omr.per_fish["bout_fraction_correct_classified"][0] == 1.0
+        assert omr.per_bout["bout_id"][0] == 7
+        assert omr.per_bout["per_bout_omr_score"][0] > 0.99
+
+    def test_weighted_bout_metrics_capture_large_aligned_bout(self) -> None:
+        """Weighted bout evidence is not the same as unweighted bout counts."""
+
+        n_frames = 100
+        fps = 30.0
+        pos = np.zeros((n_frames, 2), dtype=np.float32)
+        for frame in range(1, n_frames):
+            if frame <= 20:
+                pos[frame, 1] = pos[frame - 1, 1] - 0.10
+            elif frame <= 30:
+                pos[frame, 1] = pos[frame - 1, 1]
+            elif frame <= 80:
+                pos[frame, 1] = pos[frame - 1, 1] + 0.30
+            else:
+                pos[frame, 1] = pos[frame - 1, 1]
+        tracks = [
+            DenseTrack(
+                fish_id=0,
+                speed_mm=np.full(n_frames, 9.0, dtype=np.float32),
+                heading_deg=np.full(n_frames, 90.0, dtype=np.float32),
+                positions_mm=pos,
+                angular_velocity=np.zeros(n_frames, dtype=np.float32),
+                time_seconds=np.arange(n_frames, dtype=np.float32) / fps,
+                valid=np.ones(n_frames, dtype=bool),
+                detection_source=np.zeros(n_frames, dtype=np.int8),
+            )
+        ]
+        step = _grating_step(direction_deg=90.0, start=0, end=n_frames)
+        bouts = {
+            0: [
+                BoutEntry(0, 1, 0, 20, 20 / fps, 9.0, 9.0),
+                BoutEntry(0, 2, 30, 80, 50 / fps, 9.0, 9.0),
+            ]
+        }
+
+        omr = compute_step_omr_metrics(
+            tracks,
+            step,
+            90.0,
+            fps=fps,
+            moving_threshold_mm_s=2.0,
+            bouts_by_fish=bouts,
+        )
+
+        pf = omr.per_fish
+        assert pf["bout_count_correct"][0] == 1
+        assert pf["bout_count_opposing"][0] == 1
+        assert pf["bout_choice_index"][0] == pytest.approx(0.0)
+        assert pf["bout_path_index"][0] > 0.7
+        assert pf["bout_fraction_correct_weighted_by_path"][0] > 0.85
+        assert pf["bout_fraction_correct_weighted_by_displacement"][0] > 0.85
+
+    def test_first_aligned_bout_latency_uses_first_classified_bout(self) -> None:
+        tracks = _make_grating_tracks(heading_deg=90.0, speed=10.0)
+        step = _grating_step(direction_deg=90.0)
+        bouts = {
+            0: [
+                BoutEntry(
+                    fish_id=0,
+                    bout_id=3,
+                    start_frame=12,
+                    end_frame=30,
+                    duration_s=0.6,
+                    mean_speed=10.0,
+                    peak_physical_speed=10.0,
+                ),
+                BoutEntry(
+                    fish_id=0,
+                    bout_id=4,
+                    start_frame=40,
+                    end_frame=50,
+                    duration_s=0.33,
+                    mean_speed=10.0,
+                    peak_physical_speed=10.0,
+                ),
+            ]
+        }
+        omr = compute_step_omr_metrics(
+            tracks,
+            step,
+            90.0,
+            fps=30.0,
+            moving_threshold_mm_s=2.0,
+            bouts_by_fish=bouts,
+        )
+
+        pf = omr.per_fish
+        assert pf["first_aligned_bout_id"][0] == 3
+        assert pf["first_classified_bout_id"][0] == 3
+        assert pf["first_aligned_bout_start_frame"][0] == 12
+        assert pf["first_aligned_bout_latency_s"][0] == pytest.approx(12 / 30.0)
+        assert pf["first_aligned_bout_score"][0] > 0.99
+        assert pf["first_opposing_bout_id"][0] == -1
+        assert np.isnan(pf["first_opposing_bout_latency_s"][0])
+
+    def test_early_response_windows_start_at_grating_onset(self) -> None:
+        n_frames = 120
+        fps = 30.0
+        pos = np.zeros((n_frames, 2), dtype=np.float32)
+        for frame in range(1, n_frames):
+            if frame <= 30:
+                pos[frame, 1] = pos[frame - 1, 1] + 0.50
+            else:
+                pos[frame, 1] = pos[frame - 1, 1] - 0.20
+        tracks = [
+            DenseTrack(
+                fish_id=0,
+                speed_mm=np.full(n_frames, 15.0, dtype=np.float32),
+                heading_deg=np.full(n_frames, 90.0, dtype=np.float32),
+                positions_mm=pos,
+                angular_velocity=np.zeros(n_frames, dtype=np.float32),
+                time_seconds=np.arange(n_frames, dtype=np.float32) / fps,
+                valid=np.ones(n_frames, dtype=bool),
+                detection_source=np.zeros(n_frames, dtype=np.int8),
+            )
+        ]
+        step = _grating_step(direction_deg=90.0, start=0, end=n_frames)
+
+        omr = compute_step_omr_metrics(
+            tracks,
+            step,
+            90.0,
+            fps=fps,
+            moving_threshold_mm_s=2.0,
+            early_window_lengths_s=(1.0, 2.0),
+        )
+
+        ew = omr.early_windows
+        assert ew["window_length_s"].tolist() == pytest.approx([1.0, 2.0])
+        assert ew["start_frame"].tolist() == [0, 0]
+        assert ew["end_frame"].tolist() == [30, 60]
+        assert ew["omr_path_index"][0] > 0.99
+        assert ew["omr_path_index"][1] > 0.0
+
+    def test_global_omr_aggregates_steps_by_path(self) -> None:
+        step = _grating_step(direction_deg=90.0)
+        tracks = _make_grating_tracks(heading_deg=90.0, speed=10.0)
+        omr = compute_step_omr_metrics(
+            tracks, step, 90.0, fps=30.0, moving_threshold_mm_s=2.0,
+        )
+        global_omr = compute_global_omr_metrics([0], [omr])
+        assert global_omr["eligible_step_count"][0] == 1
+        assert global_omr["omr_path_index_weighted_by_path"][0] > 0.99
+
+
 class TestWriteWithGrating:
 
     def test_grating_subgroup_written(self) -> None:
@@ -861,12 +1251,16 @@ class TestWriteWithGrating:
         pf = compute_grating_per_frame(tracks, step_base, 90.0, fps=30.0)
         gpf = compute_grating_per_fish(pf, tracks, step_base, fps=30.0, grating_speed_mm_s=10.0)
         ts = compute_grating_time_series(pf, tracks, step_base, fps=30.0, grating_speed_mm_s=10.0)
+        omr = compute_step_omr_metrics(
+            tracks, step_base, 90.0, fps=30.0, moving_threshold_mm_s=2.0,
+        )
+        global_omr = compute_global_omr_metrics([0], [omr])
 
-        gd = {0: GratingStepData(per_frame=pf, per_fish=gpf, time_series=ts)}
+        gd = {0: GratingStepData(per_frame=pf, per_fish=gpf, time_series=ts, omr=omr)}
 
         write_stimulus_response_run(
             root, global_metrics=gm, steps=[step_base], step_metrics=sm,
-            step_grating_data=gd,
+            step_grating_data=gd, global_omr_metrics=global_omr,
             source_kinematics_run="k", source_kinematics_type="offline",
             source_stimulus_run="s", parameters={}, run_name="grating_test",
         )
@@ -884,6 +1278,18 @@ class TestWriteWithGrating:
         assert "mean_alignment_cos" in s0["grating"]["per_fish"]
         assert "optomotor_gain" in s0["grating"]["per_fish"]
         assert "bin_center_s" in s0["grating"]["time_series"]
+        assert "omr" in s0["grating"]
+        assert "omr_path_index" in s0["grating"]["omr"]["per_fish"]
+        assert "bout_path_index" in s0["grating"]["omr"]["per_fish"]
+        assert "start_position_axis_norm" in s0["grating"]["omr"]["per_fish"]
+        assert "first_aligned_bout_latency_s" in s0["grating"]["omr"]["per_fish"]
+        assert "windows" in s0["grating"]["omr"]
+        assert "fraction_time_correct_side" in s0["grating"]["omr"]["windows"]
+        assert "early_windows" in s0["grating"]["omr"]
+        assert "omr_path_index" in s0["grating"]["omr"]["early_windows"]
+        assert "omr" in sr["global"]
+        assert "omr_path_index_weighted_by_path" in sr["global"]["omr"]["per_fish"]
+        assert "bout_path_index" in sr["global"]["omr"]["per_fish"]
 
     def test_non_grating_step_has_no_grating_group(self) -> None:
         root = zarr.group()

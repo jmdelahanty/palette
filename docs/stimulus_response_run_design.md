@@ -520,6 +520,84 @@ patterns across a stimulus step.
 Answers: "When the fish decides to swim, does it choose to go with or against
 the grating?"
 
+#### 10. OMR responsiveness
+
+OMR responsiveness metrics live under the moving-grating step as:
+
+```text
+steps/step_{i}/grating/omr/
+  per_fish/
+  per_bout/
+  windows/
+  early_windows/
+```
+
+These metrics are stricter response indices built from the same grating
+direction and dense track data used by the existing grating metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `omr_path_index` | `sum(displacement · stimulus_direction) / sum(path_length)`, range `[-1, +1]` |
+| `omr_net_direction_index` | Direction of net displacement relative to stimulus direction |
+| `bout_fraction_correct_classified` | Fraction of classifiable bouts displaced along the stimulus direction |
+| `bout_choice_index` | `(N_correct - N_opposing) / (N_correct + N_opposing)` |
+| `bout_path_index` | Signed per-bout physical displacement sum normalized by per-bout path length sum |
+| `bout_fraction_correct_weighted_by_path` | Fraction of classifiable bout path length contributed by aligned bouts |
+| `bout_fraction_correct_weighted_by_displacement` | Fraction of classifiable bout displacement magnitude contributed by aligned bouts |
+| `time_choice_index` | Time-weighted correct-vs-opposing movement index |
+| `mean_position_axis_norm` | Mean arena-normalized occupancy on the stimulus axis, when arena geometry is available |
+| `fraction_time_correct_side` | Fraction of valid frames spent on the stimulus-forward side of the arena |
+| `opportunity_normalized_parallel_displacement` | Stimulus-axis displacement normalized by available arena space in the direction traveled |
+| `first_aligned_bout_latency_s` | Latency from step onset to the first classifiable aligned bout |
+
+`windows/` stores non-overlapping window summaries for distribution analyses.
+`early_windows/` stores onset-anchored first-response windows, defaulting to
+`5 s` and `10 s`, with the same physical path/time metrics plus weighted bout
+summaries.
+
+Detector-vs-estimator semantics are explicit: swim-bout runs provide event
+boundaries only, while OMR displacement/path metrics are measured from
+physical position arrays. See `docs/omr_stimulus_response_design.md` for the
+full contract and open questions.
+
+Missing metric values are stored as `NaN` in numeric arrays. Missing optional
+metadata in attrs/provenance uses JSON `null`; writers must not emit JSON
+`NaN` or `Infinity` in Zarr metadata because strict consumers reject those
+files.
+
+OMR review visualizations are persisted under the run-local visualization
+contract when `stimulus_response` is run with `--write-zarr-artifacts`, or by
+running:
+
+```bash
+scripts/py -m fisheye.analysis.plot_stimulus_response_omr <analysis.zarr> \
+  --run <stimulus_response_run>
+```
+
+The canonical artifacts are:
+
+```text
+analysis/stimulus_response_runs/<run>/visualizations/
+  stimulus_response_omr_summary_png
+  stimulus_response_omr_summary_interactive/
+  stimulus_response_omr_bout_trajectory_png
+  stimulus_response_omr_bout_trajectory_interactive/
+```
+
+The PNG is a review snapshot showing step-level OMR direction indices,
+arena-axis occupancy/opportunity, first classified/aligned/opposing bout
+latencies, and windowed path-index traces. The interactive artifact is a small
+spec that points viewers back to `steps/step_<i>/grating/omr/`; it does not
+duplicate the numeric OMR arrays.
+
+The bout-trajectory PNG is a spatial review snapshot inspired by Megabouts'
+trajectory panels. It overlays the source track-kinematics `positions_mm` path
+with OMR-classified bout segments from `grating/omr/per_bout`, heading arrows,
+stimulus direction, and the arena outline when calibration is available. It is
+intentionally spatial-only for now; yaw/heading time traces remain available
+from track-kinematics arrays and should be added later only if they answer a
+distinct QC question.
+
 ### Concentric grating metrics (CONCENTRIC_GRATING steps only)
 
 Concentric gratings produce radially symmetric flow designed to drive fish
@@ -701,6 +779,19 @@ subgroup alongside the existing ones.
 The grating `orientation_degrees` defines the direction of drift in
 projector/texture space. Fish `heading_degrees` is computed from keypoints
 in camera space. A per-rig angular offset must be applied to align them.
+
+This alignment is not optional for OMR. Directional projections compare the
+fish's camera-space trajectory with the stimulus direction, so the stored
+stimulus angle must first be corrected into camera coordinates. The current
+CLI/attribute name, `camera_to_projector_offset_deg`, is legacy wording; in the
+stimulus-response implementation it is the angular correction applied to the
+stored stimulus direction before computing camera-space alignment metrics. The
+corrected angle is wrapped into `[0, 360)`.
+
+The current moving-grating canary uses an inverted projector orientation: the
+recorded Citrus `0 deg` grating moved left in the camera view. That recording
+therefore uses `camera_to_projector_offset_deg = 180.0`. Rigs where Citrus
+directions are already expressed in camera-space should use `0.0`.
 
 This offset is:
 
