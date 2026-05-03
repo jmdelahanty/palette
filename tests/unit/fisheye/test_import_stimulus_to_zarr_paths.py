@@ -71,6 +71,74 @@ homography_matrix:
         cam.create_dataset("homography_matrix_yml", data=homography_yml.encode("utf-8"))
 
 
+def _write_stimulus_h5_with_protocol_steps(path: Path) -> None:
+    _write_stimulus_h5_with_calibration(path)
+    events_dtype = np.dtype(
+        [
+            ("event_name", "S32"),
+            ("current_step_index", np.int32),
+            ("stimulus_mode_id", np.int32),
+            ("camera_frame_id", np.int64),
+        ]
+    )
+    events = np.array(
+        [
+            (b"STEP_START", 0, 3, 10),
+            (b"STEP_END", 0, 3, 70),
+            (b"STEP_START", 1, 6, 80),
+            (b"STEP_END", 1, 6, 140),
+        ],
+        dtype=events_dtype,
+    )
+    protocol = {
+        "steps": [
+            {
+                "name": "left grating",
+                "stimulus_mode_str": "MOVING_GRATING",
+                "duration_seconds": 1.0,
+                "parameters": {
+                    "type": "ProtocolMovingGratingParams",
+                    "orientation_degrees": 180.0,
+                    "speed_mm_per_sec": 3.5,
+                    "speed_pps": 17.5,
+                    "spatial_freq_cycles_per_mm": 0.2,
+                    "spatial_freq_rpp": 0.04,
+                    "duty_cycle": 0.5,
+                },
+            },
+            {
+                "name": "concentric center",
+                "stimulus_mode_str": "CONCENTRIC_GRATING",
+                "duration_seconds": 1.0,
+                "parameters": {
+                    "type": "ProtocolConcentricGratingParams",
+                    "is_expanding": False,
+                    "speed_mm_per_sec": 4.0,
+                    "speed_pps": 20.0,
+                    "spatial_freq_cycles_per_mm": 0.25,
+                    "spatial_freq_rpp": 0.05,
+                    "stimulus_role": "centering_utility",
+                    "target_radius_min_mm": 8.0,
+                    "target_radius_max_mm": 14.0,
+                    "centering_success_fraction_threshold": 0.8,
+                },
+            },
+        ]
+    }
+    with h5py.File(path, "a") as h5:
+        h5.create_dataset("events", data=events)
+        protocol_group = h5.create_group("protocol_snapshot")
+        protocol_group.create_dataset(
+            "protocol_definition_json",
+            data=json.dumps(protocol).encode("utf-8"),
+        )
+        coords = h5.create_group("stimulus_coordinates")
+        arena = coords.create_group("arena_1")
+        custom = arena.create_group("custom_coordinates")
+        custom.attrs["texture_center_x"] = 172.0
+        custom.attrs["texture_center_y"] = 173.0
+
+
 def test_import_sets_source_stimulus_video_path_when_rendered_mp4_exists(tmp_path: Path) -> None:
     h5_path = tmp_path / "session.h5"
     rendered_mp4 = tmp_path / "session.mp4"
@@ -149,3 +217,55 @@ def test_import_materializes_h5_calibration_to_analysis_calibration(tmp_path: Pa
 
     run_calib = root["analysis"]["stimulus_runs"][run_name]["calibration"]["2010093"]
     np.testing.assert_allclose(run_calib["homography_matrix"][:], calib["homography_matrix"][:])
+
+
+def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+
+    _write_stimulus_h5_with_protocol_steps(h5_path)
+    zarr.open_group(str(zarr_path), mode="w")
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_with_steps",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run_group = root["analysis"]["stimulus_runs"][run_name]
+    steps = run_group["steps"]
+    assert steps.attrs["metadata_schema_version"] == 1
+
+    step0 = steps["step_0"]
+    assert step0.attrs["step_name"] == "left grating"
+    assert step0.attrs["stimulus_mode"] == "MOVING_GRATING"
+    assert step0.attrs["start_camera_frame"] == 10
+    assert step0.attrs["end_camera_frame"] == 70
+    assert json.loads(step0.attrs["raw_protocol_params_json"])["parameters"]["orientation_degrees"] == 180.0
+
+    moving = step0["moving_grating"]
+    assert moving.attrs["orientation_degrees_authored"] == 180.0
+    assert moving.attrs["grating_direction_camera_deg"] == 180.0
+    assert moving.attrs["speed_mm_s"] == 3.5
+    assert np.isclose(moving.attrs["temporal_frequency_hz"], 0.7)
+    assert moving.attrs["direction_mapping_status"] == "unvalidated_default_zero_offset"
+
+    step1 = steps["step_1"]
+    assert step1.attrs["step_name"] == "concentric center"
+    assert step1.attrs["stimulus_mode"] == "CONCENTRIC_GRATING"
+    concentric = step1["concentric_grating"]
+    assert concentric.attrs["radial_polarity_authored"] == "contracting"
+    assert concentric.attrs["radial_sign_authored"] == -1
+    assert concentric.attrs["stimulus_role"] == "centering_utility"
+    assert concentric.attrs["center_source"] == "stimulus_coordinates/arena_1/custom_coordinates.texture_center"
+    assert concentric.attrs["center_x_px"] == 172.0
+    assert concentric.attrs["center_y_px"] == 173.0
+    assert np.isclose(concentric.attrs["center_x_mm"], 34.4)
+    assert concentric.attrs["target_radius_min_mm"] == 8.0
+
+    copied_center = run_group["stimulus_coordinates"]["arena_1"]["custom_coordinates"]
+    assert copied_center.attrs["texture_center_x"] == 172.0

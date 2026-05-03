@@ -84,7 +84,7 @@ from hashlib import sha256
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -102,6 +102,13 @@ from .chaser_state_interpolator import (
     store_array,
     write_columnar_dataset,
 )
+from fisheye.shared.citrus_enums import (
+    EVENT_STEP_END,
+    EVENT_STEP_START,
+    EXPERIMENT_EVENT_TYPE,
+    STIMULUS_MODE,
+    STIMULUS_MODE_NAME_TO_ID,
+)
 
 
 def _log(console: Optional[Console], message: str) -> None:
@@ -118,6 +125,38 @@ def _normalize_attr_value(value):
     if isinstance(value, np.ndarray):
         return value.tolist()
     return value
+
+
+def _json_safe_value(value: Any) -> Any:
+    """Convert values to strict-JSON-safe Python primitives for Zarr attrs."""
+
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, np.ndarray):
+        return _json_safe_value(value.tolist())
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    return str(value)
+
+
+def _json_dumps_safe(value: Any) -> str:
+    return json.dumps(_json_safe_value(value), sort_keys=True, allow_nan=False)
+
+
+def _update_attrs_json_safe(group: zarr.Group, attrs: Dict[str, Any]) -> None:
+    """Update attrs, omitting unknown ``None`` values to keep metadata compact."""
+
+    for key, value in attrs.items():
+        safe = _json_safe_value(value)
+        if safe is None:
+            continue
+        group.attrs[str(key)] = safe
 
 
 def _collect_attrs(h5_obj: h5py.Group | h5py.Dataset) -> Dict[str, object]:
@@ -723,6 +762,444 @@ def _copy_enums(h5: h5py.File, analysis_group: zarr.Group, console: Optional[Con
     if copied:
         _log(console, f"[green]✓ Imported {copied} enum tables into analysis/enums (columnar format)[/green]")
 
+
+def _read_protocol_snapshot(h5: h5py.File) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Read Citrus protocol snapshot JSON from modern or legacy H5 paths."""
+
+    proto_key = None
+    if "/protocol_snapshot/protocol_definition_json" in h5:
+        proto_key = "/protocol_snapshot/protocol_definition_json"
+    elif "/protocol_snapshot/protocol_json" in h5:
+        proto_key = "/protocol_snapshot/protocol_json"
+    if proto_key is None:
+        return None, None
+
+    text = _decode_h5_text(h5[proto_key][()])
+    if not text:
+        return None, None
+    payload = _parse_json_payload(text)
+    return text, payload if isinstance(payload, dict) else None
+
+
+def _protocol_steps_list(protocol: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(protocol, dict):
+        return []
+    steps = protocol.get("steps") or protocol.get("protocol_steps") or []
+    if not isinstance(steps, list):
+        return []
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def _flatten_protocol_params(step_params: Dict[str, Any]) -> Dict[str, Any]:
+    nested = step_params.get("parameters")
+    if isinstance(nested, dict):
+        return dict(nested)
+    return dict(step_params)
+
+
+def _first_float(*values: Any) -> Optional[float]:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, np.generic):
+            value = value.item()
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(out):
+            return out
+    return None
+
+
+def _first_bool(*values: Any) -> Optional[bool]:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, np.integer)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y"}:
+                return True
+            if lowered in {"false", "0", "no", "n"}:
+                return False
+    return None
+
+
+def _structured_column(data: Optional[np.ndarray], *names: str) -> Optional[np.ndarray]:
+    if data is None or data.dtype.names is None:
+        return None
+    for name in names:
+        if name in data.dtype.names:
+            return np.asarray(data[name])
+    return None
+
+
+def _decode_text_scalar(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore").rstrip("\x00")
+    if isinstance(value, np.generic):
+        return _decode_text_scalar(value.item())
+    return str(value).rstrip("\x00")
+
+
+def _normalize_event_names(events_data: Optional[np.ndarray]) -> np.ndarray:
+    names = _structured_column(events_data, "event_name", "name")
+    if names is not None:
+        return np.asarray([_decode_text_scalar(value) for value in names], dtype=object)
+
+    event_type = _structured_column(events_data, "event_type_id", "event_type")
+    if event_type is None:
+        return np.asarray([], dtype=object)
+    return np.asarray(
+        [EXPERIMENT_EVENT_TYPE.get(int(value), f"UNKNOWN_{int(value)}") for value in event_type],
+        dtype=object,
+    )
+
+
+def _normalize_stimulus_mode_id(value: Any) -> int:
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    text = _decode_text_scalar(value)
+    if text in STIMULUS_MODE_NAME_TO_ID:
+        return int(STIMULUS_MODE_NAME_TO_ID[text])
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def _infer_camera_fps(metadata: np.ndarray) -> Optional[float]:
+    """Infer camera FPS from metadata timestamps and camera frame IDs when possible."""
+
+    if metadata.dtype.names is None:
+        return None
+    try:
+        camera_field = _resolve_struct_field(metadata, "triggering_camera_frame_id", "camera_frame_id")
+    except ValueError:
+        return None
+    timestamp_field = None
+    for candidate in ("timestamp_ns", "timestamp_relative_ns", "time_ns"):
+        if candidate in metadata.dtype.names:
+            timestamp_field = candidate
+            break
+    if timestamp_field is None or metadata.shape[0] < 2:
+        return None
+
+    camera = np.asarray(metadata[camera_field], dtype=np.float64)
+    time_ns = np.asarray(metadata[timestamp_field], dtype=np.float64)
+    camera_delta = camera[-1] - camera[0]
+    time_delta_s = (time_ns[-1] - time_ns[0]) / 1e9
+    if camera_delta <= 0 or time_delta_s <= 0:
+        return None
+    fps = camera_delta / time_delta_s
+    return float(fps) if np.isfinite(fps) and fps > 0 else None
+
+
+def _copy_h5_tree(src: h5py.Group, dst: zarr.Group) -> None:
+    """Copy an H5 group tree into Zarr, preserving attrs and simple datasets."""
+
+    for attr_name, attr_value in src.attrs.items():
+        dst.attrs[attr_name] = _json_safe_value(_normalize_attr_value(attr_value))
+
+    for name, node in src.items():
+        if isinstance(node, h5py.Group):
+            child = dst.require_group(name)
+            _copy_h5_tree(node, child)
+            continue
+
+        value = node[()]
+        if isinstance(value, bytes):
+            dst.attrs[name] = value.decode("utf-8", errors="ignore")
+            continue
+        if np.isscalar(value) or (isinstance(value, np.ndarray) and value.ndim == 0):
+            dst.attrs[name] = _json_safe_value(value.item() if hasattr(value, "item") else value)
+            continue
+
+        arr = np.asarray(value)
+        if name in dst:
+            del dst[name]
+        dst.create_array(name, data=arr, chunks=arr.shape, overwrite=True)
+
+
+def _copy_stimulus_coordinates(h5: h5py.File, run_group: zarr.Group, console: Optional[Console]) -> None:
+    if "/stimulus_coordinates" not in h5:
+        return
+    if "stimulus_coordinates" in run_group:
+        del run_group["stimulus_coordinates"]
+    dst = run_group.create_group("stimulus_coordinates")
+    _copy_h5_tree(h5["/stimulus_coordinates"], dst)
+    _log(console, "[green]✓ Copied H5 stimulus_coordinates into stimulus run[/green]")
+
+
+def _projector_pixels_per_mm(h5: h5py.File, arena_config: Dict[str, Any]) -> Optional[float]:
+    camera_config = _first_camera_config(arena_config)
+    ppm = _first_float(camera_config.get("pixels_per_mm_projector"))
+    if ppm is not None:
+        return ppm
+    active_camera_id = arena_config.get("active_camera_id") or camera_config.get("camera_id")
+    if active_camera_id is not None and f"/calibration_snapshot/{active_camera_id}" in h5:
+        return _first_float(h5[f"/calibration_snapshot/{active_camera_id}"].attrs.get("pixels_per_mm_projector"))
+    return None
+
+
+def _stimulus_coordinates_center(h5: h5py.File) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    if "/stimulus_coordinates" not in h5:
+        return None, None, None
+    parent = h5["/stimulus_coordinates"]
+    for arena_name in parent.keys():
+        arena = parent[arena_name]
+        if not isinstance(arena, h5py.Group):
+            continue
+        custom = arena.get("custom_coordinates")
+        if custom is None or not hasattr(custom, "attrs"):
+            continue
+        cx = _first_float(custom.attrs.get("texture_center_x"), custom.attrs.get("texture_center_x_px"))
+        cy = _first_float(custom.attrs.get("texture_center_y"), custom.attrs.get("texture_center_y_px"))
+        if cx is not None and cy is not None:
+            return cx, cy, f"stimulus_coordinates/{arena_name}/custom_coordinates.texture_center"
+    return None, None, None
+
+
+def _resolve_concentric_center_attrs(
+    h5: h5py.File,
+    flat_params: Dict[str, Any],
+    arena_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve source-derived concentric grating center metadata for step attrs."""
+
+    ppm_projector = _projector_pixels_per_mm(h5, arena_config)
+    cx_mm = _first_float(flat_params.get("center_x_mm"))
+    cy_mm = _first_float(flat_params.get("center_y_mm"))
+    if cx_mm is not None and cy_mm is not None:
+        return {
+            "center_x_mm": cx_mm,
+            "center_y_mm": cy_mm,
+            "center_source": "protocol_parameters.center_mm",
+            "center_coordinate_frame": "stimulus_mm",
+        }
+
+    cx_px = _first_float(flat_params.get("center_x_px"), flat_params.get("center_x_texture_px"))
+    cy_px = _first_float(flat_params.get("center_y_px"), flat_params.get("center_y_texture_px"))
+    center_source = "protocol_parameters.center_px" if cx_px is not None and cy_px is not None else ""
+    center_frame = "arena_texture_px"
+
+    if cx_px is None or cy_px is None:
+        cx_px, cy_px, center_source = _stimulus_coordinates_center(h5)
+        center_frame = "arena_texture_px"
+
+    if cx_px is None or cy_px is None:
+        cx_px = _first_float(
+            arena_config.get("arena_region_center_in_canvas_x_px"),
+            arena_config.get("experimental_area_center_x_px"),
+        )
+        cy_px = _first_float(
+            arena_config.get("arena_region_center_in_canvas_y_px"),
+            arena_config.get("experimental_area_center_y_px"),
+        )
+        if cx_px is not None and cy_px is not None:
+            center_source = "calibration_snapshot.arena_config_json.experimental_area_center_px"
+            center_frame = "projector_canvas_px"
+
+    if cx_px is None or cy_px is None:
+        width_px = _first_float(
+            arena_config.get("arena_region_width_px"),
+            arena_config.get("sub_arena_width_px"),
+            arena_config.get("experimental_area_width_px"),
+        )
+        height_px = _first_float(
+            arena_config.get("arena_region_height_px"),
+            arena_config.get("sub_arena_height_px"),
+            arena_config.get("experimental_area_height_px"),
+        )
+        if width_px is not None and height_px is not None:
+            cx_px = width_px * 0.5
+            cy_px = height_px * 0.5
+            center_source = "calibration_snapshot.arena_config_json.arena_size_half"
+            center_frame = "arena_texture_px"
+
+    attrs: Dict[str, Any] = {}
+    if cx_px is not None and cy_px is not None:
+        attrs.update({
+            "center_x_px": cx_px,
+            "center_y_px": cy_px,
+            "center_source": center_source or "unknown",
+            "center_coordinate_frame": center_frame,
+        })
+        if ppm_projector is not None and ppm_projector > 0:
+            attrs["center_x_mm"] = cx_px / ppm_projector
+            attrs["center_y_mm"] = cy_px / ppm_projector
+            attrs["center_mm_source"] = f"{attrs['center_source']} / pixels_per_mm_projector"
+            attrs["center_mm_coordinate_frame"] = "projector_relative_mm"
+    if ppm_projector is not None:
+        attrs["pixels_per_mm_projector"] = ppm_projector
+    return attrs
+
+
+def _write_moving_grating_step_metadata(step_group: zarr.Group, step_params: Dict[str, Any]) -> None:
+    flat = _flatten_protocol_params(step_params)
+    orientation = _first_float(
+        flat.get("orientation_degrees"),
+        flat.get("angle_degrees"),
+        flat.get("grating_orientation"),
+    )
+    speed_mm_s = _first_float(flat.get("grating_speed_mm_s"), flat.get("speed_mm_per_sec"), flat.get("speed_mm_s"))
+    speed_pps = _first_float(flat.get("speed_pps"))
+    spatial_mm = _first_float(flat.get("spatial_freq_cycles_per_mm"), flat.get("spatial_freq_cpmm"))
+    spatial_px = _first_float(flat.get("spatial_freq_rpp"), flat.get("spatial_freq_cpp"))
+    attrs = {
+        "metadata_schema_version": 1,
+        "source": "protocol_snapshot",
+        "orientation_degrees_authored": orientation,
+        "grating_direction_camera_deg": (orientation % 360.0) if orientation is not None else None,
+        "camera_to_projector_offset_deg": 0.0,
+        "direction_mapping_source": "protocol_orientation_degrees_no_offset",
+        "direction_mapping_status": "unvalidated_default_zero_offset",
+        "speed_mm_s": speed_mm_s,
+        "speed_pps": speed_pps,
+        "spatial_freq_cycles_per_mm": spatial_mm,
+        "spatial_freq_rpp": spatial_px,
+        "temporal_frequency_hz": abs(speed_mm_s * spatial_mm) if speed_mm_s is not None and spatial_mm is not None else None,
+        "actual_rendered_temporal_frequency_hz": abs(speed_pps * spatial_px) if speed_pps is not None and spatial_px is not None else None,
+        "duty_cycle": _first_float(flat.get("duty_cycle")),
+    }
+    group = step_group.require_group("moving_grating")
+    _update_attrs_json_safe(group, attrs)
+
+
+def _write_concentric_grating_step_metadata(
+    h5: h5py.File,
+    step_group: zarr.Group,
+    step_params: Dict[str, Any],
+    arena_config: Dict[str, Any],
+) -> None:
+    flat = _flatten_protocol_params(step_params)
+    is_expanding = _first_bool(flat.get("is_expanding"))
+    speed_mm_s = _first_float(flat.get("speed_mm_per_sec"), flat.get("grating_speed_mm_s"), flat.get("speed_mm_s"))
+    speed_pps = _first_float(flat.get("speed_pps"))
+    spatial_mm = _first_float(flat.get("spatial_freq_cycles_per_mm"), flat.get("spatial_freq_cpmm"))
+    spatial_px = _first_float(flat.get("spatial_freq_rpp"), flat.get("spatial_freq_cpp"))
+    attrs = {
+        "metadata_schema_version": 1,
+        "source": "protocol_snapshot",
+        "stimulus_role": flat.get("stimulus_role", "unknown"),
+        "radial_polarity_authored": (
+            "expanding" if is_expanding is True else "contracting" if is_expanding is False else None
+        ),
+        "radial_sign_authored": (1 if is_expanding is True else -1 if is_expanding is False else None),
+        "radial_polarity_source": "protocol_parameters.is_expanding" if is_expanding is not None else None,
+        "radial_polarity_validated": False,
+        "speed_mm_s": speed_mm_s,
+        "speed_pps": speed_pps,
+        "spatial_freq_cycles_per_mm": spatial_mm,
+        "spatial_freq_rpp": spatial_px,
+        "temporal_frequency_hz": abs(speed_mm_s * spatial_mm) if speed_mm_s is not None and spatial_mm is not None else None,
+        "actual_rendered_temporal_frequency_hz": abs(speed_pps * spatial_px) if speed_pps is not None and spatial_px is not None else None,
+        "duty_cycle": _first_float(flat.get("duty_cycle")),
+        "target_radius_min_mm": _first_float(flat.get("target_radius_min_mm")),
+        "target_radius_max_mm": _first_float(flat.get("target_radius_max_mm")),
+        "target_radius_source": flat.get("target_radius_source"),
+        "centering_success_fraction_threshold": _first_float(flat.get("centering_success_fraction_threshold")),
+    }
+    attrs.update(_resolve_concentric_center_attrs(h5, flat, arena_config))
+    group = step_group.require_group("concentric_grating")
+    _update_attrs_json_safe(group, attrs)
+
+
+def _materialize_stimulus_steps(
+    run_group: zarr.Group,
+    *,
+    h5: h5py.File,
+    events_data: Optional[np.ndarray],
+    protocol: Optional[Dict[str, Any]],
+    arena_config: Dict[str, Any],
+    metadata: np.ndarray,
+    console: Optional[Console],
+) -> None:
+    """Write canonical source-derived step metadata under a stimulus run."""
+
+    if events_data is None or events_data.dtype.names is None:
+        return
+
+    event_names = _normalize_event_names(events_data)
+    step_indices_raw = _structured_column(events_data, "step_index", "current_step_index")
+    camera_frames_raw = _structured_column(events_data, "camera_frame_id", "camera_frame_num", "triggering_camera_frame_id")
+    stimulus_modes_raw = _structured_column(events_data, "stimulus_mode_id", "stimulus_mode")
+    if event_names.size == 0 or step_indices_raw is None or camera_frames_raw is None:
+        return
+
+    step_indices = np.asarray(step_indices_raw, dtype=np.int32)
+    camera_frames = np.asarray(camera_frames_raw, dtype=np.int64)
+    stimulus_modes = (
+        np.asarray([_normalize_stimulus_mode_id(value) for value in stimulus_modes_raw], dtype=np.int32)
+        if stimulus_modes_raw is not None
+        else np.zeros(step_indices.shape[0], dtype=np.int32)
+    )
+
+    starts: Dict[int, int] = {}
+    ends: Dict[int, int] = {}
+    modes: Dict[int, int] = {}
+    for i, name in enumerate(event_names):
+        step_index = int(step_indices[i])
+        if str(name).strip() == EVENT_STEP_START:
+            starts[step_index] = int(camera_frames[i])
+            modes[step_index] = int(stimulus_modes[i])
+        elif str(name).strip() == EVENT_STEP_END:
+            ends[step_index] = int(camera_frames[i])
+
+    if not starts:
+        return
+
+    if "steps" in run_group:
+        del run_group["steps"]
+    steps_group = run_group.create_group("steps")
+    steps_group.attrs["metadata_schema_version"] = 1
+    steps_group.attrs["source"] = "h5_events_and_protocol_snapshot"
+
+    protocol_steps = _protocol_steps_list(protocol)
+    inferred_fps = _infer_camera_fps(metadata)
+    for step_index in sorted(starts):
+        protocol_step = protocol_steps[step_index] if 0 <= step_index < len(protocol_steps) else {}
+        step_params = {
+            key: value for key, value in protocol_step.items()
+            if key not in ("name", "step_name", "step_index")
+        }
+        step_name = str(protocol_step.get("name", protocol_step.get("step_name", f"step_{step_index}")))
+        start_frame = int(starts[step_index])
+        end_frame = int(ends.get(step_index, start_frame + 1))
+        mode_id = int(modes.get(step_index, protocol_step.get("stimulus_mode_id", 0) or 0))
+        mode_name = str(protocol_step.get("stimulus_mode_str") or STIMULUS_MODE.get(mode_id, f"UNKNOWN_{mode_id}"))
+        duration_s = _first_float(protocol_step.get("duration_seconds"), protocol_step.get("duration_s"))
+        if duration_s is None and inferred_fps is not None and inferred_fps > 0:
+            duration_s = max(0.0, (end_frame - start_frame) / inferred_fps)
+
+        step_group = steps_group.create_group(f"step_{step_index}")
+        _update_attrs_json_safe(step_group, {
+            "metadata_schema_version": 1,
+            "step_index": step_index,
+            "step_name": step_name,
+            "stimulus_mode_id": mode_id,
+            "stimulus_mode": mode_name,
+            "start_camera_frame": start_frame,
+            "end_camera_frame": end_frame,
+            "duration_s": duration_s,
+            "raw_protocol_params_json": _json_dumps_safe(step_params),
+        })
+
+        if mode_name == "MOVING_GRATING":
+            _write_moving_grating_step_metadata(step_group, step_params)
+        elif mode_name == "CONCENTRIC_GRATING":
+            _write_concentric_grating_step_metadata(h5, step_group, step_params, arena_config)
+
+    _log(console, f"[green]✓ Materialized {len(starts)} canonical stimulus step metadata groups[/green]")
+
 def import_stimulus_to_zarr(
     stimulus_h5: Optional[Path],
     zarr_path: Path,
@@ -921,6 +1398,7 @@ def import_stimulus_to_zarr(
             _copy_h5_dataset(h5["/tracking_data"], track_group, "bounding_boxes")
 
         # Events
+        events_data: Optional[np.ndarray] = None
         if "/events" in h5:
             events_data = h5["/events"][:]
             events_attrs = _collect_attrs(h5["/events"])
@@ -947,17 +1425,9 @@ def import_stimulus_to_zarr(
                 store_array(events_group, "values", values, {})
 
         # Protocol snapshot
-        proto_key = None
-        if "/protocol_snapshot/protocol_definition_json" in h5:
-            proto_key = "/protocol_snapshot/protocol_definition_json"
-        elif "/protocol_snapshot/protocol_json" in h5:
-            proto_key = "/protocol_snapshot/protocol_json"
-        if proto_key is not None:
-            proto_bytes = h5[proto_key][()]
-            if isinstance(proto_bytes, bytes):
-                run_group.attrs["protocol_json"] = proto_bytes.decode("utf-8")
-            else:
-                run_group.attrs["protocol_json"] = proto_bytes
+        protocol_text, protocol_payload = _read_protocol_snapshot(h5)
+        if protocol_text is not None:
+            run_group.attrs["protocol_json"] = protocol_text
 
         # Calibration snapshot
         if "/calibration_snapshot/arena_config_json" in h5:
@@ -1036,6 +1506,17 @@ def import_stimulus_to_zarr(
                     if matrix is not None:
                         _write_array(cam_dst, "homography_matrix", matrix)
                         cam_dst.attrs["homography_matrix_source"] = "homography_matrix_yml"
+
+        _copy_stimulus_coordinates(h5, run_group, console)
+        _materialize_stimulus_steps(
+            run_group,
+            h5=h5,
+            events_data=events_data,
+            protocol=protocol_payload,
+            arena_config=_read_h5_arena_config(h5) or {},
+            metadata=combined_metadata,
+            console=console,
+        )
 
         if stats:
             run_group.attrs.update(asdict(stats))

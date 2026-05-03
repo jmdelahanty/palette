@@ -363,6 +363,39 @@ class TestParseProtocolSteps:
         assert steps[1].start_frame == 50
         assert steps[1].end_frame == 100
 
+    def test_prefers_canonical_imported_step_metadata(self) -> None:
+        root = _make_kinematics_zarr(n_frames=100)
+        _make_stimulus_zarr(root)
+        stim_run = root["analysis"]["stimulus_runs"]["test_stim"]
+        steps_group = stim_run.create_group("steps")
+        step = steps_group.create_group("step_4")
+        step.attrs.update({
+            "metadata_schema_version": 1,
+            "step_index": 4,
+            "step_name": "canonical_grating",
+            "stimulus_mode_id": 3,
+            "stimulus_mode": "MOVING_GRATING",
+            "start_camera_frame": 12,
+            "end_camera_frame": 42,
+            "duration_s": 1.0,
+            "raw_protocol_params_json": json.dumps({
+                "parameters": {
+                    "orientation_degrees": 270.0,
+                    "speed_mm_per_sec": 5.0,
+                }
+            }),
+        })
+
+        steps, _, _ = parse_protocol_steps(root, fps=30.0)
+
+        assert len(steps) == 1
+        assert steps[0].index == 4
+        assert steps[0].name == "canonical_grating"
+        assert steps[0].start_frame == 12
+        assert steps[0].end_frame == 42
+        assert resolve_grating_direction(steps[0]) == 270.0
+        assert resolve_grating_speed_mm_s(steps[0]) == 5.0
+
 
 # ---------------------------------------------------------------------------
 # Base metric computation

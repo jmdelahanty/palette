@@ -1055,6 +1055,27 @@ Stimulus run data imported from Citrus H5 files. Each run contains:
 | `tracking_data/chaser_states` | Per-frame chaser position/state data (columnar) |
 | `tracking_data/bounding_boxes` | Detection bounding boxes from tracking system (columnar) |
 | `events/` | Experimental events (columnar storage, see below) |
+| `steps/step_<i>/` | Canonical per-step stimulus metadata materialized from events plus protocol JSON |
+| `stimulus_coordinates/` | Mirrored H5 stimulus-coordinate metadata when present |
+
+**Step Metadata** (`steps/step_<i>/`):
+- `metadata_schema_version`: Step metadata schema version.
+- `step_index`, `step_name`, `stimulus_mode_id`, `stimulus_mode`.
+- `start_camera_frame`, `end_camera_frame`, `duration_s`.
+- `raw_protocol_params_json`: Strict-JSON string containing the source protocol step params.
+
+Stimulus-specific source metadata is nested under optional subgroups:
+
+- `moving_grating/`: `orientation_degrees_authored`,
+  `grating_direction_camera_deg`, `direction_mapping_source`,
+  `direction_mapping_status`, speed/frequency attrs, and derived temporal
+  frequency when inputs are available.
+- `concentric_grating/`: authored radial polarity/sign, polarity validation
+  status, source-resolved center attrs, speed/frequency attrs, stimulus role,
+  and optional centering target annulus attrs.
+
+These step groups are source-derived stimulus metadata. Fish-response metrics
+remain under `analysis/stimulus_response_runs/<run>/`.
 
 **Frame Metadata Fields** (`video_metadata/frame_metadata`):
 - Stored as separate datasets (columnar layout) for Zarr v3 compatibility.

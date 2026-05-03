@@ -3,6 +3,18 @@
 Why the data is organized step-first with per-fish arrays embedded within
 each step, rather than fish-first with per-step arrays.
 
+## Source Step Metadata
+
+Canonical stimulus timing and stimulus geometry live upstream in
+`analysis/stimulus_runs/<run>/steps/step_<i>/`. Those groups are materialized
+at H5 import time from Citrus events plus the protocol snapshot and are the
+stable read surface for UI tools that need to know what stimulus was active.
+
+`analysis/stimulus_response_runs/<run>/steps/step_<i>/` reuses the same step
+identity and may copy/reference source attrs for provenance, but it owns only
+derived fish-response metrics. If a response run is absent, callers should
+still be able to inspect stimulus steps from `stimulus_runs`.
+
 ## Layout
 
 ```

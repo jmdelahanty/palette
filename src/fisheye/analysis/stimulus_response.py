@@ -406,6 +406,84 @@ def _load_event_columns(
     )
 
 
+def _attr_int(attrs: Mapping[str, Any], *names: str, default: int = 0) -> int:
+    for name in names:
+        if name not in attrs:
+            continue
+        value = attrs.get(name)
+        if isinstance(value, np.generic):
+            value = value.item()
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _attr_float(attrs: Mapping[str, Any], *names: str, default: float = 0.0) -> float:
+    for name in names:
+        if name not in attrs:
+            continue
+        value = attrs.get(name)
+        if isinstance(value, np.generic):
+            value = value.item()
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _decode_protocol_params_json(raw: Any) -> Dict[str, Any]:
+    if raw is None:
+        return {}
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    if isinstance(raw, np.generic):
+        raw = raw.item()
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _parse_canonical_stimulus_steps(stim_group: zarr.Group) -> List[ProtocolStep]:
+    """Parse import-materialized ``stimulus_runs/<run>/steps`` metadata."""
+
+    if "steps" not in stim_group:
+        return []
+    steps_group = stim_group["steps"]
+    step_names = sorted(
+        (name for name in steps_group.group_keys() if re.fullmatch(r"step_-?\d+", name)),
+        key=lambda name: int(name.split("_", 1)[1]),
+    )
+    steps: List[ProtocolStep] = []
+    for step_name in step_names:
+        group = steps_group[step_name]
+        attrs = group.attrs
+        index = _attr_int(attrs, "step_index", default=int(step_name.split("_", 1)[1]))
+        mode_id = _attr_int(attrs, "stimulus_mode_id", default=0)
+        mode_name = str(attrs.get("stimulus_mode", f"UNKNOWN_{mode_id}"))
+        start_frame = _attr_int(attrs, "start_camera_frame", "start_frame", default=0)
+        end_frame = _attr_int(attrs, "end_camera_frame", "end_frame", default=start_frame + 1)
+        duration_s = _attr_float(attrs, "duration_s", default=0.0)
+        stimulus_params = _decode_protocol_params_json(attrs.get("raw_protocol_params_json"))
+        steps.append(ProtocolStep(
+            index=index,
+            name=str(attrs.get("step_name", step_name)),
+            stimulus_mode=mode_name,
+            stimulus_mode_id=mode_id,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            duration_s=duration_s,
+            stimulus_params=stimulus_params,
+        ))
+    return steps
+
+
 def parse_protocol_steps(
     root: zarr.Group,
     *,
@@ -440,6 +518,14 @@ def parse_protocol_steps(
             protocol = json.loads(proto_raw)
         except (json.JSONDecodeError, TypeError):
             pass
+
+    canonical_steps = _parse_canonical_stimulus_steps(stim_group)
+    if canonical_steps:
+        console.print(
+            f"  Parsed {len(canonical_steps)} canonical protocol step(s) "
+            f"from stimulus_runs/{run_name}/steps/"
+        )
+        return canonical_steps, run_name, protocol
 
     # Read events (columnar format).
     events_group = stim_group["events"]
