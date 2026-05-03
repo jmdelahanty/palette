@@ -84,6 +84,31 @@ class TestLoadCalibrationTransform:
         cal = load_calibration_transform(root)
         np.testing.assert_allclose(cal["homography"], H)
 
+    def test_root_calibration_pixels_per_mm_fallback_inverts_to_pixel_to_mm(self):
+        root = zarr.open_group("memory://", mode="w")
+        calib = root.require_group("calibration")
+        calib.attrs["pixels_per_mm"] = 50.0
+
+        cal = load_calibration_transform(root)
+
+        assert cal["pixel_to_mm"] == pytest.approx(0.02)
+
+    def test_stimulus_run_calibration_fallback(self):
+        root = zarr.open_group("memory://", mode="w")
+        stim_parent = root.require_group("analysis/stimulus_runs")
+        stim_parent.attrs["latest"] = "stimulus_test"
+        cam = stim_parent.require_group("stimulus_test/calibration/2010093")
+        cam.attrs["pixels_per_mm_camera"] = 25.0
+        cam.attrs["pixels_per_mm_projector"] = 4.0
+        H = np.array([[2.0, 0.0, 10.0], [0.0, 2.0, 20.0], [0.0, 0.0, 1.0]])
+        cam.create_array("homography_matrix", data=H)
+
+        cal = load_calibration_transform(root)
+
+        assert cal["pixel_to_mm"] == pytest.approx(0.04)
+        assert cal["pixels_per_mm_projector"] == pytest.approx(4.0)
+        np.testing.assert_allclose(cal["homography"], H)
+
     def test_empty_zarr_returns_nones(self):
         root = zarr.open_group("memory://", mode="w")
         cal = load_calibration_transform(root)

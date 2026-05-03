@@ -198,7 +198,7 @@ analysis/stimulus_response_runs/<run_name>/
             │   ├── frame_indices             int64[n_frames_in_step]
             │   ├── distance_to_center_mm     float32[n_fish x n_frames]
             │   ├── radial_heading_angle_deg  float32[n_fish x n_frames]  # 0=toward center, ±180=away
-            │   ├── radial_speed_mm_s         float32[n_fish x n_frames]  # negative=approaching center
+            │   ├── radial_speed_mm_s         float32[n_fish x n_frames]  # positive=approaching center
             │   └── tangential_speed_mm_s     float32[n_fish x n_frames]  # speed perpendicular to radius
             │
             ├── per_fish/                # Indexed by parent per_fish/ fish_id ordering
@@ -209,7 +209,7 @@ analysis/stimulus_response_runs/<run_name>/
             │   ├── min_distance_to_center_mm       float32[n_fish]
             │   │ # --- centering behavior ---
             │   ├── net_radial_displacement_mm       float32[n_fish]  # negative = moved toward center
-            │   ├── fraction_approaching             float32[n_fish]  # fraction of frames with radial_speed < 0
+            │   ├── fraction_approaching             float32[n_fish]  # fraction of frames with radial_speed > 0
             │   ├── mean_radial_heading_cos          float32[n_fish]  # cos(radial_heading_angle); +1=toward center
             │   ├── time_to_center_s                 float32[n_fish]  # time to first reach center threshold (NaN if never)
             │   ├── fraction_near_center             float32[n_fish]  # fraction of time within threshold of center
@@ -605,6 +605,13 @@ toward (or away from) a center point. The relevant axes are radial
 (toward/away from center) and tangential (orbiting around center), rather
 than a single linear direction.
 
+This section describes the current centering/polar-decomposition outputs. A
+future radial OMR metric family with explicit expanding/contracting polarity,
+outward-positive physical radial fields and stimulus-aligned response scores is
+specified in
+`docs/concentric_omr_stimulus_response_design.md`. That design explicitly
+supports both primary radial-flow stimulus use and centering-utility use.
+
 #### 1. Per-frame radial decomposition
 
 For each fish at each frame, compute position and velocity relative to the
@@ -617,7 +624,7 @@ radial_heading_angle_deg = angle between fish heading and the vector
                            pointing from fish toward center
                            (0° = heading toward center, ±180° = heading away)
 
-radial_speed    = fish_speed * cos(radial_heading_angle)   # negative = approaching
+radial_speed    = fish_speed * cos(radial_heading_angle)   # positive = approaching
 tangential_speed = fish_speed * sin(radial_heading_angle)   # orbiting component
 ```
 
@@ -630,7 +637,7 @@ tangential_speed = fish_speed * sin(radial_heading_angle)   # orbiting component
 | `final_distance_to_center_mm` | Distance at step end |
 | `min_distance_to_center_mm` | Closest approach to center |
 | `net_radial_displacement_mm` | Final minus initial distance (negative = moved toward center) |
-| `fraction_approaching` | Fraction of frames where radial speed < 0 (moving inward) |
+| `fraction_approaching` | Fraction of frames where radial speed > 0 (moving inward) |
 | `mean_radial_heading_cos` | cos(radial_heading_angle); +1 = heading toward center, -1 = away |
 | `time_to_center_s` | Time to first reach within `center_threshold_mm` of center (NaN if never) |
 | `fraction_near_center` | Fraction of step time spent within `center_threshold_mm` |
@@ -639,10 +646,10 @@ tangential_speed = fish_speed * sin(radial_heading_angle)   # orbiting component
 
 | Metric | Description |
 |--------|-------------|
-| `mean_radial_speed_mm_s` | Mean speed component toward/away from center (negative = inward) |
+| `mean_radial_speed_mm_s` | Mean speed component toward/away from center (positive = inward) |
 | `mean_tangential_speed_mm_s` | Mean speed component perpendicular to radius (orbiting) |
 
-A fish that is effectively centered by the grating will show negative
+A fish that is effectively centered by the grating will show positive
 `mean_radial_speed_mm_s` and decreasing `distance_to_center_mm` in the
 time series. A fish that ignores the stimulus will show near-zero radial
 bias and no distance trend.

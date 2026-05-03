@@ -319,6 +319,7 @@ def resolve_tracking_run(
     expected_detect_run: str,
     expected_refined_run: Optional[str] = None,
     expected_arena_assignment_run: Optional[str] = None,
+    expected_source_rowset_path: Optional[str] = None,
 ) -> Tuple[str, zarr.Group]:
     """Resolve the exact tracking run for a detection/refined-detection lineage."""
 
@@ -336,12 +337,15 @@ def resolve_tracking_run(
         source_detect = _normalize_text(run_group.attrs.get("source_detect_run")) if hasattr(run_group, "attrs") else None
         source_refined = _normalize_text(run_group.attrs.get("source_refined_run")) if hasattr(run_group, "attrs") else None
         source_arena_assignment = _normalize_text(run_group.attrs.get("source_arena_assignment_run")) if hasattr(run_group, "attrs") else None
+        source_rowset_path = _normalize_text(run_group.attrs.get("source_rowset_path")) if hasattr(run_group, "attrs") else None
 
         if source_detect != expected_detect_run:
             continue
         if source_refined != expected_refined_run:
             continue
         if expected_arena_assignment_run is not None and source_arena_assignment != expected_arena_assignment_run:
+            continue
+        if expected_source_rowset_path is not None and source_rowset_path != expected_source_rowset_path:
             continue
         matches.append(run_name)
 
@@ -353,6 +357,7 @@ def resolve_tracking_run(
             f"source_detect_run={expected_detect_run}, "
             f"source_refined_run={expected_refined_text}, "
             f"source_arena_assignment_run={expected_arena_text}. "
+            f"source_rowset_path={expected_source_rowset_path or '<any>'}. "
             "Rerun fisheye.tracking.arena_assignment for this lineage."
         )
 
@@ -367,6 +372,7 @@ def load_tracking_ids(
     expected_detect_run: str,
     expected_refined_run: Optional[str] = None,
     expected_arena_assignment_run: Optional[str] = None,
+    expected_source_rowset_path: Optional[str] = None,
     return_metadata: bool = False,
 ) -> Any:
     """Load source-bound track IDs for a detection rowset."""
@@ -376,6 +382,7 @@ def load_tracking_ids(
         expected_detect_run=expected_detect_run,
         expected_refined_run=expected_refined_run,
         expected_arena_assignment_run=expected_arena_assignment_run,
+        expected_source_rowset_path=expected_source_rowset_path,
     )
 
     if "track_ids" not in run_group:

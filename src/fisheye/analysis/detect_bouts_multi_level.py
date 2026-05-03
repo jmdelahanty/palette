@@ -107,6 +107,32 @@ METHOD_VERSION = "detect_bouts_multi_level.v7"
 THRESHOLD_CROSSING_INTERPOLATION = "linear_between_samples"
 
 
+def _json_safe_attr_value(value: Any) -> Any:
+    """Return a strict-JSON-safe value for Zarr attrs.
+
+    Zarr can serialize Python/NumPy NaN values into metadata JSON, but strict
+    JSON consumers reject those files. Optional numeric attrs use None/null.
+    """
+
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, np.ndarray):
+        return _json_safe_attr_value(value.tolist())
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_attr_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_attr_value(item) for item in value]
+    return value
+
+
+def _json_safe_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): _json_safe_attr_value(value) for key, value in attrs.items()}
+
+
 def _duration_seconds_to_frames(duration_s: float, fps: float) -> int:
     """Resolve a duration in seconds to an integer frame count.
 
@@ -2040,15 +2066,11 @@ def detect_and_save_bouts(
         run_group.attrs['threshold_mm'] = threshold_mm
     elif method == "peak":
         run_group.attrs['prominence'] = prominence
-        run_group.attrs['min_peak_height'] = min_peak_height if min_peak_height is not None else float('nan')
+        run_group.attrs['min_peak_height'] = _json_safe_attr_value(min_peak_height)
         run_group.attrs['rel_height'] = rel_height
     elif method == "peak_event":
-        run_group.attrs['min_peak_height_mm_s'] = (
-            float(min_peak_height_mm_s) if min_peak_height_mm_s is not None else float('nan')
-        )
-        run_group.attrs['min_peak_prominence_mm_s'] = (
-            float(min_peak_prominence_mm_s) if min_peak_prominence_mm_s is not None else float('nan')
-        )
+        run_group.attrs['min_peak_height_mm_s'] = _json_safe_attr_value(min_peak_height_mm_s)
+        run_group.attrs['min_peak_prominence_mm_s'] = _json_safe_attr_value(min_peak_prominence_mm_s)
         run_group.attrs['min_peak_distance_s'] = float(min_peak_distance_s)
         run_group.attrs['peak_width_rel_height'] = float(peak_width_rel_height)
         run_group.attrs['peak_event_boundary_mode'] = peak_event_boundary_mode
@@ -2057,7 +2079,7 @@ def detect_and_save_bouts(
     run_group.attrs['source_track_kinematics_run'] = metadata['track_kinematics_run']
     run_group.attrs['track_id'] = track_id
     run_group.attrs['fps'] = fps
-    run_group.attrs['pixel_to_mm'] = metadata.get('pixel_to_mm', float('nan'))
+    run_group.attrs['pixel_to_mm'] = _json_safe_attr_value(metadata.get('pixel_to_mm'))
     run_group.attrs['default_level'] = default_level_key
     run_group.attrs['git_commit'] = git_info['commit_hash']
     run_group.attrs['git_branch'] = git_info['branch']
@@ -2067,7 +2089,7 @@ def detect_and_save_bouts(
         f"{metadata['track_kinematics_run']}/tracks/id_{int(track_id)}"
     )
 
-    parameters = {
+    parameters = _json_safe_attr_value({
         'method': method,
         'threshold_mm': float(threshold_mm) if method == "threshold" else None,
         'prominence': float(prominence) if method == "peak" else None,
@@ -2117,8 +2139,8 @@ def detect_and_save_bouts(
         'peak_event_schema_version': PEAK_EVENT_SCHEMA_VERSION,
         'distance_policy': 'path_length_from_track_frame_path_distance_only',
         'overwrite': bool(overwrite),
-    }
-    inputs = {
+    })
+    inputs = _json_safe_attr_value({
         'zarr_path': str(zarr_path),
         'source_track_kinematics_run': metadata['track_kinematics_run'],
         'source_track_kinematics_stage': metadata.get('track_kinematics_stage'),
@@ -2133,8 +2155,8 @@ def detect_and_save_bouts(
         'fps': float(fps),
         'pixel_to_mm': metadata.get('pixel_to_mm'),
         'n_frames': int(metadata['n_frames']),
-    }
-    provenance = build_stage_provenance(
+    })
+    provenance = _json_safe_attr_value(build_stage_provenance(
         stage="detect_bouts_multi_level",
         created_at_utc=created_at_utc,
         parameters=parameters,
@@ -2148,7 +2170,7 @@ def detect_and_save_bouts(
             'run_path': f"analysis/swim_bout_runs/{run_name}",
             'default_level': default_level_key,
         },
-    )
+    ))
     write_stage_provenance(run_group, provenance)
 
     # Save each speed level's bouts and statistics in subgroups
@@ -2202,12 +2224,8 @@ def detect_and_save_bouts(
             ],
             'peak_event_boundary_mode': peak_event_boundary_mode,
             'shape_split_policy': shape_split_policy,
-            'min_peak_height_mm_s': (
-                float(min_peak_height_mm_s) if min_peak_height_mm_s is not None else float('nan')
-            ),
-            'min_peak_prominence_mm_s': (
-                float(min_peak_prominence_mm_s) if min_peak_prominence_mm_s is not None else float('nan')
-            ),
+            'min_peak_height_mm_s': _json_safe_attr_value(min_peak_height_mm_s),
+            'min_peak_prominence_mm_s': _json_safe_attr_value(min_peak_prominence_mm_s),
             'min_peak_distance_s': float(min_peak_distance_s),
             'peak_width_rel_height': float(peak_width_rel_height),
         }
@@ -2261,6 +2279,7 @@ def detect_and_save_bouts(
             )
             level_specific_attrs['n_gap_censored_bouts'] = int(np.sum(bouts['gap_censored']))
 
+        level_specific_attrs = _json_safe_attrs(level_specific_attrs)
         level_group.attrs.update(level_specific_attrs)
         write_columnar_dataset(level_group, 'bouts', bouts, attrs=level_specific_attrs)
         write_columnar_dataset(level_group, 'peak_events', peak_events, attrs=level_specific_attrs)

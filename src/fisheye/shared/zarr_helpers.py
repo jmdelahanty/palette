@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TypeAlias
+from urllib.parse import unquote, urlparse
 
 import zarr
 
@@ -40,9 +41,19 @@ def _normalize_run_name(value: object) -> str | None:
 def _root_fs_path(root: zarr.Group) -> Path | None:
     raw = getattr(root, "_palette_fs_path", None)
     if raw is None:
+        raw = getattr(root, "store_path", None)
+    if raw is None:
+        raw = getattr(root, "store", None)
+    if raw is None:
         return None
     try:
-        return Path(str(raw))
+        value = str(raw)
+        parsed = urlparse(value)
+        if parsed.scheme == "file":
+            return Path(unquote(parsed.path))
+        if "://" in value:
+            return None
+        return Path(value)
     except Exception:
         return None
 

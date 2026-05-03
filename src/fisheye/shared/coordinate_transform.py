@@ -12,19 +12,143 @@ The homography maps projector -> camera.  To go the other direction
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 
 
+def _safe_get(group: Any, key: str) -> Any:
+    getter = getattr(group, "get", None)
+    if callable(getter):
+        try:
+            return getter(key)
+        except Exception:
+            return None
+    try:
+        return group[key]
+    except Exception:
+        return None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, np.generic):
+        value = value.item()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_group_keys(group: Any) -> Iterable[str]:
+    keys_fn = getattr(group, "group_keys", None)
+    if callable(keys_fn):
+        try:
+            yield from (str(key) for key in keys_fn())
+            return
+        except Exception:
+            pass
+    keys_fn = getattr(group, "keys", None)
+    if callable(keys_fn):
+        try:
+            yield from (str(key) for key in keys_fn())
+        except Exception:
+            return
+
+
+def _read_homography(group: Any) -> Optional[np.ndarray]:
+    if group is None or "homography_matrix" not in group:
+        return None
+    try:
+        matrix = np.asarray(group["homography_matrix"][:], dtype=np.float64)
+    except Exception:
+        return None
+    if matrix.shape != (3, 3):
+        return None
+    return matrix
+
+
+def _merge_calibration_group(result: Dict[str, Any], group: Any) -> None:
+    if group is None:
+        return
+
+    homography = _read_homography(group)
+    if result["homography"] is None and homography is not None:
+        result["homography"] = homography
+
+    attrs = group.attrs if hasattr(group, "attrs") else {}
+    if result["pixel_to_mm"] is None:
+        pixel_to_mm = _as_float(attrs.get("pixel_to_mm"))
+        if pixel_to_mm is not None:
+            result["pixel_to_mm"] = pixel_to_mm
+        else:
+            pixels_per_mm = (
+                _as_float(attrs.get("pixels_per_mm_camera"))
+                or _as_float(attrs.get("pixels_per_mm"))
+            )
+            if pixels_per_mm is not None and pixels_per_mm > 0:
+                result["pixel_to_mm"] = 1.0 / pixels_per_mm
+
+    if result["pixels_per_mm_projector"] is None:
+        result["pixels_per_mm_projector"] = _as_float(attrs.get("pixels_per_mm_projector"))
+
+    if result["z_eff_mm"] is None:
+        z_eff = _as_float(attrs.get("z_eff_mm"))
+        if z_eff is not None and z_eff > 0:
+            result["z_eff_mm"] = z_eff
+
+    if result["arena_center_px"] is None:
+        cx = _as_float(attrs.get("arena_center_x_px"))
+        cy = _as_float(attrs.get("arena_center_y_px"))
+        if cx is not None and cy is not None:
+            result["arena_center_px"] = (cx, cy)
+
+
+def _merge_stimulus_run_calibration(
+    result: Dict[str, Any],
+    root: Any,
+    stimulus_run: Optional[str],
+) -> None:
+    analysis = _safe_get(root, "analysis")
+    stim_parent = _safe_get(analysis, "stimulus_runs") if analysis is not None else None
+    if stim_parent is None:
+        return
+
+    run_name = stimulus_run
+    if not run_name:
+        attrs = stim_parent.attrs if hasattr(stim_parent, "attrs") else {}
+        latest = attrs.get("latest")
+        if latest is not None:
+            run_name = str(latest)
+    if not run_name:
+        return
+
+    stim_group = _safe_get(stim_parent, run_name)
+    calib_group = _safe_get(stim_group, "calibration") if stim_group is not None else None
+    if calib_group is None:
+        return
+
+    for camera_id in _iter_group_keys(calib_group):
+        cam_group = _safe_get(calib_group, camera_id)
+        if cam_group is not None:
+            _merge_calibration_group(result, cam_group)
+
+
 def load_calibration_transform(
     root: Any,
+    stimulus_run: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Load calibration from the zarr calibration group.
+    """Load calibration from canonical and stimulus-run Zarr calibration groups.
+
+    Import-time normalization writes machine-readable fields to
+    ``analysis/calibration``. Older archives may only have root ``calibration`` or
+    per-stimulus-run ``analysis/stimulus_runs/<run>/calibration/<camera_id>``;
+    those are treated as conservative fallbacks.
 
     Returns a dict with keys:
     - ``homography``: 3x3 float64 array (projector -> camera), or None
-    - ``pixel_to_mm``: float (camera pixels to mm), or None
+    - ``pixel_to_mm``: float (camera millimetres per pixel), or None
     - ``arena_center_px``: (x, y) in camera pixels, or None
     - ``pixels_per_mm_projector``: float (projector/texture pixels to mm), or None
     - ``z_eff_mm``: float (effective viewing distance through media), or None
@@ -37,39 +161,10 @@ def load_calibration_transform(
         "z_eff_mm": None,
     }
 
-    calib = root.get("analysis", {})
-    if hasattr(calib, "__getitem__"):
-        calib = calib.get("calibration")
-    if calib is None:
-        return result
-
-    # Homography matrix.
-    if "homography_matrix" in calib:
-        h = calib["homography_matrix"][:]
-        if h.shape == (3, 3):
-            result["homography"] = h.astype(np.float64)
-
-    # pixel_to_mm (camera space).
-    attrs = calib.attrs if hasattr(calib, "attrs") else {}
-    ptm = attrs.get("pixel_to_mm") or attrs.get("pixels_per_mm_camera")
-    if ptm is not None:
-        result["pixel_to_mm"] = float(ptm)
-
-    # pixels_per_mm_projector (projector/texture space).
-    ppm_proj = attrs.get("pixels_per_mm_projector")
-    if ppm_proj is not None:
-        result["pixels_per_mm_projector"] = float(ppm_proj)
-
-    # z_eff_mm (effective viewing distance for visual angle computation).
-    z_eff = attrs.get("z_eff_mm")
-    if z_eff is not None:
-        result["z_eff_mm"] = float(z_eff)
-
-    # Arena center in camera pixels.
-    cx = attrs.get("arena_center_x_px")
-    cy = attrs.get("arena_center_y_px")
-    if cx is not None and cy is not None:
-        result["arena_center_px"] = (float(cx), float(cy))
+    analysis = _safe_get(root, "analysis")
+    _merge_calibration_group(result, _safe_get(analysis, "calibration") if analysis is not None else None)
+    _merge_calibration_group(result, _safe_get(root, "calibration"))
+    _merge_stimulus_run_calibration(result, root, stimulus_run)
 
     return result
 
@@ -183,6 +278,7 @@ def visual_angle_deg(
 def resolve_concentric_center_mm(
     root: Any,
     step_params: Dict[str, Any],
+    stimulus_run: Optional[str] = None,
 ) -> Optional[Tuple[float, float]]:
     """Resolve the concentric grating center in camera-space mm.
 
@@ -199,7 +295,7 @@ def resolve_concentric_center_mm(
     if cx_mm is not None and cy_mm is not None:
         return (float(cx_mm), float(cy_mm))
 
-    cal = load_calibration_transform(root)
+    cal = load_calibration_transform(root, stimulus_run=stimulus_run)
 
     # 2. Projector-space center + homography.
     cx_proj = step_params.get("center_x_px") or step_params.get("center_x_texture_px")

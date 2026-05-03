@@ -89,6 +89,7 @@ from typing import Dict, Iterable, Optional, Tuple
 import h5py
 import numpy as np
 from numpy.lib import recfunctions as rfn
+import yaml
 import zarr
 from rich.console import Console
 
@@ -140,6 +141,195 @@ def _parse_json_payload(raw: object) -> Optional[Dict[str, object]]:
     if isinstance(raw, dict):
         return raw
     return None
+
+
+def _decode_h5_text(raw: object) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("utf-8", "ignore")
+    if isinstance(raw, np.generic):
+        raw = raw.item()
+    if isinstance(raw, str):
+        return raw
+    return None
+
+
+def _parse_homography_matrix_yml(raw: object) -> Optional[np.ndarray]:
+    """Parse Citrus/OpenCV homography YAML into a numeric 3x3 matrix."""
+    text = _decode_h5_text(raw)
+    if not text:
+        return None
+
+    cleaned_lines = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("%YAML") or (stripped == "---" and not cleaned_lines):
+            continue
+        cleaned_lines.append(line)
+
+    try:
+        parsed = yaml.safe_load("\n".join(cleaned_lines)) or {}
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    matrix_meta = parsed.get("homography_matrix")
+    if isinstance(matrix_meta, dict):
+        rows = int(matrix_meta.get("rows", 0) or 0)
+        cols = int(matrix_meta.get("cols", 0) or 0)
+        data = matrix_meta.get("data")
+        if rows == 3 and cols == 3 and isinstance(data, (list, tuple)):
+            return np.asarray(data, dtype=np.float64).reshape(3, 3)
+
+    data = parsed.get("data")
+    if isinstance(data, (list, tuple)) and len(data) == 9:
+        return np.asarray(data, dtype=np.float64).reshape(3, 3)
+    return None
+
+
+def _first_camera_config(arena_config: Dict[str, object]) -> Dict[str, object]:
+    camera_configs = arena_config.get("camera_calibrations")
+    if not isinstance(camera_configs, list) or not camera_configs:
+        return {}
+    active_camera_id = arena_config.get("active_camera_id")
+    for item in camera_configs:
+        if isinstance(item, dict) and str(item.get("camera_id")) == str(active_camera_id):
+            return item
+    first = camera_configs[0]
+    return first if isinstance(first, dict) else {}
+
+
+def _set_optional_float_attr(group: zarr.Group, name: str, value: object) -> None:
+    if value is None:
+        return
+    try:
+        group.attrs[name] = float(value)
+    except (TypeError, ValueError):
+        return
+
+
+def _set_optional_int_attr(group: zarr.Group, name: str, value: object) -> None:
+    if value is None:
+        return
+    try:
+        group.attrs[name] = int(value)
+    except (TypeError, ValueError):
+        return
+
+
+def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
+    if name in group:
+        del group[name]
+    group.create_array(name, data=data, chunks=data.shape, overwrite=True)
+
+
+def _materialize_analysis_calibration(
+    root: zarr.Group,
+    h5: h5py.File,
+    *,
+    source_h5: Path,
+    run_name: str,
+    console: Optional[Console],
+) -> None:
+    """Normalize H5 calibration snapshot into analysis/calibration.
+
+    The stimulus run still keeps the raw/mirrored H5 snapshot. This canonical
+    group is the machine-readable analysis surface used by downstream metrics.
+    """
+    if "/calibration_snapshot" not in h5:
+        return
+
+    calib_src = h5["/calibration_snapshot"]
+    arena_config = _read_h5_arena_config(h5) or {}
+    camera_config = _first_camera_config(arena_config)
+
+    analysis = root.require_group("analysis")
+    calib_dst = analysis.require_group("calibration")
+    calib_dst.attrs["schema_version"] = 1
+    calib_dst.attrs["source"] = "h5_calibration_snapshot"
+    calib_dst.attrs["source_h5"] = str(source_h5.resolve())
+    calib_dst.attrs["source_stimulus_run"] = run_name
+
+    active_camera_id = arena_config.get("active_camera_id") or camera_config.get("camera_id")
+    if active_camera_id is not None:
+        calib_dst.attrs["active_camera_id"] = str(active_camera_id)
+        calib_dst.attrs["primary_camera_id"] = str(active_camera_id)
+
+    ppm_camera = camera_config.get("pixels_per_mm_camera")
+    if ppm_camera is None and isinstance(active_camera_id, (str, int)) and str(active_camera_id) in calib_src:
+        ppm_camera = calib_src[str(active_camera_id)].attrs.get("pixels_per_mm_camera")
+    _set_optional_float_attr(calib_dst, "pixels_per_mm_camera", ppm_camera)
+    if ppm_camera is not None:
+        try:
+            ppm_camera_f = float(ppm_camera)
+            if ppm_camera_f > 0:
+                calib_dst.attrs["pixel_to_mm"] = 1.0 / ppm_camera_f
+        except (TypeError, ValueError):
+            pass
+
+    ppm_projector = camera_config.get("pixels_per_mm_projector")
+    if ppm_projector is None and isinstance(active_camera_id, (str, int)) and str(active_camera_id) in calib_src:
+        ppm_projector = calib_src[str(active_camera_id)].attrs.get("pixels_per_mm_projector")
+    _set_optional_float_attr(calib_dst, "pixels_per_mm_projector", ppm_projector)
+
+    _set_optional_float_attr(calib_dst, "real_world_ref_mm", camera_config.get("real_world_ref_mm"))
+    _set_optional_int_attr(calib_dst, "native_width_px", camera_config.get("native_width_px"))
+    _set_optional_int_attr(calib_dst, "native_height_px", camera_config.get("native_height_px"))
+
+    # Preserve Citrus arena config values with explicit coordinate-space names.
+    for key in (
+        "experimental_area_center_x_px",
+        "experimental_area_center_y_px",
+        "experimental_area_radius_px",
+        "experimental_area_radius_mm",
+        "experimental_area_width_px",
+        "experimental_area_height_px",
+        "sub_arena_x_px",
+        "sub_arena_y_px",
+        "sub_arena_width_px",
+        "sub_arena_height_px",
+        "sub_arena_width_mm",
+        "sub_arena_height_mm",
+        "calculated_z_eff_mm",
+    ):
+        _set_optional_float_attr(calib_dst, key, arena_config.get(key))
+    if "experimental_area_shape" in arena_config:
+        calib_dst.attrs["experimental_area_shape"] = str(arena_config["experimental_area_shape"])
+
+    z_eff = arena_config.get("calculated_z_eff_mm")
+    try:
+        z_eff_f = float(z_eff) if z_eff is not None else None
+    except (TypeError, ValueError):
+        z_eff_f = None
+    if z_eff_f is not None and z_eff_f > 0:
+        calib_dst.attrs["z_eff_mm"] = z_eff_f
+        calib_dst.attrs["z_eff_source"] = "calibration_snapshot.arena_config_json.calculated_z_eff_mm"
+    elif z_eff is not None:
+        calib_dst.attrs["z_eff_status"] = "unusable_nonpositive"
+
+    camera_ids = [
+        key for key in calib_src.keys()
+        if key != "arena_config_json" and isinstance(calib_src.get(key), h5py.Group)
+    ]
+    homography_written = False
+    for camera_id in camera_ids:
+        cam_src = calib_src[camera_id]
+        if "homography_matrix_yml" not in cam_src:
+            continue
+        matrix = _parse_homography_matrix_yml(cam_src["homography_matrix_yml"][()])
+        if matrix is None:
+            continue
+        _write_array(calib_dst, "homography_matrix", matrix)
+        calib_dst.attrs["homography_source"] = f"calibration_snapshot/{camera_id}/homography_matrix_yml"
+        homography_written = True
+        break
+
+    if not homography_written:
+        calib_dst.attrs["homography_status"] = "missing_numeric_matrix"
+
+    _log(console, "[green]✓ Normalized H5 calibration to analysis/calibration[/green]")
 
 
 def _filter_camera_metadata(payload: Dict[str, object]) -> Dict[str, object]:
@@ -590,6 +780,14 @@ def import_stimulus_to_zarr(
 
     run_group = runs_parent.create_group(run_name)
     with h5py.File(resolved_h5, "r") as h5:
+        _materialize_analysis_calibration(
+            root,
+            h5,
+            source_h5=resolved_h5,
+            run_name=run_name,
+            console=console,
+        )
+
         analysis_meta = root.require_group("analysis_metadata")
         subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
         if subject_meta:
@@ -832,6 +1030,12 @@ def import_stimulus_to_zarr(
                             chunks=arr.shape,
                             overwrite=True,
                         )
+
+                if "homography_matrix_yml" in cam_src and "homography_matrix" not in cam_dst:
+                    matrix = _parse_homography_matrix_yml(cam_src["homography_matrix_yml"][()])
+                    if matrix is not None:
+                        _write_array(cam_dst, "homography_matrix", matrix)
+                        cam_dst.attrs["homography_matrix_source"] = "homography_matrix_yml"
 
         if stats:
             run_group.attrs.update(asdict(stats))

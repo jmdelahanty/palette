@@ -270,6 +270,70 @@ def test_causal_smoothing_rejects_savitzky_golay_for_now() -> None:
         )
 
 
+def test_hysteresis_band_policy_reset_preserves_legacy_debounce() -> None:
+    # Displacements: high, low, in-band, low, low, low.
+    # Legacy reset treats the in-band sample as enough motion evidence to
+    # restart exit debounce, so the final low frame is the first zeroed sample.
+    displacements = np.array([5.0, 1.0, 3.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    positions = np.column_stack(
+        [np.concatenate([[0.0], np.cumsum(displacements)]), np.zeros(displacements.size + 1)]
+    )
+
+    speeds = compute_track_speed(
+        np.arange(positions.shape[0], dtype=np.int64),
+        positions,
+        fps=1.0,
+        smooth_seconds=1.0,
+        hysteresis_high_px=4.0,
+        hysteresis_low_px=2.0,
+        hysteresis_min_frames=3,
+        hysteresis_band_policy="reset",
+    )
+
+    np.testing.assert_allclose(
+        speeds.frame_path_distance_filtered,
+        np.array([0.0, 5.0, 1.0, 3.0, 1.0, 1.0, 0.0], dtype=np.float32),
+    )
+
+
+def test_hysteresis_band_policy_latch_is_schmitt_style_dead_band() -> None:
+    # Schmitt-style latch leaves low_count unchanged in the low/high dead band,
+    # so the exit debounce fires earlier than legacy reset on the same signal.
+    displacements = np.array([5.0, 1.0, 3.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    positions = np.column_stack(
+        [np.concatenate([[0.0], np.cumsum(displacements)]), np.zeros(displacements.size + 1)]
+    )
+
+    speeds = compute_track_speed(
+        np.arange(positions.shape[0], dtype=np.int64),
+        positions,
+        fps=1.0,
+        smooth_seconds=1.0,
+        hysteresis_high_px=4.0,
+        hysteresis_low_px=2.0,
+        hysteresis_min_frames=3,
+        hysteresis_band_policy="latch",
+    )
+
+    np.testing.assert_allclose(
+        speeds.frame_path_distance_filtered,
+        np.array([0.0, 5.0, 1.0, 3.0, 1.0, 0.0, 0.0], dtype=np.float32),
+    )
+
+
+def test_hysteresis_band_policy_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="hysteresis band policy"):
+        compute_track_speed(
+            np.arange(3, dtype=np.int64),
+            np.column_stack([np.arange(3, dtype=np.float32), np.zeros(3, dtype=np.float32)]),
+            fps=1.0,
+            smooth_seconds=1.0,
+            hysteresis_high_px=4.0,
+            hysteresis_low_px=2.0,
+            hysteresis_band_policy="unknown",
+        )
+
+
 def test_save_track_kinematics_tracks_persists_turning_arrays() -> None:
     track_ids = np.array([0, 0], dtype=np.int64)
     frames = np.array([0, 1], dtype=np.int64)

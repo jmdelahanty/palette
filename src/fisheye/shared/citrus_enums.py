@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+import numpy as np
+
 # ---------------------------------------------------------------------------
 # Event types (modern Citrus encoding)
 # ---------------------------------------------------------------------------
@@ -121,6 +123,22 @@ CHASER_LOOM_MODE: Dict[int, str] = {
 # ---------------------------------------------------------------------------
 
 
+def _decode_enum_name(value: Any) -> str:
+    """Decode enum names from UTF-8 strings, bytes, or fixed-width uint8 rows."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").rstrip("\x00")
+    if isinstance(value, str):
+        return value.rstrip("\x00")
+
+    arr = np.asarray(value)
+    if arr.dtype.kind in ("u", "i") and arr.ndim >= 1:
+        payload = bytes(int(item) for item in arr.ravel() if int(item) != 0)
+        return payload.decode("utf-8", errors="replace").rstrip("\x00")
+    if arr.dtype.kind == "S":
+        return bytes(arr.tobytes()).decode("utf-8", errors="replace").rstrip("\x00")
+    return str(value).rstrip("\x00")
+
+
 def _load_enum_from_zarr(
     root: Any,
     path: str,
@@ -134,15 +152,9 @@ def _load_enum_from_zarr(
         enum_group = root[path]
         ids = enum_group["id"][:]
         names = enum_group["name"][:]
-        # Decode bytes if needed.
-        decoded_names = []
-        for n in names:
-            if isinstance(n, bytes):
-                decoded_names.append(n.decode("utf-8", errors="replace"))
-            else:
-                decoded_names.append(str(n))
+        decoded_names = [_decode_enum_name(n) for n in names]
         return {int(i): n for i, n in zip(ids, decoded_names)}
-    except (KeyError, TypeError, IndexError):
+    except (KeyError, TypeError, IndexError, ValueError):
         return dict(fallback)
 
 
@@ -150,7 +162,13 @@ def load_event_types(root: Optional[Any] = None) -> Dict[int, str]:
     """Load event type enum from zarr data, falling back to hardcoded dict."""
     if root is None:
         return dict(EXPERIMENT_EVENT_TYPE)
-    return _load_enum_from_zarr(root, "analysis/enums/event_types", EXPERIMENT_EVENT_TYPE)
+    # Modern imports preserve Citrus' enum table name: analysis/enums/events.
+    # Older Palette docs/code sometimes used analysis/enums/event_types.
+    for path in ("analysis/enums/events", "analysis/enums/event_types"):
+        mapping = _load_enum_from_zarr(root, path, {})
+        if mapping:
+            return mapping
+    return dict(EXPERIMENT_EVENT_TYPE)
 
 
 def load_stimulus_modes(root: Optional[Any] = None) -> Dict[int, str]:

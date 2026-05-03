@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -43,8 +44,10 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return _json_safe(value.tolist())
     if isinstance(value, np.generic):
-        return value.item()
-    if value is None or isinstance(value, (str, int, float, bool)):
+        return _json_safe(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     return str(value)
 

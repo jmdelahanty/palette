@@ -1117,18 +1117,29 @@ Common enums:
 
 ### `analysis/calibration/`
 
-Calibration metadata extracted from H5 files:
+Calibration metadata normalized from H5 `/calibration_snapshot` data at stimulus
+import time. The raw/mirrored H5 calibration snapshot remains under
+`analysis/stimulus_runs/<run>/calibration/<camera_id>`, while this group is the
+machine-readable analysis surface.
 
 **Attributes**:
-- `pixel_to_mm`: Camera-space calibration (pixels/mm) **[for camera space coordinates]**
-- `pixels_per_mm_camera`: Alias for `pixel_to_mm` (pixels/mm)
-- `pixels_per_mm_projector`: Projector/texture-space calibration (pixels/mm) **[for texture space coordinates]**
+- `pixel_to_mm`: Camera-space conversion in millimetres per raw camera pixel, derived as `1 / pixels_per_mm_camera`
+- `pixels_per_mm_camera`: Citrus camera calibration in raw camera pixels per physical millimetre in the dish/arena plane
+- `pixels_per_mm_projector`: Citrus projector/canvas calibration in stimulus pixels per physical millimetre in the displayed arena plane
 - `z_eff_mm`: Effective viewing distance through media
+- `z_eff_status`: Present when acquisition provided a non-usable value, for example `unusable_nonpositive`
+- `homography_status`: Present when no numeric homography matrix was available, for example `missing_numeric_matrix`
+- `source_h5`, `source_stimulus_run`: Source lineage for the normalized calibration
 - `measured_stimulus_fps`: Measured stimulus frame rate (from H5 frame metadata timestamps)
 - `measured_fps`: Legacy alias for `measured_stimulus_fps`
 - `arena_shape`: CIRCLE or RECTANGLE
 - `arena_center_x_px`, `arena_center_y_px`: Arena center
 - `arena_radius_px` or `arena_width_px`, `arena_height_px`: Arena dimensions
+
+**Arrays**:
+- `homography_matrix`: 3×3 projector/texture → camera transform when the H5
+  includes a numeric `homography_matrix_yml`. Archives with only homography PNG
+  buffers must mark the matrix absent rather than infer one.
 
 **CRITICAL CALIBRATION NOTE**:
 There are **two separate calibrations** for the two coordinate spaces:

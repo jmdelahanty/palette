@@ -34,8 +34,8 @@ def test_write_png_visualization_artifact_stores_png_bytes_and_manifest(tmp_path
         artifact_signature="sig-1",
         created_at_utc="2026-04-26T00:00:00+00:00",
         source_paths={"speed": "tracks/id_0/speed_smoothed_mm"},
-        parameters={"dpi": np.int64(150)},
-        extra_attrs={"plot_family": "example"},
+        parameters={"dpi": np.int64(150), "missing_threshold": np.nan},
+        extra_attrs={"plot_family": "example", "nonfinite_metric": np.float32(np.inf)},
     )
 
     assert result.path == "visualizations/example_summary_png"
@@ -49,7 +49,11 @@ def test_write_png_visualization_artifact_stores_png_bytes_and_manifest(tmp_path
     assert artifact.attrs["content_sha256"] == hashlib.sha256(payload).hexdigest()
     assert artifact.attrs["source_paths"]["speed"] == "tracks/id_0/speed_smoothed_mm"
     assert artifact.attrs["parameters"]["dpi"] == 150
+    assert artifact.attrs["parameters"]["missing_threshold"] is None
     assert artifact.attrs["plot_family"] == "example"
+    assert artifact.attrs["nonfinite_metric"] is None
+    json.dumps(dict(artifact.attrs), allow_nan=False)
+    json.dumps(dict(run.attrs), allow_nan=False)
 
     manifest = run.attrs["visualizations"]
     entry = manifest["example_summary_png"]

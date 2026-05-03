@@ -253,6 +253,22 @@ Important behavior in
 - temporal smoothing can be moving-average or Savitzky-Golay
 - moving-average smoothing can be `centered` or `causal`
 
+Hysteresis now records an explicit `hysteresis_band_policy`:
+
+- `reset`: historical Palette behavior. A frame with displacement between
+  `hysteresis_low_px` and `hysteresis_high_px` keeps the current moving/stopped
+  state and resets the below-low exit counter. This favors not ending bouts too
+  early, but weak post-bout flicker can extend bout tails.
+- `latch`: Schmitt-style behavior. A frame in the low/high dead band keeps the
+  current state and leaves the below-low counter unchanged. This is closer to
+  textbook hysteresis semantics: cross `high` to enter moving, remain below
+  `low` long enough to exit, and treat the in-band region as neutral.
+
+The policy is part of the track-kinematics contract and must be persisted in run
+attrs/provenance. Do not compare `speed_filtered`, bout boundaries, or
+stimulus-response metrics across runs unless the hysteresis thresholds,
+`hysteresis_min_frames`, and `hysteresis_band_policy` match.
+
 This is conservative and generally reasonable for current data quality:
 
 - it avoids inventing distance through gaps

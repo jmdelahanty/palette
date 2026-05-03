@@ -120,6 +120,19 @@ def _infer_num_frames(
     )
 
 
+def _get_group_by_path(root: zarr.Group, path: str) -> zarr.Group:
+    """Resolve a slash-delimited group path for zarr groups and test fakes."""
+
+    current = root
+    for part in path.split("/"):
+        if not part:
+            continue
+        if part not in current:
+            raise KeyError(path)
+        current = current[part]
+    return current
+
+
 def _resolve_frame_shape(root: zarr.Group, detection_group: zarr.Group) -> Tuple[int, int]:
     """Return (height, width) using detection metadata or fallbacks."""
 
@@ -135,8 +148,18 @@ def _resolve_frame_shape(root: zarr.Group, detection_group: zarr.Group) -> Tuple
         return None, None
 
     attrs = detection_group.attrs
-    height = attrs.get("inference_height") or attrs.get("source_video_height") or attrs.get("source_full_height")
-    width = attrs.get("inference_width") or attrs.get("source_video_width") or attrs.get("source_full_width")
+    height = (
+        attrs.get("inference_height")
+        or attrs.get("source_video_height")
+        or attrs.get("source_full_height")
+        or attrs.get("height")
+    )
+    width = (
+        attrs.get("inference_width")
+        or attrs.get("source_video_width")
+        or attrs.get("source_full_width")
+        or attrs.get("width")
+    )
 
     if not height or not width:
         for key in (
@@ -181,6 +204,26 @@ def _resolve_frame_shape(root: zarr.Group, detection_group: zarr.Group) -> Tuple
     return int(height), int(width)
 
 
+def _resolve_assignment_shape(
+    root: zarr.Group,
+    detection_group: zarr.Group,
+    arena_masks: Sequence[Dict[str, Any]],
+) -> Tuple[int, int]:
+    """Return the pixel coordinate shape used by arena mask definitions."""
+
+    for mask in arena_masks:
+        image_shape = mask.get("image_shape")
+        if isinstance(image_shape, (list, tuple)) and len(image_shape) >= 2:
+            try:
+                height = int(image_shape[0])
+                width = int(image_shape[1])
+            except (TypeError, ValueError):
+                continue
+            if height > 0 and width > 0:
+                return height, width
+    return _resolve_frame_shape(root, detection_group)
+
+
 def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optional[List[Dict]]:
     """
     Create a single ROI from the dish mask for single-fish experiments.
@@ -203,6 +246,8 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
         mask_attr = analysis_meta.attrs['dish_mask']
         mask_data = dict(mask_attr)
         shape = mask_data.get('shape')
+        metrics = mask_data.get("metrics") if isinstance(mask_data.get("metrics"), dict) else {}
+        image_shape = metrics.get("image_shape")
         if not shape:
             if 'detected_circle' in mask_data:
                 shape = 'circle'
@@ -218,7 +263,8 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
                 return [{
                     'id': 0,
                     'roi_pixels': [x, y, w, h],
-                    'source': 'dish_mask_rectangle'
+                    'source': 'dish_mask_rectangle',
+                    'image_shape': image_shape,
                 }]
         
         if shape == 'circle' and 'detected_circle' in mask_data:
@@ -239,7 +285,8 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
             return [{
                 'id': 0,
                 'roi_pixels': [x, y, w, h],
-                'source': 'dish_mask_circle'
+                'source': 'dish_mask_circle',
+                'image_shape': image_shape,
             }]
     
     # Try detection config as fallback
@@ -306,7 +353,8 @@ def _missing_assignment_result(*, setup_type: str, reason: str) -> Dict[str, Any
 def assign_arenas_spatial(
     zarr_path: str,
     config: Dict[str, Any],
-    console: Optional[Console] = None
+    console: Optional[Console] = None,
+    source_rowset_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Assign detections to arenas based on spatial location (sub-dish ROIs).
@@ -325,6 +373,9 @@ def assign_arenas_spatial(
         zarr_path: Path to zarr archive
         config: Pipeline configuration dictionary
         console: Rich console for output
+        source_rowset_path: Optional exact rowset to assign. Use this when a
+            downstream crop/keypoint rowset, not refined-detect instances, is
+            the row identity that consumers must track.
         
     Returns:
         Dictionary with summary statistics
@@ -498,8 +549,43 @@ def assign_arenas_spatial(
     detection_group = None
     source_detect_run = None
     assignment_source = 'detect_raw'
+    selected_source_rowset_path = source_rowset_path
     
-    if refined_parent is not None:
+    if source_rowset_path:
+        detection_group = _get_group_by_path(root, source_rowset_path)
+        parts = source_rowset_path.split("/")
+        head = parts[0] if parts else ""
+        if head == "crop_runs":
+            refined_run_name = detection_group.attrs.get("source_refined_run")
+            source_detect_run = detection_group.attrs.get("source_detect_run")
+            assignment_source = "explicit_crop_rows"
+        elif head == "refined_detect_runs":
+            if len(parts) < 2:
+                raise ValueError(f"Malformed refined source rowset path: {source_rowset_path}")
+            refined_run_name = parts[1]
+            refined_parent_group = _get_group_by_path(root, "/".join(parts[:2]))
+            source_detect_run = refined_parent_group.attrs.get("source_detect_run")
+            assignment_source = "explicit_refined_rows"
+        elif head == "detect_runs":
+            if len(parts) < 2:
+                raise ValueError(f"Malformed detect source rowset path: {source_rowset_path}")
+            source_detect_run = parts[1]
+            assignment_source = "explicit_detect_rows"
+        else:
+            raise ValueError(
+                "Unsupported --source-rowset. Expected crop_runs/, detect_runs/, "
+                f"or refined_detect_runs/ path (got {source_rowset_path})."
+            )
+        if not source_detect_run:
+            raise ValueError(
+                f"Unable to determine source_detect_run for source rowset {source_rowset_path}."
+            )
+        console.print(f"[cyan]Using explicit arena-assignment rowset:[/cyan] {source_rowset_path}")
+        if refined_run_name:
+            console.print(f"  Source refined run: {refined_run_name}")
+        console.print(f"  Source detect run: {source_detect_run}")
+
+    if detection_group is None and refined_parent is not None:
         candidate_run = refined_parent.attrs.get('latest')
         if candidate_run and candidate_run in refined_parent:
             candidate_group = refined_parent[candidate_run]
@@ -508,6 +594,7 @@ def assign_arenas_spatial(
                 detection_group = candidate_group['instances']
                 source_detect_run = candidate_group.attrs.get('source_detect_run')
                 assignment_source = 'refined_instances'
+                selected_source_rowset_path = f"refined_detect_runs/{refined_run_name}/instances"
                 console.print(f"[cyan]Using refined detections:[/cyan] refined_detect_runs/{refined_run_name} (instances)")
                 if source_detect_run:
                     console.print(f"  Source detect run: {source_detect_run}")
@@ -524,6 +611,7 @@ def assign_arenas_spatial(
         detection_group = detect_parent[latest_detect_run]
         source_detect_run = latest_detect_run
         assignment_source = 'detect_raw'
+        selected_source_rowset_path = f"detect_runs/{source_detect_run}"
         console.print(f"[cyan]Using raw detections:[/cyan] detect_runs/{source_detect_run}")
     else:
         if not source_detect_run:
@@ -544,6 +632,7 @@ def assign_arenas_spatial(
         },
         'parameter_source': param_source,
         'source_detect_run': source_detect_run,
+        'source_rowset_path': selected_source_rowset_path,
         'assignment_method': 'spatial',
         'assignment_source': assignment_source,
         'num_arenas': len(subdish_masks)
@@ -568,8 +657,10 @@ def assign_arenas_spatial(
             frame_counts = np.pad(frame_counts, (0, max_frame - num_frames), mode='constant')
             num_frames = len(frame_counts)
     
-    # Get image dimensions for coordinate conversion
-    height_px, width_px = _resolve_frame_shape(root, detection_group)
+    # Get image dimensions for coordinate conversion. Dish/subdish masks are
+    # stored in the coordinate system they were tuned in, which can differ from
+    # the source rowset metadata for crop-backed rowsets.
+    height_px, width_px = _resolve_assignment_shape(root, detection_group, subdish_masks)
     ds_img_shape = (height_px, width_px)
     
     console.print(f"Processing [green]{len(bbox_coords)}[/green] detections...")
@@ -667,6 +758,7 @@ def assign_arenas_spatial(
     env_info = get_environment_info()
     provenance_inputs = {
         'source_detect_run': source_detect_run,
+        'source_rowset_path': selected_source_rowset_path,
         'assignment_source': assignment_source,
     }
     if refined_run_name:
@@ -717,12 +809,6 @@ def assign_arenas_spatial(
     parent_group = root['arena_assignment_runs']
     parent_group.attrs['latest'] = run_group_name
 
-    source_rowset_path = (
-        f"refined_detect_runs/{refined_run_name}/instances"
-        if refined_run_name
-        else f"detect_runs/{source_detect_run}"
-    )
-
     try:
         track_run_name, _track_group, tracking_summary = (
             write_single_subject_per_arena_tracking_run(
@@ -732,7 +818,7 @@ def assign_arenas_spatial(
                 source_detect_run=str(source_detect_run),
                 source_refined_run=str(refined_run_name) if refined_run_name else None,
                 source_arena_assignment_run=run_group_name,
-                source_rowset_path=source_rowset_path,
+                source_rowset_path=str(selected_source_rowset_path),
                 conflict_policy="fail",
                 console=console,
             )
@@ -759,6 +845,7 @@ def assign_arenas_spatial(
                 "assignment_source": assignment_source,
                 "source_detect_run": source_detect_run,
                 "source_refined_run": refined_run_name,
+                "source_rowset_path": selected_source_rowset_path,
                 "num_arenas": len(subdish_masks),
                 "assigned_detections": int(n_assigned),
                 "unassigned_detections": int(n_unassigned),
@@ -846,6 +933,7 @@ def assign_arenas_spatial(
             "assignment_source": assignment_source,
             "source_detect_run": source_detect_run,
             "source_refined_run": refined_run_name,
+            "source_rowset_path": selected_source_rowset_path,
             "num_arenas": len(subdish_masks),
             "assigned_detections": int(n_assigned),
             "unassigned_detections": int(n_unassigned),
@@ -916,6 +1004,13 @@ if __name__ == "__main__":
     parser.add_argument("zarr_path", help="Path to zarr archive")
     parser.add_argument("--config", default="configs/fisheye/default.yaml",
                        help="Configuration file")
+    parser.add_argument(
+        "--source-rowset",
+        help=(
+            "Exact rowset to assign, e.g. crop_runs/<run>. Use this when "
+            "downstream keypoints/track kinematics are aligned to crop rows."
+        ),
+    )
     
     args = parser.parse_args()
     
@@ -929,7 +1024,8 @@ if __name__ == "__main__":
     results = assign_arenas_spatial(
         args.zarr_path,
         config,
-        console=console
+        console=console,
+        source_rowset_path=args.source_rowset,
     )
     
     if results.get("status") == "missing":

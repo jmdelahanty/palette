@@ -27,10 +27,24 @@ Canonical moving-grating downstream runner:
 scripts/run_moving_grating_downstream_pipeline.sh --apply
 ```
 
-The runner chains `track_kinematics`, optional `detect_bouts_multi_level`, and
-`stimulus_response` for the current moving-grating canary. It defaults to a dry
-run unless `--apply` is provided, and exposes the source Zarr, stimulus run,
-keypoint run, and output run names as flags.
+The runner chains `arena_assignment` / `tracking_runs`, `track_kinematics`,
+optional `detect_bouts_multi_level`, and `stimulus_response` for the current
+moving-grating canary. It defaults to a dry run unless `--apply` is provided,
+and exposes the source Zarr, crop run, stimulus run, keypoint run, and output
+run names as flags. See
+`docs/moving_grating_downstream_prerequisites.md` for the procedural blockers
+and required rowset alignment.
+
+The current canary uses crop-row routing as a historical rescue because its
+refined keypoints align to a crop rowset with more rows than the curated
+refined-detect `instances` table. That is not the desired steady-state design.
+Clean modern datasets should be rebuilt as coherent run generations from one
+canonical refined instance rowset, with crops, keypoints, tracking, kinematics,
+bouts, and stimulus response all recording and validating the same
+`source_rowset_path`.
+
+This runner is canonical operational glue, not yet a `fisheye.core.pipeline`
+stage. Formal pipeline integration is tracked in Deferred Work below.
 
 Direct stimulus-response usage:
 
@@ -159,6 +173,12 @@ Biological value: "Fish aligned heading with grating direction
 
 ## Deferred Work
 
+- Promote the moving-grating downstream chain into the formal
+  `fisheye.core.pipeline` stage system instead of relying only on the shell
+  runner. This likely means adding derived analysis stages for
+  `track_kinematics`, `swim_bout_runs`, optional `bout_kinematics_runs`, and
+  `stimulus_response_runs`, with explicit dependencies, stale-state semantics,
+  and registry/status reporting.
 - Concentric grating metrics (Layer 4 in comprehensive map)
 - Eye angle integration (Layer 5)
 - Full ArraySpec coverage for existing analysis modules (Layer 6)

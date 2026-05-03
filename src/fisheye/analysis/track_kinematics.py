@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .compute_speed import (  # re-exported for compatibility
+    HYSTERESIS_BAND_POLICIES,
     SMOOTHING_ALIGNMENTS,
     TRANSITION_REASON_CODES,
     TrackSpeeds,
@@ -112,6 +113,17 @@ class DetectionResolution:
     variant: str
     source_detect_run: Optional[str]
     parent_path: str
+
+
+@dataclass
+class OfflinePositionSource:
+    """Row-aligned position arrays for offline track kinematics."""
+
+    bbox_norm_coords: np.ndarray
+    frame_indices: np.ndarray
+    detection_source: Optional[np.ndarray]
+    path: str
+    kind: str
 
 
 def resolve_keypoint_group(
@@ -329,6 +341,46 @@ def prefer_refined_detection(
     )
 
     return resolve_detection_from_path(root, refined_path)
+
+
+def load_offline_position_source(
+    crop_group: zarr.Group,
+    *,
+    crop_run_name: str,
+    detection: DetectionResolution,
+) -> OfflinePositionSource:
+    """Load the row-aligned bbox/frame source for offline keypoint motion.
+
+    Refined keypoint runs are produced from crop rows, so their headings align
+    to ``crop_runs/<run>/bbox_norm_coords`` rather than necessarily aligning to
+    the sparse refined-detection variant referenced by the crop lineage.
+    """
+
+    if "bbox_norm_coords" in crop_group and "frame_indices" in crop_group:
+        return OfflinePositionSource(
+            bbox_norm_coords=crop_group["bbox_norm_coords"][:],
+            frame_indices=crop_group["frame_indices"][:].astype(np.int64, copy=False),
+            detection_source=(
+                crop_group["detection_source"][:]
+                if "detection_source" in crop_group
+                else None
+            ),
+            path=f"crop_runs/{crop_run_name}",
+            kind="crop_rows",
+        )
+
+    detection_group = detection.group
+    return OfflinePositionSource(
+        bbox_norm_coords=detection_group["bbox_norm_coords"][:],
+        frame_indices=detection_group["frame_indices"][:].astype(np.int64, copy=False),
+        detection_source=(
+            detection_group["detection_source"][:]
+            if "detection_source" in detection_group
+            else None
+        ),
+        path=detection.path,
+        kind="detection_rows",
+    )
 
 
 def load_stimulus_run_frames(root: zarr.Group, stimulus_run: Optional[str] = None) -> Optional[np.ndarray]:
@@ -767,6 +819,7 @@ def build_track_datasets(
     hysteresis_high_px: Optional[float] = None,
     hysteresis_low_px: Optional[float] = None,
     hysteresis_min_frames: Optional[int] = None,
+    hysteresis_band_policy: str = "reset",
     smoothing_method: str = "moving_average",
     smoothing_alignment: str = "centered",
     savgol_polyorder: int = 3,
@@ -826,6 +879,7 @@ def build_track_datasets(
             hysteresis_high_px=hysteresis_high_px,
             hysteresis_low_px=hysteresis_low_px,
             hysteresis_min_frames=hysteresis_min_frames,
+            hysteresis_band_policy=hysteresis_band_policy,
             smoothing_method=smoothing_method,
             smoothing_alignment=smoothing_alignment,
             savgol_polyorder=savgol_polyorder,
@@ -2098,6 +2152,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Minimum consecutive frames below low threshold to exit 'moving' state in offline analysis (default: 3).",
     )
     parser.add_argument(
+        "--hysteresis-band-policy",
+        choices=HYSTERESIS_BAND_POLICIES,
+        default="reset",
+        help=(
+            "How in-band displacements between low and high affect exit debounce "
+            "in offline analysis: 'reset' preserves historical Palette behavior; "
+            "'latch' keeps the counter unchanged, matching Schmitt-style hysteresis "
+            "(default: reset)."
+        ),
+    )
+    parser.add_argument(
         "--no-hysteresis",
         action="store_true",
         help="Disable hysteresis filter in offline analysis (allow all sub-pixel frame path-distance increments).",
@@ -2414,19 +2479,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         preferred_detection_offline = prefer_refined_detection(root, detection_offline, console)
         detection_offline = preferred_detection_offline
 
-        detection_group_offline = detection_offline.group
-        bbox_norm_offline = detection_group_offline["bbox_norm_coords"][:]
-        frame_indices_offline = detection_group_offline["frame_indices"][:].astype(np.int64, copy=False)
-        detection_source_offline = (
-            detection_group_offline["detection_source"][:]
-            if "detection_source" in detection_group_offline
-            else None
+        position_source_offline = load_offline_position_source(
+            crop_group_offline,
+            crop_run_name=keypoints_offline.crop_run,
+            detection=detection_offline,
         )
+        bbox_norm_offline = position_source_offline.bbox_norm_coords
+        frame_indices_offline = position_source_offline.frame_indices
+        detection_source_offline = position_source_offline.detection_source
 
         heading_offline = keypoints_offline.group["heading"][:]
         if heading_offline.shape[0] != bbox_norm_offline.shape[0]:
             raise ValueError(
-                "Offline: Heading array length does not match detection count."
+                "Offline: Heading array length does not match position source row count "
+                f"(heading={heading_offline.shape[0]}, "
+                f"position_source={bbox_norm_offline.shape[0]}, "
+                f"position_source_path={position_source_offline.path})."
+            )
+        if frame_indices_offline.shape[0] != bbox_norm_offline.shape[0]:
+            raise ValueError(
+                "Offline: Frame-index array length does not match position source row count "
+                f"(frame_indices={frame_indices_offline.shape[0]}, "
+                f"position_source={bbox_norm_offline.shape[0]}, "
+                f"position_source_path={position_source_offline.path})."
             )
 
         keypoint_success_offline, keypoint_usability_dataset = (
@@ -2449,6 +2524,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             frame_indices_offline.shape[0],
             expected_detect_run=expected_detect_run,
             expected_refined_run=detection_offline.run_name if detection_offline.is_refined else None,
+            expected_source_rowset_path=position_source_offline.path,
             return_metadata=True,
         )
         track_ids_offline = track_ids_offline.astype(np.int64, copy=False)
@@ -2508,6 +2584,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     hysteresis_high_px=hysteresis_high,
                     hysteresis_low_px=hysteresis_low,
                     hysteresis_min_frames=hysteresis_min,
+                    hysteresis_band_policy=args.hysteresis_band_policy,
                     smoothing_method=args.smoothing_method,
                     smoothing_alignment=args.smoothing_alignment,
                     savgol_polyorder=args.savgol_polyorder,
@@ -2605,6 +2682,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "detection_run": detection_offline.run_name,
                             "detection_variant": detection_offline.variant,
                             "source_detect_run": detection_offline.source_detect_run,
+                            "position_source_path": position_source_offline.path,
+                            "position_source_kind": position_source_offline.kind,
                             "keypoint_run": keypoints_offline.run_name,
                             "keypoint_variant": "refined" if keypoints_offline.is_refined else "raw",
                             "base_keypoint_run": keypoints_offline.base_run_name,
@@ -2634,6 +2713,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
                             "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
                             "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
+                            "hysteresis_band_policy": args.hysteresis_band_policy if not args.no_hysteresis else None,
                         }
                         offline_provenance = build_stage_provenance(
                             stage="track_kinematics",
@@ -2663,6 +2743,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
                                 "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
                                 "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
+                                "hysteresis_band_policy": args.hysteresis_band_policy if not args.no_hysteresis else None,
                                 "source_tracking_run": tracking_metadata.get("track_run"),
                                 "source_arena_assignment_run": tracking_metadata.get("source_arena_assignment_run"),
                                 "inputs": offline_inputs,

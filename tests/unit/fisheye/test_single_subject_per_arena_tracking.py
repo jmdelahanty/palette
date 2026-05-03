@@ -170,3 +170,39 @@ def test_load_tracking_ids_requires_matching_refined_lineage() -> None:
             expected_detect_run="detect_a",
             expected_refined_run="refined_b",
         )
+
+
+def test_load_tracking_ids_can_bind_exact_source_rowset_path() -> None:
+    root = _memory_root()
+
+    write_single_subject_per_arena_tracking_run(
+        root=root,
+        arena_ids=np.array([0, 0], dtype=np.int32),
+        frame_indices=np.array([0, 1], dtype=np.int32),
+        source_detect_run="detect_a",
+        source_refined_run="refined_a",
+        source_arena_assignment_run="arena_assignment_instances",
+        source_rowset_path="refined_detect_runs/refined_a/instances",
+    )
+    crop_run, _crop_group, _ = write_single_subject_per_arena_tracking_run(
+        root=root,
+        arena_ids=np.array([0, 0, 0], dtype=np.int32),
+        frame_indices=np.array([0, 1, 2], dtype=np.int32),
+        source_detect_run="detect_a",
+        source_refined_run="refined_a",
+        source_arena_assignment_run="arena_assignment_crop",
+        source_rowset_path="crop_runs/crop_a",
+    )
+
+    track_ids, metadata = load_tracking_ids(
+        root,
+        3,
+        expected_detect_run="detect_a",
+        expected_refined_run="refined_a",
+        expected_source_rowset_path="crop_runs/crop_a",
+        return_metadata=True,
+    )
+
+    assert track_ids.tolist() == [0, 0, 0]
+    assert metadata["track_run"] == crop_run
+    assert metadata["source_rowset_path"] == "crop_runs/crop_a"

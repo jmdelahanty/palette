@@ -19,10 +19,17 @@ preserving real swims. The filter uses a two-level threshold:
 - Low threshold (default 1.0 px): frame path-distance must stay below this for N consecutive
   frames to exit "moving" state
 - Min frames (default 3): consecutive frames below low threshold required to exit
+- Band policy (default ``reset``): controls how samples between low and high affect
+  the exit debounce counter
 
 When not in "moving" state, frame path-distance increments are zeroed and do not
 contribute to path-distance or speed metrics. This prevents noise accumulation
 without clipping real swims.
+
+The historical Palette policy is ``reset``: an in-band sample keeps the current
+state and resets the exit debounce counter. The alternative ``latch`` policy is
+Schmitt-style: an in-band sample keeps the current state and leaves the debounce
+counter unchanged.
 
 To disable the filter, use ``--no-hysteresis``.
 """
@@ -59,6 +66,7 @@ TRANSITION_REASON_CODES = {
 }
 
 SMOOTHING_ALIGNMENTS = ("centered", "causal")
+HYSTERESIS_BAND_POLICIES = ("reset", "latch")
 
 
 @dataclass
@@ -357,6 +365,7 @@ def compute_track_speed(
     hysteresis_high_px: Optional[float] = None,
     hysteresis_low_px: Optional[float] = None,
     hysteresis_min_frames: Optional[int] = None,
+    hysteresis_band_policy: str = "reset",
     smoothing_method: str = "moving_average",
     smoothing_alignment: str = "centered",
     savgol_polyorder: int = 3,
@@ -367,6 +376,10 @@ def compute_track_speed(
     while preserving real movement. When enabled, displacement must exceed
     hysteresis_high_px to enter "moving" state, and must remain below hysteresis_low_px
     for hysteresis_min_frames consecutive frames to exit "moving" state.
+    ``hysteresis_band_policy`` controls how in-band displacements
+    (``low <= displacement <= high``) affect the exit debounce counter:
+    ``reset`` preserves historical Palette behavior and resets the counter;
+    ``latch`` is Schmitt-style and leaves the counter unchanged.
 
     Displacement smoothing can use either moving average (simple) or Savitzky-Golay
     (shape-preserving polynomial fit). Moving-average smoothing can be centered or
@@ -377,8 +390,13 @@ def compute_track_speed(
         smoothing_method: "moving_average" (default) or "savitzky_golay"
         smoothing_alignment: "centered" (default) or "causal". Causal is currently
             supported only with moving_average.
+        hysteresis_band_policy: "reset" preserves legacy Palette behavior;
+            "latch" preserves state and low_count in the dead band.
         savgol_polyorder: Polynomial order for Savitzky-Golay (default: 3)
     """
+    if hysteresis_band_policy not in HYSTERESIS_BAND_POLICIES:
+        expected = ", ".join(HYSTERESIS_BAND_POLICIES)
+        raise ValueError(f"Unsupported hysteresis band policy {hysteresis_band_policy!r}; expected one of: {expected}")
     if smoothing_alignment not in SMOOTHING_ALIGNMENTS:
         expected = ", ".join(SMOOTHING_ALIGNMENTS)
         raise ValueError(f"Unsupported smoothing alignment {smoothing_alignment!r}; expected one of: {expected}")
@@ -476,9 +494,9 @@ def compute_track_speed(
         # Save pre-hysteresis movement as frame_path_distance_raw
         displacement_post_hysteresis = displacement_pre_hysteresis.copy()
 
-        # Apply hysteresis filter to remove micro-jitter (sub-pixel noise) while preserving real movement.
-        # The state machine prevents toggling on every noisy sample by requiring sustained low displacement
-        # to exit "moving" state, and any high displacement to enter it.
+        # Apply hysteresis filtering to remove micro-jitter while preserving real movement.
+        # The band policy controls whether in-band samples reset the exit debounce
+        # counter (legacy Palette) or latch state/counter unchanged (Schmitt-style).
         if hysteresis_high_px is not None and hysteresis_low_px is not None:
             min_frames = hysteresis_min_frames if hysteresis_min_frames is not None else 3
             is_moving = False
@@ -502,8 +520,12 @@ def compute_track_speed(
                     if low_count >= min_frames:
                         is_moving = False
                 else:
-                    # Between low and high: maintain current state, reset counter
-                    low_count = 0
+                    # Between low and high: maintain current state. Legacy
+                    # Palette treats in-band samples as enough motion evidence
+                    # to reset the exit debounce; Schmitt-style latch leaves
+                    # the debounce counter unchanged in this dead zone.
+                    if hysteresis_band_policy == "reset":
+                        low_count = 0
 
                 # Zero displacement when not moving
                 if not is_moving:
@@ -827,6 +849,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Minimum consecutive frames below low threshold to exit 'moving' state (default: 3).",
     )
     parser.add_argument(
+        "--hysteresis-band-policy",
+        choices=HYSTERESIS_BAND_POLICIES,
+        default="reset",
+        help=(
+            "How in-band displacements between low and high affect exit debounce: "
+            "'reset' preserves historical Palette behavior; 'latch' keeps the "
+            "counter unchanged, matching Schmitt-style hysteresis (default: reset)."
+        ),
+    )
+    parser.add_argument(
         "--no-hysteresis",
         action="store_true",
         help="Disable hysteresis filter (allow all sub-pixel frame path-distance increments).",
@@ -954,6 +986,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             hysteresis_high_px=hysteresis_high,
             hysteresis_low_px=hysteresis_low,
             hysteresis_min_frames=hysteresis_min,
+            hysteresis_band_policy=args.hysteresis_band_policy,
             smoothing_method=args.smoothing_method,
             smoothing_alignment=args.smoothing_alignment,
             savgol_polyorder=args.savgol_polyorder,
@@ -1007,6 +1040,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
             "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
             "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
+            "hysteresis_band_policy": args.hysteresis_band_policy if not args.no_hysteresis else None,
             "smoothing_method": args.smoothing_method,
             "smoothing_alignment": args.smoothing_alignment,
             "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,

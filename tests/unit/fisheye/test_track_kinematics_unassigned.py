@@ -1,8 +1,11 @@
 import numpy as np
+import zarr
 
 from fisheye.analysis.track_kinematics import (
+    DetectionResolution,
     _filter_public_track_rows,
     _ordered_track_arena_ids,
+    load_offline_position_source,
 )
 
 
@@ -59,3 +62,62 @@ def test_ordered_track_arena_ids_allows_diagnostic_unassigned_track() -> None:
 
     assert result is not None
     assert result.tolist() == [-1, 5, 9]
+
+
+def test_load_offline_position_source_prefers_crop_rows() -> None:
+    root = zarr.group()
+    crop_group = root.create_group("crop")
+    crop_group.create_array(
+        "bbox_norm_coords",
+        data=np.zeros((3, 4), dtype=np.float32),
+        chunks=(3, 4),
+        overwrite=True,
+    )
+    crop_group.create_array(
+        "frame_indices",
+        data=np.array([10, 11, 12], dtype=np.int64),
+        chunks=(3,),
+        overwrite=True,
+    )
+    crop_group.create_array(
+        "detection_source",
+        data=np.array([1, 1, 0], dtype=np.int8),
+        chunks=(3,),
+        overwrite=True,
+    )
+
+    detection_group = root.create_group("refined_instances")
+    detection_group.create_array(
+        "bbox_norm_coords",
+        data=np.zeros((2, 4), dtype=np.float32),
+        chunks=(2, 4),
+        overwrite=True,
+    )
+    detection_group.create_array(
+        "frame_indices",
+        data=np.array([10, 12], dtype=np.int64),
+        chunks=(2,),
+        overwrite=True,
+    )
+    detection = DetectionResolution(
+        group=detection_group,
+        path="refined_detect_runs/refined_1/instances",
+        is_refined=True,
+        run_name="refined_1",
+        variant="instances",
+        source_detect_run="detect_1",
+        parent_path="refined_detect_runs/refined_1",
+    )
+
+    source = load_offline_position_source(
+        crop_group,
+        crop_run_name="crop_1",
+        detection=detection,
+    )
+
+    assert source.kind == "crop_rows"
+    assert source.path == "crop_runs/crop_1"
+    assert source.bbox_norm_coords.shape == (3, 4)
+    assert source.frame_indices.tolist() == [10, 11, 12]
+    assert source.detection_source is not None
+    assert source.detection_source.tolist() == [1, 1, 0]

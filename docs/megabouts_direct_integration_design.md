@@ -423,6 +423,40 @@ Megabouts has two segmentation modes:
 - tail segmentation: threshold tail vigor
 - trajectory segmentation: find peaks in trajectory kinematic activity
 
+Do not conflate the signal that defines a bout window with the signals that the
+classifier consumes. The Megabouts pipelines use these combinations:
+
+```text
+head_restrained / tail_tracking
+  segmentation source: tail_vigor
+  classifier/analysis inputs: tail angles
+
+freely_swimming / head_tracking
+  segmentation source: traj.vigor
+  classifier inputs: trajectory channels only
+
+freely_swimming / full_tracking
+  default segmentation source: tail.vigor
+  optional segmentation source: traj.vigor if TrajSegmentationConfig is selected
+  classifier inputs: tail channels plus trajectory channels
+```
+
+`tail.vigor` is derived from summed absolute derivatives across Megabouts tail
+angle channels after tail preprocessing. `traj.vigor` is not just centroid
+speed; it is a body-frame kinematic activity signal built from axial speed,
+lateral speed, and yaw speed. For full tracking, the default bout boundaries are
+tail-vigor boundaries, but the transformer input includes both the first seven
+tail-angle channels and trajectory `x, y, heading` channels.
+
+Palette implication: current Palette speed/exponential `swim_bout_runs` are
+closer to Megabouts trajectory-vigor bout detection than to Megabouts default
+full-tracking tail-vigor segmentation. Passing Palette-selected windows to the
+Megabouts classifier is therefore a valid interop mode, but it is not the same
+as running the full Megabouts preprocessing and segmentation pipeline. A future
+Megabouts-native comparison should persist both the selected segmentation source
+(`palette_speed`, `megabouts_tail_vigor`, or `megabouts_traj_vigor`) and the
+classifier input family used for labels.
+
 Default bout duration is 200 ms. The classifier input is capped at 140 frames.
 For full tracking, classifier input packs:
 

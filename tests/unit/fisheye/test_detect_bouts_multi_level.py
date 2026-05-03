@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ from fisheye.analysis.detect_bouts_multi_level import (
     _detect_bouts_from_peak_events,
     _detect_bouts_from_speed,
     _duration_seconds_to_frames,
+    _json_safe_attr_value,
     detect_and_save_bouts,
     normalize_speed_level,
 )
@@ -361,6 +363,69 @@ def test_detect_and_save_bouts_writes_peak_event_metadata(tmp_path: Path) -> Non
     assert peak_events["peak_signal_value_mm_s"][:].tolist() == [5.0]
     assert peak_events["boundary_mode"][:].shape[0] == 1
     assert "peak_prominence_mm_s" in peak_events.attrs["field_names"]
+
+
+def test_json_safe_attr_value_converts_nonfinite_numbers_to_none() -> None:
+    attrs = _json_safe_attr_value(
+        {
+            "finite": np.float64(1.25),
+            "nan": float("nan"),
+            "pos_inf": np.float32(np.inf),
+            "nested": [np.float64(-np.inf), {"ok": True}],
+        }
+    )
+
+    assert attrs == {
+        "finite": 1.25,
+        "nan": None,
+        "pos_inf": None,
+        "nested": [None, {"ok": True}],
+    }
+    assert json.loads(json.dumps(attrs, allow_nan=False)) == attrs
+
+
+def test_detect_and_save_bouts_writes_strict_json_metadata_for_optional_peak_attrs(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+
+    run_name = detect_and_save_bouts(
+        zarr_path=zarr_path,
+        run_name="bouts_peak_event_optional_attrs",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        method="peak_event",
+        min_peak_height_mm_s=None,
+        min_peak_prominence_mm_s=None,
+        min_peak_distance_s=0.05,
+        peak_width_rel_height=0.9,
+        min_bout_duration_s=0.01,
+        default_level="filtered",
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    bout_run = root["analysis"]["swim_bout_runs"][run_name]
+    assert bout_run.attrs["min_peak_height_mm_s"] is None
+    assert bout_run.attrs["min_peak_prominence_mm_s"] is None
+    assert bout_run.attrs["provenance"]["parameters"]["min_peak_height_mm_s"] is None
+    assert bout_run.attrs["provenance"]["parameters"]["min_peak_prominence_mm_s"] is None
+    assert bout_run["speed_filtered"].attrs["min_peak_height_mm_s"] is None
+    assert bout_run["speed_filtered"].attrs["min_peak_prominence_mm_s"] is None
+
+    def _reject_nonfinite_constant(value: str) -> None:
+        raise ValueError(f"Non-finite JSON constant {value!r}")
+
+    bad_json: list[Path] = []
+    for metadata_path in zarr_path.rglob("zarr.json"):
+        try:
+            json.loads(
+                metadata_path.read_text(),
+                parse_constant=_reject_nonfinite_constant,
+            )
+        except ValueError:
+            bad_json.append(metadata_path.relative_to(zarr_path))
+
+    assert bad_json == []
 
 
 def test_exponential_candidate_uses_filtered_source_for_physical_metrics(tmp_path: Path) -> None:

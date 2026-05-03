@@ -222,3 +222,34 @@ def test_resolve_zarr_run_uses_direct_filesystem_group_for_latest(
 
     assert run_name == "stimulus_888"
     assert run_group is sentinel
+
+
+def test_resolve_zarr_run_uses_store_path_file_uri_when_palette_annotation_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _FakeGroup()
+    root.require_group("analysis/stimulus_runs")
+    root.store_path = f"file://{tmp_path / 'archive.zarr'}"  # type: ignore[attr-defined]
+    direct_group_path = tmp_path / "archive.zarr" / "analysis" / "stimulus_runs" / "stimulus_999"
+    direct_group_path.mkdir(parents=True)
+    (direct_group_path / "zarr.json").write_text('{"zarr_format": 3, "node_type": "group", "attributes": {}}')
+    sentinel = _FakeGroup(path="analysis/stimulus_runs/stimulus_999")
+
+    def _fake_open_group(path: str, *, mode: str, use_consolidated: bool) -> _FakeGroup:
+        assert Path(path) == direct_group_path
+        assert mode == "r"
+        assert use_consolidated is False
+        return sentinel
+
+    monkeypatch.setattr(zarr, "open_group", _fake_open_group)
+
+    run_group, run_name = resolve_zarr_run(
+        root,
+        "analysis/stimulus_runs",
+        "stimulus_999",
+        run_label="Stimulus run",
+    )
+
+    assert run_name == "stimulus_999"
+    assert run_group is sentinel

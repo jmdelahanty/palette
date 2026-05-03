@@ -137,4 +137,6 @@ without requiring a different storage layout.
 - `docs/stimulus_response_analysis_flow.md` — data flow and provenance
 - `docs/stimulus_response_run_design.md` — full metric definitions
 - `docs/stimulus_response_implementation_plan.md` — design decisions
+- `docs/concentric_omr_stimulus_response_design.md` — planned radial OMR
+  metrics for concentric grating steps
 - `src/fisheye/docs/zarr_structure.md` — authoritative zarr layout
