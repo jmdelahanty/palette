@@ -1,6 +1,7 @@
 # Concentric OMR Metrics in Stimulus Response Runs
 
-Status: design only. No implementation yet.
+Status: first numeric implementation exists for `concentric_grating/radial_omr/`.
+Review plots and target-annulus centering-success outputs are still future work.
 
 ## Scope
 
@@ -24,7 +25,8 @@ analysis/stimulus_response_runs/<run>/
       per_frame/       # existing centering/polar decomposition
       per_fish/        # existing centering summaries
       time_series/     # existing binned centering summaries
-      omr/             # proposed radial OMR metrics
+      radial_omr/      # radial/tangential stimulus-aligned OMR metrics
+        per_frame/
         per_bout/
         per_fish/
         windows/
@@ -480,12 +482,12 @@ concentric gratings are intended for radial-flow responsiveness and centering
 utility, not for evoking or classifying escape responses. If a future protocol
 uses looming-like stimuli, the analysis should use a dedicated `LOOMING_DOT`
 metric family with its own response criteria rather than overloading
-`concentric_grating/omr/`.
+`concentric_grating/radial_omr/`.
 
 ## Proposed Output Schema
 
 ```text
-steps/step_<i>/concentric_grating/omr/
+steps/step_<i>/concentric_grating/radial_omr/
   attrs:
     method_version
     coordinate_system = "camera_mm_polar_about_stimulus_center"
@@ -514,6 +516,14 @@ steps/step_<i>/concentric_grating/omr/
     target_radius_source
     centering_success_fraction_threshold
     detector_vs_estimator attrs...
+
+  per_frame/
+    frame_indices
+    valid_radial_basis
+    radius_mm
+    radial_speed_outward_mm_s
+    tangential_speed_ccw_mm_s
+    stimulus_aligned_radial_speed_mm_s
 
   per_bout/
     fish_id
@@ -607,14 +617,16 @@ The PNG is review/QC only. The numeric arrays remain canonical.
 
 ## Implementation Plan
 
-1. Extract current concentric helpers from `stimulus_response.py` into
-   `stimulus_response_concentric.py`.
-2. Add `stimulus_response_concentric_omr.py` for radial OMR metrics.
-3. Keep `stimulus_response.py` as orchestration/writer/CLI only.
-4. Implement synthetic tests for radial, tangential, inward, outward, center
-   singularity, centering-success, and gap handling.
-5. Add canary run writing only after synthetic tests pass.
-6. Add review plots after numeric schema is stable.
+1. Done for first slice: add `stimulus_response_concentric_omr.py` for radial
+   OMR metrics.
+2. Done for first slice: keep existing centering outputs and write
+   `concentric_grating/radial_omr/` beside them.
+3. Partial: synthetic tests cover radial outward, radial inward, tangential,
+   center singularity, and writer layout. Target-annulus centering-success and
+   review plots remain future work.
+4. Future: extract current centering helpers from `stimulus_response.py` into
+   `stimulus_response_concentric.py` once the numeric schema has settled.
+5. Future: add review plots after numeric schema is stable.
 
 ## Validation Plan
 

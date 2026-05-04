@@ -59,6 +59,13 @@ from fisheye.analysis.stimulus_response_grating import (
     resolve_grating_direction,
     resolve_grating_speed_mm_s,
 )
+from fisheye.analysis.stimulus_response_concentric_omr import (
+    CONCENTRIC_RADIAL_OMR_DEFAULT_EARLY_RESPONSE_WINDOWS_S,
+    CONCENTRIC_RADIAL_OMR_DEFAULT_WINDOW_LENGTHS_S,
+    CONCENTRIC_RADIAL_OMR_METHOD_VERSION,
+    ConcentricRadialOMRStepData,
+    compute_step_concentric_radial_omr_metrics,
+)
 # OMR metrics are implemented in a dedicated module, but re-exported here so
 # existing callers can keep importing from fisheye.analysis.stimulus_response.
 from fisheye.analysis.stimulus_response_omr import (
@@ -1531,6 +1538,7 @@ class ConcentricStepData:
     per_frame: Dict[str, np.ndarray]
     per_fish: Dict[str, np.ndarray]
     time_series: Dict[str, np.ndarray]
+    radial_omr: Optional[ConcentricRadialOMRStepData] = None
 
 
 @dataclass
@@ -1793,6 +1801,30 @@ def write_stimulus_response_run(
             for name, arr in cd.time_series.items():
                 cts_group.create_array(name, data=arr, overwrite=True)
 
+            if cd.radial_omr is not None:
+                radial_group = conc_group.create_group("radial_omr")
+                radial_group.attrs.update(_json_safe_attrs(cd.radial_omr.attrs))
+
+                radial_per_frame = radial_group.create_group("per_frame")
+                for name, arr in cd.radial_omr.per_frame.items():
+                    radial_per_frame.create_array(name, data=arr, overwrite=True)
+
+                radial_per_fish = radial_group.create_group("per_fish")
+                for name, arr in cd.radial_omr.per_fish.items():
+                    radial_per_fish.create_array(name, data=arr, overwrite=True)
+
+                radial_per_bout = radial_group.create_group("per_bout")
+                for name, arr in cd.radial_omr.per_bout.items():
+                    radial_per_bout.create_array(name, data=arr, overwrite=True)
+
+                radial_windows = radial_group.create_group("windows")
+                for name, arr in cd.radial_omr.windows.items():
+                    radial_windows.create_array(name, data=arr, overwrite=True)
+
+                radial_early_windows = radial_group.create_group("early_windows")
+                for name, arr in cd.radial_omr.early_windows.items():
+                    radial_early_windows.create_array(name, data=arr, overwrite=True)
+
         # Looming dot metrics (LOOMING_DOT steps only).
         if step_loom_data is not None and step.index in step_loom_data:
             ld = step_loom_data[step.index]
@@ -1953,6 +1985,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         default=2.0,
         help="Distance threshold for 'near center' in concentric grating analysis (default: 2.0).",
     )
+    parser.add_argument(
+        "--concentric-radial-singularity-epsilon-mm",
+        type=float,
+        default=0.5,
+        help=(
+            "Minimum radius from the concentric-grating center required for "
+            "radial/tangential OMR metrics (default: 0.5 mm)."
+        ),
+    )
     # Looming dot parameters.
     parser.add_argument(
         "--escape-speed-threshold-mm-s",
@@ -2056,20 +2097,43 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     # Resolve concentric centers before parallel dispatch (needs zarr access).
     concentric_centers: Dict[int, Tuple[float, float]] = {}
+    concentric_center_sources: Dict[int, str] = {}
     for step in steps:
         if step.stimulus_mode == _CONCENTRIC_GRATING:
+            cg_attrs = (
+                step.stimulus_params.get("concentric_grating", {})
+                if isinstance(step.stimulus_params, dict) else {}
+            )
+            if not isinstance(cg_attrs, dict):
+                cg_attrs = {}
+            center_params = flatten_stimulus_params(step.stimulus_params)
+            center_params.update(cg_attrs)
             center = resolve_concentric_center_mm(
                 root,
-                flatten_stimulus_params(step.stimulus_params),
+                center_params,
                 stimulus_run=stim_run,
             )
             if center is not None:
                 concentric_centers[step.index] = center
+                concentric_center_sources[step.index] = str(
+                    cg_attrs.get("center_mm_source")
+                    or cg_attrs.get("center_source")
+                    or "resolve_concentric_center_mm"
+                )
             else:
                 console.print(
                     f"  [yellow]Warning: could not resolve center for step {step.index}; "
                     f"skipping concentric metrics.[/yellow]"
                 )
+
+    concentric_arena_radius_mm: Optional[float] = None
+    if concentric_centers:
+        _center_unused, arena_extent, _source_unused = _resolve_omr_arena_geometry_mm(
+            root,
+            stim_run,
+            np.array([1.0, 0.0], dtype=np.float64),
+        )
+        concentric_arena_radius_mm = arena_extent
 
     # Resolve loom calibration and events before parallel dispatch.
     loom_onset_events: Dict[int, List[int]] = {}
@@ -2181,7 +2245,40 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 cpf, tracks, step, fps,
                 bin_size_s=args.bin_size_s,
             )
-            result["concentric"] = ConcentricStepData(per_frame=cpf, per_fish=cpfish, time_series=cts)
+            radial_omr = None
+            if not args.no_omr:
+                radial_omr = compute_step_concentric_radial_omr_metrics(
+                    tracks,
+                    step,
+                    center,
+                    fps,
+                    moving_threshold_mm_s=args.moving_threshold_mm_s,
+                    bouts_by_fish=bouts_by_fish,
+                    projection_deadzone=args.omr_projection_deadzone,
+                    projection_speed_deadzone_mm_s=args.omr_projection_speed_deadzone_mm_s,
+                    window_lengths_s=(
+                        args.omr_window_s
+                        if args.omr_window_s is not None
+                        else CONCENTRIC_RADIAL_OMR_DEFAULT_WINDOW_LENGTHS_S
+                    ),
+                    early_window_lengths_s=(
+                        args.omr_early_window_s
+                        if args.omr_early_window_s is not None
+                        else CONCENTRIC_RADIAL_OMR_DEFAULT_EARLY_RESPONSE_WINDOWS_S
+                    ),
+                    radial_singularity_epsilon_mm=args.concentric_radial_singularity_epsilon_mm,
+                    arena_radius_mm=concentric_arena_radius_mm,
+                    center_source=concentric_center_sources.get(
+                        step.index,
+                        "resolve_concentric_center_mm",
+                    ),
+                )
+            result["concentric"] = ConcentricStepData(
+                per_frame=cpf,
+                per_fish=cpfish,
+                time_series=cts,
+                radial_omr=radial_omr,
+            )
 
         # Looming dot metrics.
         if (step.stimulus_mode == _LOOMING_DOT
@@ -2288,6 +2385,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         "follow_window_s": args.follow_window_s,
         "omr_enabled": not args.no_omr,
         "omr_method_version": OMR_METHOD_VERSION if not args.no_omr else None,
+        "concentric_radial_omr_method_version": (
+            CONCENTRIC_RADIAL_OMR_METHOD_VERSION if not args.no_omr else None
+        ),
         "omr_projection_deadzone": args.omr_projection_deadzone,
         "omr_projection_speed_deadzone_mm_s": args.omr_projection_speed_deadzone_mm_s,
         "omr_window_s": (
@@ -2301,6 +2401,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             else list(OMR_DEFAULT_EARLY_RESPONSE_WINDOWS_S)
         ),
         "center_threshold_mm": args.center_threshold_mm,
+        "concentric_radial_singularity_epsilon_mm": args.concentric_radial_singularity_epsilon_mm,
         "escape_speed_threshold_mm_s": args.escape_speed_threshold_mm_s,
         "escape_window_s": args.escape_window_s,
         "loom_pre_onset_s": args.loom_pre_onset_s,

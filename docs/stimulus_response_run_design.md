@@ -224,10 +224,12 @@ analysis/stimulus_response_runs/<run_name>/
             │   ├── radial_heading_cos          float32[n_fish x n_bins]
             │   └── fraction_approaching        float32[n_fish x n_bins]
             │
-            └── per_bout/                # Indexed by parent per_bout/ row ordering
-                ├── mean_radial_heading_cos    float32[n_bouts_in_step]
-                ├── is_centering              bool[...]    # bout directed toward center
-                └── radial_displacement_mm    float32[...]  # net radial movement during bout
+            └── radial_omr/              # Optional stimulus-aligned radial OMR outputs
+                ├── per_frame/
+                ├── per_bout/
+                ├── per_fish/
+                ├── windows/
+                └── early_windows/
 ```
 
 ### Design rationale
@@ -605,10 +607,9 @@ toward (or away from) a center point. The relevant axes are radial
 (toward/away from center) and tangential (orbiting around center), rather
 than a single linear direction.
 
-This section describes the current centering/polar-decomposition outputs. A
-future radial OMR metric family with explicit expanding/contracting polarity,
-outward-positive physical radial fields and stimulus-aligned response scores is
-specified in
+This section describes the centering/polar-decomposition outputs. Optional
+stimulus-aligned radial OMR metrics with explicit expanding/contracting
+polarity are written under `concentric_grating/radial_omr/` and specified in
 `docs/concentric_omr_stimulus_response_design.md`. That design explicitly
 supports both primary radial-flow stimulus use and centering-utility use.
 

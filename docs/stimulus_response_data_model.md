@@ -56,6 +56,7 @@ stimulus_response_runs/<run>/
     ├── step_1/
     │   ├── per_fish/
     │   └── concentric_grating/    ← only on CONCENTRIC_GRATING steps
+    │       └── radial_omr/        ← optional radial/tangential OMR metrics
     └── step_N/
         └── per_fish/
 ```
@@ -66,10 +67,12 @@ stimulus_response_runs/<run>/
 
 A SOLID_BLACK step has only `per_fish/`. A MOVING_GRATING step adds
 `grating/` with per-frame alignment, per-fish summary, and time series.
-A CONCENTRIC_GRATING step adds `concentric_grating/` with radial
-decomposition. In a fish-first layout, each fish group would need to carry
-stimulus-specific subgroups that only apply to some steps — lots of empty
-or absent groups.
+A CONCENTRIC_GRATING step adds `concentric_grating/` with centering-style
+radial decomposition. When OMR outputs are enabled, it also adds
+`concentric_grating/radial_omr/` for stimulus-aligned radial/tangential
+response metrics. In a fish-first layout, each fish group would need to carry
+stimulus-specific subgroups that only apply to some steps — lots of empty or
+absent groups.
 
 ### Steps own their metadata
 
@@ -171,6 +174,6 @@ without requiring a different storage layout.
 - `docs/stimulus_response_analysis_flow.md` — data flow and provenance
 - `docs/stimulus_response_run_design.md` — full metric definitions
 - `docs/stimulus_response_implementation_plan.md` — design decisions
-- `docs/concentric_omr_stimulus_response_design.md` — planned radial OMR
-  metrics for concentric grating steps
+- `docs/concentric_omr_stimulus_response_design.md` — radial OMR metrics for
+  concentric grating steps
 - `src/fisheye/docs/zarr_structure.md` — authoritative zarr layout

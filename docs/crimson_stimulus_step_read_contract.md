@@ -135,6 +135,30 @@ stimulus_response_runs/<response_run>.attrs["source_stimulus_run"]
 links the response run back to the source stimulus run. Crimson can join by
 `step_index`.
 
+For derived concentric-grating radial response metrics, use:
+
+```text
+analysis/stimulus_response_runs/<response_run>/steps/step_<i>/concentric_grating/radial_omr/
+```
+
+The first numeric implementation writes:
+
+```text
+radial_omr.attrs["method_version"] = "stimulus_response_concentric_radial_omr_v1"
+radial_omr.attrs["stimulus_radial_polarity"] = "expanding" | "contracting"
+radial_omr.attrs["stimulus_radial_sign"] = +1 | -1
+radial_omr.attrs["stimulus_radial_polarity_validated"] = false for current backfilled Citrus recordings
+radial_omr/per_fish/omr_path_index
+radial_omr/per_fish/tangential_bias_index
+radial_omr/per_bout/radial_omr_score
+radial_omr/per_bout/omr_label
+```
+
+The response metrics use outward-positive physical radial components, with
+`stimulus_aligned = stimulus_radial_sign * outward_radial`. This is separate
+from the older centering-style `concentric_grating/per_frame/radial_speed_mm_s`,
+where positive means approaching the center.
+
 ## Recommended Crimson UI Slice
 
 1. Add a stimulus-step layer independent of OMR metrics.

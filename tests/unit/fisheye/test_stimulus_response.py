@@ -44,6 +44,10 @@ from fisheye.analysis.stimulus_response import (
     resolve_loom_center_mm,
     write_stimulus_response_run,
 )
+from fisheye.analysis.stimulus_response_concentric_omr import (
+    compute_step_concentric_radial_omr_metrics,
+    resolve_concentric_radial_polarity,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1689,6 +1693,55 @@ def _make_centering_tracks(
     )]
 
 
+def _make_position_track(
+    positions_mm: np.ndarray,
+    *,
+    fish_id: int = 0,
+    fps: float = 30.0,
+) -> List[DenseTrack]:
+    positions = np.asarray(positions_mm, dtype=np.float32)
+    n_frames = positions.shape[0]
+    deltas = np.vstack([positions[1] - positions[0], np.diff(positions, axis=0)])
+    speed = (np.linalg.norm(deltas, axis=1) * fps).astype(np.float32)
+    heading = np.rad2deg(np.arctan2(deltas[:, 1], deltas[:, 0])).astype(np.float32)
+    heading[~np.isfinite(heading)] = 0.0
+    return [DenseTrack(
+        fish_id=fish_id,
+        speed_mm=speed,
+        heading_deg=heading,
+        positions_mm=positions,
+        angular_velocity=np.zeros(n_frames, dtype=np.float32),
+        time_seconds=np.arange(n_frames, dtype=np.float32) / fps,
+        valid=np.ones(n_frames, dtype=bool),
+        detection_source=np.zeros(n_frames, dtype=np.int8),
+    )]
+
+
+def _radial_omr_step(
+    *,
+    sign: int = 1,
+    start: int = 0,
+    end: int = 30,
+) -> ProtocolStep:
+    return ProtocolStep(
+        index=0,
+        name="concentric_radial_omr",
+        stimulus_mode="CONCENTRIC_GRATING",
+        stimulus_mode_id=6,
+        start_frame=start,
+        end_frame=end,
+        duration_s=(end - start) / 30.0,
+        stimulus_params={
+            "concentric_grating": {
+                "radial_sign_authored": sign,
+                "radial_polarity_authored": "expanding" if sign > 0 else "contracting",
+                "radial_polarity_source": "test",
+                "radial_polarity_validated": False,
+            }
+        },
+    )
+
+
 class TestComputeConcentricPerFrame:
 
     def test_distance_decreases_toward_center(self) -> None:
@@ -1797,6 +1850,97 @@ class TestComputeConcentricTimeSeries:
         assert ts["distance_to_center_mm"][0, 0] > ts["distance_to_center_mm"][0, -1]
 
 
+class TestConcentricRadialOMR:
+
+    def test_resolves_authored_polarity(self) -> None:
+        expanding = _radial_omr_step(sign=1)
+        contracting = _radial_omr_step(sign=-1)
+
+        assert resolve_concentric_radial_polarity(expanding)["stimulus_radial_sign"] == 1
+        assert resolve_concentric_radial_polarity(contracting)["stimulus_radial_sign"] == -1
+
+    def test_expanding_outward_motion_is_aligned(self) -> None:
+        center = (0.0, 0.0)
+        x = np.linspace(1.0, 4.0, 30, dtype=np.float32)
+        tracks = _make_position_track(np.column_stack([x, np.zeros_like(x)]))
+        step = _radial_omr_step(sign=1, end=30)
+        bouts = {0: [BoutEntry(0, 1, 0, 29, 29 / 30.0, 3.0, 3.0)]}
+
+        omr = compute_step_concentric_radial_omr_metrics(
+            tracks,
+            step,
+            center,
+            fps=30.0,
+            moving_threshold_mm_s=0.1,
+            bouts_by_fish=bouts,
+            arena_radius_mm=5.0,
+        )
+
+        assert omr.attrs["stimulus_radial_sign"] == 1
+        assert omr.per_fish["omr_path_index"][0] > 0.99
+        assert omr.per_fish["bout_count_correct"][0] == 1
+        assert omr.per_bout["omr_label"][0] == 1
+        assert omr.per_frame["stimulus_aligned_radial_speed_mm_s"][0, 1:].mean() > 0
+
+    def test_contracting_inward_motion_is_aligned(self) -> None:
+        center = (0.0, 0.0)
+        x = np.linspace(4.0, 1.0, 30, dtype=np.float32)
+        tracks = _make_position_track(np.column_stack([x, np.zeros_like(x)]))
+        step = _radial_omr_step(sign=-1, end=30)
+
+        omr = compute_step_concentric_radial_omr_metrics(
+            tracks,
+            step,
+            center,
+            fps=30.0,
+            moving_threshold_mm_s=0.1,
+            bouts_by_fish=None,
+            arena_radius_mm=5.0,
+        )
+
+        assert omr.attrs["stimulus_radial_sign"] == -1
+        assert omr.per_fish["omr_path_index"][0] > 0.99
+        assert omr.per_fish["radial_path_index"][0] < -0.99
+
+    def test_tangential_motion_has_near_zero_radial_index(self) -> None:
+        center = (0.0, 0.0)
+        theta = np.linspace(0.0, np.pi / 2.0, 60, dtype=np.float32)
+        radius = 3.0
+        positions = np.column_stack([radius * np.cos(theta), radius * np.sin(theta)])
+        tracks = _make_position_track(positions)
+        step = _radial_omr_step(sign=1, end=60)
+
+        omr = compute_step_concentric_radial_omr_metrics(
+            tracks,
+            step,
+            center,
+            fps=30.0,
+            moving_threshold_mm_s=0.1,
+            arena_radius_mm=5.0,
+        )
+
+        assert abs(float(omr.per_fish["omr_path_index"][0])) < 0.05
+        assert omr.per_fish["tangential_bias_index"][0] > 0.9
+
+    def test_center_singularity_marks_quality_flag(self) -> None:
+        center = (0.0, 0.0)
+        positions = np.zeros((30, 2), dtype=np.float32)
+        tracks = _make_position_track(positions)
+        step = _radial_omr_step(sign=1, end=30)
+
+        omr = compute_step_concentric_radial_omr_metrics(
+            tracks,
+            step,
+            center,
+            fps=30.0,
+            moving_threshold_mm_s=0.1,
+            radial_singularity_epsilon_mm=0.5,
+        )
+
+        assert omr.per_fish["quality_flag"][0] == 1
+        assert not omr.per_frame["valid_radial_basis"][0].any()
+
+
 class TestWriteWithConcentric:
 
     def test_concentric_subgroup_written(self) -> None:
@@ -1810,7 +1954,20 @@ class TestWriteWithConcentric:
         cpf = compute_concentric_per_frame(tracks, step, center, fps=30.0)
         cpfish = compute_concentric_per_fish(cpf, tracks, step, fps=30.0)
         cts = compute_concentric_time_series(cpf, tracks, step, fps=30.0)
-        cd = {0: ConcentricStepData(per_frame=cpf, per_fish=cpfish, time_series=cts)}
+        radial_omr = compute_step_concentric_radial_omr_metrics(
+            tracks,
+            step,
+            center,
+            fps=30.0,
+            moving_threshold_mm_s=0.1,
+            arena_radius_mm=20.0,
+        )
+        cd = {0: ConcentricStepData(
+            per_frame=cpf,
+            per_fish=cpfish,
+            time_series=cts,
+            radial_omr=radial_omr,
+        )}
 
         write_stimulus_response_run(
             root, global_metrics=gm, steps=[step], step_metrics=sm,
@@ -1827,6 +1984,12 @@ class TestWriteWithConcentric:
         assert "time_series" in s0["concentric_grating"]
         assert "distance_to_center_mm" in s0["concentric_grating"]["per_frame"]
         assert "fraction_approaching" in s0["concentric_grating"]["per_fish"]
+        assert "radial_omr" in s0["concentric_grating"]
+        assert "omr_path_index" in s0["concentric_grating"]["radial_omr"]["per_fish"]
+        assert (
+            s0["concentric_grating"]["radial_omr"].attrs["method_version"]
+            == "stimulus_response_concentric_radial_omr_v1"
+        )
 
     def test_non_concentric_step_has_no_concentric_group(self) -> None:
         root = zarr.group()
