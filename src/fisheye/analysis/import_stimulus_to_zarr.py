@@ -929,11 +929,19 @@ def _copy_h5_tree(src: h5py.Group, dst: zarr.Group) -> None:
         dst.create_array(name, data=arr, chunks=arr.shape, overwrite=True)
 
 
+def _delete_zarr_child_if_exists(group: zarr.Group, name: str) -> None:
+    """Delete a child without trusting possibly stale consolidated metadata."""
+
+    try:
+        del group[name]
+    except (KeyError, FileNotFoundError):
+        return
+
+
 def _copy_stimulus_coordinates(h5: h5py.File, run_group: zarr.Group, console: Optional[Console]) -> None:
     if "/stimulus_coordinates" not in h5:
         return
-    if "stimulus_coordinates" in run_group:
-        del run_group["stimulus_coordinates"]
+    _delete_zarr_child_if_exists(run_group, "stimulus_coordinates")
     dst = run_group.create_group("stimulus_coordinates")
     _copy_h5_tree(h5["/stimulus_coordinates"], dst)
     _log(console, "[green]✓ Copied H5 stimulus_coordinates into stimulus run[/green]")
@@ -1157,8 +1165,7 @@ def _materialize_stimulus_steps(
     if not starts:
         return
 
-    if "steps" in run_group:
-        del run_group["steps"]
+    _delete_zarr_child_if_exists(run_group, "steps")
     steps_group = run_group.create_group("steps")
     steps_group.attrs["metadata_schema_version"] = 1
     steps_group.attrs["source"] = "h5_events_and_protocol_snapshot"
@@ -1199,6 +1206,280 @@ def _materialize_stimulus_steps(
             _write_concentric_grating_step_metadata(h5, step_group, step_params, arena_config)
 
     _log(console, f"[green]✓ Materialized {len(starts)} canonical stimulus step metadata groups[/green]")
+
+
+def _open_zarr_group_unconsolidated(path: Path, *, mode: str) -> zarr.Group:
+    """Open a mutable Zarr group while bypassing stale consolidated metadata."""
+
+    try:
+        return zarr.open_group(str(path), mode=mode, use_consolidated=False)
+    except TypeError:
+        return zarr.open_group(str(path), mode=mode, consolidated=False)
+
+
+def _zarr_group_keys(group: zarr.Group) -> List[str]:
+    keys_fn = getattr(group, "group_keys", None)
+    if callable(keys_fn):
+        try:
+            return sorted(str(key) for key in keys_fn())
+        except Exception:
+            pass
+    return sorted(str(key) for key in group.keys() if isinstance(group.get(key), zarr.Group))
+
+
+def _resolve_existing_path(raw_path: object, *, bases: Iterable[Path]) -> Optional[Path]:
+    if raw_path in (None, ""):
+        return None
+    path = Path(str(raw_path)).expanduser()
+    candidates = [path] if path.is_absolute() else [base / path for base in bases] + [path]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            try:
+                return candidate.resolve()
+            except OSError:
+                return candidate
+    return None
+
+
+def _recording_dir_for_zarr(zarr_path: Path) -> Optional[Path]:
+    try:
+        parent = zarr_path.resolve().parent
+    except OSError:
+        parent = zarr_path.parent
+    if parent.name == "zarr":
+        return parent.parent
+    return None
+
+
+def _source_h5_from_recording_dir(zarr_path: Path) -> Tuple[Optional[Path], str]:
+    recording_dir = _recording_dir_for_zarr(zarr_path)
+    if recording_dir is None:
+        return None, "zarr is not under a recording/zarr directory"
+
+    candidates: List[Path] = []
+    raw_dir = recording_dir / "raw"
+    for root in (raw_dir, recording_dir):
+        if not root.exists():
+            continue
+        for suffix in ("*.h5", "*.hdf5"):
+            candidates.extend(sorted(path for path in root.glob(suffix) if path.is_file()))
+
+    unique: Dict[str, Path] = {}
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+        unique[key] = candidate
+    candidates = list(unique.values())
+    if not candidates:
+        return None, f"no H5 files found under {recording_dir}/raw or {recording_dir}"
+
+    zarr_name = zarr_path.name
+    recording_stem = None
+    if zarr_name.endswith("_analysis.zarr"):
+        recording_stem = zarr_name[: -len("_analysis.zarr")]
+    elif zarr_name.endswith("_training.zarr"):
+        recording_stem = zarr_name[: -len("_training.zarr")]
+    if recording_stem:
+        preferred = [path for path in candidates if path.stem == recording_stem]
+        if len(preferred) == 1:
+            return preferred[0], ""
+
+    if len(candidates) == 1:
+        return candidates[0], ""
+
+    joined = ", ".join(str(path) for path in candidates[:5])
+    suffix = "" if len(candidates) <= 5 else f", ... ({len(candidates)} total)"
+    return None, f"ambiguous H5 candidates: {joined}{suffix}"
+
+
+def _resolve_stimulus_backfill_h5(
+    zarr_path: Path,
+    run_group: zarr.Group,
+    *,
+    source_h5: Optional[Path],
+) -> Tuple[Optional[Path], str]:
+    bases: List[Path] = [zarr_path.parent]
+    recording_dir = _recording_dir_for_zarr(zarr_path)
+    if recording_dir is not None:
+        bases.extend([recording_dir, recording_dir / "raw"])
+
+    explicit = _resolve_existing_path(source_h5, bases=bases)
+    if source_h5 is not None:
+        return (explicit, "" if explicit is not None else f"explicit H5 path does not exist: {source_h5}")
+
+    attr_path = _resolve_existing_path(run_group.attrs.get("source_h5"), bases=bases)
+    if attr_path is not None:
+        return attr_path, ""
+
+    return _source_h5_from_recording_dir(zarr_path)
+
+
+def _count_step_start_events(events_data: Optional[np.ndarray]) -> int:
+    if events_data is None or events_data.dtype.names is None:
+        return 0
+    event_names = _normalize_event_names(events_data)
+    return int(sum(1 for name in event_names if str(name).strip() == EVENT_STEP_START))
+
+
+def _zarr_child_exists(run_group: zarr.Group, run_path: Path, name: str) -> bool:
+    """Check child existence using both Zarr metadata and local file layout."""
+
+    if name in run_group:
+        return True
+    return (run_path / name / "zarr.json").exists()
+
+
+def _empty_frame_metadata() -> np.ndarray:
+    return np.asarray([], dtype=np.dtype([]))
+
+
+def backfill_stimulus_step_metadata(
+    zarr_path: Path,
+    *,
+    stimulus_run: Optional[str] = None,
+    source_h5: Optional[Path] = None,
+    overwrite: bool = False,
+    apply: bool = False,
+    consolidate_metadata: bool = False,
+    console: Optional[Console] = None,
+) -> Dict[str, Any]:
+    """Backfill canonical stimulus step metadata into existing stimulus runs.
+
+    This is intentionally narrower than a full stimulus re-import. It reads the
+    immutable Citrus H5 snapshot associated with each existing stimulus run and
+    materializes only:
+
+    - ``analysis/stimulus_runs/<run>/steps/step_<i>``
+    - ``analysis/stimulus_runs/<run>/stimulus_coordinates``
+    - missing ``protocol_json`` attrs, when available
+
+    Default mode is a dry-run. Pass ``apply=True`` to write.
+    """
+
+    zarr_path = Path(zarr_path).expanduser()
+    mode = "a" if apply else "r"
+    root = _open_zarr_group_unconsolidated(zarr_path, mode=mode)
+    summary: Dict[str, Any] = {
+        "zarr_path": str(zarr_path),
+        "apply": bool(apply),
+        "overwrite": bool(overwrite),
+        "runs_scanned": 0,
+        "details": [],
+    }
+
+    def add_detail(status: str, **detail: Any) -> None:
+        summary[status] = int(summary.get(status, 0)) + 1
+        detail_out = {"status": status, **{key: _json_safe_value(value) for key, value in detail.items()}}
+        summary["details"].append(detail_out)
+
+    analysis = root.get("analysis")
+    if analysis is None:
+        add_detail("skipped_missing_analysis")
+        return summary
+    runs_parent = analysis.get("stimulus_runs")
+    if runs_parent is None:
+        add_detail("skipped_missing_stimulus_runs")
+        return summary
+
+    run_names = [stimulus_run] if stimulus_run is not None else _zarr_group_keys(runs_parent)
+    if not run_names:
+        add_detail("skipped_no_stimulus_runs")
+        return summary
+
+    for run_name in run_names:
+        summary["runs_scanned"] += 1
+        if run_name not in runs_parent:
+            add_detail("skipped_missing_run", run_name=run_name)
+            continue
+        run_group = runs_parent[run_name]
+        if not isinstance(run_group, zarr.Group):
+            add_detail("skipped_non_group_run", run_name=run_name)
+            continue
+
+        run_path = zarr_path / "analysis" / "stimulus_runs" / str(run_name)
+        need_steps = bool(overwrite or not _zarr_child_exists(run_group, run_path, "steps"))
+        need_coordinates = bool(overwrite or not _zarr_child_exists(run_group, run_path, "stimulus_coordinates"))
+        need_protocol = bool(overwrite or "protocol_json" not in run_group.attrs)
+        if not need_steps and not need_coordinates and not need_protocol:
+            add_detail("skipped_existing", run_name=run_name)
+            continue
+
+        h5_path, h5_reason = _resolve_stimulus_backfill_h5(zarr_path, run_group, source_h5=source_h5)
+        if h5_path is None:
+            status = "skipped_ambiguous_h5" if h5_reason.startswith("ambiguous") else "skipped_missing_h5"
+            add_detail(status, run_name=run_name, reason=h5_reason)
+            continue
+
+        try:
+            with h5py.File(h5_path, "r") as h5:
+                events_data = h5["/events"][:] if "/events" in h5 else None
+                step_count = _count_step_start_events(events_data)
+                if need_steps and step_count == 0:
+                    add_detail(
+                        "skipped_no_step_events",
+                        run_name=run_name,
+                        source_h5=str(h5_path),
+                    )
+                    continue
+
+                protocol_text, protocol_payload = _read_protocol_snapshot(h5)
+                frame_metadata = (
+                    h5["/video_metadata/frame_metadata"][:]
+                    if "/video_metadata/frame_metadata" in h5
+                    else _empty_frame_metadata()
+                )
+                arena_config = _read_h5_arena_config(h5) or {}
+
+                planned_status = "would_overwrite" if overwrite else "would_backfill"
+                written_status = "overwritten" if overwrite else "backfilled"
+                if not apply:
+                    add_detail(
+                        planned_status,
+                        run_name=run_name,
+                        source_h5=str(h5_path),
+                        step_count=step_count,
+                        write_steps=need_steps,
+                        write_stimulus_coordinates=need_coordinates,
+                        write_protocol_json=bool(need_protocol and protocol_text is not None),
+                    )
+                    continue
+
+                if need_protocol and protocol_text is not None:
+                    run_group.attrs["protocol_json"] = protocol_text
+                if need_coordinates:
+                    _copy_stimulus_coordinates(h5, run_group, console)
+                if need_steps:
+                    _materialize_stimulus_steps(
+                        run_group,
+                        h5=h5,
+                        events_data=events_data,
+                        protocol=protocol_payload,
+                        arena_config=arena_config,
+                        metadata=frame_metadata,
+                        console=console,
+                    )
+                add_detail(
+                    written_status,
+                    run_name=run_name,
+                    source_h5=str(h5_path),
+                    step_count=step_count,
+                    wrote_steps=need_steps,
+                    wrote_stimulus_coordinates=need_coordinates,
+                    wrote_protocol_json=bool(need_protocol and protocol_text is not None),
+                )
+        except Exception as exc:
+            add_detail("error", run_name=run_name, source_h5=str(h5_path), reason=str(exc))
+
+    if apply and consolidate_metadata:
+        zarr.consolidate_metadata(str(zarr_path))
+        summary["consolidated_metadata"] = True
+    else:
+        summary["consolidated_metadata"] = False
+
+    return summary
+
 
 def import_stimulus_to_zarr(
     stimulus_h5: Optional[Path],

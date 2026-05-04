@@ -15,6 +15,22 @@ identity and may copy/reference source attrs for provenance, but it owns only
 derived fish-response metrics. If a response run is absent, callers should
 still be able to inspect stimulus steps from `stimulus_runs`.
 
+Older recording Zarrs may have stimulus runs imported before canonical step
+metadata existed. Backfill them from the immutable Citrus H5 snapshots instead
+of re-importing the whole stimulus run:
+
+```bash
+# Dry run first.
+scripts/backfill_stimulus_step_metadata.sh /nvme1/recordings --recursive
+
+# Write missing steps/stimulus_coordinates and refresh consolidated metadata.
+scripts/backfill_stimulus_step_metadata.sh /nvme1/recordings --recursive --apply --consolidate-metadata
+```
+
+The backfill only writes missing `steps/`, missing `stimulus_coordinates/`, and
+missing `protocol_json` attrs by default. Use `--overwrite` only when a run's
+canonical step groups should be regenerated from source H5.
+
 ## Layout
 
 ```
