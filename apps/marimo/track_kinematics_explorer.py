@@ -1139,6 +1139,141 @@ def _(
 
 
 @app.cell
+def _(json, mo, pd, time, write_perf_event, zarr, zarr_path):
+    _stimulus_step_discovery_t0 = time.perf_counter()
+
+    def _group_keys(_group):
+        _keys_fn = getattr(_group, "group_keys", None)
+        if callable(_keys_fn):
+            try:
+                return sorted(str(_key) for _key in _keys_fn())
+            except Exception:
+                pass
+        try:
+            return sorted(str(_key) for _key in _group.keys())
+        except Exception:
+            return []
+
+    def _local_child_group_names(_parent_path):
+        if not _parent_path.exists():
+            return []
+        return sorted(
+            _child.name
+            for _child in _parent_path.iterdir()
+            if _child.is_dir() and (_child / "zarr.json").exists()
+        )
+
+    def _open_child_group(_parent, _parent_path, _name):
+        try:
+            return _parent[_name]
+        except Exception:
+            _child_path = _parent_path / str(_name)
+            if (_child_path / "zarr.json").exists():
+                return zarr.open_group(str(_child_path), mode="r", use_consolidated=False)
+            raise
+
+    def _mode_attrs(_step_group, _step_path, _mode_group_name):
+        try:
+            if _mode_group_name in _step_group:
+                return dict(_step_group[_mode_group_name].attrs)
+        except Exception:
+            pass
+        _mode_path = _step_path / _mode_group_name
+        if (_mode_path / "zarr.json").exists():
+            try:
+                return dict(zarr.open_group(str(_mode_path), mode="r", use_consolidated=False).attrs)
+            except Exception:
+                return {}
+        return {}
+
+    def _parse_raw_protocol(_value):
+        if not _value:
+            return {}
+        try:
+            _payload = json.loads(str(_value))
+        except Exception:
+            return {}
+        return _payload if isinstance(_payload, dict) else {}
+
+    _step_rows = []
+    try:
+        _root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        _parent = _root["analysis/stimulus_runs"]
+        _parent_path = zarr_path / "analysis" / "stimulus_runs"
+        _latest = str(_parent.attrs.get("latest", ""))
+        _run_names = sorted(set(_group_keys(_parent)) | set(_local_child_group_names(_parent_path)))
+        for _run_name in _run_names:
+            _run_path = _parent_path / _run_name
+            try:
+                _run_group = _open_child_group(_parent, _parent_path, _run_name)
+            except Exception:
+                continue
+            _steps_path = _run_path / "steps"
+            try:
+                _steps_group = _run_group["steps"]
+            except Exception:
+                if (_steps_path / "zarr.json").exists():
+                    _steps_group = zarr.open_group(str(_steps_path), mode="r", use_consolidated=False)
+                else:
+                    continue
+            _step_names = sorted(set(_group_keys(_steps_group)) | set(_local_child_group_names(_steps_path)))
+            for _step_name in _step_names:
+                _step_path = _steps_path / _step_name
+                try:
+                    _step_group = _open_child_group(_steps_group, _steps_path, _step_name)
+                except Exception:
+                    continue
+                _attrs = dict(_step_group.attrs)
+                _mode = str(_attrs.get("stimulus_mode", ""))
+                _moving = _mode_attrs(_step_group, _step_path, "moving_grating")
+                _concentric = _mode_attrs(_step_group, _step_path, "concentric_grating")
+                _raw_protocol = _parse_raw_protocol(_attrs.get("raw_protocol_params_json"))
+                _step_rows.append(
+                    {
+                        "stimulus_run": _run_name,
+                        "latest": "yes" if _run_name == _latest else "",
+                        "step_index": _attrs.get("step_index"),
+                        "step_name": _attrs.get("step_name", _step_name),
+                        "stimulus_mode": _mode,
+                        "start_camera_frame": _attrs.get("start_camera_frame"),
+                        "end_camera_frame": _attrs.get("end_camera_frame"),
+                        "duration_s": _attrs.get("duration_s"),
+                        "moving_direction_camera_deg": _moving.get("grating_direction_camera_deg"),
+                        "moving_orientation_authored_deg": _moving.get("orientation_degrees_authored"),
+                        "camera_to_projector_offset_deg": _moving.get("camera_to_projector_offset_deg"),
+                        "concentric_role": _concentric.get("stimulus_role"),
+                        "concentric_polarity": _concentric.get("radial_polarity_authored"),
+                        "concentric_center_x_px": _concentric.get("center_x_px"),
+                        "concentric_center_y_px": _concentric.get("center_y_px"),
+                        "protocol_param_type": _raw_protocol.get("parameters", {}).get("type")
+                        if isinstance(_raw_protocol.get("parameters"), dict)
+                        else None,
+                    }
+                )
+    except Exception:
+        _step_rows = []
+
+    stimulus_step_df = pd.DataFrame(_step_rows)
+    write_perf_event(
+        "discover_stimulus_steps",
+        time.perf_counter() - _stimulus_step_discovery_t0,
+        zarr_path=zarr_path,
+        n_stimulus_step_rows=len(stimulus_step_df),
+    )
+    if stimulus_step_df.empty:
+        stimulus_step_view = mo.md("### Stimulus Step Metadata\n\nNo canonical stimulus step metadata found.")
+    else:
+        stimulus_step_view = mo.vstack(
+            [
+                mo.md("### Stimulus Step Metadata"),
+                mo.ui.table(stimulus_step_df, selection=None, page_size=10),
+            ]
+        )
+    stimulus_step_view
+    return stimulus_step_df
+
+
+@app.cell
 def _(mo, time, write_perf_event, zarr, zarr_path):
     _stimulus_response_discovery_t0 = time.perf_counter()
     _stimulus_response_options = []

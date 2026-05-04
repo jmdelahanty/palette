@@ -1227,6 +1227,16 @@ def _zarr_group_keys(group: zarr.Group) -> List[str]:
     return sorted(str(key) for key in group.keys() if isinstance(group.get(key), zarr.Group))
 
 
+def _local_zarr_child_group_names(parent_path: Path) -> List[str]:
+    if not parent_path.exists():
+        return []
+    return sorted(
+        child.name
+        for child in parent_path.iterdir()
+        if child.is_dir() and (child / "zarr.json").exists()
+    )
+
+
 def _resolve_existing_path(raw_path: object, *, bases: Iterable[Path]) -> Optional[Path]:
     if raw_path in (None, ""):
         return None
@@ -1383,22 +1393,30 @@ def backfill_stimulus_step_metadata(
         add_detail("skipped_missing_stimulus_runs")
         return summary
 
-    run_names = [stimulus_run] if stimulus_run is not None else _zarr_group_keys(runs_parent)
+    if stimulus_run is not None:
+        run_names = [stimulus_run]
+    else:
+        runs_path = zarr_path / "analysis" / "stimulus_runs"
+        run_names = sorted(set(_zarr_group_keys(runs_parent)) | set(_local_zarr_child_group_names(runs_path)))
     if not run_names:
         add_detail("skipped_no_stimulus_runs")
         return summary
 
     for run_name in run_names:
         summary["runs_scanned"] += 1
-        if run_name not in runs_parent:
-            add_detail("skipped_missing_run", run_name=run_name)
-            continue
-        run_group = runs_parent[run_name]
+        run_path = zarr_path / "analysis" / "stimulus_runs" / str(run_name)
+        try:
+            run_group = runs_parent[run_name]
+        except (KeyError, FileNotFoundError):
+            if (run_path / "zarr.json").exists():
+                run_group = _open_zarr_group_unconsolidated(run_path, mode=mode)
+            else:
+                add_detail("skipped_missing_run", run_name=run_name)
+                continue
         if not isinstance(run_group, zarr.Group):
             add_detail("skipped_non_group_run", run_name=run_name)
             continue
 
-        run_path = zarr_path / "analysis" / "stimulus_runs" / str(run_name)
         need_steps = bool(overwrite or not _zarr_child_exists(run_group, run_path, "steps"))
         need_coordinates = bool(overwrite or not _zarr_child_exists(run_group, run_path, "stimulus_coordinates"))
         need_protocol = bool(overwrite or "protocol_json" not in run_group.attrs)

@@ -16,9 +16,13 @@ Use these run families for new Crimson readers:
 | Swim-bout event windows and detector traces | `analysis/swim_bout_runs/<run>/<speed_level>/` |
 | Per-bout physical movement, heading, eye-gaze summaries | `analysis/bout_kinematics_runs/<run>/` |
 | Body frame, snout/tail landmarks, B-spline, subject-shape QC | `analysis/subject_shape_runs/<run>/` |
+| Protocol step timing and stimulus geometry | `analysis/stimulus_runs/<run>/steps/step_<i>/` |
 
 Legacy `analysis/movement_runs` may remain a compatibility path for old
 archives, but it is not the current Palette motion source.
+
+Stimulus step details are specified in
+[`crimson_stimulus_step_read_contract.md`](./crimson_stimulus_step_read_contract.md).
 
 ## Track Kinematics
 

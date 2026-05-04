@@ -106,6 +106,12 @@ Current rules:
   per-bout measurements live in linked `analysis/bout_kinematics_runs`. The
   Crimson-facing reader contract is
   [`crimson_track_motion_read_contract.md`](./crimson_track_motion_read_contract.md).
+- Source stimulus timing and geometry should come from
+  `analysis/stimulus_runs/<run>/steps/step_<i>`, not from downstream
+  `stimulus_response_runs` or ad hoc protocol JSON parsing. Derived response
+  runs join back to this source surface by `source_stimulus_run` and
+  `step_index`. The Crimson-facing reader contract is
+  [`crimson_stimulus_step_read_contract.md`](./crimson_stimulus_step_read_contract.md).
 - Production assembly/export from `refined_subject_masks_runs` is
   approved-only by default; pending or missing component reviews require an
   explicit draft/QA override.
