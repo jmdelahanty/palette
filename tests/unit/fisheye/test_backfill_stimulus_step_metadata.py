@@ -168,6 +168,28 @@ def test_backfill_stimulus_step_metadata_writes_steps_and_coordinates(tmp_path: 
     assert run["stimulus_coordinates"]["arena_1"]["custom_coordinates"].attrs["texture_center_y"] == 173.0
 
 
+def test_backfill_stimulus_step_metadata_applies_configured_grating_offset(tmp_path: Path) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+    _write_stimulus_h5(h5_path)
+    _seed_zarr(zarr_path, source_h5=h5_path)
+
+    summary = backfill_stimulus_step_metadata(
+        zarr_path,
+        apply=True,
+        moving_grating_camera_offset_deg=180.0,
+    )
+
+    assert summary["details"][0]["status"] == "backfilled"
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    moving = root["analysis"]["stimulus_runs"]["stimulus_001"]["steps"]["step_0"]["moving_grating"]
+    assert moving.attrs["orientation_degrees_authored"] == 180.0
+    assert moving.attrs["grating_direction_camera_deg"] == 0.0
+    assert moving.attrs["camera_to_projector_offset_deg"] == 180.0
+    assert moving.attrs["direction_mapping_status"] == "configured_camera_offset"
+    assert moving.attrs["direction_mapping_validated"] is False
+
+
 def test_backfill_stimulus_step_metadata_skips_existing_unless_overwrite(tmp_path: Path) -> None:
     h5_path = tmp_path / "session.h5"
     zarr_path = tmp_path / "sample_analysis.zarr"

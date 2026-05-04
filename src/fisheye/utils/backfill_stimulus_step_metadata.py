@@ -93,6 +93,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--recursive", action="store_true", help="Recursively search for .zarr archives.")
     parser.add_argument("--stimulus-run", help="Only backfill one analysis/stimulus_runs/<run>.")
     parser.add_argument("--source-h5", type=Path, help="Explicit H5 path. Intended for single-archive repairs.")
+    parser.add_argument(
+        "--camera-to-projector-offset-deg",
+        type=float,
+        default=0.0,
+        help=(
+            "Angular correction applied to MOVING_GRATING directions when materializing "
+            "canonical step metadata. Use 180.0 for known inverted-projector recordings."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true", help="Rewrite existing steps/stimulus_coordinates.")
     parser.add_argument("--apply", action="store_true", help="Write updates (default: dry-run).")
     parser.add_argument(
@@ -118,6 +127,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 zarr_path,
                 stimulus_run=args.stimulus_run,
                 source_h5=args.source_h5,
+                moving_grating_camera_offset_deg=float(args.camera_to_projector_offset_deg),
                 overwrite=bool(args.overwrite),
                 apply=bool(args.apply),
                 consolidate_metadata=bool(args.consolidate_metadata),

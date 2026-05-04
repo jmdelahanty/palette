@@ -32,22 +32,42 @@ def resolve_grating_direction(
     direction is wrapped to ``[0, 360)`` for stable persisted labels.
     """
 
-    params = _flatten_stimulus_params(step.stimulus_params)
+    raw_params = step.stimulus_params if isinstance(step.stimulus_params, dict) else {}
+    moving_attrs = raw_params.get("moving_grating")
+    if isinstance(moving_attrs, dict):
+        status = str(moving_attrs.get("direction_mapping_status", ""))
+        camera_direction = moving_attrs.get("grating_direction_camera_deg")
+        if status == "configured_camera_offset" and camera_direction is not None:
+            return float(camera_direction) % 360.0
+
+    params = _flatten_stimulus_params(raw_params)
     direction = 0.0
     for key in ("orientation_degrees", "angle_degrees", "grating_orientation"):
         if key in params and params[key] is not None:
             direction = params[key]
             break
+    else:
+        if isinstance(moving_attrs, dict):
+            for key in ("orientation_degrees_authored", "grating_direction_camera_deg"):
+                if moving_attrs.get(key) is not None:
+                    direction = moving_attrs[key]
+                    break
     return (float(direction) + float(offset_deg)) % 360.0
 
 
 def resolve_grating_speed_mm_s(step: Any) -> float:
     """Resolve moving-grating speed from canonical protocol params."""
 
-    params = _flatten_stimulus_params(step.stimulus_params)
+    raw_params = step.stimulus_params if isinstance(step.stimulus_params, dict) else {}
+    params = _flatten_stimulus_params(raw_params)
     for key in ("grating_speed_mm_s", "speed_mm_per_sec", "speed_mm_s"):
         if key in params and params[key] is not None:
             return float(params[key])
+    moving_attrs = raw_params.get("moving_grating")
+    if isinstance(moving_attrs, dict):
+        for key in ("speed_mm_s", "speed_mm_per_sec", "grating_speed_mm_s"):
+            if moving_attrs.get(key) is not None:
+                return float(moving_attrs[key])
     return 0.0
 
 
@@ -139,6 +159,7 @@ def compute_grating_per_fish(
     grating_speed_mm_s: float = 0.0,
     follow_threshold: float = 0.5,
     follow_window_s: float = 1.0,
+    grating_dir_deg: float | None = None,
 ) -> Dict[str, np.ndarray]:
     """Per-fish summary grating metrics for one step."""
 
@@ -160,7 +181,8 @@ def compute_grating_per_fish(
     drift_perp = np.zeros(n_fish, dtype=np.float32)
     latency = np.full(n_fish, np.nan, dtype=np.float32)
 
-    grating_dir_deg = resolve_grating_direction(step)
+    if grating_dir_deg is None:
+        grating_dir_deg = resolve_grating_direction(step)
     grating_dir_rad = np.deg2rad(grating_dir_deg)
     along_vec = np.array([np.cos(grating_dir_rad), np.sin(grating_dir_rad)], dtype=np.float32)
     perp_vec = np.array([-np.sin(grating_dir_rad), np.cos(grating_dir_rad)], dtype=np.float32)

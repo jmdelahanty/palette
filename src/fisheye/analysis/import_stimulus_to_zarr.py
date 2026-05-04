@@ -1051,7 +1051,12 @@ def _resolve_concentric_center_attrs(
     return attrs
 
 
-def _write_moving_grating_step_metadata(step_group: zarr.Group, step_params: Dict[str, Any]) -> None:
+def _write_moving_grating_step_metadata(
+    step_group: zarr.Group,
+    step_params: Dict[str, Any],
+    *,
+    camera_to_projector_offset_deg: float = 0.0,
+) -> None:
     flat = _flatten_protocol_params(step_params)
     orientation = _first_float(
         flat.get("orientation_degrees"),
@@ -1062,14 +1067,23 @@ def _write_moving_grating_step_metadata(step_group: zarr.Group, step_params: Dic
     speed_pps = _first_float(flat.get("speed_pps"))
     spatial_mm = _first_float(flat.get("spatial_freq_cycles_per_mm"), flat.get("spatial_freq_cpmm"))
     spatial_px = _first_float(flat.get("spatial_freq_rpp"), flat.get("spatial_freq_cpp"))
+    offset = float(camera_to_projector_offset_deg)
+    direction_camera = ((orientation + offset) % 360.0) if orientation is not None else None
+    has_configured_offset = abs(offset) > 1e-9
     attrs = {
         "metadata_schema_version": 1,
         "source": "protocol_snapshot",
         "orientation_degrees_authored": orientation,
-        "grating_direction_camera_deg": (orientation % 360.0) if orientation is not None else None,
-        "camera_to_projector_offset_deg": 0.0,
-        "direction_mapping_source": "protocol_orientation_degrees_no_offset",
-        "direction_mapping_status": "unvalidated_default_zero_offset",
+        "grating_direction_camera_deg": direction_camera,
+        "camera_to_projector_offset_deg": offset,
+        "direction_mapping_source": (
+            "protocol_orientation_degrees_plus_configured_offset"
+            if has_configured_offset else "protocol_orientation_degrees_no_offset"
+        ),
+        "direction_mapping_status": (
+            "configured_camera_offset" if has_configured_offset else "unvalidated_default_zero_offset"
+        ),
+        "direction_mapping_validated": False,
         "speed_mm_s": speed_mm_s,
         "speed_pps": speed_pps,
         "spatial_freq_cycles_per_mm": spatial_mm,
@@ -1129,6 +1143,7 @@ def _materialize_stimulus_steps(
     protocol: Optional[Dict[str, Any]],
     arena_config: Dict[str, Any],
     metadata: np.ndarray,
+    moving_grating_camera_offset_deg: float = 0.0,
     console: Optional[Console],
 ) -> None:
     """Write canonical source-derived step metadata under a stimulus run."""
@@ -1201,7 +1216,11 @@ def _materialize_stimulus_steps(
         })
 
         if mode_name == "MOVING_GRATING":
-            _write_moving_grating_step_metadata(step_group, step_params)
+            _write_moving_grating_step_metadata(
+                step_group,
+                step_params,
+                camera_to_projector_offset_deg=moving_grating_camera_offset_deg,
+            )
         elif mode_name == "CONCENTRIC_GRATING":
             _write_concentric_grating_step_metadata(h5, step_group, step_params, arena_config)
 
@@ -1350,6 +1369,7 @@ def backfill_stimulus_step_metadata(
     *,
     stimulus_run: Optional[str] = None,
     source_h5: Optional[Path] = None,
+    moving_grating_camera_offset_deg: float = 0.0,
     overwrite: bool = False,
     apply: bool = False,
     consolidate_metadata: bool = False,
@@ -1375,6 +1395,7 @@ def backfill_stimulus_step_metadata(
         "zarr_path": str(zarr_path),
         "apply": bool(apply),
         "overwrite": bool(overwrite),
+        "moving_grating_camera_offset_deg": float(moving_grating_camera_offset_deg),
         "runs_scanned": 0,
         "details": [],
     }
@@ -1461,6 +1482,7 @@ def backfill_stimulus_step_metadata(
                         write_steps=need_steps,
                         write_stimulus_coordinates=need_coordinates,
                         write_protocol_json=bool(need_protocol and protocol_text is not None),
+                        moving_grating_camera_offset_deg=float(moving_grating_camera_offset_deg),
                     )
                     continue
 
@@ -1476,6 +1498,7 @@ def backfill_stimulus_step_metadata(
                         protocol=protocol_payload,
                         arena_config=arena_config,
                         metadata=frame_metadata,
+                        moving_grating_camera_offset_deg=float(moving_grating_camera_offset_deg),
                         console=console,
                     )
                 add_detail(
@@ -1486,6 +1509,7 @@ def backfill_stimulus_step_metadata(
                     wrote_steps=need_steps,
                     wrote_stimulus_coordinates=need_coordinates,
                     wrote_protocol_json=bool(need_protocol and protocol_text is not None),
+                    moving_grating_camera_offset_deg=float(moving_grating_camera_offset_deg),
                 )
         except Exception as exc:
             add_detail("error", run_name=run_name, source_h5=str(h5_path), reason=str(exc))
@@ -1814,6 +1838,7 @@ def import_stimulus_to_zarr(
             protocol=protocol_payload,
             arena_config=_read_h5_arena_config(h5) or {},
             metadata=combined_metadata,
+            moving_grating_camera_offset_deg=0.0,
             console=console,
         )
 

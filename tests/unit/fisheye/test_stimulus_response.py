@@ -872,6 +872,50 @@ class TestResolveGratingDirection:
         assert resolve_grating_direction(step) == 180.0
         assert resolve_grating_speed_mm_s(step) == 5.0
 
+    def test_configured_canonical_step_direction_is_not_offset_twice(self) -> None:
+        step = ProtocolStep(
+            0,
+            "t",
+            "MOVING_GRATING",
+            3,
+            0,
+            100,
+            100 / 30.0,
+            stimulus_params={
+                "moving_grating": {
+                    "orientation_degrees_authored": 0.0,
+                    "grating_direction_camera_deg": 180.0,
+                    "camera_to_projector_offset_deg": 180.0,
+                    "direction_mapping_status": "configured_camera_offset",
+                    "speed_mm_s": 5.0,
+                }
+            },
+        )
+
+        assert resolve_grating_direction(step, offset_deg=180.0) == 180.0
+        assert resolve_grating_speed_mm_s(step) == 5.0
+
+    def test_unvalidated_canonical_step_direction_can_receive_runtime_offset(self) -> None:
+        step = ProtocolStep(
+            0,
+            "t",
+            "MOVING_GRATING",
+            3,
+            0,
+            100,
+            100 / 30.0,
+            stimulus_params={
+                "moving_grating": {
+                    "orientation_degrees_authored": 0.0,
+                    "grating_direction_camera_deg": 0.0,
+                    "camera_to_projector_offset_deg": 0.0,
+                    "direction_mapping_status": "unvalidated_default_zero_offset",
+                }
+            },
+        )
+
+        assert resolve_grating_direction(step, offset_deg=180.0) == 180.0
+
 
 class TestComputeGratingPerFrame:
 

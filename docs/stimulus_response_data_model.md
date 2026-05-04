@@ -25,11 +25,17 @@ scripts/backfill_stimulus_step_metadata.sh /nvme1/recordings --recursive
 
 # Write missing steps/stimulus_coordinates and refresh consolidated metadata.
 scripts/backfill_stimulus_step_metadata.sh /nvme1/recordings --recursive --apply --consolidate-metadata
+
+# For known inverted-projector moving-grating recordings, regenerate steps with
+# the camera-space grating direction correction made explicit.
+scripts/backfill_stimulus_step_metadata.sh <analysis.zarr> --apply --overwrite \
+  --camera-to-projector-offset-deg 180 --consolidate-metadata
 ```
 
 The backfill only writes missing `steps/`, missing `stimulus_coordinates/`, and
 missing `protocol_json` attrs by default. Use `--overwrite` only when a run's
-canonical step groups should be regenerated from source H5.
+canonical step groups should be regenerated from source H5, for example to
+materialize a known moving-grating camera/projector offset.
 
 ## Layout
 

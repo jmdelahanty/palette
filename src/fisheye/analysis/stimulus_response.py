@@ -471,6 +471,9 @@ def _parse_canonical_stimulus_steps(stim_group: zarr.Group) -> List[ProtocolStep
         end_frame = _attr_int(attrs, "end_camera_frame", "end_frame", default=start_frame + 1)
         duration_s = _attr_float(attrs, "duration_s", default=0.0)
         stimulus_params = _decode_protocol_params_json(attrs.get("raw_protocol_params_json"))
+        for mode_group_name in ("moving_grating", "concentric_grating", "looming_dot"):
+            if mode_group_name in group:
+                stimulus_params[mode_group_name] = dict(group[mode_group_name].attrs)
         steps.append(ProtocolStep(
             index=index,
             name=str(attrs.get("step_name", step_name)),
@@ -2120,6 +2123,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             pf = compute_grating_per_frame(tracks, step, grating_dir, fps)
             gpf = compute_grating_per_fish(
                 pf, tracks, step, fps,
+                grating_dir_deg=grating_dir,
                 grating_speed_mm_s=grating_speed,
                 follow_threshold=args.follow_threshold,
                 follow_window_s=args.follow_window_s,

@@ -61,6 +61,7 @@ orientation_degrees_authored
 grating_direction_camera_deg
 camera_to_projector_offset_deg
 direction_mapping_status
+direction_mapping_validated
 speed_mm_s
 speed_pps
 spatial_freq_cycles_per_mm
@@ -70,9 +71,16 @@ duty_cycle
 ```
 
 For camera overlays and OMR interpretation, Crimson should use
-`grating_direction_camera_deg`. This is already camera-space and accounts for
-Palette's configured projector/camera direction correction. Do not reinterpret
-`orientation_degrees_authored` as camera-space motion direction.
+`grating_direction_camera_deg`. This is the Palette-normalized camera-space
+best estimate. Do not reinterpret `orientation_degrees_authored` as camera-space
+motion direction.
+
+If `direction_mapping_status == "configured_camera_offset"`, Palette applied the
+recorded `camera_to_projector_offset_deg` correction when materializing the
+step. If `direction_mapping_status == "unvalidated_default_zero_offset"`, the
+field is only the Citrus-authored orientation with no explicit projector/camera
+offset. Crimson can still display it, but should label it as unvalidated or
+prefer a response run whose provenance records the offset.
 
 ## Concentric Grating Subgroup
 
