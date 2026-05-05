@@ -1277,19 +1277,76 @@ def _(json, mo, pd, time, write_perf_event, zarr, zarr_path):
 def _(mo, time, write_perf_event, zarr, zarr_path):
     _stimulus_response_discovery_t0 = time.perf_counter()
     _stimulus_response_options = []
+
+    def _group_keys(_group):
+        _keys_fn = getattr(_group, "group_keys", None)
+        if callable(_keys_fn):
+            try:
+                return sorted(str(_key) for _key in _keys_fn())
+            except Exception:
+                pass
+        try:
+            return sorted(str(_key) for _key in _group.keys())
+        except Exception:
+            return []
+
+    def _local_child_group_names(_parent_path):
+        if not _parent_path.exists():
+            return []
+        return sorted(
+            _child.name
+            for _child in _parent_path.iterdir()
+            if _child.is_dir() and (_child / "zarr.json").exists()
+        )
+
+    def _open_child_group(_parent, _parent_path, _name):
+        try:
+            return _parent[_name]
+        except Exception:
+            _child_path = _parent_path / str(_name)
+            if (_child_path / "zarr.json").exists():
+                return zarr.open_group(str(_child_path), mode="r", use_consolidated=False)
+            raise
+
     try:
         _root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
         _parent = _root["analysis/stimulus_response_runs"]
+        _parent_path = zarr_path / "analysis" / "stimulus_response_runs"
         _latest = str(_parent.attrs.get("latest", ""))
-        for _run_name in sorted(str(_name) for _name in _parent.group_keys()):
-            _run_group = _parent[_run_name]
-            _omr_step_count = 0
-            if "steps" in _run_group:
-                for _step_key in _run_group["steps"].group_keys():
-                    _step_group = _run_group["steps"][_step_key]
+        _run_names = sorted(set(_group_keys(_parent)) | set(_local_child_group_names(_parent_path)))
+        for _run_name in _run_names:
+            try:
+                _run_group = _open_child_group(_parent, _parent_path, _run_name)
+            except Exception:
+                continue
+            _moving_omr_step_count = 0
+            _concentric_radial_step_count = 0
+            _steps_path = _parent_path / _run_name / "steps"
+            try:
+                _steps_group = _run_group["steps"]
+            except Exception:
+                if (_steps_path / "zarr.json").exists():
+                    _steps_group = zarr.open_group(str(_steps_path), mode="r", use_consolidated=False)
+                else:
+                    _steps_group = None
+            if _steps_group is not None:
+                _step_names = sorted(
+                    set(_group_keys(_steps_group)) | set(_local_child_group_names(_steps_path))
+                )
+                for _step_key in _step_names:
+                    try:
+                        _step_group = _open_child_group(_steps_group, _steps_path, _step_key)
+                    except Exception:
+                        continue
                     if "grating" in _step_group and "omr" in _step_group["grating"]:
-                        _omr_step_count += 1
-            if _omr_step_count == 0:
+                        _moving_omr_step_count += 1
+                    if (
+                        "concentric_grating" in _step_group
+                        and "radial_omr" in _step_group["concentric_grating"]
+                    ):
+                        _concentric_radial_step_count += 1
+            _response_step_count = _moving_omr_step_count + _concentric_radial_step_count
+            if _response_step_count == 0:
                 continue
             _provenance = _run_group.attrs.get("provenance", {})
             _parameters = _provenance.get("parameters", {}) if isinstance(_provenance, dict) else {}
@@ -1298,7 +1355,8 @@ def _(mo, time, write_perf_event, zarr, zarr_path):
             _source_bouts = str(_run_group.attrs.get("source_bout_run", "none"))
             _label_parts = [
                 _run_name,
-                f"{_omr_step_count} OMR steps",
+                f"{_moving_omr_step_count} moving OMR steps",
+                f"{_concentric_radial_step_count} radial OMR steps",
                 f"offset {_offset} deg" if _offset is not None else "offset unknown",
                 f"track {_source_track}",
             ]
@@ -1313,7 +1371,9 @@ def _(mo, time, write_perf_event, zarr, zarr_path):
                     "source_track_kinematics_run": _source_track,
                     "source_bout_run": _source_bouts,
                     "camera_to_projector_offset_deg": _offset,
-                    "n_omr_steps": _omr_step_count,
+                    "n_omr_steps": _response_step_count,
+                    "n_moving_omr_steps": _moving_omr_step_count,
+                    "n_concentric_radial_omr_steps": _concentric_radial_step_count,
                 }
             )
     except Exception:
@@ -1389,19 +1449,166 @@ def _(
             return b""
         return np.asarray(_artifact[:], dtype=np.uint8).tobytes()
 
+    def _group_keys(_group):
+        _keys_fn = getattr(_group, "group_keys", None)
+        if callable(_keys_fn):
+            try:
+                return sorted(str(_key) for _key in _keys_fn())
+            except Exception:
+                pass
+        try:
+            return sorted(str(_key) for _key in _group.keys())
+        except Exception:
+            return []
+
+    def _step_sort_key(_name):
+        try:
+            return int(str(_name).rsplit("_", 1)[-1])
+        except Exception:
+            return str(_name)
+
+    def _read_array_mapping(_group):
+        _mapping = {}
+        if _group is None:
+            return _mapping
+        for _name in _group.keys():
+            try:
+                _value = _group[_name]
+            except Exception:
+                continue
+            if hasattr(_value, "shape"):
+                _mapping[str(_name)] = np.asarray(_value[:])
+        return _mapping
+
+    def _read_child_array_mapping(_group, _child_name):
+        if _child_name not in _group:
+            return {}
+        return _read_array_mapping(_group[_child_name])
+
+    def _load_concentric_radial_omr_frames(_run_group):
+        _step_rows = []
+        _bout_frames = []
+        _window_frames = []
+        _early_window_frames = []
+        if "steps" not in _run_group:
+            return (
+                pd.DataFrame(),
+                pd.DataFrame(),
+                pd.DataFrame(),
+                pd.DataFrame(),
+            )
+        for _step_key in sorted(_group_keys(_run_group["steps"]), key=_step_sort_key):
+            _step_group = _run_group["steps"][_step_key]
+            if "concentric_grating" not in _step_group:
+                continue
+            _concentric_group = _step_group["concentric_grating"]
+            if "radial_omr" not in _concentric_group:
+                continue
+            _radial_group = _concentric_group["radial_omr"]
+            _step_attrs = dict(_step_group.attrs)
+            _radial_attrs = dict(_radial_group.attrs)
+            _per_fish = _read_child_array_mapping(_radial_group, "per_fish")
+            _per_bout = _read_child_array_mapping(_radial_group, "per_bout")
+            _windows = _read_child_array_mapping(_radial_group, "windows")
+            _early_windows = _read_child_array_mapping(_radial_group, "early_windows")
+            _center = _radial_attrs.get("stimulus_center_mm") or [np.nan, np.nan]
+            _step_rows.append(
+                {
+                    "step_index": _step_attrs.get("step_index", _step_sort_key(_step_key)),
+                    "step_name": _step_attrs.get("step_name", _step_key),
+                    "start_frame": _step_attrs.get("start_frame", _step_attrs.get("start_camera_frame")),
+                    "end_frame": _step_attrs.get("end_frame", _step_attrs.get("end_camera_frame")),
+                    "duration_s": _step_attrs.get("duration_s"),
+                    "method_version": _radial_attrs.get("method_version"),
+                    "stimulus_radial_polarity": _radial_attrs.get("stimulus_radial_polarity"),
+                    "stimulus_radial_sign": _radial_attrs.get("stimulus_radial_sign"),
+                    "stimulus_radial_polarity_source": _radial_attrs.get("stimulus_radial_polarity_source"),
+                    "stimulus_radial_polarity_validated": _radial_attrs.get(
+                        "stimulus_radial_polarity_validated"
+                    ),
+                    "concentric_grating_role": _radial_attrs.get("concentric_grating_role"),
+                    "stimulus_center_x_mm": _center[0] if len(_center) > 0 else np.nan,
+                    "stimulus_center_y_mm": _center[1] if len(_center) > 1 else np.nan,
+                    "arena_radius_mm": _radial_attrs.get("arena_radius_mm"),
+                    "omr_path_index": _first_value(_per_fish, "omr_path_index"),
+                    "radial_path_index": _first_value(_per_fish, "radial_path_index"),
+                    "omr_net_direction_index": _first_value(_per_fish, "omr_net_direction_index"),
+                    "tangential_bias_index": _first_value(_per_fish, "tangential_bias_index"),
+                    "stimulus_aligned_radial_displacement_mm": _first_value(
+                        _per_fish, "stimulus_aligned_radial_displacement_mm"
+                    ),
+                    "radial_displacement_integrated_mm": _first_value(
+                        _per_fish, "radial_displacement_integrated_mm"
+                    ),
+                    "tangential_displacement_mm": _first_value(
+                        _per_fish, "tangential_displacement_mm"
+                    ),
+                    "path_length_mm": _first_value(_per_fish, "path_length_mm"),
+                    "start_radius_mm": _first_value(_per_fish, "start_radius_mm"),
+                    "mean_radius_mm": _first_value(_per_fish, "mean_radius_mm"),
+                    "end_radius_mm": _first_value(_per_fish, "end_radius_mm"),
+                    "start_radius_norm": _first_value(_per_fish, "start_radius_norm"),
+                    "mean_radius_norm": _first_value(_per_fish, "mean_radius_norm"),
+                    "end_radius_norm": _first_value(_per_fish, "end_radius_norm"),
+                    "bout_fraction_correct_classified": _first_value(
+                        _per_fish, "bout_fraction_correct_classified"
+                    ),
+                    "bout_choice_index": _first_value(_per_fish, "bout_choice_index"),
+                    "time_choice_index": _first_value(_per_fish, "time_choice_index"),
+                    "bout_count_correct": _first_value(_per_fish, "bout_count_correct"),
+                    "bout_count_opposing": _first_value(_per_fish, "bout_count_opposing"),
+                    "bout_count_ambiguous": _first_value(_per_fish, "bout_count_ambiguous"),
+                    "bout_count_total": _first_value(_per_fish, "bout_count_total"),
+                    "first_aligned_bout_latency_s": _first_value(
+                        _per_fish, "first_aligned_bout_latency_s"
+                    ),
+                    "first_opposing_bout_latency_s": _first_value(
+                        _per_fish, "first_opposing_bout_latency_s"
+                    ),
+                    "coverage_fraction": _first_value(_per_fish, "coverage_fraction"),
+                    "quality_flag": _first_value(_per_fish, "quality_flag"),
+                }
+            )
+            for _mapping, _frames in (
+                (_per_bout, _bout_frames),
+                (_windows, _window_frames),
+                (_early_windows, _early_window_frames),
+            ):
+                if not _mapping:
+                    continue
+                _df = pd.DataFrame({str(_key): np.asarray(_value) for _key, _value in _mapping.items()})
+                _df.insert(0, "step_index", _step_attrs.get("step_index", _step_sort_key(_step_key)))
+                _df.insert(1, "step_name", _step_attrs.get("step_name", _step_key))
+                _df.insert(2, "stimulus_radial_polarity", _radial_attrs.get("stimulus_radial_polarity"))
+                _df.insert(3, "stimulus_radial_sign", _radial_attrs.get("stimulus_radial_sign"))
+                _frames.append(_df)
+        return (
+            pd.DataFrame(_step_rows),
+            pd.concat(_bout_frames, ignore_index=True) if _bout_frames else pd.DataFrame(),
+            pd.concat(_window_frames, ignore_index=True) if _window_frames else pd.DataFrame(),
+            pd.concat(_early_window_frames, ignore_index=True) if _early_window_frames else pd.DataFrame(),
+        )
+
     if selected_stimulus_response is None:
         stimulus_response_attrs = {}
         omr_step_df = pd.DataFrame()
         omr_bout_df = pd.DataFrame()
         omr_window_df = pd.DataFrame()
         omr_early_window_df = pd.DataFrame()
+        concentric_omr_step_df = pd.DataFrame()
+        concentric_omr_bout_df = pd.DataFrame()
+        concentric_omr_window_df = pd.DataFrame()
+        concentric_omr_early_window_df = pd.DataFrame()
         omr_summary_png_bytes = b""
         omr_trajectory_png_bytes = b""
     else:
         _root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
         _run_group = _root[selected_stimulus_response["run_path"]]
         stimulus_response_attrs = dict(_run_group.attrs)
-        _steps = load_omr_step_summaries(_run_group)
+        try:
+            _steps = load_omr_step_summaries(_run_group)
+        except Exception:
+            _steps = []
         _step_rows = []
         _bout_frames = []
         _window_frames = []
@@ -1471,6 +1678,12 @@ def _(
         )
         omr_summary_png_bytes = _read_png_artifact(_run_group, OMR_SUMMARY_PNG_ARTIFACT_NAME)
         omr_trajectory_png_bytes = _read_png_artifact(_run_group, OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME)
+        (
+            concentric_omr_step_df,
+            concentric_omr_bout_df,
+            concentric_omr_window_df,
+            concentric_omr_early_window_df,
+        ) = _load_concentric_radial_omr_frames(_run_group)
 
     write_perf_event(
         "load_stimulus_response_omr",
@@ -1482,10 +1695,18 @@ def _(
         n_omr_bout_rows=len(omr_bout_df),
         n_omr_window_rows=len(omr_window_df),
         n_omr_early_window_rows=len(omr_early_window_df),
+        n_concentric_radial_omr_steps=len(concentric_omr_step_df),
+        n_concentric_radial_omr_bout_rows=len(concentric_omr_bout_df),
+        n_concentric_radial_omr_window_rows=len(concentric_omr_window_df),
+        n_concentric_radial_omr_early_window_rows=len(concentric_omr_early_window_df),
         has_summary_png=bool(omr_summary_png_bytes),
         has_trajectory_png=bool(omr_trajectory_png_bytes),
     )
     return (
+        concentric_omr_bout_df,
+        concentric_omr_early_window_df,
+        concentric_omr_step_df,
+        concentric_omr_window_df,
         omr_bout_df,
         omr_early_window_df,
         omr_step_df,
@@ -1499,6 +1720,10 @@ def _(
 
 @app.cell
 def _(
+    concentric_omr_bout_df,
+    concentric_omr_early_window_df,
+    concentric_omr_step_df,
+    concentric_omr_window_df,
     go,
     mo,
     omr_bout_df,
@@ -1517,208 +1742,432 @@ def _(
     _omr_view_t0 = time.perf_counter()
     if selected_stimulus_response is None:
         stimulus_response_omr_view = mo.md("No stimulus-response / OMR run selected.")
-    elif not len(omr_step_df):
+    elif not len(omr_step_df) and not len(concentric_omr_step_df):
         stimulus_response_omr_view = mo.md("Selected stimulus-response run has no OMR step metrics.")
     else:
-        _direction_fig = go.Figure()
-        _x = omr_step_df["step_index"].astype(str)
-        for _metric_name, _color in (
-            ("omr_path_index", "#2a9d8f"),
-            ("bout_path_index", "#43aa8b"),
-            ("bout_choice_index", "#e76f51"),
-            ("time_choice_index", "#457b9d"),
-        ):
-            if _metric_name not in omr_step_df:
-                continue
-            _direction_fig.add_trace(
-                go.Bar(
-                    x=_x,
-                    y=omr_step_df[_metric_name],
-                    name=_metric_name,
-                    marker_color=_color,
-                    customdata=omr_step_df[
-                        [
-                            "stimulus_direction_deg",
-                            "bout_count_correct",
-                            "bout_count_opposing",
-                            "bout_count_total",
-                        ]
-                    ],
-                    hovertemplate=(
-                        "step %{x}<br>"
-                        f"{_metric_name}: %{{y:.3f}}<br>"
-                        "direction: %{customdata[0]:.1f} deg<br>"
-                        "correct/opposing/total: %{customdata[1]} / %{customdata[2]} / %{customdata[3]}"
-                        "<extra></extra>"
-                    ),
-                )
-            )
-        _direction_fig.add_hline(y=0.0, line_width=1, line_color="rgba(0,0,0,0.45)")
-        _direction_fig.update_layout(
-            title="OMR Direction Metrics by Grating Step",
-            xaxis_title="Step index",
-            yaxis_title="Signed OMR metric",
-            yaxis=dict(range=[-1.05, 1.05]),
-            barmode="group",
-            height=420,
-            margin=dict(l=52, r=20, t=58, b=80),
-            legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0.0),
-        )
-
-        _position_fig = go.Figure()
-        for _metric_name, _mode in (
-            ("start_position_axis_norm", "markers+lines"),
-            ("mean_position_axis_norm", "markers+lines"),
-            ("end_position_axis_norm", "markers+lines"),
-            ("fraction_time_correct_side", "markers+lines"),
-        ):
-            if _metric_name not in omr_step_df:
-                continue
-            _position_fig.add_trace(
-                go.Scatter(
-                    x=_x,
-                    y=omr_step_df[_metric_name],
-                    mode=_mode,
-                    name=_metric_name,
-                )
-            )
-        _position_fig.add_hline(y=0.0, line_width=1, line_color="rgba(0,0,0,0.45)")
-        _position_fig.update_layout(
-            title="Arena-Axis Position and Correct-Side Occupancy",
-            xaxis_title="Step index",
-            yaxis_title="Normalized axis / fraction",
-            height=380,
-            margin=dict(l=52, r=20, t=58, b=80),
-            legend=dict(orientation="h", yanchor="top", y=-0.24, xanchor="left", x=0.0),
-        )
-
-        _table_columns = [
-            _column
-            for _column in (
-                "step_index",
-                "step_name",
-                "stimulus_direction_deg",
-                "omr_path_index",
-                "bout_path_index",
-                "bout_choice_index",
-                "time_choice_index",
-                "bout_fraction_correct_weighted_by_path",
-                "bout_fraction_correct_weighted_by_displacement",
-                "bout_fraction_correct_classified",
-                "bout_count_correct",
-                "bout_count_opposing",
-                "bout_count_ambiguous",
-                "bout_count_total",
-                "start_position_axis_norm",
-                "mean_position_axis_norm",
-                "end_position_axis_norm",
-                "fraction_time_correct_side",
-                "first_aligned_bout_latency_s",
-                "first_opposing_bout_latency_s",
-            )
-            if _column in omr_step_df
-        ]
-        _bout_columns = [
-            _column
-            for _column in (
-                "step_index",
-                "fish_id",
-                "bout_id",
-                "start_frame",
-                "end_frame",
-                "per_bout_omr_score",
-                "correct_label",
-                "bout_path_length_mm",
-                "bout_displacement_mm",
-                "parallel_displacement_mm",
-            )
-            if _column in omr_bout_df
-        ]
-        _early_window_columns = [
-            _column
-            for _column in (
-                "step_index",
-                "fish_id",
-                "window_length_s",
-                "actual_window_length_s",
-                "omr_path_index",
-                "bout_path_index",
-                "bout_fraction_correct_weighted_by_path",
-                "time_choice_index",
-                "parallel_displacement_mm",
-                "path_length_mm",
-                "n_aligned_bouts",
-                "n_opposing_bouts",
-                "n_ambiguous_bouts",
-                "coverage_fraction",
-            )
-            if _column in omr_early_window_df
-        ]
         _provenance = stimulus_response_attrs.get("provenance", {})
         _parameters = _provenance.get("parameters", {}) if isinstance(_provenance, dict) else {}
-        stimulus_response_omr_view = mo.vstack(
-            [
-                mo.md(
-                    f"""
-                    ## Stimulus Response / OMR Explorer
 
-                    **Run:** `{selected_stimulus_response["run_name"]}`
+        _sections = [
+            mo.md(
+                f"""
+                ## Stimulus Response / OMR Explorer
 
-                    **Source track:** `{selected_stimulus_response["source_track_kinematics_run"]}`
+                **Run:** `{selected_stimulus_response["run_name"]}`
 
-                    **Source bouts:** `{selected_stimulus_response["source_bout_run"]}`
+                **Source track:** `{selected_stimulus_response["source_track_kinematics_run"]}`
 
-                    **Direction correction:** `{_parameters.get("camera_to_projector_offset_deg", "unknown")}` deg
-                    """
-                ),
-                mo.hstack(
-                    [
-                        mo.stat(label="OMR steps", value=f"{len(omr_step_df):,}"),
-                        mo.stat(label="OMR bouts", value=f"{len(omr_bout_df):,}"),
-                        mo.stat(label="Window rows", value=f"{len(omr_window_df):,}"),
-                        mo.stat(label="Early windows", value=f"{len(omr_early_window_df):,}"),
-                    ]
-                ),
-                _direction_fig,
-                _position_fig,
-                mo.accordion(
-                    {
-                        "Step OMR metrics": mo.ui.table(
-                            omr_step_df[_table_columns],
-                            selection=None,
-                            page_size=10,
+                **Source bouts:** `{selected_stimulus_response["source_bout_run"]}`
+
+                **Moving-grating direction correction:** `{_parameters.get("camera_to_projector_offset_deg", "unknown")}` deg
+                """
+            ),
+            mo.hstack(
+                [
+                    mo.stat(label="Moving OMR steps", value=f"{len(omr_step_df):,}"),
+                    mo.stat(label="Moving OMR bouts", value=f"{len(omr_bout_df):,}"),
+                    mo.stat(label="Radial OMR steps", value=f"{len(concentric_omr_step_df):,}"),
+                    mo.stat(label="Radial OMR bouts", value=f"{len(concentric_omr_bout_df):,}"),
+                ]
+            ),
+        ]
+
+        if len(omr_step_df):
+            _direction_fig = go.Figure()
+            _x = omr_step_df["step_index"].astype(str)
+            for _metric_name, _color in (
+                ("omr_path_index", "#2a9d8f"),
+                ("bout_path_index", "#43aa8b"),
+                ("bout_choice_index", "#e76f51"),
+                ("time_choice_index", "#457b9d"),
+            ):
+                if _metric_name not in omr_step_df:
+                    continue
+                _direction_fig.add_trace(
+                    go.Bar(
+                        x=_x,
+                        y=omr_step_df[_metric_name],
+                        name=_metric_name,
+                        marker_color=_color,
+                        customdata=omr_step_df[
+                            [
+                                "stimulus_direction_deg",
+                                "bout_count_correct",
+                                "bout_count_opposing",
+                                "bout_count_total",
+                            ]
+                        ],
+                        hovertemplate=(
+                            "step %{x}<br>"
+                            f"{_metric_name}: %{{y:.3f}}<br>"
+                            "direction: %{customdata[0]:.1f} deg<br>"
+                            "correct/opposing/total: %{customdata[1]} / %{customdata[2]} / %{customdata[3]}"
+                            "<extra></extra>"
                         ),
-                        "Per-bout OMR rows": (
-                            mo.ui.table(
-                                omr_bout_df[_bout_columns],
-                                selection=None,
-                                page_size=15,
-                            )
-                            if len(omr_bout_df)
-                            else mo.md("No per-bout OMR rows.")
-                        ),
-                        "Early-response windows": (
-                            mo.ui.table(
-                                omr_early_window_df[_early_window_columns],
-                                selection=None,
-                                page_size=15,
-                            )
-                            if len(omr_early_window_df)
-                            else mo.md("No early-response OMR windows.")
-                        ),
-                        "Persisted summary PNG": png_bytes_to_markdown_image(
-                            omr_summary_png_bytes,
-                            alt_text="OMR summary PNG",
-                        ),
-                        "Persisted trajectory PNG": png_bytes_to_markdown_image(
-                            omr_trajectory_png_bytes,
-                            alt_text="OMR bout trajectory PNG",
-                        ),
-                        "Stimulus-response attrs": mo.tree(dict(stimulus_response_attrs)),
-                    }
-                ),
+                    )
+                )
+            _direction_fig.add_hline(y=0.0, line_width=1, line_color="rgba(0,0,0,0.45)")
+            _direction_fig.update_layout(
+                title="Moving-Grating OMR Direction Metrics",
+                xaxis_title="Step index",
+                yaxis_title="Signed OMR metric",
+                yaxis=dict(range=[-1.05, 1.05]),
+                barmode="group",
+                height=420,
+                margin=dict(l=52, r=20, t=58, b=80),
+                legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0.0),
+            )
+
+            _position_fig = go.Figure()
+            for _metric_name, _mode in (
+                ("start_position_axis_norm", "markers+lines"),
+                ("mean_position_axis_norm", "markers+lines"),
+                ("end_position_axis_norm", "markers+lines"),
+                ("fraction_time_correct_side", "markers+lines"),
+            ):
+                if _metric_name not in omr_step_df:
+                    continue
+                _position_fig.add_trace(
+                    go.Scatter(
+                        x=_x,
+                        y=omr_step_df[_metric_name],
+                        mode=_mode,
+                        name=_metric_name,
+                    )
+                )
+            _position_fig.add_hline(y=0.0, line_width=1, line_color="rgba(0,0,0,0.45)")
+            _position_fig.update_layout(
+                title="Moving-Grating Axis Position and Correct-Side Occupancy",
+                xaxis_title="Step index",
+                yaxis_title="Normalized axis / fraction",
+                height=380,
+                margin=dict(l=52, r=20, t=58, b=80),
+                legend=dict(orientation="h", yanchor="top", y=-0.24, xanchor="left", x=0.0),
+            )
+
+            _table_columns = [
+                _column
+                for _column in (
+                    "step_index",
+                    "step_name",
+                    "stimulus_direction_deg",
+                    "omr_path_index",
+                    "bout_path_index",
+                    "bout_choice_index",
+                    "time_choice_index",
+                    "bout_fraction_correct_weighted_by_path",
+                    "bout_fraction_correct_weighted_by_displacement",
+                    "bout_fraction_correct_classified",
+                    "bout_count_correct",
+                    "bout_count_opposing",
+                    "bout_count_ambiguous",
+                    "bout_count_total",
+                    "start_position_axis_norm",
+                    "mean_position_axis_norm",
+                    "end_position_axis_norm",
+                    "fraction_time_correct_side",
+                    "first_aligned_bout_latency_s",
+                    "first_opposing_bout_latency_s",
+                )
+                if _column in omr_step_df
             ]
+            _bout_columns = [
+                _column
+                for _column in (
+                    "step_index",
+                    "fish_id",
+                    "bout_id",
+                    "start_frame",
+                    "end_frame",
+                    "per_bout_omr_score",
+                    "correct_label",
+                    "bout_path_length_mm",
+                    "bout_displacement_mm",
+                    "parallel_displacement_mm",
+                )
+                if _column in omr_bout_df
+            ]
+            _early_window_columns = [
+                _column
+                for _column in (
+                    "step_index",
+                    "fish_id",
+                    "window_length_s",
+                    "actual_window_length_s",
+                    "omr_path_index",
+                    "bout_path_index",
+                    "bout_fraction_correct_weighted_by_path",
+                    "time_choice_index",
+                    "parallel_displacement_mm",
+                    "path_length_mm",
+                    "n_aligned_bouts",
+                    "n_opposing_bouts",
+                    "n_ambiguous_bouts",
+                    "coverage_fraction",
+                )
+                if _column in omr_early_window_df
+            ]
+            _sections.extend(
+                [
+                    mo.md("### Moving-Grating OMR"),
+                    _direction_fig,
+                    _position_fig,
+                    mo.accordion(
+                        {
+                            "Step OMR metrics": mo.ui.table(
+                                omr_step_df[_table_columns],
+                                selection=None,
+                                page_size=10,
+                            ),
+                            "Per-bout OMR rows": (
+                                mo.ui.table(
+                                    omr_bout_df[_bout_columns],
+                                    selection=None,
+                                    page_size=15,
+                                )
+                                if len(omr_bout_df)
+                                else mo.md("No per-bout OMR rows.")
+                            ),
+                            "Early-response windows": (
+                                mo.ui.table(
+                                    omr_early_window_df[_early_window_columns],
+                                    selection=None,
+                                    page_size=15,
+                                )
+                                if len(omr_early_window_df)
+                                else mo.md("No early-response OMR windows.")
+                            ),
+                            "Persisted summary PNG": png_bytes_to_markdown_image(
+                                omr_summary_png_bytes,
+                                alt_text="OMR summary PNG",
+                            ),
+                            "Persisted trajectory PNG": png_bytes_to_markdown_image(
+                                omr_trajectory_png_bytes,
+                                alt_text="OMR bout trajectory PNG",
+                            ),
+                        }
+                    ),
+                ]
+            )
+        else:
+            _sections.append(mo.md("### Moving-Grating OMR\n\nNo moving-grating OMR metrics in this run."))
+
+        if len(concentric_omr_step_df):
+            _radial_x = concentric_omr_step_df["step_index"].astype(str)
+            _radial_direction_fig = go.Figure()
+            for _metric_name, _color in (
+                ("omr_path_index", "#2a9d8f"),
+                ("radial_path_index", "#00a896"),
+                ("omr_net_direction_index", "#277da1"),
+                ("bout_choice_index", "#e76f51"),
+                ("time_choice_index", "#457b9d"),
+                ("tangential_bias_index", "#f4a261"),
+            ):
+                if _metric_name not in concentric_omr_step_df:
+                    continue
+                _radial_direction_fig.add_trace(
+                    go.Bar(
+                        x=_radial_x,
+                        y=concentric_omr_step_df[_metric_name],
+                        name=_metric_name,
+                        marker_color=_color,
+                        customdata=concentric_omr_step_df[
+                            [
+                                "stimulus_radial_polarity",
+                                "stimulus_radial_polarity_validated",
+                                "bout_count_correct",
+                                "bout_count_opposing",
+                                "bout_count_total",
+                            ]
+                        ],
+                        hovertemplate=(
+                            "step %{x}<br>"
+                            f"{_metric_name}: %{{y:.3f}}<br>"
+                            "polarity: %{customdata[0]}<br>"
+                            "validated: %{customdata[1]}<br>"
+                            "aligned/opposing/total: %{customdata[2]} / %{customdata[3]} / %{customdata[4]}"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+            _radial_direction_fig.add_hline(y=0.0, line_width=1, line_color="rgba(0,0,0,0.45)")
+            _radial_direction_fig.update_layout(
+                title="Concentric Radial OMR Metrics",
+                xaxis_title="Step index",
+                yaxis_title="Signed radial metric",
+                yaxis=dict(range=[-1.05, 1.05]),
+                barmode="group",
+                height=440,
+                margin=dict(l=52, r=20, t=58, b=95),
+                legend=dict(orientation="h", yanchor="top", y=-0.24, xanchor="left", x=0.0),
+            )
+
+            _radius_fig = go.Figure()
+            for _metric_name, _label in (
+                ("start_radius_norm", "start radius / arena"),
+                ("mean_radius_norm", "mean radius / arena"),
+                ("end_radius_norm", "end radius / arena"),
+            ):
+                if _metric_name not in concentric_omr_step_df:
+                    continue
+                _radius_fig.add_trace(
+                    go.Scatter(
+                        x=_radial_x,
+                        y=concentric_omr_step_df[_metric_name],
+                        mode="markers+lines",
+                        name=_label,
+                    )
+                )
+            _radius_fig.update_layout(
+                title="Concentric Step Radius Summary",
+                xaxis_title="Step index",
+                yaxis_title="Normalized radius",
+                yaxis=dict(range=[0.0, 1.05]),
+                height=360,
+                margin=dict(l=52, r=20, t=58, b=80),
+                legend=dict(orientation="h", yanchor="top", y=-0.24, xanchor="left", x=0.0),
+            )
+
+            _radial_step_columns = [
+                _column
+                for _column in (
+                    "step_index",
+                    "step_name",
+                    "stimulus_radial_polarity",
+                    "stimulus_radial_sign",
+                    "stimulus_radial_polarity_source",
+                    "stimulus_radial_polarity_validated",
+                    "omr_path_index",
+                    "radial_path_index",
+                    "omr_net_direction_index",
+                    "tangential_bias_index",
+                    "bout_choice_index",
+                    "time_choice_index",
+                    "bout_fraction_correct_classified",
+                    "bout_count_correct",
+                    "bout_count_opposing",
+                    "bout_count_ambiguous",
+                    "bout_count_total",
+                    "start_radius_mm",
+                    "mean_radius_mm",
+                    "end_radius_mm",
+                    "start_radius_norm",
+                    "mean_radius_norm",
+                    "end_radius_norm",
+                    "first_aligned_bout_latency_s",
+                    "first_opposing_bout_latency_s",
+                    "coverage_fraction",
+                    "quality_flag",
+                )
+                if _column in concentric_omr_step_df
+            ]
+            _radial_bout_columns = [
+                _column
+                for _column in (
+                    "step_index",
+                    "fish_id",
+                    "bout_id",
+                    "start_frame",
+                    "end_frame",
+                    "stimulus_radial_polarity",
+                    "radial_omr_score",
+                    "radial_net_direction_score",
+                    "tangential_bias_score",
+                    "omr_label",
+                    "start_radius_mm",
+                    "end_radius_mm",
+                    "mean_radius_mm",
+                    "stimulus_aligned_radial_displacement_mm",
+                    "radial_displacement_integrated_mm",
+                    "tangential_displacement_mm",
+                    "path_length_mm",
+                    "valid_radial_basis",
+                    "quality_flag",
+                )
+                if _column in concentric_omr_bout_df
+            ]
+            _radial_window_columns = [
+                _column
+                for _column in (
+                    "step_index",
+                    "fish_id",
+                    "window_id",
+                    "start_time_s",
+                    "end_time_s",
+                    "window_length_s",
+                    "stimulus_radial_polarity",
+                    "omr_path_index",
+                    "time_choice_index",
+                    "mean_radius_norm",
+                    "n_bouts",
+                    "coverage_fraction",
+                    "quality_flag",
+                )
+                if _column in concentric_omr_window_df
+            ]
+            _radial_early_columns = [
+                _column
+                for _column in _radial_window_columns
+                if _column in concentric_omr_early_window_df
+            ]
+            _sections.extend(
+                [
+                    mo.md(
+                        """
+                        ### Concentric Radial OMR
+
+                        Positive `omr_path_index` means motion aligned to the persisted radial polarity
+                        (`expanding` = outward, `contracting` = inward). The `radial_path_index`
+                        column remains outward-positive independent of stimulus polarity.
+                        """
+                    ),
+                    _radial_direction_fig,
+                    _radius_fig,
+                    mo.accordion(
+                        {
+                            "Step radial OMR metrics": mo.ui.table(
+                                concentric_omr_step_df[_radial_step_columns],
+                                selection=None,
+                                page_size=10,
+                            ),
+                            "Per-bout radial OMR rows": (
+                                mo.ui.table(
+                                    concentric_omr_bout_df[_radial_bout_columns],
+                                    selection=None,
+                                    page_size=15,
+                                )
+                                if len(concentric_omr_bout_df)
+                                else mo.md("No per-bout radial OMR rows.")
+                            ),
+                            "Radial OMR windows": (
+                                mo.ui.table(
+                                    concentric_omr_window_df[_radial_window_columns],
+                                    selection=None,
+                                    page_size=15,
+                                )
+                                if len(concentric_omr_window_df)
+                                else mo.md("No radial OMR window rows.")
+                            ),
+                            "Early radial OMR windows": (
+                                mo.ui.table(
+                                    concentric_omr_early_window_df[_radial_early_columns],
+                                    selection=None,
+                                    page_size=15,
+                                )
+                                if len(concentric_omr_early_window_df)
+                                else mo.md("No early radial OMR windows.")
+                            ),
+                        }
+                    ),
+                ]
+            )
+        else:
+            _sections.append(mo.md("### Concentric Radial OMR\n\nNo concentric radial OMR metrics in this run."))
+
+        _sections.append(
+            mo.accordion({"Stimulus-response attrs": mo.tree(dict(stimulus_response_attrs))})
         )
+        stimulus_response_omr_view = mo.vstack(_sections)
     write_perf_event(
         "build_stimulus_response_omr_view",
         time.perf_counter() - _omr_view_t0,
@@ -1728,6 +2177,9 @@ def _(
         n_omr_steps=len(omr_step_df),
         n_omr_bout_rows=len(omr_bout_df),
         n_omr_window_rows=len(omr_window_df),
+        n_concentric_radial_omr_steps=len(concentric_omr_step_df),
+        n_concentric_radial_omr_bout_rows=len(concentric_omr_bout_df),
+        n_concentric_radial_omr_window_rows=len(concentric_omr_window_df),
     )
     stimulus_response_omr_view
     return
