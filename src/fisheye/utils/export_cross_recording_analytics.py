@@ -35,6 +35,7 @@ DEFAULT_TABLES = (
     "stimulus_step_summary",
     "stimulus_response_per_fish_step",
     "swim_bout_metrics",
+    "bout_kinematics_metrics",
 )
 
 
@@ -702,6 +703,126 @@ def _load_swim_bout_metrics(
     return rows
 
 
+def _measurement_family_for_level(level_name: str) -> str:
+    if level_name.startswith("heading_"):
+        return "heading"
+    if level_name == "movement":
+        return "movement"
+    if level_name == "eye_gaze":
+        return "eye_gaze"
+    return "unknown"
+
+
+def _load_bout_kinematics_metrics(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    stimulus_run: str | None,
+    steps: Sequence[StepSpan],
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if "bout_kinematics_metrics" not in tables:
+        return []
+
+    bout_kin_group, bout_kin_run, error = _latest_run(root, "analysis/bout_kinematics_runs")
+    if bout_kin_group is None or bout_kin_run is None:
+        diagnostics.append({"table": "bout_kinematics_metrics", "status": "skipped", "reason": error})
+        return []
+
+    run_attrs = _attrs_dict(bout_kin_group)
+    source_swim_bout_run = run_attrs.get("source_swim_bout_run")
+    source_swim_bout_speed_level = run_attrs.get("source_swim_bout_speed_level")
+    source_track_kinematics_run = run_attrs.get("source_track_kinematics_run")
+    track_id = _safe_int(run_attrs.get("source_track_id"))
+    default_heading_level = run_attrs.get("default_heading_level")
+    level_names = [
+        name
+        for name in _group_names(bout_kin_group)
+        if _has_child(bout_kin_group[name], "per_bout_metrics")
+    ]
+
+    if not level_names:
+        diagnostics.append({
+            "table": "bout_kinematics_metrics",
+            "status": "skipped",
+            "reason": "no measurement levels with per_bout_metrics",
+            "bout_kinematics_run": bout_kin_run,
+        })
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for level_name in sorted(level_names):
+        level_group = bout_kin_group[level_name]
+        metrics_group = level_group["per_bout_metrics"]
+        metrics_attrs = _attrs_dict(metrics_group)
+        metric_rows = _read_table_rows(metrics_group)
+        if not metric_rows:
+            diagnostics.append({
+                "table": "bout_kinematics_metrics",
+                "status": "partial",
+                "reason": "empty per_bout_metrics table",
+                "bout_kinematics_run": bout_kin_run,
+                "measurement_level": level_name,
+            })
+            continue
+
+        level_attrs = _attrs_dict(level_group)
+        measurement_family = _measurement_family_for_level(level_name)
+        for metric in metric_rows:
+            bout_id = _safe_int(metric.get("bout_id"))
+            start_frame = _safe_int(metric.get("source_start_frame"))
+            end_frame = _safe_int(metric.get("source_end_frame"))
+            if start_frame is None:
+                start_frame = _safe_int(metric.get("source_core_start_frame"))
+            if end_frame is None:
+                end_frame = _safe_int(metric.get("source_core_end_frame"))
+            step = _assign_step(start_frame, end_frame, steps)
+            lineage = {
+                "zarr_path": str(zarr_path),
+                "bout_kinematics_run": bout_kin_run,
+                "measurement_level": level_name,
+                "source_swim_bout_run": source_swim_bout_run,
+                "source_swim_bout_speed_level": source_swim_bout_speed_level,
+                "source_track_kinematics_run": source_track_kinematics_run,
+                "track_id": track_id,
+                "bout_id": bout_id,
+            }
+            row = _common_row(
+                export_run_id=export_run_id,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                table="bout_kinematics_metrics",
+                lineage=lineage,
+            )
+            row.update({
+                "stimulus_run": stimulus_run,
+                "bout_kinematics_run": bout_kin_run,
+                "measurement_level": level_name,
+                "measurement_family": measurement_family,
+                "is_default_heading_level": (
+                    bool(level_attrs.get("is_default_heading_level"))
+                    if level_attrs.get("is_default_heading_level") is not None
+                    else level_name == default_heading_level
+                ),
+                "source_swim_bout_run": source_swim_bout_run,
+                "source_swim_bout_speed_level": source_swim_bout_speed_level,
+                "source_track_kinematics_run": source_track_kinematics_run,
+                "track_id": track_id,
+                "schema_version": _safe_int(run_attrs.get("schema_version") or metrics_attrs.get("schema_version")),
+                "method": run_attrs.get("method"),
+                "method_version": run_attrs.get("method_version"),
+                "step_index": step.step_index if step else None,
+                "step_name": step.step_name if step else None,
+                "stimulus_mode": step.stimulus_mode if step else None,
+            })
+            row.update(metric)
+            rows.append(row)
+    return rows
+
+
 def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_id: str) -> SourceExportResult:
     zarr_path = Path(zarr_path).expanduser().resolve()
     recording_id = _recording_id_from_path(zarr_path)
@@ -763,6 +884,19 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
     )
     if bout_rows:
         result.rows_by_table.setdefault("swim_bout_metrics", []).extend(bout_rows)
+
+    bout_kinematics_rows = _load_bout_kinematics_metrics(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        stimulus_run=stimulus_run,
+        steps=steps,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if bout_kinematics_rows:
+        result.rows_by_table.setdefault("bout_kinematics_metrics", []).extend(bout_kinematics_rows)
 
     for table in table_set:
         if table not in result.rows_by_table:

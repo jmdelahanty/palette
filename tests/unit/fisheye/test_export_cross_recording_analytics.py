@@ -142,6 +142,50 @@ def _make_source_zarr(path: Path) -> Path:
     _array(bouts, "mean_speed_mm_s", [18.0, 30.0])
     _array(bouts, "peak_physical_speed_mm_s", [25.0, 45.0])
 
+    bout_kin_parent = analysis.create_group("bout_kinematics_runs")
+    bout_kin_parent.attrs["latest"] = "bout_kinematics_test"
+    bout_kin = bout_kin_parent.create_group("bout_kinematics_test")
+    bout_kin.attrs.update(
+        {
+            "schema_version": 7,
+            "method": "bout_kinematics",
+            "method_version": "bout_kinematics.v7",
+            "source_track_id": 0,
+            "source_track_kinematics_run": "tk_test",
+            "source_swim_bout_run": "bouts_test",
+            "source_swim_bout_speed_level": "speed_exponential",
+            "default_heading_level": "heading_smoothed",
+        }
+    )
+
+    movement_metrics = bout_kin.create_group("movement").create_group("per_bout_metrics")
+    _array(movement_metrics, "bout_id", [0, 1])
+    _array(movement_metrics, "source_start_frame", [20, 140])
+    _array(movement_metrics, "source_end_frame", [30, 150])
+    _array(movement_metrics, "physical_active_duration_s", [0.12, 0.14])
+    _array(movement_metrics, "physical_active_path_length_mm", [2.5, 4.5])
+    _array(movement_metrics, "physical_active_valid", [True, True])
+
+    for level_name, deltas in (
+        ("heading_smoothed", [12.5, -30.0]),
+        ("heading_raw", [14.0, -28.0]),
+    ):
+        level_group = bout_kin.create_group(level_name)
+        level_group.attrs["is_default_heading_level"] = level_name == "heading_smoothed"
+        metrics = level_group.create_group("per_bout_metrics")
+        _array(metrics, "bout_id", [0, 1])
+        _array(metrics, "source_start_frame", [20, 140])
+        _array(metrics, "source_end_frame", [30, 150])
+        _array(metrics, "pre_heading_mean_deg", [5.0, 40.0])
+        _array(metrics, "post_heading_mean_deg", [17.5, 10.0])
+        _array(metrics, "net_delta_heading_deg", deltas)
+        _array(metrics, "abs_net_delta_heading_deg", np.abs(deltas))
+        _array(metrics, "within_heading_path_deg", [18.0, 36.0])
+        _array(metrics, "within_heading_peak_to_peak_deg", [15.0, 32.0])
+        _array(metrics, "within_angular_speed_mean_deg_s", [90.0, 120.0])
+        _array(metrics, "within_angular_speed_max_deg_s", [250.0, 350.0])
+        _array(metrics, "within_window_valid", [True, True])
+
     return path
 
 
@@ -168,6 +212,7 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert manifest["row_counts_by_table"]["stimulus_step_summary"] == 2
     assert manifest["row_counts_by_table"]["stimulus_response_per_fish_step"] == 2
     assert manifest["row_counts_by_table"]["swim_bout_metrics"] == 2
+    assert manifest["row_counts_by_table"]["bout_kinematics_metrics"] == 6
 
     manifest_path = output / "v1" / "manifests" / "export_run_id=test_export.json"
     payload = json.loads(manifest_path.read_text())
@@ -189,6 +234,23 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert bout_rows[0]["step_index"] == 0
     assert bout_rows[1]["step_index"] == 1
     assert bout_rows[0]["speed_level"] == "speed_exponential"
+
+    bout_kin_rows = _read_dataset(output, "bout_kinematics_metrics", "test_export")
+    assert len(bout_kin_rows) == 6
+    heading_rows = [row for row in bout_kin_rows if row["measurement_level"] == "heading_smoothed"]
+    assert len(heading_rows) == 2
+    assert heading_rows[0]["measurement_family"] == "heading"
+    assert heading_rows[0]["is_default_heading_level"] is True
+    assert heading_rows[0]["source_swim_bout_run"] == "bouts_test"
+    assert heading_rows[0]["source_swim_bout_speed_level"] == "speed_exponential"
+    assert heading_rows[0]["step_index"] == 0
+    assert heading_rows[1]["step_index"] == 1
+    assert heading_rows[0]["net_delta_heading_deg"] == 12.5
+    assert heading_rows[1]["abs_net_delta_heading_deg"] == 30.0
+    movement_rows = [row for row in bout_kin_rows if row["measurement_level"] == "movement"]
+    assert len(movement_rows) == 2
+    assert movement_rows[0]["measurement_family"] == "movement"
+    assert movement_rows[0]["physical_active_duration_s"] == 0.12
 
 
 def test_export_cross_recording_analytics_can_limit_tables(tmp_path: Path) -> None:

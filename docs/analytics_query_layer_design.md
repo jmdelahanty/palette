@@ -540,6 +540,7 @@ Implemented tables:
 - `stimulus_step_summary`
 - `stimulus_response_per_fish_step`
 - `swim_bout_metrics`
+- `bout_kinematics_metrics`
 
 The exporter parallelizes Zarr extraction by recording, writes immutable
 per-recording Parquet part files under
@@ -547,6 +548,15 @@ per-recording Parquet part files under
 `<output-root>/v1/manifests/`. Generated export IDs are prefixed with `run_`
 so hive-partition readers such as Polars treat them as strings instead of
 trying to parse compact UTC timestamps as dates.
+
+`bout_kinematics_metrics` is additive and reads existing Zarr
+`analysis/bout_kinematics_runs/<run>/<measurement_level>/per_bout_metrics`
+tables without changing the Zarr writer. It exports one row per bout per
+measurement level, including `movement`, `heading_raw`, `heading_smoothed`,
+and optional `eye_gaze` levels when present. The table carries source run
+identity, stimulus-step assignment, and heading-change fields such as
+`net_delta_heading_deg`, `abs_net_delta_heading_deg`,
+`within_heading_path_deg`, and angular-speed summaries.
 
 Example Polars query:
 
@@ -572,6 +582,21 @@ summary = (
     .collect()
 )
 ```
+
+Reproducible cross-recording bout-kinematics plots can be generated from the
+Parquet export, without rereading source Zarr archives:
+
+```bash
+scripts/py -m fisheye.utils.plot_cross_recording_bout_kinematics \
+  --export-root /nvme1/exports/palette_analytics \
+  --export-run-id latest \
+  --output-dir /tmp/palette_lab_plots/latest_parquet \
+  --measurement-level heading_smoothed
+```
+
+This writes overall heading histograms, net heading-change by stimulus mode,
+angular-speed histograms, and JSON/TSV summaries from
+`bout_kinematics_metrics`.
 
 ## Deferred Implementation Plan
 
