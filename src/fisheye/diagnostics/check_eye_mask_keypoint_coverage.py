@@ -28,7 +28,12 @@ from fisheye.shared.row_alignment import assert_row_alignment
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 
 
-SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
+SUCCESS_DATASET_CANDIDATES = (
+    "usable_keypoints",
+    "detection_success",
+    "refined_success",
+    "source_success",
+)
 EYE_STAGE_CHOICES = ("auto", "eye_masks_runs", "refined_eye_masks_runs")
 KEYPOINT_GROUP_CHOICES = ("keypoints_runs", "refined_keypoints_runs")
 

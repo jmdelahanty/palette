@@ -14,7 +14,12 @@ from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.utils.eye_mask_profile import EyeMaskSourceError, resolve_eye_mask_source
 
 KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
-SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
+SUCCESS_DATASET_CANDIDATES = (
+    "usable_keypoints",
+    "detection_success",
+    "refined_success",
+    "source_success",
+)
 
 
 @dataclass(frozen=True)

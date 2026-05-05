@@ -141,6 +141,29 @@ def _create_keypoint_run(root: zarr.Group, *, run_name: str = "refined_kp_001") 
     return run
 
 
+def test_resolve_keypoint_success_array_prefers_usable_keypoints() -> None:
+    root = zarr.group()
+    run = root.create_group("refined_kp_001")
+    run.create_array("refined_success", data=np.asarray([True, True, True], dtype=bool))
+    run.create_array("usable_keypoints", data=np.asarray([True, False, True], dtype=bool))
+
+    success, dataset_name = assemble_mod._resolve_keypoint_success_array(run, "refined_kp_001")
+
+    assert dataset_name == "usable_keypoints"
+    np.testing.assert_array_equal(success, np.asarray([True, False, True], dtype=bool))
+
+
+def test_resolve_keypoint_success_array_falls_back_for_legacy_runs() -> None:
+    root = zarr.group()
+    run = root.create_group("legacy_kp_001")
+    run.create_array("refined_success", data=np.asarray([True, False], dtype=bool))
+
+    success, dataset_name = assemble_mod._resolve_keypoint_success_array(run, "legacy_kp_001")
+
+    assert dataset_name == "refined_success"
+    np.testing.assert_array_equal(success, np.asarray([True, False], dtype=bool))
+
+
 def _build_assembly_root() -> zarr.Group:
     root = zarr.group()
     crop_parent = root.create_group("crop_runs")

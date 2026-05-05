@@ -46,7 +46,12 @@ SUBJECT_MASK_LABEL_SCHEMA = "subject_v1_union"
 SUBJECT_MASK_LABELS: tuple[str, ...] = SUBJECT_MASK_SCHEMAS[SUBJECT_MASK_LABEL_SCHEMA]
 _SUBJECT_MASKS_STATUS_SOURCE = "runtime_infer_unet_subject_masks"
 KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
-KEYPOINT_SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
+KEYPOINT_SUCCESS_DATASET_CANDIDATES = (
+    "usable_keypoints",
+    "detection_success",
+    "refined_success",
+    "source_success",
+)
 EYE_KEYPOINT_LABELS = ("eye_left", "eye_right")
 
 

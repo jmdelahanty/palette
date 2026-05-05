@@ -115,6 +115,7 @@ def _build_fake_root() -> _FakeGroup:
         overwrite=True,
     )
     keypoint.create_array("refined_success", data=np.array([True, True], dtype=bool), overwrite=True)
+    keypoint.create_array("usable_keypoints", data=np.array([True, True], dtype=bool), overwrite=True)
     return root
 
 
@@ -484,7 +485,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert run_group.attrs["assignment_keypoint_contract"] == "subject_eyes_union_assignment_keypoints_v1"
     assert run_group.attrs["assignment_keypoint_role"] == "eyes_union_lr_assignment"
     assert run_group.attrs["assignment_keypoint_selection"] == "cli_explicit"
-    assert run_group.attrs["assignment_keypoint_success_dataset"] == "refined_success"
+    assert run_group.attrs["assignment_keypoint_success_dataset"] == "usable_keypoints"
     assert run_group.attrs["assignment_keypoint_eye_indices"] == {"eye_left": 0, "eye_right": 1}
     assert run_group.attrs["method"] == "unet_subject_mask_segmenter"
     assert run_group.attrs["run_semantics"] == "unet_subject_mask_inference"

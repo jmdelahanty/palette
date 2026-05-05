@@ -845,6 +845,23 @@ def _row_chunks(total_rows: int, chunk_size: int) -> list[tuple[int, int]]:
     ]
 
 
+def _dask_worker_row_chunk_size(total_rows: int, requested_chunk_size: int) -> int:
+    """Return a worker chunk size that avoids concurrent partial Zarr chunk writes."""
+
+    requested = max(1, int(requested_chunk_size))
+    metric_chunk = refined_subject_mask_metric_row_chunk(total_rows)
+    if requested <= metric_chunk:
+        return int(metric_chunk)
+    return int(((requested + metric_chunk - 1) // metric_chunk) * metric_chunk)
+
+
+def _worker_chunk_size_for_backend(total_rows: int, requested_chunk_size: int, execution_backend: str) -> int:
+    requested = max(1, int(requested_chunk_size))
+    if execution_backend == _DASK_WORKER_EXECUTION_BACKEND:
+        return _dask_worker_row_chunk_size(total_rows, requested)
+    return requested
+
+
 def _create_filled_array(
     group: zarr.Group,
     name: str,
@@ -1199,6 +1216,20 @@ def _create_refined_run_shell(
             "refinement_semantics": "canonical_component_masks",
             "components": list(component_names),
             "component_count": int(len(component_names)),
+            "metric_level": provenance_inputs.get("component_metric_level"),
+            "chunk_size": provenance_inputs.get("chunk_size"),
+            "worker_chunk_size": provenance_inputs.get("worker_chunk_size"),
+            "chunk_count": provenance_inputs.get("chunk_count"),
+            "write_eye_geometry": provenance_inputs.get("eye_geometry_requested"),
+            "write_component_contours": provenance_inputs.get("component_contours_requested"),
+            "execution_backend": provenance_inputs.get("execution_backend"),
+            "dask_execution_enabled": provenance_inputs.get("dask_execution_enabled"),
+            "dask_scheduler": provenance_inputs.get("dask_scheduler"),
+            "dask_num_workers": provenance_inputs.get("dask_num_workers"),
+            "dask_requested_chunk_size": provenance_inputs.get("dask_requested_chunk_size"),
+            "dask_chunk_size": provenance_inputs.get("dask_chunk_size"),
+            "dask_chunk_alignment": provenance_inputs.get("dask_chunk_alignment"),
+            "dask_version": provenance_inputs.get("dask_version"),
         },
         inputs=stage_inputs_payload,
     )
@@ -1606,15 +1637,6 @@ def refresh_refined_subject_mask_metrics_run(
     normalized_num_workers = int(num_workers) if num_workers is not None else None
     if execution_backend == _DASK_WORKER_EXECUTION_BACKEND and zarr_path is None:
         raise ValueError("execution_backend='dask_worker_chunks' requires a filesystem zarr_path.")
-    dask_metadata: dict[str, object] = {
-        "execution_backend": execution_backend,
-        "dask_execution_enabled": execution_backend == _DASK_WORKER_EXECUTION_BACKEND,
-        "dask_scheduler": scheduler_key,
-        "dask_num_workers": normalized_num_workers,
-        "dask_chunk_size": max(1, int(chunk_size)),
-        "dask_version": getattr(dask, "__version__", "unknown"),
-    }
-
     stage_start = time.perf_counter()
     timing = _TimingRecorder()
     run_name, run_group = _resolve_refined_subject_run_group(root, refined_run)
@@ -1625,10 +1647,26 @@ def refresh_refined_subject_mask_metrics_run(
         raise ValueError(f"refined_subject_masks_runs/{run_name}/masks_roi must be 4D, got {tuple(masks.shape)}.")
 
     total_rows = int(masks.shape[0])
+    requested_chunk_size = max(1, int(chunk_size))
+    worker_chunk_size = _worker_chunk_size_for_backend(total_rows, requested_chunk_size, execution_backend)
+    dask_metadata: dict[str, object] = {
+        "execution_backend": execution_backend,
+        "dask_execution_enabled": execution_backend == _DASK_WORKER_EXECUTION_BACKEND,
+        "dask_scheduler": scheduler_key,
+        "dask_num_workers": normalized_num_workers,
+        "dask_requested_chunk_size": requested_chunk_size,
+        "dask_chunk_size": worker_chunk_size,
+        "dask_chunk_alignment": (
+            "refined_subject_mask_metric_row_chunk"
+            if execution_backend == _DASK_WORKER_EXECUTION_BACKEND
+            else "requested_chunk_size"
+        ),
+        "dask_version": getattr(dask, "__version__", "unknown"),
+    }
     component_count = int(masks.shape[1])
     _ensure_refined_run_metric_shell(run_group, total_rows=total_rows, component_count=component_count)
     component_indices = _component_indices_for_refined_run(run_group, components)
-    chunk_ranges = _row_chunks(total_rows, max(1, int(chunk_size)))
+    chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
     review_counts: dict[str, dict[str, int]] = {}
     refreshed_components: list[str] = []
     reason_labels_by_component: dict[str, np.ndarray] = {}
@@ -1783,7 +1821,8 @@ def refresh_refined_subject_mask_metrics_run(
         "refined_run": run_name,
         "components": refreshed_components,
         "metric_level": metric_level,
-        "chunk_size": max(1, int(chunk_size)),
+        "chunk_size": requested_chunk_size,
+        "worker_chunk_size": worker_chunk_size,
         "chunk_count": len(chunk_ranges),
         "refresh_reason_tags": bool(refresh_reason_tags),
         "write_eye_geometry": bool(write_eye_geometry),
@@ -2050,15 +2089,25 @@ def finalize_subject_mask_run(
     execution_backend = _normalize_execution_backend(execution_backend)
     if execution_backend == _DASK_WORKER_EXECUTION_BACKEND and zarr_path is None:
         raise ValueError("execution_backend='dask_worker_chunks' requires a filesystem zarr_path.")
+    source = _load_source_subject_mask_run(root, subject_run)
+    total_rows = int(source.masks_roi.shape[0])
+    requested_chunk_size = max(1, int(chunk_size))
+    worker_chunk_size = _worker_chunk_size_for_backend(total_rows, requested_chunk_size, execution_backend)
+    chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
     dask_metadata: dict[str, object] = {
         "execution_backend": execution_backend,
         "dask_execution_enabled": execution_backend == _DASK_WORKER_EXECUTION_BACKEND,
         "dask_scheduler": scheduler_key,
         "dask_num_workers": normalized_num_workers,
-        "dask_chunk_size": max(1, int(chunk_size)),
+        "dask_requested_chunk_size": requested_chunk_size,
+        "dask_chunk_size": worker_chunk_size,
+        "dask_chunk_alignment": (
+            "refined_subject_mask_metric_row_chunk"
+            if execution_backend == _DASK_WORKER_EXECUTION_BACKEND
+            else "requested_chunk_size"
+        ),
         "dask_version": getattr(dask, "__version__", "unknown"),
     }
-    source = _load_source_subject_mask_run(root, subject_run)
     component_names = _requested_output_components(source, components)
     if not component_names:
         raise ValueError(f"subject_mask_runs/{source.run_name} has no finalizable subject-mask components.")
@@ -2087,9 +2136,10 @@ def finalize_subject_mask_run(
         "component_names": list(component_names),
         "raw_component_names": list(required_raw_components),
         "source_crop_run": source.crop_run,
-        "roi_count": int(source.masks_roi.shape[0]),
-        "chunk_size": max(1, int(chunk_size)),
-        "chunk_count": len(_row_chunks(int(source.masks_roi.shape[0]), max(1, int(chunk_size)))),
+        "roi_count": total_rows,
+        "chunk_size": requested_chunk_size,
+        "worker_chunk_size": worker_chunk_size,
+        "chunk_count": len(chunk_ranges),
         "metric_level": metric_level,
         "write_eye_geometry": bool(write_eye_geometry),
         "write_component_contours": bool(write_component_contours),
@@ -2109,12 +2159,10 @@ def finalize_subject_mask_run(
 
     stage_start = time.perf_counter()
     timing = _TimingRecorder()
-    total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
     width = int(source.masks_roi.shape[3])
     component_names = tuple(component_names)
     component_to_index = {name: idx for idx, name in enumerate(component_names)}
-    chunk_ranges = _row_chunks(total_rows, max(1, int(chunk_size)))
     reason_labels_by_component = {
         component_name: np.full((total_rows,), "clean", dtype=object)
         for component_name in component_names
@@ -2169,7 +2217,8 @@ def finalize_subject_mask_run(
         "finalization_semantics": "smart_probability_to_refined_candidate",
         "source_component_runs": dict(extra_attrs["source_component_runs"]),
         "source_component_sources": dict(extra_attrs["source_component_sources"]),
-        "chunk_size": int(max(1, int(chunk_size))),
+        "chunk_size": int(requested_chunk_size),
+        "worker_chunk_size": int(worker_chunk_size),
         "chunk_count": int(len(chunk_ranges)),
         "component_metric_level": metric_level,
         "eye_geometry_requested": bool(write_eye_geometry),

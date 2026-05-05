@@ -57,6 +57,17 @@ def _keypoint_root() -> tuple[_FakeGroup, _FakeGroup]:
     return root, kp
 
 
+def test_resolve_success_dataset_name_prefers_usable_keypoints() -> None:
+    group = _FakeGroup(
+        {
+            "refined_success": np.asarray([True, True], dtype=bool),
+            "usable_keypoints": np.asarray([True, False], dtype=bool),
+        }
+    )
+
+    assert mod._resolve_success_dataset_name(group) == "usable_keypoints"
+
+
 def _add_refined_subject_run(
     root: _FakeGroup,
     *,

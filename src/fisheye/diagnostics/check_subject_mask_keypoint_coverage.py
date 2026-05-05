@@ -35,7 +35,12 @@ from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.utils.zarr_io import open_zarr_root
 
 
-SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
+SUCCESS_DATASET_CANDIDATES = (
+    "usable_keypoints",
+    "detection_success",
+    "refined_success",
+    "source_success",
+)
 SUBJECT_STAGE_CHOICES = ("auto", "refined_subject_masks_runs", "subject_mask_runs")
 KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
 EYE_MODE_CHOICES = ("auto", "lr", "union")

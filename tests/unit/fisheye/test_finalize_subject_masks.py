@@ -148,6 +148,12 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run.attrs["dask_num_workers"] == 2
     assert run.attrs["smart_finalizer_timing_summary"]["chunk_count"] == 2
     assert len(run.attrs["smart_finalizer_chunk_timings"]) == 2
+    provenance_parameters = run.attrs["provenance"]["parameters"]
+    assert provenance_parameters["execution_backend"] == "serial_driver"
+    assert provenance_parameters["dask_scheduler"] == "threads"
+    assert provenance_parameters["dask_num_workers"] == 2
+    assert provenance_parameters["chunk_size"] == 1
+    assert provenance_parameters["metric_level"] == "cheap"
     assert run.attrs["eye_geometry_status"] == "deferred"
     assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
     assert run.attrs["component_review_statuses"]["subject_body"]["state"] == "pending"
@@ -341,14 +347,22 @@ def test_refresh_refined_subject_mask_metrics_dask_worker_chunks_updates_metric_
     assert summary["dask_execution_enabled"] is True
     assert summary["dask_scheduler"] == "threads"
     assert summary["dask_num_workers"] == 2
+    assert summary["dask_requested_chunk_size"] == 1
+    assert summary["dask_chunk_size"] == 2
+    assert summary["worker_chunk_size"] == 2
     assert summary["review_counts"]["subject_body"]["needs_review"] == 1
 
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["refined_subject_masks_runs/refined_subject_masks_smart_refresh_dask_001"]
     assert run.attrs["component_metric_qc_execution_backend"] == "dask_worker_chunks"
     assert run.attrs["component_metric_qc_timing_summary"]["dask_execution_enabled"] is True
+    assert run.attrs["component_metric_qc_timing_summary"]["dask_requested_chunk_size"] == 1
+    assert run.attrs["component_metric_qc_timing_summary"]["dask_chunk_size"] == 2
+    assert run.attrs["component_metric_qc_timing_summary"]["dask_chunk_alignment"] == (
+        "refined_subject_mask_metric_row_chunk"
+    )
     assert "dask_compute" in run.attrs["component_metric_qc_timing_summary"]["phase_seconds"]
-    assert len(run.attrs["component_metric_qc_chunk_timings"]) == 2
+    assert len(run.attrs["component_metric_qc_chunk_timings"]) == 1
     assert float(np.asarray(run["metrics/area_px"][1, body_idx], dtype=np.float32)) == pytest.approx(2.0)
     component_metrics = run["components/subject_body/metrics"]
     assert int(np.asarray(component_metrics["component_count"][1], dtype=np.int32)) == 2
@@ -385,7 +399,16 @@ def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypa
     assert run.attrs["smart_finalizer_execution_backend"] == "dask_worker_chunks"
     assert run.attrs["dask_execution_enabled"] is True
     assert run.attrs["dask_scheduler"] == "threads"
-    assert len(run.attrs["smart_finalizer_chunk_timings"]) == 2
+    provenance_parameters = run.attrs["provenance"]["parameters"]
+    assert provenance_parameters["execution_backend"] == "dask_worker_chunks"
+    assert provenance_parameters["dask_execution_enabled"] is True
+    assert provenance_parameters["dask_scheduler"] == "threads"
+    assert provenance_parameters["dask_num_workers"] == 2
+    assert provenance_parameters["dask_requested_chunk_size"] == 1
+    assert provenance_parameters["dask_chunk_size"] == 2
+    assert provenance_parameters["worker_chunk_size"] == 2
+    assert provenance_parameters["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
+    assert len(run.attrs["smart_finalizer_chunk_timings"]) == 1
     labels = list(run.attrs["mask_labels"])
     masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
     assert np.count_nonzero(masks[:, labels.index("subject_body")]) > 0

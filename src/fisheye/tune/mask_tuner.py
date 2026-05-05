@@ -238,6 +238,106 @@ def _normalize_mask_data(mask_data):
         normalized['source'] = dict(normalized['source'])
     return normalized
 
+
+def _existing_dish_mask(zarr_root):
+    """Return existing dish-mask metadata from the canonical attrs location."""
+    if 'analysis_metadata' not in zarr_root:
+        return None
+    analysis_meta = zarr_root['analysis_metadata']
+    if 'dish_mask' not in analysis_meta.attrs:
+        return None
+    return _normalize_mask_data(analysis_meta.attrs['dish_mask'])
+
+
+def _circle_mask_payload(
+    *,
+    center: tuple[int, int] | list[int],
+    radius: int,
+    method: str = "headless_circle",
+):
+    center_x, center_y = int(center[0]), int(center[1])
+    radius = int(radius)
+    if radius <= 0:
+        raise ValueError(f"Circle radius must be positive, got {radius}.")
+    return {
+        'shape': 'circle',
+        'method': method,
+        'detected_circle': {
+            'center': [center_x, center_y],
+            'radius': radius,
+        },
+    }
+
+
+def save_headless_circle_mask(
+    zarr_path,
+    *,
+    center: tuple[int, int] | list[int],
+    radius: int,
+    frame_idx: Optional[int] = None,
+    use_full_res: bool = False,
+    overwrite: bool = False,
+    method: str = "headless_circle",
+):
+    """Save a circle dish mask without launching the OpenCV UI.
+
+    The headless path is intended for deterministic backfills where the circle
+    geometry has already been reviewed elsewhere. It refuses to overwrite an
+    existing mask unless ``overwrite`` is explicitly enabled.
+    """
+    zarr_root = open_zarr_root(zarr_path, mode='r')
+    existing_mask = _existing_dish_mask(zarr_root)
+    if existing_mask is not None and not overwrite:
+        return {
+            "saved": False,
+            "status": "exists",
+            "zarr_path": str(zarr_path),
+            "existing_mask": existing_mask,
+        }
+
+    video_array, array_name, array_source = _resolve_video_array(
+        zarr_root,
+        use_full_res=use_full_res,
+    )
+    try:
+        max_frame_count = int(video_array.shape[0])
+        if max_frame_count <= 0:
+            raise ValueError("Video array has no frames.")
+        if frame_idx is None:
+            resolved_frame_idx = max_frame_count // 2
+        else:
+            resolved_frame_idx = int(np.clip(int(frame_idx), 0, max_frame_count - 1))
+        image_shape = tuple(int(v) for v in video_array.shape[1:3])
+
+        mask_payload = _circle_mask_payload(
+            center=center,
+            radius=radius,
+            method=method,
+        )
+        saved = save_mask_to_zarr(
+            zarr_path,
+            mask_payload,
+            array_name,
+            resolved_frame_idx,
+            image_shape=image_shape,
+        )
+    finally:
+        if hasattr(video_array, "close"):
+            video_array.close()
+
+    return {
+        "saved": bool(saved),
+        "status": "saved" if saved else "error",
+        "zarr_path": str(zarr_path),
+        "array_name": array_name,
+        "array_source": array_source,
+        "frame_index": int(resolved_frame_idx),
+        "center": [int(center[0]), int(center[1])],
+        "radius": int(radius),
+        "overwrite": bool(overwrite),
+    }
+
+
 def update_param1(val):
     global hough_param1
     hough_param1 = max(1, val)
@@ -665,7 +765,45 @@ if __name__ == "__main__":
         default="auto",
         help="Mask tuning mode (default: auto – reuse stored shape or circle).",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Write a reviewed circle mask without launching the OpenCV UI.",
+    )
+    parser.add_argument(
+        "--circle-center",
+        nargs=2,
+        type=int,
+        metavar=("X", "Y"),
+        help="Circle center in the selected mask coordinate space for --headless.",
+    )
+    parser.add_argument(
+        "--circle-radius",
+        type=int,
+        help="Circle radius in pixels for --headless.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow --headless to replace an existing dish mask.",
+    )
     args = parser.parse_args()
+
+    if args.headless:
+        if args.mode not in {"auto", "circle"}:
+            parser.error("--headless currently supports circle masks only.")
+        if args.circle_center is None or args.circle_radius is None:
+            parser.error("--headless requires --circle-center X Y and --circle-radius R.")
+        result = save_headless_circle_mask(
+            args.zarr_path,
+            center=args.circle_center,
+            radius=args.circle_radius,
+            frame_idx=args.frame,
+            use_full_res=args.full,
+            overwrite=bool(args.overwrite),
+        )
+        print(result)
+        raise SystemExit(0 if result["status"] in {"saved", "exists"} else 1)
 
     main(args.zarr_path, use_full_res=args.full, frame_idx=args.frame,
          config_path=args.config, mode=args.mode)

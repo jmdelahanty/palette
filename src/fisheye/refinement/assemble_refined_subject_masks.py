@@ -49,7 +49,12 @@ _REFINED_SUBJECT_MASKS_STATUS_SOURCE = "runtime_assemble_refined_subject_masks"
 _EYE_COMPONENTS = ("eye_left", "eye_right")
 _RAW_EYE_UNION_COMPONENT = "eyes_union"
 _KEYPOINT_GROUP_CHOICES = ("refined_keypoints_runs", "keypoints_runs")
-_KEYPOINT_SUCCESS_DATASET_CANDIDATES = ("detection_success", "refined_success", "source_success")
+_KEYPOINT_SUCCESS_DATASET_CANDIDATES = (
+    "usable_keypoints",
+    "detection_success",
+    "refined_success",
+    "source_success",
+)
 _SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS = frozenset(
     {
         "source_crop_signature.detection_source_path",
