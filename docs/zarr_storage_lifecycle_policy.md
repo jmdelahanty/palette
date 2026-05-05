@@ -230,6 +230,13 @@ Implications:
   not tile-level portability
 - small scalar metrics should eventually be audited for packing/aggregation
 
+For analysis-run schema direction specifically, see
+`docs/analysis_zarr_object_count_schema_direction.md`. That note covers the
+schema-level object-count issue: parameter-sweep fanout, representation/alias
+materialization, and component-per-group metric mirrors. Those patterns can
+create many `zarr.json` metadata objects even when chunking/sharding choices are
+otherwise reasonable.
+
 ## Provisional File-Count Budgets
 
 These are operational warning thresholds, not hard guarantees:
@@ -248,6 +255,51 @@ revisited after a transfer-artifact benchmark exists.
 3. Promote only canonical outputs into the finalized online profile.
 4. Create a transfer artifact for off-machine movement.
 5. Verify checksum/manifest before deleting scratch copies.
+
+## Cluster / Network Storage Workflow
+
+For cluster jobs, avoid streaming many small Zarr chunk writes directly over
+network storage. The preferred pattern is to write complete derived run groups
+on node-local scratch, pack them, transfer the packed artifact, and promote the
+complete run group near the destination archive.
+
+Recommended flow:
+
+1. Read or stage required inputs onto node-local NVMe/SSD scratch when
+   practical.
+2. Compute outputs into a local scratch Zarr run group.
+3. Validate the local run group before transfer.
+4. Pack the run group as a transfer artifact, preferably `tar.zst`, with a
+   manifest and checksums.
+5. Transfer the packed artifact over the network.
+6. Unpack into a staging path on the destination side, near the canonical Zarr.
+7. Validate the unpacked staging run group.
+8. Promote the complete run group into the destination hierarchy with an atomic
+   rename when the filesystem supports it.
+9. Update small metadata surfaces last, such as `latest` attrs and consolidated
+   metadata.
+
+Do not update `latest` attrs, consolidated metadata, or other reader-visible
+selection metadata until the destination run group is fully present and
+validated. Avoid multiple jobs promoting into the same destination archive at
+the same time unless a writer lock or equivalent coordination mechanism exists.
+
+This pattern avoids the worst case of many small random chunk writes over NFS or
+other shared storage. It also keeps mutable Dask writes on local scratch, where
+they can follow the chunk-ownership safety rules in
+`docs/dask_zarr_write_safety.md`.
+
+Prefer this:
+
+```text
+local scratch Zarr run -> validate -> tar.zst -> transfer -> stage -> validate -> atomic promote
+```
+
+Avoid this for bulk outputs:
+
+```text
+many workers inserting individual chunks directly into the home Zarr over the network
+```
 
 ## Recommended Near-Term Implementation Order
 

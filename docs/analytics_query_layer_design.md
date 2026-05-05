@@ -1,7 +1,7 @@
 # Analytics Query Layer Design
 <!-- design-meta
 status: draft
-last_updated: 2026-05-01
+last_updated: 2026-05-05
 -->
 
 Purpose: clarify how Palette should support biological cross-recording queries
@@ -43,11 +43,49 @@ Keep the current authority split:
 Zarr     = authoritative per-recording artifact store
 SQLite   = registry, lineage, metadata, status, and run discovery
 Parquet  = derived cross-recording analytic query/export tables
+DuckDB   = query engine over the Parquet analytics lake
 ```
 
 Parquet/Arrow exports should be deterministic, disposable, and reproducible
 from Zarr plus SQLite registry metadata. They should not become the source of
 truth for corrections or real-time viewing.
+
+## Incremental Analytics Lake
+
+The export layer should be an appendable analytics lake, not a set of one-off
+CSV files and not one file per protocol hash.
+
+```text
+/nvme1/analytics_exports/palette_analytics/v1/
+  manifests/
+  sessions/
+  stimulus_steps/
+  swim_bouts/
+  bout_kinematics/
+  bout_classifications/
+  stimulus_response_per_fish_step/
+  stimulus_response_windows/
+```
+
+Each table is a directory of Parquet parts. New recordings add new parts. If a
+recording is reprocessed after masks or keypoints are fixed, the exporter writes
+a new part with a new `export_run_id` and a new `source_lineage_hash`; old rows
+remain available for before/after comparison.
+
+`protocol_hash` should be a column, not the primary file organization. Query
+engines such as DuckDB can filter by protocol hash directly:
+
+```sql
+SELECT *
+FROM read_parquet('/nvme1/analytics_exports/palette_analytics/v1/stimulus_response_per_fish_step/**/*.parquet')
+WHERE protocol_hash = 'd4e71b4fcd5272227de23db51b441eedcf36fca9ed1f350948a62909796d7287';
+```
+
+Partition by low-cardinality fields only after measuring query patterns and
+file counts. Reasonable early partitions are `recording_date`,
+`protocol_name`, or `stimulus_mode`; exact `recording_id`, `run_id`,
+`subject_id`, and `protocol_hash` are usually too high-cardinality for default
+partitioning.
 
 ## Why Zarr Should Stay Primary
 
@@ -98,9 +136,60 @@ The command should:
 4. Join registry metadata onto each analytic row.
 5. Write partitioned Parquet tables plus a manifest.
 
+## Export Workflow
+
+The normal cross-recording workflow should be:
+
+```text
+1. Query registry.
+   Select recordings/fish by DPF, protocol, cross, clutch, date, genotype,
+   path, or other cohort fields.
+
+2. Resolve source Zarrs.
+   Use the registry result rows to locate each analysis Zarr.
+
+3. Resolve selected analysis runs inside each Zarr.
+   Examples: latest or explicitly selected stimulus run, track-kinematics run,
+   swim-bout run, bout-kinematics run, stimulus-response run, eye-angle run,
+   tail-posture run, or classifier run.
+
+4. Extract table-shaped metrics.
+   Read only the Zarr arrays and attrs needed for the requested export tables.
+   Keep dense traces, masks, images, and full geometry in Zarr unless a table
+   export has a concrete use case.
+
+5. Join registry context onto rows.
+   Add DPF, cross, clutch, fish/subject identity, protocol name/hash, recording
+   date, genotype, strain, arena, camera, and selected run IDs.
+
+6. Write Parquet table parts.
+   Append or write immutable part files into stable table directories such as
+   `stimulus_response_per_fish_step/`, `swim_bout_metrics/`, or
+   `bout_classifications/`.
+
+7. Write an export manifest.
+   Record source Zarrs, source run IDs, Palette commit, schema versions,
+   row counts, export parameters, and lineage hashes.
+```
+
+In short:
+
+```text
+SQLite registry = cohort selector and control plane
+Zarr archives   = authoritative source arrays and run provenance
+Parquet tables  = queryable cross-session cache
+DuckDB/Polars   = analysis/query engines over Parquet
+```
+
+For example, exporting "latency to follow the grating" should read OMR
+per-fish/per-step arrays from each selected Zarr's `stimulus_response_runs`,
+attach registry context, and write rows to
+`stimulus_response_per_fish_step`. Subsequent cohort comparisons should query
+that Parquet table rather than reopening every Zarr.
+
 The export manifest should record:
 
-- export ID and creation time
+- export run ID and creation time
 - Palette git commit and dirty state
 - registry path
 - selection query or manifest
@@ -117,14 +206,117 @@ or dense probability arrays.
 Recommended first datasets:
 
 - `recording_summary`: one row per selected recording/archive
+- `stimulus_steps`: one row per canonical stimulus step
+- `stimulus_step_summary`: one row per recording, fish, selected response/run
+  lineage, and stimulus step
 - `swim_bout_metrics`: one row per swim-bout candidate
 - `bout_kinematics_metrics`: one row per bout-kinematics measurement
-- `stimulus_response_per_step`: one row per recording, step, and fish
+- `bout_classifications`: one row per classified bout
+- `stimulus_response_per_fish_step`: one row per recording, step, and fish
+- `stimulus_response_windows`: one row per recording, step, fish, and window
 - `stimulus_response_per_bout`: one row per bout assigned to a stimulus step
 
 Add `track_kinematics_timeseries` later if there is a concrete need for
 cross-recording frame-level queries. It can be large, and many questions can be
 answered from event/per-step summaries first.
+
+## First Metric Families
+
+The first export should favor raw-ish scalar facts over frozen summary plots.
+That means exporting per-bout and per-step values from which medians,
+histograms, and cohort summaries can be recomputed later.
+
+### Recording/session level
+
+`recording_summary` should include:
+
+- total path length / cumulative distance;
+- total moving time and fraction moving;
+- mean and median speed while moving, plus whole-recording mean speed;
+- total bout count and bout rate per minute;
+- mean and median inter-bout interval;
+- mean and median bout duration;
+- mean and median bout path length and net displacement;
+- mean and median peak speed and mean bout speed;
+- mean and median vergence, including eye-frame/Bianco-style vergence when
+  available;
+- optional percent time above a configurable convergence threshold;
+- QC coverage fields: tracking coverage, valid movement fraction,
+  valid eye-angle fraction, valid bout-kinematics fraction, valid tail/posture
+  fraction.
+
+### Stimulus-step level
+
+`stimulus_step_summary` should include:
+
+- step duration, stimulus mode, direction/polarity, protocol name/hash;
+- path length / cumulative distance during the step;
+- bout count, bout rate, moving fraction;
+- mean and median bout duration;
+- mean and median bout path length and net displacement;
+- mean and median peak speed and mean bout speed;
+- mean and median inter-bout interval within or assigned to the step;
+- mean and median net heading change per bout;
+- mean and median within-bout heading range or peak-to-peak heading change;
+- mean and median vergence during the step and around bouts;
+- for translational OMR: `omr_path_index`, `bout_fraction_correct`,
+  first aligned/classified/opposing bout latencies, and aligned/opposing counts;
+- for concentric OMR: radial OMR index, radial/tangential displacement, radial
+  polarity, and centering-success fields when target annulus metadata exists.
+
+### Bout level
+
+`swim_bout_metrics` / `bout_kinematics_metrics` should include enough columns
+to rebuild distributions:
+
+- bout identity, selected source run IDs, start/end/core frames, and duration;
+- stimulus step assignment and stimulus context;
+- path length, net displacement, and displacement/path ratio;
+- peak speed and mean speed;
+- pre/post heading, net heading change, and absolute heading change;
+- within-bout heading range / peak-to-peak heading change;
+- inter-bout interval before and after;
+- OMR score and aligned/opposing/ambiguous label when applicable;
+- bout classification label/probabilities when available;
+- tail posture summaries when available, such as max absolute tail angle and
+  tail-angle energy;
+- eye summaries around the bout, such as pre/post/mean vergence,
+  eye-frame vergence, and left/right eye angles.
+
+### Histogram-ready exports
+
+Do not make pre-binned histograms the only export surface. Store the per-bout
+facts first:
+
+```text
+duration_s
+path_length_mm
+net_displacement_mm
+peak_speed_mm_s
+mean_speed_mm_s
+inter_bout_interval_s
+heading_change_deg
+within_bout_heading_range_deg
+vergence_eye_angle_deg
+```
+
+Merged histograms can then be rebuilt with whatever bins the downstream
+analysis chooses. A compact `metric_histogram_counts` table may be added later
+for dashboards, but it should reference the source table and bin policy:
+
+```text
+dataset_id
+recording_id
+protocol_hash
+step_index
+metric_name
+bin_policy
+bin_left
+bin_right
+count
+source_table
+source_lineage_hash
+```
 
 ## Required Common Columns
 
@@ -132,10 +324,22 @@ Every exported row should carry enough identity to map back to the authoritative
 Zarr source:
 
 ```text
-export_id
+export_run_id
+export_created_at_utc
 recording_id
 dataset_id
+session_uuid
 subject_id
+fish_id
+dish_id
+cross_id
+clutch_id
+dpf_at_acquisition
+line_strain
+genotype
+protocol_name
+protocol_hash
+protocol_semantic_hash
 zarr_path
 zarr_mtime_ns
 stage_family
@@ -143,6 +347,9 @@ run_id
 schema_id
 schema_version
 source_refs_json
+source_lineage_hash
+is_latest
+supersedes_export_run_id
 ```
 
 Rows should also denormalize biological and protocol metadata needed for common
@@ -193,6 +400,27 @@ WHERE dpf_at_acquisition = 6
   AND valid;
 ```
 
+For a grating OMR cohort question:
+
+```sql
+SELECT
+  cross_id,
+  count(*) AS n_fish_steps,
+  median(first_aligned_bout_latency_s) AS median_latency_s,
+  avg(omr_path_index) AS mean_omr_path_index
+FROM read_parquet('/nvme1/analytics_exports/palette_analytics/v1/stimulus_response_per_fish_step/**/*.parquet')
+WHERE dpf_at_acquisition = 6
+  AND protocol_name = 'DefaultScreen'
+  AND stimulus_mode = 'MOVING_GRATING'
+  AND first_aligned_bout_latency_s IS NOT NULL
+GROUP BY cross_id
+ORDER BY median_latency_s;
+```
+
+For comparing the same fish across protocols, use `subject_id` only if it is a
+true cross-session biological identity. If the identity is only known at the
+dish, cross, or clutch level, group at that level instead.
+
 ## Registry Role
 
 SQLite should remain the operational registry and control plane. It should own:
@@ -210,7 +438,7 @@ track generated Parquet exports in a small registry table later:
 
 ```text
 analytics_exports
-  export_id
+  export_run_id
   output_root
   manifest_path
   created_at_utc
@@ -219,6 +447,40 @@ analytics_exports
   schema_versions_json
   status
 ```
+
+The registry should also remain the place that tells the exporter which Zarrs
+belong to a cohort, for example "6 dpf DefaultScreen fish from cross A and the
+newest clutch." The Parquet table should denormalize those registry fields so
+downstream DuckDB queries do not need to repeatedly join back to SQLite for
+common biological filters.
+
+## Data Versioning And DVC
+
+The first line of data versioning should be Palette-native lineage:
+
+```text
+export_run_id
+source_lineage_hash
+source run IDs
+manifest JSON
+supersedes_export_run_id
+```
+
+This is what tells a query whether a row came from old masks/keypoints or from a
+newly recomputed downstream run.
+
+DVC can be added later around selected export snapshots. It should not replace
+Parquet, DuckDB, or Palette lineage metadata:
+
+```text
+Parquet + manifests = queryable exported facts and source lineage
+DVC                 = versioned large-file/directory snapshots outside Git
+DuckDB              = SQL query engine over Parquet
+```
+
+Good DVC candidates are frozen Parquet export snapshots, export manifests,
+training datasets, and model checkpoints. Poor DVC candidates are hot mutable
+analysis Zarrs and every transient canary export.
 
 ## Zarr Writer Guidance
 

@@ -25,6 +25,51 @@ writes** instead of many short tasks.
 - Prefer **threads** for IO‑heavy steps (background/detect on sampled imports).
 - Avoid parallelizing more than the filesystem can sustain.
 
+## Analysis-Stage Scaling Policy
+
+For downstream analysis stages such as track kinematics, swim-bout detection,
+bout kinematics, eye angles, and stimulus response metrics, prefer
+**recording-level parallelism** as the first scaling layer. On the cluster this
+means submitting one recording or a small batch of recordings per job, rather
+than assuming every analysis stage is internally Dask-aware.
+
+This is intentional:
+
+- A single analysis Zarr should normally have one writer per target run group.
+- Independent recordings can safely run in parallel because they write to
+  independent Zarr stores.
+- Internal Dask is appropriate only when the stage has a well-defined
+  chunk-boundary contract and workers write disjoint physical Zarr chunks.
+- Avoid multiplying parallelism layers blindly. If a job processes several
+  recordings concurrently, do not also launch a high-worker internal Dask stage
+  for each recording unless the filesystem budget is explicit.
+
+Current status:
+
+- `eye_angle_analysis` has a Dask worker-chunk backend and records Dask
+  scheduler/worker provenance.
+- `track_kinematics` is currently single-process within one recording. It has
+  cross-frame state such as hysteresis, smoothing, and derivatives, so any
+  future Dask implementation must define chunk-boundary state handoff.
+- `detect_bouts_multi_level` is currently single-process within one recording.
+  Peak-event detection, threshold regions, and gap merging can cross chunk
+  edges, so any future Dask implementation needs a reconciliation pass.
+- `bout_kinematics` is the best first candidate for future internal Dask:
+  per-bout rows are mostly independent and can be partitioned more cleanly,
+  with a single-writer or chunk-aligned write phase.
+- `stimulus_response` metrics should usually remain recording-level or
+  step/window-level first. Add internal Dask only after the metric writer has a
+  clear disjoint-slice contract.
+
+When running movement/bout analysis locally, `scripts/run_movement_bout_batch_pipeline`
+supports conservative archive-level scheduling. The default remains serial
+execution. Use `--jobs N` only for independent archives and keep `N` small on
+networked filesystems. Do not run two jobs that write the same run names into
+the same analysis Zarr.
+
+Before adding internal Dask to any analysis stage, follow
+`docs/dask_zarr_write_safety.md`.
+
 ## Heuristics
 
 - If a task is **<5–10 minutes**, batch it.

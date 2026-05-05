@@ -29,6 +29,14 @@
 - For deferred local validation, provide exact commands for the user to run in their terminal.
 - For new zarr-heavy tests, default to deterministic in-memory coverage first; add real-zarr integration checks only when required and mark them for local execution if sandbox stability is an issue.
 
+## Dask / Parallel Zarr Write Rule
+
+- Parallel writes to Zarr are safe only when each worker owns whole, non-overlapping physical Zarr chunks for every array it writes.
+- Do not assume disjoint logical row slices are safe. If two workers write different row ranges inside the same physical chunk, Zarr chunk-level read-modify-write behavior can cause stale overwrites.
+- When adding or changing Dask writes, align worker chunks to the physical chunk grid of the written arrays, serialize writes that cannot be chunk-aligned, or write per-worker temporary outputs and merge deterministically.
+- Record both requested and effective worker chunking in provenance when Dask chunk sizes are adjusted for Zarr write safety.
+- See `docs/dask_zarr_write_safety.md` before modifying Dask-backed Zarr writers.
+
 ## Outside-Sandbox Validation Notes
 
 - CUDA/GPU visibility may be unavailable in Codex sandbox even when available outside it.
