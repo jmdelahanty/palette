@@ -522,6 +522,57 @@ That direction is compatible with this design:
   default.
 - Do not create one giant wide table for all analytics.
 
+## Implemented First Slice
+
+The first exporter slice is implemented as:
+
+```bash
+scripts/py -m fisheye.utils.export_cross_recording_analytics \
+  --recordings-root /nvme1/recordings \
+  --output-root /nvme1/exports/palette_analytics \
+  --jobs 4
+```
+
+Implemented tables:
+
+- `recording_summary`
+- `stimulus_steps`
+- `stimulus_step_summary`
+- `stimulus_response_per_fish_step`
+- `swim_bout_metrics`
+
+The exporter parallelizes Zarr extraction by recording, writes immutable
+per-recording Parquet part files under
+`<output-root>/v1/<table>/export_run_id=<run_id>/`, and writes a manifest under
+`<output-root>/v1/manifests/`. Generated export IDs are prefixed with `run_`
+so hive-partition readers such as Polars treat them as strings instead of
+trying to parse compact UTC timestamps as dates.
+
+Example Polars query:
+
+```python
+import polars as pl
+
+run_id = "run_20260505T080239Z"
+root = "/nvme1/exports/palette_analytics"
+
+bouts = pl.scan_parquet(
+    f"{root}/v1/swim_bout_metrics/export_run_id={run_id}/*.parquet",
+    hive_partitioning=True,
+)
+
+summary = (
+    bouts.group_by("stimulus_mode")
+    .agg(
+        pl.len().alias("bouts"),
+        pl.col("duration_s").mean().alias("mean_duration_s"),
+        pl.col("path_length_mm").mean().alias("mean_path_length_mm"),
+        pl.col("peak_physical_speed_mm_s").mean().alias("mean_peak_speed_mm_s"),
+    )
+    .collect()
+)
+```
+
 ## Deferred Implementation Plan
 
 1. Inventory current scalar/event outputs in `swim_bout_runs`,
