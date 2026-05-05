@@ -346,6 +346,12 @@ differ from Palette's native tangent angles, the view should derive directly
 from the source ordered curve/keypoints and record that conversion. See
 [tail_kinematics_run_design.md](tail_kinematics_run_design.md).
 
+Execution note: the v1 writer is serial within a recording. A future
+Dask-backed writer is safe in principle because each ROI row is independent,
+but it must use chunk-aligned worker writes and single-driver group/attrs
+finalization. The intended design is documented in
+[dask_zarr_write_safety.md](dask_zarr_write_safety.md).
+
 ### External Classification Outputs
 
 Behavior labels from Megabouts, ZebraZoom, Stytra, or BEAST-like models should
