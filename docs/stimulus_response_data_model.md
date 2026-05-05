@@ -156,6 +156,31 @@ mode_id = sr["frames/stimulus_mode_id"][:]
 plt.scatter(range(len(speed)), speed, c=mode_id, cmap="tab10", s=1)
 ```
 
+### OMR review surfaces
+
+Moving-grating OMR and concentric radial OMR are separate metric families with
+different geometry and sign semantics:
+
+```python
+moving = sr["steps/step_0/grating/omr"]
+moving_idx = moving["per_fish/omr_path_index"][:]
+
+radial = sr["steps/step_1/concentric_grating/radial_omr"]
+radial_idx = radial["per_fish/omr_path_index"][:]
+radial_outward = radial["per_fish/radial_path_index"][:]
+```
+
+For moving gratings, positive OMR values mean movement along the persisted
+camera-space stimulus direction. For concentric gratings,
+`radial_path_index` is outward-positive physical motion, while
+`omr_path_index` is stimulus-aligned after multiplying by the persisted radial
+polarity. UI consumers should not merge these into one selector without
+showing which geometry is active.
+
+`apps/marimo/track_kinematics_explorer.py` reads both groups as review/debug
+surfaces. Crimson should use the same paths, joined to canonical
+`stimulus_runs/<run>/steps/step_<i>` by `source_stimulus_run` and `step_index`.
+
 ## Cross-step aggregation
 
 The per-step structure does not include cross-step summaries (e.g.,

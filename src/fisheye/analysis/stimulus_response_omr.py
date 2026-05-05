@@ -9,7 +9,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
-from fisheye.analysis.stimulus_response_grating import _grating_direction_vector
+from fisheye.analysis.stimulus_response_grating import (
+    _flatten_stimulus_params,
+    _grating_direction_vector,
+)
 from fisheye.shared.coordinate_transform import load_calibration_transform
 
 
@@ -61,6 +64,75 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     if denominator <= 0.0 or not np.isfinite(denominator):
         return float("nan")
     return _finite_or_nan(numerator / denominator)
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _moving_grating_provenance_attrs(step: Any, grating_dir_deg: float) -> Dict[str, Any]:
+    """Return local stimulus-direction provenance for a moving-grating OMR group."""
+
+    raw_params = step.stimulus_params if isinstance(step.stimulus_params, dict) else {}
+    moving_attrs = raw_params.get("moving_grating")
+    if not isinstance(moving_attrs, dict):
+        moving_attrs = {}
+    params = _flatten_stimulus_params(raw_params)
+    out: Dict[str, Any] = {
+        "stimulus_direction_deg": float(grating_dir_deg),
+        "grating_direction_camera_deg": float(grating_dir_deg),
+        "orientation_degrees_authored": _first_present(
+            moving_attrs.get("orientation_degrees_authored"),
+            params.get("orientation_degrees"),
+            params.get("angle_degrees"),
+            params.get("grating_orientation"),
+        ),
+        "camera_to_projector_offset_deg": moving_attrs.get("camera_to_projector_offset_deg"),
+        "direction_mapping_source": moving_attrs.get("direction_mapping_source"),
+        "direction_mapping_status": moving_attrs.get("direction_mapping_status"),
+        "direction_mapping_validated": moving_attrs.get("direction_mapping_validated"),
+    }
+    for key, candidates in {
+        "spatial_freq_rpp": (
+            moving_attrs.get("spatial_freq_rpp"),
+            params.get("spatial_freq_rpp"),
+            params.get("spatial_freq_cpp"),
+        ),
+        "spatial_freq_cycles_per_mm": (
+            moving_attrs.get("spatial_freq_cycles_per_mm"),
+            params.get("spatial_freq_cycles_per_mm"),
+        ),
+        "speed_pps": (moving_attrs.get("speed_pps"), params.get("speed_pps")),
+        "speed_mm_s": (
+            moving_attrs.get("speed_mm_s"),
+            moving_attrs.get("speed_mm_per_sec"),
+            params.get("speed_mm_s"),
+            params.get("speed_mm_per_sec"),
+            params.get("grating_speed_mm_s"),
+        ),
+        "speed_mm_per_sec": (
+            moving_attrs.get("speed_mm_per_sec"),
+            moving_attrs.get("speed_mm_s"),
+            params.get("speed_mm_per_sec"),
+            params.get("speed_mm_s"),
+            params.get("grating_speed_mm_s"),
+        ),
+        "temporal_frequency_hz": (
+            moving_attrs.get("temporal_frequency_hz"),
+            params.get("temporal_frequency_hz"),
+        ),
+        "actual_rendered_temporal_frequency_hz": (
+            moving_attrs.get("actual_rendered_temporal_frequency_hz"),
+            params.get("actual_rendered_temporal_frequency_hz"),
+        ),
+    }.items():
+        value = _first_present(*candidates)
+        if value is not None:
+            out[key] = value
+    return out
 
 
 def _first_finite_float(*values: Any) -> Optional[float]:
@@ -857,7 +929,6 @@ def compute_step_omr_metrics(
     attrs = {
         "method_version": OMR_METHOD_VERSION,
         "stimulus_direction_source": "static_step_params",
-        "stimulus_direction_deg": float(grating_dir_deg),
         "detector_estimator_policy": "bout_boundaries_from_detector_physical_metrics_from_positions",
         "position_source_array": "positions_mm",
         "position_anchor": position_anchor,
@@ -876,6 +947,7 @@ def compute_step_omr_metrics(
         "projection_deadzone": float(projection_deadzone),
         "projection_speed_deadzone_mm_s": float(projection_speed_deadzone_mm_s),
         "moving_threshold_mm_s": float(moving_threshold_mm_s),
+        "window_lengths_s": [float(v) for v in window_lengths_s],
         "early_response_window_lengths_s": [float(v) for v in early_window_lengths_s],
         "weighted_bout_metric_policy": (
             "bout_path_index includes all finite bout path; weighted correct fractions "
@@ -887,6 +959,7 @@ def compute_step_omr_metrics(
             "2": "no_movement",
         },
     }
+    attrs.update(_moving_grating_provenance_attrs(step, grating_dir_deg))
     return OMRStepData(
         per_fish=per_fish,
         per_bout=per_bout,

@@ -1094,6 +1094,60 @@ class TestComputeOMRMetrics:
         )
         assert abs(float(omr.per_fish["omr_path_index"][0])) < 1e-5
 
+    def test_attrs_capture_moving_grating_direction_and_window_provenance(self) -> None:
+        tracks = _make_grating_tracks(heading_deg=180.0, speed=10.0)
+        step = ProtocolStep(
+            index=0,
+            name="grating_provenance",
+            stimulus_mode="MOVING_GRATING",
+            stimulus_mode_id=3,
+            start_frame=0,
+            end_frame=100,
+            duration_s=100 / 30.0,
+            stimulus_params={
+                "parameters": {
+                    "orientation_degrees": 0.0,
+                    "speed_pps": 50.0,
+                    "speed_mm_per_sec": 5.0,
+                    "spatial_freq_cpp": 0.02,
+                    "spatial_freq_cycles_per_mm": 0.15,
+                },
+                "moving_grating": {
+                    "orientation_degrees_authored": 0.0,
+                    "grating_direction_camera_deg": 180.0,
+                    "camera_to_projector_offset_deg": 180.0,
+                    "direction_mapping_source": "protocol_orientation_degrees_plus_configured_offset",
+                    "direction_mapping_status": "configured_camera_offset",
+                    "direction_mapping_validated": False,
+                    "temporal_frequency_hz": 0.75,
+                    "actual_rendered_temporal_frequency_hz": 1.8,
+                },
+            },
+        )
+
+        omr = compute_step_omr_metrics(
+            tracks,
+            step,
+            180.0,
+            fps=30.0,
+            moving_threshold_mm_s=2.0,
+            window_lengths_s=(3.0, 7.0),
+            early_window_lengths_s=(1.0, 2.0),
+        )
+
+        attrs = omr.attrs
+        assert attrs["stimulus_direction_deg"] == 180.0
+        assert attrs["grating_direction_camera_deg"] == 180.0
+        assert attrs["orientation_degrees_authored"] == 0.0
+        assert attrs["camera_to_projector_offset_deg"] == 180.0
+        assert attrs["direction_mapping_status"] == "configured_camera_offset"
+        assert attrs["direction_mapping_validated"] is False
+        assert attrs["window_lengths_s"] == [3.0, 7.0]
+        assert attrs["early_response_window_lengths_s"] == [1.0, 2.0]
+        assert attrs["speed_mm_s"] == 5.0
+        assert attrs["spatial_freq_cycles_per_mm"] == 0.15
+        assert attrs["temporal_frequency_hz"] == 0.75
+
     def test_position_occupancy_and_opportunity_are_arena_normalized(self) -> None:
         tracks = _make_grating_tracks(n_frames=31, heading_deg=90.0, speed=30.0)
         step = _grating_step(start=0, end=31, direction_deg=90.0)
@@ -1939,6 +1993,52 @@ class TestConcentricRadialOMR:
 
         assert omr.per_fish["quality_flag"][0] == 1
         assert not omr.per_frame["valid_radial_basis"][0].any()
+
+    def test_attrs_capture_radial_window_and_stimulus_provenance(self) -> None:
+        center = (0.0, 0.0)
+        x = np.linspace(1.0, 4.0, 30, dtype=np.float32)
+        tracks = _make_position_track(np.column_stack([x, np.zeros_like(x)]))
+        step = _radial_omr_step(sign=1, end=30)
+        step.stimulus_params["concentric_grating"].update(
+            {
+                "speed_pps": 30.0,
+                "speed_mm_s": 3.0,
+                "speed_mm_per_sec": 3.0,
+                "spatial_freq_rpp": 0.02,
+                "spatial_freq_cycles_per_mm": 0.2,
+                "temporal_frequency_hz": 0.6,
+                "actual_rendered_temporal_frequency_hz": 0.6,
+                "stimulus_role": "centering_utility",
+                "target_radius_min_mm": 8.0,
+                "target_radius_max_mm": 14.0,
+            }
+        )
+
+        omr = compute_step_concentric_radial_omr_metrics(
+            tracks,
+            step,
+            center,
+            fps=30.0,
+            moving_threshold_mm_s=0.1,
+            arena_radius_mm=5.0,
+            window_lengths_s=(3.0, 7.0),
+            early_window_lengths_s=(1.0, 2.0),
+            radial_singularity_epsilon_mm=0.25,
+        )
+
+        attrs = omr.attrs
+        assert attrs["stimulus_radial_polarity"] == "expanding"
+        assert attrs["stimulus_radial_sign"] == 1
+        assert attrs["stimulus_radial_polarity_source"] == "test"
+        assert attrs["window_lengths_s"] == [3.0, 7.0]
+        assert attrs["early_response_window_lengths_s"] == [1.0, 2.0]
+        assert attrs["radial_singularity_epsilon_mm"] == 0.25
+        assert attrs["concentric_grating_role"] == "centering_utility"
+        assert attrs["speed_pps"] == 30.0
+        assert attrs["speed_mm_s"] == 3.0
+        assert attrs["spatial_freq_cycles_per_mm"] == 0.2
+        assert attrs["target_radius_min_mm"] == 8.0
+        assert attrs["target_radius_max_mm"] == 14.0
 
 
 class TestWriteWithConcentric:

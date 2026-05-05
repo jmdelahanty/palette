@@ -2048,6 +2048,72 @@ This group only exists when `stimulus_mode == "MOVING_GRATING"`.
 | `fraction_following` | `(n_fish, n_bins)` | `float32` | |
 | `optomotor_gain` | `(n_fish, n_bins)` | `float32` | |
 
+`grating/omr/`:
+
+Moving-grating OMR responsiveness indices. This subgroup is present on
+`MOVING_GRATING` steps when OMR metrics are enabled.
+
+Important attrs include `method_version`, `stimulus_direction_deg`,
+`grating_direction_camera_deg`, `orientation_degrees_authored`,
+`camera_to_projector_offset_deg`, `direction_mapping_source`,
+`direction_mapping_status`, `direction_mapping_validated`,
+`detector_estimator_policy`, `position_source_array`, `position_anchor`,
+`speed_source_array`, `projection_deadzone`,
+`projection_speed_deadzone_mm_s`, `moving_threshold_mm_s`,
+`window_lengths_s`, and `early_response_window_lengths_s`. Optional speed,
+frequency, and arena geometry attrs use JSON `null` when unavailable; metadata
+must not contain JSON-invalid `NaN` or `Infinity`.
+
+| Subgroup | Key Arrays | Notes |
+|----------|------------|-------|
+| `per_fish/` | `fish_id`, `omr_path_index`, `omr_net_direction_index`, `bout_fraction_correct_classified`, `bout_choice_index`, `bout_path_index`, `time_choice_index`, `first_aligned_bout_latency_s`, `quality_flag` | Step-level per-fish OMR summaries |
+| `per_bout/` | `fish_id`, `bout_id`, `start_frame`, `end_frame`, `per_bout_omr_score`, `parallel_displacement_mm`, `bout_displacement_mm`, `bout_path_length_mm`, `correct_label`, `quality_flag` | Bout boundaries come from swim-bout detector runs; physical scores come from track positions |
+| `windows/` | `window_id`, `fish_id`, `start_frame`, `end_frame`, `window_length_s`, `omr_path_index`, `time_choice_index`, `coverage_fraction`, `quality_flag` | Non-overlapping response windows |
+| `early_windows/` | `window_id`, `fish_id`, `window_length_s`, `actual_window_length_s`, `omr_path_index`, `bout_path_index`, `time_choice_index`, `quality_flag` | Onset-anchored first-response windows |
+
+**`steps/step_{i}/concentric_grating/`** — CONCENTRIC_GRATING steps only:
+
+This group only exists when `stimulus_mode == "CONCENTRIC_GRATING"` and a
+center can be resolved.
+
+| Subgroup | Key Arrays | Notes |
+|----------|------------|-------|
+| `per_frame/` | `frame_indices`, `distance_to_center_mm`, `radial_heading_angle_deg`, `radial_speed_mm_s`, `tangential_speed_mm_s` | Centering/polar decomposition |
+| `per_fish/` | `fish_id`, `mean_distance_to_center_mm`, `initial_distance_to_center_mm`, `final_distance_to_center_mm`, `fraction_approaching`, `mean_radial_speed_mm_s`, `mean_tangential_speed_mm_s` | Step-level centering summaries |
+| `time_series/` | `bin_center_s`, `distance_to_center_mm`, `radial_speed_mm_s`, `radial_heading_cos`, `fraction_approaching` | Binned centering summaries |
+
+`concentric_grating/radial_omr/`:
+
+Stimulus-aligned radial/tangential OMR indices for concentric gratings. This
+subgroup preserves outward-positive physical radial components separately from
+stimulus-aligned components:
+
+```text
+stimulus_aligned = stimulus_radial_sign * outward_radial
+```
+
+Important attrs include `method_version`,
+`coordinate_system = "camera_mm_polar_about_stimulus_center"`,
+`stimulus_center_mm`, `stimulus_center_source`,
+`stimulus_radial_polarity`, `stimulus_radial_sign`,
+`stimulus_radial_polarity_authored`,
+`stimulus_radial_polarity_observed`,
+`stimulus_radial_polarity_source`,
+`stimulus_radial_polarity_validated`,
+`effective_stimulus_radial_polarity_source`,
+`radial_singularity_epsilon_mm`, `projection_deadzone`,
+`projection_speed_deadzone_mm_s`, `moving_threshold_mm_s`,
+`window_lengths_s`, `early_response_window_lengths_s`,
+`concentric_grating_role`, and detector-vs-estimator source attrs.
+
+| Subgroup | Key Arrays | Notes |
+|----------|------------|-------|
+| `per_frame/` | `frame_indices`, `valid_radial_basis`, `radius_mm`, `radial_speed_outward_mm_s`, `tangential_speed_ccw_mm_s`, `stimulus_aligned_radial_speed_mm_s` | Frame-level radial basis and speed decomposition |
+| `per_fish/` | `fish_id`, `omr_path_index`, `radial_path_index`, `omr_net_direction_index`, `tangential_bias_index`, `start_radius_mm`, `end_radius_mm`, `bout_fraction_correct_classified`, `time_choice_index`, `first_aligned_bout_latency_s`, `quality_flag` | Step-level radial OMR summaries |
+| `per_bout/` | `fish_id`, `bout_id`, `start_frame`, `end_frame`, `radial_omr_score`, `radial_net_direction_score`, `tangential_bias_score`, `omr_label`, `quality_flag` | Bout-level radial/tangential scores |
+| `windows/` | `window_id`, `fish_id`, `window_length_s`, `omr_path_index`, `time_choice_index`, `tangential_bias_index`, `coverage_fraction`, `quality_flag` | Non-overlapping radial OMR windows |
+| `early_windows/` | Same structure as `windows/` | Onset-anchored radial OMR windows |
+
 ### Additional Analysis Groups
 
 Other analyzers follow the same `analysis/<analysis_type>_runs/<run_name>/` pattern with

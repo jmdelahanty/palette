@@ -768,15 +768,17 @@ Real-data validation should include:
 
 ## Implementation Direction
 
-The initial implementation extends `src/fisheye/analysis/stimulus_response.py`.
-It:
+The moving-grating OMR implementation now lives in
+`src/fisheye/analysis/stimulus_response_omr.py` and is dispatched by
+`src/fisheye/analysis/stimulus_response.py`. It:
 
-- adds OMR computation helpers for static moving-grating steps,
+- computes OMR metrics for static moving-grating steps,
 - consumes the same dense track representation as existing grating metrics,
 - consumes optional `swim_bout_runs` for bout boundaries,
 - writes `steps/step_<i>/grating/omr/`,
 - writes `global/omr/per_fish/` summaries,
-- records detector-vs-estimator provenance in attrs,
+- records detector-vs-estimator provenance, direction mapping provenance,
+  window lengths, and strict-JSON-safe optional metadata in local attrs,
 - adds unit tests in `tests/unit/fisheye/test_stimulus_response.py`.
 
 Do not add cross-recording Parquet export in the first implementation. The Zarr

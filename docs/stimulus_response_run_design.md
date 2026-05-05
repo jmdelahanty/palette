@@ -7,9 +7,11 @@ that doc are preserved and expanded here.
 ## Goal
 
 Define a general-purpose analysis run that answers stimulus-specific behavioral
-questions for every protocol step in a recording. The first implementation
-targets moving grating alignment, but the structure accommodates any stimulus
-type (looming dots, coherent dots, chaser, etc.) without schema changes.
+questions for every protocol step in a recording. The implemented surface now
+covers base step summaries, moving-grating alignment, moving-grating OMR, and
+first-slice concentric radial OMR. The structure accommodates additional
+stimulus types (looming dots, coherent dots, chaser, etc.) without changing
+the base step-first layout.
 
 Each run produces:
 
@@ -311,9 +313,16 @@ stimulus type. Its contents vary by `stimulus_mode`:
 {
     "center_x_mm": 10.0,              # grating center in camera/mm space
     "center_y_mm": 10.0,
-    "grating_speed_mm_s": 10.0,       # radial drift speed (positive = inward)
+    "center_source": "stimulus_coordinates",
+    "radial_polarity_authored": "expanding",  # Citrus-authored intent
+    "radial_sign_authored": +1,       # +1 expanding/outward, -1 contracting/inward
+    "radial_polarity_validated": False,
+    "grating_speed_mm_s": 10.0,       # radial drift speed magnitude
     "spatial_freq_cycles_per_mm": 0.5,
     "center_threshold_mm": 2.0,       # radius defining "near center" for fraction_near_center
+    "stimulus_role": "unknown",       # primary_stimulus, centering_utility, or unknown
+    "target_radius_min_mm": None,     # optional centering utility metadata
+    "target_radius_max_mm": None,
 }
 ```
 
@@ -686,8 +695,9 @@ Inputs:
   bout_run        (optional: swim bout segments per fish)
   eye_angle_run   (optional: per-frame eye angles, vergence, version per fish)
 
-Step 1  Parse protocol
-        Extract all steps from STEP_START / STEP_END events.
+Step 1  Load canonical stimulus steps
+        Prefer analysis/stimulus_runs/<run>/steps/step_<i>, which are
+        materialized from STEP_START / STEP_END events plus protocol JSON.
         For each step, record: step_index, step_name, stimulus_mode,
         start_frame, end_frame, duration_s, and stimulus-specific params.
 
@@ -718,9 +728,15 @@ Step 3  For each protocol step:
         - Bin into time windows for temporal dynamics.
         - Compute per-bout alignment metrics.
         - Write step_{i}/grating/per_fish/, time_series/, per_bout/.
+        - If OMR is enabled, compute path, bout, time, windowed,
+          early-window, occupancy/opportunity, and first directed-bout metrics
+          from physical estimator arrays, using swim-bout runs only as event
+          boundary detectors.
+        - Write step_{i}/grating/omr/.
 
     3e  If stimulus_mode == "CONCENTRIC_GRATING":
-        - Look up grating center position from protocol params.
+        - Resolve grating center position from canonical step attrs,
+          stimulus-coordinate metadata, or calibration-backed fallbacks.
         - Compute per-frame:
             distance_to_center_mm
             radial_heading_angle_deg (0° = toward center, ±180° = away)
@@ -731,6 +747,11 @@ Step 3  For each protocol step:
         - Bin into time windows for temporal dynamics.
         - Compute per-bout centering metrics.
         - Write step_{i}/concentric_grating/per_fish/, time_series/, per_bout/.
+        - If OMR is enabled, compute radial/tangential OMR metrics using the
+          best available expanding/contracting polarity metadata. Preserve
+          outward-positive physical components separately from
+          stimulus-aligned radial components.
+        - Write step_{i}/concentric_grating/radial_omr/.
 
     3f  [Future] If stimulus_mode == "LOOMING_DOT":
         - Compute escape metrics.
@@ -774,7 +795,7 @@ subgroup alongside the existing ones.
 | Stimulus Type | Subgroup | Key Metrics |
 |---------------|----------|-------------|
 | MOVING_GRATING | `grating/` | Heading alignment, optomotor gain, positional drift, angular velocity, eye alignment |
-| CONCENTRIC_GRATING | `concentric_grating/` | Distance to center, radial heading, centering fraction, radial/tangential speed |
+| CONCENTRIC_GRATING | `concentric_grating/` | Distance to center, radial heading, centering fraction, radial/tangential speed, optional `radial_omr/` |
 | COHERENT_DOTS | `coherent_dots/` | Heading vs dot motion direction, pursuit duration |
 | LOOMING_DOT | `looming/` | Escape latency, escape angle, distance to loom center |
 | CHASER | `chaser/` | Distance to chaser, escape angle, response latency |

@@ -135,6 +135,43 @@ stimulus_response_runs/<response_run>.attrs["source_stimulus_run"]
 links the response run back to the source stimulus run. Crimson can join by
 `step_index`.
 
+For derived moving-grating OMR metrics, use:
+
+```text
+analysis/stimulus_response_runs/<response_run>/steps/step_<i>/grating/omr/
+```
+
+The current implementation writes:
+
+```text
+omr.attrs["method_version"] = "stimulus_response_omr_v3"
+omr.attrs["stimulus_direction_deg"]          # camera-space direction used for projections
+omr.attrs["grating_direction_camera_deg"]    # copied from canonical stimulus step when available
+omr.attrs["orientation_degrees_authored"]    # Citrus/projector-authored direction
+omr.attrs["camera_to_projector_offset_deg"]
+omr.attrs["direction_mapping_source"]
+omr.attrs["direction_mapping_status"]
+omr.attrs["direction_mapping_validated"]
+omr.attrs["detector_estimator_policy"]
+omr.attrs["window_lengths_s"]
+omr.attrs["early_response_window_lengths_s"]
+omr/per_fish/omr_path_index
+omr/per_fish/bout_path_index
+omr/per_fish/bout_fraction_correct_weighted_by_path
+omr/per_fish/time_choice_index
+omr/per_fish/first_aligned_bout_latency_s
+omr/per_bout/per_bout_omr_score
+omr/per_bout/correct_label
+omr/windows/omr_path_index
+omr/early_windows/omr_path_index
+```
+
+Crimson should treat `stimulus_direction_deg` as the exact camera-space vector
+used by Palette for OMR projections. If `direction_mapping_validated=false`,
+display the response metrics but surface the direction as unvalidated. The
+per-bout `correct_label` convention is `+1` aligned, `-1` opposing, and `0`
+ambiguous.
+
 For derived concentric-grating radial response metrics, use:
 
 ```text

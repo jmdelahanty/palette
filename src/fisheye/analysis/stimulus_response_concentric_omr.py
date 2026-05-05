@@ -881,6 +881,8 @@ def compute_step_concentric_radial_omr_metrics(
         "projection_deadzone": float(projection_deadzone),
         "projection_speed_deadzone_mm_s": float(projection_speed_deadzone_mm_s),
         "moving_threshold_mm_s": float(moving_threshold_mm_s),
+        "window_lengths_s": [float(v) for v in window_lengths_s],
+        "early_response_window_lengths_s": [float(v) for v in early_window_lengths_s],
         "baseline_correction": "none",
         "concentric_grating_role": str(_first_present(params.get("stimulus_role"), params.get("concentric_grating_role"), "unknown")),
         "detector_estimator_policy": "bout_boundaries_from_detector_physical_metrics_from_positions",

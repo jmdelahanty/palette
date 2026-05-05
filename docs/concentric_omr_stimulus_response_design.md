@@ -1,7 +1,9 @@
 # Concentric OMR Metrics in Stimulus Response Runs
 
 Status: first numeric implementation exists for `concentric_grating/radial_omr/`.
-Review plots and target-annulus centering-success outputs are still future work.
+It writes per-frame, per-bout, per-fish, windowed, and early-window radial OMR
+arrays plus local provenance attrs. Review plots and target-annulus
+centering-success outputs are still future work.
 
 ## Scope
 
@@ -15,7 +17,7 @@ family; use the dedicated `LOOMING_DOT` pathway for that behavior class.
 
 The existing `concentric_grating/` implementation is a v0 centering analysis:
 it computes distance to a center, heading relative to the center, and radial
-and tangential speed components. The next implementation should add a
+and tangential speed components. The current OMR implementation writes a
 first-class radial OMR group under:
 
 ```text

@@ -6,18 +6,22 @@ and the dependency contracts needed to build the framework.
 
 ## Status
 
-All three passes are implemented and tested (56 unit tests).
+The base stimulus-response framework, bout integration, moving-grating
+metrics, moving-grating OMR, and first concentric radial OMR slice are
+implemented and covered by focused unit tests.
 
 | Pass | Status | Module |
 |------|--------|--------|
 | 1. Base framework | Done | `src/fisheye/analysis/stimulus_response.py` |
 | 2. Bout integration | Done | Same module, optional `--bout-run` |
-| 3. Grating metrics | Done | Same module, MOVING_GRATING dispatch |
+| 3. Moving-grating metrics | Done | Same module, MOVING_GRATING dispatch |
+| 4. Moving-grating OMR | Done | `src/fisheye/analysis/stimulus_response_omr.py` |
+| 5. Concentric radial OMR | Done, first numeric slice | `src/fisheye/analysis/stimulus_response_concentric_omr.py` |
 
 Related files:
 
 - `src/fisheye/shared/zarr/analysis_stage_arrays.py` — input/output ArraySpecs
-- `tests/unit/fisheye/test_stimulus_response.py` — 46 tests
+- `tests/unit/fisheye/test_stimulus_response.py` — focused stimulus-response tests
 - `tests/unit/fisheye/test_analysis_stage_arrays.py` — 10 tests
 - `src/fisheye/docs/zarr_structure.md` — updated with `stimulus_response_runs/` layout
 
@@ -151,7 +155,7 @@ Extends stimulus_response.py with:
 Biological value: "Fish initiated more swim bouts during grating
 presentation vs baseline."
 
-### Pass 3: Grating metrics
+### Pass 3: Moving-Grating Metrics
 
 Heading alignment, optomotor gain, temporal dynamics for MOVING_GRATING steps.
 
@@ -171,6 +175,39 @@ Adds:
 Biological value: "Fish aligned heading with grating direction
 (mean cos = 0.7), with optomotor gain of 0.4, onset latency of 2.1s."
 
+### Pass 4: Moving-Grating OMR
+
+Adds stimulus-aligned OMR responsiveness indices under:
+
+```text
+steps/step_<i>/grating/omr/
+```
+
+The helper module computes path-normalized displacement, net-direction,
+bout-fraction, weighted bout, time-weighted, windowed, early-window, arena
+occupancy/opportunity, and first directed-bout latency metrics. Bout runs are
+used as event boundaries only; physical quantities are measured from
+track-kinematics positions and physical speed traces. The local `grating/omr`
+attrs record the detector-vs-estimator policy, window lengths, direction
+mapping status/source/validation, grating speed/frequency when available, and
+strict-JSON-safe optional metadata.
+
+### Pass 5: Concentric Radial OMR
+
+Adds radial/tangential stimulus-aligned metrics for `CONCENTRIC_GRATING` steps
+under:
+
+```text
+steps/step_<i>/concentric_grating/radial_omr/
+```
+
+The first slice supports authored expanding/contracting polarity, radial and
+tangential physical components, per-bout radial scores, per-fish step
+summaries, non-overlapping windows, and onset-anchored early windows. Current
+recordings generally have authored polarity but not independently validated
+rendered polarity, so attrs explicitly record
+`stimulus_radial_polarity_validated = false` until validation metadata exists.
+
 ## Deferred Work
 
 - Promote the moving-grating downstream chain into the formal
@@ -179,7 +216,10 @@ Biological value: "Fish aligned heading with grating direction
   `track_kinematics`, `swim_bout_runs`, optional `bout_kinematics_runs`, and
   `stimulus_response_runs`, with explicit dependencies, stale-state semantics,
   and registry/status reporting.
-- Concentric grating metrics (Layer 4 in comprehensive map)
+- Review plots and target-annulus centering-success summaries for concentric
+  radial OMR.
+- Extract current centering helpers from `stimulus_response.py` into a focused
+  concentric helper module once the numeric schema has settled.
 - Eye angle integration (Layer 5)
 - Full ArraySpec coverage for existing analysis modules (Layer 6)
 - Dense array production at track_kinematics source

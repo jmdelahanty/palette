@@ -35,7 +35,7 @@ flowchart TD
 
     subgraph StimulusResponse["stimulus_response_runs/<run>/"]
         TKIN -->|"load_track_data()\nsparse -> dense"| LOAD[DenseTrack per fish]
-        STIM -->|"parse_protocol_steps()\nSTEP_START/END events"| STEPS[ProtocolStep list]
+        STIM -->|"load canonical steps\nsteps/step_i"| STEPS[ProtocolStep list]
         BOUTS -->|"load_bout_data()\noptional"| BOUTD[Bout entries per fish]
 
         LOAD --> GLOBAL[global/\nper-fish recording summary]
@@ -53,7 +53,18 @@ flowchart TD
         GRAT -->|yes| GPF[grating/per_frame/\nalignment, speed_along,\nvalid, detection_source]
         GPF --> GFISH[grating/per_fish/\nmean alignment, optomotor gain,\ndrift, latency]
         GPF --> GTS[grating/time_series/\nbinned alignment, speed,\nfollowing fraction]
+        BOUTD --> OMR[grating/omr/\npath, bout, time,\nwindowed OMR indices]
+        LOAD --> OMR
         GRAT -->|no| SKIP[no grating subgroup]
+
+        LOAD --> CONC{stimulus_mode\n== CONCENTRIC_GRATING?}
+        STEPS --> CONC
+        CONC -->|yes| CPF[concentric_grating/per_frame/\nradius, radial/tangential speed]
+        CPF --> CFISH[concentric_grating/per_fish/\ncentering summaries]
+        CPF --> CTS[concentric_grating/time_series/\nbinned radial summaries]
+        BOUTD --> ROMR[concentric_grating/radial_omr/\nradial OMR indices]
+        LOAD --> ROMR
+        CONC -->|no| CSKIP[no concentric subgroup]
     end
 
     style Pipeline fill:#1a1a2e,stroke:#e0e0e0,color:#e0e0e0
@@ -68,7 +79,7 @@ stimulus_response consumes three upstream sources (one required, two optional):
 | Source | Zarr Path | Required | What It Provides |
 |--------|-----------|----------|------------------|
 | Track kinematics | `analysis/track_kinematics_runs/<type>/<run>/` | Yes | Per-fish positions, headings, speeds, frame indices, detection source |
-| Stimulus events | `analysis/stimulus_runs/<run>/` | Yes | Protocol steps (STEP_START/END), stimulus mode per step, protocol JSON |
+| Stimulus metadata | `analysis/stimulus_runs/<run>/` | Yes | Canonical step timing, stimulus mode, normalized step geometry, protocol JSON provenance |
 | Swim bouts | `analysis/swim_bout_runs/<run>/` | No | Bout boundaries and speed per fish |
 
 ### Identity model
@@ -130,6 +141,9 @@ Each `steps/step_{i}/` group contains:
 | `per_fish/` | Always | Movement metrics (distance, speed, fraction_moving, coverage) + optional bout metrics (num_bouts, mean_bout_duration_s, mean_interbout_interval_s) |
 | `per_bout/` | When bout data available and bouts exist in step | Per-bout arrays (fish_id, bout_id, start/end frame, duration, speed) |
 | `grating/` | Only for MOVING_GRATING steps | Heading alignment and optomotor metrics (see below) |
+| `grating/omr/` | MOVING_GRATING steps when OMR is enabled | Stimulus-aligned path, bout, time, windowed, early-window, occupancy, and first directed-bout metrics |
+| `concentric_grating/` | Only for CONCENTRIC_GRATING steps with a resolved center | Centering/polar decomposition metrics |
+| `concentric_grating/radial_omr/` | CONCENTRIC_GRATING steps when OMR is enabled | Radial/tangential OMR metrics using authored or validated expanding/contracting polarity |
 
 Step attributes record: `step_index`, `step_name`, `stimulus_mode`,
 `stimulus_mode_id`, `start_frame`, `end_frame`, `duration_s`,
@@ -174,6 +188,16 @@ Per-frame grating data carries two quality columns:
 
 Filter with `valid` for any detection, or `detection_source == 0` for only
 directly observed frames.
+
+### OMR detector-vs-estimator rule
+
+`grating/omr/` and `concentric_grating/radial_omr/` treat swim-bout runs as
+event-boundary detectors only. Physical OMR metrics are measured from
+track-kinematics estimator surfaces such as `positions_mm`, gap-aware path
+transitions, and `speed_smoothed_mm`. Local OMR attrs record the
+`detector_estimator_policy`, source arrays, projection deadzones, window
+lengths, and stimulus direction/polarity provenance so strict consumers can
+interpret each metric without re-reading implementation code.
 
 ## Provenance
 

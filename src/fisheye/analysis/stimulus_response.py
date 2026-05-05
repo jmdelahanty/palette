@@ -1945,7 +1945,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--no-omr",
         action="store_true",
-        help="Skip OMR responsiveness metrics for MOVING_GRATING steps.",
+        help=(
+            "Skip OMR responsiveness metrics for MOVING_GRATING and "
+            "CONCENTRIC_GRATING steps."
+        ),
     )
     parser.add_argument(
         "--omr-projection-deadzone",
