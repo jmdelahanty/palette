@@ -41,6 +41,26 @@ predictions, user-corrected instances, tracks, skeleton/schema metadata, and
 exports, but not its assumption that a mutable multi-video project file is the
 main source of truth.
 
+Within one recording archive, the SLEAP-like mutable labeling container maps
+to the refined authoring surfaces, not to the whole Zarr. The archive is a
+provenance container with different mutability zones:
+
+- `detect_runs/...`, raw model keypoints, and raw model masks are immutable
+  model-output provenance artifacts.
+- `refined_detect_runs/...`, `refined_keypoints_runs/...`, and
+  `refined_subject_mask_runs/...` are editable or revisioned authoring
+  surfaces for curated labels/instances.
+- `analysis/...` contains rebuildable derived runs that must point to exact
+  refined source refs and revisions.
+- `exports` and external Parquet/DuckDB products are rebuildable query
+  products, not labeling surfaces.
+
+This means manual repair, identity correction, reprediction into a refined
+surface, and user-authored additions should update refined revisions and edit
+provenance. They must not rewrite the raw prediction artifacts they were
+derived from, and they must not silently leave downstream analysis runs looking
+fresh when their source refined revisions changed.
+
 Virtual project manifests should record:
 
 - exact recording/archive IDs
@@ -83,7 +103,7 @@ They must not mutate detection rows or mask rows in place.
 | Artifact family | Policy |
 | --- | --- |
 | Raw/model outputs | Row-immutable provenance artifacts. Whole-run overwrite may exist only as explicit destructive replacement. |
-| Refined surfaces | Editable authoring surfaces with stable row IDs, revisions, and edit provenance. |
+| Refined surfaces | The mutable labeling/authoring layer for one recording, with stable row IDs, revisions, and edit provenance. |
 | Derived analysis | Rebuildable outputs tied to exact source refs, source revisions, and method versions. |
 | Compatibility surfaces | Readable legacy/adaptor layouts, not competing authorities. |
 | Exports | Rebuildable sidecars or lakes tied to source run IDs and export run IDs. |
