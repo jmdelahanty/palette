@@ -83,6 +83,18 @@ avoid copying large complete metadata blobs into every derived run when
 compact `source_refs`, `source_fingerprints`, schema IDs, and manifest IDs are
 sufficient.
 
+Deferred future implementation: add protocol-derived trial descriptors as a
+search/indexing layer, not as fuzzy semantic hashes. Exact protocol semantic
+hashes should remain strict equality checks for semantically identical
+protocols. A later Citrus/registry/Palette integration should add a versioned
+trial-index payload, for example `protocol_trial_index_json`, with normalized
+step descriptors such as `stimulus_family`, `trial_family`, duration,
+direction, speed, spatial frequency, contrast, radial polarity, and center
+metadata where applicable. The registry can then support faceted/range search,
+bucketed trial hashes, and eventually example-based similarity queries such as
+"all moving-grating trials like these protocols" without weakening the meaning
+of the exact semantic hash.
+
 ## Core Identity Model
 
 Keep these identifiers separate:
@@ -289,6 +301,9 @@ Family-specific changes:
 7. What is the minimal manifest schema for virtual projects/cohorts?
 8. Should production exports forbid unresolved implicit `latest` selection by
    default?
+9. What should the first version of `protocol_trial_index_json` contain, and
+   should Citrus emit it directly or should Palette backfill it from Citrus H5
+   protocol snapshots?
 
 ## References
 
