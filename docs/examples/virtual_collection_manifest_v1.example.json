@@ -16,6 +16,7 @@
   "query": {
     "registry_path": "/nvme1/palette_registry.sqlite",
     "registry_snapshot_sha256": null,
+    "registry_snapshot_status": "not_recorded",
     "filters": {
       "protocol_signature_hash": null,
       "protocol_semantic_hash": null,
@@ -36,6 +37,22 @@
       "recording_id"
     ]
   },
+  "export_profiles": [
+    {
+      "profile_id": "movement_bouts",
+      "required_run_families": [
+        "track_kinematics_run",
+        "swim_bout_run",
+        "bout_kinematics_run"
+      ],
+      "optional_run_families": [
+        "eye_angle_run",
+        "tail_kinematics_run",
+        "stimulus_run",
+        "stimulus_response_run"
+      ]
+    }
+  ],
   "records": [
     {
       "recording_id": "2026-01-28T19-22-28Z_arena_1_DefaultScreen",
@@ -66,6 +83,15 @@
         "protocol_semantic_hash": "example_protocol_semantic_hash",
         "protocol_snapshot_sha256": null
       },
+      "stimulus_response_validation": {
+        "required": false,
+        "status": "not_applicable",
+        "stimulus_alignment_status": "not_requested",
+        "protocol_hash_status": "not_requested",
+        "direction_mapping_status": "not_requested",
+        "calibration_status": "not_requested",
+        "warnings": []
+      },
       "source_runs": {
         "detect_run": {
           "present": true,
@@ -79,6 +105,7 @@
           "method_version": null,
           "source_revision": null,
           "source_fingerprint": null,
+          "fingerprint_status": "best_effort",
           "lineage_hash": null
         },
         "refined_detect_run": {
@@ -93,6 +120,7 @@
           "method_version": null,
           "source_revision": "authoring_revision_1",
           "source_fingerprint": null,
+          "fingerprint_status": "best_effort",
           "lineage_hash": null
         },
         "refined_keypoints_run": {
@@ -107,6 +135,7 @@
           "method_version": null,
           "source_revision": "authoring_revision_1",
           "source_fingerprint": null,
+          "fingerprint_status": "best_effort",
           "lineage_hash": null
         },
         "track_kinematics_run": {
@@ -121,6 +150,7 @@
           "method_version": "v1",
           "source_revision": null,
           "source_fingerprint": "example_track_kinematics_source_fingerprint",
+          "fingerprint_status": "complete",
           "lineage_hash": "example_track_kinematics_lineage_hash"
         },
         "swim_bout_run": {
@@ -135,6 +165,7 @@
           "method_version": "v1",
           "source_revision": null,
           "source_fingerprint": "example_swim_bout_source_fingerprint",
+          "fingerprint_status": "complete",
           "lineage_hash": "example_swim_bout_lineage_hash"
         },
         "bout_kinematics_run": {
@@ -149,6 +180,7 @@
           "method_version": "v1",
           "source_revision": null,
           "source_fingerprint": "example_bout_kinematics_source_fingerprint",
+          "fingerprint_status": "complete",
           "lineage_hash": "example_bout_kinematics_lineage_hash"
         },
         "tail_kinematics_run": {
@@ -156,7 +188,8 @@
           "required": false,
           "reason": "not_requested",
           "run_id": null,
-          "path": null
+          "path": null,
+          "fingerprint_status": "not_applicable"
         },
         "eye_angle_run": {
           "present": true,
@@ -170,6 +203,7 @@
           "method_version": "v7",
           "source_revision": null,
           "source_fingerprint": "example_eye_angle_source_fingerprint",
+          "fingerprint_status": "complete",
           "lineage_hash": "example_eye_angle_lineage_hash"
         },
         "stimulus_run": {
@@ -184,6 +218,7 @@
           "method_version": null,
           "source_revision": null,
           "source_fingerprint": "example_stimulus_source_fingerprint",
+          "fingerprint_status": "best_effort",
           "lineage_hash": "example_stimulus_lineage_hash"
         },
         "stimulus_response_run": {
@@ -198,6 +233,7 @@
           "method_version": "v1",
           "source_revision": null,
           "source_fingerprint": "example_stimulus_response_source_fingerprint",
+          "fingerprint_status": "complete",
           "lineage_hash": "example_stimulus_response_lineage_hash"
         }
       },
