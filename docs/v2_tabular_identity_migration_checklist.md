@@ -261,7 +261,8 @@ Family-specific changes:
 ### Phase 6: Exports And Registry
 
 - [ ] Define a manifest/collection schema that acts as the virtual project
-      boundary for cross-recording work.
+      boundary for cross-recording work. See
+      [virtual_collection_manifest_schema.md](virtual_collection_manifest_schema.md).
 - [ ] Export builders should resolve `latest` selections to concrete source
       run IDs before writing rows.
 - [ ] Export tables should include source run IDs, source lineage hash,
@@ -318,3 +319,4 @@ Family-specific changes:
 - [repo_wide_staleness_gap_matrix.md](repo_wide_staleness_gap_matrix.md)
 - [derived_analysis_run_contract.md](derived_analysis_run_contract.md)
 - [zarr_parquet_sidecar_exports_design.md](zarr_parquet_sidecar_exports_design.md)
+- [virtual_collection_manifest_schema.md](virtual_collection_manifest_schema.md)
