@@ -72,13 +72,20 @@ recording is reprocessed after masks or keypoints are fixed, the exporter writes
 a new part with a new `export_run_id` and a new `source_lineage_hash`; old rows
 remain available for before/after comparison.
 
-`protocol_hash` should be a column, not the primary file organization. Query
-engines such as DuckDB can filter by protocol hash directly:
+Protocol hashes should be columns, not the primary file organization. The
+current exporter writes `protocol_signature_hash`, a deterministic SHA256 over
+the ordered canonical stimulus-step definition, plus `derived_protocol_hash` as
+a temporary alias for existing analysis notebooks. When a Citrus/registry
+authored `protocol_hash` is available, it should be exported as a separate
+exact-content protocol snapshot hash rather than replacing the step-signature
+hash.
+
+Query engines such as DuckDB can filter by protocol hash directly:
 
 ```sql
 SELECT *
 FROM read_parquet('/nvme1/analytics_exports/palette_analytics/v1/stimulus_response_per_fish_step/**/*.parquet')
-WHERE protocol_hash = 'd4e71b4fcd5272227de23db51b441eedcf36fca9ed1f350948a62909796d7287';
+WHERE protocol_signature_hash = 'd4e71b4fcd5272227de23db51b441eedcf36fca9ed1f350948a62909796d7287';
 ```
 
 Partition by low-cardinality fields only after measuring query patterns and
@@ -339,6 +346,8 @@ line_strain
 genotype
 protocol_name
 protocol_hash
+protocol_signature_hash
+derived_protocol_hash
 protocol_semantic_hash
 zarr_path
 zarr_mtime_ns

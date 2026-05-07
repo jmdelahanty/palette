@@ -219,8 +219,22 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert payload["source_recording_count"] == 1
     assert payload["row_counts_by_table"]["swim_bout_metrics"] == 2
 
+    step_rows = _read_dataset(output, "stimulus_steps", "test_export")
+    protocol_hash = step_rows[0]["protocol_signature_hash"]
+    assert step_rows[0]["derived_protocol_hash"] == protocol_hash
+    assert step_rows[1]["protocol_signature_hash"] == protocol_hash
+    assert step_rows[0]["protocol_mode_sequence"] == "MOVING_GRATING -> CONCENTRIC_GRATING"
+
     response_rows = _read_dataset(output, "stimulus_response_per_fish_step", "test_export")
     moving = next(row for row in response_rows if row["stimulus_mode"] == "MOVING_GRATING")
+    assert moving["protocol_signature_hash"] == protocol_hash
+    assert isinstance(protocol_hash, str)
+    assert len(protocol_hash) == 64
+    assert moving["derived_protocol_hash"] == protocol_hash
+    assert moving["protocol_signature_schema"] == "palette_protocol_signature_v1"
+    assert moving["protocol_mode_sequence"] == "MOVING_GRATING -> CONCENTRIC_GRATING"
+    assert moving["protocol_duration_sequence_s"] == "1.6667,1.6667"
+    assert moving["protocol_step_count"] == 2
     assert moving["omr_family"] == "moving_grating_omr"
     assert moving["omr_path_index"] == 0.75
     assert moving["first_aligned_bout_latency_s"] is None
@@ -231,6 +245,8 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert radial["radial_path_index"] == -0.5
 
     bout_rows = _read_dataset(output, "swim_bout_metrics", "test_export")
+    assert bout_rows[0]["protocol_signature_hash"] == protocol_hash
+    assert bout_rows[0]["derived_protocol_hash"] == protocol_hash
     assert bout_rows[0]["step_index"] == 0
     assert bout_rows[1]["step_index"] == 1
     assert bout_rows[0]["speed_level"] == "speed_exponential"
@@ -243,6 +259,8 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert heading_rows[0]["is_default_heading_level"] is True
     assert heading_rows[0]["source_swim_bout_run"] == "bouts_test"
     assert heading_rows[0]["source_swim_bout_speed_level"] == "speed_exponential"
+    assert heading_rows[0]["protocol_signature_hash"] == protocol_hash
+    assert heading_rows[0]["derived_protocol_hash"] == protocol_hash
     assert heading_rows[0]["step_index"] == 0
     assert heading_rows[1]["step_index"] == 1
     assert heading_rows[0]["net_delta_heading_deg"] == 12.5
@@ -268,3 +286,7 @@ def test_export_cross_recording_analytics_can_limit_tables(tmp_path: Path) -> No
     assert manifest["row_counts_by_table"] == {"recording_summary": 1}
     assert (output / "v1" / "recording_summary" / "export_run_id=summary_only").is_dir()
     assert not (output / "v1" / "swim_bout_metrics").exists()
+    rows = _read_dataset(output, "recording_summary", "summary_only")
+    assert rows[0]["protocol_signature_schema"] == "palette_protocol_signature_v1"
+    assert rows[0]["derived_protocol_hash"] == rows[0]["protocol_signature_hash"]
+    assert rows[0]["protocol_step_count"] == 2

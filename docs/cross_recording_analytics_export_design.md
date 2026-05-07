@@ -110,10 +110,16 @@ analytics_exports/
           part-000.parquet
 ```
 
-Do not create one Parquet file per protocol hash by default. Store
-`protocol_hash` and, in the future, `protocol_semantic_hash` as columns. Query
-engines can filter by those columns efficiently, and keeping the hash as a
-column avoids over-partitioning into many tiny files.
+Do not create one Parquet file per protocol hash by default. Store protocol
+identity as columns. The implemented exporter writes `protocol_signature_hash`,
+a deterministic SHA256 over ordered canonical stimulus-step metadata, and
+`derived_protocol_hash`, an alias retained for the current analysis notebooks.
+When registry/Citrus authored protocol snapshots are available, export their
+exact `protocol_hash` as a separate column; do not overload
+`protocol_signature_hash`.
+
+Query engines can filter by those columns efficiently, and keeping the hash as
+a column avoids over-partitioning into many tiny files.
 
 If exact protocol filtering becomes a dominant query pattern and file sizes are
 large enough, a future implementation may partition by a low-cardinality
@@ -123,11 +129,11 @@ only after measuring query and file-count behavior.
 DuckDB can query the lake directly:
 
 ```sql
-SELECT protocol_hash, median(first_aligned_bout_latency_s)
+SELECT protocol_signature_hash, median(first_aligned_bout_latency_s)
 FROM read_parquet('analytics_exports/palette_analytics/v1/stimulus_response_per_fish_step/**/*.parquet')
 WHERE dpf_at_acquisition = 6
   AND protocol_name = 'DefaultScreen'
-GROUP BY protocol_hash;
+GROUP BY protocol_signature_hash;
 ```
 
 ## Export Dataset Types
@@ -313,6 +319,7 @@ Possible columns:
 - identity columns: `recording_id`, `zarr_path`, `stimulus_run`,
   `step_index`, `step_name`
 - protocol columns: `protocol_name`, `protocol_hash`,
+  `protocol_signature_hash`, `derived_protocol_hash`,
   `protocol_semantic_hash`, `stimulus_mode`, `stimulus_mode_id`
 - timing columns: `start_frame`, `end_frame`, `start_time_s`, `end_time_s`,
   `duration_s`
@@ -335,7 +342,8 @@ Possible columns:
   `zarr_path`, `stimulus_run`, `step_index`
 - registry/protocol columns: `dish_id`, `cross_id`, `clutch_id`,
   `dpf_at_acquisition`, `line_strain`, `genotype`, `protocol_name`,
-  `protocol_hash`, `protocol_semantic_hash`, `stimulus_mode`, `step_name`
+  `protocol_hash`, `protocol_signature_hash`, `derived_protocol_hash`,
+  `protocol_semantic_hash`, `stimulus_mode`, `step_name`
 - source run columns: `source_track_kinematics_run`,
   `source_swim_bout_run`, `source_bout_kinematics_run`,
   `source_eye_angle_run`, `source_bout_classification_run`
@@ -371,6 +379,7 @@ Possible columns:
 - registry columns: `dish_id`, `cross_id`, `clutch_id`,
   `dpf_at_acquisition`, `line_strain`, `genotype`, `recording_date`
 - protocol columns: `protocol_name`, `protocol_hash`,
+  `protocol_signature_hash`, `derived_protocol_hash`,
   `protocol_semantic_hash`, `stimulus_mode`, `step_name`
 - source run columns: `source_track_kinematics_run`,
   `source_swim_bout_run`, `source_bout_kinematics_run`,

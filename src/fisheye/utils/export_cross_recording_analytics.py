@@ -48,6 +48,15 @@ class StepSpan:
     end_frame: int | None
 
 
+@dataclass(frozen=True)
+class ProtocolSignature:
+    schema: str
+    hash: str
+    mode_sequence: str | None
+    duration_sequence_s: str | None
+    step_count: int
+
+
 @dataclass
 class SourceExportResult:
     zarr_path: str
@@ -139,6 +148,40 @@ def _json_dumps_safe(value: Any) -> str:
 def _hash_payload(payload: Mapping[str, Any]) -> str:
     blob = _json_dumps_safe(payload).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _parse_jsonish(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return value
+
+
+def _protocol_signature_row(protocol_signature: ProtocolSignature | None) -> dict[str, Any]:
+    if protocol_signature is None:
+        return {
+            "protocol_signature_schema": None,
+            "protocol_signature_hash": None,
+            "derived_protocol_hash": None,
+            "protocol_mode_sequence": None,
+            "protocol_duration_sequence_s": None,
+            "protocol_step_count": None,
+        }
+    return {
+        "protocol_signature_schema": protocol_signature.schema,
+        "protocol_signature_hash": protocol_signature.hash,
+        # Temporary alias for the ad hoc analysis naming used before the
+        # exporter persisted protocol signatures directly.
+        "derived_protocol_hash": protocol_signature.hash,
+        "protocol_mode_sequence": protocol_signature.mode_sequence,
+        "protocol_duration_sequence_s": protocol_signature.duration_sequence_s,
+        "protocol_step_count": protocol_signature.step_count,
+    }
 
 
 def _group_names(group: Any) -> list[str]:
@@ -290,17 +333,18 @@ def _load_stimulus_steps(
     recording_id: str,
     tables: set[str],
     diagnostics: list[dict[str, Any]],
-) -> tuple[str | None, list[StepSpan], list[dict[str, Any]]]:
+) -> tuple[str | None, list[StepSpan], list[dict[str, Any]], ProtocolSignature | None]:
     rows: list[dict[str, Any]] = []
     spans: list[StepSpan] = []
+    signature_steps: list[dict[str, Any]] = []
     stim_group, stim_run, error = _latest_run(root, "analysis/stimulus_runs")
     if stim_group is None or stim_run is None:
         diagnostics.append({"table": "stimulus_steps", "status": "skipped", "reason": error})
-        return None, spans, rows
+        return None, spans, rows, None
 
     if not _has_child(stim_group, "steps"):
         diagnostics.append({"table": "stimulus_steps", "status": "skipped", "reason": "missing steps group"})
-        return stim_run, spans, rows
+        return stim_run, spans, rows, None
 
     steps_group = stim_group["steps"]
     step_names = sorted(
@@ -329,6 +373,24 @@ def _load_stimulus_steps(
             start_frame=start_frame,
             end_frame=end_frame,
         ))
+
+        signature_step: dict[str, Any] = {
+            "step_index": idx,
+            "step_name": step_name,
+            "stimulus_mode": stimulus_mode,
+            "stimulus_mode_id": attrs.get("stimulus_mode_id"),
+            "duration_s": _safe_float(attrs.get("duration_s")),
+            "stimulus_params": _parse_jsonish(
+                attrs.get("stimulus_params") or attrs.get("raw_protocol_params_json")
+            ),
+        }
+        for child_name in ("moving_grating", "concentric_grating", "looming_dot"):
+            if _has_child(step_group, child_name):
+                signature_step[child_name] = {
+                    key: _parse_jsonish(value)
+                    for key, value in sorted(_attrs_dict(step_group[child_name]).items())
+                }
+        signature_steps.append(signature_step)
 
         if "stimulus_steps" not in tables:
             continue
@@ -374,7 +436,37 @@ def _load_stimulus_steps(
                 row[f"{prefix}_{key}"] = value
         rows.append(row)
 
-    return stim_run, spans, rows
+    if signature_steps:
+        payload = {
+            "schema": "palette_protocol_signature_v1",
+            "stimulus_run_schema_version": _scalar_for_parquet(stim_group.attrs.get("schema_version")),
+            "steps": signature_steps,
+        }
+        step_modes = [
+            str(step["stimulus_mode"])
+            for step in signature_steps
+            if step.get("stimulus_mode") is not None
+        ]
+        step_durations = [
+            str(step["duration_s"])
+            for step in signature_steps
+            if step.get("duration_s") is not None
+        ]
+        protocol_signature = ProtocolSignature(
+            schema="palette_protocol_signature_v1",
+            hash=_hash_payload(payload),
+            mode_sequence=" -> ".join(step_modes) if step_modes else None,
+            duration_sequence_s=",".join(step_durations) if step_durations else None,
+            step_count=len(signature_steps),
+        )
+    else:
+        protocol_signature = None
+
+    signature_row = _protocol_signature_row(protocol_signature)
+    for row in rows:
+        row.update(signature_row)
+
+    return stim_run, spans, rows, protocol_signature
 
 
 def _assign_step(start_frame: int | None, end_frame: int | None, spans: Sequence[StepSpan]) -> StepSpan | None:
@@ -406,6 +498,7 @@ def _load_recording_summary(
     zarr_path: Path,
     recording_id: str,
     stimulus_run: str | None,
+    protocol_signature: ProtocolSignature | None,
     step_count: int,
     tables: set[str],
     diagnostics: list[dict[str, Any]],
@@ -435,6 +528,7 @@ def _load_recording_summary(
         "swim_bout_run": swim_run,
         "stimulus_step_count": step_count,
     })
+    row.update(_protocol_signature_row(protocol_signature))
 
     if stim_resp_group is not None:
         attrs = _attrs_dict(stim_resp_group)
@@ -474,6 +568,7 @@ def _load_stimulus_response_tables(
     export_run_id: str,
     zarr_path: Path,
     recording_id: str,
+    protocol_signature: ProtocolSignature | None,
     tables: set[str],
     diagnostics: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -538,6 +633,7 @@ def _load_stimulus_response_tables(
                 "end_camera_frame": _safe_int(attrs.get("end_camera_frame")) or _safe_int(attrs.get("end_frame")),
                 "duration_s": _safe_float(attrs.get("duration_s")),
             }
+            common.update(_protocol_signature_row(protocol_signature))
 
             if "stimulus_step_summary" in tables:
                 row = _common_row(
@@ -625,6 +721,7 @@ def _load_swim_bout_metrics(
     zarr_path: Path,
     recording_id: str,
     stimulus_run: str | None,
+    protocol_signature: ProtocolSignature | None,
     steps: Sequence[StepSpan],
     tables: set[str],
     diagnostics: list[dict[str, Any]],
@@ -698,6 +795,7 @@ def _load_swim_bout_metrics(
             "step_name": step.step_name if step else None,
             "stimulus_mode": step.stimulus_mode if step else None,
         })
+        row.update(_protocol_signature_row(protocol_signature))
         row.update(bout)
         rows.append(row)
     return rows
@@ -720,6 +818,7 @@ def _load_bout_kinematics_metrics(
     zarr_path: Path,
     recording_id: str,
     stimulus_run: str | None,
+    protocol_signature: ProtocolSignature | None,
     steps: Sequence[StepSpan],
     tables: set[str],
     diagnostics: list[dict[str, Any]],
@@ -818,6 +917,7 @@ def _load_bout_kinematics_metrics(
                 "step_name": step.step_name if step else None,
                 "stimulus_mode": step.stimulus_mode if step else None,
             })
+            row.update(_protocol_signature_row(protocol_signature))
             row.update(metric)
             rows.append(row)
     return rows
@@ -835,7 +935,7 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
         result.diagnostics.append({"table": "*", "status": "failed", "reason": f"open_failed: {exc}"})
         return result
 
-    stimulus_run, steps, step_rows = _load_stimulus_steps(
+    stimulus_run, steps, step_rows, protocol_signature = _load_stimulus_steps(
         root,
         export_run_id=export_run_id,
         zarr_path=zarr_path,
@@ -852,6 +952,7 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
         zarr_path=zarr_path,
         recording_id=recording_id,
         stimulus_run=stimulus_run,
+        protocol_signature=protocol_signature,
         step_count=len(steps),
         tables=table_set,
         diagnostics=result.diagnostics,
@@ -864,6 +965,7 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
         export_run_id=export_run_id,
         zarr_path=zarr_path,
         recording_id=recording_id,
+        protocol_signature=protocol_signature,
         tables=table_set,
         diagnostics=result.diagnostics,
     )
@@ -878,6 +980,7 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
         zarr_path=zarr_path,
         recording_id=recording_id,
         stimulus_run=stimulus_run,
+        protocol_signature=protocol_signature,
         steps=steps,
         tables=table_set,
         diagnostics=result.diagnostics,
@@ -891,6 +994,7 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
         zarr_path=zarr_path,
         recording_id=recording_id,
         stimulus_run=stimulus_run,
+        protocol_signature=protocol_signature,
         steps=steps,
         tables=table_set,
         diagnostics=result.diagnostics,

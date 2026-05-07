@@ -97,3 +97,27 @@ Source provenance should remain auditable after derived cleanup.
   4. integrity check
 
 See `docs/registry_repair_playbook.md`.
+
+## Scheduled Backups
+
+Palette owns its registry backup script:
+
+```bash
+scripts/backup_palette_registry.sh
+```
+
+Default behavior:
+- source registry: `/nvme1/palette_registry.sqlite`
+- backup directory: `/groups/ahrens/ahrenslab/jeremy/zebrobot/backups`
+- retention: delete `palette_registry_*.sqlite` files older than 7 days only
+  after a new backup has been created and verified
+
+Recommended cron entry:
+
+```cron
+0 2 * * * cd /home/delahantyj@hhmi.org/gitrepos/palette && scripts/backup_palette_registry.sh >> /home/delahantyj@hhmi.org/palette_registry_backup.log 2>&1
+```
+
+The backup script verifies that the source registry exists and is non-empty,
+uses SQLite's `.backup` command, runs `PRAGMA quick_check` on the source and
+backup, and refuses to report success for a missing or zero-byte backup.
