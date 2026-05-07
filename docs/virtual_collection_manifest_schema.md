@@ -38,6 +38,9 @@ query, export, plot, report, or training-set build.
 
 ## Required Top-Level Fields
 
+See [examples/virtual_collection_manifest_v1.example.json](examples/virtual_collection_manifest_v1.example.json)
+for a concrete v1 example.
+
 ```json
 {
   "schema_id": "palette.virtual_collection_manifest",
@@ -55,7 +58,8 @@ query, export, plot, report, or training-set build.
   },
   "query": {},
   "records": [],
-  "export_artifacts": []
+  "manifest_canonicalization": "json_sorted_keys_no_hash_fields_v1",
+  "manifest_sha256": "computed_after_canonicalization"
 }
 ```
 
@@ -209,13 +213,25 @@ Recommended derived fields:
 
 Exports should store both `collection_id` and `manifest_sha256`.
 
-## Export Artifact Entries
+## Immutability Policy
 
-When a collection is exported, append or write an export artifact entry:
+Collection manifests are immutable after creation. Do not append export
+artifact entries to the collection manifest. If the source selection changes,
+write a new collection manifest with a new `collection_id` or version suffix.
+If the same source selection is exported again with different export settings,
+write a sibling export manifest that points back to the immutable collection.
+
+## Export Artifact Manifests
+
+When a collection is exported, write a sibling export manifest:
 
 ```json
 {
+  "schema_id": "palette.virtual_collection_export_manifest",
+  "schema_version": 1,
   "export_id": "palette_analytics_20260507T120000Z",
+  "collection_id": "default_screen_6dpf_20260507_v001",
+  "collection_manifest_sha256": "hex",
   "export_schema_id": "palette.cross_recording_analytics",
   "export_schema_version": 1,
   "output_root": "/nvme1/exports/palette_analytics",
@@ -231,28 +247,22 @@ When a collection is exported, append or write an export artifact entry:
 }
 ```
 
-If the manifest is treated as immutable after creation, export artifacts should
-live in a sibling export manifest instead of mutating the source collection
-manifest.
-
 ## Relationship To Other Artifacts
 
 - Recording Zarrs remain authoritative for per-recording raw/refined/derived
   data.
 - Registry rows are indexes that help build manifests.
 - Virtual collection manifests freeze cross-recording source selection.
-- Parquet/DuckDB exports are rebuildable analytics products derived from a
-  manifest.
+- Parquet/DuckDB exports are rebuildable analytics products derived from an
+  immutable collection manifest and recorded in sibling export manifests.
 - Training manifests may reference a virtual collection but should still carry
   task-specific source rows and quality filters.
 
 ## Open Decisions
 
-1. Should collection manifests be immutable after creation, with separate
-   export manifests, or can export artifact entries be appended?
-2. Should manifests store absolute paths, registry dataset IDs, or both?
-3. Which run families are required for the first production analytics export?
-4. Should `latest_allowed_during_selection` default to false for automated
+1. Should manifests store absolute paths, registry dataset IDs, or both?
+2. Which run families are required for the first production analytics export?
+3. Should `latest_allowed_during_selection` default to false for automated
    production exports?
-5. Where should manifests live by default: inside the export root, in a
+4. Where should manifests live by default: inside the export root, in a
    registry-managed directory, or next to analysis notebooks?

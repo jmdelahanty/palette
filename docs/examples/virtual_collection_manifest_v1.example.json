@@ -1,0 +1,187 @@
+{
+  "schema_id": "palette.virtual_collection_manifest",
+  "schema_version": 1,
+  "collection_id": "default_screen_6dpf_20260507_v001",
+  "collection_name": "DefaultScreen 6 dpf May 2026",
+  "created_utc": "2026-05-07T00:00:00Z",
+  "created_by": "palette_agent",
+  "purpose": "cross_recording_analytics_export",
+  "selection_policy": {
+    "latest_allowed_during_selection": true,
+    "latest_resolved_before_export": true,
+    "missing_optional_runs": "warn",
+    "missing_required_runs": "exclude"
+  },
+  "query": {
+    "registry_path": "/nvme1/palette_registry.sqlite",
+    "registry_snapshot_sha256": null,
+    "filters": {
+      "protocol_signature_hash": null,
+      "protocol_semantic_hash": null,
+      "canvas_name": "DefaultScreen",
+      "dpf": 6,
+      "strain": null,
+      "recording_date_range": [
+        "2026-01-01",
+        "2026-12-31"
+      ]
+    },
+    "trial_descriptor_filters": {
+      "status": "deferred",
+      "note": "Future protocol_trial_index_json-backed search goes here."
+    },
+    "ordering": [
+      "recording_start_utc",
+      "recording_id"
+    ]
+  },
+  "records": [
+    {
+      "recording_id": "2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+      "analysis_zarr_path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_analysis.zarr",
+      "training_zarr_path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_training.zarr",
+      "recording_attrs": {
+        "recording_start_utc": "2026-01-28T19:22:28Z",
+        "arena_id": "arena_1",
+        "canvas_name": "DefaultScreen",
+        "dpf": 6,
+        "strain": null,
+        "clutch_id": null
+      },
+      "protocol": {
+        "stimulus_run_id": "stimulus_20260209_084518",
+        "protocol_signature_hash": "example_protocol_signature_hash",
+        "protocol_semantic_hash": "example_protocol_semantic_hash",
+        "protocol_snapshot_sha256": null
+      },
+      "source_runs": {
+        "detect_run": {
+          "run_id": "detect_2026-02-09_08-41-00",
+          "path": "detect_runs/detect_2026-02-09_08-41-00",
+          "required": true,
+          "selection": "resolved_latest",
+          "schema_id": null,
+          "schema_version": null,
+          "method": null,
+          "method_version": null,
+          "source_revision": null,
+          "source_fingerprint": null,
+          "lineage_hash": null
+        },
+        "refined_detect_run": {
+          "run_id": "refined_detect_2026-02-09_10-02-00",
+          "path": "refined_detect_runs/refined_detect_2026-02-09_10-02-00",
+          "required": true,
+          "selection": "resolved_latest",
+          "schema_id": null,
+          "schema_version": null,
+          "method": "manual_refinement",
+          "method_version": null,
+          "source_revision": "authoring_revision_1",
+          "source_fingerprint": null,
+          "lineage_hash": null
+        },
+        "refined_keypoints_run": {
+          "run_id": "refined_keypoints_2026-03-03_23-45-34",
+          "path": "refined_keypoints_runs/refined_keypoints_2026-03-03_23-45-34",
+          "required": true,
+          "selection": "explicit",
+          "schema_id": null,
+          "schema_version": null,
+          "method": null,
+          "method_version": null,
+          "source_revision": "authoring_revision_1",
+          "source_fingerprint": null,
+          "lineage_hash": null
+        },
+        "track_kinematics_run": {
+          "run_id": "tk_hyst4_low2_latch_s005",
+          "path": "analysis/track_kinematics_runs/offline/tk_hyst4_low2_latch_s005",
+          "required": true,
+          "selection": "explicit",
+          "schema_id": "palette.analysis.track_kinematics",
+          "schema_version": 1,
+          "method": "hysteresis_latch",
+          "method_version": "v1",
+          "source_revision": null,
+          "source_fingerprint": "example_track_kinematics_source_fingerprint",
+          "lineage_hash": "example_track_kinematics_lineage_hash"
+        },
+        "swim_bout_run": {
+          "run_id": "bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098",
+          "path": "analysis/swim_bout_runs/bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098",
+          "required": true,
+          "selection": "explicit",
+          "schema_id": "palette.analysis.swim_bouts",
+          "schema_version": 1,
+          "method": "peak_event",
+          "method_version": "v1",
+          "source_revision": null,
+          "source_fingerprint": "example_swim_bout_source_fingerprint",
+          "lineage_hash": "example_swim_bout_lineage_hash"
+        },
+        "bout_kinematics_run": {
+          "run_id": "bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_interbout",
+          "path": "analysis/bout_kinematics_runs/bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_interbout",
+          "required": true,
+          "selection": "explicit",
+          "schema_id": "palette.analysis.bout_kinematics",
+          "schema_version": 1,
+          "method": "pre_post_interbout_epoch",
+          "method_version": "v1",
+          "source_revision": null,
+          "source_fingerprint": "example_bout_kinematics_source_fingerprint",
+          "lineage_hash": "example_bout_kinematics_lineage_hash"
+        },
+        "eye_angle_run": {
+          "run_id": "eye_angle_variant_schema_v7_canary_20260501",
+          "path": "analysis/eye_angle_runs/eye_angle_variant_schema_v7_canary_20260501",
+          "required": false,
+          "selection": "explicit",
+          "schema_id": "palette.analysis.eye_angles",
+          "schema_version": 7,
+          "method": "ellipse_major_axis_canonical",
+          "method_version": "v7",
+          "source_revision": null,
+          "source_fingerprint": "example_eye_angle_source_fingerprint",
+          "lineage_hash": "example_eye_angle_lineage_hash"
+        },
+        "stimulus_run": {
+          "run_id": "stimulus_20260209_084518",
+          "path": "analysis/stimulus_runs/stimulus_20260209_084518",
+          "required": false,
+          "selection": "resolved_latest",
+          "schema_id": "palette.analysis.stimulus_alignment",
+          "schema_version": 1,
+          "method": null,
+          "method_version": null,
+          "source_revision": null,
+          "source_fingerprint": "example_stimulus_source_fingerprint",
+          "lineage_hash": "example_stimulus_lineage_hash"
+        },
+        "stimulus_response_run": {
+          "run_id": "stimulus_response_tk_hyst4_low2_latch_s005_omr_canary",
+          "path": "analysis/stimulus_response_runs/stimulus_response_tk_hyst4_low2_latch_s005_omr_canary",
+          "required": false,
+          "selection": "explicit",
+          "schema_id": "palette.analysis.stimulus_response",
+          "schema_version": 1,
+          "method": "translational_omr",
+          "method_version": "v1",
+          "source_revision": null,
+          "source_fingerprint": "example_stimulus_response_source_fingerprint",
+          "lineage_hash": "example_stimulus_response_lineage_hash"
+        }
+      },
+      "status": {
+        "included": true,
+        "warnings": [
+          "eye_angle_run is optional for movement-only exports"
+        ],
+        "exclusions": []
+      }
+    }
+  ],
+  "manifest_canonicalization": "json_sorted_keys_no_hash_fields_v1",
+  "manifest_sha256": "example_manifest_sha256"
+}
