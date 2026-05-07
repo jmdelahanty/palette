@@ -119,6 +119,7 @@ for a concrete v1 example.
   "selection_policy": {
     "latest_allowed_during_selection": true,
     "latest_resolved_before_export": true,
+    "production_requires_explicit_runs": true,
     "missing_optional_runs": "warn",
     "missing_required_runs": "exclude"
   },
@@ -272,6 +273,39 @@ Required behavior:
   ID or manifest hash.
 - Rebuilding an export from the same manifest must use the recorded run IDs,
   not re-resolve `latest`.
+- Automated/production exports should default to explicit/concrete run IDs and
+  require opt-in before resolving `latest`.
+
+V1 selection examples:
+
+```json
+{
+  "present": true,
+  "selection": "resolved_latest",
+  "run_id": "tk_hyst4_low2_latch_s005",
+  "source_fingerprint": "example"
+}
+```
+
+V2 tabular/refined-authoring surfaces should resolve `latest` to the most
+precise stable snapshot available, not just a run group:
+
+```json
+{
+  "present": true,
+  "selection": "resolved_latest",
+  "run_id": "refined_keypoints_main",
+  "authoring_revision": 7,
+  "table_snapshot_id": "rev_000007",
+  "rowset_fingerprint": "example"
+}
+```
+
+The policy is the same in both layouts: `latest` is a convenience for
+selection, never a persisted unresolved dependency. If a refined surface is
+edited, split, swapped, or repredicted later, `latest` may point to a newer
+authoring revision, but existing manifests continue to point to the concrete
+revision/snapshot they originally resolved.
 
 ## Missing Run Policy
 
@@ -352,7 +386,7 @@ Work through these before implementing manifest writers/export integration:
 - [ ] Define immutable-manifest writer behavior: refuse overwrite by default,
       create new collection IDs/version suffixes for changed selections, and
       keep export artifacts in sibling export manifests.
-- [ ] Define production `latest` policy. Interactive selection may use
+- [x] Define production `latest` policy. Interactive selection may use
       `latest`, but production exporters should resolve and record concrete run
       IDs before writing rows, and may forbid `latest` by default.
 - [ ] Decide how to record registry query provenance: registry path, registry

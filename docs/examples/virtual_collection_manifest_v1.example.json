@@ -9,6 +9,7 @@
   "selection_policy": {
     "latest_allowed_during_selection": true,
     "latest_resolved_before_export": true,
+    "production_requires_explicit_runs": true,
     "missing_optional_runs": "warn",
     "missing_required_runs": "exclude"
   },
