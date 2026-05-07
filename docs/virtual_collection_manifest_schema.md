@@ -22,6 +22,8 @@ query, export, plot, report, or training-set build.
   archive.
 - Make cross-recording analysis reproducible even when `latest` run pointers
   later change.
+- Use the registry as the fast searchable index for available datasets,
+  protocols, run status, and quality/state filters.
 - Let registry queries produce durable, reviewable source selections.
 - Let Parquet/DuckDB exports point back to the exact collection that produced
   them.
@@ -35,6 +37,70 @@ query, export, plot, report, or training-set build.
   `protocol_trial_index_json` / registry indexing layer.
 - Do not replace training manifests; training manifests can reference virtual
   collections or copy their resolved source rows.
+
+## Registry Role
+
+The registry is expected to be the fast query layer. It should answer questions
+such as "which active recordings have DefaultScreen data, 6 dpf metadata,
+track kinematics, swim bouts, and bout kinematics available?" without scanning
+every Zarr archive on demand.
+
+That does not make the registry scientifically authoritative. Registry rows
+are an index/cache over canonical recording archives and derived sidecars. A
+virtual collection should use the registry to find candidate datasets, then
+freeze the resolved recording IDs, paths, source run IDs, revisions, and
+fingerprints in the manifest. If the registry is rebuilt or corrected later,
+the manifest still records what was actually selected for the analysis.
+
+Practical rule:
+
+- Registry: fast discovery, filtering, freshness/status tracking, and
+  operational state.
+- Recording Zarrs: authoritative raw/refined/derived source data for one
+  recording.
+- Virtual collection manifest: immutable cross-recording source selection.
+- Export lake: rebuildable analytics product generated from a manifest.
+
+## Identity Versus Location
+
+Manifests must not treat absolute filesystem paths as scientific identity.
+Datasets can move between hot NVMe, network storage, and cold object/archive
+storage while remaining the same logical source dataset.
+
+V1 uses this split:
+
+- Stable identity: `recording_id`, optional registry `dataset_id`, artifact
+  kind, source run IDs, source revisions/fingerprints, and protocol hashes.
+- Location audit snapshot: `locator_at_selection`, recording where the data
+  was found when the manifest was built.
+- Current/alternate locations: registry-owned mutable locator state, not
+  duplicated into immutable manifests.
+
+Recommended record shape:
+
+```json
+{
+  "recording_id": "2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+  "dataset_id": "analysis_2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+  "artifact_kind": "analysis_zarr",
+  "locator_at_selection": {
+    "uri": "/nvme1/recordings/.../_analysis.zarr",
+    "storage_tier": "hot_nvme",
+    "last_verified_utc": "2026-05-07T12:00:00Z"
+  }
+}
+```
+
+Do not add `alternate_locators` to v1 manifests. The registry/catalog should
+own current and alternate storage locators so stable manifests do not need to
+change when data is archived or restored. A manifest remains scientifically
+valid if its source archive moves; recomputation only requires resolving the
+current locator through the registry.
+
+For v1, `manifest_sha256` hashes the manifest as written, including
+`locator_at_selection`, because it identifies that exact manifest file. If we
+later need to compare scientific source selections independent of storage
+movement, add a separate `source_selection_hash` that excludes locator fields.
 
 ## Required Top-Level Fields
 
@@ -101,8 +167,19 @@ by downstream work.
 ```json
 {
   "recording_id": "2026-01-28T19-22-28Z_arena_1_DefaultScreen",
-  "analysis_zarr_path": "/nvme1/recordings/.../_analysis.zarr",
-  "training_zarr_path": "/nvme1/recordings/.../_training.zarr",
+  "dataset_id": "analysis_2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+  "artifact_kind": "analysis_zarr",
+  "locator_at_selection": {
+    "uri": "/nvme1/recordings/.../_analysis.zarr",
+    "storage_tier": "hot_nvme",
+    "last_verified_utc": "2026-05-07T12:00:00Z"
+  },
+  "training_dataset_id": "training_2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+  "training_locator_at_selection": {
+    "uri": "/nvme1/recordings/.../_training.zarr",
+    "storage_tier": "hot_nvme",
+    "last_verified_utc": "2026-05-07T12:00:00Z"
+  },
   "recording_attrs": {
     "recording_start_utc": "2026-01-28T19:22:28Z",
     "arena_id": "arena_1",
@@ -212,6 +289,40 @@ Recommended derived fields:
 ```
 
 Exports should store both `collection_id` and `manifest_sha256`.
+
+## Pre-Implementation Checklist
+
+Work through these before implementing manifest writers/export integration:
+
+- [ ] Define canonical JSON hashing exactly: excluded fields, key ordering,
+      whitespace, Unicode normalization, null handling, numeric/float
+      formatting, path normalization, and whether sibling export manifests are
+      excluded.
+- [ ] Define absent-run representation. Prefer `null` or a structured object
+      with `present: false`, `required`, and `reason`; avoid ambiguous empty
+      objects.
+- [x] Define path identity policy. Store stable recording/dataset IDs plus
+      `locator_at_selection`; keep current/alternate locators in the registry,
+      and do not treat absolute filesystem paths as scientific identity.
+- [ ] Define `source_fingerprint` and `lineage_hash` semantics per run family,
+      especially for refined authoring revisions and derived runs.
+- [ ] Define immutable-manifest writer behavior: refuse overwrite by default,
+      create new collection IDs/version suffixes for changed selections, and
+      keep export artifacts in sibling export manifests.
+- [ ] Define production `latest` policy. Interactive selection may use
+      `latest`, but production exporters should resolve and record concrete run
+      IDs before writing rows, and may forbid `latest` by default.
+- [ ] Decide how to record registry query provenance: registry path, registry
+      backup/snapshot hash, query filters, result ordering, and excluded
+      candidate records.
+- [ ] Decide how to validate calibration/protocol metadata required by
+      stimulus-response analyses, including direction mapping, homography,
+      projector/camera scale, and protocol semantic hash status.
+- [ ] Audit which refined surfaces currently expose authoring revisions or
+      row-level revisions and which need backfilled revision metadata.
+- [ ] Keep the v1 schema narrow enough to support current cross-recording
+      analytics without prematurely locking in all future trial-search or
+      compact-Zarr migration choices.
 
 ## Immutability Policy
 

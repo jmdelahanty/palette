@@ -8,6 +8,32 @@ This policy defines:
 
 It applies to the palette registry database and its filesystem-linked artifacts.
 
+## Authority Model
+
+The registry is the fast searchable index for available datasets, recording
+metadata, run status, quality summaries, freshness/staleness, and operational
+state. It is expected to make queries fast enough that analysis code does not
+need to scan every Zarr archive for routine cohort construction.
+
+The registry is not the scientific source of truth for raw/refined/derived
+analysis values. Recording analysis Zarrs remain authoritative for
+per-recording artifacts, virtual collection manifests freeze cross-recording
+source selections, and Parquet/DuckDB exports are rebuildable products derived
+from those manifests.
+
+The registry is, however, the right place to maintain current and alternate
+storage locators for datasets that move between hot compute storage, networked
+storage, and cold archive/object storage. Immutable manifests should store the
+stable dataset identity plus a `locator_at_selection` audit snapshot. They
+should not duplicate every future alternate locator. When a source archive is
+moved, update the registry locator state; the manifest remains scientifically
+valid because its identity and source run selections did not change.
+
+This means registry rows may be repaired, rebuilt, normalized, or refreshed as
+indexes. Those changes must not silently change the meaning of an already
+materialized analysis export, because exports should point to immutable
+collection manifests with concrete source run IDs and source fingerprints.
+
 ## Immutable vs Mutable
 
 ### Immutable (must not be updated in normal operations)

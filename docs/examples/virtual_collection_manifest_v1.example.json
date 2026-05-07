@@ -38,8 +38,19 @@
   "records": [
     {
       "recording_id": "2026-01-28T19-22-28Z_arena_1_DefaultScreen",
-      "analysis_zarr_path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_analysis.zarr",
-      "training_zarr_path": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_training.zarr",
+      "dataset_id": "analysis_2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+      "artifact_kind": "analysis_zarr",
+      "locator_at_selection": {
+        "uri": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_analysis.zarr",
+        "storage_tier": "hot_nvme",
+        "last_verified_utc": "2026-05-07T12:00:00Z"
+      },
+      "training_dataset_id": "training_2026-01-28T19-22-28Z_arena_1_DefaultScreen",
+      "training_locator_at_selection": {
+        "uri": "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen_training.zarr",
+        "storage_tier": "hot_nvme",
+        "last_verified_utc": "2026-05-07T12:00:00Z"
+      },
       "recording_attrs": {
         "recording_start_utc": "2026-01-28T19:22:28Z",
         "arena_id": "arena_1",
