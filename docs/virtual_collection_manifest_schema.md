@@ -228,6 +228,7 @@ Run objects should use the same shape across run families:
 
 ```json
 {
+  "present": true,
   "run_id": "string",
   "path": "analysis/track_kinematics_runs/offline/tk_hyst4_low2_latch_s005",
   "required": true,
@@ -241,6 +242,22 @@ Run objects should use the same shape across run families:
   "lineage_hash": "optional"
 }
 ```
+
+Absent runs should also be structured objects, not empty objects and not bare
+`null` values:
+
+```json
+{
+  "present": false,
+  "required": false,
+  "reason": "not_generated",
+  "run_id": null,
+  "path": null
+}
+```
+
+This keeps diagnostics explicit and avoids ambiguity between "not generated",
+"not selected", "not required", and "writer forgot to fill this object".
 
 ## `latest` Policy
 
@@ -279,6 +296,25 @@ of the original query result.
 Writers should compute a stable SHA-256 over a canonical JSON representation of
 the manifest excluding fields that are generated from the hash itself.
 
+V1 hash meaning:
+
+- `manifest_sha256` identifies the exact immutable manifest document.
+- Exclude only the `manifest_sha256` field itself.
+- Include `created_utc`, query metadata, `locator_at_selection`, records,
+  warnings, exclusions, and other manifest content.
+- Do not include sibling export manifests in the collection manifest hash.
+
+Canonicalization rules:
+
+- Encode as UTF-8.
+- Sort object keys recursively.
+- Emit compact JSON with no insignificant whitespace.
+- Preserve array order exactly as written.
+- Normalize strings to Unicode NFC before hashing.
+- Reject non-JSON numeric values (`NaN`, `Infinity`, `-Infinity`).
+- Do not normalize or rewrite path/URI strings during hashing; hash the
+  manifest exactly as written after JSON canonicalization.
+
 Recommended derived fields:
 
 ```json
@@ -290,17 +326,24 @@ Recommended derived fields:
 
 Exports should store both `collection_id` and `manifest_sha256`.
 
+This hash intentionally answers "which manifest file was used?" not "is this
+the same scientific source selection after storage moves or timestamp changes?"
+If location/time-independent source-selection equivalence becomes necessary,
+add a separate `source_selection_hash` that excludes locator, creator, and
+timestamp fields and hashes only stable source identities, run IDs, revisions,
+fingerprints, and protocol hashes.
+
 ## Pre-Implementation Checklist
 
 Work through these before implementing manifest writers/export integration:
 
-- [ ] Define canonical JSON hashing exactly: excluded fields, key ordering,
+- [x] Define canonical JSON hashing exactly: excluded fields, key ordering,
       whitespace, Unicode normalization, null handling, numeric/float
       formatting, path normalization, and whether sibling export manifests are
       excluded.
-- [ ] Define absent-run representation. Prefer `null` or a structured object
-      with `present: false`, `required`, and `reason`; avoid ambiguous empty
-      objects.
+- [x] Define absent-run representation. Use structured objects with
+      `present: false`, `required`, and `reason`; avoid ambiguous empty
+      objects and bare `null` values.
 - [x] Define path identity policy. Store stable recording/dataset IDs plus
       `locator_at_selection`; keep current/alternate locators in the registry,
       and do not treat absolute filesystem paths as scientific identity.

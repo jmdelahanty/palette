@@ -67,6 +67,7 @@
       },
       "source_runs": {
         "detect_run": {
+          "present": true,
           "run_id": "detect_2026-02-09_08-41-00",
           "path": "detect_runs/detect_2026-02-09_08-41-00",
           "required": true,
@@ -80,6 +81,7 @@
           "lineage_hash": null
         },
         "refined_detect_run": {
+          "present": true,
           "run_id": "refined_detect_2026-02-09_10-02-00",
           "path": "refined_detect_runs/refined_detect_2026-02-09_10-02-00",
           "required": true,
@@ -93,6 +95,7 @@
           "lineage_hash": null
         },
         "refined_keypoints_run": {
+          "present": true,
           "run_id": "refined_keypoints_2026-03-03_23-45-34",
           "path": "refined_keypoints_runs/refined_keypoints_2026-03-03_23-45-34",
           "required": true,
@@ -106,6 +109,7 @@
           "lineage_hash": null
         },
         "track_kinematics_run": {
+          "present": true,
           "run_id": "tk_hyst4_low2_latch_s005",
           "path": "analysis/track_kinematics_runs/offline/tk_hyst4_low2_latch_s005",
           "required": true,
@@ -119,6 +123,7 @@
           "lineage_hash": "example_track_kinematics_lineage_hash"
         },
         "swim_bout_run": {
+          "present": true,
           "run_id": "bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098",
           "path": "analysis/swim_bout_runs/bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098",
           "required": true,
@@ -132,6 +137,7 @@
           "lineage_hash": "example_swim_bout_lineage_hash"
         },
         "bout_kinematics_run": {
+          "present": true,
           "run_id": "bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_interbout",
           "path": "analysis/bout_kinematics_runs/bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_interbout",
           "required": true,
@@ -144,7 +150,15 @@
           "source_fingerprint": "example_bout_kinematics_source_fingerprint",
           "lineage_hash": "example_bout_kinematics_lineage_hash"
         },
+        "tail_kinematics_run": {
+          "present": false,
+          "required": false,
+          "reason": "not_requested",
+          "run_id": null,
+          "path": null
+        },
         "eye_angle_run": {
+          "present": true,
           "run_id": "eye_angle_variant_schema_v7_canary_20260501",
           "path": "analysis/eye_angle_runs/eye_angle_variant_schema_v7_canary_20260501",
           "required": false,
@@ -158,6 +172,7 @@
           "lineage_hash": "example_eye_angle_lineage_hash"
         },
         "stimulus_run": {
+          "present": true,
           "run_id": "stimulus_20260209_084518",
           "path": "analysis/stimulus_runs/stimulus_20260209_084518",
           "required": false,
@@ -171,6 +186,7 @@
           "lineage_hash": "example_stimulus_lineage_hash"
         },
         "stimulus_response_run": {
+          "present": true,
           "run_id": "stimulus_response_tk_hyst4_low2_latch_s005_omr_canary",
           "path": "analysis/stimulus_response_runs/stimulus_response_tk_hyst4_low2_latch_s005_omr_canary",
           "required": false,
