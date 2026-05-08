@@ -23,6 +23,11 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.analysis.swim_bout_io import (
+    SwimBoutIOError,
+    load_default_swim_bout_tables,
+    structured_records_to_dicts,
+)
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.index_analytics_manifests import index_export_manifest
@@ -797,34 +802,28 @@ def _load_swim_bout_metrics(
     if "swim_bout_metrics" not in tables:
         return []
 
-    swim_group, swim_run, error = _latest_run(root, "analysis/swim_bout_runs")
-    if swim_group is None or swim_run is None:
-        diagnostics.append({"table": "swim_bout_metrics", "status": "skipped", "reason": error})
-        return []
-
-    swim_attrs = _attrs_dict(swim_group)
-    default_level = str(swim_attrs.get("default_level") or "speed_smoothed")
-    if not _has_child(swim_group, default_level):
+    try:
+        swim_payload = load_default_swim_bout_tables(root)
+    except SwimBoutIOError as exc:
         diagnostics.append({
             "table": "swim_bout_metrics",
             "status": "skipped",
-            "reason": f"missing default level {default_level!r}",
-            "swim_bout_run": swim_run,
+            "reason": str(exc),
         })
         return []
-    level_group = swim_group[default_level]
-    if not _has_child(level_group, "bouts"):
+    except Exception as exc:
         diagnostics.append({
             "table": "swim_bout_metrics",
             "status": "skipped",
-            "reason": "missing bouts group",
-            "swim_bout_run": swim_run,
-            "speed_level": default_level,
+            "reason": f"failed to load swim-bout metrics: {exc}",
         })
         return []
 
-    level_attrs = _attrs_dict(level_group)
-    bout_rows = _read_table_rows(level_group["bouts"])
+    swim_run = swim_payload.run_name
+    swim_attrs = dict(swim_payload.run_attrs)
+    level_attrs = dict(swim_payload.signal_attrs)
+    default_level = swim_payload.signal.speed_level
+    bout_rows = structured_records_to_dicts(swim_payload.bouts)
     rows: list[dict[str, Any]] = []
     for bout in bout_rows:
         bout_id = _safe_int(bout.get("bout_id"))
@@ -837,6 +836,8 @@ def _load_swim_bout_metrics(
             "speed_level": default_level,
             "source_track_kinematics_run": swim_attrs.get("source_track_kinematics_run"),
             "track_id": swim_attrs.get("track_id"),
+            "candidate_id": swim_payload.candidate.candidate_id,
+            "signal_id": swim_payload.signal.signal_id,
             "bout_id": bout_id,
         }
         row = _common_row(
@@ -853,6 +854,10 @@ def _load_swim_bout_metrics(
             "source_track_kinematics_type": swim_attrs.get("source_track_kinematics_type"),
             "track_id": _safe_int(swim_attrs.get("track_id")),
             "speed_level": default_level,
+            "candidate_id": int(swim_payload.candidate.candidate_id),
+            "signal_id": int(swim_payload.signal.signal_id),
+            "signal_role": swim_payload.signal.role,
+            "signal_source_level": swim_payload.signal.source_level,
             "detection_method": swim_attrs.get("detection_method") or level_attrs.get("detection_method"),
             "detection_signal_transform_type": level_attrs.get("detection_signal_transform_type"),
             "detection_signal_source_level": level_attrs.get("detection_signal_source_level"),

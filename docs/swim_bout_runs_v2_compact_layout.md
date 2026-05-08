@@ -5,6 +5,11 @@
 Design note for deferred implementation. No existing `analysis/swim_bout_runs`
 archives should be migrated or rewritten as part of this design slice.
 
+Implementation note, 2026-05-08: the first compatibility resolver now lives in
+`src/fisheye/analysis/swim_bout_io.py`. It reads current v1 hierarchical runs
+and exposes normalized candidate/signal/table objects so consumers can migrate
+before a compact v2 writer exists.
+
 ## Motivation
 
 The object-count audit of `/nvme1/recordings` on 2026-05-08 found
