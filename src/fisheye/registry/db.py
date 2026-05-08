@@ -2677,6 +2677,11 @@ class Registry:
                 "subject_mask_training_model_discovery",
                 self._migration_040_subject_mask_training_model_discovery,
             ),
+            (
+                41,
+                "analytics_manifest_registry",
+                self._migration_041_analytics_manifest_registry,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -9199,6 +9204,117 @@ class Registry:
         self._backfill_training_model_discovery_metadata()
         self._refresh_subject_mask_training_models_view()
 
+    def _migration_041_analytics_manifest_registry(self) -> None:
+        """Index immutable analytics collection/export manifests."""
+
+        self._ensure_analytics_manifest_tables()
+
+    def _ensure_analytics_manifest_tables(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics_collections (
+                collection_id TEXT NOT NULL,
+                manifest_sha256 TEXT NOT NULL,
+                collection_name TEXT,
+                manifest_path TEXT NOT NULL,
+                schema_id TEXT,
+                schema_version INTEGER,
+                record_count INTEGER,
+                included_record_count INTEGER,
+                created_utc TEXT,
+                indexed_utc TEXT,
+                status TEXT,
+                metadata_json TEXT,
+                PRIMARY KEY (collection_id, manifest_sha256)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics_exports (
+                export_run_id TEXT PRIMARY KEY,
+                collection_id TEXT,
+                collection_manifest_sha256 TEXT,
+                export_manifest_path TEXT NOT NULL,
+                output_root TEXT,
+                schema_version INTEGER,
+                tool TEXT,
+                palette_git_commit TEXT,
+                palette_git_dirty INTEGER,
+                source_recording_count INTEGER,
+                table_count INTEGER,
+                diagnostics_count INTEGER,
+                row_counts_json TEXT,
+                tables_json TEXT,
+                created_at_utc TEXT,
+                indexed_utc TEXT,
+                status TEXT,
+                metadata_json TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics_export_tables (
+                export_run_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                table_path TEXT,
+                row_count INTEGER,
+                part_count INTEGER,
+                part_files_json TEXT,
+                indexed_utc TEXT,
+                PRIMARY KEY (export_run_id, table_name),
+                FOREIGN KEY(export_run_id) REFERENCES analytics_exports(export_run_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analytics_collections_status
+            ON analytics_collections(status, collection_id);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analytics_exports_collection
+            ON analytics_exports(collection_id, collection_manifest_sha256, status);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_analytics_export_tables_name
+            ON analytics_export_tables(table_name, export_run_id);
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS analytics_export_overview;")
+        cur.execute(
+            """
+            CREATE VIEW analytics_export_overview AS
+            SELECT
+                ae.export_run_id,
+                ae.status,
+                ae.collection_id,
+                ae.collection_manifest_sha256,
+                ac.collection_name,
+                ae.export_manifest_path,
+                ae.output_root,
+                ae.created_at_utc,
+                ae.indexed_utc,
+                ae.source_recording_count,
+                ae.table_count,
+                ae.diagnostics_count,
+                ae.row_counts_json,
+                ae.tables_json,
+                ae.palette_git_commit,
+                ae.palette_git_dirty
+            FROM analytics_exports ae
+            LEFT JOIN analytics_collections ac
+              ON ac.collection_id = ae.collection_id
+             AND ac.manifest_sha256 = ae.collection_manifest_sha256;
+            """
+        )
+
     def _ensure_training_model_discovery_columns(self) -> None:
         self._ensure_columns(
             "training_models",
@@ -9508,6 +9624,183 @@ class Registry:
             payload,
         )
         self.conn.commit()
+
+    def upsert_analytics_collection(
+        self,
+        *,
+        collection_id: str,
+        manifest_sha256: str,
+        manifest_path: Path,
+        collection_name: Optional[str] = None,
+        schema_id: Optional[str] = None,
+        schema_version: Optional[int] = None,
+        record_count: Optional[int] = None,
+        included_record_count: Optional[int] = None,
+        created_utc: Optional[str] = None,
+        status: str = "active",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Index an immutable analytics collection manifest."""
+
+        self._ensure_analytics_manifest_tables()
+        payload = {
+            "collection_id": str(collection_id),
+            "manifest_sha256": str(manifest_sha256),
+            "collection_name": collection_name,
+            "manifest_path": str(manifest_path),
+            "schema_id": schema_id,
+            "schema_version": schema_version,
+            "record_count": record_count,
+            "included_record_count": included_record_count,
+            "created_utc": created_utc,
+            "indexed_utc": _utc_now(),
+            "status": str(status),
+            "metadata_json": _json_dumps(metadata),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO analytics_collections (
+                collection_id, manifest_sha256, collection_name, manifest_path,
+                schema_id, schema_version, record_count, included_record_count,
+                created_utc, indexed_utc, status, metadata_json
+            )
+            VALUES (
+                :collection_id, :manifest_sha256, :collection_name, :manifest_path,
+                :schema_id, :schema_version, :record_count, :included_record_count,
+                :created_utc, :indexed_utc, :status, :metadata_json
+            )
+            ON CONFLICT(collection_id, manifest_sha256) DO UPDATE SET
+                collection_name=excluded.collection_name,
+                manifest_path=excluded.manifest_path,
+                schema_id=excluded.schema_id,
+                schema_version=excluded.schema_version,
+                record_count=excluded.record_count,
+                included_record_count=excluded.included_record_count,
+                created_utc=excluded.created_utc,
+                indexed_utc=excluded.indexed_utc,
+                status=excluded.status,
+                metadata_json=excluded.metadata_json;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def upsert_analytics_export(
+        self,
+        *,
+        export_run_id: str,
+        export_manifest_path: Path,
+        collection_id: Optional[str] = None,
+        collection_manifest_sha256: Optional[str] = None,
+        output_root: Optional[Path] = None,
+        schema_version: Optional[int] = None,
+        tool: Optional[str] = None,
+        palette_git_commit: Optional[str] = None,
+        palette_git_dirty: Optional[bool] = None,
+        source_recording_count: Optional[int] = None,
+        row_counts_by_table: Optional[Mapping[str, Any]] = None,
+        part_files_by_table: Optional[Mapping[str, Any]] = None,
+        created_at_utc: Optional[str] = None,
+        diagnostics_count: Optional[int] = None,
+        status: str = "active",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Index an immutable analytics export manifest and its table paths."""
+
+        self._ensure_analytics_manifest_tables()
+        row_counts = dict(row_counts_by_table or {})
+        part_files = dict(part_files_by_table or {})
+        table_names = sorted(set(row_counts) | set(part_files))
+        payload = {
+            "export_run_id": str(export_run_id),
+            "collection_id": collection_id,
+            "collection_manifest_sha256": collection_manifest_sha256,
+            "export_manifest_path": str(export_manifest_path),
+            "output_root": str(output_root) if output_root is not None else None,
+            "schema_version": schema_version,
+            "tool": tool,
+            "palette_git_commit": palette_git_commit,
+            "palette_git_dirty": None if palette_git_dirty is None else int(bool(palette_git_dirty)),
+            "source_recording_count": source_recording_count,
+            "table_count": len(table_names),
+            "diagnostics_count": diagnostics_count,
+            "row_counts_json": _json_dumps(row_counts),
+            "tables_json": _json_dumps(table_names),
+            "created_at_utc": created_at_utc,
+            "indexed_utc": _utc_now(),
+            "status": str(status),
+            "metadata_json": _json_dumps(metadata),
+        }
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO analytics_exports (
+                    export_run_id, collection_id, collection_manifest_sha256,
+                    export_manifest_path, output_root, schema_version, tool,
+                    palette_git_commit, palette_git_dirty, source_recording_count,
+                    table_count, diagnostics_count, row_counts_json, tables_json,
+                    created_at_utc, indexed_utc, status, metadata_json
+                )
+                VALUES (
+                    :export_run_id, :collection_id, :collection_manifest_sha256,
+                    :export_manifest_path, :output_root, :schema_version, :tool,
+                    :palette_git_commit, :palette_git_dirty, :source_recording_count,
+                    :table_count, :diagnostics_count, :row_counts_json, :tables_json,
+                    :created_at_utc, :indexed_utc, :status, :metadata_json
+                )
+                ON CONFLICT(export_run_id) DO UPDATE SET
+                    collection_id=excluded.collection_id,
+                    collection_manifest_sha256=excluded.collection_manifest_sha256,
+                    export_manifest_path=excluded.export_manifest_path,
+                    output_root=excluded.output_root,
+                    schema_version=excluded.schema_version,
+                    tool=excluded.tool,
+                    palette_git_commit=excluded.palette_git_commit,
+                    palette_git_dirty=excluded.palette_git_dirty,
+                    source_recording_count=excluded.source_recording_count,
+                    table_count=excluded.table_count,
+                    diagnostics_count=excluded.diagnostics_count,
+                    row_counts_json=excluded.row_counts_json,
+                    tables_json=excluded.tables_json,
+                    created_at_utc=excluded.created_at_utc,
+                    indexed_utc=excluded.indexed_utc,
+                    status=excluded.status,
+                    metadata_json=excluded.metadata_json;
+                """,
+                payload,
+            )
+            self.conn.execute(
+                "DELETE FROM analytics_export_tables WHERE export_run_id = ?;",
+                (str(export_run_id),),
+            )
+            indexed_utc = payload["indexed_utc"]
+            for table_name in table_names:
+                files_raw = part_files.get(table_name) or []
+                files = [str(item) for item in files_raw] if isinstance(files_raw, list) else []
+                table_path = None
+                if files:
+                    try:
+                        table_path = str(Path(files[0]).parent)
+                    except Exception:
+                        table_path = None
+                self.conn.execute(
+                    """
+                    INSERT INTO analytics_export_tables (
+                        export_run_id, table_name, table_path, row_count,
+                        part_count, part_files_json, indexed_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        str(export_run_id),
+                        str(table_name),
+                        table_path,
+                        _as_int(row_counts.get(table_name)),
+                        len(files),
+                        _json_dumps(files),
+                        indexed_utc,
+                    ),
+                )
 
     def upsert_provenance(
         self,

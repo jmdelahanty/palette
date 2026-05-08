@@ -443,19 +443,39 @@ SQLite should remain the operational registry and control plane. It should own:
 - run discovery and selected/current run policy
 - lineage and staleness signals
 
-SQLite does not need to store every dense frame-level metric. It may optionally
-track generated Parquet exports in a small registry table later:
+SQLite does not need to store every dense frame-level metric. It should index
+immutable collection and export manifests so users can find exported analytics
+products quickly without scanning the Parquet lake:
 
 ```text
+analytics_collections
+  collection_id
+  manifest_sha256
+  collection_name
+  manifest_path
+  record_count
+  included_record_count
+  status
+
 analytics_exports
   export_run_id
+  collection_id
+  collection_manifest_sha256
   output_root
-  manifest_path
+  export_manifest_path
   created_at_utc
   source_recording_count
-  table_names_json
-  schema_versions_json
+  table_count
+  row_counts_json
+  tables_json
   status
+
+analytics_export_tables
+  export_run_id
+  table_name
+  table_path
+  row_count
+  part_count
 ```
 
 The registry should also remain the place that tells the exporter which Zarrs
@@ -463,6 +483,19 @@ belong to a cohort, for example "6 dpf DefaultScreen fish from cross A and the
 newest clutch." The Parquet table should denormalize those registry fields so
 downstream DuckDB queries do not need to repeatedly join back to SQLite for
 common biological filters.
+
+Operational commands:
+
+```bash
+scripts/py -m fisheye.utils.index_analytics_manifests \
+  --registry /nvme1/palette_registry.sqlite \
+  --export-manifest /nvme1/exports/palette_analytics/v1/manifests/export_run_id=<id>.json
+
+scripts/py -m fisheye.utils.query_analytics_exports \
+  --registry /nvme1/palette_registry.sqlite \
+  --collection-id movement_bouts_20260128_all_analysis_v002 \
+  --table swim_bout_metrics
+```
 
 ## Data Versioning And DVC
 
