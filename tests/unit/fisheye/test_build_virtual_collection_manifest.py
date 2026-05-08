@@ -66,6 +66,7 @@ def _fake_root() -> FakeRoot:
             "method": "peak_event",
             "method_version": "v1",
             "source_fingerprint": "bout_fp",
+            "fingerprint_status": "best_effort",
         },
         ("analysis/bout_kinematics_runs", "bk_latest"): {
             "schema_id": "palette.analysis.bout_kinematics",
@@ -107,6 +108,8 @@ def test_build_manifest_from_explicit_zarr_paths(monkeypatch, tmp_path: Path) ->
     assert record["status"]["included"] is True
     assert record["source_runs"]["track_kinematics_run"]["run_id"] == "tk_latest"
     assert record["source_runs"]["track_kinematics_run"]["selection"] == "resolved_latest"
+    assert record["source_runs"]["track_kinematics_run"]["fingerprint_status"] == "complete"
+    assert record["source_runs"]["swim_bout_run"]["fingerprint_status"] == "best_effort"
     assert record["source_runs"]["tail_kinematics_run"]["present"] is False
     assert record["source_runs"]["tail_kinematics_run"]["reason"] == "not_generated"
 

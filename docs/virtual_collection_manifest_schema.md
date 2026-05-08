@@ -504,6 +504,24 @@ Recommended v1 behavior:
 - Exporters should warn on `best_effort` and `missing`; production mode may
   later require `complete` for selected run families.
 
+Palette's v1 run-level helper writes these attrs on derived run groups when
+available:
+
+- `source_fingerprint`: SHA-256 hash of the canonical run-lineage payload.
+- `source_lineage_hash` and `lineage_hash`: aliases of the same hash for
+  compatibility with current exporters and future query layers.
+- `fingerprint_status`: one of the statuses above. Backfilled existing runs
+  should use `best_effort` unless the run family has complete source/content
+  revision coverage.
+- `lineage_payload_json`: canonical strict-JSON payload used to compute the
+  hash. It excludes output path/run name, timestamps, host, scheduler, and other
+  operational details, and includes source refs/fingerprints, schema, method,
+  method version, parameters, and code revision when available.
+
+This is deliberately run-level. Row-level revision/content fingerprints remain
+part of the tabular v2 work and should not be implied by a `best_effort`
+run-level backfill.
+
 ## Pre-Implementation Checklist
 
 Work through these before implementing manifest writers/export integration:

@@ -119,7 +119,13 @@ def _present_run_entry(
         "lineage_hash",
     )
     lineage_hash = _string_attr(group, "lineage_hash", "source_lineage_hash")
-    fingerprint_status = "complete" if source_fingerprint else "best_effort"
+    fingerprint_status = _string_attr(
+        group,
+        "fingerprint_status",
+        "lineage_fingerprint_status",
+    )
+    if fingerprint_status is None:
+        fingerprint_status = "complete" if source_fingerprint else "best_effort"
     return {
         "present": True,
         "run_id": run_id,
