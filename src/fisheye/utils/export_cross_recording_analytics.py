@@ -23,7 +23,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.utils.index_analytics_manifests import index_export_manifest
 from fisheye.utils.system import get_git_info
 from fisheye.utils.virtual_collection_manifest import load_manifest, verify_manifest_sha256
 from fisheye.utils.zarr_io import open_zarr_root
@@ -1322,6 +1324,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, help="Limit discovered sources, useful for canaries.")
     parser.add_argument("--export-run-id", help="Explicit export run id. Defaults to current UTC timestamp.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing export_run_id directory/manifest.")
+    parser.add_argument("--registry", type=Path, help="Palette registry SQLite path for optional export indexing.")
+    parser.add_argument(
+        "--index-registry",
+        action="store_true",
+        help="Index the written export manifest in the Palette registry after a successful export.",
+    )
     return parser
 
 
@@ -1345,6 +1353,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"rows\t{table}\t{count}")
     if manifest["diagnostics"]:
         print(f"diagnostics\t{len(manifest['diagnostics'])}")
+    if args.index_registry:
+        registry_path = (
+            args.registry.expanduser().resolve()
+            if args.registry is not None
+            else RegistryPaths.from_env(Path.cwd()).path
+        )
+        registry = Registry(registry_path)
+        try:
+            export_run_id = index_export_manifest(registry, Path(manifest["manifest_path"]))
+        finally:
+            registry.close()
+        print(f"indexed_registry\t{registry_path}\t{export_run_id}")
 
 
 if __name__ == "__main__":

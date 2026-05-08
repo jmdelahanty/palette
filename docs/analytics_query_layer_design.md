@@ -487,6 +487,13 @@ common biological filters.
 Operational commands:
 
 ```bash
+scripts/py -m fisheye.utils.export_cross_recording_analytics \
+  --collection-manifest /nvme1/exports/palette_analytics/manifests/collections/<collection>.manifest.json \
+  --output-root /nvme1/exports/palette_analytics \
+  --jobs 4 \
+  --registry /nvme1/palette_registry.sqlite \
+  --index-registry
+
 scripts/py -m fisheye.utils.index_analytics_manifests \
   --registry /nvme1/palette_registry.sqlite \
   --export-manifest /nvme1/exports/palette_analytics/v1/manifests/export_run_id=<id>.json
@@ -494,7 +501,9 @@ scripts/py -m fisheye.utils.index_analytics_manifests \
 scripts/py -m fisheye.utils.query_analytics_exports \
   --registry /nvme1/palette_registry.sqlite \
   --collection-id movement_bouts_20260128_all_analysis_v002 \
-  --table swim_bout_metrics
+  --table swim_bout_metrics \
+  --latest \
+  --format path
 ```
 
 ## Data Versioning And DVC

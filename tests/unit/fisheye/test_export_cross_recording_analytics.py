@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.utils.export_cross_recording_analytics import export_sources
+from fisheye.utils.export_cross_recording_analytics import main as export_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
 
 
@@ -317,3 +318,55 @@ def test_export_cross_recording_analytics_can_limit_tables(tmp_path: Path) -> No
     assert rows[0]["protocol_signature_schema"] == "palette_protocol_signature_v1"
     assert rows[0]["derived_protocol_hash"] == rows[0]["protocol_signature_hash"]
     assert rows[0]["protocol_step_count"] == 2
+
+
+def test_export_cross_recording_analytics_can_index_registry(tmp_path: Path, capsys) -> None:
+    source = _make_source_zarr(tmp_path / "recording_c_analysis.zarr")
+    output = tmp_path / "exports" / "palette_analytics"
+    registry_path = tmp_path / "registry.sqlite"
+    collection_path = tmp_path / "collection.manifest.json"
+    collection = _write_collection_manifest(collection_path, source)
+
+    export_main(
+        [
+            "--collection-manifest",
+            str(collection_path),
+            "--output-root",
+            str(output),
+            "--tables",
+            "recording_summary",
+            "--jobs",
+            "1",
+            "--export-run-id",
+            "indexed_export",
+            "--registry",
+            str(registry_path),
+            "--index-registry",
+        ]
+    )
+
+    stdout = capsys.readouterr().out
+    assert f"indexed_registry\t{registry_path.resolve()}\tindexed_export" in stdout
+
+    import sqlite3
+
+    conn = sqlite3.connect(registry_path)
+    try:
+        export_row = conn.execute(
+            """
+            SELECT collection_id, collection_manifest_sha256, source_recording_count, table_count
+            FROM analytics_export_overview
+            WHERE export_run_id = 'indexed_export';
+            """
+        ).fetchone()
+        assert export_row == ("collection_test", collection["manifest_sha256"], 1, 1)
+        table_row = conn.execute(
+            """
+            SELECT table_name, row_count, part_count
+            FROM analytics_export_tables
+            WHERE export_run_id = 'indexed_export';
+            """
+        ).fetchone()
+        assert table_row == ("recording_summary", 1, 1)
+    finally:
+        conn.close()

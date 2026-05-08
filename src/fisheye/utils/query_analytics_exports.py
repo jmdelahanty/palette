@@ -20,7 +20,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-run-id", help="Filter by export_run_id.")
     parser.add_argument("--table", help="Require/export a specific table name.")
     parser.add_argument("--status", default="active", help="Filter by export status; use 'any' to disable.")
-    parser.add_argument("--format", choices=("table", "json"), default="table")
+    parser.add_argument("--latest", action="store_true", help="Return only the latest matching export.")
+    parser.add_argument(
+        "--format",
+        choices=("table", "json", "path"),
+        default="table",
+        help="'path' prints matching table_path values and requires --table.",
+    )
     parser.add_argument("--limit", type=int, default=100)
     return parser
 
@@ -42,12 +48,22 @@ def _query_rows(registry: Registry, args: argparse.Namespace) -> list[dict[str, 
         "ae.row_counts_json",
         "ae.tables_json",
     ]
+    joins: list[str] = []
+    if args.table:
+        select_cols.extend(
+            [
+                "aet.table_path",
+                "aet.row_count AS table_row_count",
+                "aet.part_count AS table_part_count",
+                "aet.part_files_json AS table_part_files_json",
+            ]
+        )
+        joins.append("JOIN analytics_export_tables aet ON aet.export_run_id = ae.export_run_id")
     sql: list[str] = [
         f"SELECT {', '.join(select_cols)}",
         "FROM analytics_export_overview ae",
+        *joins,
     ]
-    if args.table:
-        sql.append("JOIN analytics_export_tables aet ON aet.export_run_id = ae.export_run_id")
     sql.append("WHERE 1=1")
 
     if args.status != "any":
@@ -67,9 +83,10 @@ def _query_rows(registry: Registry, args: argparse.Namespace) -> list[dict[str, 
         params.append(args.table)
 
     sql.append("ORDER BY COALESCE(ae.created_at_utc, ae.indexed_utc) DESC, ae.export_run_id DESC")
-    if args.limit and int(args.limit) > 0:
+    limit = 1 if args.latest else args.limit
+    if limit and int(limit) > 0:
         sql.append("LIMIT ?")
-        params.append(int(args.limit))
+        params.append(int(limit))
 
     rows = registry.conn.execute("\n".join(sql), params).fetchall()
     return [dict(row) for row in rows]
@@ -92,6 +109,8 @@ def _print_table(rows: Iterable[dict[str, Any]]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.format == "path" and not args.table:
+        raise SystemExit("--format path requires --table")
     registry_path = (
         args.registry.expanduser().resolve()
         if args.registry is not None
@@ -105,6 +124,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.format == "json":
         print(json.dumps(rows, sort_keys=True))
+    elif args.format == "path":
+        for row in rows:
+            if row.get("table_path"):
+                print(row["table_path"])
     else:
         _print_table(rows)
     return 0

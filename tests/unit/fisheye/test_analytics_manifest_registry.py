@@ -207,3 +207,30 @@ def test_index_and_query_analytics_manifests_cli(tmp_path: Path, capsys) -> None
     assert len(payload) == 1
     assert payload[0]["export_run_id"] == "run_test"
     assert payload[0]["collection_manifest_sha256"] == collection["manifest_sha256"]
+
+    assert (
+        query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--collection-id",
+                "movement_bouts_test_v001",
+                "--table",
+                "swim_bout_metrics",
+                "--latest",
+                "--format",
+                "path",
+            ]
+        )
+        == 0
+    )
+    path_lines = capsys.readouterr().out.strip().splitlines()
+    assert path_lines == [
+        str(
+            tmp_path
+            / "exports"
+            / "v1"
+            / "swim_bout_metrics"
+            / "export_run_id=run_test"
+        )
+    ]
