@@ -11,6 +11,7 @@ from fisheye.utils.index_analytics_manifests import (
     main as index_main,
 )
 from fisheye.utils.query_analytics_exports import main as query_main
+from fisheye.utils.resolve_analytics_export import main as resolve_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
 
 
@@ -248,3 +249,41 @@ def test_index_and_query_analytics_manifests_cli(tmp_path: Path, capsys) -> None
             / "export_run_id=run_test"
         )
     ]
+
+    assert (
+        resolve_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--collection-id",
+                "movement_bouts_test_v001",
+                "--table",
+                "swim_bout_metrics",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    resolved = json.loads(capsys.readouterr().out)
+    assert resolved["export_run_id"] == "run_test"
+    assert resolved["table_name"] == "swim_bout_metrics"
+    assert resolved["row_count"] == 42
+    assert resolved["part_count"] == 1
+
+    assert (
+        resolve_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--collection-id",
+                "movement_bouts_test_v001",
+                "--table",
+                "swim_bout_metrics",
+                "--format",
+                "path",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == path_lines[0]

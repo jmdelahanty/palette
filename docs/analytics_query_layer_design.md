@@ -505,6 +505,12 @@ scripts/py -m fisheye.utils.query_analytics_exports \
   --latest \
   --format path
 
+scripts/py -m fisheye.utils.resolve_analytics_export \
+  --registry /nvme1/palette_registry.sqlite \
+  --collection-id movement_bouts_20260128_all_analysis_v002 \
+  --table bout_kinematics_metrics \
+  --format json
+
 scripts/py -m fisheye.utils.plot_cross_recording_bout_kinematics \
   --registry /nvme1/palette_registry.sqlite \
   --collection-id movement_bouts_20260128_all_analysis_v002 \
@@ -648,13 +654,15 @@ summary = (
 ```
 
 Reproducible cross-recording bout-kinematics plots can be generated from the
-Parquet export, without rereading source Zarr archives:
+Parquet export, without rereading source Zarr archives. Prefer registry
+resolution for day-to-day work so scripts do not depend on hardcoded export
+run IDs or path conventions:
 
 ```bash
 scripts/py -m fisheye.utils.plot_cross_recording_bout_kinematics \
-  --export-root /nvme1/exports/palette_analytics \
-  --export-run-id latest \
-  --output-dir /tmp/palette_lab_plots/latest_parquet \
+  --registry /nvme1/palette_registry.sqlite \
+  --collection-id movement_bouts_20260128_all_analysis_v002 \
+  --output-dir /tmp/palette_lab_plots/latest_from_registry \
   --measurement-level heading_smoothed
 ```
 
