@@ -11,6 +11,7 @@ from fisheye.utils.virtual_collection_manifest import (
     VirtualCollectionManifestError,
     assert_valid_manifest,
     compute_manifest_sha256,
+    main,
     validate_manifest,
     verify_manifest_sha256,
     with_manifest_sha256,
@@ -118,3 +119,53 @@ def test_validate_manifest_rejects_absent_run_with_concrete_path() -> None:
     errors = validate_manifest(manifest)
 
     assert any("tail_kinematics_run.path" in error for error in errors)
+
+
+def test_cli_validate_accepts_example_manifest(capsys) -> None:
+    rc = main(["validate", str(EXAMPLE_PATH)])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.strip() == "valid"
+    assert captured.err == ""
+
+
+def test_cli_hash_prints_manifest_digest(capsys) -> None:
+    manifest = _example_manifest()
+
+    rc = main(["hash", str(EXAMPLE_PATH)])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.strip() == compute_manifest_sha256(manifest)
+
+
+def test_cli_stamp_writes_verifiable_manifest(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "collection.manifest.json"
+
+    rc = main(["stamp", str(EXAMPLE_PATH), "--output", str(output)])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    stamped = json.loads(output.read_text(encoding="utf-8"))
+    assert stamped["manifest_sha256"] == captured.out.strip()
+    assert verify_manifest_sha256(stamped)
+
+
+def test_cli_stamp_refuses_to_overwrite_by_default(tmp_path: Path, capsys) -> None:
+    output = tmp_path / "collection.manifest.json"
+    output.write_text("{}", encoding="utf-8")
+
+    rc = main(["stamp", str(EXAMPLE_PATH), "--output", str(output)])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "already exists" in captured.err
+
+
+def test_cli_validate_check_hash_rejects_placeholder_hash(capsys) -> None:
+    rc = main(["validate", str(EXAMPLE_PATH), "--check-hash"])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "manifest_sha256" in captured.err

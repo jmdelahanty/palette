@@ -7,12 +7,15 @@ code.
 
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import json
 import math
+import sys
 import unicodedata
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 
@@ -414,3 +417,116 @@ def _validate_source_run(
             errors.append(
                 f"{path}.fingerprint_status: absent runs should use 'not_applicable'"
             )
+
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    """Load a virtual collection manifest from JSON."""
+
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise VirtualCollectionManifestError(f"{path}: manifest root must be a JSON object")
+    return payload
+
+
+def write_manifest(path: Path, manifest: Mapping[str, Any], *, overwrite: bool = False) -> None:
+    """Write a manifest JSON file.
+
+    Existing files are not overwritten unless ``overwrite`` is true. This keeps
+    the default behavior aligned with immutable collection manifests.
+    """
+
+    if path.exists() and not overwrite:
+        raise VirtualCollectionManifestError(
+            f"{path}: already exists; pass --overwrite to replace it"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            _normalize_json_value(manifest),
+            handle,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        handle.write("\n")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Validate and hash Palette virtual collection manifests.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    validate_parser = subparsers.add_parser("validate", help="validate a manifest")
+    validate_parser.add_argument("manifest", type=Path)
+    validate_parser.add_argument(
+        "--check-hash",
+        action="store_true",
+        help="also require manifest_sha256 to match the canonical payload",
+    )
+
+    hash_parser = subparsers.add_parser("hash", help="print manifest_sha256")
+    hash_parser.add_argument("manifest", type=Path)
+
+    stamp_parser = subparsers.add_parser(
+        "stamp",
+        help="write a copy with manifest_sha256 populated",
+    )
+    stamp_parser.add_argument("manifest", type=Path)
+    stamp_parser.add_argument("--output", "-o", type=Path, required=True)
+    stamp_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="allow replacing an existing output manifest",
+    )
+    stamp_parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="skip structural validation before writing",
+    )
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entry point for virtual collection manifest utilities."""
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        manifest = load_manifest(args.manifest)
+        if args.command == "validate":
+            errors = validate_manifest(manifest)
+            if args.check_hash and not verify_manifest_sha256(manifest):
+                errors.append("manifest_sha256: does not match canonical payload")
+            if errors:
+                for error in errors:
+                    print(error, file=sys.stderr)
+                return 1
+            print("valid")
+            return 0
+
+        if args.command == "hash":
+            print(compute_manifest_sha256(manifest))
+            return 0
+
+        if args.command == "stamp":
+            if not args.no_validate:
+                assert_valid_manifest(manifest)
+            stamped = with_manifest_sha256(manifest)
+            write_manifest(args.output, stamped, overwrite=args.overwrite)
+            print(stamped["manifest_sha256"])
+            return 0
+    except (OSError, json.JSONDecodeError, VirtualCollectionManifestError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    parser.error(f"unknown command: {args.command}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
