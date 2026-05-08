@@ -365,6 +365,9 @@ Direction:
 - use sidecar Parquet or scratch-only Zarr for large parameter sweeps
 - promote only accepted/canonical bout candidates to the stable analysis store
 
+Focused schema design:
+[swim_bout_runs_v2_compact_layout.md](swim_bout_runs_v2_compact_layout.md).
+
 ### `analysis/bout_kinematics_runs`
 
 Current issue:
