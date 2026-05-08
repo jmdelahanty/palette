@@ -12,30 +12,48 @@ new schemas and v2 rewrites.
 
 ## Current Audit Snapshot
 
-Read-only audit of `/nvme1/recordings` on 2026-05-04:
+Read-only audit of `/nvme1/recordings` on 2026-05-08:
 
 - `53` analysis stores
-- `51,540` total `zarr.json` files
-- typical store: about `537-657` `zarr.json` files
-- median store: `573` `zarr.json` files
+- `132,343` total `zarr.json` files
+- `14,351` groups
+- `117,992` arrays
+- `0` invalid `zarr.json` files
 - largest outlier:
   `/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/..._analysis.zarr`
-  with `17,438` `zarr.json` files
+  with `17,470` `zarr.json` files
 
-Largest outlier breakdown:
+Top global family breakdown:
 
 | Prefix | `zarr.json` count |
 | --- | ---: |
-| `analysis/swim_bout_runs` | `10,358` |
-| `analysis/bout_kinematics_runs` | `2,559` |
-| `analysis/eye_angle_runs` | `1,741` |
-| `analysis/subject_shape_runs` | `904` |
-| `analysis/track_kinematics_runs` | `430` |
+| `analysis/swim_bout_runs` | `36,538` |
+| `analysis/stimulus_response_runs` | `18,975` |
+| `analysis/eye_angle_runs` | `14,384` |
+| `analysis/bout_kinematics_runs` | `13,618` |
+| `refined_subject_masks_runs` | `9,532` |
+| `refined_keypoints_runs` | `7,786` |
+| `analysis/track_kinematics_runs` | `6,758` |
+| `analysis/subject_shape_runs` | `6,309` |
 
 The new detection-coverage dashboard is not a material contributor. Persisting
 one compare dashboard under each latest refined-detect run would add only one
 new PNG-array metadata object per store because the `visualizations` groups
 already exist.
+
+Re-run the audit with:
+
+```bash
+scripts/py -m fisheye.utils.audit_zarr_group_counts \
+  --recordings-root /nvme1/recordings \
+  --output-dir /tmp/palette_zarr_group_count_audit \
+  --format markdown
+```
+
+The audit is filesystem-only: it scans `zarr.json` files, reads each
+`node_type`, and does not call `zarr.open_group(...)`. Outputs include
+`archive_summary.csv`, `family_summary.csv`, `component_summary.csv`,
+`audit_summary.json`, and `audit_summary.md`.
 
 ## Why This Matters
 
