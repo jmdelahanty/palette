@@ -10,9 +10,12 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import polars as pl
 
+from fisheye.utils.analytics_export_resolution import resolve_latest_export_table
+
 
 DEFAULT_MEASUREMENT_LEVEL = "heading_smoothed"
 DEFAULT_EXPORT_ROOT = Path("/nvme1/exports/palette_analytics")
+BOUT_KINEMATICS_TABLE = "bout_kinematics_metrics"
 
 HEADING_FIELDS = (
     "net_delta_heading_deg",
@@ -45,18 +48,17 @@ def resolve_export_run_id(export_root: Path, export_run_id: str) -> str:
     return manifests[-1].name.removeprefix("export_run_id=").removesuffix(".json")
 
 
-def load_bout_kinematics_metrics(
-    export_root: Path,
-    export_run_id: str,
+def load_bout_kinematics_metrics_from_table_dir(
+    table_dir: Path,
     *,
     measurement_level: str = DEFAULT_MEASUREMENT_LEVEL,
 ) -> pl.DataFrame:
-    """Load one measurement level from ``bout_kinematics_metrics`` Parquet parts."""
+    """Load one measurement level from a bout-kinematics Parquet table dir."""
 
-    table_dir = export_root / "v1" / "bout_kinematics_metrics" / f"export_run_id={export_run_id}"
+    table_dir = table_dir.expanduser().resolve()
     files = sorted(table_dir.glob("*.parquet"))
     if not files:
-        raise FileNotFoundError(f"No bout_kinematics_metrics Parquet files found under {table_dir}")
+        raise FileNotFoundError(f"No {BOUT_KINEMATICS_TABLE} Parquet files found under {table_dir}")
     frame = (
         pl.scan_parquet(str(table_dir / "*.parquet"), hive_partitioning=True)
         .filter(pl.col("measurement_level") == measurement_level)
@@ -64,10 +66,25 @@ def load_bout_kinematics_metrics(
     )
     if frame.is_empty():
         raise ValueError(
-            f"No bout_kinematics_metrics rows for measurement_level={measurement_level!r} "
-            f"in export_run_id={export_run_id!r}."
+            f"No {BOUT_KINEMATICS_TABLE} rows for measurement_level={measurement_level!r} "
+            f"under {table_dir}."
         )
     return frame
+
+
+def load_bout_kinematics_metrics(
+    export_root: Path,
+    export_run_id: str,
+    *,
+    measurement_level: str = DEFAULT_MEASUREMENT_LEVEL,
+) -> pl.DataFrame:
+    """Load one measurement level from the standard export-root layout."""
+
+    table_dir = export_root / "v1" / BOUT_KINEMATICS_TABLE / f"export_run_id={export_run_id}"
+    return load_bout_kinematics_metrics_from_table_dir(
+        table_dir,
+        measurement_level=measurement_level,
+    )
 
 
 def _finite_values(frame: pl.DataFrame, field: str) -> np.ndarray:
@@ -300,20 +317,56 @@ def plot_export(
     export_root: Path,
     export_run_id: str,
     output_dir: Path,
+    parquet_root: Path | None = None,
+    registry_path: Path | None = None,
+    collection_id: str | None = None,
+    collection_manifest_sha256: str | None = None,
+    registry_status: str = "active",
     measurement_level: str = DEFAULT_MEASUREMENT_LEVEL,
     dpi: int = 180,
 ) -> dict[str, Any]:
-    resolved_run_id = resolve_export_run_id(export_root, export_run_id)
-    frame = load_bout_kinematics_metrics(
-        export_root,
-        resolved_run_id,
+    table_dir: Path
+    registry_metadata: dict[str, Any] = {}
+    if parquet_root is not None:
+        table_dir = parquet_root.expanduser().resolve()
+        resolved_run_id = (
+            table_dir.name.removeprefix("export_run_id=")
+            if export_run_id == "latest" and table_dir.name.startswith("export_run_id=")
+            else export_run_id
+        )
+    elif registry_path is not None or collection_id is not None or collection_manifest_sha256 is not None:
+        resolution = resolve_latest_export_table(
+            registry_path=registry_path,
+            collection_id=collection_id,
+            collection_manifest_sha256=collection_manifest_sha256,
+            export_run_id=None if export_run_id == "latest" else export_run_id,
+            table_name=BOUT_KINEMATICS_TABLE,
+            status=registry_status,
+        )
+        table_dir = resolution.table_path
+        resolved_run_id = resolution.export_run_id
+        registry_metadata = {
+            "registry_path": str(resolution.registry_path),
+            "collection_id": resolution.collection_id,
+            "collection_manifest_sha256": resolution.collection_manifest_sha256,
+            "collection_name": resolution.collection_name,
+            "registry_status": resolution.status,
+        }
+    else:
+        resolved_run_id = resolve_export_run_id(export_root, export_run_id)
+        table_dir = export_root / "v1" / BOUT_KINEMATICS_TABLE / f"export_run_id={resolved_run_id}"
+
+    frame = load_bout_kinematics_metrics_from_table_dir(
+        table_dir,
         measurement_level=measurement_level,
     )
     summary = summarize_heading_metrics(frame)
     summary.update({
         "export_run_id": resolved_run_id,
-        "source": "parquet:bout_kinematics_metrics",
+        "source": f"parquet:{BOUT_KINEMATICS_TABLE}",
+        "table_path": str(table_dir),
         "measurement_level": measurement_level,
+        **registry_metadata,
     })
     plots = write_plots(
         frame,
@@ -333,6 +386,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--export-root", type=Path, default=DEFAULT_EXPORT_ROOT)
     parser.add_argument("--export-run-id", default="latest", help="Export run id or 'latest'.")
+    parser.add_argument(
+        "--parquet-root",
+        type=Path,
+        help="Direct bout_kinematics_metrics table directory; bypasses export-root/run-id layout.",
+    )
+    parser.add_argument("--registry", type=Path, help="Palette registry SQLite path for export resolution.")
+    parser.add_argument("--collection-id", help="Resolve latest indexed export for this collection id.")
+    parser.add_argument("--collection-manifest-sha256", help="Resolve latest indexed export for this collection hash.")
+    parser.add_argument("--registry-status", default="active", help="Registry export status filter; use 'any' to disable.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--measurement-level", default=DEFAULT_MEASUREMENT_LEVEL)
     parser.add_argument("--dpi", type=int, default=180)
@@ -345,6 +407,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         export_root=args.export_root.expanduser().resolve(),
         export_run_id=args.export_run_id,
         output_dir=args.output_dir.expanduser().resolve(),
+        parquet_root=args.parquet_root,
+        registry_path=args.registry,
+        collection_id=args.collection_id,
+        collection_manifest_sha256=args.collection_manifest_sha256,
+        registry_status=str(args.registry_status),
         measurement_level=args.measurement_level,
         dpi=int(args.dpi),
     )

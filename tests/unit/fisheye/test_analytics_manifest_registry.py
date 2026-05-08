@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from fisheye.registry.db import Registry
+from fisheye.utils.analytics_export_resolution import resolve_latest_export_table
 from fisheye.utils.index_analytics_manifests import (
     index_collection_manifest,
     index_export_manifest,
@@ -164,6 +165,19 @@ def test_index_collection_and_export_manifest_tables(tmp_path: Path) -> None:
             ("recording_summary", 2, 1),
             ("swim_bout_metrics", 42, 1),
         ]
+
+        resolution = resolve_latest_export_table(
+            registry_path=tmp_path / "registry.sqlite",
+            collection_id="movement_bouts_test_v001",
+            table_name="swim_bout_metrics",
+        )
+        assert resolution.export_run_id == "run_test"
+        assert resolution.table_name == "swim_bout_metrics"
+        assert resolution.row_count == 42
+        assert resolution.part_count == 1
+        assert resolution.table_path == (
+            tmp_path / "exports" / "v1" / "swim_bout_metrics" / "export_run_id=run_test"
+        )
     finally:
         registry.close()
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from fisheye.registry.db import Registry
 from fisheye.utils.plot_cross_recording_bout_kinematics import plot_export
 
 
@@ -55,6 +56,42 @@ def _write_parquet_export(root: Path, export_run_id: str) -> None:
     )
 
 
+def _index_parquet_export(registry_path: Path, root: Path, export_run_id: str) -> None:
+    registry = Registry(registry_path)
+    try:
+        registry.upsert_analytics_collection(
+            collection_id="collection_test",
+            manifest_sha256="abc123",
+            manifest_path=root / "collection.manifest.json",
+            collection_name="Collection Test",
+            record_count=1,
+            included_record_count=1,
+        )
+        registry.upsert_analytics_export(
+            export_run_id=export_run_id,
+            collection_id="collection_test",
+            collection_manifest_sha256="abc123",
+            export_manifest_path=root / "v1" / "manifests" / f"export_run_id={export_run_id}.json",
+            output_root=root,
+            source_recording_count=1,
+            row_counts_by_table={"bout_kinematics_metrics": 3},
+            part_files_by_table={
+                "bout_kinematics_metrics": [
+                    str(
+                        root
+                        / "v1"
+                        / "bout_kinematics_metrics"
+                        / f"export_run_id={export_run_id}"
+                        / "part-00000.parquet"
+                    )
+                ]
+            },
+            created_at_utc="2026-05-08T00:00:00Z",
+        )
+    finally:
+        registry.close()
+
+
 def test_plot_cross_recording_bout_kinematics_writes_artifacts(tmp_path: Path) -> None:
     export_root = tmp_path / "exports"
     output_dir = tmp_path / "plots"
@@ -88,3 +125,34 @@ def test_plot_cross_recording_bout_kinematics_writes_artifacts(tmp_path: Path) -
 
     payload = json.loads((output_dir / "plot_summary.json").read_text())
     assert payload["source"] == "parquet:bout_kinematics_metrics"
+
+
+def test_plot_cross_recording_bout_kinematics_resolves_registry_export(tmp_path: Path) -> None:
+    export_root = tmp_path / "exports"
+    output_dir = tmp_path / "plots"
+    registry_path = tmp_path / "registry.sqlite"
+    _write_parquet_export(export_root, "run_test")
+    _index_parquet_export(registry_path, export_root, "run_test")
+
+    summary = plot_export(
+        export_root=tmp_path / "unused_exports",
+        export_run_id="latest",
+        output_dir=output_dir,
+        registry_path=registry_path,
+        collection_id="collection_test",
+        measurement_level="heading_smoothed",
+        dpi=60,
+    )
+
+    assert summary["export_run_id"] == "run_test"
+    assert summary["collection_id"] == "collection_test"
+    assert summary["registry_path"] == str(registry_path.resolve())
+    assert summary["row_count"] == 2
+    assert summary["table_path"] == str(
+        (
+            export_root
+            / "v1"
+            / "bout_kinematics_metrics"
+            / "export_run_id=run_test"
+        ).resolve()
+    )

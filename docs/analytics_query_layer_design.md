@@ -504,6 +504,11 @@ scripts/py -m fisheye.utils.query_analytics_exports \
   --table swim_bout_metrics \
   --latest \
   --format path
+
+scripts/py -m fisheye.utils.plot_cross_recording_bout_kinematics \
+  --registry /nvme1/palette_registry.sqlite \
+  --collection-id movement_bouts_20260128_all_analysis_v002 \
+  --output-dir /tmp/palette_lab_plots/latest_from_registry
 ```
 
 ## Data Versioning And DVC
