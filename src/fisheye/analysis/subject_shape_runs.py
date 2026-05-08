@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 from ..refinement.refine_eye_masks import _measure_mask
 from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..tune.refined_subject_mask_review import _compute_geometry_metrics, _compute_mask_metrics
@@ -1176,6 +1177,7 @@ def _prepare_subject_shape_run(
         },
     )
     write_stage_provenance(run_group, provenance)
+    write_best_effort_run_lineage_attrs(run_group, run_family="subject_shape_run")
     return run_group
 
 

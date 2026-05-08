@@ -34,6 +34,7 @@ from fisheye.analysis.megabouts_classifier_inputs import (
     build_megabouts_classifier_input_pack,
     summarize_input_pack,
 )
+from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
@@ -539,6 +540,7 @@ def write_megabouts_classification_run(
         },
     )
     write_stage_provenance(run_group, provenance)
+    write_best_effort_run_lineage_attrs(run_group, run_family="bout_classification_run")
     return resolved_run_name
 
 

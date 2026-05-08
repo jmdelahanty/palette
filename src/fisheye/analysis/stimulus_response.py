@@ -45,6 +45,7 @@ from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
 )
+from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.zarr.analysis_stage_arrays import validate_track_inputs
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_git_info
@@ -1697,6 +1698,7 @@ def write_stimulus_response_run(
     if archive_identity:
         run_attrs["archive_identity"] = archive_identity
     run_group.attrs.update(_json_safe_attrs(run_attrs))
+    write_best_effort_run_lineage_attrs(run_group, run_family="stimulus_response_run")
 
     # Global group.
     global_group = run_group.create_group("global")

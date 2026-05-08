@@ -459,7 +459,11 @@ Recommended derived fields:
 }
 ```
 
-Exports should store both `collection_id` and `manifest_sha256`.
+Exports should store both `collection_id` and `manifest_sha256`. The current
+cross-recording exporter does this when invoked with `--collection-manifest`:
+the export manifest stores the manifest path, collection ID, and manifest
+SHA-256, and every Parquet row includes `collection_id`,
+`collection_manifest_sha256`, and `collection_manifest_path`.
 
 This hash intentionally answers "which manifest file was used?" not "is this
 the same scientific source selection after storage moves or timestamp changes?"
@@ -538,7 +542,7 @@ Work through these before implementing manifest writers/export integration:
       and do not treat absolute filesystem paths as scientific identity.
 - [x] Define `source_fingerprint` and `lineage_hash` semantics per run family,
       especially for refined authoring revisions and derived runs.
-- [ ] Define immutable-manifest writer behavior: refuse overwrite by default,
+- [x] Define immutable-manifest writer behavior: refuse overwrite by default,
       create new collection IDs/version suffixes for changed selections, and
       keep export artifacts in sibling export manifests.
 - [x] Define production `latest` policy. Interactive selection may use

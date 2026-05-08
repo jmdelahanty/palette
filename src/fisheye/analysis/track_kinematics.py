@@ -38,6 +38,7 @@ from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
 )
+from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.utils.system import get_git_info, get_environment_info
 from fisheye.utils.zarr_io import open_zarr_root
@@ -2456,6 +2457,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "total_distance_mm": total_mm_online if pixel_to_mm_online is not None else float("nan"),
                         }
                     )
+                    write_best_effort_run_lineage_attrs(
+                        run_group,
+                        run_family="track_kinematics_run",
+                    )
 
                     console.print(
                         f"[green]✓[/green] Saved track kinematics run to [bold]analysis/track_kinematics_runs/online/{run_name}[/bold]"
@@ -2752,6 +2757,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "total_distance_px": total_px_offline,
                                 "total_distance_mm": total_mm_offline if pixel_to_mm is not None else float("nan"),
                             }
+                        )
+                        write_best_effort_run_lineage_attrs(
+                            offline_group,
+                            run_family="track_kinematics_run",
                         )
 
                         console.print(

@@ -38,6 +38,7 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.detect_reason_codec import REASON_BYTES_ENCODING, REASON_BYTES_MIN_WIDTH
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_EYE,
@@ -3062,6 +3063,7 @@ def run(args: argparse.Namespace) -> None:
         "frame_reason_counts": _count_reason_bits(frame_reason) if num_frames else {},
     }
     run_group.attrs["provenance"] = json.loads(json.dumps(provenance, default=_to_serializable))
+    write_best_effort_run_lineage_attrs(run_group, run_family="eye_angle_run")
 
     if not args.quiet:
         console.print(

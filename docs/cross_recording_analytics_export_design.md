@@ -795,10 +795,13 @@ lineage, and DuckDB queries Parquet.
 
 ### Phase 2. Export Manifest And Table Writers
 
-- Add a CLI such as `fisheye.utils.export_cross_recording_analytics`.
-- Accept explicit Zarr paths, recording roots, registry queries, or manifest
-  inputs.
-- Write partitioned Parquet datasets and a manifest.
+- `fisheye.utils.export_cross_recording_analytics` exists for the first scalar
+  table slice.
+- It accepts explicit Zarr paths, recording roots, or virtual collection
+  manifests. When `--collection-manifest` is used, included manifest records
+  provide the source Zarr list and the export records `collection_id` plus
+  `collection_manifest_sha256` in both the export manifest and exported rows.
+- It writes partitioned Parquet datasets and an export manifest.
 - Keep dependencies optional until the workflow is stable.
 
 ### Phase 3. Polars/DuckDB Smoke Queries

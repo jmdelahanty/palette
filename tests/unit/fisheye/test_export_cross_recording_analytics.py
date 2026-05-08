@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.utils.export_cross_recording_analytics import export_sources
+from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
 
 
 def _array(group, name: str, values) -> None:
@@ -196,15 +197,37 @@ def _read_dataset(output_root: Path, table: str, export_run_id: str):
     return pq.read_table(files).to_pylist()
 
 
+def _write_collection_manifest(path: Path, source: Path) -> dict:
+    payload = with_manifest_sha256(
+        {
+            "schema_id": "palette.virtual_collection_manifest",
+            "schema_version": 1,
+            "collection_id": "collection_test",
+            "collection_name": "Collection Test",
+            "records": [
+                {
+                    "recording_id": "recording_a",
+                    "locator_at_selection": {"uri": str(source.resolve())},
+                    "status": {"included": True},
+                }
+            ],
+        }
+    )
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    return payload
+
+
 def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) -> None:
     source = _make_source_zarr(tmp_path / "recording_a_analysis.zarr")
     output = tmp_path / "exports" / "palette_analytics"
+    collection_manifest = _write_collection_manifest(tmp_path / "collection.manifest.json", source)
 
     manifest = export_sources(
         [source],
         output_root=output,
         export_run_id="test_export",
         jobs=1,
+        collection_manifest_path=tmp_path / "collection.manifest.json",
     )
 
     assert manifest["row_counts_by_table"]["recording_summary"] == 1
@@ -218,9 +241,13 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     payload = json.loads(manifest_path.read_text())
     assert payload["source_recording_count"] == 1
     assert payload["row_counts_by_table"]["swim_bout_metrics"] == 2
+    assert payload["collection_manifest"]["collection_id"] == "collection_test"
+    assert payload["collection_manifest"]["manifest_sha256"] == collection_manifest["manifest_sha256"]
 
     step_rows = _read_dataset(output, "stimulus_steps", "test_export")
     protocol_hash = step_rows[0]["protocol_signature_hash"]
+    assert step_rows[0]["collection_id"] == "collection_test"
+    assert step_rows[0]["collection_manifest_sha256"] == collection_manifest["manifest_sha256"]
     assert step_rows[0]["derived_protocol_hash"] == protocol_hash
     assert step_rows[1]["protocol_signature_hash"] == protocol_hash
     assert step_rows[0]["protocol_mode_sequence"] == "MOVING_GRATING -> CONCENTRIC_GRATING"

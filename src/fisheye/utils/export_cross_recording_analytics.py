@@ -25,6 +25,7 @@ import numpy as np
 
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_git_info
+from fisheye.utils.virtual_collection_manifest import load_manifest, verify_manifest_sha256
 from fisheye.utils.zarr_io import open_zarr_root
 
 
@@ -63,6 +64,18 @@ class SourceExportResult:
     recording_id: str
     rows_by_table: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CollectionManifestSummary:
+    path: str
+    collection_id: str
+    collection_name: str | None
+    manifest_sha256: str
+    schema_id: str | None
+    schema_version: int | None
+    record_count: int
+    included_record_count: int
 
 
 def _utc_now_id() -> str:
@@ -148,6 +161,59 @@ def _json_dumps_safe(value: Any) -> str:
 def _hash_payload(payload: Mapping[str, Any]) -> str:
     blob = _json_dumps_safe(payload).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _load_collection_manifest(path: Path) -> dict[str, Any]:
+    manifest = load_manifest(path.expanduser())
+    if not verify_manifest_sha256(manifest):
+        raise ValueError(f"collection manifest hash check failed: {path}")
+    return manifest
+
+
+def _collection_manifest_summary(path: Path) -> CollectionManifestSummary:
+    manifest = _load_collection_manifest(path)
+    records = manifest.get("records", [])
+    if not isinstance(records, list):
+        records = []
+    included = [
+        record
+        for record in records
+        if isinstance(record, Mapping)
+        and isinstance(record.get("status"), Mapping)
+        and record["status"].get("included") is True
+    ]
+    return CollectionManifestSummary(
+        path=str(path.expanduser().resolve()),
+        collection_id=str(manifest["collection_id"]),
+        collection_name=(
+            str(manifest["collection_name"])
+            if manifest.get("collection_name") is not None
+            else None
+        ),
+        manifest_sha256=str(manifest["manifest_sha256"]),
+        schema_id=str(manifest.get("schema_id")) if manifest.get("schema_id") is not None else None,
+        schema_version=_safe_int(manifest.get("schema_version")),
+        record_count=len(records),
+        included_record_count=len(included),
+    )
+
+
+def _source_paths_from_collection_manifest(path: Path) -> list[Path]:
+    manifest = _load_collection_manifest(path)
+    paths: list[Path] = []
+    for record in manifest.get("records", []):
+        if not isinstance(record, Mapping):
+            continue
+        status = record.get("status")
+        if not isinstance(status, Mapping) or status.get("included") is not True:
+            continue
+        locator = record.get("locator_at_selection")
+        if not isinstance(locator, Mapping):
+            continue
+        uri = locator.get("uri")
+        if isinstance(uri, str) and uri:
+            paths.append(Path(uri).expanduser().resolve())
+    return paths
 
 
 def _parse_jsonish(value: Any) -> Any:
@@ -1033,7 +1099,12 @@ def _parse_tables(value: str | Sequence[str] | None) -> tuple[str, ...]:
 
 
 def _collect_sources(args: argparse.Namespace) -> list[Path]:
+    if args.collection_manifest is not None and (args.zarr or args.recordings_root is not None):
+        raise ValueError("--collection-manifest cannot be combined with --zarr or --recordings-root")
+
     sources: list[Path] = []
+    if args.collection_manifest is not None:
+        sources.extend(_source_paths_from_collection_manifest(Path(args.collection_manifest)))
     for path in args.zarr or []:
         sources.append(Path(path).expanduser().resolve())
     if args.recordings_root is not None:
@@ -1113,6 +1184,7 @@ def export_sources(
     jobs: int = 1,
     export_run_id: str | None = None,
     overwrite: bool = False,
+    collection_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     tables = _parse_tables(tables)
     output_root = Path(output_root).expanduser().resolve()
@@ -1120,6 +1192,11 @@ def export_sources(
     zarr_paths = [Path(path).expanduser().resolve() for path in zarr_paths]
     if not zarr_paths:
         raise ValueError("No analysis Zarr sources were provided or discovered.")
+    collection_summary = (
+        _collection_manifest_summary(Path(collection_manifest_path))
+        if collection_manifest_path is not None
+        else None
+    )
 
     results: list[SourceExportResult] = []
     if jobs <= 1:
@@ -1145,7 +1222,13 @@ def export_sources(
             for diag in result.diagnostics
         )
         for table in tables:
-            rows_by_table_source[table].append((result.zarr_path, result.rows_by_table.get(table, [])))
+            rows = result.rows_by_table.get(table, [])
+            if collection_summary is not None:
+                for row in rows:
+                    row["collection_id"] = collection_summary.collection_id
+                    row["collection_manifest_sha256"] = collection_summary.manifest_sha256
+                    row["collection_manifest_path"] = collection_summary.path
+            rows_by_table_source[table].append((result.zarr_path, rows))
 
     output_root.mkdir(parents=True, exist_ok=True)
     row_counts: dict[str, int] = {}
@@ -1176,9 +1259,26 @@ def export_sources(
         "row_counts_by_table": row_counts,
         "part_files_by_table": part_files,
         "diagnostics": diagnostics,
+        "collection_manifest": (
+            {
+                "path": collection_summary.path,
+                "collection_id": collection_summary.collection_id,
+                "collection_name": collection_summary.collection_name,
+                "manifest_sha256": collection_summary.manifest_sha256,
+                "schema_id": collection_summary.schema_id,
+                "schema_version": collection_summary.schema_version,
+                "record_count": collection_summary.record_count,
+                "included_record_count": collection_summary.included_record_count,
+            }
+            if collection_summary is not None
+            else None
+        ),
         "export_parameters": {
             "jobs": jobs,
             "overwrite": overwrite,
+            "collection_manifest_path": (
+                collection_summary.path if collection_summary is not None else None
+            ),
         },
     }
     manifest_dir = output_root / "v1" / "manifests"
@@ -1199,6 +1299,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--zarr", action="append", type=Path, help="Analysis Zarr path. May be repeated.")
     parser.add_argument("--recordings-root", type=Path, help="Root to scan recursively for *_analysis.zarr archives.")
+    parser.add_argument(
+        "--collection-manifest",
+        type=Path,
+        help=(
+            "Virtual collection manifest. Included records provide the source Zarr list, "
+            "and collection_id/manifest_sha256 are written to export metadata and rows."
+        ),
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -1229,6 +1337,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         jobs=max(1, int(args.jobs)),
         export_run_id=args.export_run_id,
         overwrite=bool(args.overwrite),
+        collection_manifest_path=args.collection_manifest,
     )
     print(f"export_run_id\t{manifest['export_run_id']}")
     print(f"manifest\t{manifest['manifest_path']}")

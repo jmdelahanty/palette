@@ -1,7 +1,7 @@
 # Analytics Query Layer Design
 <!-- design-meta
 status: draft
-last_updated: 2026-05-05
+last_updated: 2026-05-08
 -->
 
 Purpose: clarify how Palette should support biological cross-recording queries
@@ -198,8 +198,9 @@ The export manifest should record:
 
 - export run ID and creation time
 - Palette git commit and dirty state
-- registry path
-- selection query or manifest
+- registry path, selection query, or virtual collection manifest path
+- collection ID and collection manifest SHA-256 when a virtual collection is
+  used
 - source Zarr paths and source run IDs
 - table schema versions
 - row counts
@@ -537,7 +538,7 @@ The first exporter slice is implemented as:
 
 ```bash
 scripts/py -m fisheye.utils.export_cross_recording_analytics \
-  --recordings-root /nvme1/recordings \
+  --collection-manifest /nvme1/exports/palette_analytics/manifests/collections/movement_bouts_20260128_all_analysis_v002.manifest.json \
   --output-root /nvme1/exports/palette_analytics \
   --jobs 4
 ```
@@ -557,6 +558,13 @@ per-recording Parquet part files under
 `<output-root>/v1/manifests/`. Generated export IDs are prefixed with `run_`
 so hive-partition readers such as Polars treat them as strings instead of
 trying to parse compact UTC timestamps as dates.
+
+When `--collection-manifest` is provided, included manifest records provide the
+source Zarr list. The export manifest records the collection manifest path,
+`collection_id`, and `manifest_sha256`; every exported row also carries
+`collection_id`, `collection_manifest_sha256`, and
+`collection_manifest_path`. This makes Parquet rows traceable back to the exact
+immutable selection document used for the export.
 
 `bout_kinematics_metrics` is additive and reads existing Zarr
 `analysis/bout_kinematics_runs/<run>/<measurement_level>/per_bout_metrics`

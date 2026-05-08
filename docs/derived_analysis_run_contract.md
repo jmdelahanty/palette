@@ -54,6 +54,14 @@ Every current analysis writer should record:
 - `source_refs`: dictionary of exact input runs and paths
 - `parameters`: serialized user-visible parameters or config
 - `provenance`: standard Palette provenance payload when available
+- `source_fingerprint`, `source_lineage_hash`, and `lineage_hash`:
+  run-level SHA-256 aliases over the meaningful source/method/schema/parameter
+  state when available
+- `fingerprint_status`: `complete`, `best_effort`, or `missing`; current v1
+  derived writers use `best_effort` until all refined authoring revisions and
+  source-content hashes are complete
+- `lineage_payload_json`: strict canonical JSON payload used to compute the
+  run-level fingerprint
 
 Recommended `row_axis` values:
 
@@ -202,6 +210,16 @@ Existing analysis outputs already follow this direction:
 New analysis families should follow the same `analysis/<analysis_type>_runs`
 placement unless there is a clear reason they are an authority rather than a
 derived product.
+
+Run-level lineage fingerprint attrs are intentionally narrower than full
+provenance. They exclude output path, run name, timestamps, hostname, scheduler,
+wall time, and other operational details that do not change scientific outputs.
+They include source refs/fingerprints, schema, method, method version,
+parameters, and code revision when those are exposed by the writer. This makes
+cross-recording manifests and Parquet exports able to compare selected runs
+without parsing every full provenance payload. See
+[`virtual_collection_manifest_schema.md`](virtual_collection_manifest_schema.md)
+for collection/export use of these fingerprints.
 
 ## Swim Bout Segmentation vs Per-Bout Metrics
 

@@ -25,6 +25,7 @@ from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
 )
+from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
@@ -2891,6 +2892,7 @@ def compute_and_save_bout_kinematics(
         },
     )
     write_stage_provenance(run_group, provenance)
+    write_best_effort_run_lineage_attrs(run_group, run_family="bout_kinematics_run")
 
     if write_visualizations:
         write_bout_kinematics_visualization_artifacts(

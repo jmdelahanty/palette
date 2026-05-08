@@ -57,6 +57,7 @@ import numpy as np
 from scipy import signal
 
 from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
+from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
@@ -2172,6 +2173,7 @@ def detect_and_save_bouts(
         },
     ))
     write_stage_provenance(run_group, provenance)
+    write_best_effort_run_lineage_attrs(run_group, run_family="swim_bout_run")
 
     # Save each speed level's bouts and statistics in subgroups
     for level in speed_levels:
