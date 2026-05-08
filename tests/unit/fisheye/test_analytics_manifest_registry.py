@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fisheye.registry.db import Registry
 from fisheye.utils.analytics_export_resolution import resolve_latest_export_table
+from fisheye.utils.check_analytics_exports import main as check_main
 from fisheye.utils.index_analytics_manifests import (
     index_collection_manifest,
     index_export_manifest,
@@ -128,6 +129,15 @@ def _write_export_manifest(path: Path, collection_manifest: dict, collection_pat
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
+
+
+def _touch_indexed_parts(export_manifest: dict) -> None:
+    part_files = export_manifest["part_files_by_table"]
+    for files in part_files.values():
+        for filename in files:
+            path = Path(filename)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"PAR1")
 
 
 def test_index_collection_and_export_manifest_tables(tmp_path: Path) -> None:
@@ -287,3 +297,65 @@ def test_index_and_query_analytics_manifests_cli(tmp_path: Path, capsys) -> None
         == 0
     )
     assert capsys.readouterr().out.strip() == path_lines[0]
+
+
+def test_check_analytics_exports_inventory_and_file_validation(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    collection_path = tmp_path / "collection.manifest.json"
+    collection = _write_collection_manifest(collection_path)
+    export_path = tmp_path / "exports" / "v1" / "manifests" / "export_run_id=run_test.json"
+    export_manifest = _write_export_manifest(export_path, collection, collection_path)
+
+    assert index_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--export-manifest",
+            str(export_path),
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert check_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--collection-id",
+            "movement_bouts_test_v001",
+            "--format",
+            "json",
+        ]
+    ) == 0
+    inventory = json.loads(capsys.readouterr().out)
+    assert {row["table_name"] for row in inventory} == {"recording_summary", "swim_bout_metrics"}
+    assert {row["check_status"] for row in inventory} == {"not_checked"}
+
+    assert check_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--collection-id",
+            "movement_bouts_test_v001",
+            "--check-files",
+            "--format",
+            "json",
+        ]
+    ) == 1
+    missing = json.loads(capsys.readouterr().out)
+    assert {row["check_status"] for row in missing} == {"missing_table_dir"}
+
+    _touch_indexed_parts(export_manifest)
+    assert check_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--collection-id",
+            "movement_bouts_test_v001",
+            "--check-files",
+            "--format",
+            "json",
+        ]
+    ) == 0
+    checked = json.loads(capsys.readouterr().out)
+    assert {row["check_status"] for row in checked} == {"ok"}
+    assert {row["missing_part_count"] for row in checked} == {0}

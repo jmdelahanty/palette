@@ -511,6 +511,12 @@ scripts/py -m fisheye.utils.resolve_analytics_export \
   --table bout_kinematics_metrics \
   --format json
 
+scripts/py -m fisheye.utils.check_analytics_exports \
+  --registry /nvme1/palette_registry.sqlite \
+  --collection-id movement_bouts_20260128_all_analysis_v002 \
+  --check-files \
+  --format table
+
 scripts/py -m fisheye.utils.plot_cross_recording_bout_kinematics \
   --registry /nvme1/palette_registry.sqlite \
   --collection-id movement_bouts_20260128_all_analysis_v002 \
