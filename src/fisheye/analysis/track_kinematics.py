@@ -2114,7 +2114,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--swim-bout-run",
-        help="analysis/swim_bout_runs/<run> to mirror into the offline track kinematics run (default: latest).",
+        help=(
+            "Legacy compatibility only: analysis/swim_bout_runs/<run> to mirror into "
+            "the offline track kinematics run (default: latest). New consumers "
+            "should read authoritative bouts from analysis/swim_bout_runs via swim_bout_io."
+        ),
     )
     parser.add_argument(
         "--chaser-index",

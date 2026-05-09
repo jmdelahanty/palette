@@ -1261,7 +1261,13 @@ Each track stores the ordered samples for that ID:
 - `cumulative_path_distance_px`, `cumulative_path_distance_mm`: Cumulative gap-aware path distance
 - `second_indices`, `speed_per_second_px`, `speed_per_second_mm`, `heading_per_second_degrees`, `heading_per_second_resultant`
 - `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
-- `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `path_length_mm`, `net_displacement_mm`, `mean_speed_mm_s`, `peak_detection_signal_mm_s`, `peak_physical_speed_mm_s`, …) with subgroup attrs recording the source swim-bout run. Treat this as a convenience mirror; `analysis/swim_bout_runs` remains the authoritative segmentation surface.
+- `swim_bouts/`: legacy compatibility mirror of selected
+  `analysis/swim_bout_runs` bout rows (e.g., `bout_id`, `start_time_s`,
+  `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `path_length_mm`,
+  `net_displacement_mm`, `mean_speed_mm_s`, `peak_detection_signal_mm_s`,
+  `peak_physical_speed_mm_s`, ...). Treat this as a deprecated convenience
+  copy only; new consumers should resolve authoritative bout boundaries and
+  metrics from `analysis/swim_bout_runs` through `swim_bout_io.py`.
 
 **Preferred v2 movement layout**:
 The flat speed arrays plus `speed_derivatives/` hierarchy are retained for

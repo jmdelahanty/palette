@@ -435,7 +435,10 @@ them.
    inter-bout intervals must match within existing numeric tolerances.
 6. Update Marimo, exporters, and `bout_kinematics.py` to use resolver-level
    semantics.
-7. After readers are migrated, make compact v2 the default writer for promoted
+7. Do not migrate `track_kinematics/tracks/id_*/swim_bouts` mirrors into compact
+   v2. Those mirrors are legacy compatibility copies only; authoritative bout
+   consumers should resolve `analysis/swim_bout_runs` through `swim_bout_io.py`.
+8. After readers are migrated, make compact v2 the default writer for promoted
    accepted runs. Keep broad sweeps in scratch outputs or Parquet sidecars.
 
 ## Validation Plan

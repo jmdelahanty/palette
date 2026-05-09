@@ -90,14 +90,19 @@ instead of the older ambiguous `distance = mean_speed * duration` estimate.
 Path length is summed from `track_kinematics` frame path-distance arrays and is
 not back-estimated from speed when those source arrays are unavailable.
 
-The second-priority correctness issue remains swim-bout mirroring. Mirrored
-`swim_bouts/` groups inside a `track_kinematics` run should not be treated as
-authoritative unless the mirrored bout run proves both:
+The second-priority correctness issue remains swim-bout mirroring. Decision
+2026-05-08: mirrored `swim_bouts/` groups inside a `track_kinematics` run are a
+legacy compatibility surface only. New consumers should not read them as an
+authoritative bout source, and compact swim-bout v2 work should not migrate or
+expand this mirror unless a live external consumer proves it is required.
+
+If legacy mirrors are read at all, they should only be trusted when the mirrored
+bout run proves both:
 
 - the same source `track_kinematics` run
 - the same destination `track_id`
 
-Until that is enforced, `analysis/swim_bout_runs/<run>/` should be treated as
+`analysis/swim_bout_runs/<run>/`, resolved through `swim_bout_io.py`, remains
 the canonical bout artifact.
 
 That proposal keeps `track_kinematics` as the generic motion producer and makes
@@ -790,10 +795,9 @@ Current behavior:
 This is only safe if the selected swim-bout run truly corresponds to that exact
 track for every destination track, which the current code does not prove.
 
-That means the mirrored per-track `swim_bouts/` subgroups are currently best
-understood as convenience copies, not trustworthy track-specific lineage.
-
-This should not be treated as final architecture.
+That means the mirrored per-track `swim_bouts/` subgroups are convenience
+copies, not trustworthy track-specific lineage. They are deprecated for new
+readers and should not be treated as final architecture.
 
 ## Where the Stack Is Strong Today
 
@@ -840,11 +844,11 @@ Reason:
 
 ### 2. Stop treating mirrored swim-bout data as authoritative
 
-Either:
-
-- remove the automatic mirror for now, or
-- redesign it so a swim-bout run must explicitly bind to one exact
-  `track_kinematics` run and one exact `track_id`
+Resolved 2026-05-08: keep the automatic mirror as legacy compatibility only,
+but do not migrate it into the compact swim-bout v2 design. New readers should
+resolve `analysis/swim_bout_runs` through `swim_bout_io.py`. If the mirror is
+kept long term, it must be explicitly marked as deprecated and must never be the
+source of truth for bout boundaries or bout-level metrics.
 
 ### 3. Decide how turning metrics should be summarized downstream
 
@@ -884,7 +888,8 @@ But it is not yet stable enough to treat as finished architecture.
 The next work should not start by redesigning everything. It should:
 
 1. fix downstream distance handling so consumers preserve gap-aware movement
-2. stop or redesign unsafe bout mirroring
+2. keep unsafe bout mirroring legacy-only and route new consumers to
+   `swim_bout_io.py`
 3. add first-class turning summaries for stimulus-response use
 4. collapse the two bout paths into a clearer producer/consumer split
 5. move future skeleton/body-specific metrics to `pose_kinematics_runs` or
