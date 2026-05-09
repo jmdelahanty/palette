@@ -13,8 +13,7 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import zarr
 
-from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
-from fisheye.analysis.detect_bouts_multi_level import normalize_speed_level
+from fisheye.analysis.swim_bout_io import load_swim_bout_tables
 from fisheye.utils.zarr_io import open_zarr_root
 
 DEFAULT_TAIL_POSTURE_VIEW_FAMILY = "megabouts_compatible"
@@ -142,35 +141,6 @@ def _resolve_track_run(
         raise ValueError(f"Track kinematics run {run_name!r} not found under scope {scope!r}.")
     path = f"analysis/track_kinematics_runs/{scope}/{resolved}"
     return parent[scope][resolved], str(resolved), path, str(scope)
-
-
-def _resolve_swim_bout_level(
-    root: zarr.Group,
-    run_name: str,
-    *,
-    speed_level: str,
-) -> tuple[zarr.Group, zarr.Group, str, str, str]:
-    analysis = _require_group(root, "analysis")
-    parent = _require_group(analysis, "swim_bout_runs")
-    spec = str(run_name or "latest").strip().strip("/")
-    if spec.startswith("analysis/swim_bout_runs/"):
-        parts = spec.split("/")
-        resolved = parts[2] if len(parts) >= 3 else ""
-    else:
-        resolved = parent.attrs.get("latest") if spec == "latest" else spec
-    if not resolved or resolved not in parent:
-        raise ValueError(f"Swim-bout run {run_name!r} not found.")
-
-    run = parent[resolved]
-    level_spec = str(speed_level or "default").strip()
-    if level_spec in {"default", "latest"}:
-        level = str(run.attrs.get("default_level") or "speed_filtered")
-    else:
-        level = normalize_speed_level(level_spec)
-    if level not in run:
-        raise ValueError(f"Speed level {level!r} not found in swim-bout run {resolved!r}.")
-    path = f"analysis/swim_bout_runs/{resolved}/{level}"
-    return run, run[level], str(resolved), str(level), path
 
 
 def _frame_to_index(frames: np.ndarray) -> dict[int, int]:
@@ -359,11 +329,15 @@ def build_megabouts_classifier_input_pack(
         track_kinematics_run,
         track_scope=track_scope,
     )
-    _, bout_level, bout_run_name, resolved_level, bout_level_path = _resolve_swim_bout_level(
+    requested_speed_level = None if str(speed_level or "default").strip() in {"default", "latest"} else speed_level
+    swim_payload = load_swim_bout_tables(
         root,
-        swim_bout_run,
-        speed_level=speed_level,
+        run_name=swim_bout_run,
+        speed_level=requested_speed_level,
     )
+    bout_run_name = swim_payload.run_name
+    resolved_level = swim_payload.signal.speed_level
+    bout_level_path = swim_payload.level_path
 
     track_group, track_arrays, track_refs, fps = _load_track_arrays(
         track_run,
@@ -372,7 +346,7 @@ def build_megabouts_classifier_input_pack(
         heading_source=str(heading_source),
     )
     if fps <= 0.0:
-        fps = float(bout_level.attrs.get("fps", 0.0))
+        fps = float(swim_payload.signal_attrs.get("fps") or swim_payload.run_attrs.get("fps", 0.0))
     if fps <= 0.0:
         raise ValueError("Unable to resolve positive fps from track run or swim-bout level attrs.")
     window_frames = (
@@ -402,7 +376,7 @@ def build_megabouts_classifier_input_pack(
             f"{MEGABOUTS_TAIL_SEGMENT_COUNT} tail-angle channels, got {angle_count}."
         )
 
-    bouts, _ = load_structured_dataset(bout_level, "bouts")
+    bouts = swim_payload.bouts
     start_frames = _resolve_start_frames(bouts, fps)
     end_frames = _resolve_end_frames(bouts, fps)
     bout_ids = _resolve_bout_ids(bouts)
@@ -488,6 +462,7 @@ def build_megabouts_classifier_input_pack(
         "tail_valid": f"{posture_path}/valid",
         "track_kinematics_run": track_path,
         **track_refs,
+        "swim_bout_run": swim_payload.run_path,
         "swim_bout_level": bout_level_path,
         "bouts": f"{bout_level_path}/bouts",
     }
@@ -500,6 +475,8 @@ def build_megabouts_classifier_input_pack(
         "track_id": int(track_id),
         "swim_bout_run": bout_run_name,
         "speed_level": resolved_level,
+        "swim_bout_candidate_id": int(swim_payload.candidate.candidate_id),
+        "swim_bout_signal_id": int(swim_payload.signal.signal_id),
         "heading_source": str(heading_source),
         "fps": float(fps),
         "bout_duration_s": float(window_frames) / float(fps),

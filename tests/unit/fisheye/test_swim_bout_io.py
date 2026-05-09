@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
 from fisheye.analysis.swim_bout_io import (
+    SwimBoutIOError,
     discover_swim_bout_candidates,
     load_default_swim_bout_tables,
     load_swim_bout_tables,
@@ -162,6 +164,58 @@ def test_load_swim_bout_tables_can_select_non_default_speed_level() -> None:
     assert payload.signal.speed_level == "speed_filtered"
     assert payload.signal.role == "physical_estimator"
     assert payload.bouts["bout_id"].tolist() == [100, 101]
+
+
+def test_latest_fallback_is_consistent_between_discovery_and_loading() -> None:
+    root = _build_v1_swim_bout_root()
+    parent = root["analysis"]["swim_bout_runs"]
+    del parent.attrs["latest"]
+    earlier = parent.create_group("bouts_aaa")
+    earlier.attrs.update(
+        {
+            "source_track_kinematics_run": "tk_hyst4_low2_s005",
+            "track_id": 0,
+            "detection_method": "threshold",
+            "default_level": "speed_filtered",
+        }
+    )
+    filtered = earlier.create_group("speed_filtered")
+    write_columnar_dataset(filtered, "bouts", _bout_records(offset=200))
+
+    candidates = discover_swim_bout_candidates(root)
+    payload = load_default_swim_bout_tables(root)
+
+    assert candidates[0].run_name == "bouts_canary"
+    assert candidates[0].is_latest is True
+    assert payload.run_name == "bouts_canary"
+
+
+def test_load_swim_bout_tables_requires_bouts_table() -> None:
+    root = zarr.group()
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("swim_bout_runs")
+    parent.attrs["latest"] = "bouts_missing"
+    run = parent.create_group("bouts_missing")
+    run.attrs["default_level"] = "speed_filtered"
+    run.create_group("speed_filtered")
+
+    with pytest.raises(SwimBoutIOError, match="Missing required swim-bout table"):
+        load_default_swim_bout_tables(root)
+
+
+def test_discovery_counts_structured_array_bouts_without_n_bouts_attr() -> None:
+    root = zarr.group()
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("swim_bout_runs")
+    parent.attrs["latest"] = "bouts_structured"
+    run = parent.create_group("bouts_structured")
+    run.attrs["default_level"] = "speed_filtered"
+    filtered = run.create_group("speed_filtered")
+    filtered.create_array("bouts", data=_bout_records(), overwrite=True)
+
+    candidates = discover_swim_bout_candidates(root)
+
+    assert candidates[0].signals[0].n_bouts == 2
 
 
 def test_cross_recording_export_uses_swim_bout_resolver() -> None:

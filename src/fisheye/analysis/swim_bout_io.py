@@ -147,8 +147,11 @@ def discover_swim_bout_candidates(
         return []
 
     latest = parent.attrs.get("latest")
+    group_names = _group_names(parent)
+    fallback_latest = group_names[-1] if group_names else None
+    latest_name = str(latest) if isinstance(latest, str) and latest else fallback_latest
     candidates: list[SwimBoutCandidate] = []
-    for run_name in _group_names(parent):
+    for run_name in group_names:
         run_group = parent[run_name]
         attrs = _attrs_dict(run_group)
         if not _matches_track(attrs, track_run_name=track_run_name, track_id=track_id):
@@ -156,7 +159,7 @@ def discover_swim_bout_candidates(
         candidate = _candidate_from_v1_group(
             run_group,
             run_name=str(run_name),
-            is_latest=str(latest) == str(run_name),
+            is_latest=str(latest_name) == str(run_name),
         )
         if candidate.signals:
             candidates.append(candidate)
@@ -225,7 +228,7 @@ def load_swim_bout_tables(
     signal = _resolve_signal(candidate, signal_id=signal_id, speed_level=speed_level)
     level_group = _require_child(run_group, signal.speed_level) if signal.speed_level else run_group
 
-    bouts = _load_structured_or_empty(level_group, "bouts")
+    bouts = _load_structured_or_empty(level_group, "bouts", required=True)
     peak_events = _load_structured_or_empty(level_group, "peak_events")
     intervals = _load_structured_or_empty(level_group, "inter_bout_intervals")
     global_metrics = _load_structured_or_empty(level_group, "global_metrics")
@@ -386,13 +389,25 @@ def _default_level_for_run(run_group: zarr.Group) -> str | None:
     return None
 
 
-def _load_structured_or_empty(group: zarr.Group, name: str) -> np.ndarray:
+def _load_structured_or_empty(
+    group: zarr.Group,
+    name: str,
+    *,
+    required: bool = False,
+) -> np.ndarray:
+    node = _get_child(group, name)
+    if node is None:
+        if required:
+            raise SwimBoutIOError(f"Missing required swim-bout table {name!r}.")
+        return np.zeros(0, dtype=[])
     try:
         return load_structured_dataset(group, name)[0]
-    except Exception:
-        node = _get_child(group, name)
-        if node is not None:
-            return _read_simple_column_group_or_empty(node)
+    except Exception as exc:
+        records = _read_simple_column_group_or_empty(node)
+        if records.dtype.names:
+            return records
+        if required:
+            raise SwimBoutIOError(f"Unable to read required swim-bout table {name!r}.") from exc
         return np.zeros(0, dtype=[])
 
 
@@ -449,6 +464,12 @@ def _bout_count(level_group: zarr.Group) -> int:
     bouts = _get_child(level_group, "bouts")
     if bouts is None:
         return 0
+    shape = getattr(bouts, "shape", None)
+    if shape is not None:
+        try:
+            return int(shape[0])
+        except Exception:
+            pass
     field_names = list(getattr(bouts, "attrs", {}).get("field_names", []))
     for name in field_names:
         if name not in bouts:

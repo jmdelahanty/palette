@@ -51,6 +51,7 @@ from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
+from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.stimulus_response_grating import (
     _MOVING_GRATING,
     _grating_direction_vector,
@@ -752,16 +753,17 @@ class BoutEntry:
 
 
 def _read_first_bout_column(
-    bouts_group: zarr.Group,
+    bouts: np.ndarray,
     names: Sequence[str],
     *,
     dtype: np.dtype | type = np.float64,
 ) -> np.ndarray:
     """Read the first available bout column from current or legacy schemas."""
 
+    field_names = bouts.dtype.names or ()
     for name in names:
-        if name in bouts_group:
-            return bouts_group[name][:].astype(dtype)
+        if name in field_names:
+            return np.asarray(bouts[name]).astype(dtype)
     expected = ", ".join(names)
     raise ValueError(f"Bouts group is missing expected column; tried: {expected}")
 
@@ -772,9 +774,10 @@ def load_bout_data(
     bout_run: Optional[str] = None,
     console: Optional[Console] = None,
 ) -> Tuple[Dict[int, List[BoutEntry]], str]:
-    """Load swim bouts from detect_bouts_multi_level output.
+    """Load swim bouts from the selected logical swim-bout candidate.
 
-    Reads from the ``default_level`` speed subgroup (typically speed_smoothed).
+    Reads through ``swim_bout_io`` so callers do not depend on the physical
+    ``analysis/swim_bout_runs/<run>/<speed_level>`` layout.
 
     Returns
     -------
@@ -785,41 +788,30 @@ def load_bout_data(
     """
     console = console or Console()
 
-    bout_group, run_name = resolve_zarr_run(
-        root, "analysis/swim_bout_runs", run_name=bout_run,
-    )
+    payload = load_default_swim_bout_tables(root, run_name=bout_run or "latest")
+    run_name = payload.run_name
+    speed_level = payload.signal.speed_level
+    track_id = payload.candidate.track_id
+    if track_id is None:
+        track_id = 0
 
-    default_level = str(bout_group.attrs.get("default_level", "speed_smoothed"))
-    track_id = int(bout_group.attrs.get("track_id", 0))
-
-    if default_level not in bout_group:
-        raise ValueError(
-            f"Bout run '{run_name}' missing expected level group '{default_level}'"
-        )
-
-    level_group = bout_group[default_level]
-    if "bouts" not in level_group:
-        console.print(f"  [yellow]No bouts group in {default_level}; returning empty.[/yellow]")
-        return {}, run_name
-
-    bouts_group = level_group["bouts"]
-
-    # Read columnar arrays.
-    bout_ids = bouts_group["bout_id"][:] if "bout_id" in bouts_group else np.array([], dtype=np.int32)
+    bouts = payload.bouts
+    field_names = bouts.dtype.names or ()
+    bout_ids = np.asarray(bouts["bout_id"]) if "bout_id" in field_names else np.array([], dtype=np.int32)
     n_bouts = len(bout_ids)
 
     if n_bouts == 0:
         return {}, run_name
 
-    start_frames = bouts_group["start_frame"][:].astype(np.int64)
-    end_frames = bouts_group["end_frame"][:].astype(np.int64)
-    durations = bouts_group["duration_s"][:].astype(np.float64)
+    start_frames = np.asarray(bouts["start_frame"]).astype(np.int64)
+    end_frames = np.asarray(bouts["end_frame"]).astype(np.int64)
+    durations = np.asarray(bouts["duration_s"]).astype(np.float64)
     mean_speeds = _read_first_bout_column(
-        bouts_group,
+        bouts,
         ("mean_speed_mm_s", "mean_speed"),
     )
     peak_physical_speeds = _read_first_bout_column(
-        bouts_group,
+        bouts,
         ("peak_physical_speed_mm_s", "peak_speed_mm_s", "peak_speed"),
     )
 
@@ -837,7 +829,7 @@ def load_bout_data(
         ))
 
     console.print(
-        f"  Loaded {n_bouts} bout(s) from swim_bout_runs/{run_name}/{default_level}/"
+        f"  Loaded {n_bouts} bout(s) from swim_bout_runs/{run_name}/{speed_level}/"
     )
     return bouts_by_fish, run_name
 

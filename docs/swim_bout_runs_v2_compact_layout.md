@@ -13,7 +13,9 @@ before a compact v2 writer exists. The cross-recording analytics exporter and
 `visualization/interactive_track_kinematics.py`, which backs the Marimo track
 kinematics explorer, also uses the resolver for swim-bout option discovery and
 payload loading. `analysis/plot_track_kinematics.py` uses the same resolver for
-static swim-bout overlay span loading.
+static swim-bout overlay span loading. `analysis/stimulus_response.py` and
+`analysis/megabouts_classifier_inputs.py` also resolve swim-bout source tables
+through this layer.
 
 ## Motivation
 
