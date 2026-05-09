@@ -180,6 +180,9 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     }
     assert run.attrs["source_refs"]["zarr_path"] == str(zarr_path)
     assert run.attrs["source_refs"]["source_track_id"] == 0
+    assert run.attrs["source_refs"]["source_swim_bout_candidate_id"] == 0
+    assert run.attrs["source_refs"]["source_swim_bout_signal_id"] == 0
+    assert run.attrs["source_refs"]["source_swim_bout_signal_role"] == "physical_estimator"
     assert run.attrs["source_refs"]["source_heading_arrays"] == {
         "heading_smoothed": (
             "analysis/track_kinematics_runs/offline/tk_1/tracks/id_0/"

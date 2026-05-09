@@ -8,7 +8,8 @@ archives should be migrated or rewritten as part of this design slice.
 Implementation note, 2026-05-08: the first compatibility resolver now lives in
 `src/fisheye/analysis/swim_bout_io.py`. It reads current v1 hierarchical runs
 and exposes normalized candidate/signal/table objects so consumers can migrate
-before a compact v2 writer exists.
+before a compact v2 writer exists. The cross-recording analytics exporter and
+`bout_kinematics.py` now use this resolver for swim-bout table loading.
 
 ## Motivation
 

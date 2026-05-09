@@ -21,6 +21,7 @@ from fisheye.analysis.chaser_state_interpolator import (
     write_columnar_dataset,
 )
 from fisheye.analysis.detect_bouts_multi_level import normalize_speed_level
+from fisheye.analysis.swim_bout_io import load_swim_bout_tables
 from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
@@ -561,29 +562,6 @@ def _resolve_track_run(
 
     run_path = f"analysis/track_kinematics_runs/{scope}/{run_name}"
     return parent[scope][run_name], str(run_name), run_path, str(scope)
-
-
-def _resolve_swim_bout_run(
-    root: zarr.Group,
-    swim_bout_run: str,
-    speed_level: str,
-) -> tuple[zarr.Group, zarr.Group, str, str, str]:
-    parent = root.get("analysis/swim_bout_runs")
-    if parent is None:
-        raise ValueError("No analysis/swim_bout_runs group found.")
-
-    run_name = str(swim_bout_run).strip()
-    if run_name == "latest":
-        run_name = parent.attrs.get("latest")
-    if not run_name or run_name not in parent:
-        raise ValueError(f"Swim-bout run {swim_bout_run!r} not found.")
-
-    level = normalize_speed_level(speed_level)
-    run_group = parent[run_name]
-    if level not in run_group:
-        raise ValueError(f"Speed level {level!r} not found in swim-bout run {run_name!r}.")
-    level_path = f"analysis/swim_bout_runs/{run_name}/{level}"
-    return parent, run_group, str(run_name), level, level_path
 
 
 def _resolve_eye_angle_run(
@@ -2579,19 +2557,23 @@ def compute_and_save_bout_kinematics(
         for heading_level in normalized_heading_levels
     }
 
-    _, swim_run_group, swim_run_name, source_speed_level, swim_level_path = _resolve_swim_bout_run(
+    swim_payload = load_swim_bout_tables(
         root,
-        swim_bout_run,
-        speed_level,
+        run_name=swim_bout_run,
+        speed_level=speed_level,
     )
-    source_track_id = swim_run_group.attrs.get("track_id")
+    swim_run_name = swim_payload.run_name
+    source_speed_level = swim_payload.signal.speed_level
+    swim_level_path = swim_payload.level_path
+    swim_run_attrs = swim_payload.run_attrs
+    source_track_id = swim_run_attrs.get("track_id")
     if source_track_id is not None and int(source_track_id) != int(track_id):
         raise ValueError(
             f"Swim-bout run {swim_run_name!r} was derived from track_id={source_track_id}, "
             f"not requested track_id={track_id}."
         )
 
-    source_track_run = swim_run_group.attrs.get("source_track_kinematics_run")
+    source_track_run = swim_run_attrs.get("source_track_kinematics_run")
     if source_track_run is not None and str(source_track_run).strip("/") not in {
         track_run_name,
         f"{resolved_scope}/{track_run_name}",
@@ -2602,15 +2584,12 @@ def compute_and_save_bout_kinematics(
             f"does not match selected {track_run_path!r}."
         )
 
-    swim_level_group = swim_run_group[source_speed_level]
-    bouts, bout_attrs = load_structured_dataset(swim_level_group, "bouts")
+    bouts = swim_payload.bouts
     peak_events: Optional[np.ndarray] = None
-    peak_event_attrs: Mapping[str, Any] = {}
-    if "peak_events" in swim_level_group:
-        loaded_peak_events, loaded_peak_event_attrs = load_structured_dataset(swim_level_group, "peak_events")
+    loaded_peak_events = swim_payload.peak_events
+    if len(loaded_peak_events):
         if len(loaded_peak_events) == len(bouts) and _records_align_by_bout_id(bouts, loaded_peak_events):
             peak_events = loaded_peak_events
-            peak_event_attrs = loaded_peak_event_attrs
 
     if "analysis" not in root:
         analysis = root.create_group("analysis")
@@ -2642,6 +2621,9 @@ def compute_and_save_bout_kinematics(
         "source_swim_bout_run": swim_run_name,
         "source_swim_bout_speed_level": source_speed_level,
         "source_swim_bout_path": swim_level_path,
+        "source_swim_bout_candidate_id": int(swim_payload.candidate.candidate_id),
+        "source_swim_bout_signal_id": int(swim_payload.signal.signal_id),
+        "source_swim_bout_signal_role": swim_payload.signal.role,
         "source_track_id": int(track_id),
         "source_heading_arrays": source_heading_arrays,
         "source_position_arrays": source_position_arrays,
@@ -2659,7 +2641,7 @@ def compute_and_save_bout_kinematics(
             frames=frames,
         )
         source_refs.update(eye_source_refs)
-    source_bout_field_names = list(bout_attrs.get("field_names", bouts.dtype.names or []))
+    source_bout_field_names = list(bouts.dtype.names or [])
     source_interpolated_threshold_fields = [
         field
         for field in (
@@ -2671,7 +2653,7 @@ def compute_and_save_bout_kinematics(
         )
         if field in source_bout_field_names
     ]
-    source_peak_event_fields = list(peak_event_attrs.get("field_names", peak_events.dtype.names if peak_events is not None else []))
+    source_peak_event_fields = list(peak_events.dtype.names if peak_events is not None else [])
     parameters = {
         "default_heading_level": default_heading_level,
         "heading_levels": list(normalized_heading_levels),
