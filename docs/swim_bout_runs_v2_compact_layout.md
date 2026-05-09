@@ -10,6 +10,9 @@ Implementation note, 2026-05-08: the first compatibility resolver now lives in
 and exposes normalized candidate/signal/table objects so consumers can migrate
 before a compact v2 writer exists. The cross-recording analytics exporter and
 `bout_kinematics.py` now use this resolver for swim-bout table loading.
+`visualization/interactive_track_kinematics.py`, which backs the Marimo track
+kinematics explorer, also uses the resolver for swim-bout option discovery and
+payload loading.
 
 ## Motivation
 

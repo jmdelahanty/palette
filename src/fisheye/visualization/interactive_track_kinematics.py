@@ -11,6 +11,11 @@ import numpy as np
 import pandas as pd
 import zarr
 
+from fisheye.analysis.swim_bout_io import (
+    SwimBoutIOError,
+    discover_swim_bout_candidates as discover_swim_bout_candidates_resolved,
+    load_swim_bout_tables,
+)
 from fisheye.utils.zarr_io import open_zarr_root
 
 
@@ -507,25 +512,6 @@ def _spans_from_structured_bouts(bouts: np.ndarray, fps: Optional[float]) -> np.
     return _empty_spans()
 
 
-def _load_bout_spans_from_group(group: zarr.Group, *, fps: Optional[float] = None) -> np.ndarray:
-    if "bouts" in group:
-        from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
-
-        bouts, _attrs = load_structured_dataset(group, "bouts")
-        return _spans_from_structured_bouts(bouts, fps)
-    if "start_time_s" in group and "end_time_s" in group:
-        return _spans_from_start_stop(
-            np.asarray(group["start_time_s"][:], dtype=np.float64),
-            np.asarray(group["end_time_s"][:], dtype=np.float64),
-        )
-    if "start_frame" in group and "end_frame" in group and fps:
-        return _spans_from_start_stop(
-            np.asarray(group["start_frame"][:], dtype=np.float64) / float(fps),
-            np.asarray(group["end_frame"][:], dtype=np.float64) / float(fps),
-        )
-    return _empty_spans()
-
-
 def _load_structured_or_empty(group: zarr.Group, name: str) -> np.ndarray:
     from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 
@@ -684,20 +670,6 @@ def _track_option_label(
     if is_latest:
         pieces.append("latest")
     return f"{label} | " + " | ".join(pieces)
-
-
-def _bout_count(level_group: zarr.Group) -> int:
-    if "bouts" not in level_group:
-        return 0
-    node = level_group["bouts"]
-    if isinstance(node, zarr.Array):
-        return int(node.shape[0])
-    if isinstance(node, zarr.Group):
-        fields = list(node.attrs.get("field_names", []))
-        for field in fields:
-            if field in node:
-                return int(node[field].shape[0])
-    return 0
 
 
 def _columnar_row_count(group: zarr.Group, dataset_name: str) -> int:
@@ -1149,79 +1121,64 @@ def discover_swim_bout_run_options(
     """Return swim-bout runs derived from the selected track-kinematics run."""
 
     root = open_zarr_root(Path(zarr_path), mode="r")
-    parent = root.get("analysis/swim_bout_runs")
-    if parent is None:
-        return []
-
     track_run_name = _normalize_path(track_run_path).split("/")[-1]
-    latest = parent.attrs.get("latest")
-    speed_levels = (
-        "speed_filtered",
-        "speed_exponential",
-        "speed_smoothed",
-        "speed_raw",
-        "speed_averaged",
+    candidates = discover_swim_bout_candidates_resolved(
+        root,
+        track_run_name=track_run_name,
+        track_id=track_id,
     )
     options: list[SwimBoutRunOption] = []
-    for run_name in _group_keys(parent):
-        run_group = parent[run_name]
-        source_run = run_group.attrs.get("source_track_kinematics_run")
-        if source_run is None or not _run_names_match(source_run, track_run_name):
-            continue
-        source_track_id = _safe_int(run_group.attrs.get("track_id"))
-        if source_track_id is None or source_track_id != int(track_id):
-            continue
-
-        default_level = _speed_level_key(str(run_group.attrs.get("default_level", "speed_smoothed")))
-        if default_level not in run_group:
-            default_level = "speed_smoothed" if "speed_smoothed" in run_group else ""
+    for candidate in candidates:
+        default_level = candidate.default_speed_level or ""
         if not default_level:
             continue
 
         n_bouts_by_level = {
-            level: _bout_count(run_group[level])
-            for level in speed_levels
-            if level in run_group
+            signal.speed_level: signal.n_bouts
+            for signal in candidate.signals
         }
-        method = str(run_group.attrs.get("detection_method", "unknown"))
-        threshold = _safe_float(run_group.attrs.get("threshold_mm"))
-        exponential_tau_s = _safe_float(run_group.attrs.get("exponential_tau_s"))
-        exponential_source_level = run_group.attrs.get("exponential_source_level")
+        method = candidate.detection_method
+        threshold = _safe_float(candidate.attrs.get("threshold_mm"))
+        exponential_tau_s = _safe_float(candidate.attrs.get("exponential_tau_s"))
+        exponential_source_level = candidate.attrs.get("exponential_source_level")
         exponential_source_level = (
             str(exponential_source_level) if exponential_source_level is not None else None
         )
-        is_latest = str(latest) == str(run_name)
-        ordered_levels = [default_level] + [
-            level for level in speed_levels if level != default_level
+        ordered_signals = [
+            signal for signal in candidate.signals if signal.speed_level == default_level
+        ] + [
+            signal for signal in candidate.signals if signal.speed_level != default_level
         ]
-        for level in ordered_levels:
+        for signal in ordered_signals:
+            level = signal.speed_level
             if level not in n_bouts_by_level:
                 continue
+            signal_source = exponential_source_level or signal.source_level
             speed_level = level.replace("speed_", "", 1)
             options.append(
                 SwimBoutRunOption(
-                    run_name=run_name,
+                    run_name=candidate.run_name,
                     label=_swim_option_label(
-                        run_name=run_name,
+                        run_name=candidate.run_name,
                         speed_level=speed_level,
                         is_default_level=level == default_level,
                         detection_method=method,
                         threshold_mm=threshold,
                         exponential_tau_s=exponential_tau_s,
-                        exponential_source_level=exponential_source_level,
+                        exponential_source_level=signal_source,
                         count=n_bouts_by_level[level],
-                        is_latest=is_latest,
+                        is_latest=candidate.is_latest,
                     ),
                     default_level=default_level,
                     speed_level=speed_level,
-                    source_track_kinematics_run=str(source_run) if source_run is not None else None,
-                    track_id=source_track_id,
+                    source_track_kinematics_run=candidate.source_track_kinematics_run,
+                    track_id=candidate.track_id,
                     detection_method=method,
                     threshold_mm=threshold,
                     exponential_tau_s=exponential_tau_s,
-                    exponential_source_level=exponential_source_level,
+                    exponential_source_level=signal_source,
                     n_bouts_by_level=n_bouts_by_level,
-                    is_latest=is_latest,
+                    is_latest=candidate.is_latest,
                 )
             )
 
@@ -1419,23 +1376,6 @@ def _run_names_match(source_run: object, spec_run: object) -> bool:
     return source == spec or source.endswith(f"/{spec}") or spec.endswith(f"/{source}")
 
 
-def _swim_bout_run_matches_track(run_group: zarr.Group, spec: Mapping[str, Any]) -> bool:
-    source_run = run_group.attrs.get("source_track_kinematics_run")
-    if source_run is not None and not _run_names_match(source_run, spec.get("run_name")):
-        return False
-
-    source_track_id = run_group.attrs.get("track_id")
-    spec_track_id = spec.get("track_id")
-    if source_track_id is not None and spec_track_id is not None:
-        try:
-            if int(source_track_id) != int(spec_track_id):
-                return False
-        except (TypeError, ValueError):
-            return False
-
-    return True
-
-
 def _load_global_swim_bout_payload(
     root: zarr.Group,
     *,
@@ -1443,77 +1383,55 @@ def _load_global_swim_bout_payload(
     requested_run: Optional[str],
     speed_level: Optional[str],
 ) -> _SwimBoutPayload:
-    swim_parent = root.get("analysis/swim_bout_runs")
-    if swim_parent is None:
-        return _empty_swim_bout_payload()
-
     run_name = requested_run
-    if not run_name or run_name.lower() == "latest":
-        latest = swim_parent.attrs.get("latest")
-        if isinstance(latest, str) and latest:
-            run_name = latest
-    if not run_name or run_name.lower() == "none" or run_name not in swim_parent:
+    if isinstance(run_name, str) and run_name.lower() == "none":
         return _empty_swim_bout_payload()
 
-    run_group = swim_parent[run_name]
-    if not _swim_bout_run_matches_track(run_group, spec):
+    try:
+        swim_payload = load_swim_bout_tables(
+            root,
+            run_name=run_name or "latest",
+            speed_level=speed_level,
+        )
+    except SwimBoutIOError:
         return _empty_swim_bout_payload()
 
-    speed_levels = (
-        "speed_raw",
-        "speed_filtered",
-        "speed_smoothed",
-        "speed_averaged",
-        "speed_exponential",
-    )
-    available_speed_levels = tuple(level for level in speed_levels if level in run_group)
-    is_hierarchical = bool(available_speed_levels)
-    method = run_group.attrs.get("detection_method", "unknown")
-
-    if is_hierarchical:
-        default_level = str(run_group.attrs.get("default_level", "speed_smoothed"))
-        level_key = _speed_level_key(speed_level, default_level)
-        if level_key not in run_group and default_level in run_group:
-            level_key = default_level
-        if level_key not in run_group:
+    candidate = swim_payload.candidate
+    source_run = candidate.source_track_kinematics_run
+    if source_run is not None and not _run_names_match(source_run, spec.get("run_name")):
+        return _empty_swim_bout_payload()
+    source_track_id = candidate.track_id
+    spec_track_id = spec.get("track_id")
+    if source_track_id is not None and spec_track_id is not None:
+        try:
+            if int(source_track_id) != int(spec_track_id):
+                return _empty_swim_bout_payload()
+        except (TypeError, ValueError):
             return _empty_swim_bout_payload()
-        level_group = run_group[level_key]
-        records = _load_structured_or_empty(level_group, "bouts")
-        peak_events = _load_structured_or_empty(level_group, "peak_events")
-        fps = float(run_group.attrs["fps"]) if "fps" in run_group.attrs else None
-        records = _augment_bouts_with_peak_events(records, peak_events, fps=fps)
-        spans = _load_bout_spans_from_group(
-            level_group,
-            fps=fps,
-        )
-        intervals = _load_structured_or_empty(level_group, "inter_bout_intervals")
-        series = {}
-        if "detection_signal_mm_s" in level_group:
-            series["detection_signal_mm_s"] = np.asarray(level_group["detection_signal_mm_s"][:], dtype=np.float64)
-        elif level_key == "speed_exponential" and "speed_exponential_mm" in level_group:
-            series["speed_exponential_mm"] = np.asarray(level_group["speed_exponential_mm"][:], dtype=np.float64)
-        label = f"{run_name} ({level_key}) ({method})"
-        return _SwimBoutPayload(
-            spans=spans,
-            records=records,
-            inter_bout_intervals=intervals,
-            series=series,
-            label=label,
-            source="analysis_swim_bout_runs",
-        )
 
-    records = _load_structured_or_empty(run_group, "bouts")
-    spans = _load_bout_spans_from_group(
-        run_group,
-        fps=float(run_group.attrs["fps"]) if "fps" in run_group.attrs else None,
-    )
-    intervals = _load_structured_or_empty(run_group, "inter_bout_intervals")
-    label = f"{run_name} ({method})"
+    records = swim_payload.bouts
+    peak_events = swim_payload.peak_events
+    fps_value = swim_payload.run_attrs.get("fps")
+    fps = None
+    try:
+        fps = float(fps_value) if fps_value is not None else None
+    except (TypeError, ValueError):
+        fps = None
+    records = _augment_bouts_with_peak_events(records, peak_events, fps=fps)
+    spans = _spans_from_structured_bouts(records, fps)
+    intervals = swim_payload.inter_bout_intervals
+    series = {
+        name: np.asarray(values, dtype=np.float64)
+        for name, values in swim_payload.series.items()
+        if np.asarray(values).ndim == 1
+    }
+    method = candidate.detection_method
+    label = f"{candidate.run_name} ({swim_payload.signal.speed_level}) ({method})"
     return _SwimBoutPayload(
         spans=spans,
         records=records,
         inter_bout_intervals=intervals,
-        series={},
+        series=series,
         label=label,
         source="analysis_swim_bout_runs",
     )
