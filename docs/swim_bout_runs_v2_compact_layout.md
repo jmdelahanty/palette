@@ -25,6 +25,26 @@ when invoked with `--layout compact_v2`. The CLI default is still
 `--layout hierarchical_v1`; compact writing is an opt-in canary path until v1/v2
 equivalence checks and external reader support are complete.
 
+Canary result, 2026-05-09: the feeding archive
+`2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr` was written with a
+compact-v2 copy of
+`bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098`.
+The compact run
+`bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_canary`
+matched the hierarchical default signal exactly through the reusable resolver
+audit utility: 68/68 checks passed, 519 default-signal bouts matched, and max
+numeric drift was 0. The matching v1 run used 493 `zarr.json` metadata files,
+while the compact-v2 run used 145 (`70.6%` fewer). After validation, the
+archive's `swim_bout_runs.attrs["latest"]` was restored to the original
+hierarchical run.
+
+Additional archive audit, 2026-05-09: the same compact-v2 audit was run on
+`2026-01-28T19-22-28Z_arena_1_DefaultScreen_analysis.zarr` and
+`2026-01-28T23-15-10Z_arena_3_Feeding_analysis.zarr`. Both archives passed
+68/68 resolver checks with max numeric drift 0. Each audit compact run used 145
+`zarr.json` metadata files versus 493 for its matching hierarchical run, and
+each archive's `latest` pointer was restored to the original hierarchical run.
+
 ## Motivation
 
 The object-count audit of `/nvme1/recordings` on 2026-05-08 found
@@ -459,8 +479,10 @@ them.
 - Unit-test v2 native reader output from a minimal compact fixture.
 - Unit-test that `speed_exponential` maps to `role="detector_response"` and an
   estimator signal ID rather than being mislabeled as physical speed.
-- On the feeding canary, run v1-v2 equivalence checks for the current default
-  candidate.
+- Use `fisheye.utils.compare_swim_bout_layouts` for v1-v2 equivalence checks
+  on canary archives. This utility loads both layouts through
+  `swim_bout_io.py`, compares the logical resolver payload, and reports
+  per-run object counts.
 - Re-run `fisheye.utils.audit_zarr_group_counts` on the canary and record the
   object-count delta.
 
