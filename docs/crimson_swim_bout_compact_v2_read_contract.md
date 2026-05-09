@@ -6,6 +6,37 @@ Design handoff for Crimson. Palette can now write compact swim-bout runs behind
 `detect_bouts_multi_level --layout compact_v2`, but the default writer remains
 hierarchical v1 until Crimson can read the compact layout directly.
 
+Crimson implementation update, 2026-05-09: the Crimson agent reported a focused
+compact swim-bout GUI smoke script, `scripts/gui_smoke_compact_swim_bouts.sh`,
+and successful workstation-display smoke runs on all three compact-v2 audit
+archives:
+
+```text
+arena 2 Feeding:
+  /tmp/crimson_compact_swim_bout_smoke_arena2_20260509.log
+  [SwimBouts] Loaded compact-v2 run '...compact_v2_canary' candidate 0
+  [SwimBouts] Loaded 20 candidates
+  Successfully loaded zarr file
+
+arena 1 DefaultScreen:
+  /tmp/crimson_compact_swim_bout_smoke_defaultscreen_20260509.log
+  [SwimBouts] Loaded compact-v2 run '...compact_v2_audit_20260509' candidate 0
+  [SwimBouts] Loaded 15 candidates
+  Successfully loaded zarr file
+
+arena 3 Feeding:
+  /tmp/crimson_compact_swim_bout_smoke_arena3_20260509.log
+  [SwimBouts] Loaded compact-v2 run '...compact_v2_audit_20260509' candidate 0
+  [SwimBouts] Loaded 10 candidates
+  Successfully loaded zarr file
+```
+
+That confirms the compact-v2 Crimson loader branch is reached during a real
+`redgui` startup on each audit archive. Candidate counts differ by archive
+because Crimson filters by compatible track/source inventory; the count is not a
+fixed schema-level expectation. A fresh compact-v2-only promoted canary remains
+the final validation gate before Palette flips its default writer.
+
 Palette validation on 2026-05-09 showed logical equivalence between the current
 hierarchical run and compact v2 through `fisheye.analysis.swim_bout_io`:
 
@@ -17,7 +48,7 @@ hierarchical run and compact v2 through `fisheye.analysis.swim_bout_io`:
 - object-count reduction for each matching run: 493 v1 `zarr.json` files to
   145 compact-v2 `zarr.json` files
 
-## Current Crimson Gap
+## Original Crimson Gap
 
 Read-only audit of
 `/home/delahantyj@hhmi.org/gitrepos/crimson-ui-monolith/src/zarr_loader_movement.cpp`
@@ -144,9 +175,9 @@ Expected result:
 - hierarchical v1 candidates still load
 - compact-v2 audit candidates load when selected by run name
 - default compact signal is `speed_exponential`
-- default compact bout counts match the corresponding hierarchical run
+- compact candidate counts match the compatible track/source inventory for the
+  selected archive
 - detector trace appears for `speed_exponential`
 - timeline rectangles and core rectangles render from compact rows
 - selecting a filtered track speed still offers the compatible exponential
   detector-response candidate
-

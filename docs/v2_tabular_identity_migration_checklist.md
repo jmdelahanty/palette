@@ -223,6 +223,12 @@ Recommended fingerprint model:
       stale repair is implemented. Otherwise explicitly document rerun-only.
 - [ ] Keep stale state separate from review state.
 - [ ] Project source revision/stale state into registry/query surfaces.
+- [x] Add a read-only derived-analysis staleness audit CLI:
+      `scripts/py -m fisheye.utils.audit_analysis_staleness <archive>.zarr`.
+      The current implementation resolves same-archive `source_refs` and common
+      `source_*_run` attrs, checks source fingerprint mismatches, reports
+      explicit source stale payloads, and warns on unverifiable lineage or
+      non-latest sources.
 
 ### Phase 5: Compact Analysis Layouts
 

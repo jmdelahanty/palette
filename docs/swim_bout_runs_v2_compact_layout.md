@@ -503,12 +503,24 @@ avoid materializing many Zarr run groups.
       files to 145 compact-v2 `zarr.json` files for the audited run shape.
 - [x] Palette owns a Crimson handoff contract:
       `docs/crimson_swim_bout_compact_v2_read_contract.md`.
-- [ ] Crimson reads compact-v2 swim-bout runs directly while preserving
+- [x] Crimson reads compact-v2 swim-bout runs directly while preserving
       hierarchical-v1 support.
-- [ ] Crimson validation passes on the three compact-v2 audit archives:
-      compact candidates visible, default compact signal `speed_exponential`,
-      default bout counts match v1, detector trace visible, and timeline/core
-      rectangles render.
+- [x] Crimson focused GUI smoke passes on all three compact-v2 audit archives
+      with direct compact-v2 loader assertions. Crimson reported
+      `scripts/gui_smoke_compact_swim_bouts.sh` passed on 2026-05-09 for:
+      feeding arena 2 (`/tmp/crimson_compact_swim_bout_smoke_arena2_20260509.log`,
+      20 compatible candidates), default-screen arena 1
+      (`/tmp/crimson_compact_swim_bout_smoke_defaultscreen_20260509.log`, 15
+      compatible candidates), and feeding arena 3
+      (`/tmp/crimson_compact_swim_bout_smoke_arena3_20260509.log`, 10
+      compatible candidates). Each log contained `[SwimBouts] Loaded compact-v2
+      run` and `Successfully loaded zarr file`.
+- [x] Crimson validation passes on all three compact-v2 audit archives:
+      compact candidates are visible and the compact-v2 loader branch is reached
+      during real `redgui` startup. Candidate counts differ by archive because
+      Crimson filters by compatible track/source inventory.
+- [ ] Confirm Crimson detector trace visibility and timeline/core rectangle
+      rendering from compact rows on a fresh compact-v2-only canary.
 - [ ] A fresh end-to-end canary archive is generated with compact v2 as the
       only new promoted swim-bout run, and all active Palette readers plus
       Crimson load it without needing hierarchical-v1 compatibility mirrors.

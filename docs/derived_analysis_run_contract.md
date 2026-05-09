@@ -221,6 +221,35 @@ without parsing every full provenance payload. See
 [`virtual_collection_manifest_schema.md`](virtual_collection_manifest_schema.md)
 for collection/export use of these fingerprints.
 
+## Read-Only Staleness Audit
+
+Use `fisheye.utils.audit_analysis_staleness` to check whether existing derived
+analysis runs still point at resolvable, fingerprint-compatible sources:
+
+```bash
+scripts/py -m fisheye.utils.audit_analysis_staleness <archive>.zarr
+scripts/py -m fisheye.utils.audit_analysis_staleness /nvme1/recordings --recursive --json
+```
+
+The audit is read-only. It resolves same-archive paths from `source_refs` and
+common `source_*_run` attrs, compares any recorded source fingerprints against
+the current source group's `lineage_hash`/`source_lineage_hash`, reports explicit
+`*_stale.state="stale"` payloads on sources, and warns when a source does not
+match its parent `latest` selection. Pass `--require-latest-sources` when a
+workflow treats non-latest upstream refs as stale rather than merely historical.
+
+Statuses:
+
+- `fresh`: all discovered sources resolve and fingerprint checks match.
+- `stale`: a source is missing, explicitly stale, has a fingerprint mismatch,
+  or is non-latest when `--require-latest-sources` is active.
+- `warning`: lineage is incomplete or a source is not latest in non-strict mode.
+- `no_sources`: no machine-readable source references were discovered.
+
+This tool does not replace writer-side source revision capture. It is a gate and
+diagnostic surface for finding derived runs that need regeneration or better
+lineage metadata.
+
 ## Swim Bout Segmentation vs Per-Bout Metrics
 
 `analysis/swim_bout_runs/<run>/<speed_level>/` is the bout segmentation
