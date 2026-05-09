@@ -5,8 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import zarr
+from rich.console import Console
 
 from fisheye.analysis import plot_track_kinematics as mod
+from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.shared.plot_artifacts import INTERACTIVE_SPEC_SCHEMA_ID, PNG_ARTIFACT_SCHEMA_ID
 
 
@@ -91,6 +93,110 @@ def _make_track_kinematics_archive(tmp_path: Path) -> Path:
     track.attrs["transition_reason_codes"] = {"0": "ok", "1": "first_sample", "2": "frame_gap"}
     track.attrs["sample_reason_codes"] = {"0": "ok", "4": "keypoint_failed"}
     return zarr_path
+
+
+def _add_swim_bout_run(
+    zarr_path: Path,
+    *,
+    run_name: str = "swim_bout_1",
+    default_level: str = "speed_filtered",
+    levels: tuple[str, ...] = ("speed_filtered",),
+    use_frame_fields: bool = False,
+) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a")
+    parent = root["analysis"].create_group("swim_bout_runs")
+    parent.attrs["latest"] = run_name
+    run = parent.create_group(run_name)
+    run.attrs.update(
+        {
+            "default_level": default_level,
+            "detection_method": "threshold",
+            "fps": 100.0,
+            "source_track_kinematics_run": "track_kinematics_1",
+            "track_id": 0,
+        }
+    )
+    if use_frame_fields:
+        bouts = np.asarray(
+            [(1, 10, 20), (2, 30, 45)],
+            dtype=[("bout_id", "i4"), ("start_frame", "i8"), ("end_frame", "i8")],
+        )
+    else:
+        bouts = np.asarray(
+            [(1, 0.10, 0.20), (2, 0.30, 0.45)],
+            dtype=[("bout_id", "i4"), ("start_time_s", "f8"), ("end_time_s", "f8")],
+        )
+    for level in levels:
+        level_group = run.create_group(level)
+        write_columnar_dataset(level_group, "bouts", bouts)
+
+
+def _add_flat_legacy_swim_bout_run(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a")
+    parent = root["analysis"].create_group("swim_bout_runs")
+    parent.attrs["latest"] = "legacy_bouts"
+    run = parent.create_group("legacy_bouts")
+    run.attrs.update({"detection_method": "legacy", "fps": 100.0})
+    bouts = np.asarray(
+        [(1, 5, 15)],
+        dtype=[("bout_id", "i4"), ("start_frame", "i8"), ("end_frame", "i8")],
+    )
+    write_columnar_dataset(run, "bouts", bouts)
+
+
+def test_resolve_swim_bout_spans_uses_resolver_for_selected_level(tmp_path: Path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    _add_swim_bout_run(
+        zarr_path,
+        levels=("speed_filtered", "speed_smoothed"),
+    )
+    root = zarr.open_group(str(zarr_path), mode="r")
+
+    spans, label = mod.resolve_swim_bout_spans(
+        root,
+        "latest",
+        Console(record=True),
+        speed_level="smoothed",
+    )
+
+    assert spans == [(0.10, 0.20), (0.30, 0.45)]
+    assert label == "swim_bout_1 (speed_smoothed) (threshold)"
+
+
+def test_resolve_swim_bout_spans_falls_back_to_default_and_converts_frames(
+    tmp_path: Path,
+) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    _add_swim_bout_run(zarr_path, use_frame_fields=True)
+    root = zarr.open_group(str(zarr_path), mode="r")
+    console = Console(record=True)
+
+    spans, label = mod.resolve_swim_bout_spans(
+        root,
+        "swim_bout_1",
+        console,
+        speed_level="smoothed",
+    )
+
+    assert spans == [(0.10, 0.20), (0.30, 0.45)]
+    assert label == "swim_bout_1 (speed_filtered) (threshold)"
+    assert "using default 'speed_filtered'" in console.export_text()
+
+
+def test_resolve_swim_bout_spans_keeps_flat_legacy_support(tmp_path: Path) -> None:
+    zarr_path = _make_track_kinematics_archive(tmp_path)
+    _add_flat_legacy_swim_bout_run(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="r")
+
+    spans, label = mod.resolve_swim_bout_spans(
+        root,
+        "latest",
+        Console(record=True),
+        speed_level="smoothed",
+    )
+
+    assert spans == [(0.05, 0.15)]
+    assert label == "legacy_bouts (legacy)"
 
 
 def test_plot_track_kinematics_writes_png_and_interactive_spec_artifacts(tmp_path: Path) -> None:

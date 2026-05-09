@@ -21,6 +21,7 @@ import numpy as np
 import zarr
 from rich.console import Console
 
+from fisheye.analysis.swim_bout_io import SwimBoutIOError, load_swim_bout_tables
 from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
@@ -223,60 +224,38 @@ def resolve_swim_bout_spans(
     console: Console,
     speed_level: str = "smoothed",
 ) -> Tuple[List[Tuple[float, float]], Optional[str]]:
-    swim_parent = root.get("analysis/swim_bout_runs")
-    if swim_parent is None:
-        raise ValueError("No swim_bout_runs group found under analysis/.")
-
-    run_name = requested
-    if not run_name or run_name.lower() == "latest":
-        run_name = swim_parent.attrs.get("latest")
-    if not run_name:
-        raise ValueError("No swim_bout_runs entries available.")
-    if run_name not in swim_parent:
-        raise ValueError(f"Swim bout run '{run_name}' not found.")
-
-    run_group = swim_parent[run_name]
-
-    # Detect hierarchical structure
-    speed_levels = ['speed_raw', 'speed_filtered', 'speed_smoothed', 'speed_averaged']
-    is_hierarchical = all(level in run_group for level in speed_levels)
-
-    if is_hierarchical:
-        # Map user-friendly names to internal names
-        level_map = {
-            'raw': 'speed_raw',
-            'filtered': 'speed_filtered',
-            'smoothed': 'speed_smoothed',
-            'averaged': 'speed_averaged',
-        }
-        level_key = level_map.get(speed_level, f"speed_{speed_level}")
-
-        if level_key not in run_group:
-            # Fall back to default level
-            default_level = run_group.attrs.get('default_level', 'speed_smoothed')
+    requested_level = f"speed_{speed_level}" if not str(speed_level).startswith("speed_") else str(speed_level)
+    used_level_fallback = False
+    try:
+        swim_payload = load_swim_bout_tables(root, run_name=requested or "latest", speed_level=speed_level)
+    except SwimBoutIOError as exc:
+        if "Speed level" not in str(exc):
+            raise ValueError(str(exc)) from exc
+        try:
+            swim_payload = load_swim_bout_tables(root, run_name=requested or "latest")
+        except SwimBoutIOError as fallback_exc:
+            raise ValueError(str(fallback_exc)) from fallback_exc
+        if swim_payload.signal.speed_level:
+            used_level_fallback = True
             console.print(
-                f"[yellow]Warning:[/yellow] Speed level '{level_key}' not found, using default '{default_level}'"
+                f"[yellow]Warning:[/yellow] Speed level '{requested_level}' not found, "
+                f"using default '{swim_payload.signal.speed_level}'"
             )
-            level_key = default_level
 
-        level_group = run_group[level_key]
-        if "bouts" not in level_group:
-            raise ValueError(f"Speed level '{level_key}' in run '{run_name}' lacks 'bouts' dataset.")
-
-        # Load bouts using load_structured_dataset to handle both columnar and legacy formats
-        from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
-        bout_array, _ = load_structured_dataset(level_group, 'bouts')
-        label_suffix = f" ({level_key})"
+    run_name = swim_payload.run_name
+    source_speed_level = swim_payload.signal.speed_level
+    if source_speed_level:
+        if requested_level != source_speed_level and not used_level_fallback:
+            console.print(
+                f"[yellow]Warning:[/yellow] Speed level '{requested_level}' not found, "
+                f"using default '{source_speed_level}'"
+            )
+        label_suffix = f" ({source_speed_level})"
     else:
-        # Legacy flat structure
-        if "bouts" not in run_group:
-            raise ValueError(f"Swim bout run '{run_name}' lacks 'bouts' dataset.")
-        from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
-        bout_array, _ = load_structured_dataset(run_group, 'bouts')
         label_suffix = ""
 
-    # Extract detection method for label
-    method = run_group.attrs.get('detection_method', 'unknown')
+    bout_array = swim_payload.bouts
+    method = swim_payload.candidate.detection_method
     full_label = f"{run_name}{label_suffix} ({method})"
 
     spans: List[Tuple[float, float]] = []
@@ -289,7 +268,7 @@ def resolve_swim_bout_spans(
         ends = bout_array["end_time_s"]
     elif "start_frame" in names and "end_frame" in names:
         fps: Optional[float] = None
-        provenance = run_group.attrs.get("provenance")
+        provenance = swim_payload.run_attrs.get("provenance")
         if isinstance(provenance, dict):
             params = provenance.get("parameters") or {}
             if isinstance(params, dict):
@@ -298,7 +277,7 @@ def resolve_swim_bout_spans(
                     fps = float(fps_val)
         if not fps:
             # Try to get FPS from run-level attrs
-            fps = run_group.attrs.get('fps')
+            fps = swim_payload.run_attrs.get('fps')
         if not fps:
             raise ValueError(
                 f"Swim bout run '{run_name}' lacks time fields and FPS information required to convert frames."

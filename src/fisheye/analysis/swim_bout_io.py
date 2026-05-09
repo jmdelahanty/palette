@@ -223,7 +223,7 @@ def load_swim_bout_tables(
             f"Candidate id {candidate_id!r} not found in v1 swim-bout run {resolved_name!r}."
         )
     signal = _resolve_signal(candidate, signal_id=signal_id, speed_level=speed_level)
-    level_group = _require_child(run_group, signal.speed_level)
+    level_group = _require_child(run_group, signal.speed_level) if signal.speed_level else run_group
 
     bouts = _load_structured_or_empty(level_group, "bouts")
     peak_events = _load_structured_or_empty(level_group, "peak_events")
@@ -232,7 +232,7 @@ def load_swim_bout_tables(
     bout_points = _load_structured_or_empty(level_group, "bout_points")
     series = _load_signal_series(level_group)
     run_path = f"analysis/swim_bout_runs/{resolved_name}"
-    level_path = f"{run_path}/{signal.speed_level}"
+    level_path = f"{run_path}/{signal.speed_level}" if signal.speed_level else run_path
     return SwimBoutTables(
         run_name=resolved_name,
         run_path=run_path,
@@ -265,6 +265,8 @@ def _candidate_from_v1_group(
             if signal.speed_level == default_level:
                 default_signal_id = signal.signal_id
                 break
+    if default_signal_id is None and len(signals) == 1 and signals[0].speed_level == "":
+        default_signal_id = signals[0].signal_id
     return SwimBoutCandidate(
         run_name=run_name,
         candidate_id=0,
@@ -314,6 +316,21 @@ def _signals_from_v1_group(
                 attrs=attrs,
             )
         )
+    if not signals and "bouts" in run_group:
+        attrs = _attrs_dict(run_group)
+        signals.append(
+            SwimBoutSignalVariant(
+                run_name=run_name,
+                signal_id=0,
+                speed_level="",
+                signal_name="legacy",
+                role="physical_estimator",
+                source_level=None,
+                is_default=True,
+                n_bouts=_bout_count(run_group),
+                attrs=attrs,
+            )
+        )
     return tuple(signals)
 
 
@@ -335,6 +352,8 @@ def _resolve_signal(
         for signal in candidate.signals:
             if signal.speed_level == level:
                 return signal
+        if len(candidate.signals) == 1 and candidate.signals[0].speed_level == "":
+            return candidate.signals[0]
         raise SwimBoutIOError(
             f"Speed level {level!r} not found in swim-bout run {candidate.run_name!r}."
         )
@@ -362,6 +381,8 @@ def _default_level_for_run(run_group: zarr.Group) -> str | None:
     for level in SPEED_LEVEL_ORDER:
         if level in run_group:
             return level
+    if "bouts" in run_group:
+        return ""
     return None
 
 

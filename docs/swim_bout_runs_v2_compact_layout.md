@@ -12,7 +12,8 @@ before a compact v2 writer exists. The cross-recording analytics exporter and
 `bout_kinematics.py` now use this resolver for swim-bout table loading.
 `visualization/interactive_track_kinematics.py`, which backs the Marimo track
 kinematics explorer, also uses the resolver for swim-bout option discovery and
-payload loading.
+payload loading. `analysis/plot_track_kinematics.py` uses the same resolver for
+static swim-bout overlay span loading.
 
 ## Motivation
 
@@ -77,11 +78,11 @@ analysis/swim_bout_runs/<run>/
     frame_indices                # exponential level only
 ```
 
-The main downstream readers assume this physical shape:
+The main downstream readers historically assumed this physical shape:
 
-- `bout_kinematics.py` resolves `analysis/swim_bout_runs/<run>/<speed_level>`.
-- `plot_track_kinematics.py` overlays spans from `<speed_level>/bouts`.
-- `interactive_track_kinematics.py` discovers candidates and reads
+- `bout_kinematics.py` resolved `analysis/swim_bout_runs/<run>/<speed_level>`.
+- `plot_track_kinematics.py` overlaid spans from `<speed_level>/bouts`.
+- `interactive_track_kinematics.py` discovered candidates and read
   `<speed_level>` tables for Marimo.
 - `export_cross_recording_analytics.py` exports rows from the latest run's
   `default_level`.
