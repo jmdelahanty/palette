@@ -115,6 +115,145 @@ def _build_v1_swim_bout_root() -> zarr.Group:
     return root
 
 
+def _build_compact_v2_swim_bout_root() -> zarr.Group:
+    root = zarr.group()
+    analysis = root.create_group("analysis")
+    parent = analysis.create_group("swim_bout_runs")
+    parent.attrs["latest"] = "bouts_compact"
+    run = parent.create_group("bouts_compact")
+    run.attrs.update(
+        {
+            "schema_id": "palette.swim_bout_runs",
+            "schema_version": 7,
+            "layout": "compact_tabular_v2",
+            "source_track_kinematics_run": "tk_hyst4_low2_s005",
+            "track_id": 0,
+            "default_candidate_id": 0,
+            "default_signal_id": 1,
+        }
+    )
+    indexes = run.create_group("indexes")
+    tables = run.create_group("tables")
+    signals = run.create_group("signals")
+
+    candidates = np.zeros(
+        1,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("candidate_name", "S32"),
+            ("is_default", "?"),
+            ("detection_method", "S32"),
+            ("parameters_json", "S128"),
+        ],
+    )
+    candidates[0] = (0, b"compact_candidate", True, b"peak_event", b'{"method":"peak_event"}')
+    write_columnar_dataset(indexes, "candidates", candidates)
+
+    signal_variants = np.zeros(
+        2,
+        dtype=[
+            ("signal_id", "i4"),
+            ("speed_level", "S32"),
+            ("signal_name", "S32"),
+            ("role", "S32"),
+            ("source_level", "S32"),
+            ("transform_type", "S32"),
+            ("transform_source_signal_id", "i4"),
+            ("tau_s", "f8"),
+            ("units", "S16"),
+            ("path_distance_source_level", "S32"),
+        ],
+    )
+    signal_variants[0] = (0, b"speed_filtered", b"filtered", b"physical_estimator", b"speed_filtered", b"identity", -1, np.nan, b"mm/s", b"filtered")
+    signal_variants[1] = (1, b"speed_exponential", b"exponential", b"detector_response", b"speed_filtered", b"exponential", 0, 0.025, b"mm/s", b"filtered")
+    write_columnar_dataset(indexes, "signal_variants", signal_variants)
+
+    bouts = np.zeros(
+        3,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("signal_id", "i4"),
+            ("estimator_signal_id", "i4"),
+            ("track_id", "i4"),
+            ("bout_id", "i8"),
+            ("start_frame", "i8"),
+            ("end_frame", "i8"),
+            ("duration_s", "f8"),
+            ("path_length_mm", "f8"),
+        ],
+    )
+    bouts[0] = (0, 0, 0, 0, 10, 0, 5, 0.1, 1.0)
+    bouts[1] = (0, 1, 0, 0, 20, 10, 16, 0.12, 2.0)
+    bouts[2] = (0, 1, 0, 0, 21, 30, 36, 0.12, 2.5)
+    write_columnar_dataset(tables, "bouts", bouts)
+
+    peak_events = np.zeros(
+        1,
+        dtype=[
+            ("peak_event_id", "i8"),
+            ("candidate_id", "i4"),
+            ("signal_id", "i4"),
+            ("bout_id", "i8"),
+            ("peak_frame", "i8"),
+            ("peak_time_s", "f8"),
+            ("peak_signal_value_mm_s", "f8"),
+        ],
+    )
+    peak_events[0] = (0, 0, 1, 20, 13, 0.216, 42.0)
+    write_columnar_dataset(tables, "peak_events", peak_events)
+
+    intervals = np.zeros(
+        1,
+        dtype=[
+            ("interval_id", "i8"),
+            ("candidate_id", "i4"),
+            ("signal_id", "i4"),
+            ("prev_bout_id", "i8"),
+            ("next_bout_id", "i8"),
+            ("interval_s", "f8"),
+            ("valid", "?"),
+        ],
+    )
+    intervals[0] = (0, 0, 1, 20, 21, 0.2, True)
+    write_columnar_dataset(tables, "inter_bout_intervals", intervals)
+
+    summary = np.zeros(
+        2,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("signal_id", "i4"),
+            ("metric_name", "S64"),
+            ("value", "f8"),
+            ("units", "S16"),
+            ("source_table", "S32"),
+        ],
+    )
+    summary[0] = (0, 1, b"n_bouts", 2.0, b"count", b"bouts")
+    summary[1] = (0, 1, b"total_path_length_mm", 4.5, b"mm", b"bouts")
+    write_columnar_dataset(tables, "summary_metrics", summary)
+
+    histograms = np.zeros(
+        1,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("signal_id", "i4"),
+            ("metric_name", "S64"),
+            ("bin_left", "f8"),
+            ("bin_right", "f8"),
+            ("count", "i8"),
+            ("density", "f8"),
+            ("units", "S16"),
+        ],
+    )
+    histograms[0] = (0, 1, b"inter_bout_interval_s", 0.1, 0.3, 1, np.nan, b"s")
+    write_columnar_dataset(tables, "histograms", histograms)
+    write_columnar_dataset(tables, "bout_points", np.zeros(0, dtype=[("candidate_id", "i4"), ("signal_id", "i4"), ("bout_id", "i8")]))
+    store_array(signals, "detector_signal_mm_s", np.asarray([[0.0, 5.0, 8.0]], dtype=np.float32))
+    store_array(signals, "detector_signal_signal_ids", np.asarray([1], dtype=np.int32))
+    store_array(signals, "frame_indices", np.asarray([10, 11, 12], dtype=np.int64))
+    return root
+
+
 def test_discover_swim_bout_candidates_maps_v1_levels_to_signals() -> None:
     root = _build_v1_swim_bout_root()
 
@@ -241,3 +380,36 @@ def test_cross_recording_export_uses_swim_bout_resolver() -> None:
     assert rows[0]["signal_role"] == "detector_response"
     assert rows[0]["signal_source_level"] == "filtered"
     assert rows[0]["bout_id"] == 0
+
+
+def test_discover_and_load_compact_v2_swim_bout_tables() -> None:
+    root = _build_compact_v2_swim_bout_root()
+
+    candidates = discover_swim_bout_candidates(root, track_run_name="tk_hyst4_low2_s005", track_id=0)
+    payload = load_default_swim_bout_tables(root)
+
+    assert len(candidates) == 1
+    assert candidates[0].candidate_id == 0
+    assert candidates[0].candidate_name == "compact_candidate"
+    assert candidates[0].default_signal_id == 1
+    assert [signal.speed_level for signal in candidates[0].signals] == [
+        "speed_filtered",
+        "speed_exponential",
+    ]
+    assert [signal.n_bouts for signal in candidates[0].signals] == [1, 2]
+    assert payload.signal.signal_id == 1
+    assert payload.signal.role == "detector_response"
+    assert payload.bouts["bout_id"].tolist() == [20, 21]
+    assert payload.global_metrics["n_bouts"][0] == 2.0
+    assert payload.inter_bout_interval_histogram["count"].tolist() == [1]
+    assert payload.series["detection_signal_mm_s"].tolist() == [0.0, 5.0, 8.0]
+
+
+def test_load_compact_v2_tables_can_select_physical_signal() -> None:
+    root = _build_compact_v2_swim_bout_root()
+
+    payload = load_swim_bout_tables(root, run_name="bouts_compact", speed_level="filtered")
+
+    assert payload.signal.signal_id == 0
+    assert payload.signal.role == "physical_estimator"
+    assert payload.bouts["bout_id"].tolist() == [10]

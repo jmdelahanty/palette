@@ -2,8 +2,10 @@
 
 ## Status
 
-Design note for deferred implementation. No existing `analysis/swim_bout_runs`
-archives should be migrated or rewritten as part of this design slice.
+Design note for incremental implementation. No existing `analysis/swim_bout_runs`
+archives should be migrated or rewritten as part of this design slice, and the
+default writer remains the existing hierarchical v1 layout unless a caller
+explicitly requests compact output.
 
 Implementation note, 2026-05-08: the first compatibility resolver now lives in
 `src/fisheye/analysis/swim_bout_io.py`. It reads current v1 hierarchical runs
@@ -16,6 +18,12 @@ payload loading. `analysis/plot_track_kinematics.py` uses the same resolver for
 static swim-bout overlay span loading. `analysis/stimulus_response.py` and
 `analysis/megabouts_classifier_inputs.py` also resolve swim-bout source tables
 through this layer.
+
+Implementation note, 2026-05-09: `swim_bout_io.py` now also reads native
+compact v2 runs, and `detect_bouts_multi_level.py` can write compact v2 only
+when invoked with `--layout compact_v2`. The CLI default is still
+`--layout hierarchical_v1`; compact writing is an opt-in canary path until v1/v2
+equivalence checks and external reader support are complete.
 
 ## Motivation
 
@@ -428,7 +436,9 @@ them.
 1. Add v2 schema constants and table dtype helpers.
 2. Add the resolver/adapter with tests against small fake v1 and v2 stores.
 3. Add `detect_bouts_multi_level --layout compact_v2` or
-   `--schema-version 7` behind an explicit flag.
+   `--schema-version 7` behind an explicit flag. The default must remain
+   `hierarchical_v1` until equivalence validation and external reader support
+   are complete.
 4. Write a v2 canary run with a new run ID; do not overwrite v1 runs.
 5. Compare v1 default-level and v2 default-candidate outputs:
    bout count, start/end frames, peak frames, durations, path lengths, and

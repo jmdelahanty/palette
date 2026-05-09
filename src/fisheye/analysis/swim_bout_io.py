@@ -17,6 +17,7 @@ import zarr
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 
 
+COMPACT_V2_LAYOUT = "compact_tabular_v2"
 SPEED_LEVEL_ORDER: tuple[str, ...] = (
     "speed_filtered",
     "speed_exponential",
@@ -158,13 +159,13 @@ def discover_swim_bout_candidates(
         attrs = _attrs_dict(run_group)
         if not _matches_track(attrs, track_run_name=track_run_name, track_id=track_id):
             continue
-        candidate = _candidate_from_v1_group(
+        for candidate in _candidates_from_run_group(
             run_group,
             run_name=str(run_name),
             is_latest=str(latest_name) == str(run_name),
-        )
-        if candidate.signals:
-            candidates.append(candidate)
+        ):
+            if candidate.signals:
+                candidates.append(candidate)
 
     return sorted(candidates, key=lambda item: (not item.is_latest, item.run_name))
 
@@ -195,7 +196,7 @@ def resolve_swim_bout_candidate(
 
     parent = _require_child(root, "analysis/swim_bout_runs")
     resolved_name = _resolve_run_name(parent, run_name)
-    candidate = _candidate_from_v1_group(
+    candidate = _default_candidate_from_run_group(
         parent[resolved_name],
         run_name=resolved_name,
         is_latest=str(parent.attrs.get("latest")) == str(resolved_name),
@@ -218,11 +219,17 @@ def load_swim_bout_tables(
     parent = _require_child(root, "analysis/swim_bout_runs")
     resolved_name = _resolve_run_name(parent, run_name)
     run_group = parent[resolved_name]
-    candidate = _candidate_from_v1_group(
-        run_group,
-        run_name=resolved_name,
-        is_latest=str(parent.attrs.get("latest")) == str(resolved_name),
-    )
+    is_latest = str(parent.attrs.get("latest")) == str(resolved_name)
+    if _is_compact_v2_group(run_group):
+        return _load_compact_v2_tables(
+            run_group,
+            run_name=resolved_name,
+            is_latest=is_latest,
+            candidate_id=candidate_id,
+            signal_id=signal_id,
+            speed_level=speed_level,
+        )
+    candidate = _candidate_from_v1_group(run_group, run_name=resolved_name, is_latest=is_latest)
     if candidate_id is not None and int(candidate_id) != candidate.candidate_id:
         raise SwimBoutIOError(
             f"Candidate id {candidate_id!r} not found in v1 swim-bout run {resolved_name!r}."
@@ -257,6 +264,42 @@ def load_swim_bout_tables(
         run_attrs=_attrs_dict(run_group),
         signal_attrs=_attrs_dict(level_group),
     )
+
+
+def _is_compact_v2_group(run_group: zarr.Group) -> bool:
+    attrs = _attrs_dict(run_group)
+    return attrs.get("layout") == COMPACT_V2_LAYOUT or _get_child(run_group, "indexes/candidates") is not None
+
+
+def _candidates_from_run_group(
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    is_latest: bool,
+) -> list[SwimBoutCandidate]:
+    if _is_compact_v2_group(run_group):
+        return _candidates_from_compact_v2_group(run_group, run_name=run_name, is_latest=is_latest)
+    return [_candidate_from_v1_group(run_group, run_name=run_name, is_latest=is_latest)]
+
+
+def _default_candidate_from_run_group(
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    is_latest: bool,
+) -> SwimBoutCandidate:
+    candidates = _candidates_from_run_group(run_group, run_name=run_name, is_latest=is_latest)
+    if not candidates:
+        raise SwimBoutIOError(f"Swim-bout run {run_name!r} has no candidates.")
+    default_candidate_id = _safe_int(_attrs_dict(run_group).get("default_candidate_id"))
+    if default_candidate_id is not None:
+        for candidate in candidates:
+            if candidate.candidate_id == default_candidate_id:
+                return candidate
+    for candidate in candidates:
+        if candidate.attrs.get("is_default") is True:
+            return candidate
+    return candidates[0]
 
 
 def _candidate_from_v1_group(
@@ -341,6 +384,301 @@ def _signals_from_v1_group(
             )
         )
     return tuple(signals)
+
+
+def _candidates_from_compact_v2_group(
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    is_latest: bool,
+) -> list[SwimBoutCandidate]:
+    candidate_rows = _load_structured_or_empty(_require_child(run_group, "indexes"), "candidates")
+    if candidate_rows.size == 0:
+        return []
+    signal_rows = _load_structured_or_empty(_require_child(run_group, "indexes"), "signal_variants")
+    bouts = _load_structured_or_empty(_require_child(run_group, "tables"), "bouts")
+    run_attrs = _attrs_dict(run_group)
+    default_signal_id = _safe_int(run_attrs.get("default_signal_id"))
+    default_speed_level = _signal_row_speed_level(
+        _row_by_int_field(signal_rows, "signal_id", default_signal_id)
+    ) if default_signal_id is not None else None
+    candidates: list[SwimBoutCandidate] = []
+    for row in candidate_rows:
+        row_attrs = _record_to_dict(row)
+        candidate_id = _safe_int(row_attrs.get("candidate_id"))
+        if candidate_id is None:
+            continue
+        signals = _signals_from_compact_v2_rows(
+            signal_rows,
+            run_name=run_name,
+            default_signal_id=default_signal_id,
+            n_bouts_by_signal=_count_records_by_signal(bouts, candidate_id=candidate_id),
+        )
+        detection_method = str(row_attrs.get("detection_method") or run_attrs.get("detection_method", "unknown"))
+        candidates.append(
+            SwimBoutCandidate(
+                run_name=run_name,
+                candidate_id=candidate_id,
+                candidate_name=str(row_attrs.get("candidate_name") or f"candidate_{candidate_id}"),
+                run_path=f"analysis/swim_bout_runs/{run_name}",
+                is_latest=is_latest,
+                source_track_kinematics_run=_optional_str(run_attrs.get("source_track_kinematics_run")),
+                track_id=_safe_int(run_attrs.get("track_id")),
+                detection_method=detection_method,
+                default_signal_id=default_signal_id,
+                default_speed_level=default_speed_level,
+                signals=signals,
+                attrs={**run_attrs, **row_attrs},
+            )
+        )
+    return candidates
+
+
+def _signals_from_compact_v2_rows(
+    signal_rows: np.ndarray,
+    *,
+    run_name: str,
+    default_signal_id: int | None,
+    n_bouts_by_signal: Mapping[int, int] | None = None,
+) -> tuple[SwimBoutSignalVariant, ...]:
+    signals: list[SwimBoutSignalVariant] = []
+    for row in signal_rows:
+        attrs = _record_to_dict(row)
+        signal_id = _safe_int(attrs.get("signal_id"))
+        if signal_id is None:
+            continue
+        speed_level = _signal_row_speed_level(row)
+        signal_name = str(attrs.get("signal_name") or speed_level.replace("speed_", "", 1))
+        signals.append(
+            SwimBoutSignalVariant(
+                run_name=run_name,
+                signal_id=signal_id,
+                speed_level=speed_level,
+                signal_name=signal_name,
+                role=str(attrs.get("role") or "physical_estimator"),
+                source_level=_optional_str(attrs.get("source_level")),
+                is_default=default_signal_id == signal_id,
+                n_bouts=int((n_bouts_by_signal or {}).get(signal_id, 0)),
+                attrs=attrs,
+            )
+        )
+    return tuple(signals)
+
+
+def _load_compact_v2_tables(
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    is_latest: bool,
+    candidate_id: int | None,
+    signal_id: int | None,
+    speed_level: str | None,
+) -> SwimBoutTables:
+    candidate = _resolve_compact_candidate(
+        run_group,
+        run_name=run_name,
+        is_latest=is_latest,
+        candidate_id=candidate_id,
+    )
+    signal = _resolve_signal(candidate, signal_id=signal_id, speed_level=speed_level)
+    indexes = _require_child(run_group, "indexes")
+    tables = _require_child(run_group, "tables")
+    raw_bouts = _load_structured_or_empty(tables, "bouts", required=True)
+    bouts = _filter_records(raw_bouts, candidate_id=candidate.candidate_id, signal_id=signal.signal_id)
+    peak_events = _filter_records(
+        _load_structured_or_empty(tables, "peak_events"),
+        candidate_id=candidate.candidate_id,
+        signal_id=signal.signal_id,
+    )
+    intervals = _filter_records(
+        _load_structured_or_empty(tables, "inter_bout_intervals"),
+        candidate_id=candidate.candidate_id,
+        signal_id=signal.signal_id,
+    )
+    summary_metrics = _filter_records(
+        _load_structured_or_empty(tables, "summary_metrics"),
+        candidate_id=candidate.candidate_id,
+        signal_id=signal.signal_id,
+    )
+    histograms = _filter_records(
+        _load_structured_or_empty(tables, "histograms"),
+        candidate_id=candidate.candidate_id,
+        signal_id=signal.signal_id,
+    )
+    bout_points = _filter_records(
+        _load_structured_or_empty(tables, "bout_points"),
+        candidate_id=candidate.candidate_id,
+        signal_id=signal.signal_id,
+    )
+    signal_rows = _load_structured_or_empty(indexes, "signal_variants")
+    signal_row = _row_by_int_field(signal_rows, "signal_id", signal.signal_id)
+    return SwimBoutTables(
+        run_name=run_name,
+        run_path=f"analysis/swim_bout_runs/{run_name}",
+        level_path=f"analysis/swim_bout_runs/{run_name}/tables/bouts?candidate_id={candidate.candidate_id}&signal_id={signal.signal_id}",
+        candidate=candidate,
+        signal=signal,
+        bouts=bouts,
+        peak_events=peak_events,
+        inter_bout_intervals=intervals,
+        inter_bout_interval_histogram=_histogram_rows_to_legacy(histograms),
+        global_metrics=_summary_metrics_to_legacy(summary_metrics),
+        trials=np.zeros(0, dtype=[]),
+        bout_points=bout_points,
+        series=_load_compact_signal_series(run_group, signal=signal),
+        run_attrs=_attrs_dict(run_group),
+        signal_attrs=_record_to_dict(signal_row) if signal_row is not None else signal.attrs,
+    )
+
+
+def _resolve_compact_candidate(
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    is_latest: bool,
+    candidate_id: int | None,
+) -> SwimBoutCandidate:
+    candidates = _candidates_from_compact_v2_group(run_group, run_name=run_name, is_latest=is_latest)
+    if not candidates:
+        raise SwimBoutIOError(f"Swim-bout run {run_name!r} has no compact candidates.")
+    if candidate_id is not None:
+        for candidate in candidates:
+            if candidate.candidate_id == int(candidate_id):
+                return candidate
+        raise SwimBoutIOError(f"Candidate id {candidate_id!r} not found in compact swim-bout run {run_name!r}.")
+    return _default_candidate_from_run_group(run_group, run_name=run_name, is_latest=is_latest)
+
+
+def _signal_row_speed_level(row: np.void | None) -> str:
+    if row is None:
+        return ""
+    attrs = _record_to_dict(row)
+    raw = attrs.get("speed_level") or attrs.get("signal_name")
+    if raw is None:
+        return ""
+    try:
+        return normalize_speed_level(raw)
+    except SwimBoutIOError:
+        text = str(raw)
+        return text if text.startswith("speed_") else f"speed_{text}"
+
+
+def _row_by_int_field(records: np.ndarray, field: str, value: int | None) -> np.void | None:
+    if value is None or records.dtype.names is None or field not in records.dtype.names:
+        return None
+    for row in records:
+        if _safe_int(row[field]) == int(value):
+            return row
+    return None
+
+
+def _record_to_dict(record: np.void | None) -> dict[str, Any]:
+    if record is None or getattr(record, "dtype", None) is None or record.dtype.names is None:
+        return {}
+    return {name: _scalar_value(record[name]) for name in record.dtype.names}
+
+
+def _filter_records(
+    records: np.ndarray,
+    *,
+    candidate_id: int | None = None,
+    signal_id: int | None = None,
+) -> np.ndarray:
+    if records.dtype.names is None or records.size == 0:
+        return records
+    mask = np.ones(records.shape[0], dtype=bool)
+    if candidate_id is not None and "candidate_id" in records.dtype.names:
+        mask &= np.asarray(records["candidate_id"], dtype=np.int64) == int(candidate_id)
+    if signal_id is not None and "signal_id" in records.dtype.names:
+        mask &= np.asarray(records["signal_id"], dtype=np.int64) == int(signal_id)
+    return records[mask]
+
+
+def _count_records_by_signal(records: np.ndarray, *, candidate_id: int | None = None) -> dict[int, int]:
+    if records.dtype.names is None or "signal_id" not in records.dtype.names:
+        return {}
+    filtered = _filter_records(records, candidate_id=candidate_id)
+    counts: dict[int, int] = {}
+    for value in filtered["signal_id"]:
+        signal_id = _safe_int(value)
+        if signal_id is None:
+            continue
+        counts[signal_id] = counts.get(signal_id, 0) + 1
+    return counts
+
+
+def _summary_metrics_to_legacy(records: np.ndarray) -> np.ndarray:
+    if records.dtype.names is None or records.size == 0:
+        return np.zeros(0, dtype=[])
+    required = {"metric_name", "value"}
+    if not required.issubset(set(records.dtype.names)):
+        return records
+    metric_names = [_scalar_value(value) for value in records["metric_name"]]
+    dtype = [(str(name), "f8") for name in metric_names]
+    result = np.zeros(1, dtype=dtype)
+    for name, value in zip(metric_names, records["value"]):
+        result[str(name)][0] = float(value)
+    return result
+
+
+def _histogram_rows_to_legacy(records: np.ndarray) -> np.ndarray:
+    if records.dtype.names is None or records.size == 0:
+        return np.zeros(0, dtype=[])
+    names = set(records.dtype.names)
+    if {"bin_left_edge_s", "bin_right_edge_s", "count"}.issubset(names):
+        return records
+    if not {"bin_left", "bin_right", "count"}.issubset(names):
+        return records
+    result = np.zeros(
+        records.shape[0],
+        dtype=[
+            ("bin_left_edge_s", "f8"),
+            ("bin_right_edge_s", "f8"),
+            ("count", "i8"),
+        ],
+    )
+    result["bin_left_edge_s"] = np.asarray(records["bin_left"], dtype=np.float64)
+    result["bin_right_edge_s"] = np.asarray(records["bin_right"], dtype=np.float64)
+    result["count"] = np.asarray(records["count"], dtype=np.int64)
+    return result
+
+
+def _load_compact_signal_series(
+    run_group: zarr.Group,
+    *,
+    signal: SwimBoutSignalVariant,
+) -> dict[str, np.ndarray]:
+    series: dict[str, np.ndarray] = {}
+    signals_group = _get_child(run_group, "signals")
+    if signals_group is None:
+        return series
+    detector_signal = _get_child(signals_group, "detector_signal_mm_s")
+    if detector_signal is not None:
+        try:
+            detector_values = np.asarray(detector_signal[:])
+        except Exception:
+            detector_values = np.zeros(0, dtype=np.float32)
+        signal_ids_node = _get_child(signals_group, "detector_signal_signal_ids")
+        if signal_ids_node is not None:
+            try:
+                signal_ids = np.asarray(signal_ids_node[:], dtype=np.int64)
+            except Exception:
+                signal_ids = np.zeros(0, dtype=np.int64)
+        else:
+            signal_ids = np.asarray([signal.signal_id], dtype=np.int64)
+        matches = np.flatnonzero(signal_ids == int(signal.signal_id))
+        if matches.size and detector_values.ndim >= 2:
+            values = np.asarray(detector_values[int(matches[0])])
+            series["detection_signal_mm_s"] = values
+            if signal.speed_level == "speed_exponential":
+                series["speed_exponential_mm"] = values
+    frame_indices = _get_child(signals_group, "frame_indices")
+    if frame_indices is not None:
+        try:
+            series["frame_indices"] = np.asarray(frame_indices[:])
+        except Exception:
+            pass
+    return series
 
 
 def _resolve_signal(

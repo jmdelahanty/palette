@@ -46,6 +46,7 @@ Usage (with options):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -99,6 +100,11 @@ DURATION_FRAME_ROUNDING_POLICY = "ceil_seconds_times_fps"
 BOUNDARY_FRAME_ROUNDING_POLICY = "round_seconds_times_fps"
 SWIM_BOUT_RUN_SCHEMA_ID = "palette.swim_bout_runs"
 SWIM_BOUT_RUN_SCHEMA_VERSION = 6
+SWIM_BOUT_RUN_SCHEMA_VERSION_COMPACT_V2 = 7
+SWIM_BOUT_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
+SWIM_BOUT_LAYOUT_COMPACT_V2 = "compact_v2"
+SWIM_BOUT_STORED_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
+SWIM_BOUT_LAYOUT_CHOICES = (SWIM_BOUT_LAYOUT_HIERARCHICAL_V1, SWIM_BOUT_LAYOUT_COMPACT_V2)
 BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v3"
 DETECTION_SIGNAL_SCHEMA_ID = "palette.swim_bout_detection_signal.v1"
 DETECTION_SIGNAL_SCHEMA_VERSION = 1
@@ -132,6 +138,21 @@ def _json_safe_attr_value(value: Any) -> Any:
 
 def _json_safe_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): _json_safe_attr_value(value) for key, value in attrs.items()}
+
+
+def _strict_json_dumps(value: Any) -> str:
+    """Serialize strict JSON metadata strings for compact table rows."""
+
+    return json.dumps(
+        _json_safe_attr_value(value),
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_strict_json_dumps(value).encode("utf-8")).hexdigest()
 
 
 def _duration_seconds_to_frames(duration_s: float, fps: float) -> int:
@@ -1089,6 +1110,448 @@ def _compute_global_metrics(bouts: np.ndarray, fps: float, total_frames: int) ->
     return global_metrics
 
 
+def _bytes_dtype(values: List[object], *, minimum: int = 16) -> str:
+    max_len = minimum
+    for value in values:
+        max_len = max(max_len, len(str(value).encode("utf-8")))
+    return f"S{max_len}"
+
+
+def _add_fields(records: np.ndarray, fields: Mapping[str, tuple[Any, Any]]) -> np.ndarray:
+    """Return a structured array with extra fields prepended."""
+
+    existing_names = records.dtype.names or ()
+    dtype = [(name, np.dtype(dtype)) for name, (dtype, _value) in fields.items()]
+    dtype.extend((name, records.dtype.fields[name][0]) for name in existing_names if name not in fields)
+    output = np.zeros(records.shape[0], dtype=dtype)
+    for name, (_dtype, value) in fields.items():
+        arr = np.asarray(value)
+        if arr.shape == ():
+            output[name] = value
+        else:
+            output[name] = arr
+    for name in existing_names:
+        if name not in fields:
+            output[name] = records[name]
+    return output
+
+
+def _concatenate_structured(records: List[np.ndarray], dtype: Optional[np.dtype] = None) -> np.ndarray:
+    non_empty = [record for record in records if record.size > 0]
+    if non_empty:
+        return np.concatenate(non_empty)
+    if dtype is not None:
+        return np.zeros(0, dtype=dtype)
+    if records:
+        return np.zeros(0, dtype=records[0].dtype)
+    return np.zeros(0, dtype=[])
+
+
+def _metric_units(metric_name: str) -> str:
+    if metric_name.endswith("_s") or "_time_s" in metric_name or "_duration_s" in metric_name:
+        return "s"
+    if metric_name.endswith("_mm") or "path_length_mm" in metric_name:
+        return "mm"
+    if metric_name.endswith("_mm_s") or "speed_mm_s" in metric_name:
+        return "mm/s"
+    if metric_name.endswith("_percent") or metric_name == "percent_active":
+        return "percent"
+    if metric_name.startswith("n_") or metric_name.endswith("_count"):
+        return "count"
+    return ""
+
+
+def _summary_metrics_rows(
+    global_metrics_by_level: Mapping[str, np.ndarray],
+    *,
+    signal_id_by_level: Mapping[str, int],
+) -> np.ndarray:
+    rows: list[tuple[int, int, bytes, float, bytes, bytes]] = []
+    metric_names: list[str] = []
+    units: list[str] = []
+    for level, metrics in global_metrics_by_level.items():
+        if metrics.size == 0 or metrics.dtype.names is None:
+            continue
+        signal_id = int(signal_id_by_level[level])
+        record = metrics[0]
+        for name in metrics.dtype.names:
+            value = record[name]
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            metric_names.append(name)
+            unit = _metric_units(name)
+            units.append(unit)
+            rows.append((0, signal_id, name.encode("utf-8"), numeric_value, unit.encode("utf-8"), b"global_metrics"))
+    dtype = np.dtype([
+        ("candidate_id", "i4"),
+        ("signal_id", "i4"),
+        ("metric_name", _bytes_dtype(metric_names, minimum=32)),
+        ("value", "f8"),
+        ("units", _bytes_dtype(units, minimum=8)),
+        ("source_table", "S32"),
+    ])
+    result = np.zeros(len(rows), dtype=dtype)
+    for idx, row in enumerate(rows):
+        result[idx] = row
+    return result
+
+
+def _compact_bout_rows(
+    bouts: np.ndarray,
+    peak_events: np.ndarray,
+    *,
+    candidate_id: int,
+    signal_id: int,
+    estimator_signal_id: int,
+    track_id: int,
+    pixel_to_mm: Optional[float],
+) -> np.ndarray:
+    peak_by_bout: dict[int, np.void] = {}
+    if peak_events.dtype.names is not None and "bout_id" in peak_events.dtype.names:
+        for event in peak_events:
+            peak_by_bout.setdefault(int(event["bout_id"]), event)
+
+    n_rows = bouts.shape[0]
+    peak_frame = np.full(n_rows, -1, dtype=np.int64)
+    peak_time_s = np.full(n_rows, np.nan, dtype=np.float64)
+    peak_detection_signal_px_s = np.full(n_rows, np.nan, dtype=np.float64)
+    threshold_crossing_valid = np.zeros(n_rows, dtype=bool)
+    mean_speed_px_s = np.full(n_rows, np.nan, dtype=np.float64)
+    if n_rows and bouts.dtype.names is not None:
+        if {"path_length_px", "observed_duration_s"}.issubset(set(bouts.dtype.names)):
+            valid = np.asarray(bouts["observed_duration_s"], dtype=np.float64) > 0
+            mean_speed_px_s[valid] = (
+                np.asarray(bouts["path_length_px"], dtype=np.float64)[valid]
+                / np.asarray(bouts["observed_duration_s"], dtype=np.float64)[valid]
+            )
+        if {"core_start_time_interpolated_valid", "core_end_time_interpolated_valid"}.issubset(set(bouts.dtype.names)):
+            threshold_crossing_valid = (
+                np.asarray(bouts["core_start_time_interpolated_valid"], dtype=bool)
+                & np.asarray(bouts["core_end_time_interpolated_valid"], dtype=bool)
+            )
+        for idx, bout in enumerate(bouts):
+            event = peak_by_bout.get(int(bout["bout_id"]))
+            if event is not None:
+                if "peak_frame" in event.dtype.names:
+                    peak_frame[idx] = int(event["peak_frame"])
+                if "peak_time_s" in event.dtype.names:
+                    peak_time_s[idx] = float(event["peak_time_s"])
+            if pixel_to_mm and np.isfinite(pixel_to_mm) and pixel_to_mm > 0 and "peak_detection_signal_mm_s" in bouts.dtype.names:
+                peak_detection_signal_px_s[idx] = float(bouts["peak_detection_signal_mm_s"][idx]) / float(pixel_to_mm)
+
+    return _add_fields(
+        bouts,
+        {
+            "candidate_id": ("i4", int(candidate_id)),
+            "signal_id": ("i4", int(signal_id)),
+            "estimator_signal_id": ("i4", int(estimator_signal_id)),
+            "track_id": ("i4", int(track_id)),
+            "mean_speed_px_s": ("f8", mean_speed_px_s),
+            "peak_detection_signal_px_s": ("f8", peak_detection_signal_px_s),
+            "peak_frame": ("i8", peak_frame),
+            "peak_time_s": ("f8", peak_time_s),
+            "threshold_crossing_valid": ("?", threshold_crossing_valid),
+        },
+    )
+
+
+def _compact_peak_event_rows(
+    peak_events: np.ndarray,
+    *,
+    candidate_id: int,
+    signal_id: int,
+) -> np.ndarray:
+    return _add_fields(
+        peak_events,
+        {
+            "peak_event_id": ("i8", np.arange(peak_events.shape[0], dtype=np.int64)),
+            "candidate_id": ("i4", int(candidate_id)),
+            "signal_id": ("i4", int(signal_id)),
+            "accepted": ("?", True),
+            "rejection_reason": ("S16", b""),
+        },
+    )
+
+
+def _compact_interval_rows(
+    intervals: np.ndarray,
+    *,
+    candidate_id: int,
+    signal_id: int,
+) -> np.ndarray:
+    return _add_fields(
+        intervals,
+        {
+            "interval_id": ("i8", np.arange(intervals.shape[0], dtype=np.int64)),
+            "candidate_id": ("i4", int(candidate_id)),
+            "signal_id": ("i4", int(signal_id)),
+            "valid": ("?", True),
+        },
+    )
+
+
+def _compact_histogram_rows(
+    histogram: np.ndarray,
+    *,
+    candidate_id: int,
+    signal_id: int,
+) -> np.ndarray:
+    density = np.full(histogram.shape[0], np.nan, dtype=np.float64)
+    return _add_fields(
+        histogram,
+        {
+            "candidate_id": ("i4", int(candidate_id)),
+            "signal_id": ("i4", int(signal_id)),
+            "metric_name": ("S32", b"inter_bout_interval_s"),
+            "bin_left": ("f8", histogram["bin_left_edge_s"] if "bin_left_edge_s" in histogram.dtype.names else np.nan),
+            "bin_right": ("f8", histogram["bin_right_edge_s"] if "bin_right_edge_s" in histogram.dtype.names else np.nan),
+            "density": ("f8", density),
+            "units": ("S8", b"s"),
+        },
+    )
+
+
+def _compact_bout_point_rows(
+    bout_points: np.ndarray,
+    *,
+    candidate_id: int,
+    signal_id: int,
+) -> np.ndarray:
+    point_role = bout_points["point_type"] if bout_points.size and "point_type" in bout_points.dtype.names else b""
+    return _add_fields(
+        bout_points,
+        {
+            "candidate_id": ("i4", int(candidate_id)),
+            "signal_id": ("i4", int(signal_id)),
+            "point_role": ("S8", point_role),
+        },
+    )
+
+
+def _write_compact_v2_swim_bout_payloads(
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    speed_levels: List[str],
+    level_payloads: Mapping[str, Mapping[str, Any]],
+    signal_id_by_level: Mapping[str, int],
+    estimator_signal_id_by_level: Mapping[str, int],
+    default_level_key: str,
+    method: str,
+    parameters: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    track_id: int,
+    pixel_to_mm: Optional[float],
+    path_distance_level_source: Mapping[str, str],
+    source_track_path: str,
+    exponential_source_key: str,
+    exponential_tau_s: float,
+    frames: np.ndarray,
+    speeds: Mapping[str, Optional[np.ndarray]],
+) -> None:
+    """Write the compact tabular v2 swim-bout representation."""
+
+    indexes = run_group.create_group("indexes")
+    tables = run_group.create_group("tables")
+    signals_group = run_group.create_group("signals")
+
+    parameters_json = _strict_json_dumps(parameters)
+    candidate_dtype = np.dtype([
+        ("candidate_id", "i4"),
+        ("candidate_name", _bytes_dtype([run_name], minimum=32)),
+        ("is_default", "?"),
+        ("detection_method", "S32"),
+        ("boundary_mode", "S32"),
+        ("boundary_window_s", "f8"),
+        ("boundary_constraint", "S32"),
+        ("gap_merge_policy", "S32"),
+        ("min_bout_duration_s", "f8"),
+        ("min_gap_duration_s", "f8"),
+        ("min_gap_frames", "i4"),
+        ("parameter_hash", "S64"),
+        ("parameters_json", _bytes_dtype([parameters_json], minimum=256)),
+        ("provenance_json", "S1"),
+    ])
+    candidates = np.zeros(1, dtype=candidate_dtype)
+    boundary_window_value = parameters.get("boundary_window_s")
+    min_bout_duration_value = parameters.get("min_bout_duration_s")
+    min_gap_duration_value = parameters.get("min_gap_duration_s")
+    candidates[0] = (
+        0,
+        run_name.encode("utf-8"),
+        True,
+        str(method).encode("utf-8"),
+        str(parameters.get("boundary_mode", "")).encode("utf-8"),
+        float(boundary_window_value) if boundary_window_value is not None else float("nan"),
+        b"",
+        str(parameters.get("gap_merge_policy", "")).encode("utf-8"),
+        float(min_bout_duration_value) if min_bout_duration_value is not None else float("nan"),
+        float(min_gap_duration_value) if min_gap_duration_value is not None else float("nan"),
+        int(parameters.get("min_gap_frames")) if parameters.get("min_gap_frames") is not None else -1,
+        _sha256_json(parameters).encode("utf-8"),
+        parameters_json.encode("utf-8"),
+        b"",
+    )
+
+    signal_rows = []
+    signal_parameters_json: list[str] = []
+    for level in speed_levels:
+        signal_id = int(signal_id_by_level[level])
+        attrs = _detection_signal_attrs(
+            level=level,
+            source_track_path=source_track_path,
+            path_distance_source_level=path_distance_level_source[level],
+            exponential_source_key=exponential_source_key,
+            exponential_tau_s=float(exponential_tau_s),
+        )
+        signal_params = {
+            "speed_level": level,
+            "signal_id": signal_id,
+            "path_distance_source_level": path_distance_level_source[level],
+            "detection_signal_attrs": attrs,
+        }
+        signal_json = _strict_json_dumps(signal_params)
+        signal_parameters_json.append(signal_json)
+        is_exponential = level == "speed_exponential"
+        source_level = exponential_source_key if is_exponential else level
+        transform_source_signal_id = (
+            int(signal_id_by_level.get(exponential_source_key, -1)) if is_exponential else -1
+        )
+        signal_rows.append(
+            (
+                signal_id,
+                level.encode("utf-8"),
+                level.replace("speed_", "", 1).encode("utf-8"),
+                (b"detector_response" if is_exponential else b"physical_estimator"),
+                source_level.encode("utf-8"),
+                (b"exponential" if is_exponential else b"identity"),
+                transform_source_signal_id,
+                float(exponential_tau_s) if is_exponential else float("nan"),
+                b"mm/s",
+                path_distance_level_source[level].encode("utf-8"),
+                signal_json.encode("utf-8"),
+            )
+        )
+    signal_dtype = np.dtype([
+        ("signal_id", "i4"),
+        ("speed_level", "S32"),
+        ("signal_name", "S32"),
+        ("role", "S32"),
+        ("source_level", "S32"),
+        ("transform_type", "S32"),
+        ("transform_source_signal_id", "i4"),
+        ("tau_s", "f8"),
+        ("units", "S16"),
+        ("path_distance_source_level", "S32"),
+        ("parameters_json", _bytes_dtype(signal_parameters_json, minimum=256)),
+    ])
+    signal_variants = np.zeros(len(signal_rows), dtype=signal_dtype)
+    for idx, row in enumerate(signal_rows):
+        signal_variants[idx] = row
+
+    compact_bouts = []
+    compact_peak_events = []
+    compact_intervals = []
+    compact_histograms = []
+    compact_bout_points = []
+    global_metrics_by_level: dict[str, np.ndarray] = {}
+    for level in speed_levels:
+        payload = level_payloads[level]
+        signal_id = int(signal_id_by_level[level])
+        estimator_signal_id = int(estimator_signal_id_by_level[level])
+        compact_bouts.append(
+            _compact_bout_rows(
+                payload["bouts"],
+                payload["peak_events"],
+                candidate_id=0,
+                signal_id=signal_id,
+                estimator_signal_id=estimator_signal_id,
+                track_id=track_id,
+                pixel_to_mm=pixel_to_mm,
+            )
+        )
+        compact_peak_events.append(
+            _compact_peak_event_rows(payload["peak_events"], candidate_id=0, signal_id=signal_id)
+        )
+        compact_intervals.append(
+            _compact_interval_rows(payload["intervals"], candidate_id=0, signal_id=signal_id)
+        )
+        compact_histograms.append(
+            _compact_histogram_rows(payload["interval_histogram"], candidate_id=0, signal_id=signal_id)
+        )
+        compact_bout_points.append(
+            _compact_bout_point_rows(payload["bout_points"], candidate_id=0, signal_id=signal_id)
+        )
+        global_metrics_by_level[level] = payload["global_metrics"]
+
+    write_columnar_dataset(indexes, "candidates", candidates)
+    write_columnar_dataset(indexes, "signal_variants", signal_variants)
+    write_columnar_dataset(tables, "bouts", _concatenate_structured(compact_bouts))
+    write_columnar_dataset(tables, "peak_events", _concatenate_structured(compact_peak_events))
+    write_columnar_dataset(tables, "inter_bout_intervals", _concatenate_structured(compact_intervals))
+    write_columnar_dataset(
+        tables,
+        "summary_metrics",
+        _summary_metrics_rows(global_metrics_by_level, signal_id_by_level=signal_id_by_level),
+    )
+    write_columnar_dataset(tables, "histograms", _concatenate_structured(compact_histograms))
+    write_columnar_dataset(tables, "bout_points", _concatenate_structured(compact_bout_points))
+
+    detector_levels = [level for level in speed_levels if level == "speed_exponential"]
+    detector_rows = []
+    detector_signal_ids = []
+    for level in detector_levels:
+        arr = speeds.get(f"{level}_mm")
+        if arr is None:
+            continue
+        detector_rows.append(np.asarray(arr, dtype=np.float32))
+        detector_signal_ids.append(int(signal_id_by_level[level]))
+    if detector_rows:
+        store_array(
+            signals_group,
+            "detector_signal_mm_s",
+            np.stack(detector_rows, axis=0),
+            attrs={
+                "units": "mm/s",
+                "axis_0": "detector_signal_id",
+                "axis_1": "frame",
+            },
+        )
+        store_array(
+            signals_group,
+            "detector_signal_signal_ids",
+            np.asarray(detector_signal_ids, dtype=np.int32),
+        )
+        store_array(
+            signals_group,
+            "frame_indices",
+            np.asarray(frames, dtype=np.int64),
+            attrs={"source": "track_kinematics.frame_indices"},
+        )
+
+    run_group.attrs.update(
+        _json_safe_attrs(
+            {
+                "layout": SWIM_BOUT_STORED_LAYOUT_COMPACT_V2,
+                "default_candidate_id": 0,
+                "default_signal_id": int(signal_id_by_level[default_level_key]),
+                "compact_writer": "detect_bouts_multi_level",
+                "compact_writer_opt_in": True,
+                "compact_tables": [
+                    "bouts",
+                    "peak_events",
+                    "inter_bout_intervals",
+                    "summary_metrics",
+                    "histograms",
+                    "bout_points",
+                ],
+            }
+        )
+    )
+
+
 def _detect_bouts_from_speed(
     speed: np.ndarray,
     frames: np.ndarray,
@@ -1751,6 +2214,7 @@ def detect_and_save_bouts(
     boundary_window_s: float = 0.25,
     exponential_tau_s: float = 0.05,
     exponential_source_level: str = "filtered",
+    layout: str = SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     command: Optional[str] = None,
 ) -> str:
     """
@@ -1799,6 +2263,8 @@ def detect_and_save_bouts(
             speed candidate.
         exponential_source_level: Source speed level for the exponential
             response candidate. Accepts raw/filtered/smoothed/averaged aliases.
+        layout: Storage layout. hierarchical_v1 preserves the existing physical
+            tree shape. compact_v2 writes the opt-in tabular v2 layout.
         command: Optional command string to record in stage provenance.
 
     Returns:
@@ -1810,6 +2276,9 @@ def detect_and_save_bouts(
         raise ValueError("exponential_source_level cannot be speed_exponential.")
     if exponential_tau_s <= 0:
         raise ValueError(f"exponential_tau_s must be > 0, got {exponential_tau_s!r}.")
+    if layout not in SWIM_BOUT_LAYOUT_CHOICES:
+        expected = ", ".join(SWIM_BOUT_LAYOUT_CHOICES)
+        raise ValueError(f"Unsupported layout {layout!r}; expected one of: {expected}")
     if boundary_mode not in BOUNDARY_MODES:
         expected = ", ".join(BOUNDARY_MODES)
         raise ValueError(f"Unsupported boundary_mode {boundary_mode!r}; expected one of: {expected}")
@@ -1840,6 +2309,7 @@ def detect_and_save_bouts(
     if boundary_mode == "local_minimum":
         print(f"Boundary window: {boundary_window_s} s")
     print(f"Exponential response: source={exponential_source_key}, tau={exponential_tau_s} s")
+    print(f"Storage layout: {layout}")
     if method == "threshold":
         print(f"Threshold: {threshold_mm} mm/s")
     elif method == "peak":
@@ -2026,8 +2496,14 @@ def detect_and_save_bouts(
         capture_env_vars=False,
     )
     created_at_utc = datetime.now(timezone.utc).isoformat()
+    schema_version = (
+        SWIM_BOUT_RUN_SCHEMA_VERSION_COMPACT_V2
+        if layout == SWIM_BOUT_LAYOUT_COMPACT_V2
+        else SWIM_BOUT_RUN_SCHEMA_VERSION
+    )
     run_group.attrs['schema_id'] = SWIM_BOUT_RUN_SCHEMA_ID
-    run_group.attrs['schema_version'] = SWIM_BOUT_RUN_SCHEMA_VERSION
+    run_group.attrs['schema_version'] = schema_version
+    run_group.attrs['layout'] = layout
     run_group.attrs['created_at_utc'] = created_at_utc
     run_group.attrs['detection_method'] = method
     run_group.attrs['min_bout_duration_s'] = min_bout_duration_s
@@ -2133,8 +2609,9 @@ def detect_and_save_bouts(
         'exponential_tau_s': float(exponential_tau_s),
         'exponential_source_level': exponential_source_key,
         'speed_levels': list(speed_levels),
+        'layout': layout,
         'swim_bout_run_schema_id': SWIM_BOUT_RUN_SCHEMA_ID,
-        'swim_bout_run_schema_version': SWIM_BOUT_RUN_SCHEMA_VERSION,
+        'swim_bout_run_schema_version': schema_version,
         'bout_metric_schema_id': BOUT_METRIC_SCHEMA_ID,
         'peak_event_schema_id': PEAK_EVENT_SCHEMA_ID,
         'peak_event_schema_version': PEAK_EVENT_SCHEMA_VERSION,
@@ -2170,14 +2647,19 @@ def detect_and_save_bouts(
         artifacts={
             'run_path': f"analysis/swim_bout_runs/{run_name}",
             'default_level': default_level_key,
+            'layout': layout,
         },
     ))
     write_stage_provenance(run_group, provenance)
     write_best_effort_run_lineage_attrs(run_group, run_family="swim_bout_run")
 
-    # Save each speed level's bouts and statistics in subgroups
+    signal_id_by_level = {level: idx for idx, level in enumerate(speed_levels)}
+    estimator_signal_id_by_level = {
+        level: int(signal_id_by_level[f"speed_{path_distance_level_source[level]}"])
+        for level in speed_levels
+    }
+    level_payloads: dict[str, dict[str, Any]] = {}
     for level in speed_levels:
-        level_group = run_group.create_group(level)
         bouts = bout_results[level]
         peak_events = peak_event_results[level]
 
@@ -2195,7 +2677,6 @@ def detect_and_save_bouts(
             global_metrics['inter_bout_interval_min_s'][0] = interval_metrics['inter_bout_interval_min_s']
             global_metrics['inter_bout_interval_max_s'][0] = interval_metrics['inter_bout_interval_max_s']
 
-        # Save datasets using columnar format (Zarr v3-stable)
         level_specific_attrs = {
             'n_bouts': len(bouts),
             'speed_level': level,
@@ -2240,29 +2721,6 @@ def detect_and_save_bouts(
                 exponential_tau_s=float(exponential_tau_s),
             )
         )
-        if level == "speed_exponential":
-            store_array(
-                level_group,
-                "detection_signal_mm_s",
-                np.asarray(speeds["speed_exponential_mm"], dtype=np.float32),
-                attrs={
-                    "units": "mm/s",
-                    **_detection_signal_attrs(
-                        level=level,
-                        source_track_path=source_track_path,
-                        path_distance_source_level=path_distance_level_source[level],
-                        exponential_source_key=exponential_source_key,
-                        exponential_tau_s=float(exponential_tau_s),
-                    ),
-                },
-            )
-            store_array(
-                level_group,
-                "frame_indices",
-                np.asarray(frames, dtype=np.int64),
-                attrs={"source": "track_kinematics.frame_indices"},
-            )
-
         if len(bouts) > 0:
             level_specific_attrs['total_bout_time_s'] = float(np.sum(bouts['duration_s']))
             level_specific_attrs['total_observed_bout_time_s'] = float(np.sum(bouts['observed_duration_s']))
@@ -2282,15 +2740,77 @@ def detect_and_save_bouts(
             level_specific_attrs['n_gap_censored_bouts'] = int(np.sum(bouts['gap_censored']))
 
         level_specific_attrs = _json_safe_attrs(level_specific_attrs)
-        level_group.attrs.update(level_specific_attrs)
-        write_columnar_dataset(level_group, 'bouts', bouts, attrs=level_specific_attrs)
-        write_columnar_dataset(level_group, 'peak_events', peak_events, attrs=level_specific_attrs)
-        write_columnar_dataset(level_group, 'inter_bout_intervals', intervals, attrs=None)
-        write_columnar_dataset(level_group, 'inter_bout_interval_histogram', interval_histogram, attrs=None)
-        write_columnar_dataset(level_group, 'global_metrics', global_metrics, attrs=None)
-        write_columnar_dataset(level_group, 'bout_points', bout_points, attrs=None)
+        level_payloads[level] = {
+            "bouts": bouts,
+            "peak_events": peak_events,
+            "intervals": intervals,
+            "interval_metrics": interval_metrics,
+            "interval_histogram": interval_histogram,
+            "global_metrics": global_metrics,
+            "bout_points": bout_points,
+            "attrs": level_specific_attrs,
+        }
 
-        print(f"  Saved {level}: {len(bouts)} bouts, {len(intervals)} intervals")
+    if layout == SWIM_BOUT_LAYOUT_COMPACT_V2:
+        _write_compact_v2_swim_bout_payloads(
+            run_group,
+            run_name=run_name,
+            speed_levels=speed_levels,
+            level_payloads=level_payloads,
+            signal_id_by_level=signal_id_by_level,
+            estimator_signal_id_by_level=estimator_signal_id_by_level,
+            default_level_key=default_level_key,
+            method=method,
+            parameters=parameters,
+            provenance=provenance,
+            track_id=track_id,
+            pixel_to_mm=metadata.get("pixel_to_mm"),
+            path_distance_level_source=path_distance_level_source,
+            source_track_path=source_track_path,
+            exponential_source_key=exponential_source_key,
+            exponential_tau_s=float(exponential_tau_s),
+            frames=frames,
+            speeds=speeds,
+        )
+        for level in speed_levels:
+            payload = level_payloads[level]
+            print(f"  Saved {level}: {len(payload['bouts'])} bouts, {len(payload['intervals'])} intervals")
+    else:
+        # Save each speed level's bouts and statistics in v1 subgroups.
+        for level in speed_levels:
+            level_group = run_group.create_group(level)
+            payload = level_payloads[level]
+            level_specific_attrs = payload["attrs"]
+            level_group.attrs.update(level_specific_attrs)
+            if level == "speed_exponential":
+                store_array(
+                    level_group,
+                    "detection_signal_mm_s",
+                    np.asarray(speeds["speed_exponential_mm"], dtype=np.float32),
+                    attrs={
+                        "units": "mm/s",
+                        **_detection_signal_attrs(
+                            level=level,
+                            source_track_path=source_track_path,
+                            path_distance_source_level=path_distance_level_source[level],
+                            exponential_source_key=exponential_source_key,
+                            exponential_tau_s=float(exponential_tau_s),
+                        ),
+                    },
+                )
+                store_array(
+                    level_group,
+                    "frame_indices",
+                    np.asarray(frames, dtype=np.int64),
+                    attrs={"source": "track_kinematics.frame_indices"},
+                )
+            write_columnar_dataset(level_group, 'bouts', payload["bouts"], attrs=level_specific_attrs)
+            write_columnar_dataset(level_group, 'peak_events', payload["peak_events"], attrs=level_specific_attrs)
+            write_columnar_dataset(level_group, 'inter_bout_intervals', payload["intervals"], attrs=None)
+            write_columnar_dataset(level_group, 'inter_bout_interval_histogram', payload["interval_histogram"], attrs=None)
+            write_columnar_dataset(level_group, 'global_metrics', payload["global_metrics"], attrs=None)
+            write_columnar_dataset(level_group, 'bout_points', payload["bout_points"], attrs=None)
+            print(f"  Saved {level}: {len(payload['bouts'])} bouts, {len(payload['intervals'])} intervals")
 
     # Update latest pointer
     swim_bout_runs.attrs['latest'] = run_name
@@ -2335,6 +2855,18 @@ def main():
         '--overwrite',
         action='store_true',
         help='Delete and recreate --run-name if it already exists. Ignored for auto-generated run names.',
+    )
+
+    parser.add_argument(
+        '--layout',
+        type=str,
+        choices=SWIM_BOUT_LAYOUT_CHOICES,
+        default=SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
+        help=(
+            'Storage layout for the output run. hierarchical_v1 preserves the existing '
+            'tree-shaped layout. compact_v2 writes the opt-in tabular schema version 7. '
+            'Default: hierarchical_v1.'
+        ),
     )
 
     parser.add_argument(
@@ -2554,6 +3086,7 @@ def main():
         boundary_window_s=args.boundary_window_s,
         exponential_tau_s=args.exponential_tau_s,
         exponential_source_level=args.exponential_source_level,
+        layout=args.layout,
         command=" ".join(sys.argv),
     )
 
