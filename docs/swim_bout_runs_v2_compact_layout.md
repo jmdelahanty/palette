@@ -471,6 +471,64 @@ them.
 8. After readers are migrated, make compact v2 the default writer for promoted
    accepted runs. Keep broad sweeps in scratch outputs or Parquet sidecars.
 
+## Default-Flip Readiness Checklist
+
+Do not change `detect_bouts_multi_level.py`'s CLI default from
+`hierarchical_v1` to `compact_v2` until all checks below are complete. This is
+the gate for promoted accepted runs only; scratch parameter sweeps should still
+avoid materializing many Zarr run groups.
+
+- [x] Palette can write compact v2 behind an explicit `--layout compact_v2`
+      flag.
+- [x] `swim_bout_io.py` can read both hierarchical v1 and compact v2 runs
+      through the same logical candidate/signal/table API.
+- [x] Marimo track-kinematics explorer discovers swim-bout options through
+      `swim_bout_io.py` and exposes logical `layout`, `candidate_id`,
+      `signal_id`, and `signal_role` fields.
+- [x] `plot_track_kinematics.py`, `bout_kinematics.py`,
+      `stimulus_response.py`, `megabouts_classifier_inputs.py`, and
+      cross-recording exports read swim-bout tables through the resolver rather
+      than hard-coded `<run>/<speed_level>` paths.
+- [x] Focused unit coverage exists for hierarchical-v1 reading, compact-v2
+      reading, compact-v2 writing, Marimo compact option discovery, and
+      v1-v2 comparison.
+- [x] Feeding canary v1-v2 audit passes through
+      `fisheye.utils.compare_swim_bout_layouts`: 68/68 checks, 519 default
+      signal bouts, max numeric drift 0.
+- [x] Two additional archive audits pass through the same utility:
+      `2026-01-28T19-22-28Z_arena_1_DefaultScreen_analysis.zarr` and
+      `2026-01-28T23-15-10Z_arena_3_Feeding_analysis.zarr`, each 68/68 checks
+      with max numeric drift 0.
+- [x] Compact v2 audit runs reduce metadata fanout from 493 v1 `zarr.json`
+      files to 145 compact-v2 `zarr.json` files for the audited run shape.
+- [x] Palette owns a Crimson handoff contract:
+      `docs/crimson_swim_bout_compact_v2_read_contract.md`.
+- [ ] Crimson reads compact-v2 swim-bout runs directly while preserving
+      hierarchical-v1 support.
+- [ ] Crimson validation passes on the three compact-v2 audit archives:
+      compact candidates visible, default compact signal `speed_exponential`,
+      default bout counts match v1, detector trace visible, and timeline/core
+      rectangles render.
+- [ ] A fresh end-to-end canary archive is generated with compact v2 as the
+      only new promoted swim-bout run, and all active Palette readers plus
+      Crimson load it without needing hierarchical-v1 compatibility mirrors.
+- [ ] Strict JSON validation passes on the fresh compact-v2 archive: no `NaN`,
+      `Infinity`, or `-Infinity` appears in `zarr.json` metadata.
+- [ ] The default change is explicitly documented in release notes or the
+      pipeline contract, including the migration rule that old hierarchical-v1
+      archives remain readable but new accepted runs write compact v2 by
+      default.
+
+Default flip implementation, when the checklist is complete:
+
+1. Change `detect_bouts_multi_level.py`'s CLI default layout from
+   `hierarchical_v1` to `compact_v2`.
+2. Keep `--layout hierarchical_v1` as an explicit compatibility option.
+3. Update tests that assert the CLI default.
+4. Generate one fresh compact-default canary and run
+   `fisheye.utils.compare_swim_bout_layouts` against an equivalent
+   hierarchical reference run for regression evidence.
+
 ## Validation Plan
 
 - Unit-test strict JSON serialization for candidate and signal parameter
