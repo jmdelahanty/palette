@@ -6,7 +6,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis import plot_track_kinematics as plot_mod
-from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
 from fisheye.visualization.interactive_track_kinematics import (
     DEFAULT_INTERACTIVE_ARTIFACT,
     bout_classification_records_to_dataframe,
@@ -112,6 +112,103 @@ def _add_hierarchical_swim_bouts(
         write_columnar_dataset(level_group, "inter_bout_intervals", intervals)
         if include_peak_events:
             write_columnar_dataset(level_group, "peak_events", peak_events)
+
+
+def _add_compact_swim_bouts(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a")
+    analysis = root["analysis"]
+    swim_parent = analysis.create_group("swim_bout_runs")
+    swim_parent.attrs["latest"] = "swim_bout_compact"
+
+    run = swim_parent.create_group("swim_bout_compact")
+    run.attrs.update(
+        {
+            "schema_id": "palette.swim_bout_runs",
+            "schema_version": 7,
+            "layout": "compact_tabular_v2",
+            "source_track_kinematics_run": "track_kinematics_1",
+            "track_id": 0,
+            "detection_method": "peak_event",
+            "default_candidate_id": 0,
+            "default_signal_id": 1,
+            "exponential_tau_s": 0.025,
+        }
+    )
+    indexes = run.create_group("indexes")
+    tables = run.create_group("tables")
+    signals = run.create_group("signals")
+
+    candidates = np.zeros(
+        1,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("candidate_name", "S32"),
+            ("is_default", "?"),
+            ("detection_method", "S32"),
+        ],
+    )
+    candidates[0] = (0, b"compact_candidate", True, b"peak_event")
+    write_columnar_dataset(indexes, "candidates", candidates)
+
+    signal_variants = np.zeros(
+        2,
+        dtype=[
+            ("signal_id", "i4"),
+            ("speed_level", "S32"),
+            ("signal_name", "S32"),
+            ("role", "S32"),
+            ("source_level", "S32"),
+            ("transform_type", "S32"),
+            ("transform_source_signal_id", "i4"),
+            ("tau_s", "f8"),
+            ("units", "S16"),
+            ("path_distance_source_level", "S32"),
+        ],
+    )
+    signal_variants[0] = (
+        0,
+        b"speed_filtered",
+        b"filtered",
+        b"physical_estimator",
+        b"speed_filtered",
+        b"identity",
+        -1,
+        np.nan,
+        b"mm/s",
+        b"filtered",
+    )
+    signal_variants[1] = (
+        1,
+        b"speed_exponential",
+        b"exponential",
+        b"detector_response",
+        b"speed_filtered",
+        b"exponential",
+        0,
+        0.025,
+        b"mm/s",
+        b"filtered",
+    )
+    write_columnar_dataset(indexes, "signal_variants", signal_variants)
+
+    bouts = np.zeros(
+        3,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("signal_id", "i4"),
+            ("bout_id", "i8"),
+            ("start_frame", "i8"),
+            ("end_frame", "i8"),
+            ("duration_s", "f8"),
+        ],
+    )
+    bouts[0] = (0, 0, 10, 1, 3, 0.01)
+    bouts[1] = (0, 1, 20, 4, 8, 0.02)
+    bouts[2] = (0, 1, 21, 10, 16, 0.03)
+    write_columnar_dataset(tables, "bouts", bouts)
+    store_array(signals, "detector_signal_mm_s", np.asarray([[0.0, 1.0, 0.0]], dtype=np.float32))
+    store_array(signals, "detector_signal_signal_ids", np.asarray([1], dtype=np.int32))
+    store_array(signals, "frame_indices", np.asarray([4, 5, 6], dtype=np.int64))
 
 
 def _add_eye_angle_run(zarr_path: Path) -> None:
@@ -336,7 +433,7 @@ def test_load_track_kinematics_interactive_data_reads_canonical_swim_bouts(tmp_p
     swim_bouts = to_swim_bout_dataframe(data)
     inter_bout_intervals = to_inter_bout_interval_dataframe(data)
 
-    assert data.swim_bout_source == "analysis_swim_bout_runs"
+    assert data.swim_bout_source == "analysis/swim_bout_runs/swim_bout_1/speed_smoothed"
     assert data.swim_bout_label == "swim_bout_1 (speed_smoothed) (threshold)"
     assert swim_bouts["start_s"].tolist() == [0.010, 0.035]
     np.testing.assert_allclose(swim_bouts["duration_s"].to_numpy(), [0.010, 0.010])
@@ -398,12 +495,39 @@ def test_discover_track_and_derived_swim_bout_options(tmp_path: Path) -> None:
         "averaged",
     ]
     assert swim_options[0].run_name == "swim_bout_1"
+    assert swim_options[0].layout == "hierarchical_v1"
+    assert swim_options[0].candidate_id == 0
+    assert swim_options[0].signal_id == 1
+    assert swim_options[0].signal_role == "physical_estimator"
     assert swim_options[0].default_level == "speed_smoothed"
     assert swim_options[0].source_track_kinematics_run == "track_kinematics_1"
     assert swim_options[0].track_id == 0
     assert swim_options[0].n_bouts_by_level["speed_smoothed"] == 2
     assert "smoothed" in swim_options[0].label
     assert "default" in swim_options[0].label
+
+
+def test_discover_compact_swim_bout_options_exposes_logical_identity(tmp_path: Path) -> None:
+    zarr_path = _make_archive_with_interactive_artifact(tmp_path)
+    _add_compact_swim_bouts(zarr_path)
+
+    track_options = discover_track_kinematics_run_options(zarr_path)
+    swim_options = discover_swim_bout_run_options(
+        zarr_path,
+        track_run_path=track_options[0].run_path,
+        track_id=track_options[0].track_id,
+    )
+
+    assert len(swim_options) == 2
+    assert [option.speed_level for option in swim_options] == ["exponential", "filtered"]
+    assert swim_options[0].layout == "compact_tabular_v2"
+    assert swim_options[0].candidate_id == 0
+    assert swim_options[0].signal_id == 1
+    assert swim_options[0].signal_role == "detector_response"
+    assert swim_options[0].default_level == "speed_exponential"
+    assert swim_options[0].n_bouts_by_level["speed_exponential"] == 2
+    assert swim_options[1].signal_id == 0
+    assert swim_options[1].signal_role == "physical_estimator"
 
 
 def test_discover_and_load_bout_classification_options(tmp_path: Path) -> None:

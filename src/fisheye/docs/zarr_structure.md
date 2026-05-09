@@ -1296,7 +1296,14 @@ Track-level arrays remain unchanged between online and offline runs; only the ro
 
 Bout segmentation candidates derived from track-kinematics speed traces.
 
-**Structure**: `analysis/swim_bout_runs/<run_name>/<speed_level>/`
+**Logical reader contract**: consumers should read swim-bout runs through
+`fisheye.analysis.swim_bout_io`, not by assuming a single physical tree shape.
+The resolver exposes candidates, signal variants, bout tables, intervals,
+histograms, summary metrics, and detector-response series for both historical
+hierarchical runs and compact tabular runs.
+
+**Hierarchical v1 structure**:
+`analysis/swim_bout_runs/<run_name>/<speed_level>/`
 
 Each `<speed_level>/` subgroup answers "what bouts did this speed-level detector
 find?" and stores:
@@ -1336,6 +1343,36 @@ to define that subgroup's bout boundaries. `peak_physical_speed_mm_s` is the
 maximum of the declared physical movement source inside the same boundaries.
 For identity levels these can be equal; for transformed detector signals they
 are intentionally distinct.
+
+**Compact v2 structure**:
+`analysis/swim_bout_runs/<run_name>/` with
+`attrs["layout"] == "compact_tabular_v2"` stores the same logical surfaces as
+tables and indexes:
+
+```text
+indexes/candidates
+indexes/signal_variants
+tables/bouts
+tables/peak_events
+tables/inter_bout_intervals
+tables/summary_metrics
+tables/histograms
+signals/detector_signal_mm_s
+signals/detector_signal_signal_ids
+signals/frame_indices
+```
+
+Compact v2 replaces physical `<speed_level>` subgroups with `candidate_id` and
+`signal_id` columns. A selected signal's `speed_level`, `role`,
+`source_level`, and `path_distance_source_level` come from
+`indexes/signal_variants`. A detector response such as `speed_exponential`
+therefore remains selectable, but its dense trace is stored as one row in
+`signals/detector_signal_mm_s` keyed by `detector_signal_signal_ids`.
+
+Do not add v1-style compatibility mirrors under compact runs unless a concrete
+external reader requires them. New Palette Python readers, Marimo notebooks,
+stimulus-response analysis, bout kinematics, and exports should use
+`swim_bout_io.py` and treat the physical layout as an implementation detail.
 
 **Source-speed selection rule**:
 `analysis/swim_bout_runs` is a separate event-candidate surface, not a child of

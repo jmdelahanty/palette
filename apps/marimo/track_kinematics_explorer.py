@@ -1050,6 +1050,10 @@ def _(
             {
                 "run": selected_swim_bout.run_name,
                 "label": selected_swim_bout.label,
+                "layout": selected_swim_bout.layout,
+                "candidate_id": int(selected_swim_bout.candidate_id),
+                "signal_id": int(selected_swim_bout.signal_id),
+                "signal_role": selected_swim_bout.signal_role,
                 "latest": bool(selected_swim_bout.is_latest),
                 "selected_speed_level": selected_swim_bout.speed_level,
                 "default_level": selected_swim_bout.default_level,

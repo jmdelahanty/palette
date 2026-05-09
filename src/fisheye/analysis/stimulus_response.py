@@ -829,7 +829,8 @@ def load_bout_data(
         ))
 
     console.print(
-        f"  Loaded {n_bouts} bout(s) from swim_bout_runs/{run_name}/{speed_level}/"
+        f"  Loaded {n_bouts} bout(s) from swim_bout_runs/{run_name} "
+        f"(logical signal {speed_level})"
     )
     return bouts_by_fish, run_name
 

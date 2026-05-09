@@ -86,6 +86,10 @@ class EyeAngleRunOption:
 class SwimBoutRunOption:
     run_name: str
     label: str
+    layout: str
+    candidate_id: int
+    signal_id: int
+    signal_role: str
     default_level: str
     speed_level: str
     source_track_kinematics_run: Optional[str]
@@ -1138,6 +1142,7 @@ def discover_swim_bout_run_options(
             for signal in candidate.signals
         }
         method = candidate.detection_method
+        layout = str(candidate.attrs.get("layout") or "hierarchical_v1")
         threshold = _safe_float(candidate.attrs.get("threshold_mm"))
         exponential_tau_s = _safe_float(candidate.attrs.get("exponential_tau_s"))
         exponential_source_level = candidate.attrs.get("exponential_source_level")
@@ -1169,6 +1174,10 @@ def discover_swim_bout_run_options(
                         count=n_bouts_by_level[level],
                         is_latest=candidate.is_latest,
                     ),
+                    layout=layout,
+                    candidate_id=int(candidate.candidate_id),
+                    signal_id=int(signal.signal_id),
+                    signal_role=signal.role,
                     default_level=default_level,
                     speed_level=speed_level,
                     source_track_kinematics_run=candidate.source_track_kinematics_run,
@@ -1433,7 +1442,7 @@ def _load_global_swim_bout_payload(
         inter_bout_intervals=intervals,
         series=series,
         label=label,
-        source="analysis_swim_bout_runs",
+        source=swim_payload.level_path,
     )
 
 

@@ -13,7 +13,7 @@ Use these run families for new Crimson readers:
 | Need | Preferred Palette source |
 | --- | --- |
 | Per-track position, heading, speed, path distance, acceleration | `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>/` |
-| Swim-bout event windows and detector traces | `analysis/swim_bout_runs/<run>/<speed_level>/` |
+| Swim-bout event windows and detector traces | `analysis/swim_bout_runs/<run>/` through the logical candidate/signal resolver |
 | Per-bout physical movement, heading, eye-gaze summaries | `analysis/bout_kinematics_runs/<run>/` |
 | Body frame, snout/tail landmarks, B-spline, subject-shape QC | `analysis/subject_shape_runs/<run>/` |
 | Protocol step timing and stimulus geometry | `analysis/stimulus_runs/<run>/steps/step_<i>/` |
@@ -76,9 +76,19 @@ stored analysis semantics.
 
 ## Swim-Bout Runs
 
-`analysis/swim_bout_runs/<run>/<speed_level>/` is the canonical bout
-segmentation candidate surface. It answers: what events did this detector or
-speed level find?
+`analysis/swim_bout_runs/<run>/` is the canonical bout segmentation candidate
+surface. It answers: what events did this detector or speed level find?
+
+Crimson should treat swim-bout data as a logical run/candidate/signal surface,
+not as a fixed physical path. Palette currently has two physical layouts:
+
+- hierarchical v1: `analysis/swim_bout_runs/<run>/<speed_level>/...`
+- compact v2: `analysis/swim_bout_runs/<run>/indexes/*`,
+  `tables/*`, and `signals/*`, with `attrs["layout"] ==
+  "compact_tabular_v2"`
+
+The detailed compact-v2 handoff is in
+[`crimson_swim_bout_compact_v2_read_contract.md`](./crimson_swim_bout_compact_v2_read_contract.md).
 
 Important fields:
 
@@ -90,6 +100,24 @@ global_metrics
 detection_signal_mm_s        # present for transformed detector responses
 speed_exponential_mm         # compatibility/plotting mirror when present
 ```
+
+In compact v2, these logical fields are materialized differently:
+
+```text
+indexes/candidates
+indexes/signal_variants
+tables/bouts
+tables/peak_events
+tables/inter_bout_intervals
+signals/detector_signal_mm_s
+signals/detector_signal_signal_ids
+signals/frame_indices
+```
+
+Crimson should create one selectable UI candidate per selected candidate row
+and signal row, using `candidate_id` and `signal_id` as stable identity inside
+the run. Do not require a physical `<speed_level>` subgroup when
+`layout == "compact_tabular_v2"`.
 
 The `bouts` table includes frame and timing boundaries such as:
 
@@ -127,7 +155,8 @@ Crimson should label detector traces as detector responses when plotted.
 ## Matching Track Kinematics To Swim Bouts
 
 Given a selected track-kinematics run, track ID, and speed level, Crimson should
-discover compatible swim-bout candidates by lineage attrs:
+discover compatible swim-bout candidates by lineage attrs and/or compact signal
+columns:
 
 ```text
 source_track_kinematics_run
@@ -135,6 +164,10 @@ track_id
 detection_signal_source_level
 detection_signal_source_path
 movement_metric_source_level
+source_level
+path_distance_source_level
+signal_id
+candidate_id
 ```
 
 Direct matches:
@@ -214,7 +247,8 @@ derived preview values.
    - speed from selected `movement/speed/<level>/mm` or fallback flat arrays
    - px/s fallback only when mm/s is unavailable, with honest units
 5. Discover matching `analysis/swim_bout_runs` candidates and overlay bout
-   windows from `bouts/start_frame` and `bouts/end_frame`.
+   windows from logical `bouts/start_frame` and `bouts/end_frame`, regardless
+   of whether the run is hierarchical v1 or compact v2.
 6. Load linked `analysis/bout_kinematics_runs` for per-bout measurement tables
    and histograms when present.
 7. Keep subject-shape overlays independent from motion traces.
