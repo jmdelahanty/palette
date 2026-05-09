@@ -27,6 +27,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
+from fisheye.analysis.swim_bout_io import (
+    SPEED_LEVEL_ALIASES,
+    SwimBoutIOError,
+    load_default_swim_bout_tables,
+    load_swim_bout_tables,
+)
+
 try:
     from PIL import Image, PngImagePlugin
 except ImportError:  # pragma: no cover
@@ -35,6 +42,7 @@ except ImportError:  # pragma: no cover
 
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "plots"
+DISPLAY_SPEED_LEVEL_ORDER = ("raw", "filtered", "smoothed", "averaged", "exponential")
 
 
 def _decode_bytes(arr: np.ndarray) -> np.ndarray:
@@ -44,110 +52,71 @@ def _decode_bytes(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _optional_table(records: np.ndarray) -> Optional[np.ndarray]:
+    """Return ``None`` for missing optional tables represented by an empty dtype."""
+    if records.size == 0 and records.dtype.names == ():
+        return None
+    return records
+
+
+def _display_speed_level(speed_level: str) -> str:
+    """Return the CLI/display spelling for a canonical ``speed_*`` level."""
+    return str(speed_level).replace("speed_", "", 1)
+
+
+def _sort_display_speed_levels(speed_levels: Iterable[str]) -> list[str]:
+    """Sort canonical speed levels in the dashboard's historical display order."""
+    display_levels = {_display_speed_level(level) for level in speed_levels if level}
+    order = {name: index for index, name in enumerate(DISPLAY_SPEED_LEVEL_ORDER)}
+    return sorted(display_levels, key=lambda name: (order.get(name, len(order)), name))
+
+
 def _load_swim_bout_run(
     zarr_path: Path,
     run_name: Optional[str],
     speed_level: str = "smoothed",
-) -> Tuple[Dict[str, Any], Dict[str, np.ndarray]]:
-    """Load swim bout datasets and attributes from the archive."""
+) -> Tuple[Dict[str, Any], Dict[str, Optional[np.ndarray]]]:
+    """Load swim-bout datasets through the shared logical resolver."""
     root = zarr.open(str(zarr_path), mode="r")
-    analysis = root.get("analysis")
-    if analysis is None or "swim_bout_runs" not in analysis:
-        raise ValueError("Archive does not contain analysis/swim_bout_runs.")
+    selector = run_name or "latest"
+    try:
+        payload = load_swim_bout_tables(root, run_name=selector, speed_level=speed_level)
+    except SwimBoutIOError as exc:
+        if "Speed level" not in str(exc):
+            raise ValueError(str(exc)) from exc
+        payload = load_default_swim_bout_tables(root, run_name=selector)
+        requested = SPEED_LEVEL_ALIASES.get(speed_level, f"speed_{speed_level}")
+        print(
+            f"Warning: Speed level '{requested}' not found, "
+            f"using default '{payload.signal.speed_level or payload.signal.signal_name}'"
+        )
 
-    runs_parent = analysis["swim_bout_runs"]
-    if run_name is None:
-        run_name = runs_parent.attrs.get("latest")
-        if run_name is None:
-            raise ValueError("analysis/swim_bout_runs has no 'latest' run and none was specified.")
-    if run_name not in runs_parent:
-        raise ValueError(f"Run '{run_name}' not found in analysis/swim_bout_runs.")
+    signal_level = payload.signal.speed_level
+    is_hierarchical = bool(signal_level)
+    attrs = dict(payload.run_attrs)
+    attrs["signal_attrs"] = dict(payload.signal_attrs)
+    attrs["run_name"] = (
+        f"{payload.run_name} ({signal_level})" if is_hierarchical else payload.run_name
+    )
+    attrs["speed_level"] = signal_level
+    attrs["speed_signal_name"] = payload.signal.signal_name
+    attrs["is_hierarchical"] = is_hierarchical
+    attrs["source_swim_bout_run"] = payload.run_name
+    attrs["source_swim_bout_path"] = payload.level_path
+    attrs["source_swim_bout_candidate_id"] = payload.candidate.candidate_id
+    attrs["source_swim_bout_signal_id"] = payload.signal.signal_id
+    attrs["available_speed_levels"] = [
+        signal.speed_level for signal in payload.candidate.signals if signal.speed_level
+    ]
 
-    run_group = runs_parent[run_name]
-
-    # Detect hierarchical structure
-    speed_levels = ['speed_raw', 'speed_filtered', 'speed_smoothed', 'speed_averaged']
-    is_hierarchical = all(level in run_group for level in speed_levels)
-
-    if is_hierarchical:
-        # Map user-friendly names to internal names
-        level_map = {
-            'raw': 'speed_raw',
-            'filtered': 'speed_filtered',
-            'smoothed': 'speed_smoothed',
-            'averaged': 'speed_averaged',
-        }
-        level_key = level_map.get(speed_level, f"speed_{speed_level}")
-
-        if level_key not in run_group:
-            # Fall back to default level
-            default_level = run_group.attrs.get('default_level', 'speed_smoothed')
-            print(f"Warning: Speed level '{level_key}' not found, using default '{default_level}'")
-            level_key = default_level
-
-        level_group = run_group[level_key]
-        if "bouts" not in level_group:
-            raise ValueError(f"Speed level '{level_key}' in run '{run_name}' lacks 'bouts' dataset.")
-
-        # Load bouts using load_structured_dataset to handle both columnar and legacy formats
-        from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
-        bout_array, _ = load_structured_dataset(level_group, 'bouts')
-
-        # Load additional datasets if available
-        global_metrics = None
-        inter_bout_intervals = None
-        inter_bout_histogram = None
-        bout_points = None
-
-        if 'global_metrics' in level_group:
-            global_metrics, _ = load_structured_dataset(level_group, 'global_metrics')
-
-        if 'inter_bout_intervals' in level_group:
-            inter_bout_intervals, _ = load_structured_dataset(level_group, 'inter_bout_intervals')
-
-        if 'inter_bout_interval_histogram' in level_group:
-            inter_bout_histogram, _ = load_structured_dataset(level_group, 'inter_bout_interval_histogram')
-
-        if 'bout_points' in level_group:
-            bout_points, _ = load_structured_dataset(level_group, 'bout_points')
-
-        # For hierarchical runs, we don't have trials
-        datasets = {
-            "bouts": bout_array,
-            "global_metrics": global_metrics,
-            "trials": None,
-            "bout_points": bout_points,
-            "inter_bout_intervals": inter_bout_intervals,
-            "inter_bout_interval_histogram": inter_bout_histogram,
-        }
-
-        attrs = dict(run_group.attrs)
-        attrs["run_name"] = f"{run_name} ({level_key})"
-        attrs["speed_level"] = level_key
-        attrs["is_hierarchical"] = True
-    else:
-        # Legacy flat structure
-        from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
-        bout_array, _ = load_structured_dataset(run_group, 'bouts')
-
-        datasets = {
-            "global_metrics": run_group["global_metrics"][:] if "global_metrics" in run_group else None,
-            "trials": run_group["trials"][:] if "trials" in run_group else None,
-            "bouts": bout_array,
-            "bout_points": run_group["bout_points"][:] if "bout_points" in run_group else None,
-        }
-        if "inter_bout_intervals" in run_group:
-            datasets["inter_bout_intervals"] = run_group["inter_bout_intervals"][:]
-        else:
-            datasets["inter_bout_intervals"] = None
-        if "inter_bout_interval_histogram" in run_group:
-            datasets["inter_bout_interval_histogram"] = run_group["inter_bout_interval_histogram"][:]
-        else:
-            datasets["inter_bout_interval_histogram"] = None
-        attrs = dict(run_group.attrs)
-        attrs["run_name"] = run_name
-        attrs["is_hierarchical"] = False
-
+    datasets: Dict[str, Optional[np.ndarray]] = {
+        "bouts": payload.bouts,
+        "global_metrics": _optional_table(payload.global_metrics),
+        "trials": _optional_table(payload.trials),
+        "bout_points": _optional_table(payload.bout_points),
+        "inter_bout_intervals": _optional_table(payload.inter_bout_intervals),
+        "inter_bout_interval_histogram": _optional_table(payload.inter_bout_interval_histogram),
+    }
     return attrs, datasets
 
 
@@ -248,7 +217,30 @@ def _extract_pixel_to_mm(attrs: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def create_swim_bout_dashboard(attrs: Dict[str, Any], datasets: Dict[str, np.ndarray], title: Optional[str] = None) -> plt.Figure:
+def _first_existing_field(records: Optional[np.ndarray], candidates: Iterable[str]) -> Optional[str]:
+    """Return the first candidate field present in a structured array."""
+    if records is None or records.dtype.names is None:
+        return None
+    fields = set(records.dtype.names)
+    for candidate in candidates:
+        if candidate in fields:
+            return candidate
+    return None
+
+
+def _finite_field_values(records: np.ndarray, field: Optional[str]) -> np.ndarray:
+    """Read finite numeric values for a possibly absent structured field."""
+    if field is None:
+        return np.array([], dtype=float)
+    values = np.asarray(records[field], dtype=float)
+    return values[np.isfinite(values)]
+
+
+def create_swim_bout_dashboard(
+    attrs: Dict[str, Any],
+    datasets: Dict[str, Optional[np.ndarray]],
+    title: Optional[str] = None,
+) -> plt.Figure:
     """Create the swim bout dashboard figure."""
     global_metrics = datasets["global_metrics"]
     trials = datasets["trials"]
@@ -258,9 +250,10 @@ def create_swim_bout_dashboard(attrs: Dict[str, Any], datasets: Dict[str, np.nda
     point_series = _prepare_point_series(datasets["bout_points"])
     pixel_to_mm = _extract_pixel_to_mm(attrs)
 
-    # Detect if this is hierarchical (mm-based) or legacy (px-based) data
-    is_hierarchical = attrs.get("is_hierarchical", False)
-    has_mm_fields = "distance" in bouts.dtype.names if bouts.dtype.names else False
+    distance_mm_field = _first_existing_field(bouts, ("path_length_mm", "distance"))
+    distance_px_field = _first_existing_field(bouts, ("path_length_px", "distance_px"))
+    speed_mm_field = _first_existing_field(bouts, ("mean_speed_mm_s", "mean_speed"))
+    speed_px_field = _first_existing_field(bouts, ("mean_speed_px_s",))
 
     fig = plt.figure(figsize=(16, 12))
     gs = gridspec.GridSpec(
@@ -284,18 +277,15 @@ def create_swim_bout_dashboard(attrs: Dict[str, Any], datasets: Dict[str, np.nda
     ax_duration.set_ylabel("Count")
 
     ax_distance = fig.add_subplot(gs[0, 1])
-    # Handle both mm-based (hierarchical) and px-based (legacy) data
-    if has_mm_fields:
-        distances = bouts["distance"]  # Already in mm
-        distances = distances[~np.isnan(distances)]
+    if distance_mm_field:
+        distances = _finite_field_values(bouts, distance_mm_field)
         if distances.size:
             ax_distance.hist(distances, bins=30, color="#ff7f0e", alpha=0.8)
         ax_distance.set_title("Bout Distance Distribution")
         ax_distance.set_xlabel("Distance (mm)")
         ax_distance.set_ylabel("Count")
     else:
-        distances = bouts["distance_px"]
-        distances = distances[~np.isnan(distances)]
+        distances = _finite_field_values(bouts, distance_px_field)
         if distances.size:
             ax_distance.hist(distances, bins=30, color="#ff7f0e", alpha=0.8)
         ax_distance.set_title("Bout Distance Distribution")
@@ -312,18 +302,15 @@ def create_swim_bout_dashboard(attrs: Dict[str, Any], datasets: Dict[str, np.nda
             sec_ax.set_xlabel("Distance (mm)")
 
     ax_speed = fig.add_subplot(gs[0, 2])
-    # Handle both mm/s-based (hierarchical) and px/s-based (legacy) data
-    if has_mm_fields:
-        mean_speeds = bouts["mean_speed"]  # Already in mm/s
-        mean_speeds = mean_speeds[~np.isnan(mean_speeds)]
+    if speed_mm_field:
+        mean_speeds = _finite_field_values(bouts, speed_mm_field)
         if mean_speeds.size:
             ax_speed.hist(mean_speeds, bins=30, color="#2ca02c", alpha=0.8)
         ax_speed.set_title("Mean Bout Speed Distribution")
         ax_speed.set_xlabel("Speed (mm/s)")
         ax_speed.set_ylabel("Count")
     else:
-        mean_speeds = bouts["mean_speed_px_s"]
-        mean_speeds = mean_speeds[~np.isnan(mean_speeds)]
+        mean_speeds = _finite_field_values(bouts, speed_px_field)
         if mean_speeds.size:
             ax_speed.hist(mean_speeds, bins=30, color="#2ca02c", alpha=0.8)
         ax_speed.set_title("Mean Bout Speed Distribution")
@@ -362,7 +349,8 @@ def create_swim_bout_dashboard(attrs: Dict[str, Any], datasets: Dict[str, np.nda
     ax_timeline.set_title("Bout Start/End Positions Over Time")
     ax_timeline.set_xlabel("Time (s)")
     ax_timeline.set_ylabel("X Position (px)")
-    ax_timeline.legend(loc="upper right")
+    if point_series["start_times"].size or point_series["end_times"].size:
+        ax_timeline.legend(loc="upper right")
     ax_timeline.grid(alpha=0.2)
     if pixel_to_mm:
         sec_ax_timeline = ax_timeline.secondary_yaxis(
@@ -489,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--speed-level",
         type=str,
-        choices=["raw", "filtered", "smoothed", "averaged"],
+        choices=["raw", "filtered", "smoothed", "averaged", "exponential"],
         default="smoothed",
         help="Speed level to visualize in hierarchical runs (default: smoothed).",
     )
@@ -525,8 +513,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     is_hierarchical = attrs_initial.get("is_hierarchical", False)
 
     if is_hierarchical:
-        # Generate a plot for each speed level
-        speed_levels = ["raw", "filtered", "smoothed", "averaged"]
+        # Generate a plot for each signal level available in this run.
+        speed_levels = _sort_display_speed_levels(attrs_initial.get("available_speed_levels", []))
+        if not speed_levels:
+            speed_levels = [args.speed_level]
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
         for level in speed_levels:
@@ -543,7 +533,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "generated_at_utc": datetime.now(timezone.utc).isoformat(),
                 "source_zarr": str(args.zarr_path),
                 "run_name": attrs.get("run_name"),
-                "speed_level": level,
+                "speed_level": attrs.get("speed_level"),
                 "provenance": provenance,
             }
 
@@ -553,7 +543,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 output_suffix = args.output.suffix
                 output_path = args.output.parent / f"{output_stem}_{level}{output_suffix}"
             else:
-                run_name = attrs.get("run_name", "latest").replace(f" (speed_{level})", "")
+                run_name = attrs.get("source_swim_bout_run", attrs.get("run_name", "latest"))
                 output_path = DEFAULT_OUTPUT_DIR / f"swim_bout_dashboard_{run_name}_{level}_{timestamp}.png"
 
             _save_figure_with_metadata(fig, output_path, metadata)

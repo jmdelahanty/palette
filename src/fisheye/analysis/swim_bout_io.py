@@ -95,7 +95,9 @@ class SwimBoutTables:
     bouts: np.ndarray
     peak_events: np.ndarray
     inter_bout_intervals: np.ndarray
+    inter_bout_interval_histogram: np.ndarray
     global_metrics: np.ndarray
+    trials: np.ndarray
     bout_points: np.ndarray
     series: Mapping[str, np.ndarray]
     run_attrs: Mapping[str, Any]
@@ -231,7 +233,9 @@ def load_swim_bout_tables(
     bouts = _load_structured_or_empty(level_group, "bouts", required=True)
     peak_events = _load_structured_or_empty(level_group, "peak_events")
     intervals = _load_structured_or_empty(level_group, "inter_bout_intervals")
+    interval_histogram = _load_structured_or_empty(level_group, "inter_bout_interval_histogram")
     global_metrics = _load_structured_or_empty(level_group, "global_metrics")
+    trials = _load_structured_or_empty(level_group, "trials")
     bout_points = _load_structured_or_empty(level_group, "bout_points")
     series = _load_signal_series(level_group)
     run_path = f"analysis/swim_bout_runs/{resolved_name}"
@@ -245,7 +249,9 @@ def load_swim_bout_tables(
         bouts=bouts,
         peak_events=peak_events,
         inter_bout_intervals=intervals,
+        inter_bout_interval_histogram=interval_histogram,
         global_metrics=global_metrics,
+        trials=trials,
         bout_points=bout_points,
         series=series,
         run_attrs=_attrs_dict(run_group),
