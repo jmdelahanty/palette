@@ -441,10 +441,12 @@ internal schema, model versions, dependency stack, or classifier taxonomy.
 - [x] Prototype a Megabouts-compatible posture view from the canary:
   `tail_posture_view_megabouts_compatible_canary_20260501` wrote 17,495 valid
   rows and 1,740 invalid rows from 19,235 ROI rows.
-- [ ] Decide whether Megabouts execution should be Palette-owned CLI,
-  user-run external tool, or both.
-- [ ] Define `analysis/bout_classification_runs` once we have first real
-  Megabouts output.
+- [x] Add a Palette-owned optional Megabouts classifier adapter CLI. It records
+  classifier outputs into Palette-native `analysis/bout_classification_runs`
+  while keeping Megabouts itself an optional dependency.
+- [x] Define `analysis/bout_classification_runs` for the first Megabouts
+  classifier output. See
+  [bout_classification_runs_contract.md](bout_classification_runs_contract.md).
 
 ## Open Questions
 

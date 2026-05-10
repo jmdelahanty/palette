@@ -567,7 +567,7 @@ behavior-analysis packages.
 - [x] Run the feeding canary posture-view writer:
   `tail_posture_view_megabouts_compatible_canary_20260501` wrote 17,495 valid
   rows and 1,740 invalid rows from 19,235 ROI rows.
-- [ ] Prototype classifier-only Megabouts integration using Palette
+- [x] Prototype classifier-only Megabouts integration using Palette
   `swim_bout_runs` windows and K=11 Megabouts tail keypoints.
 - [ ] Implement a keypoint-derived exporter from `pose_kinematics_runs` or
   refined keypoints when tail labels exist.
@@ -576,7 +576,7 @@ behavior-analysis packages.
 
 ### External Tool Adapters
 
-- [ ] Prototype Megabouts classifier-only execution using Palette canary data.
+- [x] Prototype Megabouts classifier-only execution using Palette canary data.
 - [ ] Decide whether Megabouts should run as an installed optional dependency,
   an explicitly configured command, or both.
 - [ ] Define ZebraZoom import/export mapping after inspecting real output files.
@@ -585,10 +585,10 @@ behavior-analysis packages.
 
 ### Classification Runs
 
-- [ ] Define `analysis/bout_classification_runs` once first external classifier
+- [x] Define `analysis/bout_classification_runs` once first external classifier
   output is available.
-- [ ] Store classifier labels, confidence/scores, source refs, and exact config.
-- [ ] Keep classifier outputs independent from `swim_bout_runs` and
+- [x] Store classifier labels, confidence/scores, source refs, and exact config.
+- [x] Keep classifier outputs independent from `swim_bout_runs` and
   `bout_kinematics_runs`.
 - [ ] Add comparison tooling to evaluate multiple classifier candidates on the
   same source bouts.

@@ -158,6 +158,12 @@ Sections:
 - **Code:** none of these appear in `registry/maintenance.py:55–72` (`RECORDING_STEP_NAMES`) or `step_cascade.STEP_DEPENDENTS`.
 - **Effect:** when `refined_subject_masks` or `refined_keypoints` regenerate, downstream analysis runs are never marked stale.
 - **Resolution direction:** update code (decide whether analysis runs belong in registry; if yes, extend) **OR** update doc to say analysis runs are intentionally outside registry coverage.
+- **2026-05-10 status:** partially addressed. Presence-level registry/status
+  coverage now exists for `track_kinematics`, `swim_bouts`,
+  `bout_kinematics`, `eye_angles`, `subject_shape`, and
+  `stimulus_response`. Still open: `tail_kinematics_runs`,
+  `tail_posture_view_runs`, `bout_classification_runs`, source-ref freshness,
+  and writer-side status upserts.
 
 ### 1.10 `repo_wide_staleness_workflow_edge_checklist.md` calls `crop → subject_masks` "todo"; code already implements it (metadata)
 - **Doc:** `docs/repo_wide_staleness_workflow_edge_checklist.md:64–65`.

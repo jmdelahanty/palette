@@ -108,6 +108,9 @@ First follow-up slice completed on 2026-05-10:
   for those derived-analysis run families.
 - `recording_step_status_wide` and the status-page query layer expose those
   derived-analysis stages.
+- Tail/posture/classification analysis families are intentionally not included
+  in this first follow-up slice. Their dependency edges should be decided as a
+  separate tail/behavior-classification registry pass.
 
 Still out of scope:
 
@@ -115,6 +118,9 @@ Still out of scope:
 - Make individual derived-analysis writers upsert their own status rows.
 - Compute semantic freshness by comparing source refs/revisions against current
   upstream selections.
+- Add canonical stage/status coverage for `tail_kinematics_runs`,
+  `tail_posture_view_runs`, and `bout_classification_runs` once their
+  dependency and invalidation edges are agreed.
 - Redesign Zarr layout or artifact schemas.
 
 Derived analysis runs such as track kinematics, swim bouts, bout kinematics,

@@ -212,10 +212,11 @@ rendered polarity, so attrs explicitly record
 
 - Promote the moving-grating downstream chain into the formal
   `fisheye.core.pipeline` stage system instead of relying only on the shell
-  runner. This likely means adding derived analysis stages for
-  `track_kinematics`, `swim_bout_runs`, optional `bout_kinematics_runs`, and
-  `stimulus_response_runs`, with explicit dependencies, stale-state semantics,
-  and registry/status reporting.
+  runner. Partial registry/status groundwork now exists: `track_kinematics`,
+  `swim_bouts`, `bout_kinematics`, and `stimulus_response` have canonical
+  catalog stages plus presence-level `recording_step_status` backfill. The
+  remaining work is command-runner integration, writer-side status emission,
+  and semantic freshness based on source run refs/revisions.
 - Review plots and target-annulus centering-success summaries for concentric
   radial OMR.
 - Extract current centering helpers from `stimulus_response.py` into a focused
