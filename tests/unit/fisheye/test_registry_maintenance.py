@@ -9194,6 +9194,172 @@ def test_backfill_recording_step_status_marks_refined_subject_masks_stale_when_s
     registry.close()
 
 
+def test_backfill_recording_step_status_marks_tail_behavior_stale_when_subject_shape_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_tail_stale" / "zarr" / "rec_step_tail_stale_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    subject_shape_parent = fake_root["analysis"]["subject_shape_runs"]
+    subject_shape_parent.add_group(
+        "shape_002",
+        attrs={
+            "created_utc": "2026-02-15T06:00:00+00:00",
+            "method": "subject_shape_v3",
+            "source_refined_subject_masks_run": "refined_subject_masks_001",
+        },
+    )
+    subject_shape_parent.attrs["latest"] = "shape_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_tail_stale",
+        session_uuid="session_tail_stale",
+        zarr_path=zarr_path,
+        recording_id="recording_tail_stale",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    rows = registry.conn.execute(
+        """
+        SELECT step_name, status, run_name, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ?
+          AND step_name IN ('subject_shape', 'tail_kinematics', 'tail_posture_view', 'bout_classification')
+        ORDER BY step_name;
+        """,
+        ("dataset_tail_stale",),
+    ).fetchall()
+    by_step = {str(row["step_name"]): row for row in rows}
+
+    assert str(by_step["subject_shape"]["status"]) == "ok"
+    assert str(by_step["subject_shape"]["run_name"]) == "shape_002"
+
+    tail_row = by_step["tail_kinematics"]
+    assert str(tail_row["status"]) == "missing"
+    assert tail_row["run_name"] is None
+    tail_details = json.loads(str(tail_row["details_json"]))
+    assert tail_details["reason"] == "stale_vs_latest_subject_shape"
+    assert tail_details["source_freshness_state"] == "stale"
+    assert tail_details["expected_source_subject_shape_run"] == "shape_002"
+    assert tail_details["actual_source_refs"]["source_subject_shape_run"] == "shape_001"
+    assert tail_details["latest_run"] == "tail_001"
+
+    posture_row = by_step["tail_posture_view"]
+    assert str(posture_row["status"]) == "missing"
+    assert posture_row["run_name"] is None
+    posture_details = json.loads(str(posture_row["details_json"]))
+    assert posture_details["reason"] == "stale_vs_latest_subject_shape"
+    assert posture_details["source_freshness_state"] == "stale"
+    assert posture_details["expected_source_subject_shape_run"] == "shape_002"
+    assert posture_details["actual_source_refs"]["source_subject_shape_run"] == "shape_001"
+    assert posture_details["latest_run"] == "posture_001"
+
+    classification_row = by_step["bout_classification"]
+    assert str(classification_row["status"]) == "missing"
+    assert classification_row["run_name"] is None
+    classification_details = json.loads(str(classification_row["details_json"]))
+    assert classification_details["reason"] == "upstream_tail_posture_view_missing"
+    assert classification_details["source_freshness_state"] == "upstream_source_unavailable"
+    assert classification_details["unresolved_expected_source_refs"] == [
+        {"attr": "source_tail_posture_view_run", "stage": "tail_posture_view"}
+    ]
+    registry.close()
+
+
+def test_backfill_recording_step_status_marks_bout_classification_stale_when_swim_bouts_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_classifier_stale" / "zarr" / "rec_step_classifier_stale_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    swim_bout_parent = fake_root["analysis"]["swim_bout_runs"]
+    swim_bout_parent.add_group(
+        "bouts_002",
+        attrs={
+            "created_utc": "2026-02-15T06:10:00+00:00",
+            "method": "peak_event",
+            "layout": "compact_tabular_v2",
+            "source_track_kinematics_run": "tk_001",
+        },
+    )
+    swim_bout_parent.attrs["latest"] = "bouts_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_classifier_stale",
+        session_uuid="session_classifier_stale",
+        zarr_path=zarr_path,
+        recording_id="recording_classifier_stale",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    swim_row = registry.conn.execute(
+        """
+        SELECT status, run_name
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'swim_bouts';
+        """,
+        ("dataset_classifier_stale",),
+    ).fetchone()
+    assert swim_row is not None
+    assert str(swim_row["status"]) == "ok"
+    assert str(swim_row["run_name"]) == "bouts_002"
+
+    classification_row = registry.conn.execute(
+        """
+        SELECT status, run_name, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'bout_classification';
+        """,
+        ("dataset_classifier_stale",),
+    ).fetchone()
+    assert classification_row is not None
+    assert str(classification_row["status"]) == "missing"
+    assert classification_row["run_name"] is None
+    classification_details = json.loads(str(classification_row["details_json"]))
+    assert classification_details["reason"] == "stale_vs_latest_swim_bouts"
+    assert classification_details["source_freshness_state"] == "stale"
+    assert classification_details["expected_source_swim_bout_run"] == "bouts_002"
+    assert classification_details["actual_source_refs"]["source_swim_bout_run"] == "bouts_001"
+    assert classification_details["latest_run"] == "classification_001"
+    assert classification_details["source_ref_mismatches"] == [
+        {
+            "actual": "bouts_001",
+            "attr": "source_swim_bout_run",
+            "expected": "bouts_002",
+            "stage": "swim_bouts",
+        }
+    ]
+    registry.close()
+
+
 def test_backfill_recording_step_status_scoped_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -35,6 +35,12 @@ slice. The focus was stale claims caused by:
   stage rows while preserving UI command names.
 - `src/fisheye/registry/maintenance.py` backfills presence-level status rows
   for the derived-analysis families above.
+- Tail behavior backfill now includes source-ref freshness checks for:
+  - `tail_kinematics_runs` against current `subject_shape`
+  - `tail_posture_view_runs` against current `subject_shape` and, when
+    declared, current `tail_kinematics`
+  - `bout_classification_runs` against current `tail_posture_view`,
+    `track_kinematics`, and `swim_bouts`
 - `recording_step_status_wide` and `src/fisheye/status_page/query.py` expose
   those derived-analysis stages.
 - `analysis/bout_classification_runs` is implemented and documented by
@@ -64,9 +70,11 @@ slice. The focus was stale claims caused by:
 
 These are not simple doc corrections; they need design or code decisions.
 
-- Current derived-analysis registry coverage is presence-level. It detects
-  whether a latest run exists, but it does not yet compare stored source refs
-  or lineage fingerprints against current upstream run selections.
+- Most derived-analysis registry coverage is still presence-level. The tail
+  behavior slice compares stored source refs against current upstream run
+  selections, but track kinematics, swim bouts, bout kinematics, eye angles,
+  subject shape, stimulus response, and lineage fingerprints still need
+  equivalent freshness semantics.
 - Derived-analysis writers mostly do not upsert their own
   `recording_step_status` rows. Registry backfill can discover their presence,
   but live writer-side status emission is still uneven.
@@ -79,12 +87,12 @@ These are not simple doc corrections; they need design or code decisions.
 
 ## Recommended Next Slice
 
-Implement semantic freshness for derived runs:
+Broaden semantic freshness for derived runs:
 
-1. Resolve current upstream latest run IDs/revisions for each derived family.
-2. Compare stored source refs and lineage fingerprints against those upstream
-   selections.
-3. Project stale/unverifiable source status into `recording_step_status` detail
-   JSON and status-page display.
-4. Add writer-side `recording_step_status` upserts after the freshness semantics
-   are settled.
+1. Extend source-ref freshness to the remaining derived-analysis families.
+2. Add source revision or lineage-fingerprint comparison where writers expose
+   those fields.
+3. Decide whether status-page display should distinguish stale from missing
+   instead of both rendering as `MISS`.
+4. Add writer-side `recording_step_status` upserts after the freshness
+   semantics are settled.

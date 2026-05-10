@@ -78,6 +78,14 @@ class StaleInProgressRunCandidate:
 
 
 @dataclass(frozen=True)
+class _SourceRefExpectation:
+    attr: str
+    expected_run: Optional[str]
+    stage: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
 class EmptyTrainingSetCandidate:
     set_id: str
     name: Optional[str]
@@ -5118,6 +5126,166 @@ def _extract_source_subject_mask_run(group: object) -> Optional[str]:
     return _decode_text(group.attrs.get("source_subject_mask_run"))  # type: ignore[attr-defined]
 
 
+def _extract_source_ref(group: object, attr: str) -> Optional[str]:
+    if group is None or not hasattr(group, "attrs"):
+        return None
+    try:
+        value = group.attrs.get(attr)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    return _decode_text(value)
+
+
+def _source_ref_status(
+    group: object,
+    expectations: Sequence[_SourceRefExpectation],
+) -> tuple[bool, str, Dict[str, object]]:
+    expected_refs: Dict[str, str] = {}
+    actual_refs: Dict[str, str] = {}
+    unresolved_expected: List[Dict[str, str]] = []
+    missing_attrs: List[Dict[str, str]] = []
+    mismatches: List[Dict[str, str]] = []
+
+    for expectation in expectations:
+        if expectation.expected_run:
+            expected_refs[expectation.attr] = expectation.expected_run
+        elif expectation.required:
+            unresolved_expected.append(
+                {"attr": expectation.attr, "stage": expectation.stage}
+            )
+            continue
+        else:
+            continue
+
+        actual = _extract_source_ref(group, expectation.attr)
+        if actual:
+            actual_refs[expectation.attr] = actual
+        if actual is None:
+            if expectation.required:
+                missing_attrs.append(
+                    {"attr": expectation.attr, "stage": expectation.stage}
+                )
+            continue
+        if actual != expectation.expected_run:
+            mismatches.append(
+                {
+                    "attr": expectation.attr,
+                    "stage": expectation.stage,
+                    "expected": str(expectation.expected_run),
+                    "actual": actual,
+                }
+            )
+
+    if unresolved_expected:
+        state = "upstream_source_unavailable"
+        fresh = False
+    elif mismatches:
+        state = "stale"
+        fresh = False
+    elif missing_attrs:
+        state = "missing_source_attrs"
+        fresh = False
+    else:
+        state = "fresh"
+        fresh = True
+
+    details: Dict[str, object] = {"source_freshness_state": state}
+    if expected_refs:
+        details["expected_source_refs"] = expected_refs
+        for attr, expected in expected_refs.items():
+            details[f"expected_{attr}"] = expected
+    if actual_refs:
+        details["actual_source_refs"] = actual_refs
+    if unresolved_expected:
+        details["unresolved_expected_source_refs"] = unresolved_expected
+    if missing_attrs:
+        details["missing_source_ref_attrs"] = missing_attrs
+    if mismatches:
+        details["source_ref_mismatches"] = mismatches
+    return fresh, state, details
+
+
+def _source_ref_reason(state: str, details: Dict[str, object]) -> Optional[str]:
+    if state == "fresh":
+        return None
+
+    stages: List[str] = []
+    if state == "stale":
+        values = details.get("source_ref_mismatches")
+    elif state == "missing_source_attrs":
+        values = details.get("missing_source_ref_attrs")
+    elif state == "upstream_source_unavailable":
+        values = details.get("unresolved_expected_source_refs")
+    else:
+        values = None
+
+    if isinstance(values, list):
+        for item in values:
+            if isinstance(item, dict):
+                stage = _decode_text(item.get("stage"))
+                if stage and stage not in stages:
+                    stages.append(stage)
+
+    if state == "stale":
+        return f"stale_vs_latest_{stages[0]}" if len(stages) == 1 else "stale_vs_latest_source_runs"
+    if state == "missing_source_attrs":
+        return f"missing_source_{stages[0]}_run" if len(stages) == 1 else "missing_source_run_attrs"
+    if state == "upstream_source_unavailable":
+        return f"upstream_{stages[0]}_missing" if len(stages) == 1 else "upstream_sources_unavailable"
+    return "source_freshness_unverified"
+
+
+def _source_ref_run_name(run_name: Optional[str]) -> Optional[str]:
+    if not run_name:
+        return None
+    return PurePosixPath(str(run_name)).name
+
+
+def _resolve_analysis_group_for_source_refs(
+    parent: object,
+    *,
+    max_depth: int,
+    source_ref_expectations: Sequence[_SourceRefExpectation],
+) -> tuple[Optional[str], Optional[object], str, Dict[str, object], Optional[str]]:
+    latest_run, latest_group, latest_selection = _resolve_latest_group_nested(parent, max_depth=max_depth)
+    if not source_ref_expectations or latest_group is None:
+        return latest_run, latest_group, latest_selection, {}, None
+
+    latest_fresh, latest_state, latest_details = _source_ref_status(
+        latest_group,
+        source_ref_expectations,
+    )
+    if latest_fresh:
+        return latest_run, latest_group, latest_selection, latest_details, None
+
+    reason = _source_ref_reason(latest_state, latest_details)
+    if latest_state != "upstream_source_unavailable":
+        for candidate_run, candidate_group in _iter_group_paths(parent, max_depth=max_depth):
+            candidate_fresh, _candidate_state, candidate_details = _source_ref_status(
+                candidate_group,
+                source_ref_expectations,
+            )
+            if candidate_fresh:
+                candidate_details["latest_run"] = latest_run
+                candidate_details["latest_source_freshness"] = latest_details
+                return (
+                    candidate_run,
+                    candidate_group,
+                    "source_match_sorted_fallback",
+                    candidate_details,
+                    None,
+                )
+
+    latest_details["latest_run"] = latest_run
+    if latest_state == "missing_source_attrs":
+        selection = "source_mismatch_missing_attr"
+    elif latest_state == "upstream_source_unavailable":
+        selection = "source_unavailable"
+    else:
+        selection = "source_mismatch"
+    return None, None, selection, latest_details, reason
+
+
 def _resolve_group_for_source_run(
     parent: object,
     *,
@@ -6068,6 +6236,7 @@ def _build_recording_step_rows_from_root(
         *,
         prerequisites: Dict[str, str],
         max_depth: int = 1,
+        source_ref_expectations: Sequence[_SourceRefExpectation] = (),
     ) -> tuple[
         Optional[str],
         Optional[object],
@@ -6079,12 +6248,24 @@ def _build_recording_step_rows_from_root(
         Dict[str, object],
     ]:
         parent = analysis_group.get(family) if analysis_group is not None else None  # type: ignore[attr-defined]
-        run_name, run_group, selection = _resolve_latest_group_nested(parent, max_depth=max_depth)
+        (
+            run_name,
+            run_group,
+            selection,
+            source_freshness_details,
+            source_freshness_reason,
+        ) = _resolve_analysis_group_for_source_refs(
+            parent,
+            max_depth=max_depth,
+            source_ref_expectations=source_ref_expectations,
+        )
         status, reason = _step_status_from_presence(
             present=run_group is not None,
             is_production=is_production,
             prerequisite_statuses=tuple(prerequisites.values()),
         )
+        if run_group is None and source_freshness_reason:
+            reason = source_freshness_reason
         status, reason, run_state = _apply_run_state_to_status(
             group=run_group,
             status=status,
@@ -6099,6 +6280,8 @@ def _build_recording_step_rows_from_root(
             upstream=prerequisites,
             run_state=run_state,
         )
+        if source_freshness_details:
+            details.update(source_freshness_details)
         return run_name, run_group, selection, status, reason, method, run_state, details
 
     (
@@ -6186,6 +6369,9 @@ def _build_recording_step_rows_from_root(
     ) = _analysis_status(
         "tail_kinematics_runs",
         prerequisites={"subject_shape": subject_shape_status},
+        source_ref_expectations=(
+            _SourceRefExpectation("source_subject_shape_run", subject_shape_run, "subject_shape"),
+        ),
     )
     (
         tail_posture_view_run,
@@ -6199,6 +6385,15 @@ def _build_recording_step_rows_from_root(
     ) = _analysis_status(
         "tail_posture_view_runs",
         prerequisites={"subject_shape": subject_shape_status},
+        source_ref_expectations=(
+            _SourceRefExpectation("source_subject_shape_run", subject_shape_run, "subject_shape"),
+            _SourceRefExpectation(
+                "source_tail_kinematics_run",
+                tail_kinematics_run,
+                "tail_kinematics",
+                required=False,
+            ),
+        ),
     )
     (
         bout_classification_run,
@@ -6216,6 +6411,19 @@ def _build_recording_step_rows_from_root(
             "track_kinematics": track_kinematics_status,
             "swim_bouts": swim_bouts_status,
         },
+        source_ref_expectations=(
+            _SourceRefExpectation(
+                "source_tail_posture_view_run",
+                tail_posture_view_run,
+                "tail_posture_view",
+            ),
+            _SourceRefExpectation(
+                "source_track_kinematics_run",
+                _source_ref_run_name(track_kinematics_run),
+                "track_kinematics",
+            ),
+            _SourceRefExpectation("source_swim_bout_run", swim_bouts_run, "swim_bouts"),
+        ),
     )
     (
         stimulus_response_run,
