@@ -6326,6 +6326,9 @@ def _build_recording_step_rows_from_root(
     ) = _analysis_status(
         "bout_kinematics_runs",
         prerequisites={"swim_bouts": swim_bouts_status},
+        source_ref_expectations=(
+            _SourceRefExpectation("source_swim_bout_run", swim_bouts_run, "swim_bouts"),
+        ),
     )
     (
         eye_angles_run,
@@ -6441,6 +6444,15 @@ def _build_recording_step_rows_from_root(
             "track_kinematics": track_kinematics_status,
             "swim_bouts": swim_bouts_status,
         },
+        source_ref_expectations=(
+            _SourceRefExpectation("source_stimulus_run", stimulus_run, "stimulus"),
+            _SourceRefExpectation(
+                "source_track_kinematics_run",
+                _source_ref_run_name(track_kinematics_run),
+                "track_kinematics",
+            ),
+            _SourceRefExpectation("source_swim_bout_run", swim_bouts_run, "swim_bouts"),
+        ),
     )
 
     analysis_meta = root.get("analysis_metadata")  # type: ignore[attr-defined]

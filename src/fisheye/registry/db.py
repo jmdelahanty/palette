@@ -2851,6 +2851,11 @@ class Registry:
                 "source_freshness_recording_step_status_wide_view",
                 self._migration_046_source_freshness_recording_step_status_wide_view,
             ),
+            (
+                47,
+                "bout_stimulus_source_freshness_recording_step_status_wide_view",
+                self._migration_047_bout_stimulus_source_freshness_recording_step_status_wide_view,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -6652,12 +6657,7 @@ class Registry:
                     WHEN r.swim_bouts_status = 'error' THEN 'ERR'
                     ELSE 'MISS'
                 END AS "Swim Bouts",
-                CASE
-                    WHEN r.bout_kinematics_status = 'ok' THEN 'OK'
-                    WHEN r.bout_kinematics_status = 'na' THEN 'N/A'
-                    WHEN r.bout_kinematics_status = 'error' THEN 'ERR'
-                    ELSE 'MISS'
-                END AS "Bout Kinematics",
+                {_recording_step_status_display_sql("r.bout_kinematics_status", "r.bout_kinematics_details_json")} AS "Bout Kinematics",
                 CASE
                     WHEN r.eye_angles_status = 'ok' THEN 'OK'
                     WHEN r.eye_angles_status = 'na' THEN 'N/A'
@@ -6673,12 +6673,7 @@ class Registry:
                 {_recording_step_status_display_sql("r.tail_kinematics_status", "r.tail_kinematics_details_json")} AS "Tail Kinematics",
                 {_recording_step_status_display_sql("r.tail_posture_view_status", "r.tail_posture_view_details_json")} AS "Tail Posture View",
                 {_recording_step_status_display_sql("r.bout_classification_status", "r.bout_classification_details_json")} AS "Bout Classification",
-                CASE
-                    WHEN r.stimulus_response_status = 'ok' THEN 'OK'
-                    WHEN r.stimulus_response_status = 'na' THEN 'N/A'
-                    WHEN r.stimulus_response_status = 'error' THEN 'ERR'
-                    ELSE 'MISS'
-                END AS "Stimulus Response",
+                {_recording_step_status_display_sql("r.stimulus_response_status", "r.stimulus_response_details_json")} AS "Stimulus Response",
                 CAST(r.stimulus_runs AS TEXT) || ' (' || CASE WHEN r.stimulus_runs > 0 THEN 'OK' ELSE 'MISS' END || ')' AS "Stimulus",
                 CASE WHEN r.calibration_present = 1 THEN 'OK' ELSE 'MISS' END AS "Calib",
                 CASE
@@ -9559,6 +9554,11 @@ class Registry:
 
     def _migration_046_source_freshness_recording_step_status_wide_view(self) -> None:
         """Refresh recording_step_status_wide to display source freshness states."""
+
+        self._migration_020_recording_step_status_wide_view()
+
+    def _migration_047_bout_stimulus_source_freshness_recording_step_status_wide_view(self) -> None:
+        """Refresh wide status display for bout/stimulus source freshness."""
 
         self._migration_020_recording_step_status_wide_view()
 

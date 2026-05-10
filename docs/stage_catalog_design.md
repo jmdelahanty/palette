@@ -1,7 +1,7 @@
 # Stage Catalog Design
 <!-- contract-meta
 status: design
-last_verified: 2026-05-09
+last_verified: 2026-05-10
 purpose: Define the canonical recording-stage vocabulary that registry/status,
 pipeline, launcher, and future readers should converge on.
 -->
@@ -107,15 +107,17 @@ First follow-up slice completed on 2026-05-10:
   posture views, bout classification, and stimulus response.
 - `src/fisheye/registry/maintenance.py` backfills presence-level status rows
   for those derived-analysis run families.
-- Tail behavior backfill also checks semantic freshness for current source
-  refs:
+- Backfill also checks semantic freshness for current source refs:
   - `tail_kinematics_runs` must point at the current `subject_shape` run.
   - `tail_posture_view_runs` must point at the current `subject_shape` run and
     must match the current `tail_kinematics` run when that optional source attr
     is declared.
   - `bout_classification_runs` must point at the current tail posture view,
     track kinematics, and swim-bout runs.
-- Tail behavior freshness states render distinctly in the wide status view:
+  - `bout_kinematics_runs` must point at the current swim-bout run.
+  - `stimulus_response_runs` must point at the current stimulus, track
+    kinematics, and swim-bout runs.
+- Source freshness states render distinctly in the wide status view:
   `STALE` means a stored source ref no longer matches the current upstream run;
   `UNVER` means the source ref cannot be verified because source attrs are
   missing or the expected upstream source is unavailable.
@@ -126,17 +128,19 @@ Still out of scope:
 
 - Rename runtime pipeline commands or launcher UI commands.
 - Make individual derived-analysis writers upsert their own status rows.
-- Compute semantic freshness for the remaining derived-analysis families by
-  comparing source refs/revisions against current upstream selections.
+- Compute semantic freshness for the remaining presence-only derived-analysis
+  families by comparing source refs/revisions against current upstream
+  selections where the writers expose enough source identity.
 - Redesign Zarr layout or artifact schemas.
 
 Derived analysis runs such as track kinematics, swim bouts, bout kinematics,
 eye angles, subject shape, tail kinematics, tail posture views, bout
 classification, and stimulus responses now use the same catalog shape with
-`category="derived_analysis"`. Tail behavior runs now get source-ref freshness
-checks during registry backfill. Other derived families still mostly detect
-whether a latest run is present and do not yet decide whether that run is fresh
-relative to its stored source refs.
+`category="derived_analysis"`. Tail behavior, bout-kinematics, and
+stimulus-response runs now get source-ref freshness checks during registry
+backfill. Other derived families still mostly detect whether a latest run is
+present and do not yet decide whether that run is fresh relative to its stored
+source refs.
 
 ## Migration TODO
 

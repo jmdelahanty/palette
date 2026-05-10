@@ -162,10 +162,11 @@ Sections:
   coverage now exists for `track_kinematics`, `swim_bouts`,
   `bout_kinematics`, `eye_angles`, `subject_shape`, and
   `stimulus_response`. Follow-up coverage also adds `tail_kinematics_runs`,
-  `tail_posture_view_runs`, and `bout_classification_runs`, with source-ref
-  freshness checks for those tail behavior families and `STALE`/`UNVER`
-  display in the wide status view. Still open: broader source-ref/revision
-  freshness for the remaining derived families and writer-side status upserts.
+  `tail_posture_view_runs`, and `bout_classification_runs`. Source-ref
+  freshness now covers tail behavior, bout-kinematics, and stimulus-response
+  run families, with `STALE`/`UNVER` display in the wide status view. Still
+  open: broader source-ref/revision freshness for the remaining derived
+  families and writer-side status upserts.
 
 ### 1.10 `repo_wide_staleness_workflow_edge_checklist.md` calls `crop → subject_masks` "todo"; code already implements it (metadata)
 - **Doc:** `docs/repo_wide_staleness_workflow_edge_checklist.md:64–65`.
@@ -674,7 +675,7 @@ These cut across all five sections:
 
 **C. `schema_version` is mostly informational.** Several schemas are versioned by writers, and a few readers/export utilities now inspect versions. Most schemas still do not have reader gates, so the remaining question is which schemas need hard compatibility checks versus metadata-only provenance.
 
-**D. The registry has derived-analysis visibility, but freshness is uneven.** `track_kinematics`, `swim_bouts`, `bout_kinematics`, `eye_angles`, `subject_shape`, `tail_kinematics`, `tail_posture_view`, `bout_classification`, and `stimulus_response` now appear in `recording_step_status` and the wide status view. Tail behavior runs compare source refs against current upstream run IDs, and the wide status view renders those checks as `STALE` or `UNVER` instead of plain `MISS`. The remaining gap is semantic staleness for the other derived families and source revision/fingerprint comparison.
+**D. The registry has derived-analysis visibility, but freshness is uneven.** `track_kinematics`, `swim_bouts`, `bout_kinematics`, `eye_angles`, `subject_shape`, `tail_kinematics`, `tail_posture_view`, `bout_classification`, and `stimulus_response` now appear in `recording_step_status` and the wide status view. Tail behavior, bout-kinematics, and stimulus-response runs compare source refs against current upstream run IDs, and the wide status view renders those checks as `STALE` or `UNVER` instead of plain `MISS`. The remaining gap is semantic staleness for the other derived families and source revision/fingerprint comparison.
 
 **E. Body-frame contract adoption is uneven.** Subject-shape remains the strongest canonical writer, and eye-angle now writes canonical body-frame attrs through the shared helper. Tail_kinematics still uses non-canonical attr names. The contract was written assuming uniform writer discipline; the actual pattern is improving but not uniform.
 

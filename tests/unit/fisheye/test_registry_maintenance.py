@@ -2659,6 +2659,24 @@ def test_recording_step_status_wide_view_renders_source_freshness_states(tmp_pat
         (
             "dataset_stale",
             "recording_stale",
+            "bout_kinematics",
+            "missing",
+            None,
+            None,
+            None,
+            None,
+            _json_text(
+                {
+                    "reason": "stale_vs_latest_swim_bouts",
+                    "source_freshness_state": "stale",
+                }
+            ),
+            "unit_test",
+            "2026-02-23T01:59:58+00:00",
+        ),
+        (
+            "dataset_stale",
+            "recording_stale",
             "tail_kinematics",
             "missing",
             None,
@@ -2710,6 +2728,24 @@ def test_recording_step_status_wide_view_renders_source_freshness_states(tmp_pat
             "unit_test",
             "2026-02-23T02:00:02+00:00",
         ),
+        (
+            "dataset_stale",
+            "recording_stale",
+            "stimulus_response",
+            "missing",
+            None,
+            None,
+            None,
+            None,
+            _json_text(
+                {
+                    "reason": "missing_source_run_attrs",
+                    "source_freshness_state": "missing_source_attrs",
+                }
+            ),
+            "unit_test",
+            "2026-02-23T02:00:03+00:00",
+        ),
     ]
     registry.conn.executemany(
         """
@@ -2734,7 +2770,12 @@ def test_recording_step_status_wide_view_renders_source_freshness_states(tmp_pat
 
     row = registry.conn.execute(
         """
-        SELECT "Tail Kinematics", "Tail Posture View", "Bout Classification"
+        SELECT
+            "Bout Kinematics",
+            "Tail Kinematics",
+            "Tail Posture View",
+            "Bout Classification",
+            "Stimulus Response"
         FROM recording_step_status_wide
         WHERE "Recording" = ?;
         """,
@@ -2742,9 +2783,11 @@ def test_recording_step_status_wide_view_renders_source_freshness_states(tmp_pat
     ).fetchone()
 
     assert row is not None
+    assert row["Bout Kinematics"] == "STALE"
     assert row["Tail Kinematics"] == "STALE"
     assert row["Tail Posture View"] == "UNVER"
     assert row["Bout Classification"] == "UNVER"
+    assert row["Stimulus Response"] == "UNVER"
     registry.close()
 
 
@@ -9384,6 +9427,145 @@ def test_backfill_recording_step_status_marks_tail_behavior_stale_when_subject_s
     assert classification_details["unresolved_expected_source_refs"] == [
         {"attr": "source_tail_posture_view_run", "stage": "tail_posture_view"}
     ]
+    registry.close()
+
+
+def test_backfill_recording_step_status_marks_bout_kinematics_stale_when_swim_bouts_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_bout_kin_stale" / "zarr" / "rec_step_bout_kin_stale_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    swim_bout_parent = fake_root["analysis"]["swim_bout_runs"]
+    swim_bout_parent.add_group(
+        "bouts_002",
+        attrs={
+            "created_utc": "2026-02-15T06:05:00+00:00",
+            "method": "peak_event",
+            "layout": "compact_tabular_v2",
+            "source_track_kinematics_run": "tk_001",
+        },
+    )
+    swim_bout_parent.attrs["latest"] = "bouts_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_bout_kin_stale",
+        session_uuid="session_bout_kin_stale",
+        zarr_path=zarr_path,
+        recording_id="recording_bout_kin_stale",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    bout_row = registry.conn.execute(
+        """
+        SELECT status, run_name, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'bout_kinematics';
+        """,
+        ("dataset_bout_kin_stale",),
+    ).fetchone()
+    assert bout_row is not None
+    assert str(bout_row["status"]) == "missing"
+    assert bout_row["run_name"] is None
+    bout_details = json.loads(str(bout_row["details_json"]))
+    assert bout_details["reason"] == "stale_vs_latest_swim_bouts"
+    assert bout_details["source_freshness_state"] == "stale"
+    assert bout_details["expected_source_swim_bout_run"] == "bouts_002"
+    assert bout_details["actual_source_refs"]["source_swim_bout_run"] == "bouts_001"
+    assert bout_details["latest_run"] == "bk_001"
+
+    swim_row = registry.conn.execute(
+        """
+        SELECT status, run_name
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'swim_bouts';
+        """,
+        ("dataset_bout_kin_stale",),
+    ).fetchone()
+    assert swim_row is not None
+    assert str(swim_row["status"]) == "ok"
+    assert str(swim_row["run_name"]) == "bouts_002"
+    registry.close()
+
+
+def test_backfill_recording_step_status_marks_stimulus_response_stale_when_stimulus_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_response_stale" / "zarr" / "rec_step_response_stale_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    stimulus_parent = fake_root["analysis"]["stimulus_runs"]
+    stimulus_parent.add_group(
+        "stimulus_002",
+        attrs={"created_utc": "2026-02-15T06:08:00+00:00"},
+    )
+    stimulus_parent.attrs["latest"] = "stimulus_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_response_stale",
+        session_uuid="session_response_stale",
+        zarr_path=zarr_path,
+        recording_id="recording_response_stale",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    response_row = registry.conn.execute(
+        """
+        SELECT status, run_name, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'stimulus_response';
+        """,
+        ("dataset_response_stale",),
+    ).fetchone()
+    assert response_row is not None
+    assert str(response_row["status"]) == "missing"
+    assert response_row["run_name"] is None
+    response_details = json.loads(str(response_row["details_json"]))
+    assert response_details["reason"] == "stale_vs_latest_stimulus"
+    assert response_details["source_freshness_state"] == "stale"
+    assert response_details["expected_source_stimulus_run"] == "stimulus_002"
+    assert response_details["actual_source_refs"]["source_stimulus_run"] == "stimulus_001"
+    assert response_details["latest_run"] == "response_001"
+
+    stimulus_row = registry.conn.execute(
+        """
+        SELECT status, run_name
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'stimulus';
+        """,
+        ("dataset_response_stale",),
+    ).fetchone()
+    assert stimulus_row is not None
+    assert str(stimulus_row["status"]) == "ok"
+    assert str(stimulus_row["run_name"]) == "stimulus_002"
     registry.close()
 
 
