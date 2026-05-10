@@ -2856,6 +2856,11 @@ class Registry:
                 "bout_stimulus_source_freshness_recording_step_status_wide_view",
                 self._migration_047_bout_stimulus_source_freshness_recording_step_status_wide_view,
             ),
+            (
+                48,
+                "eye_shape_source_freshness_recording_step_status_wide_view",
+                self._migration_048_eye_shape_source_freshness_recording_step_status_wide_view,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -6658,18 +6663,8 @@ class Registry:
                     ELSE 'MISS'
                 END AS "Swim Bouts",
                 {_recording_step_status_display_sql("r.bout_kinematics_status", "r.bout_kinematics_details_json")} AS "Bout Kinematics",
-                CASE
-                    WHEN r.eye_angles_status = 'ok' THEN 'OK'
-                    WHEN r.eye_angles_status = 'na' THEN 'N/A'
-                    WHEN r.eye_angles_status = 'error' THEN 'ERR'
-                    ELSE 'MISS'
-                END AS "Eye Angles",
-                CASE
-                    WHEN r.subject_shape_status = 'ok' THEN 'OK'
-                    WHEN r.subject_shape_status = 'na' THEN 'N/A'
-                    WHEN r.subject_shape_status = 'error' THEN 'ERR'
-                    ELSE 'MISS'
-                END AS "Subject Shape",
+                {_recording_step_status_display_sql("r.eye_angles_status", "r.eye_angles_details_json")} AS "Eye Angles",
+                {_recording_step_status_display_sql("r.subject_shape_status", "r.subject_shape_details_json")} AS "Subject Shape",
                 {_recording_step_status_display_sql("r.tail_kinematics_status", "r.tail_kinematics_details_json")} AS "Tail Kinematics",
                 {_recording_step_status_display_sql("r.tail_posture_view_status", "r.tail_posture_view_details_json")} AS "Tail Posture View",
                 {_recording_step_status_display_sql("r.bout_classification_status", "r.bout_classification_details_json")} AS "Bout Classification",
@@ -9559,6 +9554,11 @@ class Registry:
 
     def _migration_047_bout_stimulus_source_freshness_recording_step_status_wide_view(self) -> None:
         """Refresh wide status display for bout/stimulus source freshness."""
+
+        self._migration_020_recording_step_status_wide_view()
+
+    def _migration_048_eye_shape_source_freshness_recording_step_status_wide_view(self) -> None:
+        """Refresh wide status display for eye/shape source freshness."""
 
         self._migration_020_recording_step_status_wide_view()
 

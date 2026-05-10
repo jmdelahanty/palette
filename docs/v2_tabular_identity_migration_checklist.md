@@ -282,11 +282,12 @@ Family-specific changes:
       `recording_step_status` for track kinematics, swim bouts, bout
       kinematics, eye angles, subject shape, tail kinematics, tail posture
       views, bout classification, and stimulus response. Remaining work is
-      broader semantic freshness: tail behavior, bout-kinematics, and
-      stimulus-response run families now compare stored source refs against
-      current upstream selections and render `STALE`/`UNVER` in the wide status
-      view, but the other derived run families, source revisions/fingerprints,
-      and export propagation still need the same treatment.
+      broader semantic freshness: tail behavior, bout-kinematics, eye-angle,
+      subject-shape, and stimulus-response run families now compare stored
+      source refs against current upstream selections and render `STALE`/`UNVER`
+      in the wide status view, but the other derived run families, source
+      revisions/fingerprints, and export propagation still need the same
+      treatment.
 - [ ] Registry rows should remain rebuildable indexes over canonical Zarr
       archives and manifests, not the authoritative source of analysis truth.
 - [ ] Parquet sidecars may be durable analytics products, but canonical Zarr

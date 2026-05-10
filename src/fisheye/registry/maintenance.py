@@ -83,6 +83,7 @@ class _SourceRefExpectation:
     expected_run: Optional[str]
     stage: str
     required: bool = True
+    aliases: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -5157,7 +5158,11 @@ def _source_ref_status(
         else:
             continue
 
-        actual = _extract_source_ref(group, expectation.attr)
+        actual = None
+        for attr in (expectation.attr, *expectation.aliases):
+            actual = _extract_source_ref(group, attr)
+            if actual is not None:
+                break
         if actual:
             actual_refs[expectation.attr] = actual
         if actual is None:
@@ -6346,6 +6351,19 @@ def _build_recording_step_rows_from_root(
             "refined_keypoints": refined_keypoints_status,
             "refined_subject_masks": refined_subject_masks_status,
         },
+        source_ref_expectations=(
+            _SourceRefExpectation(
+                "source_keypoints_run",
+                refined_keypoints_run,
+                "refined_keypoints",
+                aliases=("source_keypoint_run",),
+            ),
+            _SourceRefExpectation(
+                "source_refined_subject_masks_run",
+                refined_subject_masks_run,
+                "refined_subject_masks",
+            ),
+        ),
     )
     (
         subject_shape_run,
@@ -6359,6 +6377,13 @@ def _build_recording_step_rows_from_root(
     ) = _analysis_status(
         "subject_shape_runs",
         prerequisites={"refined_subject_masks": refined_subject_masks_status},
+        source_ref_expectations=(
+            _SourceRefExpectation(
+                "source_refined_subject_masks_run",
+                refined_subject_masks_run,
+                "refined_subject_masks",
+            ),
+        ),
     )
     (
         tail_kinematics_run,

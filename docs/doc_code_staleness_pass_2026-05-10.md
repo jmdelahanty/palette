@@ -42,6 +42,9 @@ slice. The focus was stale claims caused by:
   - `bout_classification_runs` against current `tail_posture_view`,
     `track_kinematics`, and `swim_bouts`
   - `bout_kinematics_runs` against current `swim_bouts`
+  - `eye_angle_runs` against current `refined_keypoints` and
+    `refined_subject_masks`
+  - `subject_shape_runs` against current `refined_subject_masks`
   - `stimulus_response_runs` against current `stimulus`, `track_kinematics`,
     and `swim_bouts`
 - `recording_step_status_wide` and `src/fisheye/status_page/query.py` expose
@@ -78,8 +81,8 @@ slice. The focus was stale claims caused by:
 These are not simple doc corrections; they need design or code decisions.
 
 - Some derived-analysis registry coverage is still presence-level. Source-ref
-  freshness now covers tail behavior, bout kinematics, and stimulus response.
-  Track kinematics, swim bouts, eye angles, subject shape, and lineage
+  freshness now covers tail behavior, bout kinematics, eye angles, subject
+  shape, and stimulus response. Track kinematics, swim bouts, and lineage
   fingerprints still need equivalent semantic freshness where their writers
   expose enough source identity.
 - Derived-analysis writers mostly do not upsert their own

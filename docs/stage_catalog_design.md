@@ -115,6 +115,9 @@ First follow-up slice completed on 2026-05-10:
   - `bout_classification_runs` must point at the current tail posture view,
     track kinematics, and swim-bout runs.
   - `bout_kinematics_runs` must point at the current swim-bout run.
+  - `eye_angle_runs` must point at the current refined-keypoint and refined
+    subject-mask runs.
+  - `subject_shape_runs` must point at the current refined subject-mask run.
   - `stimulus_response_runs` must point at the current stimulus, track
     kinematics, and swim-bout runs.
 - Source freshness states render distinctly in the wide status view:
@@ -136,11 +139,11 @@ Still out of scope:
 Derived analysis runs such as track kinematics, swim bouts, bout kinematics,
 eye angles, subject shape, tail kinematics, tail posture views, bout
 classification, and stimulus responses now use the same catalog shape with
-`category="derived_analysis"`. Tail behavior, bout-kinematics, and
-stimulus-response runs now get source-ref freshness checks during registry
-backfill. Other derived families still mostly detect whether a latest run is
-present and do not yet decide whether that run is fresh relative to its stored
-source refs.
+`category="derived_analysis"`. Tail behavior, bout-kinematics, eye-angle,
+subject-shape, and stimulus-response runs now get source-ref freshness checks
+during registry backfill. Other derived families still mostly detect whether a
+latest run is present and do not yet decide whether that run is fresh relative
+to its stored source refs.
 
 ## Migration TODO
 
