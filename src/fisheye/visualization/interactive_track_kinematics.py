@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
+from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     discover_swim_bout_candidates as discover_swim_bout_candidates_resolved,
@@ -1715,23 +1716,10 @@ def load_bout_kinematics_records(
     except Exception as exc:
         raise ValueError(f"Bout kinematics run not found: {path}") from exc
 
-    if heading_level is not None:
-        levels = ("eye_gaze",) if str(heading_level).strip() == "eye_gaze" else (_heading_level_key(heading_level),)
-    else:
-        levels = tuple(str(level) for level in run_group.attrs.get("heading_levels", []))
-        if not levels:
-            levels = tuple(level for level in ("heading_smoothed", "heading_raw") if level in run_group)
-        if "movement" in run_group:
-            levels = ("movement", *levels)
-        if "eye_gaze" in run_group:
-            levels = (*levels, "eye_gaze")
-
-    records_by_level: dict[str, np.ndarray] = {}
-    for level in levels:
-        if level not in run_group:
-            continue
-        metrics = _load_structured_or_empty(run_group[level], "per_bout_metrics")
-        records_by_level[level] = metrics
+    records_by_level, _level_attrs, _table_attrs = resolve_bout_kinematics_tables(
+        run_group,
+        heading_level=heading_level,
+    )
     return records_by_level, dict(run_group.attrs)
 
 

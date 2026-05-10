@@ -68,6 +68,13 @@ question is how eye convergence or gaze state relates to those same frozen bout
 boundaries. The source eye trace remains owned by `analysis/eye_angle_runs`; the
 bout-kinematics run stores only windowed per-bout summaries and lineage.
 
+New compact-v2 runs store the same logical levels in direct tables
+(`movement_metrics`, `heading_metrics`, and optional `eye_gaze_metrics`) rather
+than subgroup-per-level tables. Readers should use
+`resolve_bout_kinematics_tables(...)` instead of hard-coding physical paths.
+See `docs/bout_kinematics_compact_v2_layout.md` for the compact layout
+contract.
+
 This boundary lets operators tune and compare segmentation candidates without
 rewriting downstream biological measurements, and lets analysts recompute
 kinematics without changing the bout-definition artifact.

@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import zarr
 
+from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.utils.export_cross_recording_analytics import export_sources
 from fisheye.utils.export_cross_recording_analytics import main as export_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
@@ -191,6 +192,125 @@ def _make_source_zarr(path: Path) -> Path:
     return path
 
 
+def _convert_bout_kinematics_fixture_to_compact_v2(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="a")
+    bout_kin = root["analysis"]["bout_kinematics_runs"]["bout_kinematics_test"]
+    for name in ("movement", "heading_smoothed", "heading_raw"):
+        del bout_kin[name]
+
+    bout_kin.attrs["layout"] = "compact_tabular_v2"
+    bout_kin.attrs["analysis_levels"] = ["movement", "heading_smoothed", "heading_raw"]
+    bout_kin.attrs["heading_levels"] = ["heading_smoothed", "heading_raw"]
+
+    level_index = np.asarray(
+        [
+            (0, b"movement", b"movement", -1, b"", False, 2),
+            (1, b"heading_smoothed", b"heading", 0, b"heading_smoothed", True, 2),
+            (2, b"heading_raw", b"heading", 1, b"heading_raw", False, 2),
+        ],
+        dtype=[
+            ("analysis_level_id", "i2"),
+            ("analysis_level_bytes", "S64"),
+            ("measurement_family_bytes", "S64"),
+            ("heading_level_id", "i2"),
+            ("heading_level_bytes", "S64"),
+            ("is_default_heading_level", "?"),
+            ("row_count", "i8"),
+        ],
+    )
+    write_columnar_dataset(
+        bout_kin,
+        "level_index",
+        level_index,
+        attrs={"schema_version": 7, "layout": "compact_tabular_v2"},
+    )
+
+    movement = np.asarray(
+        [
+            (0, b"movement", -1, b"", 0, 20, 30, 0.12, 2.5, True),
+            (0, b"movement", -1, b"", 1, 140, 150, 0.14, 4.5, True),
+        ],
+        dtype=[
+            ("analysis_level_id", "i2"),
+            ("analysis_level_bytes", "S64"),
+            ("heading_level_id", "i2"),
+            ("heading_level_bytes", "S64"),
+            ("bout_id", "i4"),
+            ("source_start_frame", "i8"),
+            ("source_end_frame", "i8"),
+            ("physical_active_duration_s", "f8"),
+            ("physical_active_path_length_mm", "f8"),
+            ("physical_active_valid", "?"),
+        ],
+    )
+    write_columnar_dataset(
+        bout_kin,
+        "movement_metrics",
+        movement,
+        attrs={"schema_version": 7, "layout": "compact_tabular_v2", "analysis_level": "movement"},
+    )
+
+    heading_rows = []
+    for level_id, level_name, deltas in (
+        (0, b"heading_smoothed", [12.5, -30.0]),
+        (1, b"heading_raw", [14.0, -28.0]),
+    ):
+        for bout_id, start, end, delta in zip((0, 1), (20, 140), (30, 150), deltas):
+            heading_rows.append(
+                (
+                    level_id + 1,
+                    level_name,
+                    level_id,
+                    level_name,
+                    bout_id,
+                    start,
+                    end,
+                    5.0 if bout_id == 0 else 40.0,
+                    17.5 if bout_id == 0 else 10.0,
+                    delta,
+                    abs(delta),
+                    18.0 if bout_id == 0 else 36.0,
+                    15.0 if bout_id == 0 else 32.0,
+                    90.0 if bout_id == 0 else 120.0,
+                    250.0 if bout_id == 0 else 350.0,
+                    True,
+                )
+            )
+    heading = np.asarray(
+        heading_rows,
+        dtype=[
+            ("analysis_level_id", "i2"),
+            ("analysis_level_bytes", "S64"),
+            ("heading_level_id", "i2"),
+            ("heading_level_bytes", "S64"),
+            ("bout_id", "i4"),
+            ("source_start_frame", "i8"),
+            ("source_end_frame", "i8"),
+            ("pre_heading_mean_deg", "f8"),
+            ("post_heading_mean_deg", "f8"),
+            ("net_delta_heading_deg", "f8"),
+            ("abs_net_delta_heading_deg", "f8"),
+            ("within_heading_path_deg", "f8"),
+            ("within_heading_peak_to_peak_deg", "f8"),
+            ("within_angular_speed_mean_deg_s", "f8"),
+            ("within_angular_speed_max_deg_s", "f8"),
+            ("within_window_valid", "?"),
+        ],
+    )
+    write_columnar_dataset(
+        bout_kin,
+        "heading_metrics",
+        heading,
+        attrs={
+            "schema_version": 7,
+            "layout": "compact_tabular_v2",
+            "analysis_level": "heading",
+            "heading_levels": ["heading_smoothed", "heading_raw"],
+            "default_heading_level": "heading_smoothed",
+        },
+    )
+
+
 def _read_dataset(output_root: Path, table: str, export_run_id: str):
     table_dir = output_root / "v1" / table / f"export_run_id={export_run_id}"
     files = sorted(table_dir.glob("*.parquet"))
@@ -297,6 +417,33 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert len(movement_rows) == 2
     assert movement_rows[0]["measurement_family"] == "movement"
     assert movement_rows[0]["physical_active_duration_s"] == 0.12
+
+
+def test_export_cross_recording_analytics_reads_compact_bout_kinematics(tmp_path: Path) -> None:
+    source = _make_source_zarr(tmp_path / "recording_compact_analysis.zarr")
+    _convert_bout_kinematics_fixture_to_compact_v2(source)
+    output = tmp_path / "exports" / "palette_analytics"
+
+    manifest = export_sources(
+        [source],
+        output_root=output,
+        export_run_id="compact_export",
+        tables=("bout_kinematics_metrics",),
+        jobs=1,
+    )
+
+    assert manifest["row_counts_by_table"]["bout_kinematics_metrics"] == 6
+    rows = _read_dataset(output, "bout_kinematics_metrics", "compact_export")
+    assert len(rows) == 6
+    assert {row["measurement_level"] for row in rows} == {"movement", "heading_smoothed", "heading_raw"}
+    heading_rows = [row for row in rows if row["measurement_level"] == "heading_smoothed"]
+    assert len(heading_rows) == 2
+    assert heading_rows[0]["measurement_family"] == "heading"
+    assert heading_rows[0]["is_default_heading_level"] is True
+    assert heading_rows[0]["net_delta_heading_deg"] == 12.5
+    assert "analysis_level_bytes" not in heading_rows[0]
+    movement_rows = [row for row in rows if row["measurement_level"] == "movement"]
+    assert movement_rows[0]["physical_active_path_length_mm"] == 2.5
 
 
 def test_export_cross_recording_analytics_can_limit_tables(tmp_path: Path) -> None:

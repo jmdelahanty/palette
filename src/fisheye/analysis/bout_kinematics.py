@@ -71,6 +71,19 @@ PHYSICAL_ACTIVE_BOUNDARY_CONSTRAINTS = (
     "allow_extension",
 )
 PHYSICAL_ACTIVE_SPEED_LEVELS = ("speed_raw", "speed_filtered", "speed_smoothed")
+LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
+LAYOUT_COMPACT_TABULAR_V2 = "compact_tabular_v2"
+BOUT_KINEMATICS_LAYOUTS = (LAYOUT_HIERARCHICAL_V1, LAYOUT_COMPACT_TABULAR_V2)
+COMPACT_LEVEL_INDEX = "level_index"
+COMPACT_MOVEMENT_TABLE = "movement_metrics"
+COMPACT_HEADING_TABLE = "heading_metrics"
+COMPACT_EYE_GAZE_TABLE = "eye_gaze_metrics"
+_COMPACT_LEVEL_FIELDS = (
+    "analysis_level_id",
+    "analysis_level_bytes",
+    "heading_level_id",
+    "heading_level_bytes",
+)
 
 
 def normalize_heading_level(value: str) -> str:
@@ -81,6 +94,375 @@ def normalize_heading_level(value: str) -> str:
         expected = ", ".join(sorted(HEADING_LEVEL_ALIASES))
         raise ValueError(f"Unsupported heading level {value!r}; expected one of: {expected}")
     return normalized
+
+
+def _fixed_bytes(value: object, *, width: int = 64) -> bytes:
+    raw = str(value).encode("utf-8", errors="replace")
+    return raw[:width]
+
+
+def _decode_fixed_bytes(value: object) -> str:
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).rstrip(b"\x00").decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _with_compact_level_columns(
+    records: np.ndarray,
+    *,
+    analysis_level: str,
+    analysis_level_id: int,
+    heading_level: Optional[str] = None,
+    heading_level_id: int = -1,
+) -> np.ndarray:
+    if records.dtype.names is None:
+        raise ValueError("Compact bout-kinematics tables require structured records.")
+    dtype = np.dtype(
+        [
+            ("analysis_level_id", "i2"),
+            ("analysis_level_bytes", "S64"),
+            ("heading_level_id", "i2"),
+            ("heading_level_bytes", "S64"),
+            *records.dtype.descr,
+        ]
+    )
+    out = np.empty(records.shape[0], dtype=dtype)
+    out["analysis_level_id"] = int(analysis_level_id)
+    out["analysis_level_bytes"] = _fixed_bytes(analysis_level)
+    out["heading_level_id"] = int(heading_level_id)
+    out["heading_level_bytes"] = _fixed_bytes(heading_level or "")
+    for name in records.dtype.names:
+        out[name] = records[name]
+    return out
+
+
+def _drop_compact_level_columns(records: np.ndarray) -> np.ndarray:
+    names = records.dtype.names or ()
+    keep = [name for name in names if name not in _COMPACT_LEVEL_FIELDS]
+    if len(keep) == len(names):
+        return records
+    if not keep:
+        return np.empty(records.shape[0], dtype=[])
+    return records[keep].copy()
+
+
+def _empty_structured_records() -> np.ndarray:
+    return np.empty(0, dtype=[])
+
+
+def _column_group_to_structured_records(table_group: zarr.Group) -> np.ndarray:
+    columns: list[tuple[str, np.ndarray]] = []
+    row_count: Optional[int] = None
+    for name in sorted(table_group.keys()):
+        try:
+            values = np.asarray(table_group[name][:])
+        except Exception:
+            continue
+        if values.ndim == 0:
+            values = values.reshape(1)
+        if row_count is None:
+            row_count = int(values.shape[0])
+        elif int(values.shape[0]) != row_count:
+            raise ValueError(
+                f"Column {name!r} length {values.shape[0]} does not match expected {row_count}."
+            )
+        columns.append((str(name), values))
+    if row_count is None:
+        return _empty_structured_records()
+
+    dtype_fields: list[tuple[object, ...]] = []
+    for name, values in columns:
+        if values.ndim <= 1:
+            dtype_fields.append((name, values.dtype))
+        else:
+            dtype_fields.append((name, values.dtype, values.shape[1:]))
+    records = np.empty(row_count, dtype=np.dtype(dtype_fields))
+    for name, values in columns:
+        records[name] = values
+    return records
+
+
+def _load_table_or_empty(parent: zarr.Group, name: str) -> tuple[np.ndarray, dict[str, object]]:
+    try:
+        records, attrs = load_structured_dataset(parent, name)
+    except Exception:
+        try:
+            table_group = parent[name]
+            return _column_group_to_structured_records(table_group), dict(table_group.attrs)
+        except Exception:
+            return _empty_structured_records(), {}
+    return np.asarray(records), dict(attrs)
+
+
+def _compact_level_index_records(
+    *,
+    heading_levels: Sequence[str],
+    default_heading_level: str,
+    movement_count: int,
+    heading_counts: Mapping[str, int],
+    eye_gaze_count: Optional[int],
+) -> np.ndarray:
+    dtype = np.dtype(
+        [
+            ("analysis_level_id", "i2"),
+            ("analysis_level_bytes", "S64"),
+            ("measurement_family_bytes", "S64"),
+            ("heading_level_id", "i2"),
+            ("heading_level_bytes", "S64"),
+            ("is_default_heading_level", "?"),
+            ("row_count", "i8"),
+        ]
+    )
+    rows: list[tuple[int, bytes, bytes, int, bytes, bool, int]] = [
+        (
+            0,
+            _fixed_bytes(MOVEMENT_LEVEL),
+            _fixed_bytes(MOVEMENT_LEVEL),
+            -1,
+            _fixed_bytes(""),
+            False,
+            int(movement_count),
+        )
+    ]
+    for idx, level in enumerate(heading_levels):
+        rows.append(
+            (
+                idx + 1,
+                _fixed_bytes(level),
+                _fixed_bytes("heading"),
+                idx,
+                _fixed_bytes(level),
+                level == default_heading_level,
+                int(heading_counts.get(level, 0)),
+            )
+        )
+    if eye_gaze_count is not None:
+        rows.append(
+            (
+                len(rows),
+                _fixed_bytes(EYE_GAZE_LEVEL),
+                _fixed_bytes(EYE_GAZE_LEVEL),
+                -1,
+                _fixed_bytes(""),
+                False,
+                int(eye_gaze_count),
+            )
+        )
+    return np.asarray(rows, dtype=dtype)
+
+
+def _concat_heading_compact_records(
+    metrics_by_level: Mapping[str, np.ndarray],
+    *,
+    heading_levels: Sequence[str],
+) -> np.ndarray:
+    pieces: list[np.ndarray] = []
+    for idx, level in enumerate(heading_levels):
+        records = metrics_by_level.get(level)
+        if records is None:
+            continue
+        pieces.append(
+            _with_compact_level_columns(
+                records,
+                analysis_level=level,
+                analysis_level_id=idx + 1,
+                heading_level=level,
+                heading_level_id=idx,
+            )
+        )
+    if not pieces:
+        return _empty_structured_records()
+    return np.concatenate(pieces)
+
+
+def resolve_bout_kinematics_tables(
+    run_group: zarr.Group,
+    *,
+    heading_level: Optional[str] = None,
+) -> tuple[dict[str, np.ndarray], dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    """Return logical bout-kinematics tables independent of physical layout.
+
+    The returned mappings are keyed by logical analysis level: ``movement``,
+    concrete heading levels such as ``heading_smoothed``, and optional
+    ``eye_gaze``. Compact-v2 rows have layout index columns stripped so callers
+    see the same record schema as hierarchical-v1 readers.
+    """
+
+    layout = str(run_group.attrs.get("layout", LAYOUT_HIERARCHICAL_V1))
+    if layout == LAYOUT_COMPACT_TABULAR_V2:
+        return _resolve_compact_bout_kinematics_tables(run_group, heading_level=heading_level)
+    return _resolve_hierarchical_bout_kinematics_tables(run_group, heading_level=heading_level)
+
+
+def _resolve_requested_levels(run_group: zarr.Group, heading_level: Optional[str]) -> tuple[str, ...]:
+    if heading_level is not None:
+        if str(heading_level).strip() == EYE_GAZE_LEVEL:
+            return (EYE_GAZE_LEVEL,)
+        if str(heading_level).strip() == MOVEMENT_LEVEL:
+            return (MOVEMENT_LEVEL,)
+        return (normalize_heading_level(heading_level),)
+
+    levels = tuple(str(level) for level in run_group.attrs.get("heading_levels", []))
+    if not levels:
+        levels = tuple(level for level in ("heading_smoothed", "heading_raw") if level in run_group)
+    if MOVEMENT_LEVEL in run_group or COMPACT_MOVEMENT_TABLE in run_group:
+        levels = (MOVEMENT_LEVEL, *levels)
+    if EYE_GAZE_LEVEL in run_group or COMPACT_EYE_GAZE_TABLE in run_group:
+        levels = (*levels, EYE_GAZE_LEVEL)
+    return levels
+
+
+def _resolve_hierarchical_bout_kinematics_tables(
+    run_group: zarr.Group,
+    *,
+    heading_level: Optional[str],
+) -> tuple[dict[str, np.ndarray], dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    records_by_level: dict[str, np.ndarray] = {}
+    level_attrs_by_level: dict[str, dict[str, object]] = {}
+    table_attrs_by_level: dict[str, dict[str, object]] = {}
+    for level in _resolve_requested_levels(run_group, heading_level):
+        if level not in run_group:
+            continue
+        records, attrs = _load_table_or_empty(run_group[level], "per_bout_metrics")
+        records_by_level[level] = records
+        level_attrs_by_level[level] = dict(run_group[level].attrs)
+        table_attrs_by_level[level] = attrs
+    return records_by_level, level_attrs_by_level, table_attrs_by_level
+
+
+def _resolve_compact_bout_kinematics_tables(
+    run_group: zarr.Group,
+    *,
+    heading_level: Optional[str],
+) -> tuple[dict[str, np.ndarray], dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    requested = set(_resolve_requested_levels(run_group, heading_level))
+    records_by_level: dict[str, np.ndarray] = {}
+    level_attrs_by_level: dict[str, dict[str, object]] = {}
+    table_attrs_by_level: dict[str, dict[str, object]] = {}
+
+    if MOVEMENT_LEVEL in requested and COMPACT_MOVEMENT_TABLE in run_group:
+        records, attrs = _load_table_or_empty(run_group, COMPACT_MOVEMENT_TABLE)
+        records_by_level[MOVEMENT_LEVEL] = _drop_compact_level_columns(records)
+        level_attrs_by_level[MOVEMENT_LEVEL] = {
+            "analysis_level": MOVEMENT_LEVEL,
+            **attrs,
+        }
+        table_attrs_by_level[MOVEMENT_LEVEL] = attrs
+
+    if COMPACT_HEADING_TABLE in run_group:
+        heading_records, heading_attrs = _load_table_or_empty(run_group, COMPACT_HEADING_TABLE)
+        names = heading_records.dtype.names or ()
+        if "heading_level_bytes" in names:
+            labels = np.asarray([_decode_fixed_bytes(value) for value in heading_records["heading_level_bytes"]])
+            heading_levels = tuple(str(level) for level in run_group.attrs.get("heading_levels", []))
+            if not heading_levels:
+                heading_levels = tuple(dict.fromkeys(str(label) for label in labels if str(label)))
+            for level in heading_levels:
+                if level not in requested:
+                    continue
+                mask = labels == level
+                level_records = heading_records[mask]
+                records_by_level[level] = _drop_compact_level_columns(level_records)
+                level_attrs_by_level[level] = {
+                    "analysis_level": level,
+                    "heading_level": level,
+                    "is_default_heading_level": level == run_group.attrs.get("default_heading_level"),
+                    **heading_attrs,
+                }
+                table_attrs_by_level[level] = heading_attrs
+
+    if EYE_GAZE_LEVEL in requested and COMPACT_EYE_GAZE_TABLE in run_group:
+        records, attrs = _load_table_or_empty(run_group, COMPACT_EYE_GAZE_TABLE)
+        records_by_level[EYE_GAZE_LEVEL] = _drop_compact_level_columns(records)
+        level_attrs_by_level[EYE_GAZE_LEVEL] = {
+            "analysis_level": EYE_GAZE_LEVEL,
+            **attrs,
+        }
+        table_attrs_by_level[EYE_GAZE_LEVEL] = attrs
+
+    return records_by_level, level_attrs_by_level, table_attrs_by_level
+
+
+def _write_compact_bout_kinematics_tables(
+    run_group: zarr.Group,
+    *,
+    movement_metrics: np.ndarray,
+    movement_attrs: Mapping[str, object],
+    metrics_by_level: Mapping[str, np.ndarray],
+    heading_levels: Sequence[str],
+    default_heading_level: str,
+    heading_table_attrs: Mapping[str, object],
+    eye_gaze_metrics: Optional[np.ndarray],
+    eye_gaze_attrs: Optional[Mapping[str, object]],
+) -> None:
+    level_index = _compact_level_index_records(
+        heading_levels=heading_levels,
+        default_heading_level=default_heading_level,
+        movement_count=int(len(movement_metrics)),
+        heading_counts={level: int(len(records)) for level, records in metrics_by_level.items()},
+        eye_gaze_count=None if eye_gaze_metrics is None else int(len(eye_gaze_metrics)),
+    )
+    write_columnar_dataset(
+        run_group,
+        COMPACT_LEVEL_INDEX,
+        level_index,
+        attrs={
+            "schema_id": f"{SCHEMA_ID}.compact_v2.level_index",
+            "schema_version": SCHEMA_VERSION,
+            "layout": LAYOUT_COMPACT_TABULAR_V2,
+        },
+    )
+    write_columnar_dataset(
+        run_group,
+        COMPACT_MOVEMENT_TABLE,
+        _with_compact_level_columns(
+            movement_metrics,
+            analysis_level=MOVEMENT_LEVEL,
+            analysis_level_id=0,
+        ),
+        attrs={
+            **dict(movement_attrs),
+            "schema_id": f"{SCHEMA_ID}.compact_v2.movement_metrics",
+            "schema_version": SCHEMA_VERSION,
+            "layout": LAYOUT_COMPACT_TABULAR_V2,
+            "analysis_level": MOVEMENT_LEVEL,
+        },
+    )
+
+    heading_metrics = _concat_heading_compact_records(metrics_by_level, heading_levels=heading_levels)
+    if heading_metrics.dtype.names:
+        write_columnar_dataset(
+            run_group,
+            COMPACT_HEADING_TABLE,
+            heading_metrics,
+            attrs={
+                **dict(heading_table_attrs),
+                "schema_id": f"{SCHEMA_ID}.compact_v2.heading_metrics",
+                "schema_version": SCHEMA_VERSION,
+                "layout": LAYOUT_COMPACT_TABULAR_V2,
+                "analysis_level": "heading",
+                "heading_levels": list(heading_levels),
+                "default_heading_level": default_heading_level,
+            },
+        )
+
+    if eye_gaze_metrics is not None and eye_gaze_attrs is not None:
+        write_columnar_dataset(
+            run_group,
+            COMPACT_EYE_GAZE_TABLE,
+            _with_compact_level_columns(
+                eye_gaze_metrics,
+                analysis_level=EYE_GAZE_LEVEL,
+                analysis_level_id=len(heading_levels) + 1,
+            ),
+            attrs={
+                **dict(eye_gaze_attrs),
+                "schema_id": f"{SCHEMA_ID}.compact_v2.eye_gaze_metrics",
+                "schema_version": SCHEMA_VERSION,
+                "layout": LAYOUT_COMPACT_TABULAR_V2,
+                "analysis_level": EYE_GAZE_LEVEL,
+            },
+        )
 
 
 def _metrics_dtype() -> np.dtype:
@@ -2407,6 +2789,7 @@ def compute_and_save_bout_kinematics(
     write_visualizations: bool = False,
     visualization_bins: int = 40,
     visualization_dpi: int = 150,
+    layout: str = LAYOUT_HIERARCHICAL_V1,
     overwrite: bool = False,
     command: Optional[str] = None,
 ) -> str:
@@ -2429,6 +2812,11 @@ def compute_and_save_bout_kinematics(
             f"Unsupported physical_active_boundary_constraint {physical_active_boundary_constraint!r}; "
             f"expected one of: {expected}"
         )
+    if layout not in BOUT_KINEMATICS_LAYOUTS:
+        expected = ", ".join(BOUT_KINEMATICS_LAYOUTS)
+        raise ValueError(f"Unsupported bout-kinematics layout {layout!r}; expected one of: {expected}")
+    if layout == LAYOUT_COMPACT_TABULAR_V2 and write_visualizations:
+        raise ValueError("Compact bout-kinematics layout does not yet support zarr visualization artifacts.")
     if float(physical_active_threshold_mm_s) < 0:
         raise ValueError("physical_active_threshold_mm_s must be >= 0.")
     if float(physical_active_boundary_margin_s) < 0:
@@ -2662,6 +3050,7 @@ def compute_and_save_bout_kinematics(
     ]
     source_peak_event_fields = list(peak_events.dtype.names if peak_events is not None else [])
     parameters = {
+        "layout": layout,
         "default_heading_level": default_heading_level,
         "heading_levels": list(normalized_heading_levels),
         "pre_post_mode": pre_post_mode,
@@ -2705,6 +3094,7 @@ def compute_and_save_bout_kinematics(
     run_group.attrs["schema_version"] = SCHEMA_VERSION
     run_group.attrs["method"] = METHOD
     run_group.attrs["method_version"] = METHOD_VERSION
+    run_group.attrs["layout"] = layout
     run_group.attrs["row_axis"] = "swim_bout_rows"
     run_group.attrs["source_refs"] = source_refs
     run_group.attrs["parameters"] = parameters
@@ -2714,16 +3104,6 @@ def compute_and_save_bout_kinematics(
     run_group.attrs["source_track_kinematics_run"] = track_run_name
     run_group.attrs["default_heading_level"] = default_heading_level
 
-    movement_group = run_group.create_group(MOVEMENT_LEVEL)
-    movement_group.attrs["analysis_level"] = MOVEMENT_LEVEL
-    movement_group.attrs["source_swim_bout_path"] = swim_level_path
-    movement_group.attrs["physical_active_boundary_policy"] = PHYSICAL_ACTIVE_BOUNDARY_POLICY
-    movement_group.attrs["physical_active_boundary_constraint"] = physical_active_boundary_constraint
-    movement_group.attrs["physical_active_boundary_margin_s"] = float(physical_active_boundary_margin_s)
-    movement_group.attrs["physical_active_boundary_margin_frames"] = int(physical_active_boundary_margin_frames)
-    movement_group.attrs["physical_active_threshold_mm_s"] = float(physical_active_threshold_mm_s)
-    movement_group.attrs["physical_active_signal_level"] = physical_active_level
-    movement_group.attrs["physical_active_signal_array"] = physical_speed_array
     movement_metrics = _build_metrics_for_movement(
         bouts=bouts,
         frames=frames,
@@ -2740,27 +3120,39 @@ def compute_and_save_bout_kinematics(
         path_distance_mm=physical_path_distance_mm,
         path_distance_px=physical_path_distance_px,
     )
-    write_columnar_dataset(
-        movement_group,
-        "per_bout_metrics",
-        movement_metrics,
-        attrs={
-            "schema_id": f"{SCHEMA_ID}.movement.per_bout_metrics",
-            "schema_version": SCHEMA_VERSION,
-            "analysis_level": MOVEMENT_LEVEL,
-            "source_bout_count": int(len(bouts)),
-            "source_bout_field_names": source_bout_field_names,
-            "physical_active_boundary_policy": PHYSICAL_ACTIVE_BOUNDARY_POLICY,
-            "physical_active_boundary_constraint": physical_active_boundary_constraint,
-            "physical_active_boundary_margin_s": float(physical_active_boundary_margin_s),
-            "physical_active_boundary_margin_frames": int(physical_active_boundary_margin_frames),
-            "physical_active_threshold_mm_s": float(physical_active_threshold_mm_s),
-            "physical_active_signal_level": physical_active_level,
-            "physical_active_signal_array": physical_speed_array,
-            "source_movement_arrays": source_movement_arrays,
-            "source_validity_arrays": source_validity_arrays,
-        },
-    )
+    movement_attrs = {
+        "schema_id": f"{SCHEMA_ID}.movement.per_bout_metrics",
+        "schema_version": SCHEMA_VERSION,
+        "analysis_level": MOVEMENT_LEVEL,
+        "source_bout_count": int(len(bouts)),
+        "source_bout_field_names": source_bout_field_names,
+        "physical_active_boundary_policy": PHYSICAL_ACTIVE_BOUNDARY_POLICY,
+        "physical_active_boundary_constraint": physical_active_boundary_constraint,
+        "physical_active_boundary_margin_s": float(physical_active_boundary_margin_s),
+        "physical_active_boundary_margin_frames": int(physical_active_boundary_margin_frames),
+        "physical_active_threshold_mm_s": float(physical_active_threshold_mm_s),
+        "physical_active_signal_level": physical_active_level,
+        "physical_active_signal_array": physical_speed_array,
+        "source_movement_arrays": source_movement_arrays,
+        "source_validity_arrays": source_validity_arrays,
+    }
+    if layout == LAYOUT_HIERARCHICAL_V1:
+        movement_group = run_group.create_group(MOVEMENT_LEVEL)
+        movement_group.attrs["analysis_level"] = MOVEMENT_LEVEL
+        movement_group.attrs["source_swim_bout_path"] = swim_level_path
+        movement_group.attrs["physical_active_boundary_policy"] = PHYSICAL_ACTIVE_BOUNDARY_POLICY
+        movement_group.attrs["physical_active_boundary_constraint"] = physical_active_boundary_constraint
+        movement_group.attrs["physical_active_boundary_margin_s"] = float(physical_active_boundary_margin_s)
+        movement_group.attrs["physical_active_boundary_margin_frames"] = int(physical_active_boundary_margin_frames)
+        movement_group.attrs["physical_active_threshold_mm_s"] = float(physical_active_threshold_mm_s)
+        movement_group.attrs["physical_active_signal_level"] = physical_active_level
+        movement_group.attrs["physical_active_signal_array"] = physical_speed_array
+        write_columnar_dataset(
+            movement_group,
+            "per_bout_metrics",
+            movement_metrics,
+            attrs=movement_attrs,
+        )
 
     written_levels: list[str] = []
     metrics_by_level: dict[str, np.ndarray] = {}
@@ -2773,10 +3165,6 @@ def compute_and_save_bout_kinematics(
             raise ValueError(
                 f"Heading source {array_name!r} length {headings.shape[0]} does not match frames length {frames.shape[0]}."
             )
-        level_group = run_group.create_group(heading_level)
-        level_group.attrs["heading_source_array"] = array_name
-        level_group.attrs["is_default_heading_level"] = heading_level == default_heading_level
-        level_group.attrs["source_swim_bout_path"] = swim_level_path
         metrics = _build_metrics_for_heading(
             bouts=bouts,
             peak_events=peak_events,
@@ -2797,34 +3185,35 @@ def compute_and_save_bout_kinematics(
             dominant_frequency_min_samples=dominant_frequency_min_samples,
             dominant_frequency_detrend=dominant_frequency_detrend,
         )
-        write_columnar_dataset(
-            level_group,
-            "per_bout_metrics",
-            metrics,
-            attrs={
-                "schema_id": f"{SCHEMA_ID}.per_bout_metrics",
-                "schema_version": SCHEMA_VERSION,
-                "heading_level": heading_level,
-                "heading_source_array": array_name,
-                "source_bout_count": int(len(bouts)),
-                "source_bout_field_names": source_bout_field_names,
-                "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
-                "source_peak_event_fields": source_peak_event_fields,
-            },
-        )
+        if layout == LAYOUT_HIERARCHICAL_V1:
+            level_group = run_group.create_group(heading_level)
+            level_group.attrs["heading_source_array"] = array_name
+            level_group.attrs["is_default_heading_level"] = heading_level == default_heading_level
+            level_group.attrs["source_swim_bout_path"] = swim_level_path
+            write_columnar_dataset(
+                level_group,
+                "per_bout_metrics",
+                metrics,
+                attrs={
+                    "schema_id": f"{SCHEMA_ID}.per_bout_metrics",
+                    "schema_version": SCHEMA_VERSION,
+                    "heading_level": heading_level,
+                    "heading_source_array": array_name,
+                    "source_bout_count": int(len(bouts)),
+                    "source_bout_field_names": source_bout_field_names,
+                    "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
+                    "source_peak_event_fields": source_peak_event_fields,
+                },
+            )
         written_levels.append(heading_level)
         metrics_by_level[heading_level] = metrics
 
     written_analysis_levels = [MOVEMENT_LEVEL, *written_levels]
     eye_gaze_metrics: Optional[np.ndarray] = None
+    eye_gaze_attrs: Optional[dict[str, object]] = None
     if include_eye_gaze:
         if eye_series is None:
             raise ValueError("include_eye_gaze=True did not resolve an eye-angle source.")
-        eye_group = run_group.create_group(EYE_GAZE_LEVEL)
-        eye_group.attrs["eye_angle_family"] = str(eye_angle_family)
-        eye_group.attrs["eye_angle_run"] = source_refs["source_eye_angle_run"]
-        eye_group.attrs["eye_angle_path"] = source_refs["source_eye_angle_path"]
-        eye_group.attrs["source_swim_bout_path"] = swim_level_path
         eye_gaze_metrics = _build_metrics_for_eye_gaze(
             bouts=bouts,
             frames=frames,
@@ -2836,30 +3225,58 @@ def compute_and_save_bout_kinematics(
             eye_validity_min_fraction=float(eye_validity_min_fraction),
             vergence_threshold_deg=vergence_threshold_deg,
         )
-        write_columnar_dataset(
-            eye_group,
-            "per_bout_metrics",
-            eye_gaze_metrics,
-            attrs={
-                "schema_id": f"{SCHEMA_ID}.eye_gaze.per_bout_metrics",
-                "schema_version": SCHEMA_VERSION,
-                "analysis_level": EYE_GAZE_LEVEL,
-                "eye_angle_family": str(eye_angle_family),
-                "eye_angle_run": source_refs["source_eye_angle_run"],
-                "eye_angle_path": source_refs["source_eye_angle_path"],
-                "source_bout_count": int(len(bouts)),
-                "source_bout_field_names": source_bout_field_names,
-                "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
-                "eye_validity_min_fraction": float(eye_validity_min_fraction),
-                "vergence_threshold_deg": (
-                    None if vergence_threshold_deg is None else float(vergence_threshold_deg)
-                ),
-            },
-        )
+        eye_gaze_attrs = {
+            "schema_id": f"{SCHEMA_ID}.eye_gaze.per_bout_metrics",
+            "schema_version": SCHEMA_VERSION,
+            "analysis_level": EYE_GAZE_LEVEL,
+            "eye_angle_family": str(eye_angle_family),
+            "eye_angle_run": source_refs["source_eye_angle_run"],
+            "eye_angle_path": source_refs["source_eye_angle_path"],
+            "source_bout_count": int(len(bouts)),
+            "source_bout_field_names": source_bout_field_names,
+            "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
+            "eye_validity_min_fraction": float(eye_validity_min_fraction),
+            "vergence_threshold_deg": (
+                None if vergence_threshold_deg is None else float(vergence_threshold_deg)
+            ),
+        }
+        if layout == LAYOUT_HIERARCHICAL_V1:
+            eye_group = run_group.create_group(EYE_GAZE_LEVEL)
+            eye_group.attrs["eye_angle_family"] = str(eye_angle_family)
+            eye_group.attrs["eye_angle_run"] = source_refs["source_eye_angle_run"]
+            eye_group.attrs["eye_angle_path"] = source_refs["source_eye_angle_path"]
+            eye_group.attrs["source_swim_bout_path"] = swim_level_path
+            write_columnar_dataset(
+                eye_group,
+                "per_bout_metrics",
+                eye_gaze_metrics,
+                attrs=eye_gaze_attrs,
+            )
         written_analysis_levels.append(EYE_GAZE_LEVEL)
 
     run_group.attrs["heading_levels"] = written_levels
     run_group.attrs["analysis_levels"] = written_analysis_levels
+
+    if layout == LAYOUT_COMPACT_TABULAR_V2:
+        _write_compact_bout_kinematics_tables(
+            run_group,
+            movement_metrics=movement_metrics,
+            movement_attrs=movement_attrs,
+            metrics_by_level=metrics_by_level,
+            heading_levels=written_levels,
+            default_heading_level=default_heading_level,
+            heading_table_attrs={
+                "schema_id": f"{SCHEMA_ID}.per_bout_metrics",
+                "schema_version": SCHEMA_VERSION,
+                "source_bout_count": int(len(bouts)),
+                "source_bout_field_names": source_bout_field_names,
+                "source_interpolated_threshold_fields": source_interpolated_threshold_fields,
+                "source_peak_event_fields": source_peak_event_fields,
+                "source_heading_arrays": source_heading_arrays,
+            },
+            eye_gaze_metrics=eye_gaze_metrics,
+            eye_gaze_attrs=eye_gaze_attrs,
+        )
 
     git_info = get_git_info()
     env_info = get_environment_info(disk_path=str(zarr_path), capture_env_vars=False)
@@ -2875,8 +3292,16 @@ def compute_and_save_bout_kinematics(
         platform=env_info.get("platform"),
         artifacts={
             "run_path": f"analysis/bout_kinematics_runs/{run_name}",
+            "layout": layout,
             "heading_levels": written_levels,
             "analysis_levels": written_analysis_levels,
+            "tables": (
+                [COMPACT_LEVEL_INDEX, COMPACT_MOVEMENT_TABLE, COMPACT_HEADING_TABLE]
+                + ([COMPACT_EYE_GAZE_TABLE] if eye_gaze_metrics is not None else [])
+                if layout == LAYOUT_COMPACT_TABULAR_V2
+                else ["movement/per_bout_metrics", *[f"{level}/per_bout_metrics" for level in written_levels]]
+                + (["eye_gaze/per_bout_metrics"] if eye_gaze_metrics is not None else [])
+            ),
         },
     )
     write_stage_provenance(run_group, provenance)
@@ -2990,6 +3415,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Write PNG and interactive visualization artifacts under the bout-kinematics run.",
     )
+    parser.add_argument(
+        "--layout",
+        choices=BOUT_KINEMATICS_LAYOUTS,
+        default=LAYOUT_HIERARCHICAL_V1,
+        help="Physical Zarr layout to write. Default preserves the existing hierarchical layout.",
+    )
     parser.add_argument("--visualization-bins", type=int, default=40)
     parser.add_argument("--visualization-dpi", type=int, default=150)
     args = parser.parse_args(argv)
@@ -3024,6 +3455,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_visualizations=args.write_zarr_artifacts,
         visualization_bins=args.visualization_bins,
         visualization_dpi=args.visualization_dpi,
+        layout=args.layout,
         overwrite=args.overwrite,
         command=" ".join(sys.argv if argv is None else [sys.argv[0], *argv]),
     )

@@ -8,8 +8,10 @@ import zarr
 
 import fisheye.analysis.bout_kinematics as bout_kinematics_module
 from fisheye.analysis.bout_kinematics import (
+    LAYOUT_COMPACT_TABULAR_V2,
     compute_and_save_bout_kinematics,
     normalize_heading_level,
+    resolve_bout_kinematics_tables,
 )
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset, write_columnar_dataset
 
@@ -330,6 +332,93 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     movement_payload = np.asarray(movement_spec["spec_json"][:], dtype=np.uint8).tobytes()
     assert b"bout_physical_movement_histograms" in movement_payload
     assert b"physical_active_peak_speed_mm_s" in movement_payload
+
+
+def test_compute_and_save_bout_kinematics_writes_compact_v2_layout(tmp_path: Path) -> None:
+    zarr_path = _make_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    _add_eye_angle_run(root)
+
+    run_name = compute_and_save_bout_kinematics(
+        zarr_path,
+        run_name="bout_kinematics_compact_v2",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        swim_bout_run="bouts_1",
+        speed_level="filtered",
+        heading_levels=("heading_smoothed", "heading_raw"),
+        pre_window_s=0.2,
+        post_window_s=0.2,
+        physical_active_threshold_mm_s=0.1,
+        physical_active_boundary_margin_s=0.1,
+        include_eye_gaze=True,
+        eye_angle_run="eye_1",
+        vergence_threshold_deg=10.0,
+        layout=LAYOUT_COMPACT_TABULAR_V2,
+    )
+
+    run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
+    assert run.attrs["layout"] == "compact_tabular_v2"
+    assert run.attrs["status"] == "complete"
+    assert run.attrs["analysis_levels"] == ["movement", "heading_smoothed", "heading_raw", "eye_gaze"]
+    assert run.attrs["parameters"]["layout"] == "compact_tabular_v2"
+    assert "movement" not in run
+    assert "heading_smoothed" not in run
+    assert "heading_raw" not in run
+    assert "eye_gaze" not in run
+    assert {"level_index", "movement_metrics", "heading_metrics", "eye_gaze_metrics"}.issubset(set(run.keys()))
+
+    level_index, level_index_attrs = load_structured_dataset(run, "level_index")
+    assert level_index_attrs["layout"] == "compact_tabular_v2"
+    assert level_index["analysis_level_bytes"].tolist() == [
+        b"movement",
+        b"heading_smoothed",
+        b"heading_raw",
+        b"eye_gaze",
+    ]
+    assert level_index["row_count"].tolist() == [1, 1, 1, 1]
+
+    movement_metrics, movement_attrs = load_structured_dataset(run, "movement_metrics")
+    assert movement_attrs["analysis_level"] == "movement"
+    assert movement_metrics["analysis_level_bytes"].tolist() == [b"movement"]
+    np.testing.assert_allclose(movement_metrics["physical_active_path_length_mm"], [0.34])
+
+    heading_metrics, heading_attrs = load_structured_dataset(run, "heading_metrics")
+    assert heading_attrs["heading_levels"] == ["heading_smoothed", "heading_raw"]
+    assert heading_metrics["heading_level_bytes"].tolist() == [b"heading_smoothed", b"heading_raw"]
+    np.testing.assert_allclose(heading_metrics["net_delta_heading_deg"], [20.0, 40.0])
+
+    records_by_level, level_attrs_by_level, table_attrs_by_level = resolve_bout_kinematics_tables(run)
+    assert set(records_by_level) == {"movement", "heading_smoothed", "heading_raw", "eye_gaze"}
+    assert "analysis_level_bytes" not in records_by_level["heading_smoothed"].dtype.names
+    np.testing.assert_allclose(records_by_level["movement"]["physical_active_path_length_mm"], [0.34])
+    np.testing.assert_allclose(records_by_level["heading_smoothed"]["net_delta_heading_deg"], [20.0])
+    np.testing.assert_allclose(records_by_level["heading_raw"]["net_delta_heading_deg"], [40.0])
+    np.testing.assert_allclose(records_by_level["eye_gaze"]["post_vergence_gaze_mean_deg"], [19.5])
+    assert level_attrs_by_level["heading_smoothed"]["is_default_heading_level"] is True
+    assert table_attrs_by_level["heading_raw"]["layout"] == "compact_tabular_v2"
+
+    filtered_records, _filtered_level_attrs, _filtered_table_attrs = resolve_bout_kinematics_tables(
+        run,
+        heading_level="raw",
+    )
+    assert set(filtered_records) == {"heading_raw"}
+    np.testing.assert_allclose(filtered_records["heading_raw"]["net_delta_heading_deg"], [40.0])
+
+
+def test_compute_and_save_bout_kinematics_compact_v2_rejects_zarr_artifacts(tmp_path: Path) -> None:
+    zarr_path = _make_archive(tmp_path)
+
+    with pytest.raises(ValueError, match="does not yet support zarr visualization artifacts"):
+        compute_and_save_bout_kinematics(
+            zarr_path,
+            run_name="bout_kinematics_compact_v2_artifacts",
+            track_kinematics_run="tk_1",
+            track_id=0,
+            swim_bout_run="bouts_1",
+            layout=LAYOUT_COMPACT_TABULAR_V2,
+            write_visualizations=True,
+        )
 
 
 def test_compute_and_save_bout_kinematics_rejects_exponential_physical_source(tmp_path: Path) -> None:

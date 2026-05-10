@@ -23,6 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from fisheye.analysis.bout_kinematics import resolve_bout_kinematics_tables
 from fisheye.analysis.swim_bout_io import (
     SwimBoutIOError,
     load_default_swim_bout_tables,
@@ -910,38 +911,34 @@ def _load_bout_kinematics_metrics(
     source_track_kinematics_run = run_attrs.get("source_track_kinematics_run")
     track_id = _safe_int(run_attrs.get("source_track_id"))
     default_heading_level = run_attrs.get("default_heading_level")
-    level_names = [
-        name
-        for name in _group_names(bout_kin_group)
-        if _has_child(bout_kin_group[name], "per_bout_metrics")
-    ]
+    records_by_level, level_attrs_by_level, metrics_attrs_by_level = resolve_bout_kinematics_tables(
+        bout_kin_group
+    )
 
-    if not level_names:
+    if not records_by_level:
         diagnostics.append({
             "table": "bout_kinematics_metrics",
             "status": "skipped",
-            "reason": "no measurement levels with per_bout_metrics",
+            "reason": "no bout-kinematics measurement tables",
             "bout_kinematics_run": bout_kin_run,
         })
         return []
 
     rows: list[dict[str, Any]] = []
-    for level_name in sorted(level_names):
-        level_group = bout_kin_group[level_name]
-        metrics_group = level_group["per_bout_metrics"]
-        metrics_attrs = _attrs_dict(metrics_group)
-        metric_rows = _read_table_rows(metrics_group)
+    for level_name in sorted(records_by_level):
+        metrics_attrs = metrics_attrs_by_level.get(level_name, {})
+        metric_rows = structured_records_to_dicts(records_by_level[level_name])
         if not metric_rows:
             diagnostics.append({
                 "table": "bout_kinematics_metrics",
                 "status": "partial",
-                "reason": "empty per_bout_metrics table",
+                "reason": "empty bout-kinematics measurement table",
                 "bout_kinematics_run": bout_kin_run,
                 "measurement_level": level_name,
             })
             continue
 
-        level_attrs = _attrs_dict(level_group)
+        level_attrs = level_attrs_by_level.get(level_name, {})
         measurement_family = _measurement_family_for_level(level_name)
         for metric in metric_rows:
             bout_id = _safe_int(metric.get("bout_id"))

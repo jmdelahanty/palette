@@ -163,7 +163,7 @@ Recommended fingerprint model:
   - `resolve_refined_detect_instances(...)`
   - `resolve_track_motion_arrays(...)`
   - `resolve_swim_bout_tables(...)`
-  - `resolve_bout_kinematics_tables(...)`
+  - `resolve_bout_kinematics_tables(...)` (initial hierarchical-v1/compact-v2 support exists)
   - `resolve_eye_angle_representation(...)`
   - `resolve_subject_shape_arrays(...)`
   - `resolve_refined_subject_mask_arrays(...)`

@@ -449,7 +449,8 @@ Direction:
 Before changing writers, add stable resolver helpers:
 
 - `resolve_swim_bout_tables(...)`
-- `resolve_bout_kinematics_tables(...)`
+- `resolve_bout_kinematics_tables(...)` (implemented for hierarchical-v1 and
+  compact-v2 bout-kinematics runs)
 - `resolve_track_motion_arrays(...)`
 - `resolve_subject_shape_arrays(...)`
 - `resolve_eye_angle_representation(...)`
