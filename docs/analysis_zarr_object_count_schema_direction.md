@@ -104,6 +104,9 @@ Observed examples:
   `inter_bout_intervals`, histograms, global metrics, and bout points.
 - `bout_kinematics.py` repeats the same pattern at a smaller scale by writing
   domain and heading-level groups with their own per-bout metric tables.
+- `stimulus_response.py` writes one subtree per protocol step, then repeats
+  stimulus-family subtrees such as `grating/omr/`,
+  `concentric_grating/radial_omr/`, and `looming/` under each step.
 
 Future direction:
 
@@ -113,6 +116,10 @@ Future direction:
 - Store candidate identity as columns or enum IDs rather than tree branches.
 - Store parameter records once in an index table, not repeated in attrs on many
   small groups.
+- For step-scoped stimulus-response data, use step/family/metric identity
+  columns instead of one physical group tree per step and family. The
+  resolver-first plan is documented in
+  `stimulus_response_compact_v2_design.md`.
 
 ### 2. Representation / Alias Materialization
 

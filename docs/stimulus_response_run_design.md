@@ -80,6 +80,13 @@ arena_assignment changes
 
 ## Storage Layout
 
+The layout below is the current hierarchical-v1 storage contract. It remains the
+active writer layout while compact-v2 is designed. The planned compact migration
+is resolver-first: current reader migrations use
+`fisheye.analysis.stimulus_response_io.resolve_stimulus_response_tables(...)`;
+the writer should only gain an opt-in compact layout after that resolver
+surface is stable. See `docs/stimulus_response_compact_v2_design.md`.
+
 ```
 analysis/stimulus_response_runs/<run_name>/
 │
@@ -944,5 +951,7 @@ The base framework, bout integration, and grating metrics are implemented in:
 - `src/fisheye/shared/zarr/analysis_stage_arrays.py`
 
 See `docs/stimulus_response_implementation_plan.md` for design decisions,
-sequencing, and deferred work. See `src/fisheye/docs/zarr_structure.md`
-for the authoritative zarr layout reference.
+sequencing, and deferred work. See
+`docs/stimulus_response_compact_v2_design.md` for the compact-layout migration
+plan. See `src/fisheye/docs/zarr_structure.md` for the authoritative zarr
+layout reference.

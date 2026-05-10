@@ -28,6 +28,7 @@ from fisheye.shared.plot_artifacts import (
 )
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.analysis.stimulus_response_io import moving_grating_omr_steps
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -100,10 +101,6 @@ def _read_array(group: zarr.Group, name: str) -> np.ndarray:
     return np.asarray(group[name][:])
 
 
-def _read_array_group(group: zarr.Group) -> dict[str, np.ndarray]:
-    return {str(name): np.asarray(group[name][:]) for name in group.keys()}
-
-
 def _as_float_pair(value: Any) -> Optional[tuple[float, float]]:
     if value is None:
         return None
@@ -150,36 +147,21 @@ def _step_label(step: OMRStepSummary) -> str:
 def load_omr_step_summaries(run_group: zarr.Group) -> list[OMRStepSummary]:
     """Load MOVING_GRATING OMR summaries from a stimulus_response run."""
 
-    if "steps" not in run_group:
-        return []
-
     summaries: list[OMRStepSummary] = []
-    steps_group = run_group["steps"]
-    for step_key in sorted(steps_group.keys()):
-        step_group = steps_group[step_key]
-        if "grating" not in step_group:
+    for step in moving_grating_omr_steps(run_group):
+        omr = step.moving_grating_omr
+        if omr is None:
             continue
-        grating_group = step_group["grating"]
-        if "omr" not in grating_group:
-            continue
-        omr_group = grating_group["omr"]
-        per_fish = _read_array_group(omr_group["per_fish"]) if "per_fish" in omr_group else {}
-        per_bout = _read_array_group(omr_group["per_bout"]) if "per_bout" in omr_group else {}
-        windows = _read_array_group(omr_group["windows"]) if "windows" in omr_group else {}
-        early_windows = (
-            _read_array_group(omr_group["early_windows"])
-            if "early_windows" in omr_group else {}
-        )
-        attrs = omr_group.attrs
+        attrs = omr.attrs
         arena_extent = attrs.get("arena_axis_extent_mm")
         summaries.append(
             OMRStepSummary(
-                step_key=str(step_key),
-                step_index=int(step_group.attrs.get("step_index", len(summaries))),
-                step_name=str(step_group.attrs.get("step_name", step_key)),
-                start_frame=int(step_group.attrs.get("start_frame", 0)),
-                end_frame=int(step_group.attrs.get("end_frame", 0)),
-                duration_s=float(step_group.attrs.get("duration_s", 0.0)),
+                step_key=step.step_key,
+                step_index=step.step_index,
+                step_name=step.step_name,
+                start_frame=int(step.start_frame or 0),
+                end_frame=int(step.end_frame or 0),
+                duration_s=float(step.duration_s or 0.0),
                 stimulus_direction_deg=float(attrs.get("stimulus_direction_deg", float("nan"))),
                 arena_center_mm=_as_float_pair(attrs.get("arena_center_mm")),
                 arena_axis_extent_mm=(
@@ -188,10 +170,10 @@ def load_omr_step_summaries(run_group: zarr.Group) -> list[OMRStepSummary]:
                     else None
                 ),
                 arena_geometry_source=str(attrs.get("arena_geometry_source", "unknown")),
-                per_fish=per_fish,
-                per_bout=per_bout,
-                windows=windows,
-                early_windows=early_windows,
+                per_fish=omr.per_fish,
+                per_bout=omr.per_bout,
+                windows=omr.windows,
+                early_windows=omr.early_windows,
             )
         )
     summaries.sort(key=lambda s: s.step_index)

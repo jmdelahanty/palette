@@ -29,6 +29,7 @@ from fisheye.analysis.swim_bout_io import (
     load_default_swim_bout_tables,
     structured_records_to_dicts,
 )
+from fisheye.analysis.stimulus_response_io import resolve_stimulus_response_tables
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.index_analytics_manifests import index_export_manifest
@@ -352,6 +353,30 @@ def _read_table_rows(
     return rows
 
 
+def _array_mapping_rows(mapping: Mapping[str, np.ndarray]) -> list[dict[str, Any]]:
+    """Read equal-length 1D arrays from a logical table mapping into rows."""
+
+    arrays: dict[str, np.ndarray] = {}
+    n_rows: int | None = None
+    for name, value in mapping.items():
+        arr = np.asarray(value)
+        if arr.ndim != 1:
+            continue
+        if n_rows is None:
+            n_rows = int(arr.shape[0])
+        if int(arr.shape[0]) != n_rows:
+            continue
+        arrays[str(name)] = arr
+
+    if not arrays or n_rows is None:
+        return []
+
+    return [
+        {name: _scalar_for_parquet(arr[idx]) for name, arr in arrays.items()}
+        for idx in range(n_rows)
+    ]
+
+
 def _latest_run(root: Any, parent_path: str, requested: str | None = None) -> tuple[Any | None, str | None, str | None]:
     try:
         group, name = resolve_zarr_run(
@@ -658,28 +683,24 @@ def _load_stimulus_response_tables(
             diagnostics.append({"table": table, "status": "skipped", "reason": error})
         return step_summary_rows, response_rows
 
-    if not _has_child(response_group, "steps"):
+    try:
+        response_tables = resolve_stimulus_response_tables(response_group)
+    except Exception as exc:
         for table in wanted:
-            diagnostics.append({"table": table, "status": "skipped", "reason": "missing steps group"})
+            diagnostics.append({
+                "table": table,
+                "status": "skipped",
+                "reason": f"failed to resolve stimulus-response tables: {exc}",
+            })
         return step_summary_rows, response_rows
 
     response_attrs = _attrs_dict(response_group)
-    steps_group = response_group["steps"]
-    step_names = sorted(
-        (name for name in _group_names(steps_group) if re.fullmatch(r"step_\d+", name)),
-        key=lambda item: int(item.split("_")[1]),
-    )
-
-    for name in step_names:
-        step_group = steps_group[name]
-        attrs = _attrs_dict(step_group)
-        idx = _safe_int(attrs.get("step_index"))
-        if idx is None:
-            idx = int(name.split("_")[1])
-
-        if not _has_child(step_group, "per_fish"):
+    for step in response_tables.steps:
+        idx = step.step_index
+        if not step.per_fish:
             continue
-        base_rows = _read_table_rows(step_group["per_fish"])
+        attrs = dict(step.attrs)
+        base_rows = _array_mapping_rows(step.per_fish)
         for base in base_rows:
             fish_id = _safe_int(base.get("fish_id"))
             lineage = {
@@ -698,14 +719,14 @@ def _load_stimulus_response_tables(
                 "source_track_kinematics_type": response_attrs.get("source_track_kinematics_type"),
                 "source_bout_run": response_attrs.get("source_bout_run"),
                 "step_index": idx,
-                "step_name": attrs.get("step_name"),
-                "stimulus_mode": attrs.get("stimulus_mode"),
-                "stimulus_mode_id": attrs.get("stimulus_mode_id"),
-                "start_frame": _safe_int(attrs.get("start_frame")) or _safe_int(attrs.get("start_camera_frame")),
-                "end_frame": _safe_int(attrs.get("end_frame")) or _safe_int(attrs.get("end_camera_frame")),
-                "start_camera_frame": _safe_int(attrs.get("start_camera_frame")) or _safe_int(attrs.get("start_frame")),
-                "end_camera_frame": _safe_int(attrs.get("end_camera_frame")) or _safe_int(attrs.get("end_frame")),
-                "duration_s": _safe_float(attrs.get("duration_s")),
+                "step_name": step.step_name,
+                "stimulus_mode": step.stimulus_mode,
+                "stimulus_mode_id": step.stimulus_mode_id,
+                "start_frame": step.start_frame,
+                "end_frame": step.end_frame,
+                "start_camera_frame": _safe_int(attrs.get("start_camera_frame")) or step.start_frame,
+                "end_camera_frame": _safe_int(attrs.get("end_camera_frame")) or step.end_frame,
+                "duration_s": step.duration_s,
             }
             common.update(_protocol_signature_row(protocol_signature))
 
@@ -735,33 +756,25 @@ def _load_stimulus_response_tables(
             row.update(base)
             row["omr_family"] = None
 
-            if _has_child(step_group, "grating"):
-                grating = step_group["grating"]
-                if _has_child(grating, "per_fish"):
-                    grating_rows = _read_table_rows(grating["per_fish"])
-                    _merge_matching_fish_row(row, grating_rows, fish_id, prefix="grating_")
-                if _has_child(grating, "omr"):
-                    omr = grating["omr"]
-                    row["omr_family"] = "moving_grating_omr"
-                    for key, value in _attrs_dict(omr).items():
-                        row[f"omr_attr_{key}"] = value
-                    if _has_child(omr, "per_fish"):
-                        omr_rows = _read_table_rows(omr["per_fish"])
-                        _merge_matching_fish_row(row, omr_rows, fish_id, prefix="")
+            if step.grating_per_fish:
+                grating_rows = _array_mapping_rows(step.grating_per_fish)
+                _merge_matching_fish_row(row, grating_rows, fish_id, prefix="grating_")
+            if step.moving_grating_omr is not None:
+                row["omr_family"] = "moving_grating_omr"
+                for key, value in step.moving_grating_omr.attrs.items():
+                    row[f"omr_attr_{key}"] = value
+                omr_rows = _array_mapping_rows(step.moving_grating_omr.per_fish)
+                _merge_matching_fish_row(row, omr_rows, fish_id, prefix="")
 
-            if _has_child(step_group, "concentric_grating"):
-                concentric = step_group["concentric_grating"]
-                if _has_child(concentric, "per_fish"):
-                    conc_rows = _read_table_rows(concentric["per_fish"])
-                    _merge_matching_fish_row(row, conc_rows, fish_id, prefix="concentric_")
-                if _has_child(concentric, "radial_omr"):
-                    radial = concentric["radial_omr"]
-                    row["omr_family"] = "concentric_radial_omr"
-                    for key, value in _attrs_dict(radial).items():
-                        row[f"radial_omr_attr_{key}"] = value
-                    if _has_child(radial, "per_fish"):
-                        radial_rows = _read_table_rows(radial["per_fish"])
-                        _merge_matching_fish_row(row, radial_rows, fish_id, prefix="")
+            if step.concentric_per_fish:
+                conc_rows = _array_mapping_rows(step.concentric_per_fish)
+                _merge_matching_fish_row(row, conc_rows, fish_id, prefix="concentric_")
+            if step.concentric_radial_omr is not None:
+                row["omr_family"] = "concentric_radial_omr"
+                for key, value in step.concentric_radial_omr.attrs.items():
+                    row[f"radial_omr_attr_{key}"] = value
+                radial_rows = _array_mapping_rows(step.concentric_radial_omr.per_fish)
+                _merge_matching_fish_row(row, radial_rows, fish_id, prefix="")
 
             response_rows.append(row)
 

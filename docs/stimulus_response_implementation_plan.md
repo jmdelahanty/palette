@@ -232,6 +232,7 @@ rendered polarity, so attrs explicitly record
 ## References
 
 - `docs/stimulus_response_run_design.md` — storage layout and metric definitions
+- `docs/stimulus_response_compact_v2_design.md` — resolver-first compact layout plan
 - `docs/grating_analysis_acquisition_questions.md` — calibration blockers
 - `docs/track_kinematics_bout_status.md` — known issues with bout mirroring
 - `docs/analysis_dense_array_migration_todo.md` — future dense array work

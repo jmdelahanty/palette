@@ -38,6 +38,7 @@ def _():
         OMR_SUMMARY_PNG_ARTIFACT_NAME,
         load_omr_step_summaries,
     )
+    from fisheye.analysis.stimulus_response_io import concentric_radial_omr_steps
     from fisheye.visualization.interactive_track_kinematics import (
         DEFAULT_INTERACTIVE_ARTIFACT,
         bout_classification_records_to_dataframe,
@@ -146,6 +147,7 @@ def _():
         apply_full_width_timeseries_layout,
         bout_classification_records_to_dataframe,
         bout_kinematics_records_to_dataframe,
+        concentric_radial_omr_steps,
         discover_bout_classification_run_options,
         discover_bout_kinematics_run_options,
         discover_eye_angle_run_options,
@@ -1278,7 +1280,7 @@ def _(json, mo, pd, time, write_perf_event, zarr, zarr_path):
 
 
 @app.cell
-def _(mo, time, write_perf_event, zarr, zarr_path):
+def _(concentric_radial_omr_steps, load_omr_step_summaries, mo, time, write_perf_event, zarr, zarr_path):
     _stimulus_response_discovery_t0 = time.perf_counter()
     _stimulus_response_options = []
 
@@ -1323,32 +1325,36 @@ def _(mo, time, write_perf_event, zarr, zarr_path):
                 _run_group = _open_child_group(_parent, _parent_path, _run_name)
             except Exception:
                 continue
-            _moving_omr_step_count = 0
-            _concentric_radial_step_count = 0
-            _steps_path = _parent_path / _run_name / "steps"
             try:
-                _steps_group = _run_group["steps"]
+                _moving_omr_step_count = len(load_omr_step_summaries(_run_group))
+                _concentric_radial_step_count = len(concentric_radial_omr_steps(_run_group))
             except Exception:
-                if (_steps_path / "zarr.json").exists():
-                    _steps_group = zarr.open_group(str(_steps_path), mode="r", use_consolidated=False)
-                else:
-                    _steps_group = None
-            if _steps_group is not None:
-                _step_names = sorted(
-                    set(_group_keys(_steps_group)) | set(_local_child_group_names(_steps_path))
-                )
-                for _step_key in _step_names:
-                    try:
-                        _step_group = _open_child_group(_steps_group, _steps_path, _step_key)
-                    except Exception:
-                        continue
-                    if "grating" in _step_group and "omr" in _step_group["grating"]:
-                        _moving_omr_step_count += 1
-                    if (
-                        "concentric_grating" in _step_group
-                        and "radial_omr" in _step_group["concentric_grating"]
-                    ):
-                        _concentric_radial_step_count += 1
+                _moving_omr_step_count = 0
+                _concentric_radial_step_count = 0
+                _steps_path = _parent_path / _run_name / "steps"
+                try:
+                    _steps_group = _run_group["steps"]
+                except Exception:
+                    if (_steps_path / "zarr.json").exists():
+                        _steps_group = zarr.open_group(str(_steps_path), mode="r", use_consolidated=False)
+                    else:
+                        _steps_group = None
+                if _steps_group is not None:
+                    _step_names = sorted(
+                        set(_group_keys(_steps_group)) | set(_local_child_group_names(_steps_path))
+                    )
+                    for _step_key in _step_names:
+                        try:
+                            _step_group = _open_child_group(_steps_group, _steps_path, _step_key)
+                        except Exception:
+                            continue
+                        if "grating" in _step_group and "omr" in _step_group["grating"]:
+                            _moving_omr_step_count += 1
+                        if (
+                            "concentric_grating" in _step_group
+                            and "radial_omr" in _step_group["concentric_grating"]
+                        ):
+                            _concentric_radial_step_count += 1
             _response_step_count = _moving_omr_step_count + _concentric_radial_step_count
             if _response_step_count == 0:
                 continue
@@ -1420,6 +1426,7 @@ def _(mo, time, write_perf_event, zarr, zarr_path):
 def _(
     OMR_BOUT_TRAJECTORY_PNG_ARTIFACT_NAME,
     OMR_SUMMARY_PNG_ARTIFACT_NAME,
+    concentric_radial_omr_steps,
     load_omr_step_summaries,
     np,
     pd,
@@ -1453,76 +1460,28 @@ def _(
             return b""
         return np.asarray(_artifact[:], dtype=np.uint8).tobytes()
 
-    def _group_keys(_group):
-        _keys_fn = getattr(_group, "group_keys", None)
-        if callable(_keys_fn):
-            try:
-                return sorted(str(_key) for _key in _keys_fn())
-            except Exception:
-                pass
-        try:
-            return sorted(str(_key) for _key in _group.keys())
-        except Exception:
-            return []
-
-    def _step_sort_key(_name):
-        try:
-            return int(str(_name).rsplit("_", 1)[-1])
-        except Exception:
-            return str(_name)
-
-    def _read_array_mapping(_group):
-        _mapping = {}
-        if _group is None:
-            return _mapping
-        for _name in _group.keys():
-            try:
-                _value = _group[_name]
-            except Exception:
-                continue
-            if hasattr(_value, "shape"):
-                _mapping[str(_name)] = np.asarray(_value[:])
-        return _mapping
-
-    def _read_child_array_mapping(_group, _child_name):
-        if _child_name not in _group:
-            return {}
-        return _read_array_mapping(_group[_child_name])
-
     def _load_concentric_radial_omr_frames(_run_group):
         _step_rows = []
         _bout_frames = []
         _window_frames = []
         _early_window_frames = []
-        if "steps" not in _run_group:
-            return (
-                pd.DataFrame(),
-                pd.DataFrame(),
-                pd.DataFrame(),
-                pd.DataFrame(),
-            )
-        for _step_key in sorted(_group_keys(_run_group["steps"]), key=_step_sort_key):
-            _step_group = _run_group["steps"][_step_key]
-            if "concentric_grating" not in _step_group:
+        for _step in concentric_radial_omr_steps(_run_group):
+            _radial = _step.concentric_radial_omr
+            if _radial is None:
                 continue
-            _concentric_group = _step_group["concentric_grating"]
-            if "radial_omr" not in _concentric_group:
-                continue
-            _radial_group = _concentric_group["radial_omr"]
-            _step_attrs = dict(_step_group.attrs)
-            _radial_attrs = dict(_radial_group.attrs)
-            _per_fish = _read_child_array_mapping(_radial_group, "per_fish")
-            _per_bout = _read_child_array_mapping(_radial_group, "per_bout")
-            _windows = _read_child_array_mapping(_radial_group, "windows")
-            _early_windows = _read_child_array_mapping(_radial_group, "early_windows")
+            _radial_attrs = dict(_radial.attrs)
+            _per_fish = _radial.per_fish
+            _per_bout = _radial.per_bout
+            _windows = _radial.windows
+            _early_windows = _radial.early_windows
             _center = _radial_attrs.get("stimulus_center_mm") or [np.nan, np.nan]
             _step_rows.append(
                 {
-                    "step_index": _step_attrs.get("step_index", _step_sort_key(_step_key)),
-                    "step_name": _step_attrs.get("step_name", _step_key),
-                    "start_frame": _step_attrs.get("start_frame", _step_attrs.get("start_camera_frame")),
-                    "end_frame": _step_attrs.get("end_frame", _step_attrs.get("end_camera_frame")),
-                    "duration_s": _step_attrs.get("duration_s"),
+                    "step_index": _step.step_index,
+                    "step_name": _step.step_name,
+                    "start_frame": _step.start_frame,
+                    "end_frame": _step.end_frame,
+                    "duration_s": _step.duration_s,
                     "method_version": _radial_attrs.get("method_version"),
                     "stimulus_radial_polarity": _radial_attrs.get("stimulus_radial_polarity"),
                     "stimulus_radial_sign": _radial_attrs.get("stimulus_radial_sign"),
@@ -1581,8 +1540,8 @@ def _(
                 if not _mapping:
                     continue
                 _df = pd.DataFrame({str(_key): np.asarray(_value) for _key, _value in _mapping.items()})
-                _df.insert(0, "step_index", _step_attrs.get("step_index", _step_sort_key(_step_key)))
-                _df.insert(1, "step_name", _step_attrs.get("step_name", _step_key))
+                _df.insert(0, "step_index", _step.step_index)
+                _df.insert(1, "step_name", _step.step_name)
                 _df.insert(2, "stimulus_radial_polarity", _radial_attrs.get("stimulus_radial_polarity"))
                 _df.insert(3, "stimulus_radial_sign", _radial_attrs.get("stimulus_radial_sign"))
                 _frames.append(_df)
