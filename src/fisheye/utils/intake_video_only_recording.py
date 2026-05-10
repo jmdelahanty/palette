@@ -23,6 +23,11 @@ DEFAULT_RECORDING_TYPE = "behavior"
 DEFAULT_RECORDING_SUBTYPE = "free"
 DEFAULT_BEHAVIOR_MODE = "free"
 DEFAULT_ARTIFACT_SCHEMA_ID = "video_only_v1"
+EXPERIMENT_CONTEXT_STATUS = "absent"
+EXPERIMENT_CONTEXT_SOURCE = "none"
+EXPERIMENT_CONTEXT_STATUS_DETAIL = (
+    "Video-only intake has no H5/protocol source; stimulus-dependent analyses are unavailable."
+)
 
 
 def _normalize_text(value: object) -> Optional[str]:
@@ -132,6 +137,10 @@ def build_session_context(metadata: VideoOnlyRecordingMetadata) -> dict[str, Any
         "recording_type": metadata.recording_type,
         "recording_subtype": metadata.recording_subtype,
         "behavior_mode": metadata.behavior_mode,
+        "experiment_context_status": EXPERIMENT_CONTEXT_STATUS,
+        "experiment_context_source": EXPERIMENT_CONTEXT_SOURCE,
+        "stimulus_runs_available": False,
+        "experiment_context_status_detail": EXPERIMENT_CONTEXT_STATUS_DETAIL,
     }
     if metadata.session_start_iso8601_utc:
         context["session_start_iso8601_utc"] = metadata.session_start_iso8601_utc
@@ -187,6 +196,10 @@ def build_manifest_payload(
         "recording_subtype": metadata.recording_subtype,
         "behavior_mode": metadata.behavior_mode,
         "artifact_schema_id": metadata.artifact_schema_id,
+        "experiment_context_status": EXPERIMENT_CONTEXT_STATUS,
+        "experiment_context_source": EXPERIMENT_CONTEXT_SOURCE,
+        "stimulus_runs_available": False,
+        "experiment_context_status_detail": EXPERIMENT_CONTEXT_STATUS_DETAIL,
         "files": {
             "cams": [_to_posix_relpath(video_path, start=recording_dir)],
         },
@@ -250,6 +263,10 @@ def apply_manual_metadata(
         "canvas_name": metadata.canvas_name,
         "protocol_name": metadata.protocol_name,
         "protocol_name_from_definition": metadata.protocol_name,
+        "experiment_context_status": EXPERIMENT_CONTEXT_STATUS,
+        "experiment_context_source": EXPERIMENT_CONTEXT_SOURCE,
+        "stimulus_runs_available": False,
+        "experiment_context_status_detail": EXPERIMENT_CONTEXT_STATUS_DETAIL,
         "genotype": metadata.genotype,
         "dpf_at_acquisition": metadata.dpf_at_acquisition,
     }

@@ -17,7 +17,23 @@ treated as the runtime-validation counterpart to this document.
 - `created_at`, `pipeline_version`, `command_line_args`
 - `git_info`, `platform_info`
 - `source_video_metadata` (width, height, fps, frames, codec, path)
+- `session_uuid`, `recording_id`, `recording_name`, `recording_path`
+- `recording_type`, `recording_subtype`, `behavior_mode`,
+  `artifact_schema_id`
+- `experiment_context_status` (`"present"` when an H5/protocol source is
+  available, `"absent"` for recording-only/video-only archives)
+- `experiment_context_source` (`"h5"` or `"none"`)
+- `stimulus_runs_available` (`false` for recording-only archives with no
+  stimulus/protocol source)
+- `experiment_context_status_detail` *(optional human-readable explanation
+  when context is absent or degraded)*
+- `source_h5`, `source_h5_path` *(when `experiment_context_source == "h5"`)*
 - `processing_history` *(optional ordered list)*
+
+`Registry.scan_zarr` treats these root attrs as sufficient recording context:
+it indexes both video-only training Zarrs and recording-only analysis Zarrs in
+`recordings` and exposes the experiment-context fields through
+`dataset_context_current`.
 
 **Immediate children**
 

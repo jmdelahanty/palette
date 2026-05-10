@@ -189,6 +189,23 @@ def test_main_defaults_to_dry_run_and_does_not_create_archive(monkeypatch, tmp_p
     assert not out.exists()
 
 
+def test_main_recording_only_dry_run_allows_missing_h5(monkeypatch, tmp_path: Path) -> None:
+    rec = tmp_path / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
+    (rec / "cams").mkdir(parents=True, exist_ok=True)
+    (rec / "cams" / "Cam2010093_foo.mp4").touch()
+    out = rec / "zarr" / f"{rec.name}_analysis.zarr"
+
+    def _unexpected_call(*_args, **_kwargs):
+        raise AssertionError("process_recording_analysis_pipeline should not run in dry-run mode")
+
+    monkeypatch.setattr(mod, "process_recording_analysis_pipeline", _unexpected_call)
+
+    rc = mod.main(["--recording-dir", str(rec), "--recording-only"])
+
+    assert rc == 0
+    assert not out.exists()
+
+
 def test_main_dry_run_with_register_does_not_open_registry(monkeypatch, tmp_path: Path) -> None:
     rec = tmp_path / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
     (rec / "cams").mkdir(parents=True, exist_ok=True)

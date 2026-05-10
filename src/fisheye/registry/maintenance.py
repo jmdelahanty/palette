@@ -826,6 +826,24 @@ def _backfill_recording_entities(
             else:
                 behavior_mode = "none"
         artifact_schema_id = manifest.get("artifact_schema_id") or "behavior_v1"
+        experiment_context_status = manifest.get("experiment_context_status")
+        experiment_context_source = manifest.get("experiment_context_source")
+        experiment_context_status_detail = manifest.get("experiment_context_status_detail")
+        stimulus_runs_available_raw = manifest.get("stimulus_runs_available")
+        if isinstance(stimulus_runs_available_raw, str):
+            stimulus_runs_available = (
+                1
+                if stimulus_runs_available_raw.strip().lower() in {"1", "true", "yes", "y"}
+                else 0
+                if stimulus_runs_available_raw.strip().lower() in {"0", "false", "no", "n"}
+                else None
+            )
+        else:
+            stimulus_runs_available = (
+                None
+                if stimulus_runs_available_raw is None
+                else int(bool(stimulus_runs_available_raw))
+            )
 
         existing_recording = registry.conn.execute(
             "SELECT 1 FROM recordings WHERE recording_id = ? LIMIT 1;",
@@ -839,11 +857,14 @@ def _backfill_recording_entities(
                 """
                 INSERT INTO recordings (
                     recording_id, session_uuid, recording_name, recording_path, started_utc,
-                    recording_type, recording_subtype, behavior_mode, artifact_schema_id, rig_id, arena_id, camera_id, canvas_name,
+                    recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+                    experiment_context_status, experiment_context_source,
+                    experiment_context_status_detail, stimulus_runs_available,
+                    rig_id, arena_id, camera_id, canvas_name,
                     protocol_name, dish_design, created_utc, updated_utc
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(recording_id) DO UPDATE SET
                     session_uuid=excluded.session_uuid,
@@ -854,6 +875,22 @@ def _backfill_recording_entities(
                     recording_subtype=COALESCE(excluded.recording_subtype, recordings.recording_subtype),
                     behavior_mode=COALESCE(excluded.behavior_mode, recordings.behavior_mode),
                     artifact_schema_id=COALESCE(excluded.artifact_schema_id, recordings.artifact_schema_id),
+                    experiment_context_status=COALESCE(
+                        excluded.experiment_context_status,
+                        recordings.experiment_context_status
+                    ),
+                    experiment_context_source=COALESCE(
+                        excluded.experiment_context_source,
+                        recordings.experiment_context_source
+                    ),
+                    experiment_context_status_detail=COALESCE(
+                        excluded.experiment_context_status_detail,
+                        recordings.experiment_context_status_detail
+                    ),
+                    stimulus_runs_available=COALESCE(
+                        excluded.stimulus_runs_available,
+                        recordings.stimulus_runs_available
+                    ),
                     rig_id=COALESCE(excluded.rig_id, recordings.rig_id),
                     arena_id=COALESCE(excluded.arena_id, recordings.arena_id),
                     camera_id=COALESCE(excluded.camera_id, recordings.camera_id),
@@ -872,6 +909,10 @@ def _backfill_recording_entities(
                     str(recording_subtype) if recording_subtype else None,
                     str(behavior_mode) if behavior_mode else None,
                     str(artifact_schema_id),
+                    str(experiment_context_status) if experiment_context_status else None,
+                    str(experiment_context_source) if experiment_context_source else None,
+                    str(experiment_context_status_detail) if experiment_context_status_detail else None,
+                    stimulus_runs_available,
                     str(rig_id) if rig_id else None,
                     str(arena_id) if arena_id else None,
                     str(camera_id) if camera_id else None,
@@ -3081,6 +3122,7 @@ def _backfill_eye_mask_profiles(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,
@@ -3223,6 +3265,7 @@ def _backfill_keypoint_profiles(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,
@@ -3260,7 +3303,10 @@ def _backfill_keypoint_profiles(
             continue
 
         try:
-            root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
             extracted_rows = _extract_keypoint_profile_rows(
                 root,
                 zarr_path=zarr_path,
@@ -3370,6 +3416,7 @@ def _backfill_keypoint_quality(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,

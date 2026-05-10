@@ -1,8 +1,8 @@
 # Recording Analysis Pipeline Contract
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-05-09
 -->
 
 Purpose: define the canonical, operator-first contract for analysis processing per recording.
@@ -27,7 +27,8 @@ Related detect batch contract:
 
 - Stage 1 import tool:
   - Module: `fisheye.utils.import_recording_analysis`
-  - Responsibility: ensure `*_analysis.zarr`, import video metadata, import stimulus metadata.
+  - Responsibility: ensure `*_analysis.zarr`, import video metadata, import
+    stimulus metadata when an H5/protocol source is available.
   - Explicit non-goal: no detect or refine orchestration.
 - Stage 2 detect tool:
   - Modules:
@@ -80,6 +81,64 @@ Rationale: refine should consume explicit quality labels, not inferred "all clea
 fallbacks. Detect/refine should also run against an archive that already has
 analysis purpose and imported metadata context.
 
+## Recording-Only Mode
+
+Some recordings have a camera video but no experiment/H5/protocol source. These
+recordings are valid inputs for experiment-agnostic processing, but they are not
+valid inputs for stimulus-aligned analyses.
+
+Supported entry points:
+
+- Single recording:
+  - `scripts/py -m fisheye.utils.import_recording_analysis --recording-only ...`
+  - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-only ...`
+- Batch:
+  - `scripts/py -m fisheye.utils.import_recordings_analysis --recording-only ...`
+  - Equivalent explicit form: `--no-import-stimulus`
+
+Behavior:
+
+- `raw/*.h5` is required by default and whenever stimulus import is enabled.
+- `--recording-only` disables stimulus import and allows the planner to resolve
+  an archive from `cams/*.mp4` alone.
+- Recording-only archives are marked at the root with:
+  - `session_uuid`, `recording_id`, `recording_name`, `recording_path`
+  - `recording_type = "behavior"`, `recording_subtype = "free"`,
+    `behavior_mode = "free"` unless already provided
+  - `artifact_schema_id = "recording_analysis_v1"` unless already provided
+  - `experiment_context_status = "absent"`
+  - `experiment_context_source = "none"`
+  - `stimulus_runs_available = false`
+- If an H5 is available, import keeps `experiment_context_status = "present"`
+  and records `source_h5` / `source_h5_path`.
+- Video-only training archives created with
+  `fisheye.utils.intake_video_only_recording` use the same experiment-context
+  fields with `artifact_schema_id = "video_only_v1"`.
+- Registry scans are self-contained for these archives: when root attrs carry
+  recording context, `Registry.scan_zarr` upserts a `recordings` row and exposes
+  `experiment_context_status`, `experiment_context_source`, and
+  `stimulus_runs_available` through `dataset_context_current`.
+
+Valid downstream stages without experiment context:
+
+- detect, detect-quality, refined detect
+- crop, keypoints, refined keypoints
+- masks, refined masks, subject shape
+- track kinematics, swim-bout detection, bout kinematics
+- detection coverage and whole-recording movement/bout exports
+
+Invalid or non-meaningful without experiment context:
+
+- `analysis/stimulus_response`
+- OMR/concentric-grating/looming metrics
+- step-level protocol summaries
+- stimulus-aligned cross-recording exports
+
+Do not synthesize fake stimulus runs for recording-only archives. If a no-stimulus
+baseline needs step-like annotations, import a real protocol/stimulus context or
+write a separate explicitly named baseline annotation run with its own
+provenance.
+
 ## Detect Quality Guardrails (Best Practice)
 
 - Always run `detect_quality` after each new detect run and before refine.
@@ -104,6 +163,9 @@ analysis purpose and imported metadata context.
 - Input resolution is fail-closed for ambiguous single-recording inputs:
   - multiple `cams/*.mp4` without explicit `--video`
   - multiple `raw/*.h5` without explicit `--h5`
+  - missing `raw/*.h5` when stimulus import is enabled
+- Input resolution permits missing H5 only in recording-only / no-stimulus
+  mode. In that mode the pipeline must not run stimulus import.
 - Single-recording orchestrator:
   - stop immediately on first failed stage
   - return non-zero

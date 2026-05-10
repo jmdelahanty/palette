@@ -42,6 +42,46 @@ def test_build_plans_uses_recording_analysis_naming(tmp_path: Path) -> None:
     assert plan.zarr_path == recording_dir / "zarr" / f"{recording_dir.name}_analysis.zarr"
 
 
+def test_build_plans_includes_video_only_recording_when_stimulus_disabled(tmp_path: Path) -> None:
+    recording_dir = tmp_path / "2026-01-28T21-47-47Z_arena_1_DefaultScreen"
+    cams = recording_dir / "cams"
+    cams.mkdir(parents=True, exist_ok=True)
+    wanted = cams / "Cam2010093_foo.mp4"
+    wanted.touch()
+
+    plans = analysis_import._build_plans(  # noqa: SLF001
+        root=tmp_path,
+        recursive=True,
+        skip_existing=True,
+        check_stimulus=False,
+        import_stimulus=False,
+    )
+
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.status == "ok"
+    assert plan.h5_path is None
+    assert plan.cam_video == wanted
+    assert plan.zarr_path == recording_dir / "zarr" / f"{recording_dir.name}_analysis.zarr"
+
+
+def test_build_plans_ignores_video_only_recording_when_stimulus_required(tmp_path: Path) -> None:
+    recording_dir = tmp_path / "2026-01-28T21-47-47Z_arena_1_DefaultScreen"
+    cams = recording_dir / "cams"
+    cams.mkdir(parents=True, exist_ok=True)
+    (cams / "Cam2010093_foo.mp4").touch()
+
+    plans = analysis_import._build_plans(  # noqa: SLF001
+        root=tmp_path,
+        recursive=True,
+        skip_existing=True,
+        check_stimulus=False,
+        import_stimulus=True,
+    )
+
+    assert plans == []
+
+
 def test_build_plans_marks_multi_camera_recording_as_unsupported(tmp_path: Path) -> None:
     recording_dir = tmp_path / "2026-01-28T21-47-47Z_arena_1_DefaultScreen"
     h5_path = recording_dir / "raw" / "session.h5"
@@ -219,6 +259,41 @@ def test_main_forwards_keypoint_stage_toggles_to_pipeline(monkeypatch, tmp_path:
     assert captured["run_keypoints"] is True
     assert captured["refine_keypoints"] is True
     assert captured["keypoints_config"] == Path("configs/fisheye/default.yaml")
+
+
+def test_main_recording_only_forwards_none_h5_to_pipeline(monkeypatch, tmp_path: Path) -> None:
+    recording_dir = tmp_path / "2026-01-28T21-47-47Z_arena_1_DefaultScreen"
+    cams = recording_dir / "cams"
+    cams.mkdir(parents=True, exist_ok=True)
+    (cams / "Cam2010093_foo.mp4").touch()
+    captured: dict[str, object] = {}
+
+    def _fake_process(plan, opts, **_kwargs):
+        captured["h5_path"] = plan.h5_path
+        captured["import_stimulus"] = opts.import_opts.import_stimulus
+        return SimpleNamespace(
+            ok=True,
+            failed_step=None,
+            error=None,
+            returncode=0,
+            dataset_id=None,
+        )
+
+    monkeypatch.setattr(analysis_import, "process_recording_analysis_pipeline", _fake_process)
+
+    rc = analysis_import.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--apply",
+            "--no-log",
+            "--recording-only",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["h5_path"] is None
+    assert captured["import_stimulus"] is False
 
 
 def test_main_rejects_deprecated_refine_max_gap(tmp_path: Path) -> None:

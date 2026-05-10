@@ -418,6 +418,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_false",
         help="Skip stimulus import.",
     )
+    parser.add_argument(
+        "--recording-only",
+        action="store_true",
+        help="Process a camera-video-only recording without requiring an H5/protocol source.",
+    )
     parser.set_defaults(import_stimulus=True, import_video_metadata=True)
     parser.add_argument("--stimulus-always", action="store_true", help="Run stimulus import even if runs exist.")
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
@@ -466,6 +471,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
 
     args = parser.parse_args(argv)
+    if args.recording_only:
+        args.import_stimulus = False
     if args.refine_max_gap is not None:
         raise SystemExit(
             "Interpolation overrides are deprecated and unsupported for the recording analysis pipeline. "
@@ -480,6 +487,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             video=args.video,
             h5=args.h5,
             output=args.output,
+            require_h5=bool(args.import_stimulus),
         )
     except ValueError as exc:
         print(f"Plan resolution failed: {exc}")
@@ -493,7 +501,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("Single recording analysis pipeline plan")
     print(f"  recording_dir: {plan.recording_dir}")
     print(f"  video: {plan.cam_video}")
-    print(f"  h5: {plan.h5_path}")
+    print(f"  h5: {plan.h5_path if plan.h5_path is not None else 'none (recording-only)'}")
     print(f"  output: {plan.zarr_path}")
     print(f"  model_source: {args.model_source}")
     print(f"  import_stimulus: {bool(args.import_stimulus)}")

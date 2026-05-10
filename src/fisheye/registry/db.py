@@ -135,6 +135,27 @@ def _as_int(value: Any) -> Optional[int]:
         return None
 
 
+def _as_bool_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return int(value)
+    if isinstance(value, (int, np.integer)):
+        return int(bool(value))
+    decoded = _shared_decode_attr(value)
+    if decoded is None:
+        return None
+    if isinstance(decoded, (bool, np.bool_)):
+        return int(decoded)
+    text = str(decoded)
+    norm = text.strip().lower()
+    if norm in {"1", "true", "yes", "y", "available"}:
+        return 1
+    if norm in {"0", "false", "no", "n", "absent", "none", "missing"}:
+        return 0
+    return None
+
+
 _decode_attr = _shared_decode_attr
 
 
@@ -2088,6 +2109,87 @@ def _extract_session_context(root: zarr.Group) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _extract_recording_context(
+    root: zarr.Group,
+    zarr_path: Path,
+    metadata: DatasetMetadata,
+    *,
+    context: Mapping[str, Any],
+    acquisition: Mapping[str, Any],
+    protocol_name: Optional[str],
+) -> Dict[str, Any]:
+    """Extract canonical recording context embedded in a Zarr root.
+
+    The registry can still be populated from recording manifests, but recording-only
+    and video-only archives need direct scan support. Only emit a row when the root
+    carries explicit recording context; this avoids creating sparse recording rows
+    for older archives that only have a session UUID.
+    """
+
+    attrs = root.attrs
+
+    def first_text(*keys: str) -> Optional[str]:
+        for key in keys:
+            value = _decode_attr(attrs.get(key))
+            if value:
+                return str(value)
+            value = _decode_attr(context.get(key))
+            if value:
+                return str(value)
+        return None
+
+    recording_id = metadata.recording_id or first_text("recording_id")
+    if not recording_id:
+        return {}
+
+    explicit_keys = (
+        "recording_name",
+        "recording_type",
+        "recording_subtype",
+        "behavior_mode",
+        "artifact_schema_id",
+        "experiment_context_status",
+        "experiment_context_source",
+    )
+    has_explicit_recording_context = any(first_text(key) for key in explicit_keys)
+    if not has_explicit_recording_context:
+        return {}
+
+    if zarr_path.parent.name == "zarr":
+        recording_path = zarr_path.parent.parent
+    else:
+        recording_path = zarr_path.parent
+
+    stimulus_runs_available = attrs.get("stimulus_runs_available")
+    if stimulus_runs_available is None:
+        stimulus_runs_available = context.get("stimulus_runs_available")
+
+    return {
+        "recording_id": str(recording_id),
+        "session_uuid": metadata.session_uuid or first_text("session_uuid", "session_id"),
+        "recording_name": first_text("recording_name") or Path(recording_path).name,
+        "recording_path": first_text("recording_path") or str(recording_path),
+        "started_utc": first_text("session_start_iso8601_utc", "started_utc"),
+        "recording_type": first_text("recording_type"),
+        "recording_subtype": first_text("recording_subtype"),
+        "behavior_mode": first_text("behavior_mode"),
+        "artifact_schema_id": first_text("artifact_schema_id"),
+        "experiment_context_status": first_text("experiment_context_status"),
+        "experiment_context_source": first_text("experiment_context_source"),
+        "experiment_context_status_detail": first_text("experiment_context_status_detail"),
+        "stimulus_runs_available": _as_bool_int(stimulus_runs_available),
+        "rig_id": first_text("rig_id"),
+        "arena_id": first_text("arena_id"),
+        "camera_id": first_text("camera_id"),
+        "canvas_name": first_text("canvas_name"),
+        "protocol_name": (
+            first_text("protocol_name", "protocol_name_from_definition")
+            or protocol_name
+        ),
+        "dish_design": first_text("dish_design") or _decode_attr(acquisition.get("dish_design")),
+    }
+
+
 def _extract_arena_config(root: zarr.Group) -> Dict[str, Any]:
     analysis = root.get("analysis")
     if analysis is None or "stimulus_runs" not in analysis:
@@ -2682,6 +2784,11 @@ class Registry:
                 "analytics_manifest_registry",
                 self._migration_041_analytics_manifest_registry,
             ),
+            (
+                42,
+                "recording_experiment_context_columns",
+                self._migration_042_recording_experiment_context_columns,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -2713,6 +2820,18 @@ class Registry:
             WHERE type='table' AND name='datasets'
             LIMIT 1;
             """
+        ).fetchone()
+        return row is not None
+
+    def _table_exists(self, table_name: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type='table' AND name=?
+            LIMIT 1;
+            """,
+            (str(table_name),),
         ).fetchone()
         return row is not None
 
@@ -2802,6 +2921,10 @@ class Registry:
                 recording_subtype TEXT,
                 behavior_mode TEXT,
                 artifact_schema_id TEXT,
+                experiment_context_status TEXT,
+                experiment_context_source TEXT,
+                experiment_context_status_detail TEXT,
+                stimulus_runs_available INTEGER,
                 rig_id TEXT,
                 arena_id TEXT,
                 camera_id TEXT,
@@ -2860,6 +2983,10 @@ class Registry:
                 "recording_subtype": "TEXT",
                 "behavior_mode": "TEXT",
                 "dish_design": "TEXT",
+                "experiment_context_status": "TEXT",
+                "experiment_context_source": "TEXT",
+                "experiment_context_status_detail": "TEXT",
+                "stimulus_runs_available": "INTEGER",
             },
         )
         cur.executemany(
@@ -3538,6 +3665,10 @@ class Registry:
                 r.recording_subtype AS recording_subtype,
                 r.behavior_mode AS behavior_mode,
                 r.artifact_schema_id AS artifact_schema_id,
+                r.experiment_context_status AS experiment_context_status,
+                r.experiment_context_source AS experiment_context_source,
+                r.experiment_context_status_detail AS experiment_context_status_detail,
+                r.stimulus_runs_available AS stimulus_runs_available,
                 COALESCE(
                     NULLIF(TRIM(r.dish_design), ''),
                     GROUP_CONCAT(DISTINCT NULLIF(TRIM(dcc.dish_design), ''))
@@ -3567,6 +3698,10 @@ class Registry:
                 r.recording_subtype,
                 r.behavior_mode,
                 r.artifact_schema_id,
+                r.experiment_context_status,
+                r.experiment_context_source,
+                r.experiment_context_status_detail,
+                r.stimulus_runs_available,
                 r.dish_design,
                 r.rig_id,
                 r.arena_id,
@@ -3823,6 +3958,8 @@ class Registry:
         return
 
     def _migration_003_recording_columns_reconcile(self) -> None:
+        if not self._table_exists("recordings"):
+            return
         # Legacy bootstrapped registries can skip migration_001 execution.
         # Reconcile additive recording columns needed by current maintenance flows.
         self._ensure_columns(
@@ -3831,6 +3968,10 @@ class Registry:
                 "recording_subtype": "TEXT",
                 "behavior_mode": "TEXT",
                 "dish_design": "TEXT",
+                "experiment_context_status": "TEXT",
+                "experiment_context_source": "TEXT",
+                "experiment_context_status_detail": "TEXT",
+                "stimulus_runs_available": "INTEGER",
             },
         )
         cur = self.conn.cursor()
@@ -3848,6 +3989,10 @@ class Registry:
                 r.recording_subtype AS recording_subtype,
                 r.behavior_mode AS behavior_mode,
                 r.artifact_schema_id AS artifact_schema_id,
+                r.experiment_context_status AS experiment_context_status,
+                r.experiment_context_source AS experiment_context_source,
+                r.experiment_context_status_detail AS experiment_context_status_detail,
+                r.stimulus_runs_available AS stimulus_runs_available,
                 COALESCE(
                     NULLIF(TRIM(r.dish_design), ''),
                     GROUP_CONCAT(DISTINCT NULLIF(TRIM(dcc.dish_design), ''))
@@ -3877,6 +4022,10 @@ class Registry:
                 r.recording_subtype,
                 r.behavior_mode,
                 r.artifact_schema_id,
+                r.experiment_context_status,
+                r.experiment_context_source,
+                r.experiment_context_status_detail,
+                r.stimulus_runs_available,
                 r.dish_design,
                 r.rig_id,
                 r.arena_id,
@@ -6700,14 +6849,20 @@ class Registry:
                     ddp.aspect_ratio_p50 AS aspect_ratio_p50,
                     ddp.aspect_ratio_p90 AS aspect_ratio_p90,
                     ddp.edge_proximity_rate AS edge_proximity_rate,
-                    dcc.rig_id AS rig_id,
-                    dcc.camera_id AS camera_id,
-                    dcc.arena_id AS arena_id,
-                    dcc.dish_design AS dish_design,
-                    dcc.canvas_name AS canvas_name,
-                    dcc.protocol_name AS protocol_name,
-                    dcc.genotype AS genotype,
-                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                    COALESCE(dcc.rig_id, ddp.rig_id) AS rig_id,
+                    COALESCE(dcc.camera_id, ddp.camera_id) AS camera_id,
+                    COALESCE(dcc.arena_id, ddp.arena_id) AS arena_id,
+                    COALESCE(dcc.dish_design, ddp.dish_design) AS dish_design,
+                    COALESCE(dcc.canvas_name, ddp.canvas_name) AS canvas_name,
+                    COALESCE(dcc.protocol_name, ddp.protocol_name) AS protocol_name,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.genotype
+                        ELSE COALESCE(dcc.genotype, ddp.genotype)
+                    END AS genotype,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.dpf_at_acquisition
+                        ELSE COALESCE(dcc.dpf_at_acquisition, ddp.dpf_at_acquisition)
+                    END AS dpf_at_acquisition,
                     ddp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY ddp.dataset_id
@@ -6979,14 +7134,20 @@ class Registry:
                     kdp.heading_p10 AS heading_p10,
                     kdp.heading_p50 AS heading_p50,
                     kdp.heading_p90 AS heading_p90,
-                    dcc.rig_id AS rig_id,
-                    dcc.camera_id AS camera_id,
-                    dcc.arena_id AS arena_id,
-                    dcc.dish_design AS dish_design,
-                    dcc.canvas_name AS canvas_name,
-                    dcc.protocol_name AS protocol_name,
-                    dcc.genotype AS genotype,
-                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                    COALESCE(dcc.rig_id, kdp.rig_id) AS rig_id,
+                    COALESCE(dcc.camera_id, kdp.camera_id) AS camera_id,
+                    COALESCE(dcc.arena_id, kdp.arena_id) AS arena_id,
+                    COALESCE(dcc.dish_design, kdp.dish_design) AS dish_design,
+                    COALESCE(dcc.canvas_name, kdp.canvas_name) AS canvas_name,
+                    COALESCE(dcc.protocol_name, kdp.protocol_name) AS protocol_name,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.genotype
+                        ELSE COALESCE(dcc.genotype, kdp.genotype)
+                    END AS genotype,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.dpf_at_acquisition
+                        ELSE COALESCE(dcc.dpf_at_acquisition, kdp.dpf_at_acquisition)
+                    END AS dpf_at_acquisition,
                     kdp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY kdp.dataset_id, COALESCE(kdp.keypoint_method, '')
@@ -7344,14 +7505,20 @@ class Registry:
                     emdp.source_keypoint_stale_reason AS source_keypoint_stale_reason,
                     emdp.source_keypoint_stale_timestamp_utc AS source_keypoint_stale_timestamp_utc,
                     emdp.source_keypoint_stale_json AS source_keypoint_stale_json,
-                    dcc.rig_id AS rig_id,
-                    dcc.camera_id AS camera_id,
-                    dcc.arena_id AS arena_id,
-                    dcc.dish_design AS dish_design,
-                    dcc.canvas_name AS canvas_name,
-                    dcc.protocol_name AS protocol_name,
-                    dcc.genotype AS genotype,
-                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                    COALESCE(dcc.rig_id, emdp.rig_id) AS rig_id,
+                    COALESCE(dcc.camera_id, emdp.camera_id) AS camera_id,
+                    COALESCE(dcc.arena_id, emdp.arena_id) AS arena_id,
+                    COALESCE(dcc.dish_design, emdp.dish_design) AS dish_design,
+                    COALESCE(dcc.canvas_name, emdp.canvas_name) AS canvas_name,
+                    COALESCE(dcc.protocol_name, emdp.protocol_name) AS protocol_name,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.genotype
+                        ELSE COALESCE(dcc.genotype, emdp.genotype)
+                    END AS genotype,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.dpf_at_acquisition
+                        ELSE COALESCE(dcc.dpf_at_acquisition, emdp.dpf_at_acquisition)
+                    END AS dpf_at_acquisition,
                     emdp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY emdp.dataset_id, COALESCE(emdp.stage_group, ''), COALESCE(emdp.eye_mask_method, '')
@@ -8434,6 +8601,16 @@ class Registry:
 
     def _migration_034_dataset_context_current_view(self) -> None:
         cur = self.conn.cursor()
+        if self._table_exists("recordings"):
+            self._ensure_columns(
+                "recordings",
+                {
+                    "experiment_context_status": "TEXT",
+                    "experiment_context_source": "TEXT",
+                    "experiment_context_status_detail": "TEXT",
+                    "stimulus_runs_available": "INTEGER",
+                },
+            )
         cur.execute("DROP VIEW IF EXISTS dataset_context_current;")
         cur.execute(
             """
@@ -8582,6 +8759,10 @@ class Registry:
                 r.recording_subtype AS recording_subtype,
                 r.behavior_mode AS behavior_mode,
                 r.artifact_schema_id AS artifact_schema_id,
+                r.experiment_context_status AS experiment_context_status,
+                r.experiment_context_source AS experiment_context_source,
+                r.experiment_context_status_detail AS experiment_context_status_detail,
+                r.stimulus_runs_available AS stimulus_runs_available,
                 COALESCE(NULLIF(TRIM(r.rig_id), ''), NULLIF(TRIM(p.rig_id), '')) AS rig_id,
                 COALESCE(NULLIF(TRIM(r.arena_id), ''), NULLIF(TRIM(p.arena_id), '')) AS arena_id,
                 COALESCE(NULLIF(TRIM(r.camera_id), ''), NULLIF(TRIM(p.camera_id), '')) AS camera_id,
@@ -9200,6 +9381,8 @@ class Registry:
     def _migration_040_subject_mask_training_model_discovery(self) -> None:
         """Index subject-mask model discovery metadata and expose a focused view."""
 
+        if not self._table_exists("training_models"):
+            return
         self._ensure_training_model_discovery_columns()
         self._backfill_training_model_discovery_metadata()
         self._refresh_subject_mask_training_models_view()
@@ -9208,6 +9391,23 @@ class Registry:
         """Index immutable analytics collection/export manifests."""
 
         self._ensure_analytics_manifest_tables()
+
+    def _migration_042_recording_experiment_context_columns(self) -> None:
+        """Expose whether a recording has experiment/stimulus context."""
+
+        if self._table_exists("recordings"):
+            self._ensure_columns(
+                "recordings",
+                {
+                    "experiment_context_status": "TEXT",
+                    "experiment_context_source": "TEXT",
+                    "experiment_context_status_detail": "TEXT",
+                    "stimulus_runs_available": "INTEGER",
+                },
+            )
+        self._migration_034_dataset_context_current_view()
+        if self._table_exists("recordings"):
+            self._migration_003_recording_columns_reconcile()
 
     def _ensure_analytics_manifest_tables(self) -> None:
         cur = self.conn.cursor()
@@ -9620,6 +9820,108 @@ class Registry:
                 path_hash=excluded.path_hash,
                 last_seen_utc=excluded.last_seen_utc,
                 status=excluded.status;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def upsert_recording(
+        self,
+        *,
+        recording_id: str,
+        session_uuid: Optional[str] = None,
+        recording_name: Optional[str] = None,
+        recording_path: Optional[str] = None,
+        started_utc: Optional[str] = None,
+        recording_type: Optional[str] = None,
+        recording_subtype: Optional[str] = None,
+        behavior_mode: Optional[str] = None,
+        artifact_schema_id: Optional[str] = None,
+        experiment_context_status: Optional[str] = None,
+        experiment_context_source: Optional[str] = None,
+        experiment_context_status_detail: Optional[str] = None,
+        stimulus_runs_available: Optional[int] = None,
+        rig_id: Optional[str] = None,
+        arena_id: Optional[str] = None,
+        camera_id: Optional[str] = None,
+        canvas_name: Optional[str] = None,
+        protocol_name: Optional[str] = None,
+        dish_design: Optional[str] = None,
+    ) -> None:
+        now = _utc_now()
+        payload = {
+            "recording_id": str(recording_id),
+            "session_uuid": session_uuid,
+            "recording_name": recording_name,
+            "recording_path": recording_path,
+            "started_utc": started_utc,
+            "recording_type": recording_type,
+            "recording_subtype": recording_subtype,
+            "behavior_mode": behavior_mode,
+            "artifact_schema_id": artifact_schema_id,
+            "experiment_context_status": experiment_context_status,
+            "experiment_context_source": experiment_context_source,
+            "experiment_context_status_detail": experiment_context_status_detail,
+            "stimulus_runs_available": stimulus_runs_available,
+            "rig_id": rig_id,
+            "arena_id": arena_id,
+            "camera_id": camera_id,
+            "canvas_name": canvas_name,
+            "protocol_name": protocol_name,
+            "dish_design": dish_design,
+            "created_utc": now,
+            "updated_utc": now,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO recordings (
+                recording_id, session_uuid, recording_name, recording_path, started_utc,
+                recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+                experiment_context_status, experiment_context_source,
+                experiment_context_status_detail, stimulus_runs_available,
+                rig_id, arena_id, camera_id, canvas_name,
+                protocol_name, dish_design, created_utc, updated_utc
+            )
+            VALUES (
+                :recording_id, :session_uuid, :recording_name, :recording_path, :started_utc,
+                :recording_type, :recording_subtype, :behavior_mode, :artifact_schema_id,
+                :experiment_context_status, :experiment_context_source,
+                :experiment_context_status_detail, :stimulus_runs_available,
+                :rig_id, :arena_id, :camera_id, :canvas_name,
+                :protocol_name, :dish_design, :created_utc, :updated_utc
+            )
+            ON CONFLICT(recording_id) DO UPDATE SET
+                session_uuid=COALESCE(excluded.session_uuid, recordings.session_uuid),
+                recording_name=COALESCE(excluded.recording_name, recordings.recording_name),
+                recording_path=COALESCE(excluded.recording_path, recordings.recording_path),
+                started_utc=COALESCE(excluded.started_utc, recordings.started_utc),
+                recording_type=COALESCE(excluded.recording_type, recordings.recording_type),
+                recording_subtype=COALESCE(excluded.recording_subtype, recordings.recording_subtype),
+                behavior_mode=COALESCE(excluded.behavior_mode, recordings.behavior_mode),
+                artifact_schema_id=COALESCE(excluded.artifact_schema_id, recordings.artifact_schema_id),
+                experiment_context_status=COALESCE(
+                    excluded.experiment_context_status,
+                    recordings.experiment_context_status
+                ),
+                experiment_context_source=COALESCE(
+                    excluded.experiment_context_source,
+                    recordings.experiment_context_source
+                ),
+                experiment_context_status_detail=COALESCE(
+                    excluded.experiment_context_status_detail,
+                    recordings.experiment_context_status_detail
+                ),
+                stimulus_runs_available=COALESCE(
+                    excluded.stimulus_runs_available,
+                    recordings.stimulus_runs_available
+                ),
+                rig_id=COALESCE(excluded.rig_id, recordings.rig_id),
+                arena_id=COALESCE(excluded.arena_id, recordings.arena_id),
+                camera_id=COALESCE(excluded.camera_id, recordings.camera_id),
+                canvas_name=COALESCE(excluded.canvas_name, recordings.canvas_name),
+                protocol_name=COALESCE(excluded.protocol_name, recordings.protocol_name),
+                dish_design=COALESCE(excluded.dish_design, recordings.dish_design),
+                updated_utc=excluded.updated_utc;
             """,
             payload,
         )
@@ -12901,6 +13203,16 @@ class Registry:
         provenance = _extract_provenance(snapshot)
         context = _extract_session_context(root)
         acquisition = _extract_acquisition(root)
+        recording_context = _extract_recording_context(
+            root,
+            zarr_path,
+            metadata,
+            context=context,
+            acquisition=acquisition,
+            protocol_name=protocol_name,
+        )
+        if recording_context:
+            self.upsert_recording(**recording_context)
         self.upsert_provenance(
             dataset_id,
             provenance=provenance,
@@ -14095,6 +14407,9 @@ class Registry:
         subject_count_max: Optional[int] = None,
         zarr_origin: Optional[str] = None,
         zarr_use: Optional[str] = None,
+        experiment_context_status: Optional[str] = None,
+        experiment_context_source: Optional[str] = None,
+        stimulus_runs_available: Optional[bool] = None,
         fps_min: Optional[float] = None,
         fps_max: Optional[float] = None,
         exposure_min: Optional[float] = None,
@@ -14131,6 +14446,8 @@ class Registry:
         sql = [
             "SELECT dcc.dataset_id, dcc.session_uuid, dcc.zarr_path,",
             "dcc.recording_id, dcc.zarr_origin, dcc.zarr_use, dcc.dataset_status AS status,",
+            "dcc.experiment_context_status, dcc.experiment_context_source,",
+            "dcc.experiment_context_status_detail, dcc.stimulus_runs_available,",
             "dcc.dish_design, COALESCE(dcc.subject_id, dcc.legacy_fish_id) AS fish_id, dcc.subject_id AS subject_id,",
             "dcc.subject_count_effective AS subject_count,",
             "dcc.subject_count_snapshot, dcc.subject_count_recorded, dcc.subject_context_source,",
@@ -14195,6 +14512,10 @@ class Registry:
         add_clause("AND dcc.subject_count_effective <= ?", subject_count_max)
         add_clause("AND dcc.zarr_origin = ?", _normalize_zarr_origin(zarr_origin))
         add_clause("AND dcc.zarr_use = ?", _normalize_zarr_use(zarr_use))
+        add_clause("AND dcc.experiment_context_status = ?", experiment_context_status)
+        add_clause("AND dcc.experiment_context_source = ?", experiment_context_source)
+        if stimulus_runs_available is not None:
+            add_clause("AND dcc.stimulus_runs_available = ?", int(bool(stimulus_runs_available)))
         add_clause("AND dcc.fps >= ?", fps_min)
         add_clause("AND dcc.fps <= ?", fps_max)
         add_clause("AND dcc.exposure >= ?", exposure_min)

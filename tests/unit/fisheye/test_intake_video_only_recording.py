@@ -95,6 +95,9 @@ def test_apply_manual_metadata_preserves_existing_fields_without_overwrite(tmp_p
     assert root.attrs["dish_design"] == "existing_dish"
     assert root.attrs["session_uuid"] == "2026-03-09_colleague_set_001"
     assert root.attrs["protocol_name"] == "ManualProtocol"
+    assert root.attrs["experiment_context_status"] == "absent"
+    assert root.attrs["experiment_context_source"] == "none"
+    assert root.attrs["stimulus_runs_available"] is False
 
     analysis_meta = root["analysis_metadata"]
     session_context = json.loads(str(analysis_meta.attrs["session_context"]))
@@ -102,6 +105,9 @@ def test_apply_manual_metadata_preserves_existing_fields_without_overwrite(tmp_p
     assert session_context["camera_id"] == "existing_camera"
     assert session_context["arena_id"] == "arena_1"
     assert session_context["protocol_name"] == "ManualProtocol"
+    assert session_context["experiment_context_status"] == "absent"
+    assert session_context["experiment_context_source"] == "none"
+    assert session_context["stimulus_runs_available"] is False
 
 
 def test_build_manifest_payload_uses_relative_camera_video_path(tmp_path: Path) -> None:
@@ -117,6 +123,9 @@ def test_build_manifest_payload_uses_relative_camera_video_path(tmp_path: Path) 
     )
 
     assert payload["artifact_schema_id"] == "video_only_v1"
+    assert payload["experiment_context_status"] == "absent"
+    assert payload["experiment_context_source"] == "none"
+    assert payload["stimulus_runs_available"] is False
     assert payload["dish_design"] == "cedar"
     assert payload["protocol_name_from_definition"] == "ManualProtocol"
     assert payload["files"]["cams"] == ["cams/Cam2010093.mp4"]
@@ -183,6 +192,9 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
     assert root.attrs["dish_design"] == "cedar"
     assert root.attrs["recording_id"] == "2026-03-09_colleague_set_001"
     assert root.attrs["artifact_schema_id"] == "video_only_v1"
+    assert root.attrs["experiment_context_status"] == "absent"
+    assert root.attrs["experiment_context_source"] == "none"
+    assert root.attrs["stimulus_runs_available"] is False
     assert root.attrs["experiment_setup"]["setup_type"] == "single_dish"
 
     analysis_meta = root["analysis_metadata"]

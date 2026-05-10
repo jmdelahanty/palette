@@ -45,6 +45,22 @@ Additional archive audit, 2026-05-09: the same compact-v2 audit was run on
 `zarr.json` metadata files versus 493 for its matching hierarchical run, and
 each archive's `latest` pointer was restored to the original hierarchical run.
 
+Fresh promoted canary, 2026-05-09: the feeding archive was also written with a
+fresh compact-v2-only promoted run,
+`bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_fresh_20260509`,
+and `swim_bout_runs.attrs["latest"]` now points to that run. The run has
+`layout = "compact_tabular_v2"`, tables/indexes/signals only, no hierarchical
+`speed_*` bout-group mirrors, 519 default `speed_exponential` bouts, and strict
+JSON metadata validation passed with `bad_json_files 0`. Palette readers loaded
+the fresh compact run through the resolver: Marimo-backed option discovery found
+five signal options, `plot_track_kinematics.py` loaded compact rows for static
+overlay, `bout_kinematics.py` consumed the compact exponential signal,
+`stimulus_response.py` consumed 519 compact bouts, and the cross-recording
+exporter wrote 519 `swim_bout_metrics` rows plus 2076
+`bout_kinematics_metrics` rows. The static plotter currently exposes only
+raw/filtered/smoothed/averaged overlay choices on its CLI, so the plot smoke
+loaded compact data but rendered the smoothed signal rather than exponential.
+
 ## Motivation
 
 The object-count audit of `/nvme1/recordings` on 2026-05-08 found
@@ -521,10 +537,10 @@ avoid materializing many Zarr run groups.
       Crimson filters by compatible track/source inventory.
 - [ ] Confirm Crimson detector trace visibility and timeline/core rectangle
       rendering from compact rows on a fresh compact-v2-only canary.
-- [ ] A fresh end-to-end canary archive is generated with compact v2 as the
+- [x] A fresh end-to-end canary archive is generated with compact v2 as the
       only new promoted swim-bout run, and all active Palette readers plus
       Crimson load it without needing hierarchical-v1 compatibility mirrors.
-- [ ] Strict JSON validation passes on the fresh compact-v2 archive: no `NaN`,
+- [x] Strict JSON validation passes on the fresh compact-v2 archive: no `NaN`,
       `Infinity`, or `-Infinity` appears in `zarr.json` metadata.
 - [ ] The default change is explicitly documented in release notes or the
       pipeline contract, including the migration rule that old hierarchical-v1

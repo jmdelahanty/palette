@@ -92,6 +92,41 @@ def test_ensure_analysis_archive_sets_purpose(monkeypatch, tmp_path: Path) -> No
     mod.ensure_analysis_archive(plan)
 
     assert fake_root.attrs.get("zarr_purpose") == "analysis"
+    assert fake_root.attrs.get("session_uuid") == "rec"
+    assert fake_root.attrs.get("recording_id") == "rec"
+    assert fake_root.attrs.get("recording_name") == "rec"
+    assert fake_root.attrs.get("recording_type") == "behavior"
+    assert fake_root.attrs.get("recording_subtype") == "free"
+    assert fake_root.attrs.get("behavior_mode") == "free"
+    assert fake_root.attrs.get("artifact_schema_id") == "recording_analysis_v1"
+
+
+def test_ensure_analysis_archive_marks_recording_only_context(monkeypatch, tmp_path: Path) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    class _FakeGroup:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs()
+
+    fake_root = _FakeGroup()
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=None,
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+
+    mod.ensure_analysis_archive(plan)
+
+    assert fake_root.attrs.get("zarr_purpose") == "analysis"
+    assert fake_root.attrs.get("experiment_context_status") == "absent"
+    assert fake_root.attrs.get("experiment_context_source") == "none"
+    assert fake_root.attrs.get("stimulus_runs_available") is False
 
 
 def test_resolve_single_recording_plan_uses_default_paths(tmp_path: Path) -> None:
@@ -109,6 +144,33 @@ def test_resolve_single_recording_plan_uses_default_paths(tmp_path: Path) -> Non
     assert plan.cam_video == video.resolve()
     assert plan.h5_path == h5.resolve()
     assert plan.zarr_path == (rec / "zarr" / f"{rec.name}_analysis.zarr").resolve()
+
+
+def test_resolve_single_recording_plan_allows_missing_h5_when_not_required(tmp_path: Path) -> None:
+    rec = tmp_path / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
+    (rec / "cams").mkdir(parents=True, exist_ok=True)
+    video = rec / "cams" / "Cam2010093_foo.mp4"
+    video.touch()
+
+    plan = mod.resolve_single_recording_plan(recording_dir=rec, require_h5=False)
+
+    assert plan.recording_dir == rec.resolve()
+    assert plan.cam_video == video.resolve()
+    assert plan.h5_path is None
+    assert plan.zarr_path == (rec / "zarr" / f"{rec.name}_analysis.zarr").resolve()
+
+
+def test_resolve_single_recording_plan_still_requires_h5_by_default(tmp_path: Path) -> None:
+    rec = tmp_path / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
+    (rec / "cams").mkdir(parents=True, exist_ok=True)
+    (rec / "cams" / "Cam2010093_foo.mp4").touch()
+
+    try:
+        mod.resolve_single_recording_plan(recording_dir=rec)
+    except ValueError as exc:
+        assert "no .h5 files" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for missing raw/*.h5")
 
 
 def test_resolve_single_recording_plan_fails_on_ambiguous_video(tmp_path: Path) -> None:
@@ -160,6 +222,25 @@ def test_process_recording_import_blocks_failed_preflight(tmp_path: Path) -> Non
     assert not result.ok
     assert result.failed_step == "preflight_gate"
     assert "preflight failed" in (result.error or "")
+
+
+def test_process_recording_import_rejects_stimulus_import_without_h5(monkeypatch, tmp_path: Path) -> None:
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=None,
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+    opts = _opts()
+    opts.import_stimulus = True
+    monkeypatch.setattr(mod, "ensure_analysis_archive", lambda _plan: None)
+
+    result = mod.process_recording_import(plan, opts, logger=None)
+
+    assert not result.ok
+    assert result.failed_step == "import_stimulus_to_zarr"
+    assert result.returncode == 2
+    assert "no H5" in (result.error or "")
 
 
 def test_process_recording_import_allows_failed_preflight_when_overridden(monkeypatch, tmp_path: Path) -> None:

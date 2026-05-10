@@ -50,7 +50,7 @@ JsonLogger = SharedJsonLogger
 @dataclass
 class AnalysisPlan:
     recording_dir: Path
-    h5_path: Path
+    h5_path: Optional[Path]
     camera_id: Optional[str]
     cam_video: Optional[Path]
     zarr_path: Path
@@ -99,6 +99,18 @@ def _find_h5_files(root: Path, recursive: bool) -> List[Path]:
     return sorted(root.glob("*/raw/*.h5"))
 
 
+def _find_video_recording_dirs(root: Path, recursive: bool) -> List[Path]:
+    candidates: set[Path] = set()
+    if (root / "cams").is_dir():
+        candidates.add(root)
+    pattern = "cams/*.mp4"
+    mp4s = root.rglob(pattern) if recursive else root.glob(f"*/{pattern}")
+    for mp4 in mp4s:
+        if mp4.parent.name == "cams":
+            candidates.add(mp4.parent.parent)
+    return sorted(candidates)
+
+
 def _select_cam_video(recording_dir: Path, camera_id: Optional[str]) -> Tuple[Optional[Path], Optional[str]]:
     cams_dir = recording_dir / "cams"
     if not cams_dir.exists():
@@ -120,6 +132,7 @@ def _build_plans(
     skip_existing: bool,
     check_stimulus: bool,
     allow_preflight_failures: bool = False,
+    import_stimulus: bool = True,
 ) -> List[AnalysisPlan]:
     # Group by recording so we can detect multi-H5 (future multi-camera) layouts.
     # Current workflow supports one H5/camera stream per recording directory.
@@ -130,10 +143,14 @@ def _build_plans(
         recording_dir = h5_path.parent.parent
         h5_by_recording.setdefault(recording_dir, []).append(h5_path)
 
+    recording_dirs = set(h5_by_recording)
+    if not import_stimulus:
+        recording_dirs.update(_find_video_recording_dirs(root, recursive))
+
     plans: List[AnalysisPlan] = []
-    for recording_dir in sorted(h5_by_recording):
-        h5_paths = sorted(h5_by_recording[recording_dir])
-        if len(h5_paths) > 1:
+    for recording_dir in sorted(recording_dirs):
+        h5_paths = sorted(h5_by_recording.get(recording_dir, []))
+        if len(h5_paths) > 1 and import_stimulus:
             reason = (
                 f"multiple raw H5 files ({len(h5_paths)}) in recording; "
                 "multi-camera analysis import is not yet supported by this command"
@@ -153,21 +170,36 @@ def _build_plans(
                 )
             continue
 
-        h5_path = h5_paths[0]
+        h5_path = h5_paths[0] if len(h5_paths) == 1 else None
         zarr_dir = recording_dir / "zarr"
         zarr_path = zarr_dir / f"{recording_dir.name}_analysis.zarr"
-        try:
-            meta = _read_h5_meta(h5_path)
-        except Exception as exc:
+        meta: Dict[str, str] = {}
+        if h5_path is not None:
+            try:
+                meta = _read_h5_meta(h5_path)
+            except Exception as exc:
+                plans.append(
+                    AnalysisPlan(
+                        recording_dir=recording_dir,
+                        h5_path=h5_path,
+                        camera_id=None,
+                        cam_video=None,
+                        zarr_path=zarr_path,
+                        status="missing",
+                        reason=f"failed to read H5: {exc}",
+                    )
+                )
+                continue
+        elif import_stimulus:
             plans.append(
                 AnalysisPlan(
                     recording_dir=recording_dir,
-                    h5_path=h5_path,
+                    h5_path=None,
                     camera_id=None,
                     cam_video=None,
                     zarr_path=zarr_path,
                     status="missing",
-                    reason=f"failed to read H5: {exc}",
+                    reason="no raw H5 file available for stimulus import",
                 )
             )
             continue
@@ -216,7 +248,7 @@ def _print_plan(plans: List[AnalysisPlan]) -> None:
     for plan in plans:
         counts[plan.status] = counts.get(plan.status, 0) + 1
         print(f"Recording: {plan.recording_dir.name}")
-        print(f"  h5: {plan.h5_path}")
+        print(f"  h5: {plan.h5_path if plan.h5_path is not None else 'none (recording-only)'}")
         print(f"  camera_id: {plan.camera_id or 'unknown'}")
         print(f"  cam: {plan.cam_video or 'MISSING'}")
         print(f"  analysis_zarr: {plan.zarr_path}")
@@ -315,6 +347,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_false",
         help="Skip stimulus import.",
     )
+    parser.add_argument(
+        "--recording-only",
+        action="store_true",
+        help="Process camera-video-only recordings without requiring H5/protocol sources.",
+    )
     parser.set_defaults(import_stimulus=True)
     parser.add_argument("--stimulus-always", action="store_true", help="Run stimulus import even when runs already exist.")
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
@@ -370,6 +407,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging.")
 
     args = parser.parse_args(argv)
+    if args.recording_only:
+        args.import_stimulus = False
     if args.refine_max_gap is not None:
         raise SystemExit(
             "Interpolation overrides are deprecated and unsupported for batch analysis import. "
@@ -430,6 +469,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         skip_existing=skip_existing,
         check_stimulus=bool(args.import_stimulus),
         allow_preflight_failures=bool(args.allow_preflight_failures),
+        import_stimulus=bool(args.import_stimulus),
     )
 
     if args.dry_run:
@@ -440,7 +480,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 logger.log(
                     "recording_plan",
                     recording_dir=str(plan.recording_dir),
-                    h5_path=str(plan.h5_path),
+                    h5_path=str(plan.h5_path) if plan.h5_path is not None else None,
                     camera_id=plan.camera_id,
                     cam_video=str(plan.cam_video) if plan.cam_video else None,
                     zarr_path=str(plan.zarr_path),
@@ -524,7 +564,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.log(
                 "recording_start",
                 recording_dir=str(plan.recording_dir),
-                h5_path=str(plan.h5_path),
+                h5_path=str(plan.h5_path) if plan.h5_path is not None else None,
                 cam_video=str(plan.cam_video),
                 zarr_path=str(plan.zarr_path),
             )

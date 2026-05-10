@@ -34,8 +34,41 @@ arena 3 Feeding:
 That confirms the compact-v2 Crimson loader branch is reached during a real
 `redgui` startup on each audit archive. Candidate counts differ by archive
 because Crimson filters by compatible track/source inventory; the count is not a
-fixed schema-level expectation. A fresh compact-v2-only promoted canary remains
-the final validation gate before Palette flips its default writer.
+fixed schema-level expectation.
+
+Fresh promoted canary update, 2026-05-09: Palette generated a compact-v2-only
+promoted swim-bout run on the feeding archive and made it the latest
+`analysis/swim_bout_runs` entry:
+
+```text
+bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_fresh_20260509
+```
+
+Palette validation showed `layout = compact_tabular_v2`, no hierarchical
+`speed_*` groups under the fresh run, 519 default/exponential bouts, and strict
+JSON metadata validation with `bad_json_files 0`. The Marimo-backed discovery
+surface exposed five compact signal options, `bout_kinematics.py` and
+`stimulus_response.py` consumed the compact exponential signal, and the
+cross-recording exporter wrote 519 `swim_bout_metrics` rows plus 2076
+`bout_kinematics_metrics` rows.
+
+Crimson then passed the focused compact swim-bout GUI smoke on the same fresh
+archive:
+
+```text
+/tmp/crimson_compact_swim_bout_smoke_fresh_arena2_20260509.log
+[SwimBouts] Loaded compact-v2 run '...compact_v2_canary' candidate 0
+[SwimBouts] Loaded compact-v2 run '...compact_v2_fresh_20260509' candidate 0
+[SwimBouts] Loaded 25 candidates
+Successfully loaded zarr file
+```
+
+Crimson confirmed the fresh run is visible as latest, has
+`layout = compact_tabular_v2`, has no hierarchical `speed_*` groups, uses
+default candidate 0 and default signal 4 (`speed_exponential`), and has 519
+default-signal bouts. The 25 compatible candidates include both compact-v2 and
+hierarchical-v1 candidates, so the smoke also provides a cheap hierarchical
+regression check.
 
 Palette validation on 2026-05-09 showed logical equivalence between the current
 hierarchical run and compact v2 through `fisheye.analysis.swim_bout_io`:

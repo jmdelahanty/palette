@@ -1290,6 +1290,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--subject-count-min", type=int)
     parser.add_argument("--subject-count-max", type=int)
     parser.add_argument("--zarr-use", type=str, help="Exact zarr use match (training/analysis/inference/export/archive).")
+    parser.add_argument(
+        "--experiment-context-status",
+        choices=["present", "absent", "unknown"],
+        help="Filter by whether experiment/protocol context is present for the recording.",
+    )
+    parser.add_argument(
+        "--experiment-context-source",
+        type=str,
+        help="Filter experiment context source, e.g. h5 or none.",
+    )
+    parser.add_argument(
+        "--stimulus-runs-available",
+        choices=["yes", "no"],
+        help="Filter by whether stimulus_runs are expected to be available.",
+    )
     parser.add_argument("--fps-min", type=float)
     parser.add_argument("--fps-max", type=float)
     parser.add_argument("--exposure-min", type=float)
@@ -1988,6 +2003,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             subject_count_min=args.subject_count_min,
             subject_count_max=args.subject_count_max,
             zarr_use=args.zarr_use,
+            experiment_context_status=args.experiment_context_status,
+            experiment_context_source=args.experiment_context_source,
+            stimulus_runs_available=(
+                None
+                if args.stimulus_runs_available is None
+                else args.stimulus_runs_available == "yes"
+            ),
             fps_min=args.fps_min,
             fps_max=args.fps_max,
             exposure_min=args.exposure_min,

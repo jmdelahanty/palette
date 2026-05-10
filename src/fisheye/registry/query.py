@@ -35,6 +35,21 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--strain", type=str, help="Substring match for line_strain.")
     parser.add_argument("--protocol", type=str, help="Exact protocol_name match.")
     parser.add_argument("--protocol-hash", type=str, help="Exact protocol_hash match.")
+    parser.add_argument(
+        "--experiment-context-status",
+        choices=["present", "absent", "unknown"],
+        help="Filter by whether experiment/protocol context is present for the recording.",
+    )
+    parser.add_argument(
+        "--experiment-context-source",
+        type=str,
+        help="Filter experiment context source, e.g. h5 or none.",
+    )
+    parser.add_argument(
+        "--stimulus-runs-available",
+        choices=["yes", "no"],
+        help="Filter by whether stimulus_runs are expected to be available.",
+    )
 
     parser.add_argument("--dpf", type=int, help="Exact dpf_at_acquisition match.")
     parser.add_argument("--dpf-min", type=int, help="Minimum dpf_at_acquisition.")
@@ -119,6 +134,9 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         "dcc.dpf_at_acquisition",
         "dcc.protocol_name",
         "dcc.protocol_hash",
+        "dcc.experiment_context_status",
+        "dcc.experiment_context_source",
+        "dcc.stimulus_runs_available",
         "dcc.snapshot_status",
         "dcc.rig_id",
         "dcc.arena_id",
@@ -226,6 +244,15 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         add_clause("AND dcc.protocol_name = ?", args.protocol)
     if args.protocol_hash:
         add_clause("AND dcc.protocol_hash = ?", args.protocol_hash)
+    if args.experiment_context_status:
+        add_clause("AND dcc.experiment_context_status = ?", args.experiment_context_status)
+    if args.experiment_context_source:
+        add_clause("AND dcc.experiment_context_source = ?", args.experiment_context_source)
+    if args.stimulus_runs_available is not None:
+        add_clause(
+            "AND dcc.stimulus_runs_available = ?",
+            1 if args.stimulus_runs_available == "yes" else 0,
+        )
 
     if args.dpf is not None:
         add_exact_or_json_membership(

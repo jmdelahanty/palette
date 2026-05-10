@@ -23,7 +23,7 @@ from fisheye.utils.recording_preflight import preflight_gate_reason
 @dataclass
 class RecordingAnalysisPlan:
     recording_dir: Path
-    h5_path: Path
+    h5_path: Optional[Path]
     cam_video: Path
     zarr_path: Path
 
@@ -78,10 +78,32 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> None:
     mode = "a" if plan.zarr_path.exists() else "w"
     root = zarr.open_group(str(plan.zarr_path), mode=mode)
     attrs = dict(root.attrs)
+    recording_id = plan.recording_dir.name
     attrs["zarr_purpose"] = "analysis"
+    attrs.setdefault("session_uuid", recording_id)
+    attrs.setdefault("recording_id", recording_id)
+    attrs.setdefault("recording_name", recording_id)
+    attrs.setdefault("recording_path", str(plan.recording_dir))
+    attrs.setdefault("recording_type", "behavior")
+    attrs.setdefault("recording_subtype", "free")
+    attrs.setdefault("behavior_mode", "free")
+    attrs.setdefault("artifact_schema_id", "recording_analysis_v1")
     attrs.setdefault("source_video", plan.cam_video.name)
     attrs.setdefault("source_video_path", str(plan.cam_video))
     attrs.setdefault("source_path", str(plan.cam_video))
+    if plan.h5_path is None:
+        attrs["experiment_context_status"] = "absent"
+        attrs["experiment_context_source"] = "none"
+        attrs["stimulus_runs_available"] = False
+        attrs["experiment_context_status_detail"] = (
+            "No H5/protocol source was provided; stimulus-dependent analyses are unavailable."
+        )
+    else:
+        attrs["experiment_context_status"] = "present"
+        attrs["experiment_context_source"] = "h5"
+        attrs["source_h5"] = plan.h5_path.name
+        attrs["source_h5_path"] = str(plan.h5_path)
+        attrs.pop("experiment_context_status_detail", None)
     root.attrs.put(attrs)
 
 
@@ -101,6 +123,8 @@ def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) ->
 
 
 def run_stimulus_import(plan: RecordingAnalysisPlan, opts: RecordingImportOptions) -> tuple[bool, int, List[str]]:
+    if plan.h5_path is None:
+        return False, 2, ["missing_h5_for_stimulus_import"]
     cmd = [
         sys.executable,
         "-m",
@@ -159,6 +183,13 @@ def process_recording_import(
         )
 
     if opts.import_stimulus:
+        if plan.h5_path is None:
+            return RecordingImportResult(
+                ok=False,
+                failed_step="import_stimulus_to_zarr",
+                returncode=2,
+                error="stimulus import requested but no H5/protocol source is available",
+            )
         stim_present = stimulus_runs_present(plan.zarr_path)
         if stim_present and not opts.stimulus_always:
             _log(
@@ -199,6 +230,7 @@ def resolve_single_recording_plan(
     video: Optional[Path] = None,
     h5: Optional[Path] = None,
     output: Optional[Path] = None,
+    require_h5: bool = True,
 ) -> RecordingAnalysisPlan:
     rec_dir = recording_dir.expanduser().resolve()
     if not rec_dir.exists() or not rec_dir.is_dir():
@@ -223,12 +255,17 @@ def resolve_single_recording_plan(
         raw_dir = rec_dir / "raw"
         h5s = sorted(raw_dir.glob("*.h5"))
         if not h5s:
-            raise ValueError(f"no .h5 files found under {raw_dir}")
+            if require_h5:
+                raise ValueError(f"no .h5 files found under {raw_dir}")
+            h5_path = None
         if len(h5s) > 1:
-            raise ValueError(
-                f"multiple .h5 files found under {raw_dir}; pass --h5 explicitly for single-recording mode"
-            )
-        h5_path = h5s[0].resolve()
+            if require_h5:
+                raise ValueError(
+                    f"multiple .h5 files found under {raw_dir}; pass --h5 explicitly for single-recording mode"
+                )
+            h5_path = None
+        elif h5s:
+            h5_path = h5s[0].resolve()
     else:
         h5_path = h5.expanduser().resolve()
         if not h5_path.exists() or not h5_path.is_file():
@@ -302,6 +339,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_false",
         help="Skip stimulus import.",
     )
+    parser.add_argument(
+        "--recording-only",
+        action="store_true",
+        help="Process a camera-video-only recording without requiring an H5/protocol source.",
+    )
     parser.set_defaults(import_stimulus=True, import_video_metadata=True)
     parser.add_argument("--stimulus-always", action="store_true", help="Run stimulus import even if runs exist.")
     parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
@@ -314,6 +356,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if args.recording_only:
+        args.import_stimulus = False
     if not args.apply:
         args.dry_run = True
 
@@ -323,6 +367,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             video=args.video,
             h5=args.h5,
             output=args.output,
+            require_h5=bool(args.import_stimulus),
         )
     except ValueError as exc:
         print(f"Plan resolution failed: {exc}")
@@ -331,7 +376,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("Single recording import plan")
     print(f"  recording_dir: {plan.recording_dir}")
     print(f"  video: {plan.cam_video}")
-    print(f"  h5: {plan.h5_path}")
+    print(f"  h5: {plan.h5_path if plan.h5_path is not None else 'none (recording-only)'}")
     print(f"  output: {plan.zarr_path}")
     print(f"  import_video_metadata: {bool(args.import_video_metadata)}")
     print(f"  import_stimulus: {bool(args.import_stimulus)}")
