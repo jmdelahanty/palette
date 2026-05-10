@@ -51,6 +51,32 @@ def _literal_class_assignment(
     raise AssertionError(f"{class_name}.{assignment_name} not found in {module_path}")
 
 
+def _launcher_stage_info(module_path: Path) -> dict[str, dict[str, object]]:
+    tree = ast.parse(module_path.read_text())
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "STAGE_INFO" for target in node.targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            raise AssertionError("STAGE_INFO is not a dict literal")
+        out: dict[str, dict[str, object]] = {}
+        for key_node, value_node in zip(node.value.keys, node.value.values):
+            stage_name = ast.literal_eval(key_node)
+            if not isinstance(value_node, ast.Call):
+                raise AssertionError(f"STAGE_INFO[{stage_name!r}] does not use _launcher_stage_info")
+            if not isinstance(value_node.func, ast.Name) or value_node.func.id != "_launcher_stage_info":
+                raise AssertionError(f"STAGE_INFO[{stage_name!r}] does not use _launcher_stage_info")
+            helper_stage_name = ast.literal_eval(value_node.args[0])
+            keywords = {keyword.arg: keyword.value for keyword in value_node.keywords}
+            out[stage_name] = {
+                "helper_stage_name": helper_stage_name,
+                "requires": ast.literal_eval(keywords["requires"]),
+            }
+        return out
+    raise AssertionError(f"STAGE_INFO not found in {module_path}")
+
+
 def test_stage_catalog_ids_are_unique_and_aliases_resolve() -> None:
     ids = [spec.id for spec in STAGE_SPECS]
     assert len(ids) == len(set(ids))
@@ -129,14 +155,23 @@ def test_current_pipeline_stage_names_resolve_or_are_intentionally_legacy() -> N
         except KeyError:
             unresolved.add(stage_name)
 
-    assert unresolved == {"downsample"}
+    assert unresolved == set()
+
+    pipeline_module = __import__(
+        "fisheye.core.pipeline",
+        fromlist=["Pipeline"],
+    )
+    stage_canonical_ids = pipeline_module.Pipeline.STAGE_CANONICAL_IDS
+    assert stage_canonical_ids == {
+        stage_name: canonical_stage_id(stage_name)
+        for stage_name in stage_order
+    }
 
 
 def test_current_launcher_stage_names_resolve_or_are_intentionally_legacy() -> None:
     launcher_path = REPO_ROOT / "src/fisheye/cli/interactive_launcher.py"
     stage_order = set(_literal_assignment(launcher_path, "STAGE_ORDER"))
-    stage_info = _literal_assignment(launcher_path, "STAGE_INFO")
-    assert isinstance(stage_info, dict)
+    stage_info = _launcher_stage_info(launcher_path)
 
     stage_names = set(stage_order).union(stage_info)
     for info in stage_info.values():
@@ -149,7 +184,10 @@ def test_current_launcher_stage_names_resolve_or_are_intentionally_legacy() -> N
         except KeyError:
             unresolved.add(stage_name)
 
-    assert unresolved == {"downsample"}
+    assert unresolved == set()
+    for stage_name in stage_order:
+        assert stage_info[stage_name]["helper_stage_name"] == stage_name
+        assert canonical_stage_id(stage_name)
 
 
 def test_unknown_stage_alias_raises_key_error() -> None:

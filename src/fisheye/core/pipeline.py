@@ -29,6 +29,7 @@ from ..tracking.arena_assignment import assign_arenas_spatial
 from ..refinement.refine_detect import create_refined_run
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 from ..refinement.refine_keypoints import create_refined_keypoint_run
+from ..registry.stage_catalog import canonical_stage_id
 from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr.schema import validate_zarr_structure
 from ..utils import run_eye_masks_batch as eye_mask_batch
@@ -184,6 +185,11 @@ class Pipeline:
         'refined_subject_masks': [],
         'assign_ids': ['detect'],
         'track': ['keypoints'],
+    }
+
+    STAGE_CANONICAL_IDS = {
+        stage: canonical_stage_id(stage)
+        for stage in STAGE_ORDER
     }
 
     ANALYSIS_STAGES = {

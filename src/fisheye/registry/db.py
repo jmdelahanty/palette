@@ -2820,6 +2820,11 @@ class Registry:
                 "stage_catalog_recording_step_status_wide_view",
                 self._migration_043_stage_catalog_recording_step_status_wide_view,
             ),
+            (
+                44,
+                "derived_analysis_recording_step_status_wide_view",
+                self._migration_044_derived_analysis_recording_step_status_wide_view,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -6036,6 +6041,12 @@ class Registry:
                     MAX(CASE WHEN step_name = 'refined_subject_masks' THEN review_status_json END) AS refined_subject_masks_review_json,
                     MAX(CASE WHEN step_name = 'refined_subject_masks' THEN details_json END) AS refined_subject_masks_details_json,
                     MAX(CASE WHEN step_name = 'tracks' THEN details_json END) AS tracks_details_json,
+                    MAX(CASE WHEN step_name = 'track_kinematics' THEN details_json END) AS track_kinematics_details_json,
+                    MAX(CASE WHEN step_name = 'swim_bouts' THEN details_json END) AS swim_bouts_details_json,
+                    MAX(CASE WHEN step_name = 'bout_kinematics' THEN details_json END) AS bout_kinematics_details_json,
+                    MAX(CASE WHEN step_name = 'eye_angles' THEN details_json END) AS eye_angles_details_json,
+                    MAX(CASE WHEN step_name = 'subject_shape' THEN details_json END) AS subject_shape_details_json,
+                    MAX(CASE WHEN step_name = 'stimulus_response' THEN details_json END) AS stimulus_response_details_json,
                     MAX(CASE WHEN step_name = 'stimulus' THEN details_json END) AS stimulus_details_json
                 FROM step_rows
                 GROUP BY dataset_id
@@ -6054,7 +6065,13 @@ class Registry:
                         json_extract(p.eye_masks_details_json, '$.pipeline_type'),
                         json_extract(p.refined_eye_masks_details_json, '$.pipeline_type'),
                         json_extract(p.subject_masks_details_json, '$.pipeline_type'),
-                        json_extract(p.refined_subject_masks_details_json, '$.pipeline_type')
+                        json_extract(p.refined_subject_masks_details_json, '$.pipeline_type'),
+                        json_extract(p.track_kinematics_details_json, '$.pipeline_type'),
+                        json_extract(p.swim_bouts_details_json, '$.pipeline_type'),
+                        json_extract(p.bout_kinematics_details_json, '$.pipeline_type'),
+                        json_extract(p.eye_angles_details_json, '$.pipeline_type'),
+                        json_extract(p.subject_shape_details_json, '$.pipeline_type'),
+                        json_extract(p.stimulus_response_details_json, '$.pipeline_type')
                     ) AS pipeline_type,
                     COALESCE(
                         json_extract(p.raw_details_json, '$.zarr_purpose'),
@@ -6067,7 +6084,13 @@ class Registry:
                         json_extract(p.eye_masks_details_json, '$.zarr_purpose'),
                         json_extract(p.refined_eye_masks_details_json, '$.zarr_purpose'),
                         json_extract(p.subject_masks_details_json, '$.zarr_purpose'),
-                        json_extract(p.refined_subject_masks_details_json, '$.zarr_purpose')
+                        json_extract(p.refined_subject_masks_details_json, '$.zarr_purpose'),
+                        json_extract(p.track_kinematics_details_json, '$.zarr_purpose'),
+                        json_extract(p.swim_bouts_details_json, '$.zarr_purpose'),
+                        json_extract(p.bout_kinematics_details_json, '$.zarr_purpose'),
+                        json_extract(p.eye_angles_details_json, '$.zarr_purpose'),
+                        json_extract(p.subject_shape_details_json, '$.zarr_purpose'),
+                        json_extract(p.stimulus_response_details_json, '$.zarr_purpose')
                     ) AS zarr_purpose,
                     COALESCE(
                         json_extract(p.raw_details_json, '$.has_raw_video_attr'),
@@ -6080,7 +6103,13 @@ class Registry:
                         json_extract(p.eye_masks_details_json, '$.has_raw_video_attr'),
                         json_extract(p.refined_eye_masks_details_json, '$.has_raw_video_attr'),
                         json_extract(p.subject_masks_details_json, '$.has_raw_video_attr'),
-                        json_extract(p.refined_subject_masks_details_json, '$.has_raw_video_attr')
+                        json_extract(p.refined_subject_masks_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.track_kinematics_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.swim_bouts_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.bout_kinematics_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.eye_angles_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.subject_shape_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.stimulus_response_details_json, '$.has_raw_video_attr')
                     ) AS has_raw_video_attr,
                     CASE
                         WHEN COALESCE(
@@ -6573,6 +6602,42 @@ class Registry:
                     WHEN lower(COALESCE(r.track_qc_state, '')) IN ('warn', 'block') THEN 'WARN'
                     ELSE 'OK'
                 END AS "Track",
+                CASE
+                    WHEN r.track_kinematics_status = 'ok' THEN 'OK'
+                    WHEN r.track_kinematics_status = 'na' THEN 'N/A'
+                    WHEN r.track_kinematics_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Track Kinematics",
+                CASE
+                    WHEN r.swim_bouts_status = 'ok' THEN 'OK'
+                    WHEN r.swim_bouts_status = 'na' THEN 'N/A'
+                    WHEN r.swim_bouts_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Swim Bouts",
+                CASE
+                    WHEN r.bout_kinematics_status = 'ok' THEN 'OK'
+                    WHEN r.bout_kinematics_status = 'na' THEN 'N/A'
+                    WHEN r.bout_kinematics_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Bout Kinematics",
+                CASE
+                    WHEN r.eye_angles_status = 'ok' THEN 'OK'
+                    WHEN r.eye_angles_status = 'na' THEN 'N/A'
+                    WHEN r.eye_angles_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Eye Angles",
+                CASE
+                    WHEN r.subject_shape_status = 'ok' THEN 'OK'
+                    WHEN r.subject_shape_status = 'na' THEN 'N/A'
+                    WHEN r.subject_shape_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Subject Shape",
+                CASE
+                    WHEN r.stimulus_response_status = 'ok' THEN 'OK'
+                    WHEN r.stimulus_response_status = 'na' THEN 'N/A'
+                    WHEN r.stimulus_response_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Stimulus Response",
                 CAST(r.stimulus_runs AS TEXT) || ' (' || CASE WHEN r.stimulus_runs > 0 THEN 'OK' ELSE 'MISS' END || ')' AS "Stimulus",
                 CASE WHEN r.calibration_present = 1 THEN 'OK' ELSE 'MISS' END AS "Calib",
                 CASE
@@ -9438,6 +9503,11 @@ class Registry:
 
     def _migration_043_stage_catalog_recording_step_status_wide_view(self) -> None:
         """Refresh recording_step_status_wide from the canonical stage catalog."""
+
+        self._migration_020_recording_step_status_wide_view()
+
+    def _migration_044_derived_analysis_recording_step_status_wide_view(self) -> None:
+        """Refresh recording_step_status_wide to expose derived-analysis stages."""
 
         self._migration_020_recording_step_status_wide_view()
 

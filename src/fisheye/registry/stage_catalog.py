@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 CORE_PIPELINE = "core_pipeline"
 RECORDING_METADATA = "recording_metadata"
+DERIVED_ANALYSIS = "derived_analysis"
 TUNING = "tuning"
 
 
@@ -37,9 +38,17 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(
         id="raw",
         aliases=("import",),
-        invalidates=("background",),
+        invalidates=("downsample", "background"),
         category=CORE_PIPELINE,
         description="Raw recording imported or registered for analysis.",
+    ),
+    StageSpec(
+        id="downsample",
+        depends_on=("raw",),
+        invalidates=("background",),
+        artifact_families=("raw_video/images_ds",),
+        category=CORE_PIPELINE,
+        description="Downsampled video array derived from raw frames.",
     ),
     StageSpec(
         id="calibration",
@@ -99,7 +108,7 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         id="refined_keypoints",
         aliases=("keypoints_refine",),
         depends_on=("keypoints",),
-        invalidates=("eye_masks", "arena_assignment"),
+        invalidates=("eye_masks", "arena_assignment", "track_kinematics", "eye_angles"),
         artifact_families=("refined_keypoints_runs",),
         description="Curated keypoint instances used downstream.",
     ),
@@ -126,6 +135,7 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec(
         id="refined_subject_masks",
         depends_on=("subject_masks",),
+        invalidates=("subject_shape", "eye_angles"),
         artifact_families=("refined_subject_masks_runs",),
         description="Curated whole-subject mask instances.",
     ),
@@ -143,6 +153,51 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         depends_on=("arena_assignment",),
         artifact_families=("tracks",),
         description="Track-level subject identity output.",
+    ),
+    StageSpec(
+        id="track_kinematics",
+        depends_on=("refined_keypoints",),
+        invalidates=("swim_bouts", "stimulus_response"),
+        artifact_families=("analysis/track_kinematics_runs",),
+        category=DERIVED_ANALYSIS,
+        description="Speed, distance, heading, and derived track kinematics.",
+    ),
+    StageSpec(
+        id="swim_bouts",
+        depends_on=("track_kinematics",),
+        invalidates=("bout_kinematics", "stimulus_response"),
+        artifact_families=("analysis/swim_bout_runs",),
+        category=DERIVED_ANALYSIS,
+        description="Swim-bout segmentation candidates derived from kinematics.",
+    ),
+    StageSpec(
+        id="bout_kinematics",
+        depends_on=("swim_bouts",),
+        artifact_families=("analysis/bout_kinematics_runs",),
+        category=DERIVED_ANALYSIS,
+        description="Per-bout movement, heading, and optional eye-gaze metrics.",
+    ),
+    StageSpec(
+        id="eye_angles",
+        depends_on=("refined_keypoints", "refined_subject_masks"),
+        invalidates=("bout_kinematics", "stimulus_response"),
+        artifact_families=("analysis/eye_angle_runs",),
+        category=DERIVED_ANALYSIS,
+        description="Per-eye angle and vergence measurements.",
+    ),
+    StageSpec(
+        id="subject_shape",
+        depends_on=("refined_subject_masks",),
+        artifact_families=("analysis/subject_shape_runs",),
+        category=DERIVED_ANALYSIS,
+        description="Mask-derived body frame, centerline, and shape geometry.",
+    ),
+    StageSpec(
+        id="stimulus_response",
+        depends_on=("stimulus", "track_kinematics", "swim_bouts"),
+        artifact_families=("analysis/stimulus_response_runs",),
+        category=DERIVED_ANALYSIS,
+        description="Stimulus-aligned response metrics and summaries.",
     ),
     StageSpec(
         id="dish_mask",
@@ -204,6 +259,12 @@ RECORDING_STATUS_STAGE_IDS: tuple[str, ...] = (
     "refined_subject_masks",
     "arena_assignment",
     "tracks",
+    "track_kinematics",
+    "swim_bouts",
+    "bout_kinematics",
+    "eye_angles",
+    "subject_shape",
+    "stimulus_response",
     "stimulus",
     "calibration",
     *RECORDING_TUNING_STAGE_IDS,
@@ -260,6 +321,7 @@ def recording_tuning_stage_ids() -> tuple[str, ...]:
 __all__ = [
     "ALIAS_TO_STAGE_ID",
     "CORE_PIPELINE",
+    "DERIVED_ANALYSIS",
     "RECORDING_METADATA",
     "RECORDING_STATUS_STAGE_IDS",
     "RECORDING_TUNING_STAGE_IDS",

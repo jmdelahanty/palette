@@ -932,6 +932,79 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         attrs={"created_utc": "2026-02-15T00:56:00+00:00"},
     )
 
+    track_kinematics_parent = analysis.add_group(
+        "track_kinematics_runs",
+        attrs={"latest": "offline/tk_001"},
+    )
+    track_kinematics_offline = track_kinematics_parent.add_group("offline")
+    track_kinematics_offline.add_group(
+        "tk_001",
+        attrs={
+            "created_utc": "2026-02-15T00:58:00+00:00",
+            "method": "track_kinematics",
+            "layout": "grouped_speed_v2",
+            "source_keypoints_run": "refined_kp_001",
+            "track_id": 0,
+        },
+    )
+
+    swim_bout_parent = analysis.add_group("swim_bout_runs", attrs={"latest": "bouts_001"})
+    swim_bout_parent.add_group(
+        "bouts_001",
+        attrs={
+            "created_utc": "2026-02-15T00:59:00+00:00",
+            "method": "peak_event",
+            "layout": "compact_tabular_v2",
+            "source_track_kinematics_run": "tk_001",
+        },
+    )
+
+    bout_kinematics_parent = analysis.add_group("bout_kinematics_runs", attrs={"latest": "bk_001"})
+    bout_kinematics_parent.add_group(
+        "bk_001",
+        attrs={
+            "created_utc": "2026-02-15T01:00:00+00:00",
+            "method": "bout_kinematics",
+            "source_swim_bout_run": "bouts_001",
+        },
+    )
+
+    eye_angle_parent = analysis.add_group("eye_angle_runs", attrs={"latest": "eye_angle_001"})
+    eye_angle_parent.add_group(
+        "eye_angle_001",
+        attrs={
+            "created_utc": "2026-02-15T01:01:00+00:00",
+            "method_version": "eye_angle_analysis.v7",
+            "source_keypoints_run": "refined_kp_001",
+            "source_refined_subject_masks_run": "refined_subject_masks_001",
+        },
+    )
+
+    subject_shape_parent = analysis.add_group("subject_shape_runs", attrs={"latest": "shape_001"})
+    subject_shape_parent.add_group(
+        "shape_001",
+        attrs={
+            "created_utc": "2026-02-15T01:02:00+00:00",
+            "method": "subject_shape_v3",
+            "source_refined_subject_masks_run": "refined_subject_masks_001",
+        },
+    )
+
+    stimulus_response_parent = analysis.add_group(
+        "stimulus_response_runs",
+        attrs={"latest": "response_001"},
+    )
+    stimulus_response_parent.add_group(
+        "response_001",
+        attrs={
+            "created_utc": "2026-02-15T01:03:00+00:00",
+            "method": "omr_translational_v1",
+            "source_stimulus_run": "stimulus_001",
+            "source_track_kinematics_run": "tk_001",
+            "source_swim_bout_run": "bouts_001",
+        },
+    )
+
     root.add_group("calibration", attrs={"created_utc": "2026-02-15T00:57:00+00:00"})
     analysis_meta = root.add_group("analysis_metadata")
     analysis_meta.attrs.update(
@@ -2426,6 +2499,12 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
         ("dataset_a", "recording_a", "refined_subject_masks", "ok", "refined_subject_001", None, None, None, None, "unit_test", "2026-02-23T01:00:08.200000+00:00"),
         ("dataset_a", "recording_a", "arena_assignment", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:09+00:00"),
         ("dataset_a", "recording_a", "tracks", "absent", None, None, None, None, None, "unit_test", "2026-02-23T01:00:10+00:00"),
+        ("dataset_a", "recording_a", "track_kinematics", "ok", "tk_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.100000+00:00"),
+        ("dataset_a", "recording_a", "swim_bouts", "ok", "bouts_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.200000+00:00"),
+        ("dataset_a", "recording_a", "bout_kinematics", "ok", "bk_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.300000+00:00"),
+        ("dataset_a", "recording_a", "eye_angles", "ok", "eye_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.400000+00:00"),
+        ("dataset_a", "recording_a", "subject_shape", "ok", "shape_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.500000+00:00"),
+        ("dataset_a", "recording_a", "stimulus_response", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:10.600000+00:00"),
         (
             "dataset_a",
             "recording_a",
@@ -2501,6 +2580,12 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
     assert row["Eye Mask Review"] == "approved (manual, training)"
     assert row["Arena Assignment"] == "MISS"
     assert row["Track"] == "MISS"
+    assert row["Track Kinematics"] == "OK"
+    assert row["Swim Bouts"] == "OK"
+    assert row["Bout Kinematics"] == "OK"
+    assert row["Eye Angles"] == "OK"
+    assert row["Subject Shape"] == "OK"
+    assert row["Stimulus Response"] == "MISS"
     assert row["Stimulus"] == "3 (OK)"
     assert row["Calib"] == "OK"
     assert row["Tuning"] == "4/6"
@@ -8491,13 +8576,13 @@ def test_backfill_recording_step_status_dry_run_no_write(
         zarr_use_filter="all",
     )
     assert summary["datasets_scanned"] == 1
-    assert summary["rows_inserted"] == 21
+    assert summary["rows_inserted"] == 27
     assert summary["rows_updated"] == 0
     assert summary["rows_skipped"] == 0
 
     rows_by_status = summary["rows_by_status"]
     assert isinstance(rows_by_status, dict)
-    assert int(rows_by_status["ok"]) == 21
+    assert int(rows_by_status["ok"]) == 27
     assert int(rows_by_status["missing"]) == 0
     assert int(rows_by_status["absent"]) == 0
     assert int(rows_by_status["na"]) == 0
@@ -8542,10 +8627,10 @@ def test_backfill_recording_step_status_apply_and_convergent(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert applied["rows_inserted"] == 21
+    assert applied["rows_inserted"] == 27
     assert applied["rows_updated"] == 0
     assert applied["rows_skipped"] == 0
-    assert applied["history_rows_inserted"] == 21
+    assert applied["history_rows_inserted"] == 27
 
     rows = registry.conn.execute(
         """
@@ -8556,7 +8641,7 @@ def test_backfill_recording_step_status_apply_and_convergent(
         """,
         ("dataset_step_a",),
     ).fetchall()
-    assert len(rows) == 21
+    assert len(rows) == 27
     by_step = {str(row["step_name"]): row for row in rows}
     assert set(by_step.keys()) == {
         "background",
@@ -8580,6 +8665,12 @@ def test_backfill_recording_step_status_apply_and_convergent(
         "subject_mask_tuning",
         "subject_masks",
         "tracks",
+        "track_kinematics",
+        "swim_bouts",
+        "bout_kinematics",
+        "eye_angles",
+        "subject_shape",
+        "stimulus_response",
     }
     assert all(str(row["status"]) == "ok" for row in rows)
     assert str(by_step["detect"]["run_name"]) == "detect_001"
@@ -8620,6 +8711,15 @@ def test_backfill_recording_step_status_apply_and_convergent(
     assert str(by_step["arena_assignment"]["run_name"]) == "arena_assignment_001"
     assert str(by_step["stimulus"]["run_name"]) == "stimulus_001"
     assert str(by_step["tracks"]["run_name"]) == "tracks_001"
+    assert str(by_step["track_kinematics"]["run_name"]) == "offline/tk_001"
+    assert str(by_step["track_kinematics"]["method"]) == "track_kinematics"
+    assert str(by_step["swim_bouts"]["run_name"]) == "bouts_001"
+    assert str(by_step["swim_bouts"]["method"]) == "peak_event"
+    assert str(by_step["bout_kinematics"]["run_name"]) == "bk_001"
+    assert str(by_step["eye_angles"]["run_name"]) == "eye_angle_001"
+    assert str(by_step["eye_angles"]["method"]) == "eye_angle_analysis.v7"
+    assert str(by_step["subject_shape"]["run_name"]) == "shape_001"
+    assert str(by_step["stimulus_response"]["run_name"]) == "response_001"
     assert str(by_step["subject_masks"]["run_name"]) == "subject_masks_001"
     assert str(by_step["subject_masks"]["method"]) == "subject_mask_threshold_lr_v1"
     assert float(by_step["subject_masks"]["coverage_pct"]) == pytest.approx(100.0)
@@ -8671,14 +8771,14 @@ def test_backfill_recording_step_status_apply_and_convergent(
     )
     assert repeat["rows_inserted"] == 0
     assert repeat["rows_updated"] == 0
-    assert repeat["rows_skipped"] == 21
+    assert repeat["rows_skipped"] == 27
     assert repeat["history_rows_inserted"] == 0
 
     history_count = registry.conn.execute(
         "SELECT COUNT(*) AS n FROM recording_step_status_history WHERE dataset_id = ?;",
         ("dataset_step_a",),
     ).fetchone()
-    assert history_count is not None and int(history_count["n"]) == 21
+    assert history_count is not None and int(history_count["n"]) == 27
     registry.close()
 
 
@@ -9080,7 +9180,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=("recording_scope_a",),
         zarr_use_filter="all",
     )
-    assert by_recording["rows_inserted"] == 21
+    assert by_recording["rows_inserted"] == 27
     assert by_recording["datasets_skipped_recording_filter"] == 1
 
     by_use = _backfill_recording_step_status(
@@ -9090,7 +9190,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="analysis",
     )
-    assert by_use["rows_inserted"] == 21
+    assert by_use["rows_inserted"] == 27
     assert by_use["datasets_skipped_zarr_use_filter"] == 1
 
     by_scope = _backfill_recording_step_status(
@@ -9100,7 +9200,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert by_scope["rows_inserted"] == 21
+    assert by_scope["rows_inserted"] == 27
     assert by_scope["datasets_skipped_path"] == 1
 
     current_count = registry.conn.execute(

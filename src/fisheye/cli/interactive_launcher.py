@@ -18,6 +18,8 @@ import sys
 import zarr
 import time
 
+from fisheye.registry.stage_catalog import canonical_stage_id, get_stage_spec
+
 try:
     from textual.app import App, ComposeResult
     from textual.widgets import (
@@ -32,57 +34,90 @@ except ImportError:
     sys.exit(1)
 
 
-# Pipeline stage information
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 
-STAGE_INFO = {
-    'import': {
-        'desc': 'Import video into zarr format',
-        'requires': [],
-        'requires_video': True,
-        'color': 'cyan'
-    },
-    'downsample': {
-        'desc': 'Create downsampled video array',
-        'requires': ['import'],
-        'color': 'blue'
-    },
-    'background': {
-        'desc': 'Compute background model',
-        'requires': ['import'],
-        'color': 'green'
-    },
-    'detect': {
-        'desc': 'Detect fish in each frame',
-        'requires': ['background'],
-        'color': 'yellow'
-    },
-    'crop': {
-        'desc': 'Crop regions around detections',
-        'requires': ['detect'],
-        'color': 'magenta'
-    },
-    'keypoints': {
-        'desc': 'Detect anatomical keypoints',
-        'requires': ['crop', 'background'],
-        'color': 'cyan'
-    },
-    'track': {
-        'desc': 'Track fish across frames',
-        'requires': ['keypoints'],
-        'color': 'green'
-    },
-    'refine': {
-        'desc': 'Refine detections (filter artifacts, write curated instances)',
-        'requires': ['detect'],
-        'color': 'blue'
-    },
-    'assign_ids': {
-        'desc': 'Assign consistent IDs (auto for single-dish)',
-        'requires': ['detect'],
-        'color': 'yellow'
+
+def _launcher_stage_info(
+    stage_name: str,
+    *,
+    requires: List[str],
+    color: str,
+    desc: Optional[str] = None,
+    requires_video: bool = False,
+) -> Dict[str, Any]:
+    canonical_id = canonical_stage_id(stage_name)
+    spec = get_stage_spec(canonical_id)
+    info: Dict[str, Any] = {
+        'canonical_id': canonical_id,
+        'desc': desc or spec.description,
+        'requires': requires,
+        'color': color,
     }
+    if requires_video:
+        info['requires_video'] = True
+    return info
+
+
+# Pipeline stage information. Runtime stage names stay compatible with
+# ``fisheye.core.pipeline``; ``canonical_id`` links each UI stage back to the
+# shared registry/status vocabulary.
+STAGE_INFO = {
+    'import': _launcher_stage_info(
+        'import',
+        desc='Import video into zarr format',
+        requires=[],
+        requires_video=True,
+        color='cyan',
+    ),
+    'downsample': _launcher_stage_info(
+        'downsample',
+        desc='Create downsampled video array',
+        requires=['import'],
+        color='blue',
+    ),
+    'background': _launcher_stage_info(
+        'background',
+        desc='Compute background model',
+        requires=['import'],
+        color='green',
+    ),
+    'detect': _launcher_stage_info(
+        'detect',
+        desc='Detect fish in each frame',
+        requires=['background'],
+        color='yellow',
+    ),
+    'crop': _launcher_stage_info(
+        'crop',
+        desc='Crop regions around detections',
+        requires=['detect'],
+        color='magenta',
+    ),
+    'keypoints': _launcher_stage_info(
+        'keypoints',
+        desc='Detect anatomical keypoints',
+        requires=['crop', 'background'],
+        color='cyan',
+    ),
+    'track': _launcher_stage_info(
+        'track',
+        desc='Track fish across frames',
+        requires=['keypoints'],
+        color='green',
+    ),
+    'refine': _launcher_stage_info(
+        'refine',
+        desc='Refine detections (filter artifacts, write curated instances)',
+        requires=['detect'],
+        color='blue',
+    ),
+    'assign_ids': _launcher_stage_info(
+        'assign_ids',
+        desc='Assign consistent IDs (auto for single-dish)',
+        requires=['detect'],
+        color='yellow',
+    ),
 }
 
 STAGE_ORDER = [

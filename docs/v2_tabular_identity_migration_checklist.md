@@ -278,7 +278,11 @@ Family-specific changes:
       protocol signature hash, track ID, optional subject ID, and source
       revision.
 - [ ] Registry should expose freshness/staleness for source refs and derived
-      exports.
+      exports. Partial: first-pass derived-analysis presence is now visible in
+      `recording_step_status` for track kinematics, swim bouts, bout
+      kinematics, eye angles, subject shape, and stimulus response. Remaining
+      work is semantic freshness: compare stored source refs/revisions against
+      current upstream selections and propagate that into exports.
 - [ ] Registry rows should remain rebuildable indexes over canonical Zarr
       archives and manifests, not the authoritative source of analysis truth.
 - [ ] Parquet sidecars may be durable analytics products, but canonical Zarr

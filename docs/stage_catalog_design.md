@@ -89,24 +89,39 @@ Two examples:
 
 ## Phase-1 Scope
 
-In scope:
+Initial scope:
 
 - Introduce `StageSpec` and the canonical `STAGE_SPECS`.
 - Provide alias translation helpers.
 - Add tests that lock uniqueness, registry coverage, and known legacy gaps.
 - Document the migration targets.
 
-Out of scope:
+First follow-up slice completed on 2026-05-10:
 
-- Rewire runtime pipeline execution.
-- Change registry update behavior.
-- Add derived analysis stages to the registry.
+- `src/fisheye/core/pipeline.py` exposes `STAGE_CANONICAL_IDS` so runtime
+  command-stage names translate to registry stage IDs.
+- `src/fisheye/cli/interactive_launcher.py` records canonical IDs for launcher
+  stage rows while preserving UI command names.
+- The catalog includes derived-analysis stages for track kinematics, swim
+  bouts, bout kinematics, eye angles, subject shape, and stimulus response.
+- `src/fisheye/registry/maintenance.py` backfills presence-level status rows
+  for those derived-analysis run families.
+- `recording_step_status_wide` and the status-page query layer expose those
+  derived-analysis stages.
+
+Still out of scope:
+
+- Rename runtime pipeline commands or launcher UI commands.
+- Make individual derived-analysis writers upsert their own status rows.
+- Compute semantic freshness by comparing source refs/revisions against current
+  upstream selections.
 - Redesign Zarr layout or artifact schemas.
 
 Derived analysis runs such as track kinematics, swim bouts, bout kinematics,
-eye angles, and stimulus responses need their own registry/staleness policy.
-They should eventually use the same catalog shape with
-`category="derived_analysis"`, but they are deliberately not in phase 1.
+eye angles, subject shape, and stimulus responses now use the same catalog
+shape with `category="derived_analysis"`. The current implementation detects
+whether a latest run is present. It does not yet decide whether that run is
+fresh relative to its stored source refs.
 
 ## Migration TODO
 
@@ -122,15 +137,15 @@ Completed in the first migration pass:
 
 Remaining:
 
-1. `src/fisheye/core/pipeline.py`
+1. Writer-side status emission
 
-   Translate command-stage names through the catalog before writing registry or
-   status state. Keep command names available for CLI compatibility.
+   Derived-analysis writers should eventually call the shared status ledger when
+   they create or fail runs, rather than relying only on registry backfill.
 
-2. `src/fisheye/cli/interactive_launcher.py`
+2. Source-ref freshness
 
-   Split UI command names from registry stage IDs. Keep ambiguous tuner
-   commands local to the launcher instead of making them global aliases.
+   Status rows should distinguish "run exists" from "run is fresh relative to
+   current upstream selections/revisions".
 
 3. Registry status overview
 

@@ -4928,6 +4928,59 @@ def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[objec
         return fallback, None, "sorted_fallback_error"
 
 
+def _get_group_path(parent: object, path: str) -> Optional[object]:
+    current = parent
+    for part in [part for part in path.split("/") if part]:
+        try:
+            if part not in current:  # type: ignore[operator]
+                return None
+            current = current[part]  # type: ignore[index]
+        except Exception:
+            return None
+    return current
+
+
+def _iter_group_paths(parent: object, *, max_depth: int = 1) -> List[tuple[str, object]]:
+    if parent is None or max_depth < 1:
+        return []
+    out: List[tuple[str, object]] = []
+    for name in _group_names(parent):
+        group = _get_group_path(parent, name)
+        if group is None:
+            continue
+        out.append((name, group))
+        if max_depth > 1:
+            for child_name, child_group in _iter_group_paths(group, max_depth=max_depth - 1):
+                out.append((f"{name}/{child_name}", child_group))
+    return out
+
+
+def _resolve_latest_group_nested(
+    parent: object,
+    *,
+    max_depth: int = 1,
+) -> tuple[Optional[str], Optional[object], str]:
+    if parent is None:
+        return None, None, "none"
+
+    latest = None
+    if hasattr(parent, "attrs"):
+        try:
+            latest = _decode_text(parent.attrs.get("latest"))  # type: ignore[attr-defined]
+        except Exception:
+            latest = None
+    if latest:
+        latest_group = _get_group_path(parent, latest)
+        if latest_group is not None:
+            return latest, latest_group, "latest_attr"
+
+    groups = _iter_group_paths(parent, max_depth=max_depth)
+    if not groups:
+        return None, None, "none"
+    fallback, group = groups[-1]
+    return fallback, group, "sorted_fallback"
+
+
 def _group_names(parent: object) -> List[str]:
     if parent is None:
         return []
@@ -4940,6 +4993,95 @@ def _group_names(parent: object) -> List[str]:
     except Exception:
         names = []
     return sorted(name for name in names if name)
+
+
+def _extract_run_state(group: object) -> Optional[str]:
+    if group is None or not hasattr(group, "attrs"):
+        return None
+    for key in ("status", "run_status", "state"):
+        try:
+            value = _decode_text(group.attrs.get(key))  # type: ignore[attr-defined]
+        except Exception:
+            value = None
+        if value:
+            return value
+    return None
+
+
+def _apply_run_state_to_status(
+    *,
+    group: object,
+    status: str,
+    reason: str,
+) -> tuple[str, str, Optional[str]]:
+    run_state = _extract_run_state(group)
+    if not run_state:
+        return status, reason, None
+    normalized = run_state.strip().lower()
+    if normalized in {"failed", "failure", "error"}:
+        return "error", "run_failed", run_state
+    if normalized in {"running", "in_progress", "started", "pending"}:
+        return "missing", "run_in_progress", run_state
+    return status, reason, run_state
+
+
+def _extract_analysis_run_method(group: object) -> Optional[str]:
+    if group is None or not hasattr(group, "attrs"):
+        return None
+    for key in ("method", "method_version", "algorithm", "layout"):
+        try:
+            value = _decode_text(group.attrs.get(key))  # type: ignore[attr-defined]
+        except Exception:
+            value = None
+        if value:
+            return value
+    return None
+
+
+def _extract_analysis_run_details(
+    group: object,
+    *,
+    family: str,
+    reason: str,
+    latest_selector: str,
+    upstream: Dict[str, str],
+    run_state: Optional[str],
+) -> Dict[str, object]:
+    details: Dict[str, object] = {
+        "reason": reason,
+        "analysis_family": family,
+        "latest_selector": latest_selector,
+        "upstream": upstream,
+    }
+    if run_state:
+        details["run_state"] = run_state
+    if group is None or not hasattr(group, "attrs"):
+        return details
+
+    attrs = group.attrs  # type: ignore[attr-defined]
+    for key in (
+        "schema_id",
+        "schema_version",
+        "method",
+        "method_version",
+        "layout",
+        "source_track_kinematics_run",
+        "source_swim_bout_run",
+        "source_stimulus_run",
+        "source_keypoint_run",
+        "source_keypoints_run",
+        "source_refined_subject_masks_run",
+        "source_subject_shape_run",
+        "track_id",
+    ):
+        try:
+            value = attrs.get(key)
+        except Exception:
+            value = None
+        text = _decode_text(value)
+        if text is not None:
+            details[key] = text
+    return details
 
 
 def _extract_source_keypoints_run(group: object) -> Optional[str]:
@@ -5914,6 +6056,135 @@ def _build_recording_step_rows_from_root(
     calibration_status = "ok" if calibration_present else "missing"
     calibration_reason = "present" if calibration_present else "missing"
 
+    def _analysis_status(
+        family: str,
+        *,
+        prerequisites: Dict[str, str],
+        max_depth: int = 1,
+    ) -> tuple[
+        Optional[str],
+        Optional[object],
+        str,
+        str,
+        str,
+        Optional[str],
+        Optional[str],
+        Dict[str, object],
+    ]:
+        parent = analysis_group.get(family) if analysis_group is not None else None  # type: ignore[attr-defined]
+        run_name, run_group, selection = _resolve_latest_group_nested(parent, max_depth=max_depth)
+        status, reason = _step_status_from_presence(
+            present=run_group is not None,
+            is_production=is_production,
+            prerequisite_statuses=tuple(prerequisites.values()),
+        )
+        status, reason, run_state = _apply_run_state_to_status(
+            group=run_group,
+            status=status,
+            reason=reason,
+        )
+        method = _extract_analysis_run_method(run_group)
+        details = _extract_analysis_run_details(
+            run_group,
+            family=family,
+            reason=reason,
+            latest_selector=selection,
+            upstream=prerequisites,
+            run_state=run_state,
+        )
+        return run_name, run_group, selection, status, reason, method, run_state, details
+
+    (
+        track_kinematics_run,
+        track_kinematics_group,
+        _track_kinematics_selection,
+        track_kinematics_status,
+        _track_kinematics_reason,
+        track_kinematics_method,
+        _track_kinematics_state,
+        track_kinematics_details,
+    ) = _analysis_status(
+        "track_kinematics_runs",
+        prerequisites={
+            "keypoints": keypoints_status,
+            "refined_keypoints": refined_keypoints_status,
+        },
+        max_depth=2,
+    )
+    (
+        swim_bouts_run,
+        swim_bouts_group,
+        _swim_bouts_selection,
+        swim_bouts_status,
+        _swim_bouts_reason,
+        swim_bouts_method,
+        _swim_bouts_state,
+        swim_bouts_details,
+    ) = _analysis_status(
+        "swim_bout_runs",
+        prerequisites={"track_kinematics": track_kinematics_status},
+    )
+    (
+        bout_kinematics_run,
+        bout_kinematics_group,
+        _bout_kinematics_selection,
+        bout_kinematics_status,
+        _bout_kinematics_reason,
+        bout_kinematics_method,
+        _bout_kinematics_state,
+        bout_kinematics_details,
+    ) = _analysis_status(
+        "bout_kinematics_runs",
+        prerequisites={"swim_bouts": swim_bouts_status},
+    )
+    (
+        eye_angles_run,
+        eye_angles_group,
+        _eye_angles_selection,
+        eye_angles_status,
+        _eye_angles_reason,
+        eye_angles_method,
+        _eye_angles_state,
+        eye_angles_details,
+    ) = _analysis_status(
+        "eye_angle_runs",
+        prerequisites={
+            "keypoints": keypoints_status,
+            "refined_keypoints": refined_keypoints_status,
+            "refined_subject_masks": refined_subject_masks_status,
+        },
+    )
+    (
+        subject_shape_run,
+        subject_shape_group,
+        _subject_shape_selection,
+        subject_shape_status,
+        _subject_shape_reason,
+        subject_shape_method,
+        _subject_shape_state,
+        subject_shape_details,
+    ) = _analysis_status(
+        "subject_shape_runs",
+        prerequisites={"refined_subject_masks": refined_subject_masks_status},
+    )
+    (
+        stimulus_response_run,
+        stimulus_response_group,
+        _stimulus_response_selection,
+        stimulus_response_status,
+        _stimulus_response_reason,
+        stimulus_response_method,
+        _stimulus_response_state,
+        stimulus_response_details,
+    ) = _analysis_status(
+        "stimulus_response_runs",
+        prerequisites={
+            "stimulus": stimulus_status,
+            "track_kinematics": track_kinematics_status,
+            "swim_bouts": swim_bouts_status,
+        },
+    )
+
     analysis_meta = root.get("analysis_metadata")  # type: ignore[attr-defined]
     analysis_meta_attrs = analysis_meta.attrs if analysis_meta is not None and hasattr(analysis_meta, "attrs") else {}
     subdish_needed = subdish_required(root.attrs)  # type: ignore[attr-defined]
@@ -6251,6 +6522,90 @@ def _build_recording_step_rows_from_root(
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
             updated_utc=_extract_updated_utc(tracks_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="track_kinematics",
+            status=track_kinematics_status,
+            run_name=track_kinematics_run,
+            method=track_kinematics_method,
+            coverage_pct=None,
+            review_status=None,
+            details={**common_details, **track_kinematics_details},
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(track_kinematics_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="swim_bouts",
+            status=swim_bouts_status,
+            run_name=swim_bouts_run,
+            method=swim_bouts_method,
+            coverage_pct=None,
+            review_status=None,
+            details={**common_details, **swim_bouts_details},
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(swim_bouts_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="bout_kinematics",
+            status=bout_kinematics_status,
+            run_name=bout_kinematics_run,
+            method=bout_kinematics_method,
+            coverage_pct=None,
+            review_status=None,
+            details={**common_details, **bout_kinematics_details},
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(bout_kinematics_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="eye_angles",
+            status=eye_angles_status,
+            run_name=eye_angles_run,
+            method=eye_angles_method,
+            coverage_pct=None,
+            review_status=None,
+            details={**common_details, **eye_angles_details},
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(eye_angles_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="subject_shape",
+            status=subject_shape_status,
+            run_name=subject_shape_run,
+            method=subject_shape_method,
+            coverage_pct=None,
+            review_status=None,
+            details={**common_details, **subject_shape_details},
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(subject_shape_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="stimulus_response",
+            status=stimulus_response_status,
+            run_name=stimulus_response_run,
+            method=stimulus_response_method,
+            coverage_pct=None,
+            review_status=None,
+            details={**common_details, **stimulus_response_details},
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(stimulus_response_group, fallback=fallback_updated_utc),
         ),
         _make_recording_step_row(
             dataset_id=dataset_id,

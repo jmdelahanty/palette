@@ -15,24 +15,25 @@ This section records a later read-only comparison against the current repository
 state. It does not rewrite the original 2026-05-01 inventory; it marks which
 high-signal findings still look current and which have become partially stale.
 
-2026-05-10 follow-up: the first canonical-stage-catalog slice has now landed,
-including registry consumers of that catalog. Treat the stage-vocabulary item
-below as partially addressed; derived-analysis registry coverage and several
-other provenance/status gaps remain open.
+2026-05-10 follow-up: the canonical-stage-catalog slice now covers registry
+consumers, the runtime pipeline stage map, the interactive launcher stage map,
+and the first derived-analysis status rows. Treat the stage-vocabulary and
+derived-analysis registry items below as partially addressed. Remaining gaps
+are richer source-ref freshness semantics, writer-side status upserts, and
+several provenance/status normalizations.
 
 Still confirmed:
 
-- The stage/DAG split is still real. `pipeline.py`,
-  `interactive_launcher.py`, `step_cascade.py`, and registry
-  `RECORDING_STEP_NAMES` still use different vocabularies and dependency
-  graphs.
-- Derived analysis runs are still mostly outside registry staleness tracking:
-  no registry/cascade coverage was found for `subject_shape`, `tail_kinematics`,
-  `eye_angle`, `swim_bout`, `bout_kinematics`, or `stimulus_response` run
-  families.
-- The registry wide status view still omits `subject_masks`,
-  `refined_subject_masks`, and `subject_mask_tuning`, even though those steps
-  are registered elsewhere.
+- The stage/DAG split is reduced but not gone. `step_cascade.py` now derives
+  invalidation from the canonical catalog, `pipeline.py` exposes
+  `STAGE_CANONICAL_IDS`, and `interactive_launcher.py` records canonical IDs
+  for launcher stages. Runtime command names still remain intentionally
+  separate from registry stage IDs.
+- Derived analysis runs now have first-pass `recording_step_status` coverage
+  for `track_kinematics`, `swim_bouts`, `bout_kinematics`, `eye_angles`,
+  `subject_shape`, and `stimulus_response`. Remaining work is not basic
+  visibility; it is source-ref freshness, staleness policy, and writer-side
+  status emission.
 - `stimulus_runs` and `speed_runs` still sit outside the stronger derived-run
   provenance discipline. `import_stimulus_to_zarr.py` has gained richer
   canonical step metadata, but the run itself is still not contract-compliant
@@ -51,6 +52,9 @@ Partially stale or changed since the snapshot:
   `bout_classification_runs.py` also gates on `schema_version`, and export /
   manifest utilities read schema versions. The broader concern remains: most
   schema versions are still informational rather than enforced reader gates.
+- The "registry wide status view omits subject-mask stages" finding is stale.
+  `subject_masks`, `refined_subject_masks`, and subject-mask tuning columns are
+  now in `recording_step_status_wide` via the catalog-driven view refresh.
 - Body-frame metadata discipline improved for eye-angle runs. `eye_angle` now
   uses `build_keypoint_body_frame_contract_attrs`, so it writes canonical
   estimator version, coordinate space, angle convention, and source refs.
@@ -68,10 +72,11 @@ Partially stale or changed since the snapshot:
 Practical interpretation:
 
 - Treat this document as a useful hypothesis map, not a literal fix list.
-- The highest-leverage strategy items still look like: define one canonical
-  stage vocabulary plus translations; decide whether derived analysis runs
-  belong in registry staleness tracking; normalize run-root provenance attrs
-  for new analysis writers; and archive or close out stale migration-log docs.
+- The highest-leverage strategy items now look like: keep runtime command names
+  translated through the canonical stage catalog; make derived-analysis
+  freshness compare source refs instead of only detecting run presence;
+  normalize run-root provenance attrs for new analysis writers; and archive or
+  close out stale migration-log docs.
 
 ## Summary
 
@@ -655,21 +660,21 @@ These need your input before they can be classified.
 
 These cut across all five sections:
 
-**A. Three independent stage-name vocabularies, no translation table.** Pipeline class, interactive launcher, and registry/cascade/maintenance each name the same logical stages differently. Five places carry the DAG. This is the highest-leverage consolidation target — every other status-page / staleness / launcher bug downstream of this is partly caused by it.
+**A. Stage-name vocabularies are converging through the canonical catalog.** Pipeline class and interactive launcher still keep runtime command names for compatibility, but they now expose canonical IDs. Registry cascade/maintenance derive from the same catalog. Remaining work is to keep new writer/status code using these translations instead of reintroducing hand-written DAGs.
 
 **B. Required-attr drift is concentrated in the cheaply-built writers.** `subject_shape_runs` and `tail_kinematics_runs` are nearly perfect. `import_stimulus_to_zarr`, `compute_speed`, profile writers, and `chaser_state_interpolator` are nearly empty. The contract describes the discipline of the best writers. The worst writers are the ones that quietly accreted around the edges of the contract.
 
-**C. `schema_version` is write-only.** ~12 schemas are versioned by writers; only 1 has a reader gate (eye-angle). Either the contract should drop the requirement or readers should grow gates. The current state — written everywhere, checked nowhere — is the worst of both: cost without benefit.
+**C. `schema_version` is mostly informational.** Several schemas are versioned by writers, and a few readers/export utilities now inspect versions. Most schemas still do not have reader gates, so the remaining question is which schemas need hard compatibility checks versus metadata-only provenance.
 
-**D. The registry doesn't know about derived analysis runs.** `step_cascade` and `RECORDING_STEP_NAMES` stop at `tracks` / `refined_subject_masks`. Every analysis run downstream is invisible to staleness propagation. The contracts treat these runs as first-class; the registry treats them as not present.
+**D. The registry has presence-level derived-analysis visibility, but not full freshness.** `track_kinematics`, `swim_bouts`, `bout_kinematics`, `eye_angles`, `subject_shape`, and `stimulus_response` now appear in `recording_step_status` and the wide status view. The remaining gap is semantic staleness: comparing each derived run's source refs against current upstream run IDs/revisions.
 
-**E. Body-frame contract is only honored by subject_shape.** Every other consumer (eye_angle, tail_kinematics) reads a body frame but doesn't redeclare estimator metadata. Tail_kinematics actively uses non-canonical attr names. The contract was written assuming uniform writer discipline; the actual pattern is "one canonical writer + read-only consumers".
+**E. Body-frame contract adoption is uneven.** Subject-shape remains the strongest canonical writer, and eye-angle now writes canonical body-frame attrs through the shared helper. Tail_kinematics still uses non-canonical attr names. The contract was written assuming uniform writer discipline; the actual pattern is improving but not uniform.
 
 **F. Several docs describe state that's already shipped, with unchecked checkboxes.** `crop_storage_mode_migration_todo.md` Phase 5 and `repo_wide_staleness_workflow_edge_checklist.md` `crop → subject_masks` and `detect → subject_masks` are all done in code but unchecked in docs. The opposite (doc says done, code doesn't) is rarer — usually the doc lags.
 
 **G. Root-level scratch describes one-time migrations.** ENUM_*.md cluster + CRITICAL_REIMPORT_NEEDED.md describe migrations whose targets are now the live state of the code. Without a closeout marker, future-you can't tell whether they're load-bearing reference or expired log.
 
-**H. `latest` pointer is everywhere, atomicity is nowhere.** Every `*_runs/` parent has it; no helper writes it; no contract states whether a partial run can leave it dangling. Currently a partial-write failure leaves `latest` pointing at an incomplete run with a missing `provenance` attr.
+**H. `latest` pointer atomicity is uneven.** Every `*_runs/` parent has a latest pointer, but only some newer writers stage run state carefully before promoting it. There is still no shared helper or repo-wide rule that prevents a partial run from becoming latest.
 
 ---
 
