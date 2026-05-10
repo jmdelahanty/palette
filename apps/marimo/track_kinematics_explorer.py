@@ -1723,6 +1723,89 @@ def _(
 
 
 @app.cell
+def _(concentric_omr_step_df, mo, np, omr_step_df):
+    _all_label = "All stimulus-response steps"
+    stimulus_response_step_label_to_option = {_all_label: None}
+
+    def _clean_display_value(_value):
+        if _value is None:
+            return "unknown"
+        try:
+            if hasattr(_value, "item"):
+                _value = _value.item()
+        except Exception:
+            pass
+        if isinstance(_value, float) and not np.isfinite(_value):
+            return "unknown"
+        return str(_value)
+
+    if len(omr_step_df):
+        for _row in omr_step_df.to_dict("records"):
+            _step_index = _row.get("step_index")
+            _bout_total = _clean_display_value(_row.get("bout_count_total"))
+            _direction = _clean_display_value(_row.get("stimulus_direction_deg"))
+            _label = (
+                f"step {_clean_display_value(_step_index)} | moving grating | "
+                f"direction {_direction} deg | {_bout_total} bouts"
+            )
+            stimulus_response_step_label_to_option[_label] = {
+                "family": "moving_grating_omr",
+                "step_index": _step_index,
+                "label": _label,
+            }
+
+    if len(concentric_omr_step_df):
+        for _row in concentric_omr_step_df.to_dict("records"):
+            _step_index = _row.get("step_index")
+            _bout_total = _clean_display_value(_row.get("bout_count_total"))
+            _polarity = _clean_display_value(_row.get("stimulus_radial_polarity"))
+            _label = (
+                f"step {_clean_display_value(_step_index)} | concentric radial | "
+                f"{_polarity} | {_bout_total} bouts"
+            )
+            stimulus_response_step_label_to_option[_label] = {
+                "family": "concentric_radial_omr",
+                "step_index": _step_index,
+                "label": _label,
+            }
+
+    stimulus_response_step_picker = mo.ui.dropdown(
+        options=list(stimulus_response_step_label_to_option),
+        value=_all_label,
+        label="Step / trial",
+    )
+    if len(stimulus_response_step_label_to_option) == 1:
+        stimulus_response_step_selector_view = mo.md(
+            "### Step-Level Trial Explorer\n\nNo step-level response metrics loaded."
+        )
+    else:
+        stimulus_response_step_selector_view = mo.vstack(
+            [
+                mo.md(
+                    """
+                    ### Step-Level Trial Explorer
+
+                    Select a protocol step to inspect its response metrics and
+                    per-bout score distribution. In Palette's current stimulus
+                    schema, a protocol step is the safest trial-like unit.
+                    """
+                ),
+                stimulus_response_step_picker,
+            ]
+        )
+    stimulus_response_step_selector_view
+    return stimulus_response_step_label_to_option, stimulus_response_step_picker
+
+
+@app.cell
+def _(stimulus_response_step_label_to_option, stimulus_response_step_picker):
+    selected_stimulus_response_step = stimulus_response_step_label_to_option[
+        stimulus_response_step_picker.value
+    ]
+    return (selected_stimulus_response_step,)
+
+
+@app.cell
 def _(
     concentric_omr_bout_df,
     concentric_omr_early_window_df,
@@ -1738,6 +1821,8 @@ def _(
     omr_window_df,
     pd,
     png_bytes_to_markdown_image,
+    position_df,
+    selected_stimulus_response_step,
     selected_stimulus_response,
     stimulus_response_attrs,
     time,
@@ -1775,6 +1860,293 @@ def _(
                 ]
             ),
         ]
+
+        def _filter_selected_step(_df, _step_index):
+            if not len(_df) or "step_index" not in _df:
+                return _df.iloc[0:0].copy()
+            return _df[_df["step_index"].astype(str) == str(_step_index)].copy()
+
+        def _first_finite(_df, _column):
+            if not len(_df) or _column not in _df:
+                return "n/a"
+            _values = pd.to_numeric(_df[_column], errors="coerce")
+            _values = _values[_values.notna()]
+            if not len(_values):
+                return "n/a"
+            _value = float(_values.iloc[0])
+            return f"{_value:.3g}"
+
+        def _first_numeric(_df, _column):
+            if not len(_df) or _column not in _df:
+                return None
+            _values = pd.to_numeric(_df[_column], errors="coerce")
+            _values = _values[_values.notna()]
+            return float(_values.iloc[0]) if len(_values) else None
+
+        def _selected_position_rows(_selected_step_df):
+            if not len(position_df) or "frame_index" not in position_df:
+                return position_df.iloc[0:0].copy()
+            _start_frame = _first_numeric(_selected_step_df, "start_frame")
+            _end_frame = _first_numeric(_selected_step_df, "end_frame")
+            if _start_frame is None or _end_frame is None:
+                return position_df.iloc[0:0].copy()
+            _frame_index = pd.to_numeric(position_df["frame_index"], errors="coerce")
+            return position_df[
+                (_frame_index >= _start_frame) & (_frame_index <= _end_frame)
+            ].copy()
+
+        def _selected_step_heatmap(_selected_positions, _selected_step_df, _title):
+            if not len(_selected_positions):
+                return None
+            if not {"x", "y"}.issubset(_selected_positions.columns):
+                return None
+            _plot_positions = _selected_positions.dropna(subset=["x", "y"]).copy()
+            if not len(_plot_positions):
+                return None
+            _unit = (
+                str(_plot_positions["unit"].iloc[0])
+                if "unit" in _plot_positions and len(_plot_positions["unit"])
+                else "position units"
+            )
+            _heatmap = go.Figure()
+            _heatmap.add_trace(
+                go.Histogram2d(
+                    x=_plot_positions["x"],
+                    y=_plot_positions["y"],
+                    nbinsx=80,
+                    nbinsy=80,
+                    colorscale="Viridis",
+                    colorbar=dict(title="samples"),
+                    hovertemplate=(
+                        f"x: %{{x:.3g}} {_unit}<br>"
+                        f"y: %{{y:.3g}} {_unit}<br>"
+                        "samples: %{z}<extra></extra>"
+                    ),
+                    name="occupancy",
+                )
+            )
+            if len(_plot_positions) > 1:
+                _heatmap.add_trace(
+                    go.Scatter(
+                        x=_plot_positions["x"],
+                        y=_plot_positions["y"],
+                        mode="lines",
+                        line=dict(color="rgba(255,255,255,0.72)", width=2),
+                        hoverinfo="skip",
+                        name="trajectory",
+                    )
+                )
+            _heatmap.add_trace(
+                go.Scatter(
+                    x=[_plot_positions["x"].iloc[0]],
+                    y=[_plot_positions["y"].iloc[0]],
+                    mode="markers",
+                    marker=dict(color="#f4a261", size=10, symbol="circle"),
+                    name="start",
+                )
+            )
+            _heatmap.add_trace(
+                go.Scatter(
+                    x=[_plot_positions["x"].iloc[-1]],
+                    y=[_plot_positions["y"].iloc[-1]],
+                    mode="markers",
+                    marker=dict(color="#e76f51", size=11, symbol="x"),
+                    name="end",
+                )
+            )
+            _center_x = _first_numeric(_selected_step_df, "stimulus_center_x_mm")
+            _center_y = _first_numeric(_selected_step_df, "stimulus_center_y_mm")
+            if _center_x is not None and _center_y is not None:
+                _heatmap.add_trace(
+                    go.Scatter(
+                        x=[_center_x],
+                        y=[_center_y],
+                        mode="markers",
+                        marker=dict(color="#ffffff", size=12, symbol="cross", line=dict(color="#222", width=1)),
+                        name="stimulus center",
+                    )
+                )
+            _heatmap.update_yaxes(scaleanchor="x", scaleratio=1)
+            _heatmap.update_layout(
+                title=_title,
+                xaxis_title=f"X ({_unit})",
+                yaxis_title=f"Y ({_unit})",
+                height=520,
+                margin=dict(l=52, r=20, t=58, b=64),
+                legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0.0),
+            )
+            return _heatmap
+
+        if selected_stimulus_response_step is not None:
+            _selected_family = selected_stimulus_response_step["family"]
+            _selected_index = selected_stimulus_response_step["step_index"]
+            _selected_title = selected_stimulus_response_step["label"]
+            if _selected_family == "moving_grating_omr":
+                _selected_step_df = _filter_selected_step(omr_step_df, _selected_index)
+                _selected_bout_df = _filter_selected_step(omr_bout_df, _selected_index)
+                _selected_score_column = "per_bout_omr_score"
+                _selected_card_metrics = (
+                    ("OMR path index", "omr_path_index"),
+                    ("Bout choice", "bout_choice_index"),
+                    ("Time choice", "time_choice_index"),
+                    ("First aligned latency s", "first_aligned_bout_latency_s"),
+                )
+                _selected_columns = [
+                    _column
+                    for _column in (
+                        "step_index",
+                        "step_name",
+                        "stimulus_direction_deg",
+                        "omr_path_index",
+                        "bout_choice_index",
+                        "time_choice_index",
+                        "bout_fraction_correct_classified",
+                        "bout_count_correct",
+                        "bout_count_opposing",
+                        "bout_count_ambiguous",
+                        "bout_count_total",
+                        "first_aligned_bout_latency_s",
+                        "first_opposing_bout_latency_s",
+                    )
+                    if _column in _selected_step_df
+                ]
+            else:
+                _selected_step_df = _filter_selected_step(concentric_omr_step_df, _selected_index)
+                _selected_bout_df = _filter_selected_step(concentric_omr_bout_df, _selected_index)
+                _selected_score_column = "radial_omr_score"
+                _selected_card_metrics = (
+                    ("Radial OMR path", "omr_path_index"),
+                    ("Radial path", "radial_path_index"),
+                    ("Tangential bias", "tangential_bias_index"),
+                    ("First aligned latency s", "first_aligned_bout_latency_s"),
+                )
+                _selected_columns = [
+                    _column
+                    for _column in (
+                        "step_index",
+                        "step_name",
+                        "stimulus_radial_polarity",
+                        "stimulus_radial_sign",
+                        "omr_path_index",
+                        "radial_path_index",
+                        "tangential_bias_index",
+                        "bout_choice_index",
+                        "time_choice_index",
+                        "bout_count_correct",
+                        "bout_count_opposing",
+                        "bout_count_ambiguous",
+                        "bout_count_total",
+                        "start_radius_norm",
+                        "mean_radius_norm",
+                        "end_radius_norm",
+                        "first_aligned_bout_latency_s",
+                        "first_opposing_bout_latency_s",
+                    )
+                    if _column in _selected_step_df
+                ]
+
+            _selected_sections = [
+                mo.md(f"### Selected Step / Trial\n\n`{_selected_title}`"),
+                mo.hstack(
+                    [
+                        mo.stat(label=_label, value=_first_finite(_selected_step_df, _column))
+                        for _label, _column in _selected_card_metrics
+                    ]
+                ),
+            ]
+            if len(_selected_step_df) and _selected_columns:
+                _selected_sections.append(
+                    mo.ui.table(_selected_step_df[_selected_columns], selection=None, page_size=5)
+                )
+            _selected_positions = _selected_position_rows(_selected_step_df)
+            _selected_sections.append(
+                mo.hstack(
+                    [
+                        mo.stat(label="Step position samples", value=f"{len(_selected_positions):,}"),
+                        mo.stat(
+                            label="Start frame",
+                            value=_first_finite(_selected_step_df, "start_frame"),
+                        ),
+                        mo.stat(
+                            label="End frame",
+                            value=_first_finite(_selected_step_df, "end_frame"),
+                        ),
+                    ]
+                )
+            )
+            _heatmap = _selected_step_heatmap(
+                _selected_positions,
+                _selected_step_df,
+                "Selected-Step Occupancy Heatmap",
+            )
+            if _heatmap is not None:
+                _selected_sections.append(_heatmap)
+            else:
+                _selected_sections.append(
+                    mo.md(
+                        "No selected-step heatmap available. This requires track positions with `frame_index`."
+                    )
+                )
+            if len(_selected_bout_df) and _selected_score_column in _selected_bout_df:
+                _score_values = pd.to_numeric(
+                    _selected_bout_df[_selected_score_column],
+                    errors="coerce",
+                ).dropna()
+                if len(_score_values):
+                    _score_fig = go.Figure()
+                    _score_fig.add_trace(
+                        go.Histogram(
+                            x=_score_values,
+                            nbinsx=24,
+                            marker_color="#2a9d8f",
+                            name=_selected_score_column,
+                        )
+                    )
+                    _score_fig.add_vline(x=0.0, line_width=1, line_color="rgba(0,0,0,0.55)")
+                    _score_fig.update_layout(
+                        title="Selected-Step Per-Bout Direction Scores",
+                        xaxis_title=_selected_score_column,
+                        yaxis_title="Bout count",
+                        height=340,
+                        margin=dict(l=52, r=20, t=58, b=64),
+                    )
+                    _selected_sections.append(_score_fig)
+                _selected_bout_columns = [
+                    _column
+                    for _column in (
+                        "step_index",
+                        "fish_id",
+                        "bout_id",
+                        "start_frame",
+                        "end_frame",
+                        _selected_score_column,
+                        "correct_label",
+                        "omr_label",
+                        "bout_path_length_mm",
+                        "path_length_mm",
+                        "bout_displacement_mm",
+                        "parallel_displacement_mm",
+                        "stimulus_aligned_radial_displacement_mm",
+                        "radial_displacement_integrated_mm",
+                        "tangential_displacement_mm",
+                    )
+                    if _column in _selected_bout_df
+                ]
+                if _selected_bout_columns:
+                    _selected_sections.append(
+                        mo.accordion(
+                            {
+                                "Selected-step per-bout rows": mo.ui.table(
+                                    _selected_bout_df[_selected_bout_columns],
+                                    selection=None,
+                                    page_size=20,
+                                )
+                            }
+                        )
+                    )
+            else:
+                _selected_sections.append(mo.md("No per-bout rows for the selected step."))
+            _sections.append(mo.vstack(_selected_sections))
 
         if len(omr_step_df):
             _direction_fig = go.Figure()

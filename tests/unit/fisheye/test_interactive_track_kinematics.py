@@ -414,7 +414,8 @@ def test_track_kinematics_interactive_dataframes(tmp_path: Path) -> None:
     assert "smoothed_acceleration_mm" in timeseries.columns
     assert "angular_velocity_smoothed_deg_s" in timeseries.columns
     assert "angular_speed_smoothed_deg_s" in timeseries.columns
-    assert list(positions.columns) == ["time_s", "x", "y", "unit"]
+    assert list(positions.columns) == ["time_s", "frame_index", "x", "y", "unit"]
+    assert list(positions["frame_index"]) == [0, 1, 2, 3, 4, 5]
     assert positions["unit"].unique().tolist() == ["mm"]
     assert validity["reason"].tolist() == ["transition:frame_gap", "sample:keypoint_failed"]
     np.testing.assert_allclose(validity["duration_s"].to_numpy(), [0.005, 0.005])

@@ -1656,16 +1656,21 @@ def to_timeseries_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFram
 
 def to_position_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:
     if data.positions is None or data.positions.ndim != 2 or data.positions.shape[1] < 2:
-        return pd.DataFrame(columns=["time_s", "x", "y", "unit"])
+        return pd.DataFrame(columns=["time_s", "frame_index", "x", "y", "unit"])
     count = min(data.positions.shape[0], data.time_seconds.shape[0])
-    return pd.DataFrame(
+    frame: dict[str, Any] = {
+        "time_s": data.time_seconds[:count],
+    }
+    if data.frame_indices is not None and data.frame_indices.shape[0] >= count:
+        frame["frame_index"] = data.frame_indices[:count]
+    frame.update(
         {
-            "time_s": data.time_seconds[:count],
             "x": data.positions[:count, 0],
             "y": data.positions[:count, 1],
             "unit": data.position_unit,
         }
     )
+    return pd.DataFrame(frame)
 
 
 def to_swim_bout_dataframe(data: TrackKinematicsInteractiveData) -> pd.DataFrame:
