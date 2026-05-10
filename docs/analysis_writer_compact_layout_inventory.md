@@ -33,7 +33,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
   as `tracks/id_<track_id>` subtrees and materializes compatibility arrays.
 - `stimulus_response_runs`, `eye_angle_runs`, `subject_shape_runs`, and
   `refined_subject_masks_runs` are the main remaining future migration
-  candidates.
+  candidates, but each now has at least an initial logical reader surface.
 
 ## Writer Inventory
 
@@ -46,7 +46,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | `analysis/stimulus_response_runs` | Hierarchical v1 by step/family, plus compact-tabular-v2 opt-in summary/bout/window tables | Compact-v2 implemented, not default | Medium-high | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. The first compact slice writes step/global/base/family per-fish/per-bout/window/trial tables and intentionally omits high-volume per-frame/time-series tables. See `stimulus_response_compact_v2_design.md`. |
 | `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Logical resolver implemented; writer still materializes many arrays | Medium-high | Continue moving readers through `fisheye.analysis.eye_angle_io` before writer changes. Future migration should store canonical major/gaze/body-frame arrays plus transform metadata and keep accepted compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
 | `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Logical resolver implemented; writer still hierarchical by component | Medium | Continue moving readers through `fisheye.analysis.subject_shape_io` before writer changes. Future layout should stack common component metrics along a component axis while keeping specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
-| `refined_subject_masks_runs` | Dense `masks_roi` plus component-local metrics/QC/review groups | Canonical dense mask is appropriate; component mirrors fan out | Medium | Keep `masks_roi` dense. Future layout should stack common component metrics/QC as `(row, component)` arrays and reserve component groups for true component-specific authoring state. |
+| `refined_subject_masks_runs` | Dense `masks_roi` plus component-local metrics/QC/review groups | Logical resolver implemented; canonical dense masks remain appropriate | Medium | Keep `masks_roi` dense and handle-backed for readers. Future layout should stack common component metrics/QC as `(row, component)` arrays and reserve component groups for true component-specific authoring state. |
 | `analysis/tail_kinematics_runs` | Run-level dense arrays such as `tail_angle_rad (N,K)`, `tail_lateral_deflection_px (N,K)`, row lineage | Already compact for current single source | Low | Do not migrate now. Add source revision/fingerprint consistency as v2 lineage work, not a physical layout rewrite. |
 | `analysis/tail_posture_view_runs` | Run-level dense tool-compatible arrays such as `tail_keypoints_xy`, `tail_angle_rad`, row lineage | Already compact for current single view | Low | Do not migrate now. If multiple tool views are persisted later, add a `view_index` rather than one run per minor view. |
 | `analysis/bout_classification_runs` | Single `per_bout` columnar table plus run attrs | Already compact | Low | Keep as-is. If multiple classifiers are compared, prefer classifier rows/attrs or separate promoted runs, not nested classifier subgroups. |
@@ -172,14 +172,32 @@ Most other writers are still hierarchical, but they are not equally urgent:
     `subject_shape_v3_snout_medialjoin_canary_20260429` with 19,235 rows and
     components `subject_body`, `swim_bladder`, `eye_left`, and `eye_right`.
 
-### Needs Resolver Before Writer Changes
+### Resolver-First Refined Subject-Mask Work
 
 - `refined_subject_masks_runs`
+  - Initial logical loader exists in
+    `fisheye.shared.refined_subject_masks_io`.
+  - The loader discovers runs, resolves `latest`, exposes dense `masks_roi` as
+    an array handle instead of materializing it, and materializes small run,
+    metric, component QC/geometry, and relation tables.
+  - `subject_shape_runs.write_subject_shape_run_group(...)` now resolves the
+    refined mask run and selected components through this loader before entering
+    its chunk-writing path.
+  - Focused tests passed outside the sandbox on 2026-05-10:
+    `test_refined_subject_masks_io.py` and `test_subject_shape_runs.py`.
+  - Read-only feeding canary validation passed on 2026-05-10. The resolver
+    discovered 6 refined subject-mask options, loaded latest
+    `refined_subject_masks_smart_finalizer_dask_processes48_c64_canary_2026-04-26`
+    with dense mask handle shape `(19235, 4, 512, 512)`, and the subject-shape
+    dry-run path resolved 19,235 rows without writing.
 
-For these families, first add resolver/helper APIs that return logical tables or
-arrays without exposing physical paths. Then add compact writer support behind an
-explicit opt-in. Only switch defaults after Palette, Marimo, Crimson, and export
-consumers are verified against both layouts.
+### Needs Resolver Before Writer Changes
+
+No high-priority analysis writer family in this inventory remains completely
+without a resolver/helper surface. Future compact work should keep the same
+resolver-first rule: widen consumers through logical APIs, add compact writer
+support behind an explicit opt-in, and only switch defaults after Palette,
+Marimo, Crimson, and export consumers are verified against both layouts.
 
 ## Recommended Migration Order
 
@@ -209,8 +227,9 @@ consumers are verified against both layouts.
    For `subject_shape_runs`, continue migrating consumers through the logical
    resolver, then stack common component metrics into `(row, component, ...)`
    arrays while preserving body-specific geometry. For `refined_subject_masks_runs`,
-   first add the analogous resolver/helper API, then stack common component
-   metrics/QC while preserving dense masks and authoring state.
+   keep `masks_roi` as the dense authoring surface and use the new resolver to
+   move future consumers before stacking common component metrics/QC and
+   preserving true component-specific authoring state.
 
 6. **Track kinematics ragged run-level layout.**
    Defer until multi-track/multi-subject tracking pressure is real. The current

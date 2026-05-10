@@ -34,6 +34,11 @@ from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.refined_subject_masks_io import (
+    RefinedSubjectMasksRunTables,
+    load_refined_subject_masks_run_tables,
+    resolve_refined_subject_masks_run,
+)
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..tune.refined_subject_mask_review import _compute_geometry_metrics, _compute_mask_metrics
 from ..utils.system import get_environment_info, get_git_info
@@ -238,60 +243,21 @@ def _set_reason_bytes_attrs(group: zarr.Group, *, width: int = REASON_BYTES_WIDT
     group.attrs["reason_bytes_null_terminated"] = True
 
 
-def _label_index_map(refined_group: zarr.Group) -> dict[str, int]:
-    labels = refined_group.attrs.get("mask_labels")
-    if not isinstance(labels, (list, tuple)):
-        raise ValueError("refined subject-mask run is missing mask_labels attrs.")
-    return {str(label): int(idx) for idx, label in enumerate(labels)}
-
-
-def _component_available(refined_group: zarr.Group, component_idx: int) -> bool:
-    available = refined_group.get("available_channels")
-    if available is None:
-        return True
-    values = np.asarray(available[:], dtype=bool).reshape(-1)
-    return int(component_idx) < int(values.shape[0]) and bool(values[int(component_idx)])
-
-
 def _resolve_refined_run(root: zarr.Group, refined_run: Optional[str]) -> tuple[str, zarr.Group]:
-    parent = root.get("refined_subject_masks_runs")
-    if parent is None:
-        raise ValueError("Archive has no refined_subject_masks_runs group.")
-    if refined_run:
-        run_name = str(refined_run)
-    else:
-        latest = parent.attrs.get("latest")
-        if latest is None:
-            keys = sorted(str(key) for key in parent.keys())
-            if not keys:
-                raise ValueError("refined_subject_masks_runs has no runs.")
-            run_name = keys[-1]
-        else:
-            run_name = str(latest)
-    if run_name not in parent:
-        raise ValueError(f"refined_subject_masks_runs/{run_name} not found.")
-    return run_name, parent[run_name]
+    refined_group, run_name, _run_path = resolve_refined_subject_masks_run(root, refined_run)
+    return run_name, refined_group
 
 
-def _resolve_components(refined_group: zarr.Group, components: Optional[Sequence[str]]) -> tuple[tuple[str, int], ...]:
-    label_map = _label_index_map(refined_group)
-    requested = [str(value) for value in components] if components else [name for name in COMPONENT_ORDER if name in label_map]
-    resolved: list[tuple[str, int]] = []
-    seen: set[str] = set()
-    for component in requested:
-        name = str(component)
-        if name in seen:
-            continue
-        if name not in label_map:
-            raise ValueError(f"Component {name!r} not present in refined run mask_labels.")
-        idx = int(label_map[name])
-        if not _component_available(refined_group, idx):
-            continue
-        resolved.append((name, idx))
-        seen.add(name)
-    if not resolved:
+def _resolve_components_from_refined_tables(
+    refined_tables: RefinedSubjectMasksRunTables,
+    components: Optional[Sequence[str]],
+) -> tuple[tuple[str, int], ...]:
+    requested = [str(value) for value in components] if components else [name for name in COMPONENT_ORDER if name in refined_tables.label_to_index]
+    resolved = refined_tables.resolve_components(requested)
+    ordered = tuple((name, idx) for name, idx in resolved if name in requested)
+    if not ordered:
         raise ValueError("No available refined subject-mask components selected for subject-shape analysis.")
-    return tuple(resolved)
+    return ordered
 
 
 def _create_array(
@@ -2414,8 +2380,17 @@ def write_subject_shape_run_group(
     if backend == DASK_WORKER_EXECUTION_BACKEND and zarr_path is None:
         raise ValueError("execution_backend='dask_worker_chunks' requires a filesystem zarr_path.")
     refined_run_name, refined_group = _resolve_refined_run(root, refined_run)
-    component_indices = _resolve_components(refined_group, components)
-    masks = refined_group["masks_roi"]
+    refined_tables = load_refined_subject_masks_run_tables(
+        root,
+        run_name=refined_run_name,
+        component_names=components,
+        include_masks_roi=True,
+        include_metrics=False,
+        include_components=False,
+        include_relations=False,
+    )
+    component_indices = _resolve_components_from_refined_tables(refined_tables, components)
+    masks = refined_tables.require_masks_roi()
     total_rows = int(masks.shape[0])
     target_run = str(run_name or _default_run_name())
     chunks = _row_chunks(total_rows, max(1, int(chunk_size)))
