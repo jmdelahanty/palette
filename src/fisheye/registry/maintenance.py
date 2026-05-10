@@ -32,6 +32,7 @@ from .db import (
 )
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
+from .stage_catalog import recording_status_stage_ids, recording_tuning_stage_ids
 
 DEFAULT_ALLOWED_RECORDING_TYPES = {
     "behavior",
@@ -44,32 +45,8 @@ DEFAULT_ALLOWED_RECORDING_SUBTYPES_BY_TYPE = {
     "histology": {"section", "wholemount"},
 }
 ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
-RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = (
-    "dish_mask",
-    "detection_tuning",
-    "keypoint_tuning",
-    "subject_mask_tuning",
-    "eye_mask_tuning",
-    "subdish_mask_tuning",
-)
-RECORDING_STEP_NAMES: tuple[str, ...] = (
-    "raw",
-    "background",
-    "detect",
-    "refined_detect",
-    "crop",
-    "keypoints",
-    "refined_keypoints",
-    "eye_masks",
-    "refined_eye_masks",
-    "subject_masks",
-    "refined_subject_masks",
-    "arena_assignment",
-    "tracks",
-    "stimulus",
-    "calibration",
-    *RECORDING_TUNING_STEP_NAMES,
-)
+RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = recording_tuning_stage_ids()
+RECORDING_STEP_NAMES: tuple[str, ...] = recording_status_stage_ids()
 RECORDING_STEP_STATUS_VALUES: tuple[str, ...] = ("ok", "missing", "absent", "na", "error")
 
 

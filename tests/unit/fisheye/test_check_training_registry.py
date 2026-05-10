@@ -1820,7 +1820,7 @@ def test_recording_steps_wide_view_outputs_rows(tmp_path: Path, capsys) -> None:
     assert "rec_steps_wide_001" in out
     assert "OK (73.6%, registry, blob)" in out
     assert "100% (passthrough)" in out
-    assert "4/5" in out
+    assert "4/6" in out
 
 
 def test_recording_steps_wide_view_respects_zarr_use_filter(tmp_path: Path, capsys) -> None:

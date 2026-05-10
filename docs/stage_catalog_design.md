@@ -110,6 +110,18 @@ They should eventually use the same catalog shape with
 
 ## Migration TODO
 
+Completed in the first migration pass:
+
+- `src/fisheye/registry/maintenance.py` derives
+  `RECORDING_STEP_NAMES` and `RECORDING_TUNING_STEP_NAMES` from the catalog.
+- `src/fisheye/registry/db.py` uses the catalog to generate status-pivot
+  columns for `recording_step_status_wide`; subject-mask and subject-mask
+  tuning stages are now included in the wide view.
+- `src/fisheye/registry/step_cascade.py` derives `STEP_DEPENDENTS` from the
+  catalog invalidation map.
+
+Remaining:
+
 1. `src/fisheye/core/pipeline.py`
 
    Translate command-stage names through the catalog before writing registry or
@@ -120,22 +132,11 @@ They should eventually use the same catalog shape with
    Split UI command names from registry stage IDs. Keep ambiguous tuner
    commands local to the launcher instead of making them global aliases.
 
-3. `src/fisheye/registry/step_cascade.py`
+3. Registry status overview
 
-   Generate `STEP_DEPENDENTS` from `stage_catalog.invalidation_map()` after
-   confirming the `detect -> detect_quality -> refined_detect` transition does
-   not break runtime cascade expectations.
-
-4. `src/fisheye/registry/maintenance.py`
-
-   Replace `RECORDING_STEP_NAMES` and `RECORDING_TUNING_STEP_NAMES` with catalog
-   projections. This should happen after status backfill tests cover all
-   current steps.
-
-5. Registry status wide view
-
-   Generate the wide-view pivot columns from the catalog so subject-mask,
-   tuning, stimulus, and calibration status do not drift from maintenance.
+   The wide view now consumes the catalog. The older
+   `recording_step_overview` aggregate still has hand-written count columns and
+   should be migrated separately if we keep that view.
 
 ## Validation
 

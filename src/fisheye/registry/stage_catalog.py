@@ -187,6 +187,27 @@ ALIAS_TO_STAGE_ID: dict[str, str] = {
     alias: spec.id for spec in STAGE_SPECS for alias in spec.aliases
 }
 STAGE_IDS: tuple[str, ...] = tuple(spec.id for spec in STAGE_SPECS)
+RECORDING_TUNING_STAGE_IDS: tuple[str, ...] = tuple(
+    spec.id for spec in STAGE_SPECS if spec.category == TUNING
+)
+RECORDING_STATUS_STAGE_IDS: tuple[str, ...] = (
+    "raw",
+    "background",
+    "detect",
+    "refined_detect",
+    "crop",
+    "keypoints",
+    "refined_keypoints",
+    "eye_masks",
+    "refined_eye_masks",
+    "subject_masks",
+    "refined_subject_masks",
+    "arena_assignment",
+    "tracks",
+    "stimulus",
+    "calibration",
+    *RECORDING_TUNING_STAGE_IDS,
+)
 
 
 def canonical_stage_id(stage_id_or_alias: str) -> str:
@@ -224,10 +245,24 @@ def artifact_family_map() -> dict[str, tuple[str, ...]]:
     return {spec.id: spec.artifact_families for spec in STAGE_SPECS}
 
 
+def recording_status_stage_ids() -> tuple[str, ...]:
+    """Return canonical recording-status stage ids in display/backfill order."""
+
+    return RECORDING_STATUS_STAGE_IDS
+
+
+def recording_tuning_stage_ids() -> tuple[str, ...]:
+    """Return canonical tuning stage ids in display/backfill order."""
+
+    return RECORDING_TUNING_STAGE_IDS
+
+
 __all__ = [
     "ALIAS_TO_STAGE_ID",
     "CORE_PIPELINE",
     "RECORDING_METADATA",
+    "RECORDING_STATUS_STAGE_IDS",
+    "RECORDING_TUNING_STAGE_IDS",
     "STAGE_BY_ID",
     "STAGE_IDS",
     "STAGE_SPECS",
@@ -238,4 +273,6 @@ __all__ = [
     "dependency_map",
     "get_stage_spec",
     "invalidation_map",
+    "recording_status_stage_ids",
+    "recording_tuning_stage_ids",
 ]

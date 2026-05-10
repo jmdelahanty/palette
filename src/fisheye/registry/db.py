@@ -15,6 +15,32 @@ import yaml
 
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
+from .stage_catalog import recording_status_stage_ids, recording_tuning_stage_ids
+
+
+def _require_sql_identifier(value: str) -> str:
+    if not value or not all(ch.isalnum() or ch == "_" for ch in value):
+        raise ValueError(f"Unsafe SQL identifier fragment: {value!r}")
+    return value
+
+
+def _recording_step_status_pivot_columns() -> str:
+    lines = []
+    for step_name in recording_status_stage_ids():
+        step = _require_sql_identifier(step_name)
+        lines.append(
+            f"MAX(CASE WHEN step_name = '{step}' THEN status END) AS {step}_status"
+        )
+    return ",\n                    ".join(lines)
+
+
+def _recording_tuning_ok_count_sql(alias: str) -> str:
+    table_alias = _require_sql_identifier(alias)
+    terms = []
+    for step_name in recording_tuning_stage_ids():
+        step = _require_sql_identifier(step_name)
+        terms.append(f"CASE WHEN {table_alias}.{step}_status = 'ok' THEN 1 ELSE 0 END")
+    return "\n                        + ".join(terms) if terms else "0"
 
 
 @dataclass(frozen=True)
@@ -2788,6 +2814,11 @@ class Registry:
                 42,
                 "recording_experiment_context_columns",
                 self._migration_042_recording_experiment_context_columns,
+            ),
+            (
+                43,
+                "stage_catalog_recording_step_status_wide_view",
+                self._migration_043_stage_catalog_recording_step_status_wide_view,
             ),
         ]
 
@@ -5951,7 +5982,7 @@ class Registry:
         cur = self.conn.cursor()
         cur.execute("DROP VIEW IF EXISTS recording_step_status_wide;")
         cur.execute(
-            """
+            f"""
             CREATE VIEW recording_step_status_wide AS
             WITH step_rows AS (
                 SELECT
@@ -5978,48 +6009,34 @@ class Registry:
                     MAX(zarr_path) AS zarr_path,
                     MAX(zarr_use) AS zarr_use,
                     MAX(dataset_status) AS dataset_status,
-                    MAX(CASE WHEN step_name = 'raw' THEN status END) AS raw_status,
+                    {_recording_step_status_pivot_columns()},
                     MAX(CASE WHEN step_name = 'raw' THEN details_json END) AS raw_details_json,
-                    MAX(CASE WHEN step_name = 'background' THEN status END) AS background_status,
                     MAX(CASE WHEN step_name = 'background' THEN details_json END) AS background_details_json,
-                    MAX(CASE WHEN step_name = 'detect' THEN status END) AS detect_status,
                     MAX(CASE WHEN step_name = 'detect' THEN method END) AS detect_method,
                     MAX(CASE WHEN step_name = 'detect' THEN coverage_pct END) AS detect_coverage_pct,
                     MAX(CASE WHEN step_name = 'detect' THEN details_json END) AS detect_details_json,
-                    MAX(CASE WHEN step_name = 'detect_quality' THEN status END) AS detect_quality_status,
                     MAX(CASE WHEN step_name = 'detect_quality' THEN run_name END) AS detect_quality_run_name,
                     MAX(CASE WHEN step_name = 'detect_quality' THEN details_json END) AS detect_quality_details_json,
-                    MAX(CASE WHEN step_name = 'refined_detect' THEN status END) AS refined_detect_status,
                     MAX(CASE WHEN step_name = 'refined_detect' THEN method END) AS refined_detect_method,
                     MAX(CASE WHEN step_name = 'refined_detect' THEN coverage_pct END) AS refined_detect_coverage_pct,
                     MAX(CASE WHEN step_name = 'refined_detect' THEN review_status_json END) AS refined_detect_review_json,
                     MAX(CASE WHEN step_name = 'refined_detect' THEN details_json END) AS refined_detect_details_json,
-                    MAX(CASE WHEN step_name = 'crop' THEN status END) AS crop_status,
                     MAX(CASE WHEN step_name = 'crop' THEN review_status_json END) AS crop_review_json,
                     MAX(CASE WHEN step_name = 'crop' THEN details_json END) AS crop_details_json,
-                    MAX(CASE WHEN step_name = 'keypoints' THEN status END) AS keypoints_status,
                     MAX(CASE WHEN step_name = 'keypoints' THEN details_json END) AS keypoints_details_json,
-                    MAX(CASE WHEN step_name = 'refined_keypoints' THEN status END) AS refined_keypoints_status,
                     MAX(CASE WHEN step_name = 'refined_keypoints' THEN coverage_pct END) AS refined_keypoints_coverage_pct,
                     MAX(CASE WHEN step_name = 'refined_keypoints' THEN review_status_json END) AS refined_keypoints_review_json,
                     MAX(CASE WHEN step_name = 'refined_keypoints' THEN details_json END) AS refined_keypoints_details_json,
-                    MAX(CASE WHEN step_name = 'eye_masks' THEN status END) AS eye_masks_status,
                     MAX(CASE WHEN step_name = 'eye_masks' THEN review_status_json END) AS eye_masks_review_json,
                     MAX(CASE WHEN step_name = 'eye_masks' THEN details_json END) AS eye_masks_details_json,
-                    MAX(CASE WHEN step_name = 'refined_eye_masks' THEN status END) AS refined_eye_masks_status,
                     MAX(CASE WHEN step_name = 'refined_eye_masks' THEN review_status_json END) AS refined_eye_masks_review_json,
                     MAX(CASE WHEN step_name = 'refined_eye_masks' THEN details_json END) AS refined_eye_masks_details_json,
-                    MAX(CASE WHEN step_name = 'arena_assignment' THEN status END) AS arena_assignment_status,
-                    MAX(CASE WHEN step_name = 'tracks' THEN status END) AS tracks_status,
+                    MAX(CASE WHEN step_name = 'subject_masks' THEN review_status_json END) AS subject_masks_review_json,
+                    MAX(CASE WHEN step_name = 'subject_masks' THEN details_json END) AS subject_masks_details_json,
+                    MAX(CASE WHEN step_name = 'refined_subject_masks' THEN review_status_json END) AS refined_subject_masks_review_json,
+                    MAX(CASE WHEN step_name = 'refined_subject_masks' THEN details_json END) AS refined_subject_masks_details_json,
                     MAX(CASE WHEN step_name = 'tracks' THEN details_json END) AS tracks_details_json,
-                    MAX(CASE WHEN step_name = 'stimulus' THEN status END) AS stimulus_status,
-                    MAX(CASE WHEN step_name = 'stimulus' THEN details_json END) AS stimulus_details_json,
-                    MAX(CASE WHEN step_name = 'calibration' THEN status END) AS calibration_status,
-                    MAX(CASE WHEN step_name = 'dish_mask' THEN status END) AS dish_mask_status,
-                    MAX(CASE WHEN step_name = 'detection_tuning' THEN status END) AS detection_tuning_status,
-                    MAX(CASE WHEN step_name = 'keypoint_tuning' THEN status END) AS keypoint_tuning_status,
-                    MAX(CASE WHEN step_name = 'eye_mask_tuning' THEN status END) AS eye_mask_tuning_status,
-                    MAX(CASE WHEN step_name = 'subdish_mask_tuning' THEN status END) AS subdish_mask_tuning_status
+                    MAX(CASE WHEN step_name = 'stimulus' THEN details_json END) AS stimulus_details_json
                 FROM step_rows
                 GROUP BY dataset_id
             ),
@@ -6035,7 +6052,9 @@ class Registry:
                         json_extract(p.keypoints_details_json, '$.pipeline_type'),
                         json_extract(p.refined_keypoints_details_json, '$.pipeline_type'),
                         json_extract(p.eye_masks_details_json, '$.pipeline_type'),
-                        json_extract(p.refined_eye_masks_details_json, '$.pipeline_type')
+                        json_extract(p.refined_eye_masks_details_json, '$.pipeline_type'),
+                        json_extract(p.subject_masks_details_json, '$.pipeline_type'),
+                        json_extract(p.refined_subject_masks_details_json, '$.pipeline_type')
                     ) AS pipeline_type,
                     COALESCE(
                         json_extract(p.raw_details_json, '$.zarr_purpose'),
@@ -6046,7 +6065,9 @@ class Registry:
                         json_extract(p.keypoints_details_json, '$.zarr_purpose'),
                         json_extract(p.refined_keypoints_details_json, '$.zarr_purpose'),
                         json_extract(p.eye_masks_details_json, '$.zarr_purpose'),
-                        json_extract(p.refined_eye_masks_details_json, '$.zarr_purpose')
+                        json_extract(p.refined_eye_masks_details_json, '$.zarr_purpose'),
+                        json_extract(p.subject_masks_details_json, '$.zarr_purpose'),
+                        json_extract(p.refined_subject_masks_details_json, '$.zarr_purpose')
                     ) AS zarr_purpose,
                     COALESCE(
                         json_extract(p.raw_details_json, '$.has_raw_video_attr'),
@@ -6057,7 +6078,9 @@ class Registry:
                         json_extract(p.keypoints_details_json, '$.has_raw_video_attr'),
                         json_extract(p.refined_keypoints_details_json, '$.has_raw_video_attr'),
                         json_extract(p.eye_masks_details_json, '$.has_raw_video_attr'),
-                        json_extract(p.refined_eye_masks_details_json, '$.has_raw_video_attr')
+                        json_extract(p.refined_eye_masks_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.subject_masks_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.refined_subject_masks_details_json, '$.has_raw_video_attr')
                     ) AS has_raw_video_attr,
                     CASE
                         WHEN COALESCE(
@@ -6102,6 +6125,8 @@ class Registry:
                     END AS refined_keypoints_success_effective,
                     CASE WHEN p.eye_masks_status = 'ok' THEN 1 ELSE 0 END AS eye_masks_present,
                     CASE WHEN p.refined_eye_masks_status = 'ok' THEN 1 ELSE 0 END AS refined_eye_masks_present,
+                    CASE WHEN p.subject_masks_status = 'ok' THEN 1 ELSE 0 END AS subject_masks_present,
+                    CASE WHEN p.refined_subject_masks_status = 'ok' THEN 1 ELSE 0 END AS refined_subject_masks_present,
                     CASE WHEN p.arena_assignment_status = 'ok' THEN 1 ELSE 0 END AS arena_assignment_present,
                     CASE WHEN p.tracks_status = 'ok' THEN 1 ELSE 0 END AS track_present,
                     CAST(
@@ -6201,14 +6226,8 @@ class Registry:
                         WHEN d.has_raw_video_attr = 0 AND NOT (d.full_present = 1 OR d.ds_present = 1) THEN 1
                         ELSE 0
                     END AS is_production,
-                    (
-                        CASE WHEN d.dish_mask_status = 'ok' THEN 1 ELSE 0 END
-                        + CASE WHEN d.detection_tuning_status = 'ok' THEN 1 ELSE 0 END
-                        + CASE WHEN d.keypoint_tuning_status = 'ok' THEN 1 ELSE 0 END
-                        + CASE WHEN d.eye_mask_tuning_status = 'ok' THEN 1 ELSE 0 END
-                        + CASE WHEN d.subdish_mask_tuning_status = 'ok' THEN 1 ELSE 0 END
-                    ) AS tuning_ok_count,
-                    5 AS tuning_total,
+                    ({_recording_tuning_ok_count_sql("d")}) AS tuning_ok_count,
+                    {len(recording_tuning_stage_ids())} AS tuning_total,
                     NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.state') AS TEXT)), '') AS detect_review_state,
                     NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.method') AS TEXT)), '') AS detect_review_method,
                     NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.intended_use') AS TEXT)), '') AS detect_review_use,
@@ -6502,6 +6521,8 @@ class Registry:
                 END AS "Keypoint Review",
                 CASE WHEN r.eye_masks_present = 1 THEN 'OK' ELSE 'MISS' END AS "Eye Masks",
                 CASE WHEN r.refined_eye_masks_present = 1 THEN 'OK' ELSE 'MISS' END AS "Refined Eye Masks",
+                CASE WHEN r.subject_masks_present = 1 THEN 'OK' ELSE 'MISS' END AS "Subject Masks",
+                CASE WHEN r.refined_subject_masks_present = 1 THEN 'OK' ELSE 'MISS' END AS "Refined Subject Masks",
                 CASE
                     WHEN r.eye_review_state IS NULL
                         AND r.eye_review_method IS NULL
@@ -6576,6 +6597,12 @@ class Registry:
                     WHEN r.keypoint_tuning_status = 'na' THEN 'N/A'
                     ELSE 'MISS'
                 END AS "keypoint_tuning",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.subject_mask_tuning_status = 'ok' THEN 'OK'
+                    WHEN r.subject_mask_tuning_status = 'na' THEN 'N/A'
+                    ELSE 'MISS'
+                END AS "subject_mask_tuning",
                 CASE
                     WHEN r.is_production = 1 THEN 'N/A'
                     WHEN r.eye_mask_tuning_status = 'ok' THEN 'OK'
@@ -9408,6 +9435,11 @@ class Registry:
         self._migration_034_dataset_context_current_view()
         if self._table_exists("recordings"):
             self._migration_003_recording_columns_reconcile()
+
+    def _migration_043_stage_catalog_recording_step_status_wide_view(self) -> None:
+        """Refresh recording_step_status_wide from the canonical stage catalog."""
+
+        self._migration_020_recording_step_status_wide_view()
 
     def _ensure_analytics_manifest_tables(self) -> None:
         cur = self.conn.cursor()

@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any, Dict, FrozenSet, Optional, Set
 
+from .stage_catalog import canonical_stage_id, invalidation_map
 from .status_ledger import upsert_recording_step_status
 
 logger = logging.getLogger(__name__)
@@ -33,18 +34,8 @@ logger = logging.getLogger(__name__)
 # previous version of X (or an ancestor of X).
 # ---------------------------------------------------------------------------
 STEP_DEPENDENTS: Dict[str, FrozenSet[str]] = {
-    "detect": frozenset({"refined_detect", "detect_quality"}),
-    "refined_detect": frozenset({"crop"}),
-    "detect_quality": frozenset(),
-    "crop": frozenset({"keypoints", "subject_masks"}),
-    "keypoints": frozenset({"refined_keypoints"}),
-    "refined_keypoints": frozenset({"eye_masks", "arena_assignment"}),
-    "eye_masks": frozenset({"refined_eye_masks"}),
-    "refined_eye_masks": frozenset(),
-    "subject_masks": frozenset({"refined_subject_masks"}),
-    "refined_subject_masks": frozenset(),
-    "arena_assignment": frozenset({"tracks"}),
-    "tracks": frozenset(),
+    step_name: frozenset(dependents)
+    for step_name, dependents in invalidation_map().items()
 }
 
 _CASCADE_SOURCE_PREFIX = "runtime_cascade_invalidation"
@@ -56,8 +47,12 @@ _SKIP_STATUSES = frozenset({"missing", "absent", "na"})
 
 def get_transitive_dependents(step_name: str) -> FrozenSet[str]:
     """Return all steps transitively downstream of *step_name* (excluding itself)."""
+    try:
+        resolved_step_name = canonical_stage_id(step_name)
+    except KeyError:
+        resolved_step_name = step_name
     visited: Set[str] = set()
-    frontier = list(STEP_DEPENDENTS.get(step_name, frozenset()))
+    frontier = list(STEP_DEPENDENTS.get(resolved_step_name, frozenset()))
     while frontier:
         current = frontier.pop()
         if current in visited:
@@ -103,13 +98,18 @@ def invalidate_downstream_steps(
         Summary with keys ``steps_invalidated``, ``steps_skipped``, and
         ``errors``.
     """
-    downstream = get_transitive_dependents(step_name)
+    try:
+        resolved_step_name = canonical_stage_id(step_name)
+    except KeyError:
+        resolved_step_name = step_name
+
+    downstream = get_transitive_dependents(resolved_step_name)
     if not downstream:
         return {"steps_invalidated": [], "steps_skipped": [], "errors": []}
 
     cascade_source = f"{_CASCADE_SOURCE_PREFIX}:{source}"
     details_payload: Dict[str, Any] = {
-        "cascade_trigger_step": step_name,
+        "cascade_trigger_step": resolved_step_name,
     }
     if trigger_run_name is not None:
         details_payload["cascade_trigger_run"] = trigger_run_name

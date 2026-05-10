@@ -2422,6 +2422,8 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
             "unit_test",
             "2026-02-23T01:00:08+00:00",
         ),
+        ("dataset_a", "recording_a", "subject_masks", "ok", "subject_001", None, None, None, None, "unit_test", "2026-02-23T01:00:08.100000+00:00"),
+        ("dataset_a", "recording_a", "refined_subject_masks", "ok", "refined_subject_001", None, None, None, None, "unit_test", "2026-02-23T01:00:08.200000+00:00"),
         ("dataset_a", "recording_a", "arena_assignment", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:09+00:00"),
         ("dataset_a", "recording_a", "tracks", "absent", None, None, None, None, None, "unit_test", "2026-02-23T01:00:10+00:00"),
         (
@@ -2441,6 +2443,7 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
         ("dataset_a", "recording_a", "dish_mask", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:13+00:00"),
         ("dataset_a", "recording_a", "detection_tuning", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:14+00:00"),
         ("dataset_a", "recording_a", "keypoint_tuning", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:15+00:00"),
+        ("dataset_a", "recording_a", "subject_mask_tuning", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:15.500000+00:00"),
         ("dataset_a", "recording_a", "eye_mask_tuning", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:16+00:00"),
         ("dataset_a", "recording_a", "subdish_mask_tuning", "na", None, None, None, None, None, "unit_test", "2026-02-23T01:00:17+00:00"),
     ]
@@ -2493,15 +2496,18 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
     assert row["Keypoint Review"] == "approved (manual, training)"
     assert row["Eye Masks"] == "OK"
     assert row["Refined Eye Masks"] == "OK"
+    assert row["Subject Masks"] == "OK"
+    assert row["Refined Subject Masks"] == "OK"
     assert row["Eye Mask Review"] == "approved (manual, training)"
     assert row["Arena Assignment"] == "MISS"
     assert row["Track"] == "MISS"
     assert row["Stimulus"] == "3 (OK)"
     assert row["Calib"] == "OK"
-    assert row["Tuning"] == "3/5"
+    assert row["Tuning"] == "4/6"
     assert row["dish_mask"] == "OK"
     assert row["detection_tuning"] == "MISS"
     assert row["keypoint_tuning"] == "OK"
+    assert row["subject_mask_tuning"] == "OK"
     assert row["eye_mask_tuning"] == "OK"
     assert row["subdish_mask_tuning"] == "N/A"
     registry.close()

@@ -159,6 +159,8 @@ _WIDE_COL_TO_STEP: Dict[str, str] = {
     "refined keypoints (analysis/train)": "refined_keypoints",
     "eye masks": "eye_masks",
     "refined eye masks": "refined_eye_masks",
+    "subject masks": "subject_masks",
+    "refined subject masks": "refined_subject_masks",
     "arena assignment": "arena_assignment",
     "track": "tracks",
     "stimulus": "stimulus",

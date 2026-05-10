@@ -9,6 +9,7 @@ import sqlite3
 from typing import Any, Iterable, Optional, Sequence
 
 from ..registry.db import RegistryPaths
+from ..registry.stage_catalog import recording_status_stage_ids
 from .models import HealthReport
 
 REQUIRED_STATUS_OBJECTS: tuple[str, ...] = (
@@ -34,6 +35,8 @@ WIDE_SEARCH_COLUMNS: tuple[str, ...] = (
     "Keypoint Review",
     "Eye Masks",
     "Refined Eye Masks",
+    "Subject Masks",
+    "Refined Subject Masks",
     "Eye Mask Review",
     "Arena Assignment",
     "Track",
@@ -55,6 +58,8 @@ WIDE_BLOCKING_COLUMNS: tuple[str, ...] = (
     "Refined Keypoints (analysis/train)",
     "Eye Masks",
     "Refined Eye Masks",
+    "Subject Masks",
+    "Refined Subject Masks",
     "Arena Assignment",
     "Track",
     "Stimulus",
@@ -62,28 +67,7 @@ WIDE_BLOCKING_COLUMNS: tuple[str, ...] = (
     "Tuning",
 )
 
-STEP_SORT_ORDER: tuple[str, ...] = (
-    "raw",
-    "background",
-    "detect",
-    "detect_quality",
-    "refined_detect",
-    "crop",
-    "keypoints",
-    "refined_keypoints",
-    "eye_masks",
-    "refined_eye_masks",
-    "arena_assignment",
-    "tracks",
-    "stimulus",
-    "calibration",
-    "dish_mask",
-    "detection_tuning",
-    "keypoint_tuning",
-    "subject_mask_tuning",
-    "eye_mask_tuning",
-    "subdish_mask_tuning",
-)
+STEP_SORT_ORDER: tuple[str, ...] = recording_status_stage_ids()
 
 
 def _utc_now() -> str:

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.registry.status_ledger import upsert_recording_step_status
+from fisheye.registry.stage_catalog import invalidation_map
 from fisheye.registry.step_cascade import (
     STEP_DEPENDENTS,
     get_transitive_dependents,
@@ -111,11 +112,31 @@ def test_get_transitive_dependents_leaf_step() -> None:
     assert get_transitive_dependents("tracks") == frozenset()
     assert get_transitive_dependents("refined_eye_masks") == frozenset()
     assert get_transitive_dependents("refined_subject_masks") == frozenset()
-    assert get_transitive_dependents("detect_quality") == frozenset()
 
 
 def test_get_transitive_dependents_unknown_step() -> None:
     assert get_transitive_dependents("nonexistent") == frozenset()
+
+
+def test_get_transitive_dependents_detect_quality_uses_catalog_flow() -> None:
+    result = get_transitive_dependents("detect_quality")
+    expected = frozenset({
+        "refined_detect",
+        "crop",
+        "keypoints",
+        "refined_keypoints",
+        "eye_masks",
+        "refined_eye_masks",
+        "subject_masks",
+        "refined_subject_masks",
+        "arena_assignment",
+        "tracks",
+    })
+    assert result == expected
+
+
+def test_get_transitive_dependents_resolves_aliases() -> None:
+    assert get_transitive_dependents("refine") == get_transitive_dependents("refined_detect")
 
 
 # ---------------------------------------------------------------------------
@@ -364,3 +385,11 @@ def test_graph_no_self_loops() -> None:
     """No step should list itself as a dependent."""
     for step, dependents in STEP_DEPENDENTS.items():
         assert step not in dependents, f"Step {step!r} has a self-loop"
+
+
+def test_graph_is_derived_from_stage_catalog() -> None:
+    expected = {
+        step_name: frozenset(dependents)
+        for step_name, dependents in invalidation_map().items()
+    }
+    assert STEP_DEPENDENTS == expected

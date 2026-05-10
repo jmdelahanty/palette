@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from fisheye.registry.maintenance import RECORDING_STEP_NAMES
+from fisheye.registry.maintenance import RECORDING_STEP_NAMES, RECORDING_TUNING_STEP_NAMES
 from fisheye.registry.stage_catalog import (
     ALIAS_TO_STAGE_ID,
     STAGE_BY_ID,
@@ -14,6 +14,8 @@ from fisheye.registry.stage_catalog import (
     canonical_stage_id,
     dependency_map,
     invalidation_map,
+    recording_status_stage_ids,
+    recording_tuning_stage_ids,
 )
 
 
@@ -65,8 +67,20 @@ def test_stage_catalog_ids_are_unique_and_aliases_resolve() -> None:
 
 
 def test_stage_catalog_covers_registry_recording_step_names() -> None:
-    missing = set(RECORDING_STEP_NAMES).difference(STAGE_BY_ID)
-    assert missing == set()
+    assert RECORDING_STEP_NAMES == recording_status_stage_ids()
+    assert set(RECORDING_STEP_NAMES).issubset(STAGE_BY_ID)
+
+
+def test_stage_catalog_tuning_stage_projection() -> None:
+    assert recording_tuning_stage_ids() == (
+        "dish_mask",
+        "detection_tuning",
+        "keypoint_tuning",
+        "subject_mask_tuning",
+        "eye_mask_tuning",
+        "subdish_mask_tuning",
+    )
+    assert RECORDING_TUNING_STEP_NAMES == recording_tuning_stage_ids()
 
 
 def test_stage_catalog_dependency_and_invalidation_maps_are_canonical() -> None:
