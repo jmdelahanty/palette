@@ -10,7 +10,7 @@ and speed levels here instead of hard-coding physical paths.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import numpy as np
 import zarr
@@ -43,11 +43,22 @@ class TrackKinematicsTrackTables:
     speed_px_by_level: Mapping[str, np.ndarray]
     frame_path_distance_mm_by_level: Mapping[str, np.ndarray]
     frame_path_distance_px_by_level: Mapping[str, np.ndarray]
+    acceleration_mm_by_level: Mapping[str, np.ndarray]
+    acceleration_px_by_level: Mapping[str, np.ndarray]
+    smoothed_acceleration_mm_by_level: Mapping[str, np.ndarray]
+    smoothed_acceleration_px_by_level: Mapping[str, np.ndarray]
     delta_seconds: Optional[np.ndarray]
     transition_valid: Optional[np.ndarray]
     sample_valid: Optional[np.ndarray]
+    time_seconds: Optional[np.ndarray]
+    heading_degrees: Optional[np.ndarray]
+    smoothed_heading_degrees: Optional[np.ndarray]
+    angular_velocity_deg_s: Optional[np.ndarray]
+    detection_source: Optional[np.ndarray]
     positions_mm: Optional[np.ndarray]
     positions_px: Optional[np.ndarray]
+    cumulative_path_distance_mm: Optional[np.ndarray]
+    cumulative_path_distance_px: Optional[np.ndarray]
 
     def speed_level_dict(self) -> dict[str, Optional[np.ndarray]]:
         """Return the legacy speed-dict shape expected by bout detectors."""
@@ -135,7 +146,16 @@ def _load_speed_level(
     track_group: zarr.Group,
     *,
     level: str,
-) -> tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+) -> tuple[
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+]:
     """Load speed and path-distance arrays for one logical level.
 
     Prefer the grouped v2 ``movement/speed/<level>`` surface. Fall back to the
@@ -154,8 +174,13 @@ def _load_speed_level(
         speed_px = _optional_array(grouped, "px")
         path_mm = _optional_array(grouped, "frame_path_distance_mm")
         path_px = _optional_array(grouped, "frame_path_distance_px")
+        accel_mm = _optional_array(grouped, "acceleration_mm")
+        accel_px = _optional_array(grouped, "acceleration_px")
+        smooth_accel_mm = _optional_array(grouped, "smoothed_acceleration_mm")
+        smooth_accel_px = _optional_array(grouped, "smoothed_acceleration_px")
     else:
         speed_mm = speed_px = path_mm = path_px = None
+        accel_mm = accel_px = smooth_accel_mm = smooth_accel_px = None
 
     if speed_mm is None:
         speed_mm = _optional_array(track_group, f"{source_level}_mm")
@@ -165,7 +190,16 @@ def _load_speed_level(
         path_mm = _optional_array(track_group, f"frame_path_distance_{level}_mm")
     if path_px is None:
         path_px = _optional_array(track_group, f"frame_path_distance_{level}_px")
-    return speed_mm, speed_px, path_mm, path_px
+    if level == "smoothed":
+        if accel_mm is None:
+            accel_mm = _optional_array(track_group, "acceleration_mm")
+        if accel_px is None:
+            accel_px = _optional_array(track_group, "acceleration_px")
+        if smooth_accel_mm is None:
+            smooth_accel_mm = _optional_array(track_group, "smoothed_acceleration_mm")
+        if smooth_accel_px is None:
+            smooth_accel_px = _optional_array(track_group, "smoothed_acceleration_px")
+    return speed_mm, speed_px, path_mm, path_px, accel_mm, accel_px, smooth_accel_mm, smooth_accel_px
 
 
 def load_track_kinematics_track(
@@ -174,6 +208,7 @@ def load_track_kinematics_track(
     run_name: str = "latest",
     scope: str = "offline",
     track_id: int = 0,
+    required_speed_levels: Iterable[str] = TRACK_KINEMATICS_SPEED_LEVELS,
 ) -> TrackKinematicsTrackTables:
     """Load logical arrays for one track from ``analysis/track_kinematics_runs``."""
 
@@ -202,8 +237,21 @@ def load_track_kinematics_track(
     speed_px_by_level: dict[str, np.ndarray] = {}
     frame_path_distance_mm_by_level: dict[str, np.ndarray] = {}
     frame_path_distance_px_by_level: dict[str, np.ndarray] = {}
+    acceleration_mm_by_level: dict[str, np.ndarray] = {}
+    acceleration_px_by_level: dict[str, np.ndarray] = {}
+    smoothed_acceleration_mm_by_level: dict[str, np.ndarray] = {}
+    smoothed_acceleration_px_by_level: dict[str, np.ndarray] = {}
     for level in TRACK_KINEMATICS_SPEED_LEVELS:
-        speed_mm, speed_px, path_mm, path_px = _load_speed_level(track_group, level=level)
+        (
+            speed_mm,
+            speed_px,
+            path_mm,
+            path_px,
+            accel_mm,
+            accel_px,
+            smooth_accel_mm,
+            smooth_accel_px,
+        ) = _load_speed_level(track_group, level=level)
         if speed_mm is not None:
             speed_mm_by_level[level] = speed_mm
         if speed_px is not None:
@@ -212,8 +260,17 @@ def load_track_kinematics_track(
             frame_path_distance_mm_by_level[level] = path_mm
         if path_px is not None:
             frame_path_distance_px_by_level[level] = path_px
+        if accel_mm is not None:
+            acceleration_mm_by_level[level] = accel_mm
+        if accel_px is not None:
+            acceleration_px_by_level[level] = accel_px
+        if smooth_accel_mm is not None:
+            smoothed_acceleration_mm_by_level[level] = smooth_accel_mm
+        if smooth_accel_px is not None:
+            smoothed_acceleration_px_by_level[level] = smooth_accel_px
 
-    for required in ("raw", "filtered", "smoothed", "averaged"):
+    for required in required_speed_levels:
+        required = str(required)
         if required not in speed_mm_by_level:
             source_level = TRACK_KINEMATICS_SOURCE_SPEED_LEVELS[required]
             raise ValueError(f"{label} is missing required speed level '{source_level}_mm'")
@@ -231,9 +288,20 @@ def load_track_kinematics_track(
         speed_px_by_level=speed_px_by_level,
         frame_path_distance_mm_by_level=frame_path_distance_mm_by_level,
         frame_path_distance_px_by_level=frame_path_distance_px_by_level,
+        acceleration_mm_by_level=acceleration_mm_by_level,
+        acceleration_px_by_level=acceleration_px_by_level,
+        smoothed_acceleration_mm_by_level=smoothed_acceleration_mm_by_level,
+        smoothed_acceleration_px_by_level=smoothed_acceleration_px_by_level,
         delta_seconds=_optional_array(track_group, "delta_seconds"),
         transition_valid=_optional_array(track_group, "transition_valid"),
         sample_valid=_optional_array(track_group, "sample_valid"),
+        time_seconds=_optional_array(track_group, "time_seconds"),
+        heading_degrees=_optional_array(track_group, "heading_degrees"),
+        smoothed_heading_degrees=_optional_array(track_group, "smoothed_heading_degrees"),
+        angular_velocity_deg_s=_optional_array(track_group, "angular_velocity_deg_s"),
+        detection_source=_optional_array(track_group, "detection_source"),
         positions_mm=_optional_array(track_group, "positions_mm"),
         positions_px=_optional_array(track_group, "positions_px"),
+        cumulative_path_distance_mm=_optional_array(track_group, "cumulative_path_distance_mm"),
+        cumulative_path_distance_px=_optional_array(track_group, "cumulative_path_distance_px"),
     )

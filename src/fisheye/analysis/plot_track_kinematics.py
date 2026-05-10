@@ -22,6 +22,7 @@ import zarr
 from rich.console import Console
 
 from fisheye.analysis.swim_bout_io import SwimBoutIOError, load_swim_bout_tables
+from fisheye.analysis.track_kinematics_io import TrackKinematicsTrackTables, load_track_kinematics_track
 from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
@@ -209,12 +210,24 @@ def resolve_track(group: zarr.Group, track_id: Optional[int], console: Console) 
     return int(track_id), group["tracks"][track_group_name]
 
 
-def pick_units(run_group: zarr.Group, track_group: zarr.Group) -> tuple[str, np.ndarray, np.ndarray]:
+def pick_units(
+    run_group: zarr.Group,
+    track_group: zarr.Group,
+    track_tables: Optional[TrackKinematicsTrackTables] = None,
+) -> tuple[str, np.ndarray, np.ndarray]:
     pixel_to_mm = run_group.attrs.get("pixel_to_mm")
-    positions_mm = track_group["positions_mm"][:]
+    positions_mm = (
+        track_tables.positions_mm
+        if track_tables is not None and track_tables.positions_mm is not None
+        else track_group["positions_mm"][:]
+    )
     if pixel_to_mm and np.isfinite(positions_mm).any():
         return "mm", positions_mm[:, 0], positions_mm[:, 1]
-    positions_px = track_group["positions_px"][:]
+    positions_px = (
+        track_tables.positions_px
+        if track_tables is not None and track_tables.positions_px is not None
+        else track_group["positions_px"][:]
+    )
     return "px", positions_px[:, 0], positions_px[:, 1]
 
 
@@ -1054,28 +1067,64 @@ def plot_track(
     render_png: bool = False,
     artifact_dpi: int = 150,
     show: bool = True,
+    track_tables: Optional[TrackKinematicsTrackTables] = None,
 ) -> Optional[bytes]:
-    time_seconds = track_group["time_seconds"][:]
+    if track_tables is not None and track_tables.time_seconds is not None:
+        time_seconds = track_tables.time_seconds
+    else:
+        time_seconds = track_group["time_seconds"][:]
 
-    speed_raw_px = track_group["speed_raw_px"][:]
-    speed_raw_mm = track_group["speed_raw_mm"][:]
-    speed_filtered_px = track_group["speed_filtered_px"][:]
-    speed_filtered_mm = track_group["speed_filtered_mm"][:]
-    speed_smoothed_px = track_group["speed_smoothed_px"][:]
-    speed_smoothed_mm = track_group["speed_smoothed_mm"][:]
-    speed_averaged_px = track_group["speed_averaged_px"][:]
-    speed_averaged_mm = track_group["speed_averaged_mm"][:]
+    def _speed(level: str, unit: str, fallback_name: str) -> Optional[np.ndarray]:
+        if track_tables is not None:
+            source = track_tables.speed_mm_by_level if unit == "mm" else track_tables.speed_px_by_level
+            value = source.get(level)
+            if value is not None:
+                return value
+        return track_group[fallback_name][:] if fallback_name in track_group else None
 
-    smoothed_heading_deg = track_group["smoothed_heading_degrees"][:]
-    smoothed_accel_px = track_group["smoothed_acceleration_px"][:]
-    smoothed_accel_mm = track_group["smoothed_acceleration_mm"][:]
+    speed_raw_px = _speed("raw", "px", "speed_raw_px")
+    speed_raw_mm = _speed("raw", "mm", "speed_raw_mm")
+    speed_filtered_px = _speed("filtered", "px", "speed_filtered_px")
+    speed_filtered_mm = _speed("filtered", "mm", "speed_filtered_mm")
+    speed_smoothed_px = _speed("smoothed", "px", "speed_smoothed_px")
+    speed_smoothed_mm = _speed("smoothed", "mm", "speed_smoothed_mm")
+    speed_averaged_px = _speed("averaged", "px", "speed_averaged_px")
+    speed_averaged_mm = _speed("averaged", "mm", "speed_averaged_mm")
+    if speed_raw_px is None or speed_raw_mm is None or speed_smoothed_px is None or speed_smoothed_mm is None:
+        raise ValueError("Track is missing required raw/smoothed speed arrays for plotting.")
 
-    unit_label, pos_x, pos_y = pick_units(run_group, track_group)
-    speed_smoothed = speed_smoothed_mm if unit_label == "mm" and np.isfinite(speed_smoothed_mm).any() else speed_smoothed_px
-    speed_raw = speed_raw_mm if unit_label == "mm" and np.isfinite(speed_raw_mm).any() else speed_raw_px
+    if track_tables is not None and track_tables.smoothed_heading_degrees is not None:
+        smoothed_heading_deg = track_tables.smoothed_heading_degrees
+    else:
+        smoothed_heading_deg = track_group["smoothed_heading_degrees"][:]
+    if track_tables is not None:
+        smoothed_accel_px = track_tables.smoothed_acceleration_px_by_level.get("smoothed")
+        smoothed_accel_mm = track_tables.smoothed_acceleration_mm_by_level.get("smoothed")
+    else:
+        smoothed_accel_px = smoothed_accel_mm = None
+    if smoothed_accel_px is None:
+        smoothed_accel_px = track_group["smoothed_acceleration_px"][:]
+    if smoothed_accel_mm is None:
+        smoothed_accel_mm = track_group["smoothed_acceleration_mm"][:]
 
-    speed_filtered = speed_filtered_mm if unit_label == "mm" and np.isfinite(speed_filtered_mm).any() else speed_filtered_px
-    speed_averaged = speed_averaged_mm if unit_label == "mm" and np.isfinite(speed_averaged_mm).any() else speed_averaged_px
+    unit_label, pos_x, pos_y = pick_units(run_group, track_group, track_tables)
+    def _has_finite(values: Optional[np.ndarray]) -> bool:
+        return values is not None and np.isfinite(values).any()
+
+    def _pick_unit_series(
+        mm_values: Optional[np.ndarray],
+        px_values: Optional[np.ndarray],
+    ) -> Optional[np.ndarray]:
+        if unit_label == "mm" and _has_finite(mm_values):
+            return mm_values
+        return px_values
+
+    speed_smoothed = _pick_unit_series(speed_smoothed_mm, speed_smoothed_px)
+    speed_raw = _pick_unit_series(speed_raw_mm, speed_raw_px)
+    speed_filtered = _pick_unit_series(speed_filtered_mm, speed_filtered_px)
+    speed_averaged = _pick_unit_series(speed_averaged_mm, speed_averaged_px)
+    if speed_raw is None or speed_smoothed is None:
+        raise ValueError("Track is missing required raw/smoothed speed arrays for plotting.")
     speed_label = f"Speed ({unit_label}/s)" if unit_label in {"mm", "px"} else "Speed"
     accel = (
         smoothed_accel_mm
@@ -1183,9 +1232,15 @@ def plot_track(
     heading_ax.set_title("Heading over time (smoothed)")
     heading_ax.grid(alpha=0.3)
 
-    cumulative = track_group["cumulative_path_distance_mm"][:]
+    if track_tables is not None and track_tables.cumulative_path_distance_mm is not None:
+        cumulative = track_tables.cumulative_path_distance_mm
+    else:
+        cumulative = track_group["cumulative_path_distance_mm"][:]
     if not (np.isfinite(cumulative).any() and unit_label == "mm"):
-        cumulative = track_group["cumulative_path_distance_px"][:]
+        if track_tables is not None and track_tables.cumulative_path_distance_px is not None:
+            cumulative = track_tables.cumulative_path_distance_px
+        else:
+            cumulative = track_group["cumulative_path_distance_px"][:]
         cumulative_label = "Cumulative path distance (px)"
     else:
         cumulative_label = "Cumulative path distance (mm)"
@@ -1371,6 +1426,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         except ValueError as exc:
             console.print(f"[yellow]Warning:[/yellow] {exc}")
             continue
+        run_scope, logical_run_name = run_name.split("/", 1)
+        try:
+            track_tables = load_track_kinematics_track(
+                root,
+                run_name=logical_run_name,
+                scope=run_scope,
+                track_id=track_id,
+                required_speed_levels=("raw", "smoothed"),
+            )
+        except ValueError as exc:
+            console.print(f"[yellow]Warning:[/yellow] Unable to load logical track tables: {exc}")
+            continue
         dest = save_path
         if dest:
             # Replace slashes in run_name to avoid invalid filenames
@@ -1418,6 +1485,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             render_png=bool(args.write_zarr_artifacts),
             artifact_dpi=int(args.artifact_dpi),
             show=show_plot,
+            track_tables=track_tables,
         )
         if args.write_zarr_artifacts:
             if png_bytes is None:

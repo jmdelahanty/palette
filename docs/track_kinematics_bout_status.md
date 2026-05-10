@@ -244,10 +244,11 @@ allowing existing flat-array consumers to keep working during migration.
 
 Current implementation note, 2026-05-10: new reader code should go through
 `fisheye.analysis.track_kinematics_io.load_track_kinematics_track(...)` rather
-than hard-coding `tracks/id_<track>/...` paths. The first consumer moved behind
-this resolver is `detect_bouts_multi_level`, so swim-bout detection now inherits
-the same preferred grouped-speed read rule while retaining flat-array fallback
-for existing runs.
+than hard-coding `tracks/id_<track>/...` paths. Current consumers moved behind
+this resolver include `detect_bouts_multi_level`, `stimulus_response`, and the
+data-loading path in `plot_track_kinematics`. These consumers now inherit the
+same preferred grouped-speed read rule while retaining flat-array fallback for
+existing runs.
 
 This schema is intentionally strict after the path-distance cleanup: current
 consumers expect `frame_path_distance_*` and `cumulative_path_distance_*`, not

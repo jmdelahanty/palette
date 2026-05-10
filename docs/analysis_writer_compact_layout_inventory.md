@@ -95,7 +95,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
     - decide whether visualization artifact specs need compact source paths
       before allowing `--write-zarr-artifacts` with compact-v2.
 
-### Next Writer Validation Target
+### Validated Compact Reader Target
 
 - `analysis/stimulus_response_runs`
   - Writer exists behind `--layout compact_tabular_v2`.
@@ -112,6 +112,9 @@ Most other writers are still hierarchical, but they are not equally urgent:
     `stimulus_response_tk_hyst4_low2_latch_s005_omr_compact_v2_canary_20260510`
     passed strict JSON, resolver parity against the hierarchical canary,
     Parquet export, OMR plot generation, and `marimo check`.
+  - The writer path now reads upstream track-kinematics inputs through
+    `fisheye.analysis.track_kinematics_io.load_track_kinematics_track(...)`
+    instead of hard-coding `tracks/id_<track>/...` arrays.
   - Remaining before default switch:
     - decide whether high-volume per-frame/time-series tables should stay
       omitted, become optional, or be written in a separate compact table family;
@@ -128,6 +131,10 @@ Most other writers are still hierarchical, but they are not equally urgent:
     `movement/speed/<level>` arrays, and falls back to compatibility flat arrays.
   - `detect_bouts_multi_level` now loads track speed/position inputs through that
     resolver, reducing one direct dependency on `tracks/id_<track>/...`.
+  - `stimulus_response` now expands sparse track inputs through the same logical
+    loader before computing dense stimulus-response metrics.
+  - `plot_track_kinematics` now uses the logical loader for plot data while
+    retaining existing physical source-path metadata for artifact specs.
   - Focused tests and a non-mutating DefaultScreen real-Zarr smoke passed on
     2026-05-10.
 
@@ -155,10 +162,11 @@ consumers are verified against both layouts.
    compact-v2 the preferred canary/batch layout, while keeping hierarchical v1
    as compatibility.
 
-3. **Stimulus response compact-v2 canary validation.**
-   The opt-in writer and resolver exist. Next, write a real compact run, validate
-   export/Marimo/plot paths, and decide whether high-volume per-frame/time-series
-   outputs stay omitted or become optional compact tables.
+3. **Stimulus response compact-v2 default decision.**
+   The opt-in writer, resolver, export/Marimo/plot consumers, and a real canary
+   validation now exist. The remaining design decision is whether high-volume
+   per-frame/time-series outputs stay omitted, become optional, or move into a
+   separate compact table family before any default switch.
 
 4. **Eye-angle canonical/variant repack.**
    Keep canonical major/gaze/body-frame arrays and variant metadata. Materialize

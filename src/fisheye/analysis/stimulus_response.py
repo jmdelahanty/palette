@@ -46,13 +46,17 @@ from fisheye.shared.stage_provenance import (
     write_stage_provenance,
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
-from fisheye.shared.zarr.analysis_stage_arrays import validate_track_inputs
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.analysis.track_kinematics_io import (
+    list_track_ids,
+    load_track_kinematics_track,
+    resolve_track_kinematics_run,
+)
 from fisheye.analysis.stimulus_response_grating import (
     _MOVING_GRATING,
     _grating_direction_vector,
@@ -233,47 +237,40 @@ def load_track_data(
     """
     console = console or Console()
 
-    parent_path = f"analysis/track_kinematics_runs/{kinematics_type}"
-    kin_group, run_name = resolve_zarr_run(
-        root, parent_path, run_name=kinematics_run,
+    kin_group, run_name, run_path = resolve_track_kinematics_run(
+        root,
+        run_name=kinematics_run or "latest",
+        scope=kinematics_type,
     )
 
     fps = float(kin_group.attrs.get("fps", 30.0))
 
-    tracks_parent = kin_group["tracks"]
-    track_names = sorted(
-        (name for name in tracks_parent.group_keys()
-         if re.fullmatch(r"id_\d+", name)),
-        key=lambda n: int(n.split("_")[1]),
-    )
-    if not track_names:
-        raise ValueError(
-            f"No track subgroups (id_*) found in {parent_path}/{run_name}/tracks/"
-        )
+    track_ids = list_track_ids(kin_group)
+    if not track_ids:
+        raise ValueError(f"No tracks found in {run_path}/")
 
     # First pass: determine total frame span and validate inputs.
     max_frame = 0
-    for name in track_names:
-        tg = tracks_parent[name]
-        result = validate_track_inputs(tg, label=f"{parent_path}/{run_name}/tracks/{name}")
-        if not result.valid:
-            raise ValueError(
-                f"Track {name} failed input validation:\n"
-                + "\n".join(f"  - {e}" for e in result.errors)
-            )
-        fi = tg["frame_indices"]
-        if fi.shape[0] > 0:
-            max_frame = max(max_frame, int(fi[-1]))
+    sparse_tracks = []
+    for fish_id in track_ids:
+        track = load_track_kinematics_track(
+            root,
+            run_name=run_name,
+            scope=kinematics_type,
+            track_id=int(fish_id),
+            required_speed_levels=("smoothed",),
+        )
+        sparse_tracks.append(track)
+        if track.frame_indices.shape[0] > 0:
+            max_frame = max(max_frame, int(track.frame_indices[-1]))
 
     n_frames = max_frame + 1
 
     # Second pass: expand sparse → dense.
     tracks: List[DenseTrack] = []
-    for name in track_names:
-        fish_id = int(name.split("_")[1])
-        tg = tracks_parent[name]
-
-        frame_indices = tg["frame_indices"][:].astype(np.int64)
+    for track in sparse_tracks:
+        fish_id = int(track.track_id)
+        frame_indices = track.frame_indices.astype(np.int64, copy=False)
         n_samples = frame_indices.shape[0]
 
         # Allocate dense arrays.  Gap frames default to zero/False/-1.
@@ -288,18 +285,29 @@ def load_track_data(
         cumulative_path_distance_mm: Optional[np.ndarray] = None
 
         if n_samples > 0:
-            speed_mm[frame_indices] = tg["speed_smoothed_mm"][:].astype(np.float32)
-            heading_deg[frame_indices] = tg["heading_degrees"][:].astype(np.float32)
-            pos_mm[frame_indices] = tg["positions_mm"][:].astype(np.float32)
-            ang_vel[frame_indices] = tg["angular_velocity_deg_s"][:].astype(np.float32)
-            time_s[frame_indices] = tg["time_seconds"][:].astype(np.float32)
+            if track.heading_degrees is None:
+                raise ValueError(f"{track.track_path} is missing required array 'heading_degrees'")
+            if track.positions_mm is None:
+                raise ValueError(f"{track.track_path} is missing required array 'positions_mm'")
+            speed_mm[frame_indices] = track.speed_mm_by_level["smoothed"].astype(np.float32)
+            heading_deg[frame_indices] = track.heading_degrees.astype(np.float32)
+            pos_mm[frame_indices] = track.positions_mm.astype(np.float32)
+            if track.angular_velocity_deg_s is not None:
+                ang_vel[frame_indices] = track.angular_velocity_deg_s.astype(np.float32)
+            if track.time_seconds is not None:
+                time_s[frame_indices] = track.time_seconds.astype(np.float32)
+            elif fps > 0:
+                time_s[frame_indices] = frame_indices.astype(np.float32) / np.float32(fps)
             valid[frame_indices] = True
-            det_src[frame_indices] = tg["detection_source"][:].astype(np.int8)
-            if "frame_path_distance_smoothed_mm" in tg:
+            if track.detection_source is not None:
+                det_src[frame_indices] = track.detection_source.astype(np.int8)
+            else:
+                det_src[frame_indices] = 0
+            if "smoothed" in track.frame_path_distance_mm_by_level:
                 frame_path_distance_mm = np.zeros(n_frames, dtype=np.float32)
-                frame_path_distance_mm[frame_indices] = tg["frame_path_distance_smoothed_mm"][:].astype(np.float32)
-            if "cumulative_path_distance_mm" in tg:
-                sparse_cumulative = tg["cumulative_path_distance_mm"][:].astype(np.float32)
+                frame_path_distance_mm[frame_indices] = track.frame_path_distance_mm_by_level["smoothed"].astype(np.float32)
+            if track.cumulative_path_distance_mm is not None:
+                sparse_cumulative = track.cumulative_path_distance_mm.astype(np.float32)
                 cumulative_path_distance_mm = np.zeros(n_frames, dtype=np.float32)
                 fill_positions = np.searchsorted(frame_indices, np.arange(n_frames), side="right") - 1
                 has_previous = fill_positions >= 0
@@ -321,7 +329,7 @@ def load_track_data(
     upstream_lineage = _snapshot_upstream_lineage(kin_group)
 
     console.print(
-        f"  Loaded {len(tracks)} track(s) from {parent_path}/{run_name}/ "
+        f"  Loaded {len(tracks)} track(s) from {run_path}/ "
         f"({n_frames} frames)"
     )
     return tracks, run_name, n_frames, upstream_lineage
