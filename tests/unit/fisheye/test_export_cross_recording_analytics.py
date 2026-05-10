@@ -8,6 +8,15 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
+from fisheye.analysis.stimulus_response import (
+    ConcentricStepData,
+    GratingStepData,
+    ProtocolStep,
+    STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+    write_stimulus_response_run,
+)
+from fisheye.analysis.stimulus_response_concentric_omr import ConcentricRadialOMRStepData
+from fisheye.analysis.stimulus_response_omr import OMRStepData
 from fisheye.utils.export_cross_recording_analytics import export_sources
 from fisheye.utils.export_cross_recording_analytics import main as export_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
@@ -190,6 +199,103 @@ def _make_source_zarr(path: Path) -> Path:
         _array(metrics, "within_window_valid", [True, True])
 
     return path
+
+
+def _replace_stimulus_response_fixture_with_compact_v2(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="a")
+    steps = [
+        ProtocolStep(
+            0,
+            "Moving Grating",
+            "MOVING_GRATING",
+            3,
+            10,
+            110,
+            1.6667,
+            {"direction_degrees": 0.0},
+        ),
+        ProtocolStep(
+            1,
+            "Concentric",
+            "CONCENTRIC_GRATING",
+            6,
+            110,
+            210,
+            1.6667,
+            {"is_expanding": False},
+        ),
+    ]
+    global_metrics = {
+        "fish_id": np.asarray([0], dtype=np.int32),
+        "total_distance_mm": np.asarray([25.0], dtype=np.float32),
+        "mean_speed_mm_s": np.asarray([3.5], dtype=np.float32),
+        "total_active_s": np.asarray([4.0], dtype=np.float32),
+        "fraction_moving": np.asarray([0.25], dtype=np.float32),
+    }
+    step_metrics = [
+        {
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "total_distance_mm": np.asarray([12.5], dtype=np.float32),
+            "mean_speed_mm_s": np.asarray([5.0], dtype=np.float32),
+            "num_bouts": np.asarray([2], dtype=np.int32),
+        },
+        {
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "total_distance_mm": np.asarray([10.0], dtype=np.float32),
+            "mean_speed_mm_s": np.asarray([4.0], dtype=np.float32),
+            "num_bouts": np.asarray([1], dtype=np.int32),
+        },
+    ]
+    grating = GratingStepData(
+        per_frame={},
+        per_fish={},
+        time_series={},
+        omr=OMRStepData(
+            per_fish={
+                "fish_id": np.asarray([0], dtype=np.int32),
+                "omr_path_index": np.asarray([0.75], dtype=np.float32),
+                "first_aligned_bout_latency_s": np.asarray([np.nan], dtype=np.float32),
+            },
+            per_bout={},
+            windows={},
+            early_windows={},
+            attrs={"method_version": "omr.v1"},
+        ),
+    )
+    concentric = ConcentricStepData(
+        per_frame={},
+        per_fish={},
+        time_series={},
+        radial_omr=ConcentricRadialOMRStepData(
+            per_frame={},
+            per_fish={
+                "fish_id": np.asarray([0], dtype=np.int32),
+                "omr_path_index": np.asarray([0.5], dtype=np.float32),
+                "radial_path_index": np.asarray([-0.5], dtype=np.float32),
+                "first_aligned_bout_latency_s": np.asarray([0.2], dtype=np.float32),
+            },
+            per_bout={},
+            windows={},
+            early_windows={},
+            attrs={"method_version": "radial.v1"},
+        ),
+    )
+    write_stimulus_response_run(
+        root,
+        global_metrics=global_metrics,
+        steps=steps,
+        step_metrics=step_metrics,
+        step_grating_data={0: grating},
+        step_concentric_data={1: concentric},
+        source_kinematics_run="tk_test",
+        source_kinematics_type="offline",
+        source_stimulus_run="stimulus_test",
+        source_bout_run="bouts_test",
+        parameters={"layout": STIMULUS_RESPONSE_LAYOUT_COMPACT_V2},
+        run_name="stimulus_response_test",
+        overwrite=True,
+        layout=STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+    )
 
 
 def _convert_bout_kinematics_fixture_to_compact_v2(path: Path) -> None:
@@ -384,7 +490,7 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert moving["protocol_duration_sequence_s"] == "1.6667,1.6667"
     assert moving["protocol_step_count"] == 2
     assert moving["omr_family"] == "moving_grating_omr"
-    assert moving["omr_path_index"] == 0.75
+    np.testing.assert_allclose(moving["omr_path_index"], 0.75)
     assert moving["first_aligned_bout_latency_s"] is None
 
     radial = next(row for row in response_rows if row["stimulus_mode"] == "CONCENTRIC_GRATING")
@@ -417,6 +523,34 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert len(movement_rows) == 2
     assert movement_rows[0]["measurement_family"] == "movement"
     assert movement_rows[0]["physical_active_duration_s"] == 0.12
+
+
+def test_export_cross_recording_analytics_reads_compact_stimulus_response(tmp_path: Path) -> None:
+    source = _make_source_zarr(tmp_path / "recording_compact_response_analysis.zarr")
+    _replace_stimulus_response_fixture_with_compact_v2(source)
+    output = tmp_path / "exports" / "palette_analytics"
+
+    manifest = export_sources([source], output_root=output, export_run_id="compact_response", jobs=1)
+
+    assert manifest["row_counts_by_table"]["recording_summary"] == 1
+    assert manifest["row_counts_by_table"]["stimulus_step_summary"] == 2
+    assert manifest["row_counts_by_table"]["stimulus_response_per_fish_step"] == 2
+
+    summary_rows = _read_dataset(output, "recording_summary", "compact_response")
+    assert summary_rows[0]["stimulus_response_run"] == "stimulus_response_test"
+    assert summary_rows[0]["global_fish_count"] == 1
+    assert summary_rows[0]["total_distance_mm_sum"] == 25.0
+
+    response_rows = _read_dataset(output, "stimulus_response_per_fish_step", "compact_response")
+    moving = next(row for row in response_rows if row["stimulus_mode"] == "MOVING_GRATING")
+    assert moving["omr_family"] == "moving_grating_omr"
+    assert moving["omr_path_index"] == 0.75
+    assert moving["first_aligned_bout_latency_s"] is None
+
+    radial = next(row for row in response_rows if row["stimulus_mode"] == "CONCENTRIC_GRATING")
+    assert radial["omr_family"] == "concentric_radial_omr"
+    np.testing.assert_allclose(radial["radial_path_index"], -0.5)
+    np.testing.assert_allclose(radial["first_aligned_bout_latency_s"], 0.2)
 
 
 def test_export_cross_recording_analytics_reads_compact_bout_kinematics(tmp_path: Path) -> None:

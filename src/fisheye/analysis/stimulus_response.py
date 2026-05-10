@@ -52,6 +52,7 @@ from fisheye.utils.system import get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables
+from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.analysis.stimulus_response_grating import (
     _MOVING_GRATING,
     _grating_direction_vector,
@@ -1566,6 +1567,323 @@ class LoomStepData:
     time_series: Dict[str, np.ndarray]
 
 
+STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
+STIMULUS_RESPONSE_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
+STIMULUS_RESPONSE_SCHEMA_ID = "palette.stimulus_response"
+STIMULUS_RESPONSE_SCHEMA_VERSION = 2
+
+
+def _scalar_for_record(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return _scalar_for_record(value.item())
+        return _json_safe_attr_value(value.tolist())
+    return _json_safe_attr_value(value)
+
+
+def _mapping_to_rows(
+    mapping: Mapping[str, np.ndarray],
+    *,
+    constants: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    constants = constants or {}
+    arrays: dict[str, np.ndarray] = {}
+    n_rows: int | None = None
+    for name, values in mapping.items():
+        arr = np.asarray(values)
+        if arr.ndim != 1:
+            continue
+        if n_rows is None:
+            n_rows = int(arr.shape[0])
+        if int(arr.shape[0]) != n_rows:
+            continue
+        arrays[str(name)] = arr
+    if n_rows is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    for idx in range(n_rows):
+        row = {str(key): _scalar_for_record(value) for key, value in constants.items()}
+        for name, arr in arrays.items():
+            row[name] = _scalar_for_record(arr[idx])
+        rows.append(row)
+    return rows
+
+
+def _dtype_for_values(values: Sequence[Any]) -> np.dtype:
+    non_null = [value for value in values if value is not None]
+    if not non_null:
+        return np.dtype("float64")
+    if any(isinstance(value, (str, bytes, bytearray)) for value in non_null):
+        max_len = max(
+            len(
+                (
+                    bytes(value)
+                    if isinstance(value, (bytes, bytearray))
+                    else str(value).encode("utf-8")
+                )
+            )
+            for value in non_null
+        )
+        width = max(1, min(512, 2 ** max_len.bit_length()))
+        return np.dtype(f"S{width}")
+    if any(isinstance(value, float) for value in non_null):
+        return np.dtype("float64")
+    if all(isinstance(value, (bool, np.bool_)) for value in non_null):
+        return np.dtype("bool")
+    if all(isinstance(value, (int, np.integer, bool, np.bool_)) for value in non_null):
+        return np.dtype("int64")
+    return np.dtype("S512")
+
+
+def _coerce_record_value(value: Any, dtype: np.dtype) -> Any:
+    if value is None:
+        if dtype.kind == "f":
+            return np.nan
+        if dtype.kind in {"i", "u"}:
+            return 0
+        if dtype.kind == "b":
+            return False
+        return b""
+    if dtype.kind == "S":
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        return str(value).encode("utf-8")
+    return value
+
+
+def _rows_to_structured(rows: Sequence[Mapping[str, Any]]) -> np.ndarray:
+    field_names: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row:
+            key_str = str(key)
+            if key_str not in seen:
+                seen.add(key_str)
+                field_names.append(key_str)
+    dtype = [
+        (name, _dtype_for_values([row.get(name) for row in rows]))
+        for name in field_names
+    ]
+    out = np.zeros(len(rows), dtype=dtype)
+    for row_idx, row in enumerate(rows):
+        for name, field_dtype in dtype:
+            out[name][row_idx] = _coerce_record_value(row.get(name), np.dtype(field_dtype))
+    return out
+
+
+def _write_rows_table(
+    parent: zarr.Group,
+    name: str,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    attrs: Mapping[str, Any] | None = None,
+) -> bool:
+    if not rows:
+        return False
+    safe_attrs = _json_safe_attrs(attrs or {})
+    data = _rows_to_structured(rows)
+    write_columnar_dataset(parent, name, data, attrs=safe_attrs)
+    return True
+
+
+def _step_constants(step: ProtocolStep) -> dict[str, Any]:
+    return {
+        "step_index": int(step.index),
+        "step_name": step.name,
+        "stimulus_mode": step.stimulus_mode,
+        "stimulus_mode_id": int(step.stimulus_mode_id),
+        "start_frame": int(step.start_frame),
+        "end_frame": int(step.end_frame),
+        "duration_s": float(step.duration_s),
+    }
+
+
+def _step_attr_record(step: ProtocolStep) -> dict[str, Any]:
+    record = _step_constants(step)
+    record["stimulus_params"] = step.stimulus_params
+    return record
+
+
+def _write_stimulus_response_compact_v2(
+    run_group: zarr.Group,
+    *,
+    global_metrics: Mapping[str, np.ndarray],
+    steps: Sequence[ProtocolStep],
+    step_metrics: Sequence[Mapping[str, np.ndarray]],
+    frame_annotations: Optional[Mapping[str, np.ndarray]],
+    step_bout_metrics: Optional[Sequence[Tuple[Mapping[str, np.ndarray], Mapping[str, np.ndarray]]]],
+    step_grating_data: Optional[Mapping[int, GratingStepData]],
+    step_concentric_data: Optional[Mapping[int, ConcentricStepData]],
+    step_loom_data: Optional[Mapping[int, LoomStepData]],
+    global_omr_metrics: Optional[Mapping[str, np.ndarray]],
+) -> None:
+    """Write the compact-tabular-v2 physical layout.
+
+    This first compact slice intentionally omits high-volume per-frame and
+    time-series tables. Those remain a later performance/object-count decision.
+    """
+
+    table_names: list[str] = []
+    omitted_tables = [
+        "grating_per_frame",
+        "grating_time_series",
+        "concentric_per_frame",
+        "concentric_time_series",
+        "concentric_radial_omr_per_frame",
+        "looming_per_frame",
+        "looming_time_series",
+    ]
+
+    def write_table(name: str, rows: Sequence[Mapping[str, Any]], attrs: Mapping[str, Any] | None = None) -> None:
+        if _write_rows_table(run_group, name, rows, attrs=attrs):
+            table_names.append(name)
+
+    step_rows = [
+        {
+            **_step_constants(step),
+            "stimulus_params_json": json.dumps(
+                _json_safe_attr_value(step.stimulus_params),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        }
+        for step in steps
+    ]
+    write_table("step_index", step_rows, {"table_role": "step_index"})
+
+    write_table(
+        "global_per_fish",
+        _mapping_to_rows(global_metrics),
+        {"table_role": "global_per_fish"},
+    )
+    if global_omr_metrics is not None:
+        write_table(
+            "global_omr_per_fish",
+            _mapping_to_rows(global_omr_metrics),
+            {
+                "table_role": "global_omr_per_fish",
+                "method_version": OMR_METHOD_VERSION,
+                "scope": "aggregate_across_moving_grating_steps",
+            },
+        )
+    if frame_annotations is not None:
+        write_table(
+            "frame_annotations",
+            _mapping_to_rows(frame_annotations),
+            {"table_role": "frame_annotations"},
+        )
+
+    step_per_fish_rows: list[dict[str, Any]] = []
+    step_per_bout_rows: list[dict[str, Any]] = []
+    grating_per_fish_rows: list[dict[str, Any]] = []
+    moving_omr_per_fish_rows: list[dict[str, Any]] = []
+    moving_omr_per_bout_rows: list[dict[str, Any]] = []
+    moving_omr_windows_rows: list[dict[str, Any]] = []
+    moving_omr_early_rows: list[dict[str, Any]] = []
+    moving_omr_attrs: list[dict[str, Any]] = []
+    concentric_per_fish_rows: list[dict[str, Any]] = []
+    radial_omr_per_fish_rows: list[dict[str, Any]] = []
+    radial_omr_per_bout_rows: list[dict[str, Any]] = []
+    radial_omr_windows_rows: list[dict[str, Any]] = []
+    radial_omr_early_rows: list[dict[str, Any]] = []
+    radial_omr_attrs: list[dict[str, Any]] = []
+    looming_trials_rows: list[dict[str, Any]] = []
+    looming_per_trial_per_fish_rows: list[dict[str, Any]] = []
+    looming_per_fish_rows: list[dict[str, Any]] = []
+    looming_attrs: list[dict[str, Any]] = []
+
+    for idx, (step, metrics) in enumerate(zip(steps, step_metrics)):
+        constants = _step_constants(step)
+        per_fish_metrics = dict(metrics)
+        if step_bout_metrics is not None and idx < len(step_bout_metrics):
+            bout_per_fish, bout_per_bout = step_bout_metrics[idx]
+            per_fish_metrics.update(bout_per_fish)
+            step_per_bout_rows.extend(_mapping_to_rows(bout_per_bout, constants=constants))
+        step_per_fish_rows.extend(_mapping_to_rows(per_fish_metrics, constants=constants))
+
+        if step_grating_data is not None and step.index in step_grating_data:
+            gd = step_grating_data[step.index]
+            grating_constants = {**constants, "stimulus_family": "moving_grating"}
+            grating_per_fish_rows.extend(_mapping_to_rows(gd.per_fish, constants=grating_constants))
+            if gd.omr is not None:
+                omr_constants = {
+                    **constants,
+                    "stimulus_family": "moving_grating",
+                    "metric_family": "moving_grating_omr",
+                }
+                moving_omr_attrs.append({"step_index": step.index, "attrs": gd.omr.attrs})
+                moving_omr_per_fish_rows.extend(_mapping_to_rows(gd.omr.per_fish, constants=omr_constants))
+                moving_omr_per_bout_rows.extend(_mapping_to_rows(gd.omr.per_bout, constants=omr_constants))
+                moving_omr_windows_rows.extend(_mapping_to_rows(gd.omr.windows, constants=omr_constants))
+                moving_omr_early_rows.extend(_mapping_to_rows(gd.omr.early_windows, constants=omr_constants))
+
+        if step_concentric_data is not None and step.index in step_concentric_data:
+            cd = step_concentric_data[step.index]
+            conc_constants = {**constants, "stimulus_family": "concentric_grating"}
+            concentric_per_fish_rows.extend(_mapping_to_rows(cd.per_fish, constants=conc_constants))
+            if cd.radial_omr is not None:
+                radial_constants = {
+                    **constants,
+                    "stimulus_family": "concentric_grating",
+                    "metric_family": "concentric_radial_omr",
+                }
+                radial_omr_attrs.append({"step_index": step.index, "attrs": cd.radial_omr.attrs})
+                radial_omr_per_fish_rows.extend(_mapping_to_rows(cd.radial_omr.per_fish, constants=radial_constants))
+                radial_omr_per_bout_rows.extend(_mapping_to_rows(cd.radial_omr.per_bout, constants=radial_constants))
+                radial_omr_windows_rows.extend(_mapping_to_rows(cd.radial_omr.windows, constants=radial_constants))
+                radial_omr_early_rows.extend(_mapping_to_rows(cd.radial_omr.early_windows, constants=radial_constants))
+
+        if step_loom_data is not None and step.index in step_loom_data:
+            ld = step_loom_data[step.index]
+            loom_constants = {**constants, "stimulus_family": "looming", "metric_family": "looming"}
+            looming_attrs.append({
+                "step_index": step.index,
+                "attrs": {
+                    "n_trials": len(ld.trials),
+                },
+            })
+            for trial in ld.trials:
+                looming_trials_rows.append({
+                    **loom_constants,
+                    "trial_index": int(trial.trial_index),
+                    "onset_frame": int(trial.onset_frame),
+                    "offset_frame": int(trial.offset_frame),
+                    "trial_duration_s": float(trial.duration_s),
+                })
+            looming_per_trial_per_fish_rows.extend(
+                _mapping_to_rows(ld.per_trial_per_fish, constants=loom_constants)
+            )
+            looming_per_fish_rows.extend(_mapping_to_rows(ld.per_fish, constants=loom_constants))
+
+    write_table("step_per_fish", step_per_fish_rows, {"table_role": "step_per_fish"})
+    write_table("step_per_bout", step_per_bout_rows, {"table_role": "step_per_bout"})
+    write_table("grating_per_fish", grating_per_fish_rows, {"table_role": "grating_per_fish"})
+    write_table("moving_grating_omr_per_fish", moving_omr_per_fish_rows, {"table_role": "moving_grating_omr_per_fish"})
+    write_table("moving_grating_omr_per_bout", moving_omr_per_bout_rows, {"table_role": "moving_grating_omr_per_bout"})
+    write_table("moving_grating_omr_windows", moving_omr_windows_rows, {"table_role": "moving_grating_omr_windows"})
+    write_table("moving_grating_omr_early_windows", moving_omr_early_rows, {"table_role": "moving_grating_omr_early_windows"})
+    write_table("concentric_per_fish", concentric_per_fish_rows, {"table_role": "concentric_per_fish"})
+    write_table("concentric_radial_omr_per_fish", radial_omr_per_fish_rows, {"table_role": "concentric_radial_omr_per_fish"})
+    write_table("concentric_radial_omr_per_bout", radial_omr_per_bout_rows, {"table_role": "concentric_radial_omr_per_bout"})
+    write_table("concentric_radial_omr_windows", radial_omr_windows_rows, {"table_role": "concentric_radial_omr_windows"})
+    write_table("concentric_radial_omr_early_windows", radial_omr_early_rows, {"table_role": "concentric_radial_omr_early_windows"})
+    write_table("looming_trials", looming_trials_rows, {"table_role": "looming_trials"})
+    write_table("looming_per_trial_per_fish", looming_per_trial_per_fish_rows, {"table_role": "looming_per_trial_per_fish"})
+    write_table("looming_per_fish", looming_per_fish_rows, {"table_role": "looming_per_fish"})
+
+    run_group.attrs.update(_json_safe_attrs({
+        "compact_table_names": table_names,
+        "compact_omitted_tables": omitted_tables,
+        "step_attrs": [_step_attr_record(step) for step in steps],
+        "moving_grating_omr_attrs": moving_omr_attrs,
+        "concentric_radial_omr_attrs": radial_omr_attrs,
+        "looming_attrs": looming_attrs,
+    }))
+
+
 def build_frame_annotations(
     steps: Sequence[ProtocolStep],
     n_frames: int,
@@ -1611,10 +1929,17 @@ def write_stimulus_response_run(
     parameters: Dict[str, Any],
     run_name: Optional[str] = None,
     overwrite: bool = False,
+    layout: str = STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1,
     console: Optional[Console] = None,
 ) -> str:
     """Write stimulus response run to zarr."""
     console = console or Console()
+    if layout not in {STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1, STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}:
+        raise ValueError(
+            "Unsupported stimulus_response layout "
+            f"'{layout}'. Expected {STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1} "
+            f"or {STIMULUS_RESPONSE_LAYOUT_COMPACT_V2}."
+        )
 
     analysis = root.require_group("analysis")
     parent = analysis.require_group("stimulus_response_runs")
@@ -1679,6 +2004,9 @@ def write_stimulus_response_run(
     write_stage_provenance(run_group, provenance)
 
     run_attrs: Dict[str, Any] = {
+        "schema_id": STIMULUS_RESPONSE_SCHEMA_ID,
+        "schema_version": STIMULUS_RESPONSE_SCHEMA_VERSION,
+        "layout": layout,
         "source_track_kinematics_run": source_kinematics_run,
         "source_track_kinematics_type": source_kinematics_type,
         "source_stimulus_run": source_stimulus_run,
@@ -1692,6 +2020,25 @@ def write_stimulus_response_run(
         run_attrs["archive_identity"] = archive_identity
     run_group.attrs.update(_json_safe_attrs(run_attrs))
     write_best_effort_run_lineage_attrs(run_group, run_family="stimulus_response_run")
+
+    if layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V2:
+        _write_stimulus_response_compact_v2(
+            run_group,
+            global_metrics=global_metrics,
+            steps=steps,
+            step_metrics=step_metrics,
+            frame_annotations=frame_annotations,
+            step_bout_metrics=step_bout_metrics,
+            step_grating_data=step_grating_data,
+            step_concentric_data=step_concentric_data,
+            step_loom_data=step_loom_data,
+            global_omr_metrics=global_omr_metrics,
+        )
+        console.print(
+            f"  Wrote stimulus_response_runs/{run_name}/ "
+            f"({len(steps)} steps, {len(fish_ids)} fish, layout {layout})"
+        )
+        return run_name
 
     # Global group.
     global_group = run_group.create_group("global")
@@ -2034,6 +2381,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Overwrite an existing stimulus_response run with the same name.",
     )
     parser.add_argument(
+        "--layout",
+        choices=(STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1, STIMULUS_RESPONSE_LAYOUT_COMPACT_V2),
+        default=STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1,
+        help=(
+            "Physical Zarr layout to write. compact_tabular_v2 is opt-in and "
+            "currently omits high-volume per-frame/time-series compact tables."
+        ),
+    )
+    parser.add_argument(
         "--write-zarr-artifacts",
         action="store_true",
         help=(
@@ -2374,6 +2730,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     # Write output.
     parameters = {
+        "layout": args.layout,
         "moving_threshold_mm_s": args.moving_threshold_mm_s,
         "fps": fps,
         "n_frames": n_frames,
@@ -2429,6 +2786,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         parameters=parameters,
         run_name=args.run_name,
         overwrite=args.overwrite,
+        layout=args.layout,
         console=console,
     )
 

@@ -43,7 +43,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | `analysis/swim_bout_runs` legacy statistics writer | Flat legacy run written by `swim_bout_statistics.py` | Not compact-v2 and not the canonical detector writer | Low | Treat as historical/reporting output. Do not use it as the model for future bout-segmentation storage. |
 | `analysis/track_kinematics_runs` | `online/offline/<run>/tracks/id_<track>/...`; also writes grouped `movement/speed/<level>/...` | Partial v2 grouping, not compact tabular | Medium | Do not rewrite immediately. First add/standardize resolver APIs. Future compact layout should use run-level track index plus ragged/CSR arrays instead of one subtree per track. |
 | `analysis/bout_kinematics_runs` | Hierarchical v1 by domain/heading variant, plus compact-v2 opt-in tables `level_index`, `movement_metrics`, `heading_metrics`, and optional `eye_gaze_metrics` | Compact-v2 implemented, not default | High, reader validation in progress | Keep resolver-first policy. After Crimson/Marimo confidence, consider switching new canary/batch runs to `compact_tabular_v2`; keep hierarchical v1 as explicit compatibility. |
-| `analysis/stimulus_response_runs` | `global/`, `frames/`, `steps/step_<n>/...`, stimulus-family subgroups, per-frame/per-fish/per-bout/window groups | Hierarchical by step and stimulus family; hierarchical resolver implemented | Medium-high | `stimulus_response_io.resolve_stimulus_response_tables(...)` now covers the current layout. See `stimulus_response_compact_v2_design.md`. Future layout should use `step_index`, `global_per_fish`, `step_per_fish`, `step_per_bout`, `stimulus_per_frame`, `stimulus_time_series`, `omr_per_fish`, `omr_per_bout`, `omr_windows`, `omr_early_windows`, and looming trial tables with `step_index`, `stimulus_family`, `metric_family`, `track_id`, and optional `subject_id` columns. |
+| `analysis/stimulus_response_runs` | Hierarchical v1 by step/family, plus compact-tabular-v2 opt-in summary/bout/window tables | Compact-v2 implemented, not default | Medium-high | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. The first compact slice writes step/global/base/family per-fish/per-bout/window/trial tables and intentionally omits high-volume per-frame/time-series tables. See `stimulus_response_compact_v2_design.md`. |
 | `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Variant schema exists, but values are materialized as many arrays | Medium-high | Migrate by storing canonical major/gaze/body-frame arrays plus transform metadata. Keep compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
 | `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Hierarchical by component, with many common metric mirrors | Medium | Stack common component metrics along a component axis. Keep specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
 | `refined_subject_masks_runs` | Dense `masks_roi` plus component-local metrics/QC/review groups | Canonical dense mask is appropriate; component mirrors fan out | Medium | Keep `masks_roi` dense. Future layout should stack common component metrics/QC as `(row, component)` arrays and reserve component groups for true component-specific authoring state. |
@@ -95,17 +95,25 @@ Most other writers are still hierarchical, but they are not equally urgent:
     - decide whether visualization artifact specs need compact source paths
       before allowing `--write-zarr-artifacts` with compact-v2.
 
-### Next Resolver Target
+### Next Writer Validation Target
 
 - `analysis/stimulus_response_runs`
-  - Current writer still uses hierarchical-v1 step/family subtrees.
-  - A shared logical resolver now reads hierarchical-v1:
+  - Writer exists behind `--layout compact_tabular_v2`.
+  - A shared logical resolver reads hierarchical-v1 and compact-tabular-v2:
     `fisheye.analysis.stimulus_response_io.resolve_stimulus_response_tables(...)`.
   - The cross-recording exporter, the Marimo `track_kinematics_explorer.py`
     stimulus-response panels, and `plot_stimulus_response_omr.py` now use that
     resolver for the moving-grating OMR and concentric radial-OMR reader paths.
-  - Remaining before writer changes: decide compact physical table details,
-    then add an opt-in writer and parity tests against resolver output.
+  - Focused tests passed outside the sandbox on 2026-05-10:
+    `test_stimulus_response_io.py`, `test_stimulus_response.py`,
+    `test_plot_stimulus_response_omr.py`, and
+    `test_export_cross_recording_analytics.py`.
+  - Remaining before default switch:
+    - write and validate a real compact stimulus-response canary;
+    - decide whether high-volume per-frame/time-series tables should stay
+      omitted, become optional, or be written in a separate compact table family;
+    - decide whether visualization artifact specs need logical table names before
+      allowing compact runs with `--write-zarr-artifacts`.
   - Design details live in
     `docs/stimulus_response_compact_v2_design.md`.
 
@@ -134,11 +142,10 @@ consumers are verified against both layouts.
    compact-v2 the preferred canary/batch layout, while keeping hierarchical v1
    as compatibility.
 
-3. **Stimulus response table layout.**
-   Replace `steps/step_<n>/...` fanout with step-indexed tables. This will also
-   improve export and registry query behavior because `step_index`,
-   `stimulus_family`, `trial_id`, `window_id`, and `track_id` become ordinary
-   columns.
+3. **Stimulus response compact-v2 canary validation.**
+   The opt-in writer and resolver exist. Next, write a real compact run, validate
+   export/Marimo/plot paths, and decide whether high-volume per-frame/time-series
+   outputs stay omitted or become optional compact tables.
 
 4. **Eye-angle canonical/variant repack.**
    Keep canonical major/gaze/body-frame arrays and variant metadata. Materialize

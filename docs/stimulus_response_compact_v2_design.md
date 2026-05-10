@@ -13,17 +13,19 @@ inspection, but it fans out by protocol step, stimulus family, metric scope, and
 window/trial family. That fanout is now one of the largest sources of Zarr
 metadata objects.
 
-This document defines the resolver-first migration plan. It is not permission to
-change the writer default yet.
+This document defines the resolver-first migration plan. Compact-tabular-v2 is
+implemented as an opt-in writer layout; it is not the writer default yet.
 
 Implementation status:
 
 - `fisheye.analysis.stimulus_response_io.resolve_stimulus_response_tables(...)`
-  reads the current hierarchical-v1 layout and exposes logical tables.
+  reads hierarchical-v1 and compact-tabular-v2 layouts and exposes logical
+  tables.
 - The cross-recording exporter, OMR plotter, and Marimo stimulus-response panels
   now use the resolver for the paths covered by moving-grating OMR and
   concentric radial OMR.
-- Compact-tabular-v2 writing is still deferred.
+- `fisheye.analysis.stimulus_response` supports
+  `--layout compact_tabular_v2` as an explicit opt-in writer mode.
 
 ## Current Hierarchical-V1 Shape
 
@@ -79,7 +81,8 @@ subtree with many small column arrays.
 
 ## Current Readers
 
-Known readers currently walk the hierarchical-v1 tree directly:
+Known readers now use the shared resolver for the paths needed by current
+moving-grating OMR and concentric radial OMR workflows:
 
 - `src/fisheye/utils/export_cross_recording_analytics.py`
   reads `steps/step_<n>/per_fish`, then joins optional `grating/per_fish`,
@@ -92,8 +95,9 @@ Known readers currently walk the hierarchical-v1 tree directly:
   reads `steps/step_<n>/grating/omr/{per_fish,per_bout,windows,early_windows}`
   for PNG and interactive artifacts.
 
-These readers should be moved behind a shared resolver before adding a compact
-writer. Otherwise each consumer will need a separate v1/v2 branch.
+Additional future readers should use
+`resolve_stimulus_response_tables(...)` rather than branching on physical Zarr
+paths directly.
 
 ## Resolver Contract
 
@@ -103,9 +107,8 @@ Shared logical loader:
 resolve_stimulus_response_tables(run_group) -> StimulusResponseTables
 ```
 
-The resolver currently reads `layout == "hierarchical_v1"`. Future
-`layout == "compact_tabular_v2"` runs should be adapted in the same module and
-return the same logical tables.
+The resolver reads `layout == "hierarchical_v1"` and
+`layout == "compact_tabular_v2"` runs and returns the same logical tables.
 
 Recommended logical outputs:
 
@@ -147,8 +150,8 @@ should introduce `subject_id` without changing old run semantics.
 
 ## Compact-Tabular-V2 Layout
 
-Future compact runs should write fewer groups and put step/family identity into
-columns or index arrays:
+Compact runs write fewer groups and put step/family identity into columns or
+index arrays:
 
 ```text
 analysis/stimulus_response_runs/<run>/
@@ -165,14 +168,19 @@ analysis/stimulus_response_runs/<run>/
   frame_annotations/
   step_per_fish/
   step_per_bout/
-  stimulus_per_frame/
-  stimulus_time_series/
-  omr_per_fish/
-  omr_per_bout/
-  omr_windows/
-  omr_early_windows/
+  grating_per_fish/
+  moving_grating_omr_per_fish/
+  moving_grating_omr_per_bout/
+  moving_grating_omr_windows/
+  moving_grating_omr_early_windows/
+  concentric_per_fish/
+  concentric_radial_omr_per_fish/
+  concentric_radial_omr_per_bout/
+  concentric_radial_omr_windows/
+  concentric_radial_omr_early_windows/
   looming_trials/
   looming_per_trial_per_fish/
+  looming_per_fish/
   visualizations/
 ```
 
@@ -183,12 +191,14 @@ Notes:
   `analysis/stimulus_runs/<run>/steps`, which remains the canonical protocol
   import.
 - `step_per_fish` stores base movement and coverage metrics for all steps.
-- `omr_per_fish`, `omr_per_bout`, `omr_windows`, and `omr_early_windows` store
-  moving-grating and radial OMR outputs in one family-aware table each.
-- `stimulus_per_frame` and `stimulus_time_series` are the highest-volume
-  portions. They can be concatenated across steps with `step_index` and
-  `stimulus_family`, but the implementation should measure object-count and
-  read-performance impact before making them mandatory.
+- This first compact slice keeps family-specific table names rather than one
+  metric-long OMR table. That preserves current reader/export ergonomics while
+  still removing the per-step subtree fanout.
+- The high-volume per-frame and time-series tables are intentionally omitted
+  from compact-v2 for now: `grating_per_frame`, `grating_time_series`,
+  `concentric_per_frame`, `concentric_time_series`,
+  `concentric_radial_omr_per_frame`, `looming_per_frame`, and
+  `looming_time_series`. The run records these in `compact_omitted_tables`.
 - Looming remains a stimulus-response family, not a separate top-level run
   family. Its trial-scoped data belongs in `looming_trials` and
   `looming_per_trial_per_fish`.
@@ -200,7 +210,7 @@ Notes:
    current moving-grating OMR and concentric radial OMR readers on 2026-05-10.
 3. Add focused tests proving resolver parity on a hierarchical-v1 fixture. Done
    for the resolver, exporter, and OMR plotter on 2026-05-10.
-4. Add an opt-in `--layout compact_tabular_v2` writer mode.
+4. Add an opt-in `--layout compact_tabular_v2` writer mode. Done 2026-05-10.
 5. Write and validate one real canary run.
 6. Add Crimson/Marimo/export smoke checks for v2.
 7. Only then consider changing the writer default.

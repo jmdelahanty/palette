@@ -8,6 +8,13 @@ from fisheye.analysis.stimulus_response_io import (
     moving_grating_omr_steps,
     resolve_stimulus_response_tables,
 )
+from fisheye.analysis.stimulus_response import (
+    GratingStepData,
+    ProtocolStep,
+    STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+    write_stimulus_response_run,
+)
+from fisheye.analysis.stimulus_response_omr import OMRStepData
 
 
 def _array(group, name: str, values) -> None:
@@ -105,7 +112,7 @@ def test_resolve_stimulus_response_tables_reads_hierarchical_v1() -> None:
     assert tables.global_omr_per_fish["omr_path_index_weighted_by_path"].tolist() == [0.75]
     assert tables.frame_annotations["step_index"].tolist() == [0, 0, 1, 1]
     assert [step.step_index for step in tables.steps] == [0, 1]
-    assert tables.steps[0].grating_per_fish["mean_alignment_cos"].tolist() == [0.9]
+    np.testing.assert_allclose(tables.steps[0].grating_per_fish["mean_alignment_cos"], [0.9])
     assert tables.steps[0].moving_grating_omr is not None
     assert tables.steps[0].moving_grating_omr.per_bout["bout_id"].tolist() == [2]
     assert tables.steps[0].moving_grating_omr.windows["omr_path_index"].tolist() == [0.4]
@@ -126,3 +133,95 @@ def test_stimulus_response_omr_step_helpers_filter_families() -> None:
     assert [step.step_name for step in radial] == ["concentric"]
     assert radial[0].concentric_radial_omr is not None
     assert radial[0].concentric_radial_omr.per_fish["radial_path_index"].tolist() == [0.8]
+
+
+def test_compact_writer_roundtrips_through_resolver() -> None:
+    root = zarr.group()
+    steps = [
+        ProtocolStep(0, "moving", "MOVING_GRATING", 3, 10, 20, 1.0),
+        ProtocolStep(1, "baseline", "SOLID_BLACK", 4, 20, 30, 1.0),
+    ]
+    global_metrics = {
+        "fish_id": np.asarray([0], dtype=np.int32),
+        "total_distance_mm": np.asarray([12.5], dtype=np.float32),
+        "mean_speed_mm_s": np.asarray([3.0], dtype=np.float32),
+        "fraction_moving": np.asarray([0.5], dtype=np.float32),
+        "total_active_s": np.asarray([1.0], dtype=np.float32),
+    }
+    step_metrics = [
+        {
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "total_distance_mm": np.asarray([5.0], dtype=np.float32),
+            "mean_speed_mm_s": np.asarray([4.0], dtype=np.float32),
+        },
+        {
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "total_distance_mm": np.asarray([7.5], dtype=np.float32),
+            "mean_speed_mm_s": np.asarray([2.0], dtype=np.float32),
+        },
+    ]
+    omr = OMRStepData(
+        per_fish={
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "omr_path_index": np.asarray([0.75], dtype=np.float32),
+        },
+        per_bout={
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "bout_id": np.asarray([4], dtype=np.int32),
+            "per_bout_omr_score": np.asarray([0.6], dtype=np.float32),
+        },
+        windows={
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "window_length_s": np.asarray([5.0], dtype=np.float32),
+            "omr_path_index": np.asarray([0.4], dtype=np.float32),
+        },
+        early_windows={},
+        attrs={"stimulus_direction_deg": 0.0, "method_version": "test_omr"},
+    )
+    grating = GratingStepData(
+        per_frame={},
+        per_fish={
+            "fish_id": np.asarray([0], dtype=np.int32),
+            "mean_alignment_cos": np.asarray([0.9], dtype=np.float32),
+        },
+        time_series={},
+        omr=omr,
+    )
+
+    run_name = write_stimulus_response_run(
+        root,
+        global_metrics=global_metrics,
+        steps=steps,
+        step_metrics=step_metrics,
+        frame_annotations={
+            "step_index": np.asarray([0, 0, 1, 1], dtype=np.int32),
+            "stimulus_mode_id": np.asarray([3, 3, 4, 4], dtype=np.int32),
+        },
+        step_grating_data={0: grating},
+        source_kinematics_run="tk",
+        source_kinematics_type="offline",
+        source_stimulus_run="stim",
+        parameters={"layout": STIMULUS_RESPONSE_LAYOUT_COMPACT_V2},
+        run_name="compact",
+        layout=STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+    )
+
+    run = root["analysis"]["stimulus_response_runs"][run_name]
+    assert run.attrs["layout"] == STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
+    assert "steps" not in run
+    assert "step_index" in run
+    assert "step_per_fish" in run
+    assert "moving_grating_omr_per_fish" in run
+
+    tables = resolve_stimulus_response_tables(run)
+    assert tables.layout == STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
+    assert tables.global_per_fish["total_distance_mm"].tolist() == [12.5]
+    assert tables.frame_annotations["stimulus_mode_id"].tolist() == [3, 3, 4, 4]
+    assert [step.step_index for step in tables.steps] == [0, 1]
+    assert tables.steps[0].per_fish["total_distance_mm"].tolist() == [5.0]
+    np.testing.assert_allclose(tables.steps[0].grating_per_fish["mean_alignment_cos"], [0.9])
+    assert tables.steps[0].moving_grating_omr is not None
+    assert tables.steps[0].moving_grating_omr.attrs["method_version"] == "test_omr"
+    np.testing.assert_allclose(tables.steps[0].moving_grating_omr.per_fish["omr_path_index"], [0.75])
+    assert tables.steps[0].moving_grating_omr.per_bout["bout_id"].tolist() == [4]
+    np.testing.assert_allclose(tables.steps[0].moving_grating_omr.windows["omr_path_index"], [0.4])

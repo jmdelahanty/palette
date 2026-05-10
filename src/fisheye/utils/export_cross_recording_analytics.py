@@ -638,14 +638,21 @@ def _load_recording_summary(
             "n_fish": attrs.get("n_fish"),
             "n_steps": attrs.get("n_steps"),
         })
-        if _has_child(stim_resp_group, "global"):
-            global_group = stim_resp_group["global"]
-            fish_ids = _read_1d_array(global_group, "fish_id")
-            row["global_fish_count"] = int(fish_ids.size) if fish_ids is not None else None
-            row["total_distance_mm_sum"] = _summarize_numeric(_read_1d_array(global_group, "total_distance_mm"), "sum")
-            row["mean_speed_mm_s_mean"] = _summarize_numeric(_read_1d_array(global_group, "mean_speed_mm_s"), "mean")
-            row["fraction_moving_mean"] = _summarize_numeric(_read_1d_array(global_group, "fraction_moving"), "mean")
-            row["total_active_s_sum"] = _summarize_numeric(_read_1d_array(global_group, "total_active_s"), "sum")
+        try:
+            stim_resp_tables = resolve_stimulus_response_tables(stim_resp_group)
+            global_metrics = stim_resp_tables.global_per_fish
+            fish_ids = np.asarray(global_metrics.get("fish_id", []))
+            row["global_fish_count"] = int(fish_ids.size) if fish_ids.size else None
+            row["total_distance_mm_sum"] = _summarize_numeric(global_metrics.get("total_distance_mm"), "sum")
+            row["mean_speed_mm_s_mean"] = _summarize_numeric(global_metrics.get("mean_speed_mm_s"), "mean")
+            row["fraction_moving_mean"] = _summarize_numeric(global_metrics.get("fraction_moving"), "mean")
+            row["total_active_s_sum"] = _summarize_numeric(global_metrics.get("total_active_s"), "sum")
+        except Exception as exc:
+            diagnostics.append({
+                "table": "recording_summary",
+                "status": "partial",
+                "reason": f"failed to resolve stimulus-response global metrics: {exc}",
+            })
     elif stim_resp_error:
         diagnostics.append({"table": "recording_summary", "status": "partial", "reason": stim_resp_error})
 

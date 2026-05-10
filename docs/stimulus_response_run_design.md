@@ -80,12 +80,12 @@ arena_assignment changes
 
 ## Storage Layout
 
-The layout below is the current hierarchical-v1 storage contract. It remains the
-active writer layout while compact-v2 is designed. The planned compact migration
-is resolver-first: current reader migrations use
-`fisheye.analysis.stimulus_response_io.resolve_stimulus_response_tables(...)`;
-the writer should only gain an opt-in compact layout after that resolver
-surface is stable. See `docs/stimulus_response_compact_v2_design.md`.
+The layout below is the current default hierarchical-v1 storage contract.
+Compact-tabular-v2 is available as an explicit opt-in writer layout via
+`--layout compact_tabular_v2`, and current reader migrations use
+`fisheye.analysis.stimulus_response_io.resolve_stimulus_response_tables(...)`.
+The compact layout is not the default yet. See
+`docs/stimulus_response_compact_v2_design.md`.
 
 ```
 analysis/stimulus_response_runs/<run_name>/
