@@ -58,6 +58,7 @@ import numpy as np
 from scipy import signal
 
 from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
+from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
@@ -2074,75 +2075,15 @@ def _load_track_kinematics_track_speeds(
         metadata_dict keys: fps, pixel_to_mm, n_frames, etc.
     """
     root = open_zarr_root(zarr_path, mode='r')
+    track = load_track_kinematics_track(
+        root,
+        run_name=track_kinematics_run,
+        scope="offline",
+        track_id=track_id,
+    )
+    speeds = track.speed_level_dict()
 
-    # Navigate to track_kinematics_runs
-    if 'analysis' not in root or 'track_kinematics_runs' not in root['analysis']:
-        raise ValueError(f"No track_kinematics_runs found in {zarr_path}")
-
-    track_kinematics_runs = root['analysis']['track_kinematics_runs']
-
-    if 'offline' not in track_kinematics_runs:
-        raise ValueError("No offline track_kinematics_runs found")
-
-    offline_group = track_kinematics_runs['offline']
-
-    # Resolve "latest" if needed
-    if track_kinematics_run == "latest":
-        track_kinematics_run = offline_group.attrs.get('latest')
-        if track_kinematics_run is None:
-            raise ValueError("No 'latest' offline track kinematics run found")
-
-    if track_kinematics_run not in offline_group:
-        raise ValueError(
-            f"Track kinematics run '{track_kinematics_run}' not found in offline runs"
-        )
-
-    run_group = offline_group[track_kinematics_run]
-
-    # Load track data
-    tracks_group = run_group['tracks']
-    track_key = f"id_{track_id}"
-
-    if track_key not in tracks_group:
-        raise ValueError(
-            f"Track {track_key} not found in track kinematics run {track_kinematics_run}"
-        )
-
-    track_group = tracks_group[track_key]
-
-    def _optional_track_array(name: str) -> Optional[np.ndarray]:
-        if name not in track_group:
-            return None
-        return track_group[name][:]
-
-    # Load speed arrays
-    speeds = {
-        'speed_raw_mm': track_group['speed_raw_mm'][:],
-        'speed_filtered_mm': track_group['speed_filtered_mm'][:],
-        'speed_smoothed_mm': track_group['speed_smoothed_mm'][:],
-        'speed_averaged_mm': track_group['speed_averaged_mm'][:],
-        'frames': track_group['frame_indices'][:],
-        'frame_path_distance_raw_mm': _optional_track_array('frame_path_distance_raw_mm'),
-        'frame_path_distance_raw_px': _optional_track_array('frame_path_distance_raw_px'),
-        'frame_path_distance_filtered_mm': _optional_track_array('frame_path_distance_filtered_mm'),
-        'frame_path_distance_filtered_px': _optional_track_array('frame_path_distance_filtered_px'),
-        'frame_path_distance_smoothed_mm': _optional_track_array('frame_path_distance_smoothed_mm'),
-        'frame_path_distance_smoothed_px': _optional_track_array('frame_path_distance_smoothed_px'),
-        'delta_seconds': _optional_track_array('delta_seconds'),
-        'transition_valid': _optional_track_array('transition_valid'),
-        'sample_valid': _optional_track_array('sample_valid'),
-    }
-
-    # Load position data for bout_points (both px and mm)
-    positions_mm = None
-    if 'positions_mm' in track_group:
-        positions_mm = track_group['positions_mm'][:]
-
-    positions_px = None
-    if 'positions_px' in track_group:
-        positions_px = track_group['positions_px'][:]
-
-    source_provenance = run_group.attrs.get('provenance')
+    source_provenance = track.run_attrs.get('provenance')
     if not isinstance(source_provenance, dict):
         source_provenance = {}
     source_git = source_provenance.get('git')
@@ -2151,18 +2092,19 @@ def _load_track_kinematics_track_speeds(
 
     # Load metadata
     metadata = {
-        'fps': run_group.attrs.get('fps', 60.0),
-        'pixel_to_mm': run_group.attrs.get('pixel_to_mm'),
+        'fps': track.run_attrs.get('fps', 60.0),
+        'pixel_to_mm': track.run_attrs.get('pixel_to_mm'),
         'n_frames': len(speeds['frames']),
-        'track_kinematics_run': track_kinematics_run,
-        'track_kinematics_created_at_utc': run_group.attrs.get('created_at_utc'),
+        'track_kinematics_run': track.run_name,
+        'track_kinematics_scope': track.scope,
+        'track_kinematics_created_at_utc': track.run_attrs.get('created_at_utc'),
         'track_kinematics_stage': source_provenance.get('stage'),
         'track_kinematics_version': source_provenance.get('version'),
-        'track_kinematics_git_commit': run_group.attrs.get('git_commit') or source_git.get('commit'),
-        'track_kinematics_git_dirty': run_group.attrs.get('git_dirty', source_git.get('is_dirty')),
+        'track_kinematics_git_commit': track.run_attrs.get('git_commit') or source_git.get('commit'),
+        'track_kinematics_git_dirty': track.run_attrs.get('git_dirty', source_git.get('is_dirty')),
         'track_id': track_id,
-        'positions_mm': positions_mm,
-        'positions_px': positions_px,
+        'positions_mm': track.positions_mm,
+        'positions_px': track.positions_px,
     }
 
     return speeds, metadata

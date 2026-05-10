@@ -41,7 +41,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | --- | --- | --- | --- | --- |
 | `analysis/swim_bout_runs` | Hierarchical v1 by speed level, plus compact-v2 opt-in | Compact-v2 implemented, not default | High, nearly ready | Keep resolver-first policy. After Crimson/Marimo confidence, switch default to `compact_v2` and keep `--layout hierarchical_v1` as explicit compatibility. |
 | `analysis/swim_bout_runs` legacy statistics writer | Flat legacy run written by `swim_bout_statistics.py` | Not compact-v2 and not the canonical detector writer | Low | Treat as historical/reporting output. Do not use it as the model for future bout-segmentation storage. |
-| `analysis/track_kinematics_runs` | `online/offline/<run>/tracks/id_<track>/...`; also writes grouped `movement/speed/<level>/...` | Partial v2 grouping, not compact tabular | Medium | Do not rewrite immediately. First add/standardize resolver APIs. Future compact layout should use run-level track index plus ragged/CSR arrays instead of one subtree per track. |
+| `analysis/track_kinematics_runs` | `online/offline/<run>/tracks/id_<track>/...`; also writes grouped `movement/speed/<level>/...` | Partial v2 grouping plus initial logical loader, not compact tabular | Medium | Do not rewrite immediately. Continue moving readers through `fisheye.analysis.track_kinematics_io` first. Future compact layout should use run-level track index plus ragged/CSR arrays instead of one subtree per track. |
 | `analysis/bout_kinematics_runs` | Hierarchical v1 by domain/heading variant, plus compact-v2 opt-in tables `level_index`, `movement_metrics`, `heading_metrics`, and optional `eye_gaze_metrics` | Compact-v2 implemented, not default | High, reader validation in progress | Keep resolver-first policy. After Crimson/Marimo confidence, consider switching new canary/batch runs to `compact_tabular_v2`; keep hierarchical v1 as explicit compatibility. |
 | `analysis/stimulus_response_runs` | Hierarchical v1 by step/family, plus compact-tabular-v2 opt-in summary/bout/window tables | Compact-v2 implemented, not default | Medium-high | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. The first compact slice writes step/global/base/family per-fish/per-bout/window/trial tables and intentionally omits high-volume per-frame/time-series tables. See `stimulus_response_compact_v2_design.md`. |
 | `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Variant schema exists, but values are materialized as many arrays | Medium-high | Migrate by storing canonical major/gaze/body-frame arrays plus transform metadata. Keep compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
@@ -108,8 +108,11 @@ Most other writers are still hierarchical, but they are not equally urgent:
     `test_stimulus_response_io.py`, `test_stimulus_response.py`,
     `test_plot_stimulus_response_omr.py`, and
     `test_export_cross_recording_analytics.py`.
+  - Real DefaultScreen canary validation, 2026-05-10:
+    `stimulus_response_tk_hyst4_low2_latch_s005_omr_compact_v2_canary_20260510`
+    passed strict JSON, resolver parity against the hierarchical canary,
+    Parquet export, OMR plot generation, and `marimo check`.
   - Remaining before default switch:
-    - write and validate a real compact stimulus-response canary;
     - decide whether high-volume per-frame/time-series tables should stay
       omitted, become optional, or be written in a separate compact table family;
     - decide whether visualization artifact specs need logical table names before
@@ -117,9 +120,19 @@ Most other writers are still hierarchical, but they are not equally urgent:
   - Design details live in
     `docs/stimulus_response_compact_v2_design.md`.
 
-### Needs Resolver Before Writer Changes
+### Resolver-First Track-Kinematics Work
 
 - `analysis/track_kinematics_runs`
+  - Initial logical loader exists in `fisheye.analysis.track_kinematics_io`.
+  - The loader reads current hierarchical runs, prefers grouped
+    `movement/speed/<level>` arrays, and falls back to compatibility flat arrays.
+  - `detect_bouts_multi_level` now loads track speed/position inputs through that
+    resolver, reducing one direct dependency on `tracks/id_<track>/...`.
+  - Focused tests and a non-mutating DefaultScreen real-Zarr smoke passed on
+    2026-05-10.
+
+### Needs Resolver Before Writer Changes
+
 - `analysis/eye_angle_runs`
 - `analysis/subject_shape_runs`
 - `refined_subject_masks_runs`
