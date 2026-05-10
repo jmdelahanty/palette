@@ -80,12 +80,15 @@ def test_get_transitive_dependents_detect() -> None:
         "subject_masks",
         "refined_subject_masks",
         "subject_shape",
+        "tail_kinematics",
+        "tail_posture_view",
         "arena_assignment",
         "tracks",
         "track_kinematics",
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
+        "bout_classification",
         "stimulus_response",
     })
     assert result == expected
@@ -102,6 +105,7 @@ def test_get_transitive_dependents_refined_keypoints() -> None:
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
+        "bout_classification",
         "stimulus_response",
     })
     assert result == expected
@@ -119,16 +123,30 @@ def test_get_transitive_dependents_keypoints() -> None:
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
+        "bout_classification",
         "stimulus_response",
     })
     assert result == expected
+
+
+def test_get_transitive_dependents_subject_shape_includes_tail_classification_flow() -> None:
+    result = get_transitive_dependents("subject_shape")
+    assert result == frozenset({
+        "tail_kinematics",
+        "tail_posture_view",
+        "bout_classification",
+    })
+
+
+def test_get_transitive_dependents_tail_posture_view_includes_classification() -> None:
+    assert get_transitive_dependents("tail_posture_view") == frozenset({"bout_classification"})
 
 
 def test_get_transitive_dependents_leaf_step() -> None:
     assert get_transitive_dependents("tracks") == frozenset()
     assert get_transitive_dependents("refined_eye_masks") == frozenset()
     assert get_transitive_dependents("bout_kinematics") == frozenset()
-    assert get_transitive_dependents("subject_shape") == frozenset()
+    assert get_transitive_dependents("bout_classification") == frozenset()
     assert get_transitive_dependents("stimulus_response") == frozenset()
 
 
@@ -148,12 +166,15 @@ def test_get_transitive_dependents_detect_quality_uses_catalog_flow() -> None:
         "subject_masks",
         "refined_subject_masks",
         "subject_shape",
+        "tail_kinematics",
+        "tail_posture_view",
         "arena_assignment",
         "tracks",
         "track_kinematics",
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
+        "bout_classification",
         "stimulus_response",
     })
     assert result == expected
@@ -188,9 +209,10 @@ def test_invalidate_downstream_marks_missing(tmp_path: Path) -> None:
     assert "detect" not in result["steps_invalidated"]
     for step in ["refined_detect", "crop", "keypoints", "refined_keypoints",
                   "eye_masks", "refined_eye_masks", "subject_masks", "refined_subject_masks",
-                  "subject_shape", "arena_assignment", "tracks",
+                  "subject_shape", "tail_kinematics", "tail_posture_view",
+                  "arena_assignment", "tracks",
                   "track_kinematics", "swim_bouts", "bout_kinematics",
-                  "eye_angles", "stimulus_response",
+                  "eye_angles", "bout_classification", "stimulus_response",
                   "detect_quality"]:
         assert step in result["steps_invalidated"], f"{step} should be invalidated"
         assert _get_step_status(registry, step) == "missing"
@@ -228,12 +250,15 @@ def test_get_transitive_dependents_crop_includes_subject_masks() -> None:
         "subject_masks",
         "refined_subject_masks",
         "subject_shape",
+        "tail_kinematics",
+        "tail_posture_view",
         "arena_assignment",
         "tracks",
         "track_kinematics",
         "swim_bouts",
         "bout_kinematics",
         "eye_angles",
+        "bout_classification",
         "stimulus_response",
     })
     assert result == expected

@@ -161,9 +161,9 @@ Sections:
 - **2026-05-10 status:** partially addressed. Presence-level registry/status
   coverage now exists for `track_kinematics`, `swim_bouts`,
   `bout_kinematics`, `eye_angles`, `subject_shape`, and
-  `stimulus_response`. Still open: `tail_kinematics_runs`,
-  `tail_posture_view_runs`, `bout_classification_runs`, source-ref freshness,
-  and writer-side status upserts.
+  `stimulus_response`. Follow-up coverage also adds `tail_kinematics_runs`,
+  `tail_posture_view_runs`, and `bout_classification_runs`. Still open:
+  source-ref freshness and writer-side status upserts.
 
 ### 1.10 `repo_wide_staleness_workflow_edge_checklist.md` calls `crop → subject_masks` "todo"; code already implements it (metadata)
 - **Doc:** `docs/repo_wide_staleness_workflow_edge_checklist.md:64–65`.

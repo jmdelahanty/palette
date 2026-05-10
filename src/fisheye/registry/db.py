@@ -2825,6 +2825,11 @@ class Registry:
                 "derived_analysis_recording_step_status_wide_view",
                 self._migration_044_derived_analysis_recording_step_status_wide_view,
             ),
+            (
+                45,
+                "tail_behavior_recording_step_status_wide_view",
+                self._migration_045_tail_behavior_recording_step_status_wide_view,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -6046,6 +6051,9 @@ class Registry:
                     MAX(CASE WHEN step_name = 'bout_kinematics' THEN details_json END) AS bout_kinematics_details_json,
                     MAX(CASE WHEN step_name = 'eye_angles' THEN details_json END) AS eye_angles_details_json,
                     MAX(CASE WHEN step_name = 'subject_shape' THEN details_json END) AS subject_shape_details_json,
+                    MAX(CASE WHEN step_name = 'tail_kinematics' THEN details_json END) AS tail_kinematics_details_json,
+                    MAX(CASE WHEN step_name = 'tail_posture_view' THEN details_json END) AS tail_posture_view_details_json,
+                    MAX(CASE WHEN step_name = 'bout_classification' THEN details_json END) AS bout_classification_details_json,
                     MAX(CASE WHEN step_name = 'stimulus_response' THEN details_json END) AS stimulus_response_details_json,
                     MAX(CASE WHEN step_name = 'stimulus' THEN details_json END) AS stimulus_details_json
                 FROM step_rows
@@ -6071,6 +6079,9 @@ class Registry:
                         json_extract(p.bout_kinematics_details_json, '$.pipeline_type'),
                         json_extract(p.eye_angles_details_json, '$.pipeline_type'),
                         json_extract(p.subject_shape_details_json, '$.pipeline_type'),
+                        json_extract(p.tail_kinematics_details_json, '$.pipeline_type'),
+                        json_extract(p.tail_posture_view_details_json, '$.pipeline_type'),
+                        json_extract(p.bout_classification_details_json, '$.pipeline_type'),
                         json_extract(p.stimulus_response_details_json, '$.pipeline_type')
                     ) AS pipeline_type,
                     COALESCE(
@@ -6090,6 +6101,9 @@ class Registry:
                         json_extract(p.bout_kinematics_details_json, '$.zarr_purpose'),
                         json_extract(p.eye_angles_details_json, '$.zarr_purpose'),
                         json_extract(p.subject_shape_details_json, '$.zarr_purpose'),
+                        json_extract(p.tail_kinematics_details_json, '$.zarr_purpose'),
+                        json_extract(p.tail_posture_view_details_json, '$.zarr_purpose'),
+                        json_extract(p.bout_classification_details_json, '$.zarr_purpose'),
                         json_extract(p.stimulus_response_details_json, '$.zarr_purpose')
                     ) AS zarr_purpose,
                     COALESCE(
@@ -6109,6 +6123,9 @@ class Registry:
                         json_extract(p.bout_kinematics_details_json, '$.has_raw_video_attr'),
                         json_extract(p.eye_angles_details_json, '$.has_raw_video_attr'),
                         json_extract(p.subject_shape_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.tail_kinematics_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.tail_posture_view_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.bout_classification_details_json, '$.has_raw_video_attr'),
                         json_extract(p.stimulus_response_details_json, '$.has_raw_video_attr')
                     ) AS has_raw_video_attr,
                     CASE
@@ -6632,6 +6649,24 @@ class Registry:
                     WHEN r.subject_shape_status = 'error' THEN 'ERR'
                     ELSE 'MISS'
                 END AS "Subject Shape",
+                CASE
+                    WHEN r.tail_kinematics_status = 'ok' THEN 'OK'
+                    WHEN r.tail_kinematics_status = 'na' THEN 'N/A'
+                    WHEN r.tail_kinematics_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Tail Kinematics",
+                CASE
+                    WHEN r.tail_posture_view_status = 'ok' THEN 'OK'
+                    WHEN r.tail_posture_view_status = 'na' THEN 'N/A'
+                    WHEN r.tail_posture_view_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Tail Posture View",
+                CASE
+                    WHEN r.bout_classification_status = 'ok' THEN 'OK'
+                    WHEN r.bout_classification_status = 'na' THEN 'N/A'
+                    WHEN r.bout_classification_status = 'error' THEN 'ERR'
+                    ELSE 'MISS'
+                END AS "Bout Classification",
                 CASE
                     WHEN r.stimulus_response_status = 'ok' THEN 'OK'
                     WHEN r.stimulus_response_status = 'na' THEN 'N/A'
@@ -9508,6 +9543,11 @@ class Registry:
 
     def _migration_044_derived_analysis_recording_step_status_wide_view(self) -> None:
         """Refresh recording_step_status_wide to expose derived-analysis stages."""
+
+        self._migration_020_recording_step_status_wide_view()
+
+    def _migration_045_tail_behavior_recording_step_status_wide_view(self) -> None:
+        """Refresh recording_step_status_wide to expose tail/classifier stages."""
 
         self._migration_020_recording_step_status_wide_view()
 

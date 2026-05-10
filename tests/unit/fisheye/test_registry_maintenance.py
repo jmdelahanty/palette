@@ -990,6 +990,43 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         },
     )
 
+    tail_kinematics_parent = analysis.add_group("tail_kinematics_runs", attrs={"latest": "tail_001"})
+    tail_kinematics_parent.add_group(
+        "tail_001",
+        attrs={
+            "created_utc": "2026-02-15T01:02:20+00:00",
+            "method": "tail_kinematics_from_subject_shape",
+            "source_subject_shape_run": "shape_001",
+        },
+    )
+
+    tail_posture_parent = analysis.add_group("tail_posture_view_runs", attrs={"latest": "posture_001"})
+    tail_posture_parent.add_group(
+        "posture_001",
+        attrs={
+            "created_utc": "2026-02-15T01:02:40+00:00",
+            "method": "tail_posture_view_from_subject_shape",
+            "view_family": "megabouts_compatible",
+            "source_subject_shape_run": "shape_001",
+            "source_tail_kinematics_run": "tail_001",
+        },
+    )
+
+    bout_classification_parent = analysis.add_group("bout_classification_runs", attrs={"latest": "classification_001"})
+    bout_classification_parent.add_group(
+        "classification_001",
+        attrs={
+            "created_utc": "2026-02-15T01:02:50+00:00",
+            "method": "megabouts_classifier_adapter",
+            "classifier_family": "megabouts",
+            "classifier_name": "megabouts_classifier",
+            "source_mode": "palette_bouts",
+            "source_tail_posture_view_run": "posture_001",
+            "source_track_kinematics_run": "tk_001",
+            "source_swim_bout_run": "bouts_001",
+        },
+    )
+
     stimulus_response_parent = analysis.add_group(
         "stimulus_response_runs",
         attrs={"latest": "response_001"},
@@ -2504,7 +2541,10 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
         ("dataset_a", "recording_a", "bout_kinematics", "ok", "bk_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.300000+00:00"),
         ("dataset_a", "recording_a", "eye_angles", "ok", "eye_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.400000+00:00"),
         ("dataset_a", "recording_a", "subject_shape", "ok", "shape_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.500000+00:00"),
-        ("dataset_a", "recording_a", "stimulus_response", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:10.600000+00:00"),
+        ("dataset_a", "recording_a", "tail_kinematics", "ok", "tail_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.600000+00:00"),
+        ("dataset_a", "recording_a", "tail_posture_view", "ok", "posture_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.700000+00:00"),
+        ("dataset_a", "recording_a", "bout_classification", "ok", "classification_001", None, None, None, None, "unit_test", "2026-02-23T01:00:10.800000+00:00"),
+        ("dataset_a", "recording_a", "stimulus_response", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:10.900000+00:00"),
         (
             "dataset_a",
             "recording_a",
@@ -2585,6 +2625,9 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
     assert row["Bout Kinematics"] == "OK"
     assert row["Eye Angles"] == "OK"
     assert row["Subject Shape"] == "OK"
+    assert row["Tail Kinematics"] == "OK"
+    assert row["Tail Posture View"] == "OK"
+    assert row["Bout Classification"] == "OK"
     assert row["Stimulus Response"] == "MISS"
     assert row["Stimulus"] == "3 (OK)"
     assert row["Calib"] == "OK"
@@ -8576,13 +8619,13 @@ def test_backfill_recording_step_status_dry_run_no_write(
         zarr_use_filter="all",
     )
     assert summary["datasets_scanned"] == 1
-    assert summary["rows_inserted"] == 27
+    assert summary["rows_inserted"] == 30
     assert summary["rows_updated"] == 0
     assert summary["rows_skipped"] == 0
 
     rows_by_status = summary["rows_by_status"]
     assert isinstance(rows_by_status, dict)
-    assert int(rows_by_status["ok"]) == 27
+    assert int(rows_by_status["ok"]) == 30
     assert int(rows_by_status["missing"]) == 0
     assert int(rows_by_status["absent"]) == 0
     assert int(rows_by_status["na"]) == 0
@@ -8627,10 +8670,10 @@ def test_backfill_recording_step_status_apply_and_convergent(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert applied["rows_inserted"] == 27
+    assert applied["rows_inserted"] == 30
     assert applied["rows_updated"] == 0
     assert applied["rows_skipped"] == 0
-    assert applied["history_rows_inserted"] == 27
+    assert applied["history_rows_inserted"] == 30
 
     rows = registry.conn.execute(
         """
@@ -8641,7 +8684,7 @@ def test_backfill_recording_step_status_apply_and_convergent(
         """,
         ("dataset_step_a",),
     ).fetchall()
-    assert len(rows) == 27
+    assert len(rows) == 30
     by_step = {str(row["step_name"]): row for row in rows}
     assert set(by_step.keys()) == {
         "background",
@@ -8670,6 +8713,9 @@ def test_backfill_recording_step_status_apply_and_convergent(
         "bout_kinematics",
         "eye_angles",
         "subject_shape",
+        "tail_kinematics",
+        "tail_posture_view",
+        "bout_classification",
         "stimulus_response",
     }
     assert all(str(row["status"]) == "ok" for row in rows)
@@ -8719,6 +8765,12 @@ def test_backfill_recording_step_status_apply_and_convergent(
     assert str(by_step["eye_angles"]["run_name"]) == "eye_angle_001"
     assert str(by_step["eye_angles"]["method"]) == "eye_angle_analysis.v7"
     assert str(by_step["subject_shape"]["run_name"]) == "shape_001"
+    assert str(by_step["tail_kinematics"]["run_name"]) == "tail_001"
+    assert str(by_step["tail_kinematics"]["method"]) == "tail_kinematics_from_subject_shape"
+    assert str(by_step["tail_posture_view"]["run_name"]) == "posture_001"
+    assert str(by_step["tail_posture_view"]["method"]) == "tail_posture_view_from_subject_shape"
+    assert str(by_step["bout_classification"]["run_name"]) == "classification_001"
+    assert str(by_step["bout_classification"]["method"]) == "megabouts_classifier_adapter"
     assert str(by_step["stimulus_response"]["run_name"]) == "response_001"
     assert str(by_step["subject_masks"]["run_name"]) == "subject_masks_001"
     assert str(by_step["subject_masks"]["method"]) == "subject_mask_threshold_lr_v1"
@@ -8771,14 +8823,14 @@ def test_backfill_recording_step_status_apply_and_convergent(
     )
     assert repeat["rows_inserted"] == 0
     assert repeat["rows_updated"] == 0
-    assert repeat["rows_skipped"] == 27
+    assert repeat["rows_skipped"] == 30
     assert repeat["history_rows_inserted"] == 0
 
     history_count = registry.conn.execute(
         "SELECT COUNT(*) AS n FROM recording_step_status_history WHERE dataset_id = ?;",
         ("dataset_step_a",),
     ).fetchone()
-    assert history_count is not None and int(history_count["n"]) == 27
+    assert history_count is not None and int(history_count["n"]) == 30
     registry.close()
 
 
@@ -9180,7 +9232,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=("recording_scope_a",),
         zarr_use_filter="all",
     )
-    assert by_recording["rows_inserted"] == 27
+    assert by_recording["rows_inserted"] == 30
     assert by_recording["datasets_skipped_recording_filter"] == 1
 
     by_use = _backfill_recording_step_status(
@@ -9190,7 +9242,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="analysis",
     )
-    assert by_use["rows_inserted"] == 27
+    assert by_use["rows_inserted"] == 30
     assert by_use["datasets_skipped_zarr_use_filter"] == 1
 
     by_scope = _backfill_recording_step_status(
@@ -9200,7 +9252,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert by_scope["rows_inserted"] == 27
+    assert by_scope["rows_inserted"] == 30
     assert by_scope["datasets_skipped_path"] == 1
 
     current_count = registry.conn.execute(

@@ -10,7 +10,7 @@ This pass checked docs and code after the first derived-analysis registry/status
 slice. The focus was stale claims caused by:
 
 - canonical stage-catalog adoption in registry, pipeline, and launcher code
-- first-pass derived-analysis `recording_step_status` coverage
+- derived-analysis `recording_step_status` coverage
 - Megabouts classifier and bout-classification run implementation
 
 ## Confirmed Current State
@@ -23,6 +23,9 @@ slice. The focus was stale claims caused by:
   - `bout_kinematics`
   - `eye_angles`
   - `subject_shape`
+  - `tail_kinematics`
+  - `tail_posture_view`
+  - `bout_classification`
   - `stimulus_response`
 - `src/fisheye/registry/step_cascade.py` derives invalidation edges from the
   catalog.
@@ -31,7 +34,7 @@ slice. The focus was stale claims caused by:
 - `src/fisheye/cli/interactive_launcher.py` exposes canonical IDs for launcher
   stage rows while preserving UI command names.
 - `src/fisheye/registry/maintenance.py` backfills presence-level status rows
-  for the six derived-analysis families above.
+  for the derived-analysis families above.
 - `recording_step_status_wide` and `src/fisheye/status_page/query.py` expose
   those derived-analysis stages.
 - `analysis/bout_classification_runs` is implemented and documented by
@@ -61,12 +64,6 @@ slice. The focus was stale claims caused by:
 
 These are not simple doc corrections; they need design or code decisions.
 
-- Tail-derived registry/status coverage is incomplete. Current lineage audit
-  utilities know about:
-  - `analysis/tail_kinematics_runs`
-  - `analysis/tail_posture_view_runs`
-  - `analysis/bout_classification_runs`
-  but the stage catalog and registry/status backfill do not yet expose them.
 - Current derived-analysis registry coverage is presence-level. It detects
   whether a latest run exists, but it does not yet compare stored source refs
   or lineage fingerprints against current upstream run selections.
@@ -82,18 +79,12 @@ These are not simple doc corrections; they need design or code decisions.
 
 ## Recommended Next Slice
 
-Define a tail/behavior-classification registry slice:
+Implement semantic freshness for derived runs:
 
-1. Add catalog stages for `tail_kinematics`, `tail_posture_view`, and
-   `bout_classification`.
-2. Decide invalidation edges:
-   - `subject_shape -> tail_kinematics`
-   - `subject_shape -> tail_posture_view`
-   - `tail_kinematics -> tail_posture_view` when a posture view records a
-     tail-kinematics comparison source
-   - `tail_posture_view`, `track_kinematics`, and `swim_bouts` ->
-     `bout_classification`
-3. Extend registry backfill and wide-status display only after those edges are
-   agreed.
-4. Then implement semantic freshness for derived runs by comparing source refs
-   and lineage fingerprints.
+1. Resolve current upstream latest run IDs/revisions for each derived family.
+2. Compare stored source refs and lineage fingerprints against those upstream
+   selections.
+3. Project stale/unverifiable source status into `recording_step_status` detail
+   JSON and status-page display.
+4. Add writer-side `recording_step_status` upserts after the freshness semantics
+   are settled.
