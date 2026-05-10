@@ -10,6 +10,10 @@ selectability.
 This is not a migration plan for existing runs. It is a design constraint for
 new schemas and v2 rewrites.
 
+For the current writer-by-writer compact-layout status and migration priority
+list, see
+[analysis_writer_compact_layout_inventory.md](analysis_writer_compact_layout_inventory.md).
+
 ## Current Audit Snapshot
 
 Read-only audit of `/nvme1/recordings` on 2026-05-08:

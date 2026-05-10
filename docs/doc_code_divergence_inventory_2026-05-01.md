@@ -9,6 +9,70 @@ purpose: One-time snapshot of drift between contract/design docs and the code th
 
 This is a snapshot, not infrastructure. Each item names a doc claim and the code reality. No fixes are proposed here beyond a "Resolution direction" hint. The strategy doc that follows this one is where reconciliation happens.
 
+## 2026-05-09 Read-Only Recheck Notes
+
+This section records a later read-only comparison against the current repository
+state. It does not rewrite the original 2026-05-01 inventory; it marks which
+high-signal findings still look current and which have become partially stale.
+
+2026-05-10 follow-up: the first canonical-stage-catalog slice has now landed,
+including registry consumers of that catalog. Treat the stage-vocabulary item
+below as partially addressed; derived-analysis registry coverage and several
+other provenance/status gaps remain open.
+
+Still confirmed:
+
+- The stage/DAG split is still real. `pipeline.py`,
+  `interactive_launcher.py`, `step_cascade.py`, and registry
+  `RECORDING_STEP_NAMES` still use different vocabularies and dependency
+  graphs.
+- Derived analysis runs are still mostly outside registry staleness tracking:
+  no registry/cascade coverage was found for `subject_shape`, `tail_kinematics`,
+  `eye_angle`, `swim_bout`, `bout_kinematics`, or `stimulus_response` run
+  families.
+- The registry wide status view still omits `subject_masks`,
+  `refined_subject_masks`, and `subject_mask_tuning`, even though those steps
+  are registered elsewhere.
+- `stimulus_runs` and `speed_runs` still sit outside the stronger derived-run
+  provenance discipline. `import_stimulus_to_zarr.py` has gained richer
+  canonical step metadata, but the run itself is still not contract-compliant
+  as a derived analysis run.
+- Required-attribute drift remains real. Examples still observed:
+  `bout_kinematics` lacks top-level `created_at_utc`; `eye_angle` uses flat
+  source attrs rather than a unified `source_refs`; `track_kinematics` keeps
+  most schema metadata on nested groups rather than at run root.
+- Root-level one-time migration logs such as `ENUM_*.md` and
+  `CRITICAL_REIMPORT_NEEDED.md` still exist at repo root and can read like
+  active references.
+
+Partially stale or changed since the snapshot:
+
+- The "schema_version is checked in exactly one place" finding is now stale.
+  `bout_classification_runs.py` also gates on `schema_version`, and export /
+  manifest utilities read schema versions. The broader concern remains: most
+  schema versions are still informational rather than enforced reader gates.
+- Body-frame metadata discipline improved for eye-angle runs. `eye_angle` now
+  uses `build_keypoint_body_frame_contract_attrs`, so it writes canonical
+  estimator version, coordinate space, angle convention, and source refs.
+  `tail_kinematics` still uses non-canonical names such as
+  `body_frame_convention` and `body_frame_source`.
+- The "latest pointer atomicity is nowhere" theme is now stale for
+  `bout_kinematics`: that writer now marks runs `running` / `complete` /
+  `failed`, records visualization-artifact failures, and only updates parent
+  `latest` after requested artifacts succeed. The global concern remains
+  because many other writers still update `latest` ad hoc.
+- The open question about cited pipeline modules being missing is resolved for
+  the checked module list: all six cited modules existed at the expected paths
+  during the 2026-05-09 recheck.
+
+Practical interpretation:
+
+- Treat this document as a useful hypothesis map, not a literal fix list.
+- The highest-leverage strategy items still look like: define one canonical
+  stage vocabulary plus translations; decide whether derived analysis runs
+  belong in registry staleness tracking; normalize run-root provenance attrs
+  for new analysis writers; and archive or close out stale migration-log docs.
+
 ## Summary
 
 | Severity        | Count |

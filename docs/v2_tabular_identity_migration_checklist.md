@@ -21,6 +21,9 @@ This checklist consolidates the v2 direction for Palette analysis archives:
 This is not a migration script. It is the implementation order and contract
 checklist for future code changes.
 
+For a writer-by-writer status inventory and migration priority list, see
+[analysis_writer_compact_layout_inventory.md](analysis_writer_compact_layout_inventory.md).
+
 ## Archive, Collection, And Project Model
 
 Do not make a SLEAP-style mutable physical project container the canonical
@@ -316,6 +319,7 @@ Family-specific changes:
 
 - [current_pipeline_contract.md](current_pipeline_contract.md)
 - [analysis_zarr_object_count_schema_direction.md](analysis_zarr_object_count_schema_direction.md)
+- [analysis_writer_compact_layout_inventory.md](analysis_writer_compact_layout_inventory.md)
 - [refined_detect_sparse_instances_schema.md](refined_detect_sparse_instances_schema.md)
 - [refined_detect_row_identity_contract.md](refined_detect_row_identity_contract.md)
 - [realtime_sparse_row_index_contract.md](realtime_sparse_row_index_contract.md)
