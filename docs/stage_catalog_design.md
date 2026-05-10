@@ -115,6 +115,10 @@ First follow-up slice completed on 2026-05-10:
     is declared.
   - `bout_classification_runs` must point at the current tail posture view,
     track kinematics, and swim-bout runs.
+- Tail behavior freshness states render distinctly in the wide status view:
+  `STALE` means a stored source ref no longer matches the current upstream run;
+  `UNVER` means the source ref cannot be verified because source attrs are
+  missing or the expected upstream source is unavailable.
 - `recording_step_status_wide` and the status-page query layer expose those
   derived-analysis stages.
 

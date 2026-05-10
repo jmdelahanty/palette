@@ -168,6 +168,8 @@ def _blocking_expr(available_columns: set[str]) -> str:
         clauses.append(
             "("
             f"UPPER(COALESCE(CAST({quoted} AS TEXT), '')) LIKE 'MISS%'"
+            f" OR UPPER(COALESCE(CAST({quoted} AS TEXT), '')) LIKE 'STALE%'"
+            f" OR UPPER(COALESCE(CAST({quoted} AS TEXT), '')) LIKE 'UNVER%'"
             f" OR UPPER(COALESCE(CAST({quoted} AS TEXT), '')) LIKE 'ERR%'"
             f" OR UPPER(COALESCE(CAST({quoted} AS TEXT), '')) LIKE 'FAIL%'"
             ")"

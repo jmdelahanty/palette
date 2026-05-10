@@ -84,6 +84,12 @@ function statusClassForText(text) {
   if (upper.startsWith("MISS")) {
     return "status-miss";
   }
+  if (upper.startsWith("STALE")) {
+    return "status-stale";
+  }
+  if (upper.startsWith("UNVER")) {
+    return "status-unver";
+  }
   if (upper.startsWith("ERR") || upper.startsWith("FAIL")) {
     return "status-error";
   }

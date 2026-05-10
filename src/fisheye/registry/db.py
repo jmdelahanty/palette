@@ -43,6 +43,22 @@ def _recording_tuning_ok_count_sql(alias: str) -> str:
     return "\n                        + ".join(terms) if terms else "0"
 
 
+def _recording_step_status_display_sql(status_expr: str, details_expr: str) -> str:
+    return f"""
+                    CASE
+                        WHEN {status_expr} = 'ok' THEN 'OK'
+                        WHEN {status_expr} = 'na' THEN 'N/A'
+                        WHEN {status_expr} = 'error' THEN 'ERR'
+                        WHEN json_extract({details_expr}, '$.source_freshness_state') = 'stale' THEN 'STALE'
+                        WHEN json_extract({details_expr}, '$.source_freshness_state') IN (
+                            'missing_source_attrs',
+                            'upstream_source_unavailable'
+                        ) THEN 'UNVER'
+                        ELSE 'MISS'
+                    END
+    """.strip()
+
+
 @dataclass(frozen=True)
 class RegistryPaths:
     path: Path
@@ -2829,6 +2845,11 @@ class Registry:
                 45,
                 "tail_behavior_recording_step_status_wide_view",
                 self._migration_045_tail_behavior_recording_step_status_wide_view,
+            ),
+            (
+                46,
+                "source_freshness_recording_step_status_wide_view",
+                self._migration_046_source_freshness_recording_step_status_wide_view,
             ),
         ]
 
@@ -6649,24 +6670,9 @@ class Registry:
                     WHEN r.subject_shape_status = 'error' THEN 'ERR'
                     ELSE 'MISS'
                 END AS "Subject Shape",
-                CASE
-                    WHEN r.tail_kinematics_status = 'ok' THEN 'OK'
-                    WHEN r.tail_kinematics_status = 'na' THEN 'N/A'
-                    WHEN r.tail_kinematics_status = 'error' THEN 'ERR'
-                    ELSE 'MISS'
-                END AS "Tail Kinematics",
-                CASE
-                    WHEN r.tail_posture_view_status = 'ok' THEN 'OK'
-                    WHEN r.tail_posture_view_status = 'na' THEN 'N/A'
-                    WHEN r.tail_posture_view_status = 'error' THEN 'ERR'
-                    ELSE 'MISS'
-                END AS "Tail Posture View",
-                CASE
-                    WHEN r.bout_classification_status = 'ok' THEN 'OK'
-                    WHEN r.bout_classification_status = 'na' THEN 'N/A'
-                    WHEN r.bout_classification_status = 'error' THEN 'ERR'
-                    ELSE 'MISS'
-                END AS "Bout Classification",
+                {_recording_step_status_display_sql("r.tail_kinematics_status", "r.tail_kinematics_details_json")} AS "Tail Kinematics",
+                {_recording_step_status_display_sql("r.tail_posture_view_status", "r.tail_posture_view_details_json")} AS "Tail Posture View",
+                {_recording_step_status_display_sql("r.bout_classification_status", "r.bout_classification_details_json")} AS "Bout Classification",
                 CASE
                     WHEN r.stimulus_response_status = 'ok' THEN 'OK'
                     WHEN r.stimulus_response_status = 'na' THEN 'N/A'
@@ -9548,6 +9554,11 @@ class Registry:
 
     def _migration_045_tail_behavior_recording_step_status_wide_view(self) -> None:
         """Refresh recording_step_status_wide to expose tail/classifier stages."""
+
+        self._migration_020_recording_step_status_wide_view()
+
+    def _migration_046_source_freshness_recording_step_status_wide_view(self) -> None:
+        """Refresh recording_step_status_wide to display source freshness states."""
 
         self._migration_020_recording_step_status_wide_view()
 

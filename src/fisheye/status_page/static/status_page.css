@@ -172,6 +172,12 @@ header h1 {
   font-weight: 700;
 }
 
+.status-stale,
+.status-unver {
+  color: var(--warn);
+  font-weight: 700;
+}
+
 .status-error {
   color: var(--warn);
   font-weight: 700;

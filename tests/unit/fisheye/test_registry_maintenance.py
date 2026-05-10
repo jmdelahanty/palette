@@ -2641,6 +2641,113 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
     registry.close()
 
 
+def test_recording_step_status_wide_view_renders_source_freshness_states(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_stale",
+        session_uuid="session_stale",
+        zarr_path=tmp_path / "recording_stale_analysis.zarr",
+        recording_id="recording_stale",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    def _json_text(payload: Dict[str, object]) -> str:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    rows = [
+        (
+            "dataset_stale",
+            "recording_stale",
+            "tail_kinematics",
+            "missing",
+            None,
+            None,
+            None,
+            None,
+            _json_text(
+                {
+                    "reason": "stale_vs_latest_subject_shape",
+                    "source_freshness_state": "stale",
+                }
+            ),
+            "unit_test",
+            "2026-02-23T02:00:00+00:00",
+        ),
+        (
+            "dataset_stale",
+            "recording_stale",
+            "tail_posture_view",
+            "missing",
+            None,
+            None,
+            None,
+            None,
+            _json_text(
+                {
+                    "reason": "upstream_tail_kinematics_missing",
+                    "source_freshness_state": "upstream_source_unavailable",
+                }
+            ),
+            "unit_test",
+            "2026-02-23T02:00:01+00:00",
+        ),
+        (
+            "dataset_stale",
+            "recording_stale",
+            "bout_classification",
+            "missing",
+            None,
+            None,
+            None,
+            None,
+            _json_text(
+                {
+                    "reason": "missing_source_run_attrs",
+                    "source_freshness_state": "missing_source_attrs",
+                }
+            ),
+            "unit_test",
+            "2026-02-23T02:00:02+00:00",
+        ),
+    ]
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id,
+            recording_id,
+            step_name,
+            status,
+            run_name,
+            method,
+            coverage_pct,
+            review_status_json,
+            details_json,
+            source,
+            updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        rows,
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT "Tail Kinematics", "Tail Posture View", "Bout Classification"
+        FROM recording_step_status_wide
+        WHERE "Recording" = ?;
+        """,
+        ("recording_stale",),
+    ).fetchone()
+
+    assert row is not None
+    assert row["Tail Kinematics"] == "STALE"
+    assert row["Tail Posture View"] == "UNVER"
+    assert row["Bout Classification"] == "UNVER"
+    registry.close()
+
+
 def test_recording_step_status_wide_view_tracks_warn_on_unassigned_rows(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.upsert_dataset(

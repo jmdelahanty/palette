@@ -43,6 +43,9 @@ slice. The focus was stale claims caused by:
     `track_kinematics`, and `swim_bouts`
 - `recording_step_status_wide` and `src/fisheye/status_page/query.py` expose
   those derived-analysis stages.
+- Tail behavior freshness is display-visible in `recording_step_status_wide`:
+  stale source refs render as `STALE`; unverifiable or missing source refs
+  render as `UNVER`.
 - `analysis/bout_classification_runs` is implemented and documented by
   `docs/bout_classification_runs_contract.md`.
 
@@ -92,7 +95,7 @@ Broaden semantic freshness for derived runs:
 1. Extend source-ref freshness to the remaining derived-analysis families.
 2. Add source revision or lineage-fingerprint comparison where writers expose
    those fields.
-3. Decide whether status-page display should distinguish stale from missing
-   instead of both rendering as `MISS`.
+3. Extend `STALE`/`UNVER` display semantics beyond tail behavior once other
+   derived families gain source freshness checks.
 4. Add writer-side `recording_step_status` upserts after the freshness
    semantics are settled.

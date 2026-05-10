@@ -377,6 +377,50 @@ def test_query_status_wide_does_not_treat_block_prefixed_cells_as_blocking(tmp_p
     assert {row["Recording"] for row in filtered_blocking["rows"]} == {"rec-a", "rec-b"}
 
 
+def test_query_status_wide_treats_source_freshness_cells_as_blocking(tmp_path: Path) -> None:
+    registry_path = tmp_path / "palette_registry.sqlite"
+    _create_registry_fixture(registry_path)
+
+    conn = sqlite3.connect(registry_path)
+    try:
+        conn.execute(
+            """
+            UPDATE recording_step_status_wide
+            SET "Track" = ?
+            WHERE "Recording" = ?;
+            """,
+            ("STALE", "rec-c"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = query_status_summary(registry_path)
+    filtered_blocking = query_status_wide(registry_path, only_blocking=True, limit=20, offset=0)
+
+    assert summary["wide_rows_blocking"] == 3
+    assert filtered_blocking["total_rows"] == 3
+    assert {row["Recording"] for row in filtered_blocking["rows"]} == {"rec-a", "rec-b", "rec-c"}
+
+    conn = sqlite3.connect(registry_path)
+    try:
+        conn.execute(
+            """
+            UPDATE recording_step_status_wide
+            SET "Track" = ?
+            WHERE "Recording" = ?;
+            """,
+            ("UNVER", "rec-c"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    filtered_unver = query_status_wide(registry_path, only_blocking=True, limit=20, offset=0)
+    assert filtered_unver["total_rows"] == 3
+    assert {row["Recording"] for row in filtered_unver["rows"]} == {"rec-a", "rec-b", "rec-c"}
+
+
 def test_query_dataset_status_and_history(tmp_path: Path) -> None:
     registry_path = tmp_path / "palette_registry.sqlite"
     _create_registry_fixture(registry_path)

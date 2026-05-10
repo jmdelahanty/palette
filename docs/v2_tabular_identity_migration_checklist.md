@@ -283,9 +283,10 @@ Family-specific changes:
       kinematics, eye angles, subject shape, tail kinematics, tail posture
       views, bout classification, and stimulus response. Remaining work is
       broader semantic freshness: tail behavior run families now compare stored
-      source refs against current upstream selections, but the other derived
-      run families, source revisions/fingerprints, and export propagation still
-      need the same treatment.
+      source refs against current upstream selections and render `STALE`/`UNVER`
+      in the wide status view, but the other derived run families, source
+      revisions/fingerprints, and export propagation still need the same
+      treatment.
 - [ ] Registry rows should remain rebuildable indexes over canonical Zarr
       archives and manifests, not the authoritative source of analysis truth.
 - [ ] Parquet sidecars may be durable analytics products, but canonical Zarr
