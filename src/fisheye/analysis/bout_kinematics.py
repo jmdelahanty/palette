@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
+import matplotlib
+
+# Bout-kinematics plot artifacts are persisted PNG bytes, not interactive GUI
+# windows. Force a non-GUI backend so workstation display settings cannot make
+# CLI artifact generation depend on Tk/Qt teardown behavior.
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
@@ -2611,6 +2617,7 @@ def compute_and_save_bout_kinematics(
         del parent[run_name]
 
     run_group = parent.create_group(run_name)
+    run_group.attrs["status"] = "running"
     created_at_utc = datetime.now(timezone.utc).isoformat()
     source_refs = {
         "zarr_path": str(zarr_path),
@@ -2853,7 +2860,6 @@ def compute_and_save_bout_kinematics(
 
     run_group.attrs["heading_levels"] = written_levels
     run_group.attrs["analysis_levels"] = written_analysis_levels
-    parent.attrs["latest"] = run_name
 
     git_info = get_git_info()
     env_info = get_environment_info(disk_path=str(zarr_path), capture_env_vars=False)
@@ -2877,22 +2883,31 @@ def compute_and_save_bout_kinematics(
     write_best_effort_run_lineage_attrs(run_group, run_family="bout_kinematics_run")
 
     if write_visualizations:
-        write_bout_kinematics_visualization_artifacts(
-            zarr_path=zarr_path,
-            run_group=run_group,
-            run_name=str(run_name),
-            metrics_by_level=metrics_by_level,
-            movement_metrics=movement_metrics,
-            eye_gaze_metrics=eye_gaze_metrics,
-            source_refs=source_refs,
-            parameters=parameters,
-            heading_levels=written_levels,
-            default_heading_level=default_heading_level,
-            source_speed_level=source_speed_level,
-            bins=int(visualization_bins),
-            artifact_dpi=int(visualization_dpi),
-            command=command,
-        )
+        try:
+            write_bout_kinematics_visualization_artifacts(
+                zarr_path=zarr_path,
+                run_group=run_group,
+                run_name=str(run_name),
+                metrics_by_level=metrics_by_level,
+                movement_metrics=movement_metrics,
+                eye_gaze_metrics=eye_gaze_metrics,
+                source_refs=source_refs,
+                parameters=parameters,
+                heading_levels=written_levels,
+                default_heading_level=default_heading_level,
+                source_speed_level=source_speed_level,
+                bins=int(visualization_bins),
+                artifact_dpi=int(visualization_dpi),
+                command=command,
+            )
+        except Exception as exc:
+            run_group.attrs["status"] = "failed"
+            run_group.attrs["failure_stage"] = "bout_kinematics_visualization"
+            run_group.attrs["failure_reason"] = f"{type(exc).__name__}: {exc}"
+            raise
+
+    run_group.attrs["status"] = "complete"
+    parent.attrs["latest"] = run_name
 
     return str(run_name)
 

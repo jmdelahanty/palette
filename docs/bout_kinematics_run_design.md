@@ -377,6 +377,7 @@ analysis/bout_kinematics_runs/<run_name>/
     schema_version: 7
     method: "heading_window_and_within_bout_metrics"
     method_version: "bout_kinematics.v7"
+    status: "running" | "complete" | "failed"
     created_at_utc
     row_axis: "swim_bout_rows"
     source_refs:
@@ -404,6 +405,8 @@ analysis/bout_kinematics_runs/<run_name>/
       source_eye_angle_schema_version           optional
       source_eye_angle_family                   optional
       source_eye_angle_arrays                   optional
+    failure_stage                               optional, when status == "failed"
+    failure_reason                              optional, when status == "failed"
     parameters:
       default_heading_level: "heading_smoothed"
       heading_levels: ["heading_smoothed", "heading_raw"]
@@ -687,6 +690,19 @@ Recommended failure tags:
 
 Floating-point metrics may use `NaN`, but consumers should read validity arrays
 and reason tags rather than infer failure state from `NaN` alone.
+
+## Completion And Visualization Failure Policy
+
+`analysis/bout_kinematics_runs.attrs["latest"]` should only point at a run after
+the writer has completed all requested outputs. This includes optional
+`--write-zarr-artifacts` output. A failure while writing optional visualization
+artifacts may leave useful numeric tables in the run group, but the run must be
+marked `status = "failed"` and must not be promoted to `latest`.
+
+Persisted visualization artifacts are non-interactive PNG/spec products. The
+writer should use a non-GUI matplotlib backend so CLI artifact generation is not
+coupled to workstation display state, Tk/Qt availability, or GUI teardown
+behavior.
 
 ## Naming Policy For `_runs`
 

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import zarr
 
+import fisheye.analysis.bout_kinematics as bout_kinematics_module
 from fisheye.analysis.bout_kinematics import (
     compute_and_save_bout_kinematics,
     normalize_heading_level,
@@ -151,6 +152,7 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     run = parent[run_name]
 
     assert parent.attrs["latest"] == "bout_kinematics_1"
+    assert run.attrs["status"] == "complete"
     assert run.attrs["schema_id"] == "analysis.bout_kinematics_runs"
     assert run.attrs["schema_version"] == 7
     assert run.attrs["method_version"] == "bout_kinematics.v7"
@@ -551,6 +553,40 @@ def test_compute_and_save_bout_kinematics_requires_overwrite(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="Use --overwrite"):
         compute_and_save_bout_kinematics(**kwargs)
     compute_and_save_bout_kinematics(**kwargs, overwrite=True)
+
+
+def test_compute_and_save_bout_kinematics_does_not_publish_latest_when_visualization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = _make_archive(tmp_path)
+
+    def _fail_visualization_artifacts(*_args, **_kwargs) -> None:
+        raise RuntimeError("synthetic plot failure")
+
+    monkeypatch.setattr(
+        bout_kinematics_module,
+        "write_bout_kinematics_visualization_artifacts",
+        _fail_visualization_artifacts,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic plot failure"):
+        compute_and_save_bout_kinematics(
+            zarr_path,
+            run_name="bout_kinematics_failed_plot",
+            track_kinematics_run="tk_1",
+            track_id=0,
+            swim_bout_run="bouts_1",
+            speed_level="filtered",
+            write_visualizations=True,
+        )
+
+    parent = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"]
+    assert parent.attrs.get("latest") is None
+    run = parent["bout_kinematics_failed_plot"]
+    assert run.attrs["status"] == "failed"
+    assert run.attrs["failure_stage"] == "bout_kinematics_visualization"
+    assert "synthetic plot failure" in run.attrs["failure_reason"]
 
 
 def test_compute_and_save_bout_kinematics_interbout_epoch_mode(tmp_path: Path) -> None:

@@ -29,6 +29,12 @@ Required behavior:
 - Maintain the run-local `attrs["visualizations"]` manifest so registry,
   CLI, Crimson, marimo, and reports can discover available plots without
   knowing stage-specific filenames.
+- Use a non-GUI rendering backend for CLI writers. Persisted artifacts should
+  not depend on display availability or GUI toolkit teardown behavior.
+- Promote a run to the parent `latest` pointer only after all requested
+  visualization artifacts have been written successfully. If artifact writing
+  fails after numeric arrays were written, mark the run failed rather than
+  publishing it as the latest complete candidate.
 - Prefer one small canonical overview PNG per run first. Add more snapshots
   only when they answer distinct QC questions.
 - Prefer an interactive plot spec beside the PNG when the review naturally
