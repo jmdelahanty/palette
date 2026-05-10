@@ -27,6 +27,7 @@ from fisheye.analysis.chaser_state_interpolator import (
     write_columnar_dataset,
 )
 from fisheye.analysis.detect_bouts_multi_level import normalize_speed_level
+from fisheye.analysis.eye_angle_io import EyeAngleIOError, load_eye_gaze_frame_series
 from fisheye.analysis.swim_bout_io import load_swim_bout_tables
 from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
@@ -952,48 +953,6 @@ def _resolve_track_run(
     return parent[scope][run_name], str(run_name), run_path, str(scope)
 
 
-def _resolve_eye_angle_run(
-    root: zarr.Group,
-    eye_angle_run: str,
-) -> tuple[zarr.Group, str, str]:
-    parent = root.get("analysis/eye_angle_runs")
-    if parent is None:
-        raise ValueError("No analysis/eye_angle_runs group found.")
-
-    spec = str(eye_angle_run).strip().strip("/")
-    parts = spec.split("/")
-    if spec.startswith("analysis/eye_angle_runs/") and len(parts) >= 3:
-        run_name = parts[2]
-    else:
-        run_name = parent.attrs.get("latest") if spec == "latest" else spec
-
-    if not run_name or run_name not in parent:
-        raise ValueError(f"Eye-angle run {eye_angle_run!r} not found.")
-
-    run_path = f"analysis/eye_angle_runs/{run_name}"
-    return parent[run_name], str(run_name), run_path
-
-
-def _aligned_frame_values(
-    array: zarr.Array,
-    frames: np.ndarray,
-    *,
-    dtype: np.dtype | type,
-    source_path: str,
-) -> np.ndarray:
-    frame_indices = np.asarray(frames, dtype=np.int64)
-    if frame_indices.size == 0:
-        return np.asarray([], dtype=dtype)
-    if np.any(frame_indices < 0):
-        raise ValueError(f"{source_path} cannot be aligned to negative frame indices.")
-    if int(np.max(frame_indices)) >= int(array.shape[0]):
-        raise ValueError(
-            f"{source_path} length {array.shape[0]} cannot cover requested frame "
-            f"{int(np.max(frame_indices))}."
-        )
-    return np.asarray(array[frame_indices], dtype=dtype)
-
-
 def _load_eye_gaze_frame_series(
     root: zarr.Group,
     *,
@@ -1001,77 +960,16 @@ def _load_eye_gaze_frame_series(
     eye_angle_family: str,
     frames: np.ndarray,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    family = str(eye_angle_family).strip()
-    if family not in EYE_ANGLE_FAMILIES:
-        expected = ", ".join(EYE_ANGLE_FAMILIES)
-        raise ValueError(f"Unsupported eye_angle_family {eye_angle_family!r}; expected one of: {expected}")
-
-    run_group, run_name, run_path = _resolve_eye_angle_run(root, eye_angle_run)
-    schema_version = int(run_group.attrs.get("schema_version", 0) or 0)
-    if schema_version < 2:
-        raise ValueError(
-            f"Eye-angle run {run_name!r} has schema_version={schema_version}; "
-            "bout eye-gaze summaries require schema v2 frame-level gaze arrays."
+    try:
+        return load_eye_gaze_frame_series(
+            root,
+            eye_angle_run=eye_angle_run,
+            eye_angle_family=eye_angle_family,
+            frames=frames,
+            allowed_families=EYE_ANGLE_FAMILIES,
         )
-
-    frame_group = run_group.get("angles/frame")
-    if frame_group is None:
-        raise ValueError(f"Eye-angle run {run_name!r} is missing angles/frame outputs.")
-
-    required_arrays = {
-        "left_gaze_deg": "left_gaze_deg",
-        "right_gaze_deg": "right_gaze_deg",
-        "vergence_gaze_deg": "vergence_gaze_deg",
-    }
-    series: dict[str, np.ndarray] = {}
-    source_arrays: dict[str, str] = {}
-    for key, array_name in required_arrays.items():
-        if array_name not in frame_group:
-            raise ValueError(f"Eye-angle run {run_name!r} is missing angles/frame/{array_name}.")
-        source_path = f"{run_path}/angles/frame/{array_name}"
-        series[key] = _aligned_frame_values(
-            frame_group[array_name],
-            frames,
-            dtype=np.float64,
-            source_path=source_path,
-        )
-        source_arrays[key] = source_path
-
-    signed_name = "vergence_gaze_signed_deg"
-    if signed_name in frame_group:
-        source_path = f"{run_path}/angles/frame/{signed_name}"
-        series[signed_name] = _aligned_frame_values(
-            frame_group[signed_name],
-            frames,
-            dtype=np.float64,
-            source_path=source_path,
-        )
-        source_arrays[signed_name] = source_path
-    else:
-        series[signed_name] = np.full(frames.shape[0], float("nan"), dtype=np.float64)
-
-    valid = np.isfinite(series["left_gaze_deg"]) & np.isfinite(series["right_gaze_deg"])
-    valid &= np.isfinite(series["vergence_gaze_deg"])
-    qa_group = run_group.get("qa/frame")
-    if qa_group is not None and "valid_frame" in qa_group:
-        source_path = f"{run_path}/qa/frame/valid_frame"
-        valid &= _aligned_frame_values(
-            qa_group["valid_frame"],
-            frames,
-            dtype=bool,
-            source_path=source_path,
-        )
-        source_arrays["valid_frame"] = source_path
-    series["valid_frame"] = np.asarray(valid, dtype=bool)
-
-    source_refs = {
-        "source_eye_angle_run": run_name,
-        "source_eye_angle_path": run_path,
-        "source_eye_angle_schema_version": schema_version,
-        "source_eye_angle_family": family,
-        "source_eye_angle_arrays": source_arrays,
-    }
-    return series, source_refs
+    except EyeAngleIOError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _eye_epoch_stats(

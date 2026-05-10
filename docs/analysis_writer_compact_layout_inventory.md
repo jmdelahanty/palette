@@ -44,7 +44,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | `analysis/track_kinematics_runs` | `online/offline/<run>/tracks/id_<track>/...`; also writes grouped `movement/speed/<level>/...` | Partial v2 grouping plus initial logical loader, not compact tabular | Medium | Do not rewrite immediately. Continue moving readers through `fisheye.analysis.track_kinematics_io` first. Future compact layout should use run-level track index plus ragged/CSR arrays instead of one subtree per track. |
 | `analysis/bout_kinematics_runs` | Hierarchical v1 by domain/heading variant, plus compact-v2 opt-in tables `level_index`, `movement_metrics`, `heading_metrics`, and optional `eye_gaze_metrics` | Compact-v2 implemented, not default | High, reader validation in progress | Keep resolver-first policy. After Crimson/Marimo confidence, consider switching new canary/batch runs to `compact_tabular_v2`; keep hierarchical v1 as explicit compatibility. |
 | `analysis/stimulus_response_runs` | Hierarchical v1 by step/family, plus compact-tabular-v2 opt-in summary/bout/window tables | Compact-v2 implemented, not default | Medium-high | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. The first compact slice writes step/global/base/family per-fish/per-bout/window/trial tables and intentionally omits high-volume per-frame/time-series tables. See `stimulus_response_compact_v2_design.md`. |
-| `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Variant schema exists, but values are materialized as many arrays | Medium-high | Migrate by storing canonical major/gaze/body-frame arrays plus transform metadata. Keep compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
+| `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Logical resolver implemented; writer still materializes many arrays | Medium-high | Continue moving readers through `fisheye.analysis.eye_angle_io` before writer changes. Future migration should store canonical major/gaze/body-frame arrays plus transform metadata and keep accepted compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
 | `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Hierarchical by component, with many common metric mirrors | Medium | Stack common component metrics along a component axis. Keep specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
 | `refined_subject_masks_runs` | Dense `masks_roi` plus component-local metrics/QC/review groups | Canonical dense mask is appropriate; component mirrors fan out | Medium | Keep `masks_roi` dense. Future layout should stack common component metrics/QC as `(row, component)` arrays and reserve component groups for true component-specific authoring state. |
 | `analysis/tail_kinematics_runs` | Run-level dense arrays such as `tail_angle_rad (N,K)`, `tail_lateral_deflection_px (N,K)`, row lineage | Already compact for current single source | Low | Do not migrate now. Add source revision/fingerprint consistency as v2 lineage work, not a physical layout rewrite. |
@@ -138,9 +138,23 @@ Most other writers are still hierarchical, but they are not equally urgent:
   - Focused tests and a non-mutating DefaultScreen real-Zarr smoke passed on
     2026-05-10.
 
-### Needs Resolver Before Writer Changes
+### Resolver-First Eye-Angle Work
 
 - `analysis/eye_angle_runs`
+  - Initial logical loader exists in `fisheye.analysis.eye_angle_io`.
+  - The loader reads current hierarchical `angles/roi`, `angles/frame`,
+    `qa/roi`, `qa/frame`, and `support` arrays and exposes run discovery,
+    logical tables, frame alignment, and bout eye-gaze frame-series helpers.
+  - `bout_kinematics` now loads optional bout eye-gaze inputs through this
+    resolver.
+  - `interactive_track_kinematics.py` now discovers eye-angle runs and builds
+    Marimo eye-angle time-series data through the resolver.
+  - Focused tests passed outside the sandbox on 2026-05-10:
+    `test_eye_angle_io.py`, `test_interactive_track_kinematics.py`, and
+    `test_bout_kinematics.py`.
+
+### Needs Resolver Before Writer Changes
+
 - `analysis/subject_shape_runs`
 - `refined_subject_masks_runs`
 
