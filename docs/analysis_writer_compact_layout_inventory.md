@@ -2,7 +2,7 @@
 
 <!-- design-meta
 status: draft
-last_updated: 2026-05-09
+last_updated: 2026-05-10
 -->
 
 ## Purpose
@@ -20,10 +20,10 @@ that is the natural access pattern.
 
 ## Summary
 
-Only `analysis/swim_bout_runs` currently has a true compact-v2 writer. It is
-implemented in `fisheye.analysis.detect_bouts_multi_level` behind
-`--layout compact_v2`; the default remains hierarchical v1 until the remaining
-internal compatibility checks below are resolved.
+`analysis/swim_bout_runs` and `analysis/bout_kinematics_runs` now have
+compact-v2 writers behind explicit layout flags. Both defaults remain
+hierarchical v1 until external-reader confidence is high enough to switch
+defaults deliberately.
 
 Most other writers are still hierarchical, but they are not equally urgent:
 
@@ -31,9 +31,9 @@ Most other writers are still hierarchical, but they are not equally urgent:
   `tail_posture_view_runs` are already compact enough for their current scope.
 - `track_kinematics_runs` has a grouped v2 speed layout, but still stores tracks
   as `tracks/id_<track_id>` subtrees and materializes compatibility arrays.
-- `bout_kinematics_runs`, `stimulus_response_runs`, `eye_angle_runs`,
-  `subject_shape_runs`, and `refined_subject_masks_runs` are the main future
-  migration candidates.
+- `stimulus_response_runs`, `eye_angle_runs`, `subject_shape_runs`, and
+  `refined_subject_masks_runs` are the main remaining future migration
+  candidates.
 
 ## Writer Inventory
 
@@ -42,7 +42,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | `analysis/swim_bout_runs` | Hierarchical v1 by speed level, plus compact-v2 opt-in | Compact-v2 implemented, not default | High, nearly ready | Keep resolver-first policy. After Crimson/Marimo confidence, switch default to `compact_v2` and keep `--layout hierarchical_v1` as explicit compatibility. |
 | `analysis/swim_bout_runs` legacy statistics writer | Flat legacy run written by `swim_bout_statistics.py` | Not compact-v2 and not the canonical detector writer | Low | Treat as historical/reporting output. Do not use it as the model for future bout-segmentation storage. |
 | `analysis/track_kinematics_runs` | `online/offline/<run>/tracks/id_<track>/...`; also writes grouped `movement/speed/<level>/...` | Partial v2 grouping, not compact tabular | Medium | Do not rewrite immediately. First add/standardize resolver APIs. Future compact layout should use run-level track index plus ragged/CSR arrays instead of one subtree per track. |
-| `analysis/bout_kinematics_runs` | Domain groups such as `movement/`, `heading_smoothed/`, `heading_raw/`, optional `eye_gaze/`; each uses columnar per-bout tables | Columnar inside groups, but hierarchical by domain/heading variant | High | Collapse heading/domain variants into table columns or enum IDs. Keep one run per selected source swim-bout candidate. This is the next best compact migration after swim bouts. |
+| `analysis/bout_kinematics_runs` | Hierarchical v1 by domain/heading variant, plus compact-v2 opt-in tables `level_index`, `movement_metrics`, `heading_metrics`, and optional `eye_gaze_metrics` | Compact-v2 implemented, not default | High, reader validation in progress | Keep resolver-first policy. After Crimson/Marimo confidence, consider switching new canary/batch runs to `compact_tabular_v2`; keep hierarchical v1 as explicit compatibility. |
 | `analysis/stimulus_response_runs` | `global/`, `frames/`, `steps/step_<n>/...`, stimulus-family subgroups, per-frame/per-fish/per-bout/window groups | Hierarchical by step and stimulus family | Medium-high | Keep current layout for canaries. Future layout should use `steps`, `per_frame`, `per_fish`, `per_bout`, `windows`, and `trials` tables with `step_index`, `stimulus_family`, `metric_family`, `track_id`, and optional `subject_id` columns. |
 | `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Variant schema exists, but values are materialized as many arrays | Medium-high | Migrate by storing canonical major/gaze/body-frame arrays plus transform metadata. Keep compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
 | `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Hierarchical by component, with many common metric mirrors | Medium | Stack common component metrics along a component axis. Keep specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
@@ -79,10 +79,25 @@ Most other writers are still hierarchical, but they are not equally urgent:
   - Already uses a single `per_bout` columnar table.
   - No physical-layout migration is needed for the current scope.
 
+- `analysis/bout_kinematics_runs`
+  - Writer exists behind `--layout compact_tabular_v2`.
+  - Python resolver exists in `fisheye.analysis.bout_kinematics` as
+    `resolve_bout_kinematics_tables(...)`.
+  - Marimo-backed interactive loading and cross-recording Parquet export now
+    use the resolver.
+  - Focused tests passed outside the sandbox on 2026-05-10:
+    `test_bout_kinematics.py` and `test_export_cross_recording_analytics.py`.
+  - A real feeding canary run was written and resolver-validated on
+    2026-05-10:
+    `bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_compact_v2_canary_20260510`.
+  - Remaining steps before default switch:
+    - complete Crimson smoke/visual checks for compact bout-kinematics reads;
+    - decide whether visualization artifact specs need compact source paths
+      before allowing `--write-zarr-artifacts` with compact-v2.
+
 ### Needs Resolver Before Writer Changes
 
 - `analysis/track_kinematics_runs`
-- `analysis/bout_kinematics_runs`
 - `analysis/stimulus_response_runs`
 - `analysis/eye_angle_runs`
 - `analysis/subject_shape_runs`
@@ -100,11 +115,11 @@ consumers are verified against both layouts.
    the current Crimson visual smoke is accepted. Keep `--layout hierarchical_v1`
    as an explicit compatibility option.
 
-2. **Bout kinematics compact table.**
-   This is the next highest-value writer because it repeats per-bout metric
-   tables under movement/heading/eye-gaze groups. A v2 layout can preserve the
-   same values with fewer groups by using columns such as `metric_family`,
-   `heading_level_id`, and `source_signal_id`.
+2. **Finish bout-kinematics compact-v2 external-reader validation.**
+   The writer and Palette resolvers exist. The next decision is whether Crimson
+   and visualization/export consumers are sufficiently validated to make
+   compact-v2 the preferred canary/batch layout, while keeping hierarchical v1
+   as compatibility.
 
 3. **Stimulus response table layout.**
    Replace `steps/step_<n>/...` fanout with step-indexed tables. This will also

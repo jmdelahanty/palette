@@ -480,15 +480,26 @@ accepted peak counts. `w098` may be a useful review candidate. `w100` can captur
 long tails, but may over-extend events because it reaches the full prominence
 base.
 
-Current canary choice: use
+Historical canary choice from the first non-latch sweep: use
 `bouts_tk_hyst4_low2_s005_peak_event_exp_tau025_prom5_dist010_w098` /
-`speed_exponential` as the review candidate for downstream bout kinematics on
-the 2026-01-28 arena 2 recording. This is a canary-level decision, not a
+`speed_exponential` as a review candidate for downstream bout kinematics on
+the 2026-01-28 arena 2 recording. This was a canary-level decision, not a
 repository-wide default. A linked full bout-kinematics run was generated as:
 
 ```text
 bk_tk_hyst4_low2_s005_peak_event_prom5_w098_interbout
 ```
+
+Current feeding canary choice after adopting explicit latch hysteresis is:
+
+```text
+bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_fresh_20260509
+bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_compact_v2_canary_20260510
+```
+
+That pair uses `min_peak_prominence_mm_s=4.0`, `min_peak_distance_s=0.10`,
+`peak_width_rel_height=0.98`, compact swim-bout layout, and compact
+bout-kinematics layout.
 
 That downstream run uses the sampled frame boundaries stored in the source
 `bouts` table for frame-indexed heading and position windows. The Marimo overlay
@@ -496,7 +507,7 @@ can display interpolated peak-width boundaries for visual review, but biological
 metrics still operate on concrete frames unless a future analysis explicitly
 interpolates heading or position at fractional boundary times.
 
-Current bout-kinematics schema `4` preserves both layers: integer frame
+Current bout-kinematics schema `7` preserves both layers: integer frame
 boundaries remain the slicing contract, and aligned peak-event boundary context
 is copied into downstream `source_peak_*` fields for provenance and review.
 

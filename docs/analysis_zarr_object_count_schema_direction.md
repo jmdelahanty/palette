@@ -377,13 +377,16 @@ Focused schema design:
 Current issue:
 
 - per-heading-level groups duplicate table structure
+- compact-v2 support now exists behind `--layout compact_tabular_v2`, but
+  hierarchical v1 remains the default pending external-reader validation
 
 Direction:
 
 - keep semantic domains (`movement`, `heading`, `eye_gaze`) but collapse
   heading-level variants into a `heading_level_id` column
-- store `analysis_level_index` once per run
-- make readers accept both v1 hierarchical and v2 compact layouts
+- store `level_index` once per run
+- keep readers on `resolve_bout_kinematics_tables(...)` so they accept both v1
+  hierarchical and v2 compact layouts
 
 ### `analysis/track_kinematics_runs`
 

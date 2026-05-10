@@ -254,8 +254,10 @@ Family-specific changes:
 - [ ] `analysis/swim_bout_runs`: use `candidate_index`, `signal_index`,
       `bouts`, `peak_events`, and optional detector signals rather than
       one group per parameter/speed-level variant.
-- [ ] `analysis/bout_kinematics_runs`: collapse heading/source variants into
-      enum columns such as `heading_level_id`.
+- [x] `analysis/bout_kinematics_runs`: add initial compact-v2 writer/resolver
+      that collapses heading/source variants into enum columns such as
+      `heading_level_id`; default switch and external-reader rollout remain
+      separate acceptance steps.
 - [ ] `analysis/stimulus_response_runs`: replace `fish_id` language with
       `track_id` plus optional `subject_id`; store step/bout/window tables
       rather than step subtrees where practical.

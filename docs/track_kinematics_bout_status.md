@@ -460,19 +460,24 @@ selected the current canary candidate below. If broader review still shows tail
 over-segmentation, add a separate `peak_merge_policy` or refractory-style policy
 rather than hiding that behavior inside the threshold gap merge rule.
 
-The current 2026-01-28 arena 2 peak-event review candidate is
-`bouts_tk_hyst4_low2_s005_peak_event_exp_tau025_prom5_dist010_w098` at
-`speed_exponential`. It uses `peak_width_rel_height=0.98`, which visually
-captures the large-pulse tail better than the narrower `0.90` boundary without
-the broad over-extension seen in the `1.00` candidate. The linked downstream
-bout-kinematics run is
-`bk_tk_hyst4_low2_s005_peak_event_prom5_w098_interbout`.
+The current 2026-01-28 arena 2 feeding review candidate is the latch-policy
+peak-event run
+`bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_fresh_20260509`
+at `speed_exponential`. It uses `peak_width_rel_height=0.98`,
+`min_peak_prominence_mm_s=4.0`, and the explicit hysteresis latch policy. The
+linked compact bout-kinematics canary is
+`bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_compact_v2_canary_20260510`.
 
 The Marimo explorer can render this candidate with
-`interpolated_peak_width` overlays from the persisted `peak_events` table. The
-linked bout-kinematics schema v4 run also copies that peak-event context into
+`interpolated_peak_width` overlays from the persisted `peak_events` table.
+Linked bout-kinematics schema v7 runs also copy that peak-event context into
 `source_peak_*` fields while keeping integer frame boundaries as the metric
 slicing contract.
+
+New compact-v2 bout-kinematics runs store the same logical movement, heading,
+and eye-gaze tables as direct compact tables and should be read through
+`resolve_bout_kinematics_tables(...)`; older hierarchical runs remain supported
+for compatibility.
 
 Do not zero tiny nonzero values in stored smoothed or exponential speed traces
 just to make the plot baseline look cleaner. Those values are transformation
