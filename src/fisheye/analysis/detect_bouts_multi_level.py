@@ -105,6 +105,7 @@ SWIM_BOUT_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 SWIM_BOUT_LAYOUT_COMPACT_V2 = "compact_v2"
 SWIM_BOUT_STORED_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
 SWIM_BOUT_LAYOUT_CHOICES = (SWIM_BOUT_LAYOUT_HIERARCHICAL_V1, SWIM_BOUT_LAYOUT_COMPACT_V2)
+SWIM_BOUT_LAYOUT_DEFAULT = SWIM_BOUT_LAYOUT_HIERARCHICAL_V1
 BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v3"
 DETECTION_SIGNAL_SCHEMA_ID = "palette.swim_bout_detection_signal.v1"
 DETECTION_SIGNAL_SCHEMA_VERSION = 1
@@ -2214,7 +2215,7 @@ def detect_and_save_bouts(
     boundary_window_s: float = 0.25,
     exponential_tau_s: float = 0.05,
     exponential_source_level: str = "filtered",
-    layout: str = SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
+    layout: str = SWIM_BOUT_LAYOUT_DEFAULT,
     command: Optional[str] = None,
 ) -> str:
     """
@@ -2861,11 +2862,11 @@ def main():
         '--layout',
         type=str,
         choices=SWIM_BOUT_LAYOUT_CHOICES,
-        default=SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
+        default=SWIM_BOUT_LAYOUT_DEFAULT,
         help=(
             'Storage layout for the output run. hierarchical_v1 preserves the existing '
             'tree-shaped layout. compact_v2 writes the opt-in tabular schema version 7. '
-            'Default: hierarchical_v1.'
+            f'Default: {SWIM_BOUT_LAYOUT_DEFAULT}.'
         ),
     )
 

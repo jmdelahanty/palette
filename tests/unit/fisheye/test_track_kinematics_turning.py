@@ -8,6 +8,7 @@ import zarr
 from rich.console import Console
 
 from fisheye.analysis import track_kinematics as mod
+from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.analysis.compute_speed import (
     TRANSITION_REASON_FIRST_SAMPLE,
     TRANSITION_REASON_FRAME_GAP,
@@ -567,6 +568,65 @@ def _add_flat_swim_bout_run_without_track_id(root: zarr.Group, *, run_name: str 
     bout_run.create_array("bouts", data=np.array([(10, 20, 1.0)], dtype=dtype))
 
 
+def _add_compact_swim_bout_run(root: zarr.Group, *, track_id: int = 1, run_name: str = "compact_bout") -> None:
+    swim_parent = root.require_group("analysis").require_group("swim_bout_runs")
+    bout_run = swim_parent.create_group(run_name)
+    swim_parent.attrs["latest"] = run_name
+    bout_run.attrs.update(
+        {
+            "schema_id": "palette.swim_bout_runs",
+            "schema_version": 7,
+            "layout": "compact_tabular_v2",
+            "source_track_kinematics_run": "kin_run",
+            "track_id": track_id,
+            "default_candidate_id": 0,
+            "default_signal_id": 1,
+        }
+    )
+    indexes = bout_run.create_group("indexes")
+    tables = bout_run.create_group("tables")
+    candidates = np.zeros(
+        1,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("candidate_name", "S32"),
+            ("is_default", "?"),
+            ("detection_method", "S32"),
+            ("parameters_json", "S64"),
+        ],
+    )
+    candidates[0] = (0, b"candidate", True, b"peak_event", b"{}")
+    write_columnar_dataset(indexes, "candidates", candidates)
+    signals = np.zeros(
+        2,
+        dtype=[
+            ("signal_id", "i4"),
+            ("speed_level", "S32"),
+            ("signal_name", "S32"),
+            ("role", "S32"),
+            ("source_level", "S32"),
+        ],
+    )
+    signals[0] = (0, b"speed_filtered", b"filtered", b"physical_estimator", b"speed_filtered")
+    signals[1] = (1, b"speed_exponential", b"exponential", b"detector_response", b"speed_filtered")
+    write_columnar_dataset(indexes, "signal_variants", signals)
+    bouts = np.zeros(
+        2,
+        dtype=[
+            ("candidate_id", "i4"),
+            ("signal_id", "i4"),
+            ("track_id", "i4"),
+            ("bout_id", "i8"),
+            ("start_frame", "i8"),
+            ("end_frame", "i8"),
+            ("duration_s", "f8"),
+        ],
+    )
+    bouts[0] = (0, 0, track_id, 10, 5, 9, 0.1)
+    bouts[1] = (0, 1, track_id, 20, 10, 20, 0.2)
+    write_columnar_dataset(tables, "bouts", bouts)
+
+
 def test_swim_bout_mirror_only_writes_matching_track_id() -> None:
     root = zarr.group()
     run_group = _make_run_group_with_tracks(root, (0, 1))
@@ -611,3 +671,32 @@ def test_swim_bout_mirror_skips_unscoped_legacy_run_with_multiple_tracks() -> No
     tracks = run_group["tracks"]
     assert "swim_bouts" not in tracks["id_0"]
     assert "swim_bouts" not in tracks["id_1"]
+
+
+def test_swim_bout_mirror_reads_compact_v2_logical_signals() -> None:
+    root = zarr.group()
+    run_group = _make_run_group_with_tracks(root, (0, 1))
+    _add_compact_swim_bout_run(root, track_id=1)
+
+    result = mod._mirror_swim_bouts_to_tracks(
+        root,
+        run_group,
+        [0, 1],
+        "compact_bout",
+        _quiet_console(),
+        expected_track_kinematics_run="kin_run",
+    )
+
+    assert result == "compact_bout"
+    tracks = run_group["tracks"]
+    assert "swim_bouts" not in tracks["id_0"]
+    mirrored = tracks["id_1"]["swim_bouts"]
+    assert mirrored.attrs["layout"] == "compact_tabular_v2"
+    assert mirrored.attrs["source_swim_bout_candidate_id"] == 0
+    assert mirrored.attrs["source_swim_bout_default_signal_id"] == 1
+    assert set(mirrored.group_keys()) == {"speed_filtered", "speed_exponential"}
+    np.testing.assert_array_equal(
+        mirrored["speed_exponential"]["start_frame"][:],
+        np.array([10], dtype=np.int32),
+    )
+    assert mirrored["speed_exponential"].attrs["signal_id"] == 1

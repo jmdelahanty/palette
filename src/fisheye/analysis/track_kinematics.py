@@ -43,6 +43,7 @@ from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.utils.system import get_git_info, get_environment_info
 from fisheye.utils.zarr_io import open_zarr_root
 from .chaser_state_interpolator import load_structured_dataset
+from .swim_bout_io import SwimBoutIOError, load_default_swim_bout_tables, load_swim_bout_tables
 
 
 SAMPLE_REASON_OK = 0
@@ -1840,9 +1841,21 @@ def _mirror_swim_bouts_to_tracks(
         )
         return None
 
+    try:
+        default_payload = load_default_swim_bout_tables(root, run_name=run_name)
+    except SwimBoutIOError as exc:
+        console.print(
+            f"[yellow]Warning:[/yellow] Unable to resolve swim bout run '{run_name}' "
+            f"for legacy mirror: {exc}"
+        )
+        return None
+
     bout_group = bouts_parent[run_name]
     ordered_track_ids = [int(track_id) for track_id in track_ids]
-    source_track_kinematics_run = bout_group.attrs.get("source_track_kinematics_run")
+    source_track_kinematics_run = (
+        default_payload.candidate.source_track_kinematics_run
+        or default_payload.run_attrs.get("source_track_kinematics_run")
+    )
     if (
         expected_track_kinematics_run
         and source_track_kinematics_run
@@ -1856,7 +1869,7 @@ def _mirror_swim_bouts_to_tracks(
         )
         return None
 
-    source_track_id = bout_group.attrs.get("track_id")
+    source_track_id = default_payload.candidate.track_id
     mirror_scope = "single_track_legacy"
     if source_track_id is not None:
         source_track_id = int(source_track_id)
@@ -1880,92 +1893,36 @@ def _mirror_swim_bouts_to_tracks(
         )
         return None
 
-    # Detect hierarchical structure (multi-level bouts)
-    speed_levels = ['speed_raw', 'speed_filtered', 'speed_smoothed', 'speed_averaged']
-    is_hierarchical = all(level in bout_group for level in speed_levels)
+    track_subgroup_attrs = {
+        "source_swim_bout_run": run_name,
+        "source_track_kinematics_run": source_track_kinematics_run,
+        "source_swim_bout_track_id": source_track_id,
+        "source_swim_bout_candidate_id": int(default_payload.candidate.candidate_id),
+        "source_swim_bout_default_signal_id": int(default_payload.signal.signal_id),
+        "mirror_scope": mirror_scope,
+        "default_level": default_payload.signal.speed_level or default_payload.signal.signal_name,
+        "layout": str(default_payload.run_attrs.get("layout", "hierarchical_v1")),
+        "is_hierarchical": all(level in bout_group for level in SPEED_DERIVATIVE_LEVELS),
+    }
 
-    if is_hierarchical:
-        # Mirror all 4 speed levels to separate subgroups
-        tracks_parent = run_group["tracks"]
-        default_level = bout_group.attrs.get('default_level', 'speed_smoothed')
-
-        for track_id in mirror_track_ids:
-            track_subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
-
-            # Store metadata at track's swim_bouts level
-            track_subgroup.attrs.update({
-                "source_swim_bout_run": run_name,
-                "source_track_kinematics_run": source_track_kinematics_run,
-                "source_swim_bout_track_id": source_track_id,
-                "mirror_scope": mirror_scope,
-                "default_level": default_level,
-                "is_hierarchical": True,
-            })
-
-            # Mirror each speed level
-            for level in speed_levels:
-                level_group = bout_group[level]
-
-                if "bouts" not in level_group:
-                    console.print(
-                        f"[yellow]Warning:[/yellow] Speed level '{level}' in run '{run_name}' lacks 'bouts' dataset."
-                    )
-                    continue
-
-                bouts_struct = np.asarray(level_group["bouts"])
-                columns = _columnar_bout_data(bouts_struct)
-
-                if not columns:
-                    continue
-
-                # Create subgroup for this speed level
-                level_subgroup = track_subgroup.require_group(level)
-
-                # Clear existing arrays in this level
-                for name in list(level_subgroup.array_keys()):
-                    del level_subgroup[name]
-
-                # Write bout data
-                for name, array in columns.items():
-                    level_subgroup.create_array(
-                        name,
-                        data=array,
-                        chunks=(max(1, min(4096, array.shape[0])),),
-                        overwrite=True,
-                    )
-
-                level_subgroup.attrs.update({
-                    "speed_level": level,
-                    "n_bouts": len(bouts_struct),
-                    "mirrored_fields": list(columns.keys()),
-                })
-
+    signals = [signal for signal in default_payload.candidate.signals if signal.n_bouts > 0]
+    if not signals:
         console.print(
-            f"[dim]Mirrored hierarchical swim bouts (4 levels) from swim_bout_runs/{run_name} "
-            f"into {len(mirror_track_ids)} track kinematics track(s).[/dim]"
+            f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' has no non-empty logical signals to mirror."
         )
-        return run_name
+        return None
 
-    else:
-        # Legacy flat structure - mirror as before
-        if "bouts" not in bout_group:
-            console.print(
-                f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' lacks a 'bouts' dataset."
-            )
-            return None
-
-        bouts_struct = np.asarray(bout_group["bouts"])
-        columns = _columnar_bout_data(bouts_struct)
+    if len(signals) == 1 and not signals[0].speed_level:
+        # Legacy flat structure - mirror as before at the track swim_bouts level.
+        columns = _columnar_bout_data(default_payload.bouts)
         if not columns:
             console.print(
                 f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' contains no numeric bout fields to mirror."
             )
             return None
-
         tracks_parent = run_group["tracks"]
         for track_id in mirror_track_ids:
             subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
-            # Clear existing arrays
             for name in list(subgroup.array_keys()):
                 del subgroup[name]
             for name, array in columns.items():
@@ -1975,22 +1932,64 @@ def _mirror_swim_bouts_to_tracks(
                     chunks=(max(1, min(4096, array.shape[0])),),
                     overwrite=True,
                 )
-            subgroup.attrs.update(
-                {
-                    "source_swim_bout_run": run_name,
-                    "source_track_kinematics_run": source_track_kinematics_run,
-                    "source_swim_bout_track_id": source_track_id,
-                    "mirror_scope": mirror_scope,
-                    "mirrored_fields": list(columns.keys()),
-                    "is_hierarchical": False,
-                }
-            )
+            subgroup.attrs.update({**track_subgroup_attrs, "mirrored_fields": list(columns.keys())})
 
         console.print(
-            f"[dim]Mirrored swim bouts from swim_bout_runs/{run_name} into "
+            f"[dim]Mirrored legacy flat swim bouts from swim_bout_runs/{run_name} into "
             f"{len(mirror_track_ids)} track kinematics track(s).[/dim]"
         )
         return run_name
+
+    tracks_parent = run_group["tracks"]
+    for track_id in mirror_track_ids:
+        track_subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
+        track_subgroup.attrs.update(track_subgroup_attrs)
+
+        for signal in signals:
+            payload = (
+                default_payload
+                if signal.signal_id == default_payload.signal.signal_id
+                else load_swim_bout_tables(
+                    root,
+                    run_name=run_name,
+                    candidate_id=default_payload.candidate.candidate_id,
+                    signal_id=signal.signal_id,
+                )
+            )
+            columns = _columnar_bout_data(payload.bouts)
+            if not columns:
+                continue
+
+            level_name = signal.speed_level or signal.signal_name or f"signal_{signal.signal_id}"
+            level_subgroup = track_subgroup.require_group(level_name)
+            for name in list(level_subgroup.array_keys()):
+                del level_subgroup[name]
+            for name, array in columns.items():
+                level_subgroup.create_array(
+                    name,
+                    data=array,
+                    chunks=(max(1, min(4096, array.shape[0])),),
+                    overwrite=True,
+                )
+            level_subgroup.attrs.update(
+                {
+                    "speed_level": signal.speed_level,
+                    "signal_id": int(signal.signal_id),
+                    "signal_name": signal.signal_name,
+                    "signal_role": signal.role,
+                    "signal_source_level": signal.source_level,
+                    "source_swim_bout_path": payload.level_path,
+                    "n_bouts": len(payload.bouts),
+                    "mirrored_fields": list(columns.keys()),
+                }
+            )
+
+    console.print(
+        f"[dim]Mirrored {len(signals)} logical swim-bout signal(s) from "
+        f"swim_bout_runs/{run_name} into {len(mirror_track_ids)} "
+        "track kinematics track(s).[/dim]"
+    )
+    return run_name
 
 
 def summarize_to_table(

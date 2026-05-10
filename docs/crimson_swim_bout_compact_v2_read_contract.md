@@ -3,8 +3,9 @@
 ## Status
 
 Design handoff for Crimson. Palette can now write compact swim-bout runs behind
-`detect_bouts_multi_level --layout compact_v2`, but the default writer remains
-hierarchical v1 until Crimson can read the compact layout directly.
+`detect_bouts_multi_level --layout compact_v2`. Crimson loader smoke confirms
+direct compact-v2 reads work; the Palette default writer remains hierarchical
+v1 until the deferred Crimson visual overlay check is accepted.
 
 Crimson implementation update, 2026-05-09: the Crimson agent reported a focused
 compact swim-bout GUI smoke script, `scripts/gui_smoke_compact_swim_bouts.sh`,
@@ -80,6 +81,32 @@ hierarchical run and compact v2 through `fisheye.analysis.swim_bout_io`:
 - second feeding archive: 68/68 checks passed, max numeric drift 0
 - object-count reduction for each matching run: 493 v1 `zarr.json` files to
   145 compact-v2 `zarr.json` files
+
+## Deferred Visual Overlay Acceptance Gate
+
+Before Palette changes `detect_bouts_multi_level`'s default writer layout from
+`hierarchical_v1` to `compact_v2`, Crimson should complete one human-visible
+overlay check on the fresh promoted compact run:
+
+```text
+/nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr
+analysis/swim_bout_runs/bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_fresh_20260509
+```
+
+Acceptance criteria:
+
+- Crimson starts from the Zarr above and resolves the compact-v2 run as the
+  latest/default swim-bout candidate.
+- The swim-bout selector exposes the compact signals, including the default
+  `speed_exponential` detector-response signal with 519 bouts.
+- Camera/timeline overlays draw the compact-v2 bout spans at the same frames as
+  the corresponding hierarchical-v1 run when selecting the same signal.
+- Switching between compact-v2 and hierarchical-v1 candidates does not change
+  fish/frame alignment, overlay anchoring, or start/end frame inclusivity.
+- Hierarchical-v1 candidates remain visible after loading the compact-v2 run.
+
+This is a visual/rendering acceptance gate, not a loader gate. Loader smoke and
+Palette logical-equivalence tests have already passed.
 
 ## Original Crimson Gap
 

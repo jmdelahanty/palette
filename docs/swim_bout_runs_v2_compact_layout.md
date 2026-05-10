@@ -61,6 +61,14 @@ exporter wrote 519 `swim_bout_metrics` rows plus 2076
 raw/filtered/smoothed/averaged overlay choices on its CLI, so the plot smoke
 loaded compact data but rendered the smoothed signal rather than exponential.
 
+Internal compatibility update, 2026-05-09: the batch movement/bout pipeline
+validation now accepts compact-v2 logical bout tables instead of requiring the
+hierarchical `speed_exponential/bouts` path, and the legacy track-kinematics
+swim-bout mirror now resolves compact and hierarchical runs through
+`swim_bout_io.py`. Focused Marimo-backed compact discovery/loading parity tests
+passed outside the sandbox. The writer default remains hierarchical v1 until
+the deferred Crimson visual overlay check is accepted.
+
 ## Motivation
 
 The object-count audit of `/nvme1/recordings` on 2026-05-08 found
@@ -489,10 +497,12 @@ them.
 
 ## Default-Flip Readiness Checklist
 
-Do not change `detect_bouts_multi_level.py`'s CLI default from
-`hierarchical_v1` to `compact_v2` until all checks below are complete. This is
-the gate for promoted accepted runs only; scratch parameter sweeps should still
-avoid materializing many Zarr run groups.
+Do not change `detect_bouts_multi_level.py`'s `SWIM_BOUT_LAYOUT_DEFAULT` from
+`hierarchical_v1` to `compact_v2` until all checks below are complete. The
+function default and CLI default both use this constant, so the default flip
+must be a single audited constant change. This is the gate for promoted
+accepted runs only; scratch parameter sweeps should still avoid materializing
+many Zarr run groups.
 
 - [x] Palette can write compact v2 behind an explicit `--layout compact_v2`
       flag.
@@ -542,6 +552,9 @@ avoid materializing many Zarr run groups.
       Crimson load it without needing hierarchical-v1 compatibility mirrors.
 - [x] Strict JSON validation passes on the fresh compact-v2 archive: no `NaN`,
       `Infinity`, or `-Infinity` appears in `zarr.json` metadata.
+- [x] `SWIM_BOUT_LAYOUT_DEFAULT` centralizes the writer default, with focused
+      unit coverage proving the CLI and function defaults use the same
+      constant.
 - [ ] The default change is explicitly documented in release notes or the
       pipeline contract, including the migration rule that old hierarchical-v1
       archives remain readable but new accepted runs write compact v2 by
@@ -549,10 +562,10 @@ avoid materializing many Zarr run groups.
 
 Default flip implementation, when the checklist is complete:
 
-1. Change `detect_bouts_multi_level.py`'s CLI default layout from
-   `hierarchical_v1` to `compact_v2`.
+1. Change `SWIM_BOUT_LAYOUT_DEFAULT` in `detect_bouts_multi_level.py` from
+   `SWIM_BOUT_LAYOUT_HIERARCHICAL_V1` to `SWIM_BOUT_LAYOUT_COMPACT_V2`.
 2. Keep `--layout hierarchical_v1` as an explicit compatibility option.
-3. Update tests that assert the CLI default.
+3. Update tests that assert `SWIM_BOUT_LAYOUT_DEFAULT`.
 4. Generate one fresh compact-default canary and run
    `fisheye.utils.compare_swim_bout_layouts` against an equivalent
    hierarchical reference run for regression evidence.
