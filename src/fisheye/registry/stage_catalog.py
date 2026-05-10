@@ -1,0 +1,241 @@
+"""Canonical recording-stage vocabulary for registry/status surfaces.
+
+This module is intentionally declarative. It does not change runtime pipeline
+behavior yet; it gives pipeline, launcher, registry, and status-page code one
+place to converge on stable stage identifiers.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+CORE_PIPELINE = "core_pipeline"
+RECORDING_METADATA = "recording_metadata"
+TUNING = "tuning"
+
+
+@dataclass(frozen=True)
+class StageSpec:
+    """Stable description of a registry/status stage.
+
+    ``id`` is the canonical registry/status name. ``aliases`` are legacy or UI
+    names that may be translated to the canonical id. ``artifact_families`` are
+    advisory Zarr families; they are not exhaustive path contracts.
+    """
+
+    id: str
+    aliases: tuple[str, ...] = ()
+    depends_on: tuple[str, ...] = ()
+    invalidates: tuple[str, ...] = ()
+    artifact_families: tuple[str, ...] = ()
+    category: str = CORE_PIPELINE
+    description: str = ""
+
+
+STAGE_SPECS: tuple[StageSpec, ...] = (
+    StageSpec(
+        id="raw",
+        aliases=("import",),
+        invalidates=("background",),
+        category=CORE_PIPELINE,
+        description="Raw recording imported or registered for analysis.",
+    ),
+    StageSpec(
+        id="calibration",
+        category=RECORDING_METADATA,
+        description="Camera/stimulus calibration metadata available for the recording.",
+    ),
+    StageSpec(
+        id="stimulus",
+        artifact_families=("analysis/stimulus_runs",),
+        category=RECORDING_METADATA,
+        description="Stimulus timing and canonical step metadata available for the recording.",
+    ),
+    StageSpec(
+        id="background",
+        depends_on=("raw",),
+        invalidates=("detect",),
+        artifact_families=("background",),
+        description="Background model used by traditional detection stages.",
+    ),
+    StageSpec(
+        id="detect",
+        depends_on=("background",),
+        invalidates=("detect_quality",),
+        artifact_families=("detect_runs",),
+        description="Raw detection/model output. Immutable except explicit overwrite.",
+    ),
+    StageSpec(
+        id="detect_quality",
+        depends_on=("detect",),
+        invalidates=("refined_detect",),
+        artifact_families=("detect_quality_runs",),
+        description="Quality-control summaries for raw detections.",
+    ),
+    StageSpec(
+        id="refined_detect",
+        aliases=("refine",),
+        depends_on=("detect_quality",),
+        invalidates=("crop",),
+        artifact_families=("refined_detect_runs",),
+        description="Curated detection instances used as the authoring surface.",
+    ),
+    StageSpec(
+        id="crop",
+        depends_on=("refined_detect",),
+        invalidates=("keypoints", "subject_masks"),
+        artifact_families=("crop_runs",),
+        description="ROI crops derived from refined detection instances.",
+    ),
+    StageSpec(
+        id="keypoints",
+        depends_on=("crop",),
+        invalidates=("refined_keypoints",),
+        artifact_families=("keypoints_runs",),
+        description="Raw anatomical keypoint predictions.",
+    ),
+    StageSpec(
+        id="refined_keypoints",
+        aliases=("keypoints_refine",),
+        depends_on=("keypoints",),
+        invalidates=("eye_masks", "arena_assignment"),
+        artifact_families=("refined_keypoints_runs",),
+        description="Curated keypoint instances used downstream.",
+    ),
+    StageSpec(
+        id="eye_masks",
+        depends_on=("refined_keypoints",),
+        invalidates=("refined_eye_masks",),
+        artifact_families=("eye_masks_runs",),
+        description="Raw eye mask predictions.",
+    ),
+    StageSpec(
+        id="refined_eye_masks",
+        depends_on=("eye_masks",),
+        artifact_families=("refined_eye_masks_runs",),
+        description="Curated eye mask instances.",
+    ),
+    StageSpec(
+        id="subject_masks",
+        depends_on=("crop",),
+        invalidates=("refined_subject_masks",),
+        artifact_families=("subject_mask_runs",),
+        description="Raw whole-subject mask predictions.",
+    ),
+    StageSpec(
+        id="refined_subject_masks",
+        depends_on=("subject_masks",),
+        artifact_families=("refined_subject_masks_runs",),
+        description="Curated whole-subject mask instances.",
+    ),
+    StageSpec(
+        id="arena_assignment",
+        aliases=("assign_ids",),
+        depends_on=("refined_keypoints",),
+        invalidates=("tracks",),
+        artifact_families=("analysis/arena_assignment_runs",),
+        description="Assignment of detected subjects to arena identities.",
+    ),
+    StageSpec(
+        id="tracks",
+        aliases=("track",),
+        depends_on=("arena_assignment",),
+        artifact_families=("tracks",),
+        description="Track-level subject identity output.",
+    ),
+    StageSpec(
+        id="dish_mask",
+        aliases=("mask",),
+        category=TUNING,
+        description="Dish/arena mask tuning metadata.",
+    ),
+    StageSpec(
+        id="detection_tuning",
+        aliases=("threshold",),
+        category=TUNING,
+        description="Detection threshold/tuning metadata.",
+    ),
+    StageSpec(
+        id="keypoint_tuning",
+        category=TUNING,
+        description="Keypoint detector tuning metadata.",
+    ),
+    StageSpec(
+        id="subject_mask_tuning",
+        aliases=("subject-mask", "subject_mask"),
+        category=TUNING,
+        description="Subject mask tuner metadata.",
+    ),
+    StageSpec(
+        id="eye_mask_tuning",
+        aliases=("eye-mask", "eye_mask"),
+        category=TUNING,
+        description="Eye mask tuner metadata.",
+    ),
+    StageSpec(
+        id="subdish_mask_tuning",
+        aliases=("subdish", "subdish-mask", "subdish_mask"),
+        category=TUNING,
+        description="Sub-dish/arena subdivision tuning metadata.",
+    ),
+)
+
+
+STAGE_BY_ID: dict[str, StageSpec] = {spec.id: spec for spec in STAGE_SPECS}
+ALIAS_TO_STAGE_ID: dict[str, str] = {
+    alias: spec.id for spec in STAGE_SPECS for alias in spec.aliases
+}
+STAGE_IDS: tuple[str, ...] = tuple(spec.id for spec in STAGE_SPECS)
+
+
+def canonical_stage_id(stage_id_or_alias: str) -> str:
+    """Return the canonical stage id for a canonical id or unambiguous alias."""
+
+    if stage_id_or_alias in STAGE_BY_ID:
+        return stage_id_or_alias
+    try:
+        return ALIAS_TO_STAGE_ID[stage_id_or_alias]
+    except KeyError as exc:
+        raise KeyError(f"unknown stage id or alias: {stage_id_or_alias!r}") from exc
+
+
+def get_stage_spec(stage_id_or_alias: str) -> StageSpec:
+    """Return a :class:`StageSpec` by canonical id or alias."""
+
+    return STAGE_BY_ID[canonical_stage_id(stage_id_or_alias)]
+
+
+def dependency_map() -> dict[str, tuple[str, ...]]:
+    """Return canonical stage dependencies keyed by canonical stage id."""
+
+    return {spec.id: spec.depends_on for spec in STAGE_SPECS}
+
+
+def invalidation_map() -> dict[str, tuple[str, ...]]:
+    """Return direct downstream invalidations keyed by canonical stage id."""
+
+    return {spec.id: spec.invalidates for spec in STAGE_SPECS}
+
+
+def artifact_family_map() -> dict[str, tuple[str, ...]]:
+    """Return advisory artifact families keyed by canonical stage id."""
+
+    return {spec.id: spec.artifact_families for spec in STAGE_SPECS}
+
+
+__all__ = [
+    "ALIAS_TO_STAGE_ID",
+    "CORE_PIPELINE",
+    "RECORDING_METADATA",
+    "STAGE_BY_ID",
+    "STAGE_IDS",
+    "STAGE_SPECS",
+    "TUNING",
+    "StageSpec",
+    "artifact_family_map",
+    "canonical_stage_id",
+    "dependency_map",
+    "get_stage_spec",
+    "invalidation_map",
+]
