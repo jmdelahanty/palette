@@ -22,6 +22,7 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
+from .subject_shape_io import SubjectShapeRunTables, load_subject_shape_run_tables, resolve_subject_shape_run
 from .subject_shape_spline import tail_sample_positions
 
 TAIL_KINEMATICS_SCHEMA_ID = "analysis.tail_kinematics_runs"
@@ -155,25 +156,11 @@ def _copy_optional_source_revision_snapshot(
     return bool(copied)
 
 
-def _require_group(parent: zarr.Group, name: str) -> zarr.Group:
-    group = parent.get(name)
-    if not isinstance(group, zarr.Group):
-        raise ValueError(f"Missing required group: {parent.name}/{name}")
-    return group
-
-
-def _require_array(group: zarr.Group, name: str) -> object:
-    arr = group.get(name)
-    if arr is None:
-        raise ValueError(f"Missing required array: {group.name}/{name}")
-    return arr
-
-
-def _read_optional_reason_labels(group: zarr.Group, name: str, row_count: int) -> np.ndarray:
+def _read_optional_reason_labels(group: zarr.Group | Mapping[str, np.ndarray], name: str, row_count: int) -> np.ndarray:
     arr = group.get(name)
     if arr is None:
         return np.full((int(row_count),), "", dtype=object)
-    data = np.asarray(arr[:])
+    data = np.asarray(arr[:] if hasattr(arr, "shape") and not isinstance(arr, np.ndarray) else arr)
     if data.ndim == 2 and np.issubdtype(data.dtype, np.integer):
         return decode_reason_bytes(data)
     return np.asarray(data, dtype=object).reshape(-1)
@@ -363,10 +350,10 @@ def compute_tail_kinematics_from_subject_shape_arrays(
         angle_rms_rad[row_idx] = np.float32(float(np.sqrt(np.mean(np.square(angle_rad[row_idx])))))
         max_abs_curvature[row_idx] = np.float32(float(np.max(np.abs(sampled_curvature[row_idx]))))
         integrated_abs_angle[row_idx] = np.float32(
-            np.trapz(np.abs(angle_rad[row_idx]).astype(np.float64), target_s.astype(np.float64))
+            np.trapezoid(np.abs(angle_rad[row_idx]).astype(np.float64), target_s.astype(np.float64))
         )
         integrated_abs_curvature[row_idx] = np.float32(
-            np.trapz(np.abs(sampled_curvature[row_idx]).astype(np.float64), target_s.astype(np.float64))
+            np.trapezoid(np.abs(sampled_curvature[row_idx]).astype(np.float64), target_s.astype(np.float64))
         )
 
     return TailKinematicsBatch(
@@ -392,40 +379,67 @@ def compute_tail_kinematics_from_subject_shape_arrays(
     )
 
 
-def _resolve_subject_shape_run(root: zarr.Group, shape_run: Optional[str]) -> tuple[str, zarr.Group]:
-    analysis = _require_group(root, "analysis")
-    parent = _require_group(analysis, "subject_shape_runs")
-    run_name = str(shape_run or parent.attrs.get("latest") or "")
-    if not run_name:
-        raise ValueError("No subject-shape run specified and analysis/subject_shape_runs.attrs['latest'] is missing.")
-    if run_name not in parent:
-        raise ValueError(f"analysis/subject_shape_runs/{run_name} not found.")
-    return run_name, parent[run_name]
+def _resolve_subject_shape_tables(
+    root: zarr.Group,
+    shape_run: Optional[str],
+) -> tuple[str, zarr.Group, SubjectShapeRunTables]:
+    shape_group, run_name, _run_path = resolve_subject_shape_run(root, shape_run)
+    tables = load_subject_shape_run_tables(
+        root,
+        run_name=run_name,
+        component_names=("subject_body",),
+        relation_names=(),
+        component_array_names={
+            "subject_body": (
+                "tail_sample_s",
+                "tail_sample_xy",
+                "tail_tangent_xy",
+                "tail_curvature_px_inv",
+                "tail_sample_valid",
+                "bspline_valid",
+                "tail_base_xy",
+                "tail_sample_failure_reason_bytes",
+                "bspline_failure_reason_bytes",
+            )
+        },
+        include_body_frame=True,
+        include_row_index=True,
+        include_source_refined_subject_masks=True,
+    )
+    return run_name, shape_group, tables
 
 
-def _read_tail_kinematics_sources(shape_group: zarr.Group) -> tuple[dict[str, np.ndarray], int]:
-    components = _require_group(shape_group, "components")
-    body = _require_group(components, "subject_body")
-    body_frame = _require_group(shape_group, "body_frame")
+def _read_tail_kinematics_sources(shape_tables: SubjectShapeRunTables) -> tuple[dict[str, np.ndarray], int]:
+    body = shape_tables.require_component("subject_body")
 
-    tail_xy = np.asarray(_require_array(body, "tail_sample_xy")[:], dtype=np.float32)
+    tail_xy = np.asarray(body.require_array("tail_sample_xy"), dtype=np.float32)
     row_count = int(tail_xy.shape[0])
     sources = {
-        "source_tail_sample_s": np.asarray(_require_array(body, "tail_sample_s")[:], dtype=np.float32),
+        "source_tail_sample_s": np.asarray(body.require_array("tail_sample_s"), dtype=np.float32),
         "tail_sample_xy": tail_xy,
-        "tail_tangent_xy": np.asarray(_require_array(body, "tail_tangent_xy")[:], dtype=np.float32),
-        "tail_curvature_px_inv": np.asarray(_require_array(body, "tail_curvature_px_inv")[:], dtype=np.float32),
-        "tail_sample_valid": np.asarray(_require_array(body, "tail_sample_valid")[:], dtype=bool),
-        "bspline_valid": np.asarray(_require_array(body, "bspline_valid")[:], dtype=bool),
-        "tail_base_xy": np.asarray(_require_array(body, "tail_base_xy")[:], dtype=np.float32),
-        "body_forward_axis_xy": np.asarray(_require_array(body_frame, "forward_axis_xy")[:], dtype=np.float32),
-        "body_left_axis_xy": np.asarray(_require_array(body_frame, "left_axis_xy")[:], dtype=np.float32),
-        "body_frame_valid": np.asarray(_require_array(body_frame, "valid")[:], dtype=bool),
-        "tail_sample_failure_reason": _read_optional_reason_labels(
-            body, "tail_sample_failure_reason_bytes", row_count
+        "tail_tangent_xy": np.asarray(body.require_array("tail_tangent_xy"), dtype=np.float32),
+        "tail_curvature_px_inv": np.asarray(body.require_array("tail_curvature_px_inv"), dtype=np.float32),
+        "tail_sample_valid": np.asarray(body.require_array("tail_sample_valid"), dtype=bool),
+        "bspline_valid": np.asarray(body.require_array("bspline_valid"), dtype=bool),
+        "tail_base_xy": np.asarray(body.require_array("tail_base_xy"), dtype=np.float32),
+        "body_forward_axis_xy": np.asarray(
+            shape_tables.require_body_frame_array("forward_axis_xy"),
+            dtype=np.float32,
         ),
-        "bspline_failure_reason": _read_optional_reason_labels(body, "bspline_failure_reason_bytes", row_count),
-        "body_frame_failure_reason": _read_optional_reason_labels(body_frame, "failure_reason_bytes", row_count),
+        "body_left_axis_xy": np.asarray(
+            shape_tables.require_body_frame_array("left_axis_xy"),
+            dtype=np.float32,
+        ),
+        "body_frame_valid": np.asarray(shape_tables.require_body_frame_array("valid"), dtype=bool),
+        "tail_sample_failure_reason": _read_optional_reason_labels(
+            body.arrays, "tail_sample_failure_reason_bytes", row_count
+        ),
+        "bspline_failure_reason": _read_optional_reason_labels(body.arrays, "bspline_failure_reason_bytes", row_count),
+        "body_frame_failure_reason": _read_optional_reason_labels(
+            shape_tables.body_frame,
+            "failure_reason_bytes",
+            row_count,
+        ),
     }
     return sources, row_count
 
@@ -644,8 +658,8 @@ def write_tail_kinematics_run_group(
 
     if int(tail_angle_sample_count) < 2:
         raise ValueError("tail_angle_sample_count must be >= 2.")
-    shape_run_name, shape_group = _resolve_subject_shape_run(root, shape_run)
-    sources, row_count = _read_tail_kinematics_sources(shape_group)
+    shape_run_name, shape_group, shape_tables = _resolve_subject_shape_tables(root, shape_run)
+    sources, row_count = _read_tail_kinematics_sources(shape_tables)
     target_run = str(run_name or _default_run_name())
     summary: dict[str, object] = {
         "status": "planned" if dry_run else "updated",

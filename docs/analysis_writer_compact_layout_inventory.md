@@ -45,7 +45,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | `analysis/bout_kinematics_runs` | Hierarchical v1 by domain/heading variant, plus compact-v2 opt-in tables `level_index`, `movement_metrics`, `heading_metrics`, and optional `eye_gaze_metrics` | Compact-v2 implemented, not default | High, reader validation in progress | Keep resolver-first policy. After Crimson/Marimo confidence, consider switching new canary/batch runs to `compact_tabular_v2`; keep hierarchical v1 as explicit compatibility. |
 | `analysis/stimulus_response_runs` | Hierarchical v1 by step/family, plus compact-tabular-v2 opt-in summary/bout/window tables | Compact-v2 implemented, not default | Medium-high | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. The first compact slice writes step/global/base/family per-fish/per-bout/window/trial tables and intentionally omits high-volume per-frame/time-series tables. See `stimulus_response_compact_v2_design.md`. |
 | `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Logical resolver implemented; writer still materializes many arrays | Medium-high | Continue moving readers through `fisheye.analysis.eye_angle_io` before writer changes. Future migration should store canonical major/gaze/body-frame arrays plus transform metadata and keep accepted compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
-| `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Hierarchical by component, with many common metric mirrors | Medium | Stack common component metrics along a component axis. Keep specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
+| `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Logical resolver implemented; writer still hierarchical by component | Medium | Continue moving readers through `fisheye.analysis.subject_shape_io` before writer changes. Future layout should stack common component metrics along a component axis while keeping specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
 | `refined_subject_masks_runs` | Dense `masks_roi` plus component-local metrics/QC/review groups | Canonical dense mask is appropriate; component mirrors fan out | Medium | Keep `masks_roi` dense. Future layout should stack common component metrics/QC as `(row, component)` arrays and reserve component groups for true component-specific authoring state. |
 | `analysis/tail_kinematics_runs` | Run-level dense arrays such as `tail_angle_rad (N,K)`, `tail_lateral_deflection_px (N,K)`, row lineage | Already compact for current single source | Low | Do not migrate now. Add source revision/fingerprint consistency as v2 lineage work, not a physical layout rewrite. |
 | `analysis/tail_posture_view_runs` | Run-level dense tool-compatible arrays such as `tail_keypoints_xy`, `tail_angle_rad`, row lineage | Already compact for current single view | Low | Do not migrate now. If multiple tool views are persisted later, add a `view_index` rather than one run per minor view. |
@@ -153,9 +153,27 @@ Most other writers are still hierarchical, but they are not equally urgent:
     `test_eye_angle_io.py`, `test_interactive_track_kinematics.py`, and
     `test_bout_kinematics.py`.
 
-### Needs Resolver Before Writer Changes
+### Resolver-First Subject-Shape Work
 
 - `analysis/subject_shape_runs`
+  - Initial logical loader exists in `fisheye.analysis.subject_shape_io`.
+  - The loader reads current hierarchical `components/<component>`,
+    `relations/<relation>`, `body_frame`, `row_index`, and
+    `source_refined_subject_masks` arrays and exposes run discovery plus
+    component/body-frame require helpers.
+  - `tail_kinematics_runs.py` and `tail_posture_view_runs.py` now load
+    subject-body source arrays through this resolver instead of hard-coding
+    `components/subject_body/...` reads for their source data.
+  - Focused tests passed outside the sandbox on 2026-05-10:
+    `test_subject_shape_io.py`, `test_tail_kinematics_runs.py`, and
+    `test_tail_posture_view_runs.py`.
+  - Read-only feeding canary validation passed on 2026-05-10. The resolver
+    discovered 9 subject-shape options and loaded latest
+    `subject_shape_v3_snout_medialjoin_canary_20260429` with 19,235 rows and
+    components `subject_body`, `swim_bladder`, `eye_left`, and `eye_right`.
+
+### Needs Resolver Before Writer Changes
+
 - `refined_subject_masks_runs`
 
 For these families, first add resolver/helper APIs that return logical tables or
@@ -188,9 +206,11 @@ consumers are verified against both layouts.
    accepted compatibility caches or expensive enough to justify persistence.
 
 5. **Component metric stacking.**
-   For `subject_shape_runs` and `refined_subject_masks_runs`, stack common
-   component metrics into `(row, component, ...)` arrays while preserving dense
-   masks and body-specific geometry.
+   For `subject_shape_runs`, continue migrating consumers through the logical
+   resolver, then stack common component metrics into `(row, component, ...)`
+   arrays while preserving body-specific geometry. For `refined_subject_masks_runs`,
+   first add the analogous resolver/helper API, then stack common component
+   metrics/QC while preserving dense masks and authoring state.
 
 6. **Track kinematics ragged run-level layout.**
    Defer until multi-track/multi-subject tracking pressure is real. The current
