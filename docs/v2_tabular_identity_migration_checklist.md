@@ -2,7 +2,7 @@
 
 <!-- design-meta
 status: draft
-last_updated: 2026-05-06
+last_updated: 2026-05-11
 -->
 
 ## Purpose
@@ -251,19 +251,25 @@ Family-specific changes:
 
 - [ ] `analysis/track_kinematics_runs`: move toward run-level ragged/CSR
       arrays instead of `tracks/id_<track_id>` subtrees as the only layout.
-- [ ] `analysis/swim_bout_runs`: use `candidate_index`, `signal_index`,
-      `bouts`, `peak_events`, and optional detector signals rather than
-      one group per parameter/speed-level variant.
-- [x] `analysis/bout_kinematics_runs`: add initial compact-v2 writer/resolver
-      that collapses heading/source variants into enum columns such as
-      `heading_level_id`; default switch and external-reader rollout remain
-      separate acceptance steps.
-- [ ] `analysis/stimulus_response_runs`: replace `fish_id` language with
-      `track_id` plus optional `subject_id`; store step/bout/window tables
-      rather than step subtrees where practical.
-- [ ] `analysis/eye_angle_runs`: keep canonical major/gaze/body-frame arrays
-      and variant transforms; materialize aliases/smoothed/delta surfaces only
-      as compatibility/cache outputs.
+- [x] `analysis/swim_bout_runs`: use candidate/signal indexes,
+      `tables/bouts`, `tables/peak_events`, optional detector signals, and
+      related compact tables rather than one group per parameter/speed-level
+      variant. New promoted runs default to compact-v2; hierarchical-v1
+      remains an explicit compatibility/debug layout.
+- [x] `analysis/bout_kinematics_runs`: add compact-v2 writer/resolver that
+      collapses movement, heading, and eye-gaze measurement variants into
+      compact metric tables with enum/index columns such as
+      `heading_level_id`. New promoted runs default to compact-v2;
+      hierarchical-v1 remains an explicit compatibility/debug layout.
+- [x] `analysis/stimulus_response_runs`: store step/bout/window/trial summary
+      tables rather than step subtrees by default. The compact-v2 writer and
+      resolver are active; current tables expose `track_id` while preserving
+      `fish_id` as a compatibility alias where needed. Optional `subject_id`
+      remains a future multi-subject identity extension.
+- [x] `analysis/eye_angle_runs`: keep canonical major/gaze/body-frame arrays
+      and variant transforms in compact dense channel tables. Aliases,
+      smoothed arrays, and delta surfaces are currently materialized as
+      compatibility/cache channels and resolved through `eye_angle_io`.
 - [ ] `analysis/subject_shape_runs`: stack common component metrics by
       component axis; keep body-only geometry semantic.
 - [ ] `analysis/tail_kinematics_runs`: preserve the compact dense shape, but

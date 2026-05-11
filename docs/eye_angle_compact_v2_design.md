@@ -1,7 +1,7 @@
 # Eye-Angle Compact-Dense-V2 Design
 
 <!-- design-meta
-status: proposed
+status: accepted
 last_updated: 2026-05-11
 -->
 
@@ -17,13 +17,14 @@ Compact-dense-v2 keeps the dense time-series surfaces, but stacks related
 channels into a small number of arrays with explicit channel-index metadata.
 The goal is object-count reduction without changing eye-angle semantics.
 
-This is a resolver-first design. The writer is not changed yet. Readers should
-be able to consume both current hierarchical-v1 and future compact-dense-v2
-runs through `fisheye.analysis.eye_angle_io`.
+This was implemented as a resolver-first migration. The writer defaults to
+compact-dense-v2 as of 2026-05-11, and readers consume both historical
+hierarchical-v1 and compact-dense-v2 runs through
+`fisheye.analysis.eye_angle_io`.
 
 ## Physical Layout
 
-Proposed future layout:
+Current compact-dense-v2 layout:
 
 ```text
 analysis/eye_angle_runs/<run>/

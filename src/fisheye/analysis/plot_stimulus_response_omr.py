@@ -29,6 +29,11 @@ from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.analysis.stimulus_response_io import moving_grating_omr_steps
+from fisheye.analysis.track_kinematics_io import (
+    list_track_ids,
+    load_track_kinematics_track,
+    resolve_track_kinematics_run,
+)
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -62,6 +67,7 @@ class OMRStepSummary:
 @dataclass(frozen=True)
 class TrackSeries:
     fish_id: int
+    track_path: str
     frame_indices: np.ndarray
     time_seconds: np.ndarray
     positions_mm: np.ndarray
@@ -74,12 +80,6 @@ _json_safe = json_attr_safe
 def _artifact_signature(payload: Mapping[str, Any]) -> str:
     data = strict_json_dumps(payload).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
-
-
-def _read_array(group: zarr.Group, name: str) -> np.ndarray:
-    if name not in group:
-        return np.asarray([], dtype=np.float32)
-    return np.asarray(group[name][:])
 
 
 def _as_float_pair(value: Any) -> Optional[tuple[float, float]]:
@@ -274,38 +274,50 @@ def _load_track_series(
     kinematics_run: str,
     track_id: Optional[int] = None,
 ) -> TrackSeries:
-    kin_group, resolved_run = resolve_zarr_run(
-        root,
-        f"analysis/track_kinematics_runs/{kinematics_type}",
-        run_name=kinematics_run,
-    )
-    tracks_group = kin_group["tracks"]
-    track_names = sorted(
-        (name for name in tracks_group.group_keys() if str(name).startswith("id_")),
-        key=lambda name: int(str(name).split("_", 1)[1]),
-    )
-    if not track_names:
-        raise ValueError(f"No tracks found in track_kinematics run: {kinematics_type}/{resolved_run}")
     if track_id is None:
-        selected_name = track_names[0]
+        kin_group, resolved_run, _run_path = resolve_track_kinematics_run(
+            root,
+            run_name=kinematics_run,
+            scope=kinematics_type,
+        )
+        available_track_ids = list_track_ids(kin_group)
+        if not available_track_ids:
+            raise ValueError(f"No tracks found in track_kinematics run: {kinematics_type}/{resolved_run}")
+        selected_track_id = int(available_track_ids[0])
     else:
-        selected_name = f"id_{int(track_id)}"
-        if selected_name not in tracks_group:
-            available = ", ".join(track_names)
-            raise ValueError(f"Track {track_id} not found in {kinematics_type}/{resolved_run}; available: {available}")
-    track_group = tracks_group[selected_name]
-    fish_id = int(selected_name.split("_", 1)[1])
-    frame_indices = _read_array(track_group, "frame_indices").astype(np.int64, copy=False)
-    time_seconds = _read_array(track_group, "time_seconds").astype(np.float64, copy=False)
-    positions_mm = _read_array(track_group, "positions_mm").astype(np.float64, copy=False)
-    heading = _read_array(track_group, "smoothed_heading_degrees")
-    if heading.size == 0:
-        heading = _read_array(track_group, "heading_degrees")
+        selected_track_id = int(track_id)
+    tables = load_track_kinematics_track(
+        root,
+        run_name=kinematics_run,
+        scope=kinematics_type,
+        track_id=selected_track_id,
+        required_speed_levels=(),
+    )
+    time_seconds = tables.time_seconds
+    positions_mm = tables.positions_mm
+    heading = tables.smoothed_heading_degrees
+    if heading is None or heading.size == 0:
+        heading = tables.heading_degrees
+    if time_seconds is None or positions_mm is None or heading is None:
+        missing = [
+            name
+            for name, values in (
+                ("time_seconds", time_seconds),
+                ("positions_mm", positions_mm),
+                ("heading_degrees", heading),
+            )
+            if values is None
+        ]
+        raise ValueError(f"{tables.track_path} is missing required trajectory arrays: {', '.join(missing)}")
+    frame_indices = tables.frame_indices.astype(np.int64, copy=False)
+    time_seconds = time_seconds.astype(np.float64, copy=False)
+    positions_mm = positions_mm.astype(np.float64, copy=False)
     heading_degrees = heading.astype(np.float64, copy=False)
     if not (frame_indices.size == time_seconds.size == positions_mm.shape[0] == heading_degrees.size):
-        raise ValueError(f"Track arrays have inconsistent lengths for {kinematics_type}/{resolved_run}/{selected_name}")
+        raise ValueError(f"Track arrays have inconsistent lengths for {tables.track_path}")
     return TrackSeries(
-        fish_id=fish_id,
+        fish_id=int(tables.track_id),
+        track_path=tables.track_path,
         frame_indices=frame_indices,
         time_seconds=time_seconds,
         positions_mm=positions_mm,
@@ -763,10 +775,6 @@ def _build_bout_trajectory_interactive_spec(
                 "end_frame": step.end_frame,
             }
         )
-    track_path = (
-        f"analysis/track_kinematics_runs/{kinematics_type}/"
-        f"{kinematics_run}/tracks/id_{track.fish_id}"
-    )
     return {
         "schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
         "renderer": STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
@@ -777,7 +785,7 @@ def _build_bout_trajectory_interactive_spec(
         "source_paths": source_paths,
         "source_filters": source_filters,
         "track_id": int(track.fish_id),
-        "track_path": track_path,
+        "track_path": track.track_path,
         "track_fields": ["frame_indices", "positions_mm", "heading_degrees", "smoothed_heading_degrees"],
         "bout_fields": ["start_frame", "end_frame", "per_bout_omr_score", "correct_label"],
         "steps": step_specs,
@@ -959,15 +967,11 @@ def write_omr_summary_visualization(
                 bout_trajectory_save_path.write_bytes(trajectory_png)
                 console.print(f"[green]Saved OMR bout trajectory PNG to {bout_trajectory_save_path}[/green]")
 
-            track_path = (
-                f"analysis/track_kinematics_runs/{kinematics_type}/"
-                f"{kinematics_run}/tracks/id_{track.fish_id}"
-            )
             trajectory_source_paths = {
                 **source_paths,
-                "track": track_path,
-                "track_positions": f"{track_path}/positions_mm",
-                "track_headings": f"{track_path}/heading_degrees",
+                "track": track.track_path,
+                "track_positions": f"{track.track_path}/positions_mm",
+                "track_headings": f"{track.track_path}/heading_degrees",
             }
             trajectory_source_filters = {
                 **source_filters,

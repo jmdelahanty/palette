@@ -89,11 +89,12 @@ not perform identity resolution.  By the time data reaches track_kinematics,
 `fish_id` is a settled per-arena identity assigned by `arena_assignment` and
 `tracking` upstream.
 
-Storage note: the current run layout is hierarchical-v1 and step-first. A
-compact-v2 migration is planned, and current consumers should use the shared
+Storage note: new stimulus-response runs default to compact-tabular-v2. The
+historical hierarchical-v1, step-first layout remains readable and available
+only as an explicit compatibility/debug layout. Consumers should use the shared
 logical resolver in `fisheye.analysis.stimulus_response_io` instead of walking
-physical `steps/step_<n>/...` paths directly. The resolver plan is documented
-in `docs/stimulus_response_compact_v2_design.md`.
+physical `steps/step_<n>/...` paths directly. The compact-v2 contract is
+documented in `docs/stimulus_response_compact_v2_design.md`.
 
 ### Sparse-to-dense expansion
 
