@@ -162,29 +162,42 @@ variants:
 Implemented in this slice:
 
 - `eye_angle_io` keeps hierarchical-v1 support.
-- `eye_angle_io` can read future compact-dense-v2 runs with:
+- `eye_angle_io` can read compact-dense-v2 runs with:
   `roi_angles`, `frame_angles`, `roi_vectors`, `frame_vectors`, `roi_qa`,
   `frame_qa`, and channel-index groups.
 - `load_eye_gaze_frame_series(...)` reports compact backing channels in
   `source_eye_angle_arrays`.
-- In-memory tests prove compact channels roundtrip to existing logical names.
+- `eye_angle_analysis.py` has opt-in `--layout compact_dense_v2` writer support.
+- In-memory tests prove compact channels roundtrip to existing logical names
+  and that writer-packed compact runs resolve through the same logical API.
+- Real canary generated on 2026-05-11:
+  `analysis/eye_angle_runs/eye_angle_compact_dense_v2_canary_20260511`.
 
 Not implemented yet:
 
-- `eye_angle_analysis.py` writer support for compact-dense-v2.
-- Real canary compact eye-angle run.
+- Compact-dense-v2 as the default writer layout.
 - Crimson compact eye-angle reader validation.
 
 ## Writer Migration Plan
 
-1. Keep hierarchical writer as the default until consumers are verified.
-2. Add `--layout compact_dense_v2` to `eye_angle_analysis.py`.
-3. Write compact arrays by stacking the existing arrays in schema order.
-4. Populate `angle_channel_index`, `vector_channel_index`, and
-   `qa_channel_index` from the existing output schema metadata.
-5. Validate resolver parity against a hierarchical canary: same logical field
-   names, shapes, values, and strict JSON attrs.
-6. Only then decide whether compact-dense-v2 should become the default.
+Current status:
+
+1. Hierarchical-v1 remains the default layout.
+2. `--layout compact_dense_v2` stacks completed hierarchical computation
+   outputs into compact dense tables during finalization using deterministic
+   channel-index order.
+3. `angle_channel_index`, `vector_channel_index`, and `qa_channel_index` store
+   fixed-width UTF-8 text metadata for names, representation, eye, value kind,
+   units, source channels, formulas, and compatibility aliases.
+4. Focused unit tests and one real canary validate the resolver path, strict
+   JSON metadata, and interactive/bout eye-gaze reader surfaces.
+
+Remaining before making compact the default:
+
+1. Crimson compact eye-angle reader validation.
+2. A current-code hierarchical/compact parity canary if exact value parity is
+   required as a release gate. Older hierarchical canaries may differ because
+   they were produced by different schema/source revisions.
 
 ## Risks
 

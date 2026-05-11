@@ -43,7 +43,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | `analysis/track_kinematics_runs` | `online/offline/<run>/tracks/id_<track>/...`; also writes grouped `movement/speed/<level>/...` | Partial v2 grouping plus initial logical loader, not compact tabular | Medium | Do not rewrite immediately. Continue moving readers through `fisheye.analysis.track_kinematics_io` first. Future compact layout should use run-level track index plus ragged/CSR arrays instead of one subtree per track. |
 | `analysis/bout_kinematics_runs` | Compact-v2 tabular layout by default; hierarchical v1 remains explicit compatibility | Compact-v2 default as of 2026-05-11 | High, accepted | Keep resolver-first policy. Compact visualization artifacts use table paths plus logical source filters; use `--layout hierarchical_v1` only for legacy/debug compatibility. |
 | `analysis/stimulus_response_runs` | Compact-tabular-v2 summary/bout/window/trial tables by default; hierarchical v1 remains explicit compatibility | Compact-v2 default as of 2026-05-11 | Medium-high, accepted | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. Compact-v2 intentionally omits high-volume per-frame/time-series tables; reconstruct dense traces from upstream source runs or add explicit cache tables for named consumers. See `stimulus_response_compact_v2_design.md`. |
-| `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Logical resolver supports hierarchical-v1 and proposed compact-dense-v2; writer still hierarchical | Medium-high | Continue resolver-first migration. Future compact-dense-v2 should stack dense ROI/frame angle channels plus channel-index metadata while preserving frame-aligned outputs. See `eye_angle_compact_v2_design.md`. |
+| `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Logical resolver supports hierarchical-v1 and compact-dense-v2; writer supports opt-in `--layout compact_dense_v2` while default remains hierarchical | Medium-high | Keep hierarchical default until Crimson compact eye-angle reader validation. Compact-dense-v2 stacks dense ROI/frame angle channels plus channel-index metadata while preserving frame-aligned outputs. See `eye_angle_compact_v2_design.md`. |
 | `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Logical resolver implemented; writer still hierarchical by component | Medium | Continue moving readers through `fisheye.analysis.subject_shape_io` before writer changes. Future layout should stack common component metrics along a component axis while keeping specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
 | `refined_subject_masks_runs` | Dense `masks_roi` plus component-local metrics/QC/review groups | Logical resolver implemented; canonical dense masks remain appropriate | Medium | Keep `masks_roi` dense and handle-backed for readers. Future layout should stack common component metrics/QC as `(row, component)` arrays and reserve component groups for true component-specific authoring state. |
 | `analysis/tail_kinematics_runs` | Run-level dense arrays such as `tail_angle_rad (N,K)`, `tail_lateral_deflection_px (N,K)`, row lineage | Already compact for current single source | Low | Do not migrate now. Add source revision/fingerprint consistency as v2 lineage work, not a physical layout rewrite. |
@@ -157,10 +157,11 @@ Most other writers are still hierarchical, but they are not equally urgent:
   - The loader reads current hierarchical `angles/roi`, `angles/frame`,
     `qa/roi`, `qa/frame`, and `support` arrays and exposes run discovery,
     logical tables, frame alignment, and bout eye-gaze frame-series helpers.
-  - The loader also understands the proposed compact-dense-v2 read surface:
+  - The loader also understands the compact-dense-v2 read surface:
     `roi_angles`, `frame_angles`, vector/QA dense channel arrays, and
-    channel-index groups. This is reader support only; the writer has not been
-    migrated.
+    channel-index groups.
+  - `eye_angle_analysis.py` now has opt-in `--layout compact_dense_v2` writer
+    support. The default layout is still hierarchical-v1.
   - `bout_kinematics` now loads optional bout eye-gaze inputs through this
     resolver.
   - `interactive_track_kinematics.py` now discovers eye-angle runs and builds
@@ -170,6 +171,8 @@ Most other writers are still hierarchical, but they are not equally urgent:
     `test_bout_kinematics.py`.
   - Compact-dense-v2 design and output inventory live in
     `docs/eye_angle_compact_v2_design.md`.
+  - Real canary generated on 2026-05-11:
+    `eye_angle_compact_dense_v2_canary_20260511`.
 
 ### Resolver-First Subject-Shape Work
 

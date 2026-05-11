@@ -93,6 +93,9 @@ EYE_ANGLE_VARIANT_SCHEMA_VERSION = 1
 EYE_ANGLE_METHOD = "ellipse_and_centroid_eye_angles"
 EYE_ANGLE_METHOD_VERSION = "eye_angle_analysis.v5"
 EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
+EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
+EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2 = "compact_dense_v2"
+EYE_ANGLE_LAYOUT_CHOICES = (EYE_ANGLE_LAYOUT_HIERARCHICAL_V1, EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2)
 MAJOR_AXIS_MARGINAL_DOT_THRESHOLD = 0.1
 
 _BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
@@ -1192,6 +1195,409 @@ def _prepare_output_arrays(
         group.create_array(name, shape=shape, **kwargs)
 
 
+def _fixed_width_text_array(values: Sequence[object], *, width: int = 256) -> np.ndarray:
+    """Encode text metadata as uint8 fixed-width rows for Zarr-v3 stability."""
+
+    out = np.zeros((len(values), width), dtype=np.uint8)
+    for idx, value in enumerate(values):
+        encoded = str(value or "").encode("utf-8")[: max(0, width - 1)]
+        out[idx, : len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
+    return out
+
+
+def _write_text_index_array(group: zarr.Group, name: str, values: Sequence[object], *, width: int = 256) -> None:
+    data = _fixed_width_text_array(values, width=width)
+    if name in group:
+        del group[name]
+    group.create_array(name, data=data, chunks=(max(1, int(data.shape[0])), int(data.shape[1])), overwrite=True)
+
+
+def _delete_child(group: zarr.Group, name: str) -> None:
+    if name in group:
+        del group[name]
+
+
+def _array_keys(group: zarr.Group) -> list[str]:
+    try:
+        return sorted(str(key) for key in group.keys())
+    except Exception:
+        return []
+
+
+def _scalar_channel_names(group: zarr.Group, *, dtype_kinds: str) -> list[str]:
+    names: list[str] = []
+    for name in _array_keys(group):
+        try:
+            array = group[name]
+            if len(array.shape) == 1 and np.dtype(array.dtype).kind in dtype_kinds:
+                names.append(name)
+        except Exception:
+            continue
+    return names
+
+
+def _vector_channel_names(group: zarr.Group) -> list[str]:
+    names: list[str] = []
+    for name in _array_keys(group):
+        try:
+            array = group[name]
+            if len(array.shape) == 2 and int(array.shape[1]) == 2 and np.dtype(array.dtype).kind == "f":
+                names.append(name)
+        except Exception:
+            continue
+    return names
+
+
+def _ordered_union(*name_lists: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for names in name_lists:
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            ordered.append(str(name))
+    return ordered
+
+
+def _stack_scalar_channels(
+    group: zarr.Group,
+    channel_names: Sequence[str],
+    *,
+    row_count: int,
+    dtype: np.dtype | str,
+    fill_value: float | int,
+) -> np.ndarray:
+    data = np.full((int(row_count), len(channel_names)), fill_value, dtype=dtype)
+    for channel_idx, name in enumerate(channel_names):
+        if name not in group:
+            continue
+        values = np.asarray(group[name][:])
+        if values.ndim != 1:
+            raise ValueError(f"Expected scalar eye-angle channel '{name}' to be 1D, got shape {values.shape}.")
+        if int(values.shape[0]) != int(row_count):
+            raise ValueError(
+                f"Expected scalar eye-angle channel '{name}' length {row_count}, got {values.shape[0]}."
+            )
+        data[:, channel_idx] = values.astype(dtype, copy=False)
+    return data
+
+
+def _stack_vector_channels(
+    group: zarr.Group,
+    channel_names: Sequence[str],
+    *,
+    row_count: int,
+    fill_value: float = np.nan,
+) -> np.ndarray:
+    data = np.full((int(row_count), len(channel_names), 2), fill_value, dtype=np.float32)
+    for channel_idx, name in enumerate(channel_names):
+        if name not in group:
+            continue
+        values = np.asarray(group[name][:], dtype=np.float32)
+        if values.ndim != 2 or int(values.shape[1]) != 2:
+            raise ValueError(f"Expected vector eye-angle channel '{name}' to have shape (N, 2), got {values.shape}.")
+        if int(values.shape[0]) != int(row_count):
+            raise ValueError(
+                f"Expected vector eye-angle channel '{name}' length {row_count}, got {values.shape[0]}."
+            )
+        data[:, channel_idx, :] = values
+    return data
+
+
+def _replace_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tuple[int, ...]) -> None:
+    if name in group:
+        del group[name]
+    group.create_array(name, data=data, chunks=chunks, overwrite=True)
+
+
+def _eye_for_channel(name: str) -> str:
+    if name.startswith("left_"):
+        return "left"
+    if name.startswith("right_"):
+        return "right"
+    if name.startswith(("vergence_", "version_", "mean_eye_vergence_")):
+        return "binocular"
+    return "none"
+
+
+def _value_kind_for_angle_channel(name: str) -> str:
+    if name.endswith("_accel_deg_s2"):
+        return "acceleration"
+    if name.endswith("_speed_deg_s"):
+        return "speed"
+    if "delta_deg" in name:
+        return "delta"
+    if name.startswith("vergence_") or name.startswith("mean_eye_vergence_"):
+        return "vergence"
+    if name.startswith("version_"):
+        return "version"
+    if name == "heading_deg":
+        return "heading"
+    return "angle"
+
+
+def _units_for_angle_channel(name: str) -> str:
+    if name.endswith("_accel_deg_s2"):
+        return "deg/s2"
+    if name.endswith("_speed_deg_s"):
+        return "deg/s"
+    return "deg"
+
+
+def _representation_for_angle_channel(name: str) -> str:
+    if "centroid" in name:
+        return "centroid"
+    if "nasal_gaze" in name or name.startswith("mean_eye_vergence_gaze"):
+        return "nasal_gaze"
+    if "eye_angle" in name:
+        return "eye_frame"
+    if "gaze" in name:
+        return "gaze"
+    if "major" in name:
+        return "major"
+    if "minor" in name:
+        return "legacy_minor"
+    if name in {"left_deg", "right_deg", "left_signed_deg", "right_signed_deg", "vergence_deg", "vergence_signed_deg"}:
+        return "legacy"
+    return "major" if name in {"version_deg", "heading_deg"} else "legacy"
+
+
+def _alias_target_for_angle_channel(name: str) -> str:
+    aliases = {
+        "left_signed_deg": "left_major_signed_deg",
+        "right_signed_deg": "right_major_signed_deg",
+        "left_minor_signed_deg": "left_gaze_signed_deg",
+        "right_minor_signed_deg": "right_gaze_signed_deg",
+        "vergence_minor_signed_deg": "vergence_gaze_deg",
+        "version_minor_deg": "version_gaze_deg",
+        "vergence_deg": "vergence_major_signed_deg",
+        "vergence_signed_deg": "vergence_major_signed_deg",
+        "version_deg": "version_major_deg",
+    }
+    return aliases.get(name, "")
+
+
+def _angle_channel_from_stem(stem: str) -> str:
+    return stem if stem.endswith("_deg") else f"{stem}_deg"
+
+
+def _source_channel_for_angle_channel(name: str) -> str:
+    if name.endswith("_delta_deg_smoothed"):
+        return _angle_channel_from_stem(name[: -len("_delta_deg_smoothed")])
+    if name.endswith("_delta_deg"):
+        return _angle_channel_from_stem(name[: -len("_delta_deg")])
+    if name.endswith("_smoothed"):
+        return name[: -len("_smoothed")]
+    if name.endswith("_speed_deg_s"):
+        return _angle_channel_from_stem(name[: -len("_speed_deg_s")])
+    if name.endswith("_accel_deg_s2"):
+        return f"{name[: -len('_accel_deg_s2')]}_speed_deg_s"
+    return _alias_target_for_angle_channel(name)
+
+
+def _formula_for_angle_channel(name: str) -> str:
+    if name.endswith("_smoothed"):
+        return "moving_average(source_channel)"
+    if name.endswith("_delta_deg"):
+        return "framewise_delta(source_channel)"
+    if name.endswith("_delta_deg_smoothed"):
+        return "framewise_delta(smoothed_source_channel)"
+    if name.endswith("_speed_deg_s"):
+        return "time_derivative(source_channel)"
+    if name.endswith("_accel_deg_s2"):
+        return "time_derivative(speed_channel)"
+    formulas = {
+        "left_eye_angle_deg": "-left_major_signed_deg",
+        "right_eye_angle_deg": "right_major_signed_deg",
+        "vergence_eye_angle_deg": "left_eye_angle_deg + right_eye_angle_deg",
+        "mean_eye_vergence_gaze_deg": "0.5 * (left_nasal_gaze_deg + right_nasal_gaze_deg)",
+    }
+    return formulas.get(name, "")
+
+
+def _write_angle_channel_index(run_group: zarr.Group, channel_names: Sequence[str]) -> None:
+    group = run_group.require_group("angle_channel_index")
+    for name in _array_keys(group):
+        del group[name]
+    _write_text_index_array(group, "name", channel_names)
+    _write_text_index_array(group, "representation", [_representation_for_angle_channel(name) for name in channel_names])
+    _write_text_index_array(group, "eye", [_eye_for_channel(name) for name in channel_names], width=64)
+    _write_text_index_array(group, "value_kind", [_value_kind_for_angle_channel(name) for name in channel_names], width=64)
+    _write_text_index_array(group, "units", [_units_for_angle_channel(name) for name in channel_names], width=64)
+    _write_text_index_array(group, "source_channel", [_source_channel_for_angle_channel(name) for name in channel_names])
+    _write_text_index_array(group, "formula", [_formula_for_angle_channel(name) for name in channel_names], width=512)
+    _write_text_index_array(
+        group,
+        "compatibility_alias_of",
+        [_alias_target_for_angle_channel(name) for name in channel_names],
+    )
+    group.attrs.update(
+        {
+            "channel_count": int(len(channel_names)),
+            "encoding": "uint8_fixed_width_null_terminated_utf8",
+            "axis": 1,
+        }
+    )
+
+
+def _write_vector_channel_index(run_group: zarr.Group, channel_names: Sequence[str]) -> None:
+    group = run_group.require_group("vector_channel_index")
+    for name in _array_keys(group):
+        del group[name]
+    _write_text_index_array(group, "name", channel_names)
+    _write_text_index_array(group, "representation", ["gaze" if "gaze" in name else "support" for name in channel_names])
+    _write_text_index_array(group, "eye", [_eye_for_channel(name) for name in channel_names], width=64)
+    _write_text_index_array(group, "value_kind", ["unit_vector_xy" for _name in channel_names], width=64)
+    _write_text_index_array(group, "units", ["unitless" for _name in channel_names], width=64)
+    group.attrs.update(
+        {
+            "channel_count": int(len(channel_names)),
+            "encoding": "uint8_fixed_width_null_terminated_utf8",
+            "axis": 1,
+            "component_axis": 2,
+        }
+    )
+
+
+def _write_qa_channel_index(run_group: zarr.Group, channel_names: Sequence[str], dtype_by_name: Mapping[str, str]) -> None:
+    group = run_group.require_group("qa_channel_index")
+    for name in _array_keys(group):
+        del group[name]
+    _write_text_index_array(group, "name", channel_names)
+    _write_text_index_array(
+        group,
+        "value_kind",
+        ["reason_code" if name == "reason_codes" else "warning_flag" if "marginal" in name else "validity_flag" for name in channel_names],
+    )
+    _write_text_index_array(group, "dtype", [dtype_by_name.get(name, "uint16") for name in channel_names], width=64)
+    group.attrs.update(
+        {
+            "channel_count": int(len(channel_names)),
+            "encoding": "uint8_fixed_width_null_terminated_utf8",
+            "axis": 1,
+        }
+    )
+
+
+def _write_compact_dense_layout(
+    run_group: zarr.Group,
+    *,
+    total_detections: int,
+    num_frames: int,
+    chunk_len: int,
+    frame_chunk: int,
+) -> None:
+    """Pack completed hierarchical eye-angle outputs into compact dense arrays."""
+
+    angles_group = run_group["angles"]
+    roi_group = angles_group["roi"]
+    frame_group = angles_group["frame"]
+    qa_group = run_group["qa"]
+    qa_roi = qa_group["roi"]
+    qa_frame = qa_group["frame"]
+
+    roi_angle_names = _scalar_channel_names(roi_group, dtype_kinds="f")
+    frame_angle_names = _scalar_channel_names(frame_group, dtype_kinds="f")
+    angle_names = _ordered_union(roi_angle_names, frame_angle_names)
+    _write_angle_channel_index(run_group, angle_names)
+    _replace_array(
+        run_group,
+        "roi_angles",
+        _stack_scalar_channels(
+            roi_group,
+            angle_names,
+            row_count=total_detections,
+            dtype=np.float32,
+            fill_value=np.nan,
+        ),
+        chunks=(max(1, min(int(chunk_len), max(1, int(total_detections)))), max(1, len(angle_names))),
+    )
+    _replace_array(
+        run_group,
+        "frame_angles",
+        _stack_scalar_channels(
+            frame_group,
+            angle_names,
+            row_count=num_frames,
+            dtype=np.float32,
+            fill_value=np.nan,
+        ),
+        chunks=(max(1, min(int(frame_chunk), max(1, int(num_frames)))), max(1, len(angle_names))),
+    )
+
+    roi_vector_names = _vector_channel_names(roi_group)
+    frame_vector_names = _vector_channel_names(frame_group)
+    vector_names = _ordered_union(roi_vector_names, frame_vector_names)
+    if vector_names:
+        _write_vector_channel_index(run_group, vector_names)
+        _replace_array(
+            run_group,
+            "roi_vectors",
+            _stack_vector_channels(roi_group, vector_names, row_count=total_detections),
+            chunks=(max(1, min(int(chunk_len), max(1, int(total_detections)))), max(1, len(vector_names)), 2),
+        )
+        if frame_vector_names:
+            _replace_array(
+                run_group,
+                "frame_vectors",
+                _stack_vector_channels(frame_group, vector_names, row_count=num_frames),
+                chunks=(max(1, min(int(frame_chunk), max(1, int(num_frames)))), max(1, len(vector_names)), 2),
+            )
+
+    roi_qa_names = _scalar_channel_names(qa_roi, dtype_kinds="bui")
+    frame_qa_names = _scalar_channel_names(qa_frame, dtype_kinds="bui")
+    qa_names = _ordered_union(roi_qa_names, frame_qa_names)
+    dtype_by_name: dict[str, str] = {}
+    for source_group in (qa_roi, qa_frame):
+        for name in qa_names:
+            if name in dtype_by_name or name not in source_group:
+                continue
+            dtype_by_name[name] = str(np.dtype(source_group[name].dtype))
+    _write_qa_channel_index(run_group, qa_names, dtype_by_name)
+    _replace_array(
+        run_group,
+        "roi_qa",
+        _stack_scalar_channels(
+            qa_roi,
+            qa_names,
+            row_count=total_detections,
+            dtype=np.uint16,
+            fill_value=0,
+        ),
+        chunks=(max(1, min(int(chunk_len), max(1, int(total_detections)))), max(1, len(qa_names))),
+    )
+    _replace_array(
+        run_group,
+        "frame_qa",
+        _stack_scalar_channels(
+            qa_frame,
+            qa_names,
+            row_count=num_frames,
+            dtype=np.uint16,
+            fill_value=0,
+        ),
+        chunks=(max(1, min(int(frame_chunk), max(1, int(num_frames)))), max(1, len(qa_names))),
+    )
+
+    _delete_child(run_group, "angles")
+    _delete_child(run_group, "qa")
+    run_group.attrs.update(
+        {
+            "layout": EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+            "storage_layout": EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+            "compact_dense_v2": True,
+            "compact_dense_v2_angle_channel_count": int(len(angle_names)),
+            "compact_dense_v2_vector_channel_count": int(len(vector_names)),
+            "compact_dense_v2_qa_channel_count": int(len(qa_names)),
+            "compact_dense_v2_note": (
+                "Eye-angle scalar channels are stored in roi_angles/frame_angles and resolved "
+                "by angle_channel_index; logical hierarchical paths remain available through eye_angle_io."
+            ),
+        }
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -1272,6 +1678,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=f"Override the moving-average window for angle smoothing (default: {ANGLE_SMOOTHING_WINDOW}).",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=EYE_ANGLE_LAYOUT_CHOICES,
+        default=EYE_ANGLE_LAYOUT_HIERARCHICAL_V1,
+        help=(
+            "Output storage layout. hierarchical_v1 writes one array per logical field; "
+            "compact_dense_v2 packs completed angle/QA outputs into dense channel tables."
+        ),
     )
     return parser
 
@@ -1711,7 +2126,9 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError(f"Run '{resolved_run_name}' already exists in analysis/eye_angle_runs.")
 
     run_group = parent_group.create_group(resolved_run_name)
+    output_layout = str(args.layout)
     run_group.attrs["status"] = "running"
+    run_group.attrs["layout"] = output_layout
     run_group.attrs["execution_backend"] = backend
     run_group.attrs["dask_scheduler"] = scheduler_key
     run_group.attrs["dask_num_workers"] = int(args.num_workers) if args.num_workers is not None else None
@@ -2732,6 +3149,15 @@ def run(args: argparse.Namespace) -> None:
             overwrite=True,
         )
 
+    if output_layout == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        _write_compact_dense_layout(
+            run_group,
+            total_detections=total_detections,
+            num_frames=num_frames,
+            chunk_len=chunk_len,
+            frame_chunk=frame_chunk,
+        )
+
     duration_seconds = float(time.perf_counter() - stage_start)
     rows_per_second = float(total_detections / duration_seconds) if duration_seconds > 0.0 else float("inf")
     timing_summary = {
@@ -2751,6 +3177,7 @@ def run(args: argparse.Namespace) -> None:
             "status": "complete",
             "schema_id": EYE_ANGLE_RUN_SCHEMA_ID,
             "schema_version": EYE_ANGLE_RUN_SCHEMA_VERSION,
+            "layout": output_layout,
             "method": EYE_ANGLE_METHOD,
             "method_version": EYE_ANGLE_METHOD_VERSION,
             "row_axis": EYE_ANGLE_ROW_AXIS,
@@ -2822,6 +3249,7 @@ def run(args: argparse.Namespace) -> None:
             "dask_num_workers": int(args.num_workers) if args.num_workers is not None else None,
             "fps_override": args.fps,
             "smoothing_window": smoothing_window_param,
+            "layout": output_layout,
         },
         "outputs": {
             "left_signed_deg": True,
