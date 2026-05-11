@@ -152,6 +152,94 @@ def test_graph_maps_compact_table_source_to_owner_run(monkeypatch, tmp_path: Pat
     assert graph.edges[0].status == "fresh"
 
 
+def test_collapse_run_duplicates_preserves_ref_details(monkeypatch, tmp_path: Path) -> None:
+    root = FakeGroup(
+        children={
+            "analysis": FakeGroup(
+                children={
+                    "swim_bout_runs": FakeGroup(
+                        children={
+                            "bouts_1": FakeGroup(
+                                {
+                                    "lineage_hash": "bouthash",
+                                    "fingerprint_status": "complete",
+                                },
+                                children={
+                                    "tables": FakeGroup(
+                                        children={
+                                            "bouts": FakeGroup(
+                                                {
+                                                    "lineage_hash": "tablehash",
+                                                    "fingerprint_status": "complete",
+                                                }
+                                            )
+                                        }
+                                    )
+                                },
+                            )
+                        }
+                    ),
+                    "bout_kinematics_runs": FakeGroup(
+                        children={
+                            "bk_1": FakeGroup(
+                                {
+                                    "source_refs": {
+                                        "source_swim_bout_run": "analysis/swim_bout_runs/bouts_1",
+                                        "source_swim_bout_path": (
+                                            "analysis/swim_bout_runs/bouts_1/"
+                                            "tables/bouts?candidate_id=0"
+                                        ),
+                                    },
+                                    "source_fingerprints": {
+                                        "source_swim_bout_run": "bouthash",
+                                        "source_swim_bout_path": "tablehash",
+                                    },
+                                }
+                            )
+                        }
+                    ),
+                }
+            )
+        }
+    )
+
+    full_graph = _build_graph(
+        root,
+        monkeypatch,
+        tmp_path,
+        root_paths=["analysis/bout_kinematics_runs/bk_1"],
+    )
+    collapsed_graph = _build_graph(
+        root,
+        monkeypatch,
+        tmp_path,
+        root_paths=["analysis/bout_kinematics_runs/bk_1"],
+        collapse_run_duplicates=True,
+    )
+
+    assert len(full_graph.edges) == 2
+    assert len(collapsed_graph.edges) == 1
+    edge = collapsed_graph.edges[0]
+    assert edge.source_node_id == "analysis/swim_bout_runs/bouts_1"
+    assert edge.target_node_id == "analysis/bout_kinematics_runs/bk_1"
+    assert edge.collapsed_edge_count == 2
+    assert edge.collapsed_details is not None
+    assert {detail.edge_key for detail in edge.collapsed_details} == {
+        "source_swim_bout_path",
+        "source_swim_bout_run",
+    }
+    assert {
+        detail.source_path for detail in edge.collapsed_details
+    } == {
+        "analysis/swim_bout_runs/bouts_1",
+        "analysis/swim_bout_runs/bouts_1/tables/bouts",
+    }
+
+    payload = json.loads(lineage.render_json(collapsed_graph))
+    assert payload["edges"][0]["collapsed_edge_count"] == 2
+    assert len(payload["edges"][0]["collapsed_details"]) == 2
+
+
 def test_graph_preserves_missing_source_edges(monkeypatch, tmp_path: Path) -> None:
     root = FakeGroup(
         children={

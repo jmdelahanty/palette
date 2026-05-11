@@ -51,6 +51,17 @@ class LineageNode:
 
 
 @dataclass(frozen=True)
+class LineageEdgeDetail:
+    edge_key: str
+    source_path: str
+    status: str
+    message: str
+    expected_fingerprint: str | None = None
+    actual_fingerprint: str | None = None
+    actual_fingerprint_status: str | None = None
+
+
+@dataclass(frozen=True)
 class LineageEdge:
     source_node_id: str
     target_node_id: str
@@ -62,6 +73,8 @@ class LineageEdge:
     expected_fingerprint: str | None = None
     actual_fingerprint: str | None = None
     actual_fingerprint_status: str | None = None
+    collapsed_edge_count: int = 1
+    collapsed_details: list[LineageEdgeDetail] | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +151,87 @@ def _owner_run(path: str) -> tuple[str | None, str, str | None]:
     return None, "/".join(parts), parts[-1] if parts else None
 
 
+EDGE_STATUS_SEVERITY = {
+    "fresh": 0,
+    "unverifiable_missing_expected_fingerprint": 1,
+    "unverifiable_missing_actual_fingerprint": 1,
+    "source_not_latest": 1,
+    "missing_source": 2,
+    "source_explicit_stale": 2,
+    "stale": 2,
+    "error": 3,
+}
+
+
+def _edge_severity(edge: LineageEdge) -> int:
+    return EDGE_STATUS_SEVERITY.get(edge.status, 2)
+
+
+def _edge_detail(edge: LineageEdge) -> LineageEdgeDetail:
+    return LineageEdgeDetail(
+        edge_key=edge.edge_key,
+        source_path=edge.source_path,
+        status=edge.status,
+        message=edge.message,
+        expected_fingerprint=edge.expected_fingerprint,
+        actual_fingerprint=edge.actual_fingerprint,
+        actual_fingerprint_status=edge.actual_fingerprint_status,
+    )
+
+
+def _collapse_edges(edges: Sequence[LineageEdge]) -> list[LineageEdge]:
+    grouped: dict[tuple[str, str], list[LineageEdge]] = {}
+    for edge in edges:
+        grouped.setdefault((edge.source_node_id, edge.target_node_id), []).append(edge)
+
+    collapsed: list[LineageEdge] = []
+    for (source_node_id, target_node_id), group_edges in sorted(grouped.items()):
+        sorted_edges = sorted(
+            group_edges,
+            key=lambda edge: (
+                -_edge_severity(edge),
+                edge.edge_key,
+                edge.source_path,
+            ),
+        )
+        representative = sorted_edges[0]
+        details = [
+            _edge_detail(edge)
+            for edge in sorted(
+                group_edges,
+                key=lambda edge: (edge.edge_key, edge.source_path, edge.status),
+            )
+        ]
+        unique_keys = sorted({detail.edge_key for detail in details})
+        edge_key = representative.edge_key
+        message = representative.message
+        if len(group_edges) > 1:
+            edge_key = ", ".join(unique_keys[:3])
+            if len(unique_keys) > 3:
+                edge_key += f", +{len(unique_keys) - 3} more"
+            message = (
+                f"collapsed {len(group_edges)} source refs between the same "
+                f"source and target run; representative status: {representative.status}"
+            )
+        collapsed.append(
+            LineageEdge(
+                source_node_id=source_node_id,
+                target_node_id=target_node_id,
+                edge_key=edge_key,
+                source_path=source_node_id,
+                target_path=target_node_id,
+                status=representative.status,
+                message=message,
+                expected_fingerprint=representative.expected_fingerprint,
+                actual_fingerprint=representative.actual_fingerprint,
+                actual_fingerprint_status=representative.actual_fingerprint_status,
+                collapsed_edge_count=len(group_edges),
+                collapsed_details=details if len(group_edges) > 1 else None,
+            )
+        )
+    return collapsed
+
+
 def _node_for_path(root: Any, zarr_path: Path, path: str) -> LineageNode:
     family, run_path, run_id = _owner_run(path)
     group = _resolve_internal_path(root, run_path, archive_path=zarr_path)
@@ -194,6 +288,7 @@ def build_run_lineage_graph(
     root_paths: Sequence[str] | None = None,
     run_families: set[str] | None = None,
     require_latest_sources: bool = False,
+    collapse_run_duplicates: bool = False,
 ) -> RunLineageGraph:
     """Build a run-lineage DAG from one Palette Zarr archive.
 
@@ -264,19 +359,23 @@ def build_run_lineage_graph(
     for root_path in roots:
         visit(root_path)
 
+    edge_list = [
+        edges[key]
+        for key in sorted(
+            edges,
+            key=lambda item: (item[1], item[0], item[2], item[3]),
+        )
+    ]
+    if collapse_run_duplicates:
+        edge_list = _collapse_edges(edge_list)
+
     return RunLineageGraph(
         schema_id=LINEAGE_DAG_SCHEMA_ID,
         schema_version=LINEAGE_DAG_SCHEMA_VERSION,
         zarr_path=str(zarr_path),
         root_paths=list(dict.fromkeys(roots)),
         nodes=[nodes[key] for key in sorted(nodes)],
-        edges=[
-            edges[key]
-            for key in sorted(
-                edges,
-                key=lambda item: (item[1], item[0], item[2], item[3]),
-            )
-        ],
+        edges=edge_list,
     )
 
 
@@ -334,10 +433,22 @@ def render_tree(graph: RunLineageGraph) -> str:
                 f"{prefix}{branch}{edge.edge_key}: {label} "
                 f"[{edge.status}]"
             )
+            if edge.collapsed_edge_count > 1:
+                lines.append(
+                    f"{prefix}{child_prefix}collapsed_refs: {edge.collapsed_edge_count}"
+                )
             if edge.source_path != edge.source_node_id:
                 lines.append(f"{prefix}{child_prefix}source_path: {edge.source_path}")
             if edge.status != "fresh":
                 lines.append(f"{prefix}{child_prefix}message: {edge.message}")
+            if edge.collapsed_details:
+                keys = ", ".join(
+                    f"{detail.edge_key} ({detail.status})"
+                    for detail in edge.collapsed_details[:5]
+                )
+                if len(edge.collapsed_details) > 5:
+                    keys += f", +{len(edge.collapsed_details) - 5} more"
+                lines.append(f"{prefix}{child_prefix}details: {keys}")
             walk(edge.source_node_id, prefix + child_prefix, active)
 
     for index, root_path in enumerate(graph.root_paths):
@@ -440,6 +551,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="treat source refs that do not point at parent latest as stale",
     )
+    parser.add_argument(
+        "--collapse-run-duplicates",
+        action="store_true",
+        help=(
+            "collapse multiple refs between the same source and target run into "
+            "one edge; collapsed edge details remain available in JSON"
+        ),
+    )
     return parser
 
 
@@ -450,6 +569,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         root_paths=args.root_paths,
         run_families=set(args.run_family) if args.run_family else None,
         require_latest_sources=bool(args.require_latest_sources),
+        collapse_run_duplicates=bool(args.collapse_run_duplicates),
     )
     print(render_graph(graph, output_format=str(args.format)))
     return 0

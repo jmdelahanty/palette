@@ -88,6 +88,20 @@ scripts/py -m fisheye.utils.inspect_run_lineage_graph <archive>.zarr \
   --format tree
 ```
 
+For a less noisy human view, collapse duplicate source references between the
+same source run and target run:
+
+```bash
+scripts/py -m fisheye.utils.inspect_run_lineage_graph <archive>.zarr \
+  --root analysis/bout_kinematics_runs/<run> \
+  --format tree \
+  --collapse-run-duplicates
+```
+
+The full JSON remains lossless enough for debugging: collapsed edges retain
+`collapsed_edge_count` and `collapsed_details` with the original edge keys,
+source paths, statuses, messages, and fingerprints.
+
 When `--root` is omitted, the inspector discovers all known derived analysis
 runs listed in `audit_analysis_staleness.RUN_PARENT_SPECS`. `--run-family` can
 limit that root set.
@@ -112,6 +126,13 @@ This avoids having a separate lineage interpretation for graph rendering.
 The tree output is a human projection of a DAG. If the same upstream run appears
 under multiple downstream roots, the first occurrence is expanded and later
 occurrences are marked as already shown.
+
+`--collapse-run-duplicates` is a separate projection choice. It collapses
+parallel edges between the same source and target run, such as
+`source_swim_bout_run`, `source_swim_bout_path`, and
+`source_peak_events_path`, into one run-to-run edge while preserving the
+original per-reference details in JSON. This is useful for terminal reading, but
+the non-collapsed view remains the most literal edge table.
 
 This is intentional. Repeating shared nodes as if they were independent parents
 would hide important reuse and make stale-source diagnosis harder.
