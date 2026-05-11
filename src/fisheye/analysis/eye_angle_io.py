@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional
 import numpy as np
 import zarr
 
+from ..shared.json_safety import decode_null_terminated_text
 from ..shared.zarr_helpers import (
     first_array_length as _shared_first_array_length,
     first_array_length_in_group as _first_array_length_in_group,
@@ -27,6 +28,8 @@ from ..shared.zarr_helpers import (
 
 
 EYE_ANGLE_RUN_PARENT = "analysis/eye_angle_runs"
+EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
+EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2 = "compact_dense_v2"
 
 EYE_ANGLE_TIMESERIES_COLUMNS: tuple[str, ...] = (
     "left_eye_angle_deg",
@@ -162,6 +165,196 @@ def optional_1d_array(arrays: Mapping[str, np.ndarray], name: str, *, length: Op
     return values
 
 
+def _layout(attrs: Mapping[str, Any]) -> str:
+    return str(attrs.get("layout") or attrs.get("storage_layout") or EYE_ANGLE_LAYOUT_HIERARCHICAL_V1)
+
+
+def _logical_source_path(tables: "EyeAngleRunTables", logical_path: str) -> str:
+    return tables.source_paths.get(logical_path, logical_path)
+
+
+def _channel_names(index_group: Any | None, *, expected_count: int | None = None) -> list[str]:
+    if index_group is None:
+        return []
+
+    attrs = _attrs_dict(index_group)
+    for attr_name in ("channel_names", "names", "field_names"):
+        raw_names = attrs.get(attr_name)
+        if isinstance(raw_names, (list, tuple)):
+            names = [str(decode_null_terminated_text(value)) for value in raw_names]
+            if names:
+                return names[:expected_count] if expected_count is not None else names
+
+    for array_name in ("name", "channel_name", "field_name"):
+        try:
+            if array_name not in index_group:
+                continue
+            values = np.asarray(index_group[array_name][:])
+        except Exception:
+            continue
+        if values.ndim >= 2 and values.dtype.kind in {"u", "i"}:
+            iter_values = values.reshape(values.shape[0], -1)
+        else:
+            iter_values = values.reshape(-1)
+        names = [str(decode_null_terminated_text(value)) for value in iter_values]
+        names = [name for name in names if name]
+        if names:
+            return names[:expected_count] if expected_count is not None else names
+    return []
+
+
+def _dense_channel_mapping(
+    run_group: zarr.Group,
+    *,
+    data_name: str,
+    index_name: str,
+    run_path: str,
+    logical_prefix: str,
+    source_paths: dict[str, str],
+) -> dict[str, np.ndarray]:
+    if data_name not in run_group:
+        return {}
+    data = np.asarray(run_group[data_name][:])
+    if data.ndim != 2:
+        raise EyeAngleIOError(f"{run_path}/{data_name} must be a 2D dense channel array.")
+    names = _channel_names(_child_group(run_group, index_name), expected_count=int(data.shape[1]))
+    if not names:
+        raise EyeAngleIOError(f"{run_path}/{data_name} is missing channel names in {index_name}.")
+    if len(names) != int(data.shape[1]):
+        raise EyeAngleIOError(
+            f"{run_path}/{data_name} has {data.shape[1]} channels but "
+            f"{index_name} names {len(names)} channels."
+        )
+
+    arrays: dict[str, np.ndarray] = {}
+    for channel_idx, name in enumerate(names):
+        arrays[name] = np.asarray(data[:, channel_idx])
+        source_paths[f"{run_path}/{logical_prefix}/{name}"] = f"{run_path}/{data_name}[:,{channel_idx}]"
+    return arrays
+
+
+def _dense_vector_mapping(
+    run_group: zarr.Group,
+    *,
+    data_name: str,
+    index_name: str,
+    run_path: str,
+    logical_prefix: str,
+    source_paths: dict[str, str],
+) -> dict[str, np.ndarray]:
+    if data_name not in run_group:
+        return {}
+    data = np.asarray(run_group[data_name][:])
+    if data.ndim != 3 or int(data.shape[2]) != 2:
+        raise EyeAngleIOError(f"{run_path}/{data_name} must have shape (rows, channels, 2).")
+    names = _channel_names(_child_group(run_group, index_name), expected_count=int(data.shape[1]))
+    if not names:
+        raise EyeAngleIOError(f"{run_path}/{data_name} is missing channel names in {index_name}.")
+    if len(names) != int(data.shape[1]):
+        raise EyeAngleIOError(
+            f"{run_path}/{data_name} has {data.shape[1]} channels but "
+            f"{index_name} names {len(names)} channels."
+        )
+
+    arrays: dict[str, np.ndarray] = {}
+    for channel_idx, name in enumerate(names):
+        arrays[name] = np.asarray(data[:, channel_idx, :])
+        source_paths[f"{run_path}/{logical_prefix}/{name}"] = f"{run_path}/{data_name}[:,{channel_idx},:]"
+    return arrays
+
+
+def _compact_dense_tables(
+    run_group: zarr.Group,
+    *,
+    resolved_run: str,
+    run_path: str,
+    attrs: Mapping[str, Any],
+) -> "EyeAngleRunTables":
+    source_paths: dict[str, str] = {
+        "run": run_path,
+        "angles/roi": f"{run_path}/roi_angles",
+        "angles/frame": f"{run_path}/frame_angles",
+        "qa/roi": f"{run_path}/roi_qa",
+        "qa/frame": f"{run_path}/frame_qa",
+        "support": f"{run_path}/support",
+        "angle_channel_index": f"{run_path}/angle_channel_index",
+        "qa_channel_index": f"{run_path}/qa_channel_index",
+        "vector_channel_index": f"{run_path}/vector_channel_index",
+    }
+    roi = _dense_channel_mapping(
+        run_group,
+        data_name="roi_angles",
+        index_name="angle_channel_index",
+        run_path=run_path,
+        logical_prefix="angles/roi",
+        source_paths=source_paths,
+    )
+    frame = _dense_channel_mapping(
+        run_group,
+        data_name="frame_angles",
+        index_name="angle_channel_index",
+        run_path=run_path,
+        logical_prefix="angles/frame",
+        source_paths=source_paths,
+    )
+    roi.update(
+        _dense_vector_mapping(
+            run_group,
+            data_name="roi_vectors",
+            index_name="vector_channel_index",
+            run_path=run_path,
+            logical_prefix="angles/roi",
+            source_paths=source_paths,
+        )
+    )
+    frame.update(
+        _dense_vector_mapping(
+            run_group,
+            data_name="frame_vectors",
+            index_name="vector_channel_index",
+            run_path=run_path,
+            logical_prefix="angles/frame",
+            source_paths=source_paths,
+        )
+    )
+    if not roi and not frame:
+        raise EyeAngleIOError(f"Eye-angle compact run {resolved_run!r} is missing roi_angles and frame_angles.")
+
+    qa_roi = _dense_channel_mapping(
+        run_group,
+        data_name="roi_qa",
+        index_name="qa_channel_index",
+        run_path=run_path,
+        logical_prefix="qa/roi",
+        source_paths=source_paths,
+    )
+    qa_frame = _dense_channel_mapping(
+        run_group,
+        data_name="frame_qa",
+        index_name="qa_channel_index",
+        run_path=run_path,
+        logical_prefix="qa/frame",
+        source_paths=source_paths,
+    )
+    support = read_zarr_array_mapping(
+        _child_group(run_group, "support"),
+        physical_prefix=f"{run_path}/support",
+        source_paths=source_paths,
+    )
+
+    return EyeAngleRunTables(
+        run_name=resolved_run,
+        run_path=run_path,
+        attrs=attrs,
+        roi=roi,
+        frame=frame,
+        qa_roi=qa_roi,
+        qa_frame=qa_frame,
+        support=support,
+        source_paths=source_paths,
+    )
+
+
 def _eye_angle_option_label(
     *,
     run_name: str,
@@ -223,6 +416,15 @@ def load_eye_angle_run_tables(
     """Load logical angle, QA, and support arrays for one eye-angle run."""
 
     run_group, resolved_run, run_path = resolve_eye_angle_run(root, run_name)
+    attrs = _attrs_dict(run_group)
+    if _layout(attrs) == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        return _compact_dense_tables(
+            run_group,
+            resolved_run=resolved_run,
+            run_path=run_path,
+            attrs=attrs,
+        )
+
     source_paths: dict[str, str] = {
         "run": run_path,
         "angles/roi": f"{run_path}/angles/roi",
@@ -268,7 +470,7 @@ def load_eye_angle_run_tables(
     return EyeAngleRunTables(
         run_name=resolved_run,
         run_path=run_path,
-        attrs=_attrs_dict(run_group),
+        attrs=attrs,
         roi=roi,
         frame=frame,
         qa_roi=qa_roi,
@@ -276,6 +478,21 @@ def load_eye_angle_run_tables(
         support=support,
         source_paths=source_paths,
     )
+
+
+def _run_row_count(run_group: zarr.Group) -> int:
+    attrs = _attrs_dict(run_group)
+    if _layout(attrs) == EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2:
+        for name in ("roi_angles", "frame_angles"):
+            try:
+                if name in run_group:
+                    shape = getattr(run_group[name], "shape", ())
+                    if shape:
+                        return int(shape[0])
+            except Exception:
+                continue
+        return 0
+    return _first_array_length_in_group(_child_group(run_group, "angles/roi"), EYE_ANGLE_ROW_COUNT_COLUMNS)
 
 
 def discover_eye_angle_run_options(root: zarr.Group) -> list[EyeAngleRunOption]:
@@ -292,8 +509,7 @@ def discover_eye_angle_run_options(root: zarr.Group) -> list[EyeAngleRunOption]:
             run_group = parent[run_name]
         except Exception:
             continue
-        roi_group = _child_group(run_group, "angles/roi")
-        n_rows = _first_array_length_in_group(roi_group, EYE_ANGLE_ROW_COUNT_COLUMNS)
+        n_rows = _run_row_count(run_group)
         if n_rows <= 0:
             continue
         attrs = _attrs_dict(run_group)
@@ -392,6 +608,7 @@ def load_eye_gaze_frame_series(
         if values is None:
             raise EyeAngleIOError(f"Eye-angle run {tables.run_name!r} is missing angles/frame/{array_name}.")
         source_path = f"{tables.run_path}/angles/frame/{array_name}"
+        source_path = _logical_source_path(tables, source_path)
         series[key] = aligned_frame_values(
             values,
             frames,
@@ -404,6 +621,7 @@ def load_eye_gaze_frame_series(
     signed_values = tables.frame.get(signed_name)
     if signed_values is not None:
         source_path = f"{tables.run_path}/angles/frame/{signed_name}"
+        source_path = _logical_source_path(tables, source_path)
         series[signed_name] = aligned_frame_values(
             signed_values,
             frames,
@@ -419,6 +637,7 @@ def load_eye_gaze_frame_series(
     valid_frame = tables.qa_frame.get("valid_frame")
     if valid_frame is not None:
         source_path = f"{tables.run_path}/qa/frame/valid_frame"
+        source_path = _logical_source_path(tables, source_path)
         valid &= aligned_frame_values(
             valid_frame,
             frames,
@@ -460,6 +679,8 @@ def roi_frame_indices(tables: EyeAngleRunTables, *, row_count: int) -> Optional[
 
 
 __all__ = [
+    "EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2",
+    "EYE_ANGLE_LAYOUT_HIERARCHICAL_V1",
     "EYE_ANGLE_RUN_PARENT",
     "EYE_ANGLE_ROW_COUNT_COLUMNS",
     "EYE_ANGLE_TIMESERIES_COLUMNS",
