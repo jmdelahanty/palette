@@ -203,6 +203,28 @@ def _channel_names(index_group: Any | None, *, expected_count: int | None = None
     return []
 
 
+def _channel_availability(
+    index_group: Any | None,
+    *,
+    array_name: str,
+    expected_count: int,
+) -> np.ndarray:
+    if index_group is None:
+        return np.ones(int(expected_count), dtype=bool)
+    try:
+        if array_name not in index_group:
+            return np.ones(int(expected_count), dtype=bool)
+        values = np.asarray(index_group[array_name][:], dtype=bool).reshape(-1)
+    except Exception:
+        return np.ones(int(expected_count), dtype=bool)
+    if int(values.shape[0]) != int(expected_count):
+        raise EyeAngleIOError(
+            f"Channel availability array {array_name!r} has {values.shape[0]} rows; "
+            f"expected {expected_count}."
+        )
+    return values
+
+
 def _dense_channel_mapping(
     run_group: zarr.Group,
     *,
@@ -210,6 +232,7 @@ def _dense_channel_mapping(
     index_name: str,
     run_path: str,
     logical_prefix: str,
+    available_name: str,
     source_paths: dict[str, str],
 ) -> dict[str, np.ndarray]:
     if data_name not in run_group:
@@ -217,7 +240,8 @@ def _dense_channel_mapping(
     data = np.asarray(run_group[data_name][:])
     if data.ndim != 2:
         raise EyeAngleIOError(f"{run_path}/{data_name} must be a 2D dense channel array.")
-    names = _channel_names(_child_group(run_group, index_name), expected_count=int(data.shape[1]))
+    index_group = _child_group(run_group, index_name)
+    names = _channel_names(index_group, expected_count=int(data.shape[1]))
     if not names:
         raise EyeAngleIOError(f"{run_path}/{data_name} is missing channel names in {index_name}.")
     if len(names) != int(data.shape[1]):
@@ -225,9 +249,12 @@ def _dense_channel_mapping(
             f"{run_path}/{data_name} has {data.shape[1]} channels but "
             f"{index_name} names {len(names)} channels."
         )
+    available = _channel_availability(index_group, array_name=available_name, expected_count=int(data.shape[1]))
 
     arrays: dict[str, np.ndarray] = {}
     for channel_idx, name in enumerate(names):
+        if not bool(available[channel_idx]):
+            continue
         arrays[name] = np.asarray(data[:, channel_idx])
         source_paths[f"{run_path}/{logical_prefix}/{name}"] = f"{run_path}/{data_name}[:,{channel_idx}]"
     return arrays
@@ -240,6 +267,7 @@ def _dense_vector_mapping(
     index_name: str,
     run_path: str,
     logical_prefix: str,
+    available_name: str,
     source_paths: dict[str, str],
 ) -> dict[str, np.ndarray]:
     if data_name not in run_group:
@@ -247,7 +275,8 @@ def _dense_vector_mapping(
     data = np.asarray(run_group[data_name][:])
     if data.ndim != 3 or int(data.shape[2]) != 2:
         raise EyeAngleIOError(f"{run_path}/{data_name} must have shape (rows, channels, 2).")
-    names = _channel_names(_child_group(run_group, index_name), expected_count=int(data.shape[1]))
+    index_group = _child_group(run_group, index_name)
+    names = _channel_names(index_group, expected_count=int(data.shape[1]))
     if not names:
         raise EyeAngleIOError(f"{run_path}/{data_name} is missing channel names in {index_name}.")
     if len(names) != int(data.shape[1]):
@@ -255,9 +284,12 @@ def _dense_vector_mapping(
             f"{run_path}/{data_name} has {data.shape[1]} channels but "
             f"{index_name} names {len(names)} channels."
         )
+    available = _channel_availability(index_group, array_name=available_name, expected_count=int(data.shape[1]))
 
     arrays: dict[str, np.ndarray] = {}
     for channel_idx, name in enumerate(names):
+        if not bool(available[channel_idx]):
+            continue
         arrays[name] = np.asarray(data[:, channel_idx, :])
         source_paths[f"{run_path}/{logical_prefix}/{name}"] = f"{run_path}/{data_name}[:,{channel_idx},:]"
     return arrays
@@ -287,6 +319,7 @@ def _compact_dense_tables(
         index_name="angle_channel_index",
         run_path=run_path,
         logical_prefix="angles/roi",
+        available_name="roi_available",
         source_paths=source_paths,
     )
     frame = _dense_channel_mapping(
@@ -295,6 +328,7 @@ def _compact_dense_tables(
         index_name="angle_channel_index",
         run_path=run_path,
         logical_prefix="angles/frame",
+        available_name="frame_available",
         source_paths=source_paths,
     )
     roi.update(
@@ -304,6 +338,7 @@ def _compact_dense_tables(
             index_name="vector_channel_index",
             run_path=run_path,
             logical_prefix="angles/roi",
+            available_name="roi_available",
             source_paths=source_paths,
         )
     )
@@ -314,6 +349,7 @@ def _compact_dense_tables(
             index_name="vector_channel_index",
             run_path=run_path,
             logical_prefix="angles/frame",
+            available_name="frame_available",
             source_paths=source_paths,
         )
     )
@@ -326,6 +362,7 @@ def _compact_dense_tables(
         index_name="qa_channel_index",
         run_path=run_path,
         logical_prefix="qa/roi",
+        available_name="roi_available",
         source_paths=source_paths,
     )
     qa_frame = _dense_channel_mapping(
@@ -334,6 +371,7 @@ def _compact_dense_tables(
         index_name="qa_channel_index",
         run_path=run_path,
         logical_prefix="qa/frame",
+        available_name="frame_available",
         source_paths=source_paths,
     )
     support = read_zarr_array_mapping(

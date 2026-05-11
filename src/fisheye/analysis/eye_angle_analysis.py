@@ -1212,6 +1212,13 @@ def _write_text_index_array(group: zarr.Group, name: str, values: Sequence[objec
     group.create_array(name, data=data, chunks=(max(1, int(data.shape[0])), int(data.shape[1])), overwrite=True)
 
 
+def _write_bool_index_array(group: zarr.Group, name: str, values: Sequence[bool]) -> None:
+    data = np.asarray(values, dtype=bool)
+    if name in group:
+        del group[name]
+    group.create_array(name, data=data, chunks=(max(1, int(data.shape[0])),), overwrite=True)
+
+
 def _delete_child(group: zarr.Group, name: str) -> None:
     if name in group:
         del group[name]
@@ -1416,11 +1423,19 @@ def _formula_for_angle_channel(name: str) -> str:
     return formulas.get(name, "")
 
 
-def _write_angle_channel_index(run_group: zarr.Group, channel_names: Sequence[str]) -> None:
+def _write_angle_channel_index(
+    run_group: zarr.Group,
+    channel_names: Sequence[str],
+    *,
+    roi_available: Sequence[bool],
+    frame_available: Sequence[bool],
+) -> None:
     group = run_group.require_group("angle_channel_index")
     for name in _array_keys(group):
         del group[name]
     _write_text_index_array(group, "name", channel_names)
+    _write_bool_index_array(group, "roi_available", roi_available)
+    _write_bool_index_array(group, "frame_available", frame_available)
     _write_text_index_array(group, "representation", [_representation_for_angle_channel(name) for name in channel_names])
     _write_text_index_array(group, "eye", [_eye_for_channel(name) for name in channel_names], width=64)
     _write_text_index_array(group, "value_kind", [_value_kind_for_angle_channel(name) for name in channel_names], width=64)
@@ -1441,11 +1456,19 @@ def _write_angle_channel_index(run_group: zarr.Group, channel_names: Sequence[st
     )
 
 
-def _write_vector_channel_index(run_group: zarr.Group, channel_names: Sequence[str]) -> None:
+def _write_vector_channel_index(
+    run_group: zarr.Group,
+    channel_names: Sequence[str],
+    *,
+    roi_available: Sequence[bool],
+    frame_available: Sequence[bool],
+) -> None:
     group = run_group.require_group("vector_channel_index")
     for name in _array_keys(group):
         del group[name]
     _write_text_index_array(group, "name", channel_names)
+    _write_bool_index_array(group, "roi_available", roi_available)
+    _write_bool_index_array(group, "frame_available", frame_available)
     _write_text_index_array(group, "representation", ["gaze" if "gaze" in name else "support" for name in channel_names])
     _write_text_index_array(group, "eye", [_eye_for_channel(name) for name in channel_names], width=64)
     _write_text_index_array(group, "value_kind", ["unit_vector_xy" for _name in channel_names], width=64)
@@ -1460,11 +1483,20 @@ def _write_vector_channel_index(run_group: zarr.Group, channel_names: Sequence[s
     )
 
 
-def _write_qa_channel_index(run_group: zarr.Group, channel_names: Sequence[str], dtype_by_name: Mapping[str, str]) -> None:
+def _write_qa_channel_index(
+    run_group: zarr.Group,
+    channel_names: Sequence[str],
+    dtype_by_name: Mapping[str, str],
+    *,
+    roi_available: Sequence[bool],
+    frame_available: Sequence[bool],
+) -> None:
     group = run_group.require_group("qa_channel_index")
     for name in _array_keys(group):
         del group[name]
     _write_text_index_array(group, "name", channel_names)
+    _write_bool_index_array(group, "roi_available", roi_available)
+    _write_bool_index_array(group, "frame_available", frame_available)
     _write_text_index_array(
         group,
         "value_kind",
@@ -1500,7 +1532,14 @@ def _write_compact_dense_layout(
     roi_angle_names = _scalar_channel_names(roi_group, dtype_kinds="f")
     frame_angle_names = _scalar_channel_names(frame_group, dtype_kinds="f")
     angle_names = _ordered_union(roi_angle_names, frame_angle_names)
-    _write_angle_channel_index(run_group, angle_names)
+    roi_angle_name_set = set(roi_angle_names)
+    frame_angle_name_set = set(frame_angle_names)
+    _write_angle_channel_index(
+        run_group,
+        angle_names,
+        roi_available=[name in roi_angle_name_set for name in angle_names],
+        frame_available=[name in frame_angle_name_set for name in angle_names],
+    )
     _replace_array(
         run_group,
         "roi_angles",
@@ -1530,7 +1569,14 @@ def _write_compact_dense_layout(
     frame_vector_names = _vector_channel_names(frame_group)
     vector_names = _ordered_union(roi_vector_names, frame_vector_names)
     if vector_names:
-        _write_vector_channel_index(run_group, vector_names)
+        roi_vector_name_set = set(roi_vector_names)
+        frame_vector_name_set = set(frame_vector_names)
+        _write_vector_channel_index(
+            run_group,
+            vector_names,
+            roi_available=[name in roi_vector_name_set for name in vector_names],
+            frame_available=[name in frame_vector_name_set for name in vector_names],
+        )
         _replace_array(
             run_group,
             "roi_vectors",
@@ -1554,7 +1600,15 @@ def _write_compact_dense_layout(
             if name in dtype_by_name or name not in source_group:
                 continue
             dtype_by_name[name] = str(np.dtype(source_group[name].dtype))
-    _write_qa_channel_index(run_group, qa_names, dtype_by_name)
+    roi_qa_name_set = set(roi_qa_names)
+    frame_qa_name_set = set(frame_qa_names)
+    _write_qa_channel_index(
+        run_group,
+        qa_names,
+        dtype_by_name,
+        roi_available=[name in roi_qa_name_set for name in qa_names],
+        frame_available=[name in frame_qa_name_set for name in qa_names],
+    )
     _replace_array(
         run_group,
         "roi_qa",

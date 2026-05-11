@@ -759,6 +759,7 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
     roi = run.create_group("angles").create_group("roi")
     roi.create_array("left_eye_angle_deg", data=np.asarray([10.0, 11.0], dtype=np.float32), chunks=(2,))
     roi.create_array("left_gaze_deg", data=np.asarray([80.0, 81.0], dtype=np.float32), chunks=(2,))
+    roi.create_array("heading_deg", data=np.asarray([1.0, 2.0], dtype=np.float32), chunks=(2,))
     roi.create_array(
         "left_gaze_xy",
         data=np.asarray([[1.0, 0.0], [0.9, 0.1]], dtype=np.float32),
@@ -770,6 +771,7 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
 
     qa_roi = run.create_group("qa").create_group("roi")
     qa_roi.create_array("valid_frame", data=np.asarray([True, False], dtype=bool), chunks=(2,))
+    qa_roi.create_array("valid_left", data=np.asarray([True, True], dtype=bool), chunks=(2,))
     qa_roi.create_array("reason_codes", data=np.asarray([0, 4], dtype=np.uint16), chunks=(2,))
     qa_frame = run["qa"].create_group("frame")
     qa_frame.create_array("valid_frame", data=np.asarray([True, False, True], dtype=bool), chunks=(3,))
@@ -787,15 +789,20 @@ def test_eye_angle_compact_dense_writer_packs_logical_tables(tmp_path) -> None:
     assert run.attrs["layout"] == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
     assert "angles" not in run
     assert "qa" not in run
-    assert run["roi_angles"].shape == (2, 2)
-    assert run["frame_angles"].shape == (3, 2)
+    assert run["roi_angles"].shape == (2, 3)
+    assert run["frame_angles"].shape == (3, 3)
     assert run["roi_vectors"].shape == (2, 1, 2)
-    assert run["roi_qa"].shape == (2, 2)
+    assert run["roi_qa"].shape == (2, 3)
 
     tables = load_eye_angle_run_tables(root, run_name="latest")
     np.testing.assert_allclose(tables.roi["left_eye_angle_deg"], [10.0, 11.0])
+    np.testing.assert_allclose(tables.roi["heading_deg"], [1.0, 2.0])
+    assert "heading_deg" not in tables.frame
     np.testing.assert_allclose(tables.frame["left_gaze_deg"], [80.0, 81.0, 82.0])
     np.testing.assert_allclose(tables.roi["left_gaze_xy"], [[1.0, 0.0], [0.9, 0.1]])
+    assert "left_gaze_xy" not in tables.frame
+    assert tables.qa_roi["valid_left"].astype(bool).tolist() == [True, True]
+    assert "valid_left" not in tables.qa_frame
     assert tables.qa_frame["valid_frame"].astype(bool).tolist() == [True, False, True]
     assert tables.source_paths[
         "analysis/eye_angle_runs/compact/angles/frame/left_gaze_deg"

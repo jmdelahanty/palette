@@ -35,6 +35,8 @@ analysis/eye_angle_runs/<run>/
 
   angle_channel_index/
     name                         # string channel names
+    roi_available                # bool; channel resolves under angles/roi
+    frame_available              # bool; channel resolves under angles/frame
     representation               # major, gaze, eye_frame, nasal_gaze, centroid, legacy
     eye                          # left, right, binocular, none
     value_kind                   # angle, version, vergence, speed, acceleration, delta
@@ -48,6 +50,8 @@ analysis/eye_angle_runs/<run>/
 
   vector_channel_index/
     name                         # left_gaze_xy, right_gaze_xy, ...
+    roi_available                # bool; channel resolves under angles/roi
+    frame_available              # bool; channel resolves under angles/frame
     representation
     value_kind
     units
@@ -57,6 +61,8 @@ analysis/eye_angle_runs/<run>/
 
   qa_channel_index/
     name                         # valid_left, valid_right, valid_frame, ...
+    roi_available                # bool; channel resolves under qa/roi
+    frame_available              # bool; channel resolves under qa/frame
     value_kind                   # bool, reason_code, warning_flag
 
   roi_qa                         # bool/int, shape (n_roi_rows, n_qa_channels)
@@ -171,7 +177,7 @@ Implemented in this slice:
 - In-memory tests prove compact channels roundtrip to existing logical names
   and that writer-packed compact runs resolve through the same logical API.
 - Real canary generated on 2026-05-11:
-  `analysis/eye_angle_runs/eye_angle_compact_dense_v2_canary_20260511`.
+  `analysis/eye_angle_runs/eye_angle_compact_dense_v2_canary_20260511_axisavail`.
 
 Not implemented yet:
 
@@ -188,7 +194,8 @@ Current status:
    channel-index order.
 3. `angle_channel_index`, `vector_channel_index`, and `qa_channel_index` store
    fixed-width UTF-8 text metadata for names, representation, eye, value kind,
-   units, source channels, formulas, and compatibility aliases.
+   units, source channels, formulas, compatibility aliases, and per-row-axis
+   availability flags.
 4. Focused unit tests and one real canary validate the resolver path, strict
    JSON metadata, and interactive/bout eye-gaze reader surfaces.
 

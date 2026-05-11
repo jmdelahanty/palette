@@ -171,8 +171,9 @@ Most other writers are still hierarchical, but they are not equally urgent:
     `test_bout_kinematics.py`.
   - Compact-dense-v2 design and output inventory live in
     `docs/eye_angle_compact_v2_design.md`.
-  - Real canary generated on 2026-05-11:
-    `eye_angle_compact_dense_v2_canary_20260511`.
+  - Same-code hierarchical/compact parity passed on 2026-05-11 with:
+    `eye_angle_hierarchical_v1_canary_20260511_samecode` and
+    `eye_angle_compact_dense_v2_canary_20260511_axisavail`.
 
 ### Resolver-First Subject-Shape Work
 
