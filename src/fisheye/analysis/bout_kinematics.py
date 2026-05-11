@@ -76,6 +76,7 @@ PHYSICAL_ACTIVE_SPEED_LEVELS = ("speed_raw", "speed_filtered", "speed_smoothed")
 LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 LAYOUT_COMPACT_TABULAR_V2 = "compact_tabular_v2"
 BOUT_KINEMATICS_LAYOUTS = (LAYOUT_HIERARCHICAL_V1, LAYOUT_COMPACT_TABULAR_V2)
+BOUT_KINEMATICS_LAYOUT_DEFAULT = LAYOUT_COMPACT_TABULAR_V2
 COMPACT_LEVEL_INDEX = "level_index"
 COMPACT_MOVEMENT_TABLE = "movement_metrics"
 COMPACT_HEADING_TABLE = "heading_metrics"
@@ -1981,6 +1982,173 @@ def _plot_bout_movement_summary(
     return _png_bytes_from_figure(fig, dpi=150)
 
 
+_BOUT_HEADING_ARTIFACT_FIELDS = (
+    "bout_id",
+    "source_start_frame",
+    "source_end_frame",
+    "source_core_start_frame",
+    "source_core_end_frame",
+    "source_core_start_time_s_interpolated",
+    "source_core_end_time_s_interpolated",
+    "source_core_duration_s_interpolated",
+    "source_core_start_time_interpolated_valid",
+    "source_core_end_time_interpolated_valid",
+    "source_peak_frame",
+    "source_peak_time_s",
+    "source_peak_signal_value_mm_s",
+    "source_peak_prominence_mm_s",
+    "source_peak_width_s",
+    "source_peak_width_height_mm_s",
+    "source_peak_left_width_frame_interpolated",
+    "source_peak_right_width_frame_interpolated",
+    "source_peak_left_width_time_s",
+    "source_peak_right_width_time_s",
+    "source_peak_boundary_mode_bytes",
+    "source_peak_shape_split_policy_bytes",
+    "pre_epoch_start_frame",
+    "pre_epoch_end_frame",
+    "post_epoch_start_frame",
+    "post_epoch_end_frame",
+    "net_delta_heading_deg",
+    "abs_net_delta_heading_deg",
+    "pre_position_mean_x_mm",
+    "pre_position_mean_y_mm",
+    "post_position_mean_x_mm",
+    "post_position_mean_y_mm",
+    "interbout_epoch_displacement_mm",
+    "pre_position_mean_x_px",
+    "pre_position_mean_y_px",
+    "post_position_mean_x_px",
+    "post_position_mean_y_px",
+    "interbout_epoch_displacement_px",
+    "within_heading_range_deg",
+    "within_heading_peak_to_peak_deg",
+    "within_heading_path_deg",
+    "within_heading_std_deg",
+    "within_heading_zero_crossings",
+    "within_angular_velocity_mean_deg_s",
+    "within_angular_speed_mean_deg_s",
+    "within_angular_speed_max_deg_s",
+    "within_angular_velocity_std_deg_s",
+    "within_angular_velocity_valid",
+    "within_angular_velocity_transition_count",
+)
+
+_BOUT_EYE_GAZE_ARTIFACT_FIELDS = (
+    "bout_id",
+    "source_start_frame",
+    "source_end_frame",
+    "source_core_start_frame",
+    "source_core_end_frame",
+    "pre_epoch_start_frame",
+    "pre_epoch_end_frame",
+    "post_epoch_start_frame",
+    "post_epoch_end_frame",
+    "within_epoch_start_frame",
+    "within_epoch_end_frame",
+    "pre_left_gaze_mean_deg",
+    "pre_right_gaze_mean_deg",
+    "pre_vergence_gaze_mean_deg",
+    "pre_vergence_gaze_signed_mean_deg",
+    "pre_vergence_gaze_std_deg",
+    "pre_vergence_gaze_valid_fraction",
+    "pre_converged_fraction",
+    "post_left_gaze_mean_deg",
+    "post_right_gaze_mean_deg",
+    "post_vergence_gaze_mean_deg",
+    "post_vergence_gaze_signed_mean_deg",
+    "post_vergence_gaze_std_deg",
+    "post_vergence_gaze_valid_fraction",
+    "post_converged_fraction",
+    "within_bout_left_gaze_mean_deg",
+    "within_bout_right_gaze_mean_deg",
+    "within_bout_vergence_gaze_mean_deg",
+    "within_bout_vergence_gaze_signed_mean_deg",
+    "within_bout_vergence_gaze_max_deg",
+    "within_bout_vergence_gaze_range_deg",
+    "within_bout_vergence_gaze_std_deg",
+    "within_bout_vergence_gaze_valid_fraction",
+    "within_bout_converged_fraction",
+    "pre_eye_window_valid",
+    "post_eye_window_valid",
+    "within_eye_window_valid",
+)
+
+_BOUT_MOVEMENT_ARTIFACT_FIELDS = (
+    "bout_id",
+    "source_start_frame",
+    "source_end_frame",
+    "source_core_start_frame",
+    "source_core_end_frame",
+    "detector_duration_s",
+    "detector_observed_duration_s",
+    "detector_core_duration_s",
+    "physical_active_start_frame",
+    "physical_active_end_frame",
+    "physical_active_start_time_s",
+    "physical_active_end_time_s",
+    "physical_active_duration_s",
+    "physical_active_observed_duration_s",
+    "physical_active_start_time_s_interpolated",
+    "physical_active_end_time_s_interpolated",
+    "physical_active_duration_s_interpolated",
+    "physical_active_start_time_interpolated_valid",
+    "physical_active_end_time_interpolated_valid",
+    "physical_active_valid_transition_fraction",
+    "physical_active_path_length_mm",
+    "physical_active_path_length_px",
+    "physical_active_mean_speed_mm_s",
+    "physical_active_peak_speed_mm_s",
+    "physical_active_valid",
+)
+
+
+def _source_table_path_for_level(*, run_name: str, layout: str, level: str) -> str:
+    run_path = f"analysis/bout_kinematics_runs/{run_name}"
+    if layout == LAYOUT_COMPACT_TABULAR_V2:
+        if level == MOVEMENT_LEVEL:
+            return f"{run_path}/{COMPACT_MOVEMENT_TABLE}"
+        if level == EYE_GAZE_LEVEL:
+            return f"{run_path}/{COMPACT_EYE_GAZE_TABLE}"
+        return f"{run_path}/{COMPACT_HEADING_TABLE}"
+    return f"{run_path}/{level}/per_bout_metrics"
+
+
+def _source_filter_for_level(*, layout: str, level: str) -> dict[str, str]:
+    if layout != LAYOUT_COMPACT_TABULAR_V2:
+        return {}
+    if level == MOVEMENT_LEVEL:
+        return {"table": COMPACT_MOVEMENT_TABLE, "analysis_level_bytes": MOVEMENT_LEVEL}
+    if level == EYE_GAZE_LEVEL:
+        return {"table": COMPACT_EYE_GAZE_TABLE, "analysis_level_bytes": EYE_GAZE_LEVEL}
+    return {"table": COMPACT_HEADING_TABLE, "heading_level_bytes": level}
+
+
+def _build_bout_kinematics_source_metadata(
+    *,
+    run_name: str,
+    layout: str,
+    levels_to_fields: Mapping[str, Sequence[str]],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    run_path = f"analysis/bout_kinematics_runs/{run_name}"
+    source_paths: dict[str, str] = {"run": run_path}
+    source_filters: dict[str, dict[str, str]] = {}
+
+    for level, fields in levels_to_fields.items():
+        table_path = _source_table_path_for_level(run_name=run_name, layout=layout, level=level)
+        source_paths[f"{level}.per_bout_metrics"] = table_path
+        if layout == LAYOUT_COMPACT_TABULAR_V2:
+            table_name = table_path.rsplit("/", 1)[-1]
+            source_paths.setdefault(table_name, table_path)
+        for field in fields:
+            source_paths[f"{level}.{field}"] = f"{table_path}/{field}"
+        source_filter = _source_filter_for_level(layout=layout, level=level)
+        if source_filter:
+            source_filters[level] = source_filter
+
+    return source_paths, source_filters
+
+
 def _build_bout_kinematics_interactive_spec(
     *,
     run_name: str,
@@ -1988,72 +2156,24 @@ def _build_bout_kinematics_interactive_spec(
     parameters: Mapping[str, Any],
     heading_levels: Sequence[str],
     default_heading_level: str,
+    layout: str,
     bins: int,
 ) -> dict[str, Any]:
-    source_paths: dict[str, str] = {"run": f"analysis/bout_kinematics_runs/{run_name}"}
-    for level in heading_levels:
-        base = f"analysis/bout_kinematics_runs/{run_name}/{level}/per_bout_metrics"
-        source_paths[f"{level}.per_bout_metrics"] = base
-        for field in (
-            "bout_id",
-            "source_start_frame",
-            "source_end_frame",
-            "source_core_start_frame",
-            "source_core_end_frame",
-            "source_core_start_time_s_interpolated",
-            "source_core_end_time_s_interpolated",
-            "source_core_duration_s_interpolated",
-            "source_core_start_time_interpolated_valid",
-            "source_core_end_time_interpolated_valid",
-            "source_peak_frame",
-            "source_peak_time_s",
-            "source_peak_signal_value_mm_s",
-            "source_peak_prominence_mm_s",
-            "source_peak_width_s",
-            "source_peak_width_height_mm_s",
-            "source_peak_left_width_frame_interpolated",
-            "source_peak_right_width_frame_interpolated",
-            "source_peak_left_width_time_s",
-            "source_peak_right_width_time_s",
-            "source_peak_boundary_mode_bytes",
-            "source_peak_shape_split_policy_bytes",
-            "pre_epoch_start_frame",
-            "pre_epoch_end_frame",
-            "post_epoch_start_frame",
-            "post_epoch_end_frame",
-            "net_delta_heading_deg",
-            "abs_net_delta_heading_deg",
-            "pre_position_mean_x_mm",
-            "pre_position_mean_y_mm",
-            "post_position_mean_x_mm",
-            "post_position_mean_y_mm",
-            "interbout_epoch_displacement_mm",
-            "pre_position_mean_x_px",
-            "pre_position_mean_y_px",
-            "post_position_mean_x_px",
-            "post_position_mean_y_px",
-            "interbout_epoch_displacement_px",
-            "within_heading_range_deg",
-            "within_heading_peak_to_peak_deg",
-            "within_heading_path_deg",
-            "within_heading_std_deg",
-            "within_heading_zero_crossings",
-            "within_angular_velocity_mean_deg_s",
-            "within_angular_speed_mean_deg_s",
-            "within_angular_speed_max_deg_s",
-            "within_angular_velocity_std_deg_s",
-            "within_angular_velocity_valid",
-            "within_angular_velocity_transition_count",
-        ):
-            source_paths[f"{level}.{field}"] = f"{base}/{field}"
+    source_paths, source_filters = _build_bout_kinematics_source_metadata(
+        run_name=run_name,
+        layout=layout,
+        levels_to_fields={str(level): _BOUT_HEADING_ARTIFACT_FIELDS for level in heading_levels},
+    )
 
     return {
         "schema_id": BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
         "title": "Bout heading kinematics",
         "run_name": run_name,
         "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+        "layout": layout,
         "source_refs": dict(source_refs),
         "source_paths": source_paths,
+        "source_filters": source_filters,
         "parameters": dict(parameters),
         "default_heading_level": default_heading_level,
         "heading_levels": list(heading_levels),
@@ -2114,61 +2234,24 @@ def _build_bout_eye_gaze_interactive_spec(
     run_name: str,
     source_refs: Mapping[str, Any],
     parameters: Mapping[str, Any],
+    layout: str,
     bins: int,
 ) -> dict[str, Any]:
-    base = f"analysis/bout_kinematics_runs/{run_name}/eye_gaze/per_bout_metrics"
-    source_paths: dict[str, str] = {
-        "run": f"analysis/bout_kinematics_runs/{run_name}",
-        "eye_gaze.per_bout_metrics": base,
-    }
-    for field in (
-        "bout_id",
-        "source_start_frame",
-        "source_end_frame",
-        "source_core_start_frame",
-        "source_core_end_frame",
-        "pre_epoch_start_frame",
-        "pre_epoch_end_frame",
-        "post_epoch_start_frame",
-        "post_epoch_end_frame",
-        "within_epoch_start_frame",
-        "within_epoch_end_frame",
-        "pre_left_gaze_mean_deg",
-        "pre_right_gaze_mean_deg",
-        "pre_vergence_gaze_mean_deg",
-        "pre_vergence_gaze_signed_mean_deg",
-        "pre_vergence_gaze_std_deg",
-        "pre_vergence_gaze_valid_fraction",
-        "pre_converged_fraction",
-        "post_left_gaze_mean_deg",
-        "post_right_gaze_mean_deg",
-        "post_vergence_gaze_mean_deg",
-        "post_vergence_gaze_signed_mean_deg",
-        "post_vergence_gaze_std_deg",
-        "post_vergence_gaze_valid_fraction",
-        "post_converged_fraction",
-        "within_bout_left_gaze_mean_deg",
-        "within_bout_right_gaze_mean_deg",
-        "within_bout_vergence_gaze_mean_deg",
-        "within_bout_vergence_gaze_signed_mean_deg",
-        "within_bout_vergence_gaze_max_deg",
-        "within_bout_vergence_gaze_range_deg",
-        "within_bout_vergence_gaze_std_deg",
-        "within_bout_vergence_gaze_valid_fraction",
-        "within_bout_converged_fraction",
-        "pre_eye_window_valid",
-        "post_eye_window_valid",
-        "within_eye_window_valid",
-    ):
-        source_paths[f"eye_gaze.{field}"] = f"{base}/{field}"
+    source_paths, source_filters = _build_bout_kinematics_source_metadata(
+        run_name=run_name,
+        layout=layout,
+        levels_to_fields={EYE_GAZE_LEVEL: _BOUT_EYE_GAZE_ARTIFACT_FIELDS},
+    )
 
     return {
         "schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
         "title": "Bout eye-gaze summaries",
         "run_name": run_name,
         "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+        "layout": layout,
         "source_refs": dict(source_refs),
         "source_paths": source_paths,
+        "source_filters": source_filters,
         "parameters": dict(parameters),
         "analysis_level": EYE_GAZE_LEVEL,
         "panels": [
@@ -2203,49 +2286,24 @@ def _build_bout_movement_interactive_spec(
     run_name: str,
     source_refs: Mapping[str, Any],
     parameters: Mapping[str, Any],
+    layout: str,
     bins: int,
 ) -> dict[str, Any]:
-    base = f"analysis/bout_kinematics_runs/{run_name}/movement/per_bout_metrics"
-    source_paths: dict[str, str] = {
-        "run": f"analysis/bout_kinematics_runs/{run_name}",
-        "movement.per_bout_metrics": base,
-    }
-    for field in (
-        "bout_id",
-        "source_start_frame",
-        "source_end_frame",
-        "source_core_start_frame",
-        "source_core_end_frame",
-        "detector_duration_s",
-        "detector_observed_duration_s",
-        "detector_core_duration_s",
-        "physical_active_start_frame",
-        "physical_active_end_frame",
-        "physical_active_start_time_s",
-        "physical_active_end_time_s",
-        "physical_active_duration_s",
-        "physical_active_observed_duration_s",
-        "physical_active_start_time_s_interpolated",
-        "physical_active_end_time_s_interpolated",
-        "physical_active_duration_s_interpolated",
-        "physical_active_start_time_interpolated_valid",
-        "physical_active_end_time_interpolated_valid",
-        "physical_active_valid_transition_fraction",
-        "physical_active_path_length_mm",
-        "physical_active_path_length_px",
-        "physical_active_mean_speed_mm_s",
-        "physical_active_peak_speed_mm_s",
-        "physical_active_valid",
-    ):
-        source_paths[f"movement.{field}"] = f"{base}/{field}"
+    source_paths, source_filters = _build_bout_kinematics_source_metadata(
+        run_name=run_name,
+        layout=layout,
+        levels_to_fields={MOVEMENT_LEVEL: _BOUT_MOVEMENT_ARTIFACT_FIELDS},
+    )
 
     return {
         "schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
         "title": "Bout physical movement summaries",
         "run_name": run_name,
         "renderer": BOUT_KINEMATICS_PLOT_RENDERER,
+        "layout": layout,
         "source_refs": dict(source_refs),
         "source_paths": source_paths,
+        "source_filters": source_filters,
         "parameters": dict(parameters),
         "analysis_level": MOVEMENT_LEVEL,
         "panels": [
@@ -2283,18 +2341,18 @@ def write_bout_movement_visualization_artifacts(
     source_refs: Mapping[str, Any],
     parameters: Mapping[str, Any],
     source_speed_level: str,
+    layout: str,
     bins: int,
     artifact_dpi: int,
     command: Optional[str],
 ) -> None:
     png_artifact_name = f"{BOUT_MOVEMENT_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_png"
     spec_artifact_name = f"{BOUT_MOVEMENT_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_interactive"
-    source_paths = {
-        "run": f"analysis/bout_kinematics_runs/{run_name}",
-        "movement.per_bout_metrics": (
-            f"analysis/bout_kinematics_runs/{run_name}/movement/per_bout_metrics"
-        ),
-    }
+    source_paths, source_filters = _build_bout_kinematics_source_metadata(
+        run_name=run_name,
+        layout=layout,
+        levels_to_fields={MOVEMENT_LEVEL: _BOUT_MOVEMENT_ARTIFACT_FIELDS},
+    )
     source_runs = {
         "bout_kinematics": run_name,
         "track_kinematics": source_refs.get("source_track_kinematics_run"),
@@ -2304,6 +2362,7 @@ def write_bout_movement_visualization_artifacts(
     plot_parameters = {
         "bins": int(bins),
         "artifact_dpi": int(artifact_dpi),
+        "layout": layout,
         "analysis_level": MOVEMENT_LEVEL,
         "physical_active": parameters.get("physical_active", {}),
     }
@@ -2329,6 +2388,7 @@ def write_bout_movement_visualization_artifacts(
             "zarr_path": str(zarr_path),
             "source_refs": dict(source_refs),
             "source_paths": source_paths,
+            "source_filters": source_filters,
             "source_runs": source_runs,
         },
         command=command,
@@ -2360,6 +2420,7 @@ def write_bout_movement_visualization_artifacts(
         parameters=plot_parameters,
         extra_attrs={
             "plot_schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
@@ -2367,6 +2428,7 @@ def write_bout_movement_visualization_artifacts(
         run_name=run_name,
         source_refs=source_refs,
         parameters=parameters,
+        layout=layout,
         bins=bins,
     )
     write_interactive_plot_spec_artifact(
@@ -2384,6 +2446,7 @@ def write_bout_movement_visualization_artifacts(
         parameters=plot_parameters,
         extra_attrs={
             "plot_schema_id": BOUT_MOVEMENT_PLOT_SPEC_SCHEMA_ID,
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
@@ -2398,18 +2461,18 @@ def write_bout_eye_gaze_visualization_artifacts(
     source_refs: Mapping[str, Any],
     parameters: Mapping[str, Any],
     source_speed_level: str,
+    layout: str,
     bins: int,
     artifact_dpi: int,
     command: Optional[str],
 ) -> None:
     png_artifact_name = f"{BOUT_EYE_GAZE_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_png"
     spec_artifact_name = f"{BOUT_EYE_GAZE_PNG_PREFIX}_track_{int(source_refs['source_track_id'])}_interactive"
-    source_paths = {
-        "run": f"analysis/bout_kinematics_runs/{run_name}",
-        "eye_gaze.per_bout_metrics": (
-            f"analysis/bout_kinematics_runs/{run_name}/eye_gaze/per_bout_metrics"
-        ),
-    }
+    source_paths, source_filters = _build_bout_kinematics_source_metadata(
+        run_name=run_name,
+        layout=layout,
+        levels_to_fields={EYE_GAZE_LEVEL: _BOUT_EYE_GAZE_ARTIFACT_FIELDS},
+    )
     source_runs = {
         "bout_kinematics": run_name,
         "track_kinematics": source_refs.get("source_track_kinematics_run"),
@@ -2420,6 +2483,7 @@ def write_bout_eye_gaze_visualization_artifacts(
     plot_parameters = {
         "bins": int(bins),
         "artifact_dpi": int(artifact_dpi),
+        "layout": layout,
         "analysis_level": EYE_GAZE_LEVEL,
         "pre_post_mode": parameters.get("pre_post_mode"),
         "eye_gaze": parameters.get("eye_gaze", {}),
@@ -2446,6 +2510,7 @@ def write_bout_eye_gaze_visualization_artifacts(
             "zarr_path": str(zarr_path),
             "source_refs": dict(source_refs),
             "source_paths": source_paths,
+            "source_filters": source_filters,
             "source_runs": source_runs,
         },
         command=command,
@@ -2477,6 +2542,7 @@ def write_bout_eye_gaze_visualization_artifacts(
         parameters=plot_parameters,
         extra_attrs={
             "plot_schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
@@ -2484,6 +2550,7 @@ def write_bout_eye_gaze_visualization_artifacts(
         run_name=run_name,
         source_refs=source_refs,
         parameters=parameters,
+        layout=layout,
         bins=bins,
     )
     write_interactive_plot_spec_artifact(
@@ -2501,6 +2568,7 @@ def write_bout_eye_gaze_visualization_artifacts(
         parameters=plot_parameters,
         extra_attrs={
             "plot_schema_id": BOUT_EYE_GAZE_PLOT_SPEC_SCHEMA_ID,
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
@@ -2519,6 +2587,7 @@ def write_bout_kinematics_visualization_artifacts(
     heading_levels: Sequence[str],
     default_heading_level: str,
     source_speed_level: str,
+    layout: str,
     bins: int,
     artifact_dpi: int,
     command: Optional[str],
@@ -2533,19 +2602,16 @@ def write_bout_kinematics_visualization_artifacts(
         source_refs=source_refs,
         parameters=parameters,
         source_speed_level=source_speed_level,
+        layout=layout,
         bins=int(bins),
         artifact_dpi=int(artifact_dpi),
         command=command,
     )
-    source_paths = {
-        "run": f"analysis/bout_kinematics_runs/{run_name}",
-        **{
-            f"{level}.per_bout_metrics": (
-                f"analysis/bout_kinematics_runs/{run_name}/{level}/per_bout_metrics"
-            )
-            for level in heading_levels
-        },
-    }
+    source_paths, source_filters = _build_bout_kinematics_source_metadata(
+        run_name=run_name,
+        layout=layout,
+        levels_to_fields={str(level): _BOUT_HEADING_ARTIFACT_FIELDS for level in heading_levels},
+    )
     source_runs = {
         "bout_kinematics": run_name,
         "track_kinematics": source_refs.get("source_track_kinematics_run"),
@@ -2555,6 +2621,7 @@ def write_bout_kinematics_visualization_artifacts(
     plot_parameters = {
         "bins": int(bins),
         "artifact_dpi": int(artifact_dpi),
+        "layout": layout,
         "heading_levels": list(heading_levels),
         "default_heading_level": default_heading_level,
         "pre_post_mode": parameters.get("pre_post_mode"),
@@ -2581,6 +2648,7 @@ def write_bout_kinematics_visualization_artifacts(
             "zarr_path": str(zarr_path),
             "source_refs": dict(source_refs),
             "source_paths": source_paths,
+            "source_filters": source_filters,
             "source_runs": source_runs,
         },
         command=command,
@@ -2613,6 +2681,7 @@ def write_bout_kinematics_visualization_artifacts(
         parameters=plot_parameters,
         extra_attrs={
             "plot_schema_id": BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
@@ -2622,6 +2691,7 @@ def write_bout_kinematics_visualization_artifacts(
         parameters=parameters,
         heading_levels=heading_levels,
         default_heading_level=default_heading_level,
+        layout=layout,
         bins=bins,
     )
     write_interactive_plot_spec_artifact(
@@ -2639,6 +2709,7 @@ def write_bout_kinematics_visualization_artifacts(
         parameters=plot_parameters,
         extra_attrs={
             "plot_schema_id": BOUT_KINEMATICS_PLOT_SPEC_SCHEMA_ID,
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
@@ -2651,6 +2722,7 @@ def write_bout_kinematics_visualization_artifacts(
             source_refs=source_refs,
             parameters=parameters,
             source_speed_level=source_speed_level,
+            layout=layout,
             bins=int(bins),
             artifact_dpi=int(artifact_dpi),
             command=command,
@@ -2688,7 +2760,7 @@ def compute_and_save_bout_kinematics(
     write_visualizations: bool = False,
     visualization_bins: int = 40,
     visualization_dpi: int = 150,
-    layout: str = LAYOUT_HIERARCHICAL_V1,
+    layout: str = BOUT_KINEMATICS_LAYOUT_DEFAULT,
     overwrite: bool = False,
     command: Optional[str] = None,
 ) -> str:
@@ -2714,8 +2786,6 @@ def compute_and_save_bout_kinematics(
     if layout not in BOUT_KINEMATICS_LAYOUTS:
         expected = ", ".join(BOUT_KINEMATICS_LAYOUTS)
         raise ValueError(f"Unsupported bout-kinematics layout {layout!r}; expected one of: {expected}")
-    if layout == LAYOUT_COMPACT_TABULAR_V2 and write_visualizations:
-        raise ValueError("Compact bout-kinematics layout does not yet support zarr visualization artifacts.")
     if float(physical_active_threshold_mm_s) < 0:
         raise ValueError("physical_active_threshold_mm_s must be >= 0.")
     if float(physical_active_boundary_margin_s) < 0:
@@ -3220,6 +3290,7 @@ def compute_and_save_bout_kinematics(
                 heading_levels=written_levels,
                 default_heading_level=default_heading_level,
                 source_speed_level=source_speed_level,
+                layout=layout,
                 bins=int(visualization_bins),
                 artifact_dpi=int(visualization_dpi),
                 command=command,
@@ -3317,8 +3388,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--layout",
         choices=BOUT_KINEMATICS_LAYOUTS,
-        default=LAYOUT_HIERARCHICAL_V1,
-        help="Physical Zarr layout to write. Default preserves the existing hierarchical layout.",
+        default=BOUT_KINEMATICS_LAYOUT_DEFAULT,
+        help=(
+            "Physical Zarr layout to write. Default: "
+            f"{BOUT_KINEMATICS_LAYOUT_DEFAULT}. Use hierarchical_v1 for legacy/debug compatibility."
+        ),
     )
     parser.add_argument("--visualization-bins", type=int, default=40)
     parser.add_argument("--visualization-dpi", type=int, default=150)

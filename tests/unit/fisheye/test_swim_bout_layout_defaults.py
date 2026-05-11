@@ -9,7 +9,7 @@ from fisheye.analysis import detect_bouts_multi_level as mod
 def test_swim_bout_layout_default_constant_controls_function_default() -> None:
     signature = inspect.signature(mod.detect_and_save_bouts)
 
-    assert mod.SWIM_BOUT_LAYOUT_DEFAULT == mod.SWIM_BOUT_LAYOUT_HIERARCHICAL_V1
+    assert mod.SWIM_BOUT_LAYOUT_DEFAULT == mod.SWIM_BOUT_LAYOUT_COMPACT_V2
     assert signature.parameters["layout"].default == mod.SWIM_BOUT_LAYOUT_DEFAULT
 
 

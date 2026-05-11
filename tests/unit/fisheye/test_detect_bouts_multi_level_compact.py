@@ -8,7 +8,6 @@ import fisheye.analysis.detect_bouts_multi_level as detect_bouts_multi_level
 from fisheye.analysis.detect_bouts_multi_level import (
     PATH_DISTANCE_LEVEL_SOURCE,
     SPEED_LEVELS,
-    SWIM_BOUT_LAYOUT_COMPACT_V2,
     SWIM_BOUT_STORED_LAYOUT_COMPACT_V2,
     _compute_global_metrics,
     _compute_inter_bout_intervals,
@@ -127,7 +126,7 @@ def test_compact_v2_writer_helper_outputs_resolver_readable_tables() -> None:
     assert payload.series["detection_signal_mm_s"].shape == (frames.size,)
 
 
-def test_detect_and_save_bouts_can_write_compact_v2_layout(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_detect_and_save_bouts_defaults_to_compact_v2_layout(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     zarr_path = tmp_path / "analysis.zarr"
     zarr.open_group(str(zarr_path), mode="w")
     frames = np.arange(12, dtype=np.int64)
@@ -178,7 +177,6 @@ def test_detect_and_save_bouts_can_write_compact_v2_layout(tmp_path, monkeypatch
         min_bout_duration_s=0.01,
         min_gap_duration_s=0.01,
         default_level="exponential",
-        layout=SWIM_BOUT_LAYOUT_COMPACT_V2,
         command="test",
     )
 

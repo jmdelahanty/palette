@@ -3,9 +3,30 @@
 ## Status
 
 Design handoff for Crimson. Palette can now write compact swim-bout runs behind
-`detect_bouts_multi_level --layout compact_v2`. Crimson loader smoke confirms
-direct compact-v2 reads work; the Palette default writer remains hierarchical
-v1 until the deferred Crimson visual overlay check is accepted.
+`detect_bouts_multi_level --layout compact_v2`. Crimson loader smoke and manual
+UI validation confirm direct compact-v2 reads work. Palette changed the
+`detect_bouts_multi_level` default writer layout to compact-v2 on 2026-05-11;
+hierarchical v1 remains an explicit compatibility option.
+
+Crimson consumer validation update, 2026-05-11: Crimson loaded the feeding
+canary and reported both compact-v2 swim-bout runs plus compact-v2
+bout-kinematics metrics:
+
+```text
+[SwimBouts] Loaded compact-v2 run 'bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_canary' candidate 0
+[SwimBouts] Loaded compact-v2 run 'bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098_compact_v2_fresh_20260509' candidate 0
+[SwimBouts] Loaded 25 candidates
+[BoutKinematics] Loaded compact-v2 metrics for 'bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_compact_v2_canary_20260510' (movement 519, heading_smoothed 519, heading_raw 519, eye_gaze 519)
+[BoutKinematics] Loaded metrics for 'bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_compact_v2_fresh_20260509' (519 bouts)
+[BoutKinematics] Loaded 2 candidates
+Successfully loaded zarr file
+```
+
+Manual UI behavior looked clear. Crimson also gracefully loaded a
+training/optional-missing archive without swim-bout, bout-kinematics,
+eye-angle, stimulus-response, or track-kinematics runs, and a synthetic local
+probe with `analysis/stimulus_runs` omitted. The compact-v2 analysis canary
+passed strict JSON validation with `bad_json_files 0`.
 
 Crimson implementation update, 2026-05-09: the Crimson agent reported a focused
 compact swim-bout GUI smoke script, `scripts/gui_smoke_compact_swim_bouts.sh`,
@@ -82,11 +103,11 @@ hierarchical run and compact v2 through `fisheye.analysis.swim_bout_io`:
 - object-count reduction for each matching run: 493 v1 `zarr.json` files to
   145 compact-v2 `zarr.json` files
 
-## Deferred Visual Overlay Acceptance Gate
+## Visual Overlay Acceptance Gate
 
-Before Palette changes `detect_bouts_multi_level`'s default writer layout from
-`hierarchical_v1` to `compact_v2`, Crimson should complete one human-visible
-overlay check on the fresh promoted compact run:
+Before Palette changed `detect_bouts_multi_level`'s default writer layout from
+`hierarchical_v1` to `compact_v2`, Crimson completed one human-visible overlay
+check on the fresh promoted compact run:
 
 ```text
 /nvme1/recordings/2026-01-28T23-15-10Z_arena_2_Feeding/zarr/2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr
@@ -107,6 +128,11 @@ Acceptance criteria:
 
 This is a visual/rendering acceptance gate, not a loader gate. Loader smoke and
 Palette logical-equivalence tests have already passed.
+
+Status: accepted on 2026-05-11 from the Crimson side for the current compact-v2
+analysis canary. Palette subsequently switched new promoted swim-bout runs to
+compact-v2 by default while keeping hierarchical-v1 as explicit compatibility
+output.
 
 ## Original Crimson Gap
 

@@ -7,7 +7,14 @@ optional transformed detector signals and detects swim bouts across candidate
 levels. Results are stored hierarchically under a single run name with one
 subgroup per detector-signal candidate.
 
-Storage structure:
+Default storage structure (`--layout compact_v2`):
+    analysis/swim_bout_runs/<run_name>/
+    ├── indexes/
+    ├── tables/
+    ├── series/
+    └── attrs: layout = "compact_tabular_v2"
+
+Compatibility storage structure (`--layout hierarchical_v1`):
     analysis/swim_bout_runs/<run_name>/
     ├── speed_raw/
     │   ├── bouts (structured array)
@@ -106,7 +113,7 @@ SWIM_BOUT_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 SWIM_BOUT_LAYOUT_COMPACT_V2 = "compact_v2"
 SWIM_BOUT_STORED_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
 SWIM_BOUT_LAYOUT_CHOICES = (SWIM_BOUT_LAYOUT_HIERARCHICAL_V1, SWIM_BOUT_LAYOUT_COMPACT_V2)
-SWIM_BOUT_LAYOUT_DEFAULT = SWIM_BOUT_LAYOUT_HIERARCHICAL_V1
+SWIM_BOUT_LAYOUT_DEFAULT = SWIM_BOUT_LAYOUT_COMPACT_V2
 BOUT_METRIC_SCHEMA_ID = "palette.swim_bout_metrics.v3"
 DETECTION_SIGNAL_SCHEMA_ID = "palette.swim_bout_detection_signal.v1"
 DETECTION_SIGNAL_SCHEMA_VERSION = 1
@@ -2780,7 +2787,7 @@ def main():
         default=SWIM_BOUT_LAYOUT_DEFAULT,
         help=(
             'Storage layout for the output run. hierarchical_v1 preserves the existing '
-            'tree-shaped layout. compact_v2 writes the opt-in tabular schema version 7. '
+            'tree-shaped layout. compact_v2 writes the tabular schema version 7. '
             f'Default: {SWIM_BOUT_LAYOUT_DEFAULT}.'
         ),
     )

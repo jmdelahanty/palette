@@ -2,10 +2,11 @@
 
 ## Status
 
-Design note for incremental implementation. No existing `analysis/swim_bout_runs`
-archives should be migrated or rewritten as part of this design slice, and the
-default writer remains the existing hierarchical v1 layout unless a caller
-explicitly requests compact output.
+Design note for incremental implementation. Existing `analysis/swim_bout_runs`
+archives should not be migrated or rewritten solely because of this design
+slice. New promoted runs now default to compact-v2; the historical
+hierarchical-v1 layout remains available only as an explicit compatibility or
+debug option.
 
 Implementation note, 2026-05-08: the first compatibility resolver now lives in
 `src/fisheye/analysis/swim_bout_io.py`. It reads current v1 hierarchical runs
@@ -20,10 +21,13 @@ static swim-bout overlay span loading. `analysis/stimulus_response.py` and
 through this layer.
 
 Implementation note, 2026-05-09: `swim_bout_io.py` now also reads native
-compact v2 runs, and `detect_bouts_multi_level.py` can write compact v2 only
-when invoked with `--layout compact_v2`. The CLI default is still
-`--layout hierarchical_v1`; compact writing is an opt-in canary path until v1/v2
-equivalence checks and external reader support are complete.
+compact v2 runs, and `detect_bouts_multi_level.py` can write compact v2.
+
+Default update, 2026-05-11: after v1/v2 equivalence checks, Palette reader
+validation, Marimo discovery validation, Crimson GUI smoke, Crimson manual UI
+validation, and strict JSON validation all passed, `detect_bouts_multi_level`
+now defaults to `--layout compact_v2`. `--layout hierarchical_v1` remains an
+explicit compatibility option for legacy/debug runs.
 
 Canary result, 2026-05-09: the feeding archive
 `2026-01-28T23-15-10Z_arena_2_Feeding_analysis.zarr` was written with a
@@ -66,8 +70,8 @@ validation now accepts compact-v2 logical bout tables instead of requiring the
 hierarchical `speed_exponential/bouts` path, and the legacy track-kinematics
 swim-bout mirror now resolves compact and hierarchical runs through
 `swim_bout_io.py`. Focused Marimo-backed compact discovery/loading parity tests
-passed outside the sandbox. The writer default remains hierarchical v1 until
-the deferred Crimson visual overlay check is accepted.
+passed outside the sandbox. The writer default switched to compact-v2 on
+2026-05-11 after Crimson visual validation passed.
 
 ## Motivation
 
@@ -477,12 +481,12 @@ them.
 
 ## Writer Migration Plan
 
+Completed as of 2026-05-11. The original staged plan was:
+
 1. Add v2 schema constants and table dtype helpers.
 2. Add the resolver/adapter with tests against small fake v1 and v2 stores.
 3. Add `detect_bouts_multi_level --layout compact_v2` or
-   `--schema-version 7` behind an explicit flag. The default must remain
-   `hierarchical_v1` until equivalence validation and external reader support
-   are complete.
+   `--schema-version 7` behind an explicit flag.
 4. Write a v2 canary run with a new run ID; do not overwrite v1 runs.
 5. Compare v1 default-level and v2 default-candidate outputs:
    bout count, start/end frames, peak frames, durations, path lengths, and
@@ -497,12 +501,11 @@ them.
 
 ## Default-Flip Readiness Checklist
 
-Do not change `detect_bouts_multi_level.py`'s `SWIM_BOUT_LAYOUT_DEFAULT` from
-`hierarchical_v1` to `compact_v2` until all checks below are complete. The
-function default and CLI default both use this constant, so the default flip
-must be a single audited constant change. This is the gate for promoted
-accepted runs only; scratch parameter sweeps should still avoid materializing
-many Zarr run groups.
+`detect_bouts_multi_level.py`'s `SWIM_BOUT_LAYOUT_DEFAULT` changed from
+`hierarchical_v1` to `compact_v2` on 2026-05-11 after the checks below were
+completed. The function default and CLI default both use this constant. This
+default applies to promoted accepted runs; scratch parameter sweeps should still
+avoid materializing many Zarr run groups.
 
 - [x] Palette can write compact v2 behind an explicit `--layout compact_v2`
       flag.
@@ -545,8 +548,11 @@ many Zarr run groups.
       compact candidates are visible and the compact-v2 loader branch is reached
       during real `redgui` startup. Candidate counts differ by archive because
       Crimson filters by compatible track/source inventory.
-- [ ] Confirm Crimson detector trace visibility and timeline/core rectangle
-      rendering from compact rows on a fresh compact-v2-only canary.
+- [x] Confirm Crimson detector trace visibility and timeline/core rectangle
+      rendering from compact rows on a fresh compact-v2-only canary. Crimson
+      consumer validation on 2026-05-11 loaded both compact swim-bout runs,
+      reported 25 compatible candidates, passed startup/load behavior, and the
+      manual UI check found compact-v2 behavior clear.
 - [x] A fresh end-to-end canary archive is generated with compact v2 as the
       only new promoted swim-bout run, and all active Palette readers plus
       Crimson load it without needing hierarchical-v1 compatibility mirrors.
@@ -555,18 +561,18 @@ many Zarr run groups.
 - [x] `SWIM_BOUT_LAYOUT_DEFAULT` centralizes the writer default, with focused
       unit coverage proving the CLI and function defaults use the same
       constant.
-- [ ] The default change is explicitly documented in release notes or the
+- [x] The default change is explicitly documented in release notes or the
       pipeline contract, including the migration rule that old hierarchical-v1
       archives remain readable but new accepted runs write compact v2 by
       default.
 
-Default flip implementation, when the checklist is complete:
+Default flip implementation:
 
-1. Change `SWIM_BOUT_LAYOUT_DEFAULT` in `detect_bouts_multi_level.py` from
+1. Changed `SWIM_BOUT_LAYOUT_DEFAULT` in `detect_bouts_multi_level.py` from
    `SWIM_BOUT_LAYOUT_HIERARCHICAL_V1` to `SWIM_BOUT_LAYOUT_COMPACT_V2`.
 2. Keep `--layout hierarchical_v1` as an explicit compatibility option.
-3. Update tests that assert `SWIM_BOUT_LAYOUT_DEFAULT`.
-4. Generate one fresh compact-default canary and run
+3. Updated tests that assert `SWIM_BOUT_LAYOUT_DEFAULT`.
+4. Next validation target: generate one fresh compact-default canary and run
    `fisheye.utils.compare_swim_bout_layouts` against an equivalent
    hierarchical reference run for regression evidence.
 

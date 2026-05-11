@@ -2,7 +2,7 @@
 
 Date anchored: 2026-05-10
 
-Status: initial opt-in writer and resolver contract.
+Status: default writer, resolver, and visualization artifact contract.
 
 ## Purpose
 
@@ -29,7 +29,8 @@ A compact run is identified by:
 analysis/bout_kinematics_runs/<run>.attrs["layout"] = "compact_tabular_v2"
 ```
 
-The writer remains opt-in. The default layout is still `hierarchical_v1`.
+The writer defaults to compact-v2 as of 2026-05-11. `hierarchical_v1` remains
+available as an explicit compatibility/debug layout.
 
 Run attrs must retain the same source and provenance fields as hierarchical
 runs, including:
@@ -102,18 +103,43 @@ logical API or implement equivalent layout-aware reads.
 
 ## Visualization Artifacts
 
-Compact-v2 currently rejects `--write-zarr-artifacts`. Existing visualization
-artifact writers still reference hierarchical `*/per_bout_metrics` source
-paths. This is intentional until visualization specs are updated to reference
-logical resolver paths or compact table paths.
+Compact-v2 supports `--write-zarr-artifacts` as of 2026-05-11. Persisted PNG
+snapshots and interactive plot specs use the same artifact names as
+hierarchical-v1 runs, but their provenance is layout-aware:
+
+- `source_paths` point at compact physical tables such as `movement_metrics`,
+  `heading_metrics`, and `eye_gaze_metrics`.
+- `source_filters` identify the logical rows inside each compact table, such as
+  `heading_level_bytes = "heading_smoothed"` or
+  `analysis_level_bytes = "movement"`.
+- Artifact `parameters` include `layout = "compact_tabular_v2"` so signatures
+  differ from hierarchical-v1 artifacts even when plotted values are identical.
+
+Readers should treat `source_paths` plus `source_filters` as the compact
+equivalent of hierarchical `*/per_bout_metrics` paths. The rendered PNG remains
+a snapshot; the interactive spec remains the canonical machine-readable
+description of how to re-read the plotted source data.
 
 ## Migration Policy
 
-Compact-v2 is additive and opt-in:
+Compact-v2 is additive and default for new promoted bout-kinematics runs:
 
 - Existing hierarchical runs remain valid.
-- Existing readers should migrate through the resolver before compact becomes
-  default.
+- Existing readers should continue using the resolver instead of physical-path
+  branching.
 - No derived values are recomputed solely because the layout changes.
 - A compact run may be generated from the same upstream track, swim-bout, and
   eye-angle sources as a hierarchical run; provenance distinguishes the layout.
+
+Crimson validation update, 2026-05-11: Crimson loaded compact-v2
+bout-kinematics metrics from the feeding canary, including `movement`,
+`heading_smoothed`, `heading_raw`, and `eye_gaze` tables with 519 rows each, and
+loaded the fresh compact bout-kinematics candidate with 519 bouts. The Crimson
+consumer gate is passed for reading current compact-v2 bout-kinematics runs.
+
+Default update, 2026-05-11: after Palette resolver/export validation, Crimson
+consumer validation, and compact visualization artifact support were in place,
+`compute_and_save_bout_kinematics(...)` and the CLI `--layout` default changed
+from `hierarchical_v1` to `compact_tabular_v2`. Use
+`--layout hierarchical_v1` only when a legacy physical tree is specifically
+needed.

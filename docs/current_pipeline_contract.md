@@ -43,6 +43,15 @@ The default rule is:
   compatibility state explicitly
 - stale state is separate from review state
 
+Recording-only archives follow the same artifact-role rules. They may lack
+experiment/stimulus context, but they can still accumulate the full
+non-stimulus analysis stack: detections, pose/keypoints, segmentation/refined
+masks, subject shape, track kinematics, swim bouts, bout kinematics, and
+non-stimulus exports. Stimulus runs and stimulus-response runs are optional
+context-dependent layers and should be absent rather than faked when no
+experiment context exists. The operational details live in
+[`recording_analysis_pipeline_contract.md`](recording_analysis_pipeline_contract.md#recording-only-mode).
+
 ## Current Stage Contract
 
 | Family | Raw provenance | Current refined authority | Compatibility/cache surfaces | Operator/query truth |
@@ -102,8 +111,10 @@ Current rules:
 - Track-level motion should come from
   `analysis/track_kinematics_runs/<scope>/<run>/tracks/id_<track>`, not from
   legacy `analysis/movement_runs` or ad hoc subject-shape-origin differencing.
-  Swim-bout event windows live in `analysis/swim_bout_runs`, while physical
-  per-bout measurements live in linked `analysis/bout_kinematics_runs`. The
+  Swim-bout event windows live in `analysis/swim_bout_runs`; new accepted
+  swim-bout runs default to the compact-v2 tabular layout, while
+  hierarchical-v1 remains an explicit compatibility option. Physical per-bout
+  measurements live in linked `analysis/bout_kinematics_runs`. The
   Crimson-facing reader contract is
   [`crimson_track_motion_read_contract.md`](./crimson_track_motion_read_contract.md).
 - Source stimulus timing and geometry should come from

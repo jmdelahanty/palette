@@ -87,6 +87,15 @@ Some recordings have a camera video but no experiment/H5/protocol source. These
 recordings are valid inputs for experiment-agnostic processing, but they are not
 valid inputs for stimulus-aligned analyses.
 
+`recording-only` means "no experiment/stimulus context is required"; it does
+not mean the archive is limited to raw video metadata. A recording-only analysis
+archive can still accumulate the normal non-stimulus Palette datasets:
+detections, refined detection instances, crops, keypoints, refined keypoints,
+raw segmentation/probability outputs, refined subject masks, subject shape,
+track kinematics, swim-bout runs, bout-kinematics runs, and non-stimulus
+exports/visualizations. The optional boundary is stimulus context and the
+analysis families that require it.
+
 Supported entry points:
 
 - Single recording:
@@ -126,6 +135,19 @@ Valid downstream stages without experiment context:
 - masks, refined masks, subject shape
 - track kinematics, swim-bout detection, bout kinematics
 - detection coverage and whole-recording movement/bout exports
+
+Readers, notebooks, and GUI tools should treat the following groups as optional
+on recording-only archives and disable the corresponding UI panels or analysis
+selectors rather than failing archive load:
+
+- `analysis/stimulus_runs`
+- `analysis/stimulus_response_runs`
+- stimulus-aligned visualization artifacts
+
+Other analysis families remain optional in the ordinary staged-processing sense:
+they may be absent until produced, but their absence does not imply that the
+archive is "video only" or ineligible for later detections, pose, segmentation,
+or kinematics.
 
 Invalid or non-meaningful without experiment context:
 

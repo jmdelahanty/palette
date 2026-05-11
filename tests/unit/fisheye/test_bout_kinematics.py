@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +10,9 @@ import zarr
 
 import fisheye.analysis.bout_kinematics as bout_kinematics_module
 from fisheye.analysis.bout_kinematics import (
+    BOUT_KINEMATICS_LAYOUT_DEFAULT,
     LAYOUT_COMPACT_TABULAR_V2,
+    LAYOUT_HIERARCHICAL_V1,
     compute_and_save_bout_kinematics,
     normalize_heading_level,
     resolve_bout_kinematics_tables,
@@ -130,7 +134,30 @@ def test_normalize_heading_level_rejects_unknown() -> None:
         normalize_heading_level("median")
 
 
-def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) -> None:
+def test_bout_kinematics_layout_default_is_compact_v2(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert BOUT_KINEMATICS_LAYOUT_DEFAULT == LAYOUT_COMPACT_TABULAR_V2
+    assert (
+        inspect.signature(compute_and_save_bout_kinematics).parameters["layout"].default
+        == BOUT_KINEMATICS_LAYOUT_DEFAULT
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_compute_and_save_bout_kinematics(**kwargs: object) -> str:
+        captured.update(kwargs)
+        return "run"
+
+    monkeypatch.setattr(
+        bout_kinematics_module,
+        "compute_and_save_bout_kinematics",
+        _fake_compute_and_save_bout_kinematics,
+    )
+
+    assert bout_kinematics_module.main(["/tmp/example.zarr"]) == 0
+    assert captured["layout"] == BOUT_KINEMATICS_LAYOUT_DEFAULT
+
+
+def test_compute_and_save_bout_kinematics_writes_hierarchical_heading_levels(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
 
     run_name = compute_and_save_bout_kinematics(
@@ -146,6 +173,7 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
         physical_active_boundary_margin_s=0.1,
         write_visualizations=True,
         visualization_bins=8,
+        layout=LAYOUT_HIERARCHICAL_V1,
         overwrite=False,
     )
 
@@ -334,7 +362,7 @@ def test_compute_and_save_bout_kinematics_writes_heading_levels(tmp_path: Path) 
     assert b"physical_active_peak_speed_mm_s" in movement_payload
 
 
-def test_compute_and_save_bout_kinematics_writes_compact_v2_layout(tmp_path: Path) -> None:
+def test_compute_and_save_bout_kinematics_writes_default_compact_v2_layout(tmp_path: Path) -> None:
     zarr_path = _make_archive(tmp_path)
     root = zarr.open_group(str(zarr_path), mode="a")
     _add_eye_angle_run(root)
@@ -354,7 +382,6 @@ def test_compute_and_save_bout_kinematics_writes_compact_v2_layout(tmp_path: Pat
         include_eye_gaze=True,
         eye_angle_run="eye_1",
         vergence_threshold_deg=10.0,
-        layout=LAYOUT_COMPACT_TABULAR_V2,
     )
 
     run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
@@ -406,19 +433,76 @@ def test_compute_and_save_bout_kinematics_writes_compact_v2_layout(tmp_path: Pat
     np.testing.assert_allclose(filtered_records["heading_raw"]["net_delta_heading_deg"], [40.0])
 
 
-def test_compute_and_save_bout_kinematics_compact_v2_rejects_zarr_artifacts(tmp_path: Path) -> None:
-    zarr_path = _make_archive(tmp_path)
+def _read_interactive_spec_json(spec_artifact: zarr.Group) -> dict[str, object]:
+    spec_payload = np.asarray(spec_artifact["spec_json"][:], dtype=np.uint8).tobytes()
+    return json.loads(spec_payload.decode("utf-8"))
 
-    with pytest.raises(ValueError, match="does not yet support zarr visualization artifacts"):
-        compute_and_save_bout_kinematics(
-            zarr_path,
-            run_name="bout_kinematics_compact_v2_artifacts",
-            track_kinematics_run="tk_1",
-            track_id=0,
-            swim_bout_run="bouts_1",
-            layout=LAYOUT_COMPACT_TABULAR_V2,
-            write_visualizations=True,
-        )
+
+def test_compute_and_save_bout_kinematics_compact_v2_writes_zarr_artifacts(tmp_path: Path) -> None:
+    zarr_path = _make_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    _add_eye_angle_run(root)
+
+    run_name = compute_and_save_bout_kinematics(
+        zarr_path,
+        run_name="bout_kinematics_compact_v2_artifacts",
+        track_kinematics_run="tk_1",
+        track_id=0,
+        swim_bout_run="bouts_1",
+        speed_level="filtered",
+        heading_levels=("heading_smoothed", "heading_raw"),
+        pre_window_s=0.2,
+        post_window_s=0.2,
+        physical_active_threshold_mm_s=0.1,
+        physical_active_boundary_margin_s=0.1,
+        include_eye_gaze=True,
+        eye_angle_run="eye_1",
+        vergence_threshold_deg=10.0,
+        layout=LAYOUT_COMPACT_TABULAR_V2,
+        write_visualizations=True,
+        visualization_bins=8,
+    )
+
+    run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
+    visualizations = run["visualizations"]
+    png = visualizations["bout_kinematics_summary_track_0_png"]
+    assert bytes(np.asarray(png[:], dtype=np.uint8)[:8]) == b"\x89PNG\r\n\x1a\n"
+    assert png.attrs["parameters"]["layout"] == LAYOUT_COMPACT_TABULAR_V2
+    assert png.attrs["source_paths"]["heading_metrics"].endswith("/heading_metrics")
+    assert png.attrs["source_filters"]["heading_smoothed"]["heading_level_bytes"] == "heading_smoothed"
+
+    heading_spec = _read_interactive_spec_json(visualizations["bout_kinematics_summary_track_0_interactive"])
+    assert heading_spec["layout"] == LAYOUT_COMPACT_TABULAR_V2
+    assert heading_spec["source_paths"]["heading_metrics"].endswith("/heading_metrics")
+    assert heading_spec["source_paths"]["heading_smoothed.net_delta_heading_deg"].endswith(
+        "/heading_metrics/net_delta_heading_deg"
+    )
+    assert heading_spec["source_filters"]["heading_smoothed"] == {
+        "table": "heading_metrics",
+        "heading_level_bytes": "heading_smoothed",
+    }
+
+    movement_spec = _read_interactive_spec_json(visualizations["bout_movement_summary_track_0_interactive"])
+    assert movement_spec["layout"] == LAYOUT_COMPACT_TABULAR_V2
+    assert movement_spec["source_paths"]["movement_metrics"].endswith("/movement_metrics")
+    assert movement_spec["source_paths"]["movement.physical_active_peak_speed_mm_s"].endswith(
+        "/movement_metrics/physical_active_peak_speed_mm_s"
+    )
+    assert movement_spec["source_filters"]["movement"] == {
+        "table": "movement_metrics",
+        "analysis_level_bytes": "movement",
+    }
+
+    eye_spec = _read_interactive_spec_json(visualizations["bout_eye_gaze_summary_track_0_interactive"])
+    assert eye_spec["layout"] == LAYOUT_COMPACT_TABULAR_V2
+    assert eye_spec["source_paths"]["eye_gaze_metrics"].endswith("/eye_gaze_metrics")
+    assert eye_spec["source_paths"]["eye_gaze.post_vergence_gaze_mean_deg"].endswith(
+        "/eye_gaze_metrics/post_vergence_gaze_mean_deg"
+    )
+    assert eye_spec["source_filters"]["eye_gaze"] == {
+        "table": "eye_gaze_metrics",
+        "analysis_level_bytes": "eye_gaze",
+    }
 
 
 def test_compute_and_save_bout_kinematics_rejects_exponential_physical_source(tmp_path: Path) -> None:
@@ -458,6 +542,7 @@ def test_compute_and_save_bout_kinematics_writes_optional_eye_gaze_metrics(
         vergence_threshold_deg=10.0,
         write_visualizations=True,
         visualization_bins=8,
+        layout=LAYOUT_HIERARCHICAL_V1,
     )
 
     run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
@@ -545,6 +630,7 @@ def test_compute_and_save_bout_kinematics_marks_angular_velocity_invalid_across_
         swim_bout_run="bouts_1",
         speed_level="filtered",
         overwrite=False,
+        layout=LAYOUT_HIERARCHICAL_V1,
     )
 
     run = zarr.open_group(str(zarr_path), mode="r")["analysis"]["bout_kinematics_runs"][run_name]
@@ -589,6 +675,7 @@ def test_compute_and_save_bout_kinematics_copies_peak_event_boundary_context(tmp
         heading_levels=("heading_smoothed",),
         pre_window_s=0.2,
         post_window_s=0.2,
+        layout=LAYOUT_HIERARCHICAL_V1,
     )
 
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -703,6 +790,7 @@ def test_compute_and_save_bout_kinematics_interbout_epoch_mode(tmp_path: Path) -
         speed_level="filtered",
         heading_levels=("heading_smoothed",),
         pre_post_mode="interbout_epoch",
+        layout=LAYOUT_HIERARCHICAL_V1,
         overwrite=False,
     )
 

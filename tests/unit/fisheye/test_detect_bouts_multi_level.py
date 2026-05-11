@@ -13,6 +13,7 @@ from fisheye.analysis.detect_bouts_multi_level import (
     _detect_bouts_from_speed,
     _duration_seconds_to_frames,
     _json_safe_attr_value,
+    SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     detect_and_save_bouts,
     normalize_speed_level,
 )
@@ -212,6 +213,7 @@ def test_detect_and_save_bouts_records_filtered_default_level(tmp_path: Path) ->
         min_bout_duration_s=0.01,
         min_gap_duration_s=0.01,
         default_level="filtered",
+        layout=SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     )
 
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -333,6 +335,7 @@ def test_detect_and_save_bouts_writes_peak_event_metadata(tmp_path: Path) -> Non
         peak_width_rel_height=0.9,
         min_bout_duration_s=0.01,
         default_level="filtered",
+        layout=SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     )
 
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -401,6 +404,7 @@ def test_detect_and_save_bouts_writes_strict_json_metadata_for_optional_peak_att
         peak_width_rel_height=0.9,
         min_bout_duration_s=0.01,
         default_level="filtered",
+        layout=SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     )
 
     root = zarr.open_group(str(zarr_path), mode="r")
@@ -446,6 +450,7 @@ def test_exponential_candidate_uses_filtered_source_for_physical_metrics(tmp_pat
         default_level="exponential",
         exponential_tau_s=0.05,
         exponential_source_level="filtered",
+        layout=SWIM_BOUT_LAYOUT_HIERARCHICAL_V1,
     )
 
     root = zarr.open_group(str(zarr_path), mode="r")
