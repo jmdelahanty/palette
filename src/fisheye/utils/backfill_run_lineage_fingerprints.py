@@ -41,8 +41,10 @@ class RunLineageBackfillResult:
 
 RUN_PARENT_SPECS = (
     RunParentSpec("track_kinematics_run", ("analysis", "track_kinematics_runs", "offline")),
+    RunParentSpec("track_kinematics_run", ("analysis", "track_kinematics_runs", "online")),
     RunParentSpec("swim_bout_run", ("analysis", "swim_bout_runs")),
     RunParentSpec("bout_kinematics_run", ("analysis", "bout_kinematics_runs")),
+    RunParentSpec("stimulus_run", ("analysis", "stimulus_runs")),
     RunParentSpec("stimulus_response_run", ("analysis", "stimulus_response_runs")),
     RunParentSpec("eye_angle_run", ("analysis", "eye_angle_runs")),
     RunParentSpec("subject_shape_run", ("analysis", "subject_shape_runs")),
@@ -185,7 +187,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-family",
         action="append",
-        choices=sorted(spec.family for spec in RUN_PARENT_SPECS),
+        choices=sorted({spec.family for spec in RUN_PARENT_SPECS}),
         help="limit to one run family; may be repeated",
     )
     parser.add_argument("--json", action="store_true", help="print JSONL results")

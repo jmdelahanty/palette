@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -181,3 +182,188 @@ def test_audit_infers_common_source_run_attr_paths(monkeypatch, tmp_path: Path) 
     assert len(results) == 1
     assert results[0].status == "fresh"
     assert results[0].sources[0].path == "analysis/track_kinematics_runs/offline/tk_1"
+
+
+def test_audit_ignores_absolute_external_source_paths(monkeypatch, tmp_path: Path) -> None:
+    root = FakeGroup(
+        children={
+            "analysis": FakeGroup(
+                children={
+                    "stimulus_runs": FakeGroup(
+                        children={
+                            "stim_1": FakeGroup(
+                                {
+                                    "source_stimulus_video_path": "/nvme1/raw/video.mp4",
+                                    "source_refs": {
+                                        "zarr_path": "/nvme1/archive_analysis.zarr",
+                                    },
+                                }
+                            )
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+    monkeypatch.setattr(audit, "open_zarr_root", lambda path, mode="r": root)
+    results = audit.audit_zarr_analysis_staleness(
+        tmp_path / "archive.zarr",
+        run_families={"stimulus_run"},
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "no_sources"
+    assert results[0].sources == []
+
+
+def test_audit_extracts_internal_path_from_absolute_zarr_reference(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = FakeGroup(
+        children={
+            "analysis": FakeGroup(
+                children={
+                    "stimulus_runs": FakeGroup(
+                        children={
+                            "stim_1": FakeGroup(
+                                {
+                                    "source_refs": {
+                                        "track": (
+                                            "/nvme1/archive_analysis.zarr/"
+                                            "analysis/track_kinematics_runs/offline/tk_1"
+                                        ),
+                                    },
+                                }
+                            )
+                        }
+                    ),
+                    "track_kinematics_runs": FakeGroup(
+                        children={
+                            "offline": FakeGroup(
+                                children={"tk_1": FakeGroup({"lineage_hash": "abc"})}
+                            )
+                        }
+                    ),
+                }
+            )
+        }
+    )
+
+    monkeypatch.setattr(audit, "open_zarr_root", lambda path, mode="r": root)
+    results = audit.audit_zarr_analysis_staleness(
+        tmp_path / "archive.zarr",
+        run_families={"stimulus_run"},
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "warning"
+    assert results[0].sources[0].path == "analysis/track_kinematics_runs/offline/tk_1"
+
+
+def test_audit_resolves_source_from_direct_zarr_json_when_parent_listing_is_stale(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "archive.zarr"
+    direct_source = archive / "analysis" / "stimulus_runs" / "stim_1"
+    direct_source.mkdir(parents=True)
+    (direct_source / "zarr.json").write_text(
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {
+                    "lineage_hash": "stimhash",
+                    "fingerprint_status": "complete",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    root = FakeGroup(
+        children={
+            "analysis": FakeGroup(
+                children={
+                    "stimulus_runs": FakeGroup(attrs={"latest": "stim_1"}),
+                    "stimulus_response_runs": FakeGroup(
+                        children={
+                            "response_1": FakeGroup(
+                                {
+                                    "source_stimulus_run": "stim_1",
+                                    "source_fingerprints": {
+                                        "source_stimulus_run": "stimhash",
+                                    },
+                                }
+                            )
+                        }
+                    ),
+                }
+            )
+        }
+    )
+
+    monkeypatch.setattr(audit, "open_zarr_root", lambda path, mode="r": root)
+    results = audit.audit_zarr_analysis_staleness(
+        archive,
+        run_families={"stimulus_response_run"},
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "fresh"
+    assert results[0].sources[0].actual_fingerprint == "stimhash"
+
+
+def test_audit_strips_compact_table_query_suffix(monkeypatch, tmp_path: Path) -> None:
+    root = FakeGroup(
+        children={
+            "analysis": FakeGroup(
+                children={
+                    "swim_bout_runs": FakeGroup(
+                        children={
+                            "bouts_1": FakeGroup(
+                                children={
+                                    "tables": FakeGroup(
+                                        children={
+                                            "bouts": FakeGroup(
+                                                {"lineage_hash": "bouttable"}
+                                            )
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    ),
+                    "bout_kinematics_runs": FakeGroup(
+                        children={
+                            "bk_1": FakeGroup(
+                                {
+                                    "source_refs": {
+                                        "source_swim_bout_path": (
+                                            "analysis/swim_bout_runs/bouts_1/"
+                                            "tables/bouts?candidate_id=0&signal_id=4"
+                                        ),
+                                    },
+                                    "source_fingerprints": {
+                                        "source_swim_bout_path": "bouttable",
+                                    },
+                                }
+                            )
+                        }
+                    ),
+                }
+            )
+        }
+    )
+
+    monkeypatch.setattr(audit, "open_zarr_root", lambda path, mode="r": root)
+    results = audit.audit_zarr_analysis_staleness(
+        tmp_path / "archive.zarr",
+        run_families={"bout_kinematics_run"},
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "fresh"
+    assert results[0].sources[0].path == "analysis/swim_bout_runs/bouts_1/tables/bouts"

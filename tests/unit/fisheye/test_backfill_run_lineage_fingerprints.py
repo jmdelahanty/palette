@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from fisheye.utils import audit_analysis_staleness as audit
 from fisheye.utils import backfill_run_lineage_fingerprints as backfill
 
 
@@ -121,3 +122,16 @@ def test_backfill_skips_existing_without_overwrite(monkeypatch, tmp_path: Path) 
 
     assert [result.action for result in results] == ["skip_existing"]
     assert run.attrs == {"source_fingerprint": "existing"}
+
+
+def test_backfill_parent_specs_match_staleness_auditor() -> None:
+    backfill_specs = {
+        (spec.family, spec.parent_path)
+        for spec in backfill.RUN_PARENT_SPECS
+    }
+    audit_specs = {
+        (spec.family, spec.parent_path)
+        for spec in audit.RUN_PARENT_SPECS
+    }
+
+    assert backfill_specs == audit_specs

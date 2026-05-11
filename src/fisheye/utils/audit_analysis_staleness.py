@@ -24,6 +24,13 @@ class RunParentSpec:
     parent_path: tuple[str, ...]
 
 
+@dataclass
+class DirectJsonNode:
+    """Minimal Zarr-like node loaded directly from metadata files."""
+
+    attrs: dict[str, Any]
+
+
 @dataclass(frozen=True)
 class SourceRef:
     key: str
@@ -167,6 +174,16 @@ def _normalize_internal_path(value: Any) -> str | None:
     marker = ".zarr/"
     if marker in text:
         text = text.split(marker, 1)[1]
+    elif text.startswith("/"):
+        # Absolute filesystem inputs are external provenance, not same-archive
+        # Zarr paths. Without an explicit ".zarr/<internal>" suffix there is
+        # no internal group/array to resolve.
+        return None
+    if "?" in text:
+        # Compact layouts may record logical table selections such as
+        # "tables/bouts?candidate_id=0&signal_id=4". The table path is the
+        # resolvable Zarr node; the query string is row-selection provenance.
+        text = text.split("?", 1)[0]
     text = text.lstrip("/")
     if not text or text.startswith(("http://", "https://", "s3://")):
         return None
@@ -317,8 +334,37 @@ def discover_source_refs(root: Any, run_group: Any) -> list[SourceRef]:
     return refs
 
 
-def _resolve_internal_path(root: Any, path: str) -> Any | None:
-    return _get_nested_group(root, tuple(part for part in path.split("/") if part))
+def _direct_json_node(archive_path: Path | None, path: str) -> DirectJsonNode | None:
+    if archive_path is None:
+        return None
+    node_path = Path(archive_path).joinpath(*(part for part in path.split("/") if part))
+    for metadata_name, attrs_key in (("zarr.json", "attributes"), (".zattrs", None)):
+        metadata_path = node_path / metadata_name
+        if not metadata_path.is_file():
+            continue
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        attrs = payload.get(attrs_key) if attrs_key is not None else payload
+        if isinstance(attrs, Mapping):
+            return DirectJsonNode(
+                attrs={str(key): _parse_jsonish(value) for key, value in attrs.items()}
+            )
+        return DirectJsonNode(attrs={})
+    return None
+
+
+def _resolve_internal_path(
+    root: Any,
+    path: str,
+    *,
+    archive_path: Path | None = None,
+) -> Any | None:
+    node = _get_nested_group(root, tuple(part for part in path.split("/") if part))
+    if node is not None:
+        return node
+    return _direct_json_node(archive_path, path)
 
 
 def _source_actual_fingerprint(group: Any) -> tuple[str | None, str | None]:
@@ -370,9 +416,10 @@ def audit_source_ref(
     root: Any,
     ref: SourceRef,
     *,
+    zarr_path: Path | None = None,
     require_latest_sources: bool = False,
 ) -> SourceAudit:
-    source_group = _resolve_internal_path(root, ref.path)
+    source_group = _resolve_internal_path(root, ref.path, archive_path=zarr_path)
     latest = _latest_reference(root, ref.path)
     latest_parent_path = latest[0] if latest else None
     latest_run_id = latest[1] if latest else None
@@ -479,7 +526,12 @@ def audit_run(
     explicit_stale_attrs = _explicit_stale_attrs(run_group)
     refs = discover_source_refs(root, run_group)
     sources = [
-        audit_source_ref(root, ref, require_latest_sources=require_latest_sources)
+        audit_source_ref(
+            root,
+            ref,
+            zarr_path=zarr_path,
+            require_latest_sources=require_latest_sources,
+        )
         for ref in refs
     ]
     status = _run_status(
