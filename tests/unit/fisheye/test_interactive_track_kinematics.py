@@ -11,10 +11,12 @@ from fisheye.visualization.interactive_track_kinematics import (
     DEFAULT_INTERACTIVE_ARTIFACT,
     bout_classification_records_to_dataframe,
     discover_bout_classification_run_options,
+    discover_bout_kinematics_run_options,
     discover_eye_angle_run_options,
     discover_swim_bout_run_options,
     discover_track_kinematics_run_options,
     load_bout_classification_records,
+    load_bout_kinematics_records,
     load_eye_angle_timeseries_data,
     load_track_kinematics_interactive_data,
     to_inter_bout_interval_dataframe,
@@ -209,6 +211,90 @@ def _add_compact_swim_bouts(zarr_path: Path) -> None:
     store_array(signals, "detector_signal_mm_s", np.asarray([[0.0, 1.0, 0.0]], dtype=np.float32))
     store_array(signals, "detector_signal_signal_ids", np.asarray([1], dtype=np.int32))
     store_array(signals, "frame_indices", np.asarray([4, 5, 6], dtype=np.int64))
+
+
+def _add_compact_bout_kinematics(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="a")
+    analysis = root["analysis"]
+    parent = analysis.create_group("bout_kinematics_runs")
+    parent.attrs["latest"] = "bout_kinematics_compact"
+
+    run = parent.create_group("bout_kinematics_compact")
+    run.attrs.update(
+        {
+            "schema_id": "analysis.bout_kinematics_runs",
+            "schema_version": 7,
+            "layout": "compact_tabular_v2",
+            "heading_levels": ["heading_smoothed", "heading_raw"],
+            "default_heading_level": "heading_smoothed",
+            "parameters": {"pre_post_mode": "interbout_epoch"},
+            "source_refs": {
+                "source_track_kinematics_run": "track_kinematics_1",
+                "source_track_id": 0,
+                "source_swim_bout_run": "swim_bout_compact",
+                "source_swim_bout_speed_level": "speed_exponential",
+            },
+        }
+    )
+
+    movement = np.zeros(
+        2,
+        dtype=[
+            ("analysis_level_bytes", "S16"),
+            ("analysis_level_id", "i2"),
+            ("bout_id", "i4"),
+            ("physical_active_duration_s", "f8"),
+        ],
+    )
+    movement["analysis_level_bytes"] = b"movement"
+    movement["analysis_level_id"] = 0
+    movement["bout_id"] = [20, 21]
+    movement["physical_active_duration_s"] = [0.02, 0.03]
+    write_columnar_dataset(run, "movement_metrics", movement)
+
+    heading = np.zeros(
+        4,
+        dtype=[
+            ("analysis_level_bytes", "S16"),
+            ("analysis_level_id", "i2"),
+            ("heading_level_bytes", "S32"),
+            ("heading_level_id", "i2"),
+            ("bout_id", "i4"),
+            ("net_delta_heading_deg", "f8"),
+        ],
+    )
+    heading["analysis_level_bytes"] = [
+        b"heading_smoothed",
+        b"heading_smoothed",
+        b"heading_raw",
+        b"heading_raw",
+    ]
+    heading["analysis_level_id"] = [1, 1, 2, 2]
+    heading["heading_level_bytes"] = [
+        b"heading_smoothed",
+        b"heading_smoothed",
+        b"heading_raw",
+        b"heading_raw",
+    ]
+    heading["heading_level_id"] = [0, 0, 1, 1]
+    heading["bout_id"] = [20, 21, 20, 21]
+    heading["net_delta_heading_deg"] = [1.0, 2.0, 3.0, 4.0]
+    write_columnar_dataset(run, "heading_metrics", heading)
+
+    eye_gaze = np.zeros(
+        2,
+        dtype=[
+            ("analysis_level_bytes", "S16"),
+            ("analysis_level_id", "i2"),
+            ("bout_id", "i4"),
+            ("pre_vergence_gaze_mean_deg", "f8"),
+        ],
+    )
+    eye_gaze["analysis_level_bytes"] = b"eye_gaze"
+    eye_gaze["analysis_level_id"] = 3
+    eye_gaze["bout_id"] = [20, 21]
+    eye_gaze["pre_vergence_gaze_mean_deg"] = [10.0, 11.0]
+    write_columnar_dataset(run, "eye_gaze_metrics", eye_gaze)
 
 
 def _add_eye_angle_run(zarr_path: Path) -> None:
@@ -529,6 +615,43 @@ def test_discover_compact_swim_bout_options_exposes_logical_identity(tmp_path: P
     assert swim_options[0].n_bouts_by_level["speed_exponential"] == 2
     assert swim_options[1].signal_id == 0
     assert swim_options[1].signal_role == "physical_estimator"
+
+
+def test_discover_compact_bout_kinematics_options_uses_logical_tables(tmp_path: Path) -> None:
+    zarr_path = _make_archive_with_interactive_artifact(tmp_path)
+    _add_compact_swim_bouts(zarr_path)
+    _add_compact_bout_kinematics(zarr_path)
+
+    track = discover_track_kinematics_run_options(zarr_path)[0]
+    swim = discover_swim_bout_run_options(
+        zarr_path,
+        track_run_path=track.run_path,
+        track_id=track.track_id,
+    )[0]
+    options = discover_bout_kinematics_run_options(
+        zarr_path,
+        track_run_path=track.run_path,
+        track_id=track.track_id,
+        swim_bout_run=swim.run_name,
+        speed_level=swim.speed_level,
+    )
+
+    assert len(options) == 1
+    option = options[0]
+    assert option.run_name == "bout_kinematics_compact"
+    assert option.is_latest is True
+    assert option.n_rows_by_level == {
+        "movement": 2,
+        "heading_smoothed": 2,
+        "heading_raw": 2,
+        "eye_gaze": 2,
+    }
+    assert "movement" in option.label
+    assert "eye gaze" in option.label
+
+    records, _attrs = load_bout_kinematics_records(zarr_path, run_name=option.run_name)
+    assert set(records) == {"movement", "heading_smoothed", "heading_raw", "eye_gaze"}
+    assert len(records["eye_gaze"]) == 2
 
 
 def test_discover_and_load_bout_classification_options(tmp_path: Path) -> None:

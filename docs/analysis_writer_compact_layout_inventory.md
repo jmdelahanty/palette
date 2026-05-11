@@ -33,6 +33,12 @@ Most other writers are still hierarchical, but they are not equally urgent:
 - `stimulus_response_runs`, `eye_angle_runs`, `subject_shape_runs`, and
   `refined_subject_masks_runs` are the main remaining future migration
   candidates, but each now has at least an initial logical reader surface.
+- Decision, 2026-05-11: defer physical-layout migration for
+  `subject_shape_runs` and `refined_subject_masks_runs`. Subject shape has
+  specialized body-frame, centerline, and tail geometry; refined subject masks
+  have dense masks and authoring/review state. Resolver-first readers are still
+  valuable, but flattening these writers is not required before the current
+  compact-v2 rollout.
 
 ## Smoke-Run Latest Policy
 
@@ -54,6 +60,32 @@ canary, the 2026-05-11 cleanup restored:
 
 The validation smoke runs remain present for explicit regression checks, but
 they are not the canonical default selection.
+
+## Track Identity And Visualization Access
+
+For compact analytic tables, keep `track_id` as a column rather than using a
+physical subgroup per track. This keeps multi-track runs queryable, avoids
+reintroducing group-per-track object fanout, and maps directly to Parquet/DuckDB
+exports. Use `source_track_id` for run-level provenance when a run is scoped to
+one upstream track; normalize it to a row/table `track_id` column in exported
+analytics.
+
+Real-time visualization remains supported by a load-on-selection pattern:
+
+- Readers load the selected run/candidate/signal subset once.
+- Readers build an in-memory interval or row index keyed by
+  `(track_id, candidate_id, signal_id, start_frame)` as needed.
+- Playback code must not scan a full compact table on every displayed frame.
+- If a compact table becomes large enough that subset loading is expensive, add
+  an explicit offset/index table such as
+  `(track_id, candidate_id, signal_id, row_start, row_count)` before adding
+  per-track physical subgroups.
+
+Reserve per-track physical groups for dense framewise or ragged data where
+track-local random access dominates and table-column filtering would be a real
+performance problem. Sparse analytic outputs such as swim bouts,
+bout-kinematics metrics, classifications, and stimulus-response summaries
+should stay table-first.
 
 ## Writer Inventory
 

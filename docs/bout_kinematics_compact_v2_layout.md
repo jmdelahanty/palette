@@ -45,6 +45,12 @@ runs, including:
 - `parameters`
 - `provenance`
 
+`source_track_id` is run-level provenance for the upstream track when the
+bout-kinematics run is scoped to one track. Exports normalize this field to a
+row/table `track_id` column. If a future compact run stores multiple tracks in
+one bout-kinematics run, every metric table should add a `track_id` column
+rather than creating per-track physical subgroups.
+
 The run `parameters` and provenance artifact metadata must include the chosen
 `layout`.
 
@@ -62,6 +68,12 @@ eye_gaze_metrics        # optional, only when eye gaze is requested
 `level_index` is the semantic table catalog. It records each logical analysis
 level, measurement family, heading-level id, default-heading marker, and row
 count.
+
+Visualization consumers should treat these tables as load-on-selection data:
+load the selected run once, build any needed in-memory bout/track index, and
+avoid scanning a full compact table during every playback frame. Add an
+explicit row-offset index table if multi-track compact runs become large enough
+that loading a selected subset is no longer cheap.
 
 `movement_metrics` stores the logical `movement` rows. It includes compact
 index columns:

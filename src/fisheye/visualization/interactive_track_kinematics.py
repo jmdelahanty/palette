@@ -1040,7 +1040,12 @@ def discover_bout_kinematics_run_options(
         )
         if source_track_run is None or not _run_names_match(source_track_run, track_run_name):
             continue
-        source_track_id = _safe_int(source_refs.get("source_track_id") or run_group.attrs.get("source_track_id"))
+        source_track_id_raw = (
+            source_refs["source_track_id"]
+            if "source_track_id" in source_refs
+            else run_group.attrs.get("source_track_id")
+        )
+        source_track_id = _safe_int(source_track_id_raw)
         if source_track_id is None or source_track_id != int(track_id):
             continue
         source_swim = source_refs.get("source_swim_bout_run") or run_group.attrs.get("source_swim_bout_run")
@@ -1060,18 +1065,15 @@ def discover_bout_kinematics_run_options(
         parameters = run_group.attrs.get("parameters")
         parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
         pre_post_mode = parameters.get("pre_post_mode")
-        n_rows_by_level = {}
-        if "movement" in run_group:
-            n_rows_by_level["movement"] = _columnar_row_count(run_group["movement"], "per_bout_metrics")
-        for level in heading_levels:
-            n_rows_by_level[level] = (
-                _columnar_row_count(run_group[level], "per_bout_metrics")
-                if level in run_group
-                else 0
-            )
-        has_eye_gaze = "eye_gaze" in run_group and _columnar_row_count(run_group["eye_gaze"], "per_bout_metrics") > 0
-        if has_eye_gaze:
-            n_rows_by_level["eye_gaze"] = _columnar_row_count(run_group["eye_gaze"], "per_bout_metrics")
+        try:
+            records_by_level, _level_attrs, _table_attrs = resolve_bout_kinematics_tables(run_group)
+        except Exception:
+            records_by_level = {}
+        n_rows_by_level = {
+            str(level): int(len(records))
+            for level, records in records_by_level.items()
+        }
+        has_eye_gaze = n_rows_by_level.get("eye_gaze", 0) > 0
         is_latest = str(latest) == str(run_name)
         label_parts = [
             run_name,

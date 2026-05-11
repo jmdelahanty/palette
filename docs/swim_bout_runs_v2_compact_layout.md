@@ -266,6 +266,15 @@ estimator_signal_id             int32 physical signal used for movement metrics
 track_id                        int32
 ```
 
+`track_id` is intentionally a row/table column, not a physical
+`tracks/id_<track_id>` subgroup. Compact swim-bout tables should be
+multi-track-capable by filtering/indexing rows. Real-time consumers should load
+the selected run/candidate/signal subset once and build an in-memory interval
+index keyed by `(track_id, candidate_id, signal_id, start_frame)`, rather than
+scanning the table on every displayed frame. If this table grows large enough
+that subset loading is expensive, add a compact offset/index table before
+splitting back into per-track physical groups.
+
 Required boundary columns:
 
 ```text
