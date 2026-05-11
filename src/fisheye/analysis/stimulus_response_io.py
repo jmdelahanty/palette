@@ -15,6 +15,14 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import read_columnar_dataset
+from fisheye.shared.json_safety import decode_null_terminated_text
+from fisheye.shared.zarr_helpers import (
+    read_zarr_array_mapping,
+    safe_int as _safe_int,
+    zarr_attrs_dict as _attrs_dict,
+    zarr_child_group as _child_group,
+    zarr_group_keys,
+)
 
 
 ArrayMapping = Mapping[str, np.ndarray]
@@ -73,21 +81,6 @@ class StimulusResponseTables:
     steps: tuple[StimulusResponseStepTables, ...] = ()
 
 
-def _attrs_dict(group: Any) -> dict[str, Any]:
-    attrs = getattr(group, "attrs", {})
-    try:
-        return {str(key): value for key, value in attrs.items()}
-    except Exception:
-        return {}
-
-
-def _keys(group: Any) -> list[str]:
-    try:
-        return [str(key) for key in group.keys()]
-    except Exception:
-        return []
-
-
 def _has_child(group: Any, name: str) -> bool:
     try:
         return name in group
@@ -95,46 +88,14 @@ def _has_child(group: Any, name: str) -> bool:
         return False
 
 
-def _child_group(group: Any, name: str) -> Any | None:
-    if not _has_child(group, name):
-        return None
-    try:
-        child = group[name]
-    except Exception:
-        return None
-    return child if hasattr(child, "keys") else None
-
-
 def read_array_mapping(group: Any | None) -> dict[str, np.ndarray]:
     """Read direct child arrays from a Zarr group into a name-to-array mapping."""
 
-    if group is None:
-        return {}
-    mapping: dict[str, np.ndarray] = {}
-    for name in _keys(group):
-        try:
-            value = group[name]
-        except Exception:
-            continue
-        if hasattr(value, "shape"):
-            try:
-                mapping[str(name)] = np.asarray(value[:])
-            except Exception:
-                continue
-    return mapping
+    return read_zarr_array_mapping(group, physical_prefix="")
 
 
 def _read_child_array_mapping(group: Any | None, child_name: str) -> dict[str, np.ndarray]:
     return read_array_mapping(_child_group(group, child_name))
-
-
-def _safe_int(value: Any) -> int | None:
-    try:
-        if value is None:
-            return None
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _safe_float(value: Any) -> float | None:
@@ -149,8 +110,8 @@ def _safe_float(value: Any) -> float | None:
 def _decode_scalar(value: Any) -> Any:
     if isinstance(value, np.generic):
         value = value.item()
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value).rstrip(b"\x00").decode("utf-8", errors="ignore")
+    if isinstance(value, (bytes, bytearray, np.bytes_)):
+        return decode_null_terminated_text(value, errors="ignore")
     return value
 
 
@@ -246,7 +207,7 @@ def _resolve_hierarchical_v1(run_group: zarr.Group, *, layout: str) -> StimulusR
     steps: list[StimulusResponseStepTables] = []
     steps_group = _child_group(run_group, "steps")
     if steps_group is not None:
-        for step_key in sorted(_keys(steps_group), key=_step_sort_key):
+        for step_key in sorted(zarr_group_keys(steps_group), key=_step_sort_key):
             step_group = _child_group(steps_group, step_key)
             if step_group is None:
                 continue

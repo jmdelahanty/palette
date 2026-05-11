@@ -12,6 +12,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import read_columnar_dataset
+from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.utils.zarr_io import open_zarr_root
 
 BOUT_CLASSIFICATION_SCHEMA_ID = "analysis.bout_classification_runs"
@@ -62,18 +63,7 @@ REQUIRED_PER_BOUT_FIELDS = (
 )
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    return value
+_json_safe = json_attr_safe
 
 
 def _require_group(parent: zarr.Group, name: str) -> zarr.Group:
@@ -117,10 +107,8 @@ def load_bout_classification_table(run_group: zarr.Group) -> np.ndarray:
 def _decode_string_column(values: np.ndarray) -> list[str]:
     labels: list[str] = []
     for value in np.asarray(values).reshape(-1):
-        if isinstance(value, bytes):
-            labels.append(value.rstrip(b"\x00").decode("utf-8", "replace"))
-        elif isinstance(value, str):
-            labels.append(value.rstrip("\x00"))
+        if isinstance(value, (bytes, np.bytes_, str)):
+            labels.append(decode_null_terminated_text(value))
         else:
             labels.append(str(value))
     return labels

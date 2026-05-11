@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -18,6 +17,7 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.swim_bout_io import load_default_swim_bout_tables, load_swim_bout_tables
+from fisheye.shared.json_safety import json_attr_safe
 
 
 DEFAULT_ATOL = 1e-9
@@ -339,22 +339,7 @@ def _run_object_counts(zarr_path: Path, run_name: str) -> RunObjectCounts:
     )
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, np.generic):
-        return _json_safe(value.item())
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value).rstrip(b"\x00").decode("utf-8", errors="replace")
-    if isinstance(value, np.ndarray):
-        return [_json_safe(item) for item in value.tolist()]
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    return str(value)
+_json_safe = json_attr_safe
 
 
 def comparison_to_dict(comparison: SwimBoutLayoutComparison) -> dict[str, Any]:

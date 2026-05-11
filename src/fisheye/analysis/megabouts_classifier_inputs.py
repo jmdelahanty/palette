@@ -13,6 +13,7 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe
 from fisheye.analysis.swim_bout_io import load_swim_bout_tables
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -56,18 +57,7 @@ class MegaboutsClassifierInputPack:
     parameters: dict[str, object]
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    return value
+_json_safe = json_attr_safe
 
 
 def _require_group(parent: zarr.Group, name: str) -> zarr.Group:
@@ -203,19 +193,15 @@ def _align_traj_array_to_reference(
 
 
 def _decode_reason_value(value: Any) -> str:
-    if isinstance(value, bytes):
-        return value.split(b"\x00", 1)[0].decode("utf-8", "replace")
-    if isinstance(value, str):
-        return value
+    if isinstance(value, (bytes, np.bytes_, str)):
+        return decode_null_terminated_text(value)
     arr = np.asarray(value)
     if arr.ndim == 0:
         item = arr.item()
-        if isinstance(item, bytes):
-            return item.split(b"\x00", 1)[0].decode("utf-8", "replace")
-        return str(item)
+        return decode_null_terminated_text(item)
     if arr.dtype.kind in {"S", "U", "O"}:
         return str(arr.reshape(-1)[0])
-    return bytes(arr.astype(np.uint8, copy=False).tolist()).split(b"\x00", 1)[0].decode("utf-8", "replace")
+    return decode_null_terminated_text(arr.astype(np.uint8, copy=False))
 
 
 def _load_reason_array(group: zarr.Group, names: Sequence[str]) -> Optional[np.ndarray]:

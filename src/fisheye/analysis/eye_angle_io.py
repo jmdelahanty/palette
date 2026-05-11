@@ -14,6 +14,17 @@ from typing import Any, Mapping, Optional
 import numpy as np
 import zarr
 
+from ..shared.zarr_helpers import (
+    first_array_length as _shared_first_array_length,
+    first_array_length_in_group as _first_array_length_in_group,
+    normalize_zarr_path as _normalize_path,
+    read_zarr_array_mapping,
+    safe_int as _safe_int,
+    zarr_attrs_dict as _attrs_dict,
+    zarr_child_group as _child_group,
+    zarr_group_keys as _group_keys,
+)
+
 
 EYE_ANGLE_RUN_PARENT = "analysis/eye_angle_runs"
 
@@ -134,100 +145,10 @@ class EyeAngleRunTables:
         raise EyeAngleIOError(f"Unsupported eye-angle QA row axis {row_axis!r}; expected 'frame' or 'roi'.")
 
 
-def _normalize_path(path: str) -> str:
-    return "/".join(part for part in str(path).strip("/").split("/") if part)
-
-
-def _attrs_dict(group: Any) -> dict[str, Any]:
-    attrs = getattr(group, "attrs", {})
-    try:
-        return {str(key): value for key, value in attrs.items()}
-    except Exception:
-        return {}
-
-
-def _safe_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _group_keys(group: Any) -> list[str]:
-    keys_fn = getattr(group, "group_keys", None)
-    if not callable(keys_fn):
-        return []
-    try:
-        return sorted(str(key) for key in keys_fn())
-    except Exception:
-        return []
-
-
-def _child_group(group: Any | None, path: str) -> Any | None:
-    if group is None:
-        return None
-    current = group
-    for part in _normalize_path(path).split("/"):
-        if not part:
-            continue
-        try:
-            if part not in current:
-                return None
-            current = current[part]
-        except Exception:
-            return None
-    return current if hasattr(current, "keys") or hasattr(current, "group_keys") else None
-
-
-def _read_array_mapping(group: Any | None, *, prefix: str, source_paths: dict[str, str]) -> dict[str, np.ndarray]:
-    if group is None:
-        return {}
-    arrays: dict[str, np.ndarray] = {}
-    try:
-        keys = list(group.keys())
-    except Exception:
-        keys = []
-    for name in keys:
-        try:
-            value = group[name]
-        except Exception:
-            continue
-        if not hasattr(value, "shape"):
-            continue
-        try:
-            arrays[str(name)] = np.asarray(value[:])
-        except Exception:
-            continue
-        source_paths[f"{prefix}/{name}"] = f"{prefix}/{name}"
-    return arrays
-
-
 def first_array_length(arrays: Mapping[str, np.ndarray], names: tuple[str, ...] = EYE_ANGLE_ROW_COUNT_COLUMNS) -> int:
     """Return the first non-scalar array length found among candidate names."""
 
-    for name in names:
-        values = arrays.get(name)
-        if values is not None and values.shape:
-            return int(values.shape[0])
-    return 0
-
-
-def _first_array_length_in_group(group: Any | None, names: tuple[str, ...] = EYE_ANGLE_ROW_COUNT_COLUMNS) -> int:
-    if group is None:
-        return 0
-    for name in names:
-        try:
-            if name not in group:
-                continue
-            node = group[name]
-        except Exception:
-            continue
-        shape = getattr(node, "shape", None)
-        if shape:
-            return int(shape[0])
-    return 0
+    return _shared_first_array_length(arrays, names)
 
 
 def optional_1d_array(arrays: Mapping[str, np.ndarray], name: str, *, length: Optional[int] = None) -> Optional[np.ndarray]:
@@ -316,13 +237,33 @@ def load_eye_angle_run_tables(
     qa_frame_group = _child_group(run_group, "qa/frame")
     support_group = _child_group(run_group, "support")
 
-    roi = _read_array_mapping(roi_group, prefix=f"{run_path}/angles/roi", source_paths=source_paths)
-    frame = _read_array_mapping(frame_group, prefix=f"{run_path}/angles/frame", source_paths=source_paths)
+    roi = read_zarr_array_mapping(
+        roi_group,
+        physical_prefix=f"{run_path}/angles/roi",
+        source_paths=source_paths,
+    )
+    frame = read_zarr_array_mapping(
+        frame_group,
+        physical_prefix=f"{run_path}/angles/frame",
+        source_paths=source_paths,
+    )
     if not roi and not frame:
         raise EyeAngleIOError(f"Eye-angle run {resolved_run!r} is missing angles/roi and angles/frame arrays.")
-    qa_roi = _read_array_mapping(qa_roi_group, prefix=f"{run_path}/qa/roi", source_paths=source_paths)
-    qa_frame = _read_array_mapping(qa_frame_group, prefix=f"{run_path}/qa/frame", source_paths=source_paths)
-    support = _read_array_mapping(support_group, prefix=f"{run_path}/support", source_paths=source_paths)
+    qa_roi = read_zarr_array_mapping(
+        qa_roi_group,
+        physical_prefix=f"{run_path}/qa/roi",
+        source_paths=source_paths,
+    )
+    qa_frame = read_zarr_array_mapping(
+        qa_frame_group,
+        physical_prefix=f"{run_path}/qa/frame",
+        source_paths=source_paths,
+    )
+    support = read_zarr_array_mapping(
+        support_group,
+        physical_prefix=f"{run_path}/support",
+        source_paths=source_paths,
+    )
 
     return EyeAngleRunTables(
         run_name=resolved_run,
@@ -352,7 +293,7 @@ def discover_eye_angle_run_options(root: zarr.Group) -> list[EyeAngleRunOption]:
         except Exception:
             continue
         roi_group = _child_group(run_group, "angles/roi")
-        n_rows = _first_array_length_in_group(roi_group)
+        n_rows = _first_array_length_in_group(roi_group, EYE_ANGLE_ROW_COUNT_COLUMNS)
         if n_rows <= 0:
             continue
         attrs = _attrs_dict(run_group)

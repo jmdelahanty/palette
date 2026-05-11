@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import math
 import sys
 from datetime import datetime, timezone
@@ -59,6 +58,7 @@ from scipy import signal
 
 from fisheye.analysis.chaser_state_interpolator import store_array, write_columnar_dataset
 from fisheye.analysis.track_kinematics_io import load_track_kinematics_track
+from fisheye.shared.json_safety import json_attr_safe, json_attr_safe_mapping, strict_json_dumps
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
@@ -116,41 +116,14 @@ METHOD_VERSION = "detect_bouts_multi_level.v7"
 THRESHOLD_CROSSING_INTERPOLATION = "linear_between_samples"
 
 
-def _json_safe_attr_value(value: Any) -> Any:
-    """Return a strict-JSON-safe value for Zarr attrs.
-
-    Zarr can serialize Python/NumPy NaN values into metadata JSON, but strict
-    JSON consumers reject those files. Optional numeric attrs use None/null.
-    """
-
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, np.ndarray):
-        return _json_safe_attr_value(value.tolist())
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe_attr_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe_attr_value(item) for item in value]
-    return value
-
-
-def _json_safe_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
-    return {str(key): _json_safe_attr_value(value) for key, value in attrs.items()}
+_json_safe_attr_value = json_attr_safe
+_json_safe_attrs = json_attr_safe_mapping
 
 
 def _strict_json_dumps(value: Any) -> str:
     """Serialize strict JSON metadata strings for compact table rows."""
 
-    return json.dumps(
-        _json_safe_attr_value(value),
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    return strict_json_dumps(value)
 
 
 def _sha256_json(value: Any) -> str:

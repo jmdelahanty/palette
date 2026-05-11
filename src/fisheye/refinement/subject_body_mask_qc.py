@@ -23,6 +23,7 @@ from skimage.morphology import convex_hull_image, skeletonize
 import zarr
 
 from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.json_safety import json_attr_safe
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..utils.zarr_io import open_zarr_root
 
@@ -70,18 +71,7 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    return value
+_json_safe = json_attr_safe
 
 
 def _policy_payload(policy: SubjectBodyMaskQcPolicy) -> dict[str, object]:

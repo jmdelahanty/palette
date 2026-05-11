@@ -15,6 +15,11 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.json_safety import decode_null_terminated_text
+from fisheye.shared.zarr_helpers import (
+    normalize_zarr_path as _normalize_path,
+    zarr_group_keys,
+)
 
 
 COMPACT_V2_LAYOUT = "compact_tabular_v2"
@@ -865,14 +870,7 @@ def _resolve_run_name(parent: zarr.Group, run_name: str | None) -> str:
 
 
 def _group_names(group: Any) -> list[str]:
-    try:
-        names = group.group_keys()
-    except Exception:
-        try:
-            names = [name for name in group.keys() if hasattr(group[name], "keys")]
-        except Exception:
-            return []
-    return sorted(str(name) for name in names)
+    return zarr_group_keys(group)
 
 
 def _attrs_dict(group: Any) -> dict[str, Any]:
@@ -905,10 +903,6 @@ def _run_names_match(source_run: object, requested_run: object) -> bool:
     return source == requested or source.endswith(f"/{requested}") or requested.endswith(f"/{source}")
 
 
-def _normalize_path(path: str) -> str:
-    return "/".join(part for part in str(path).strip("/").split("/") if part)
-
-
 def _optional_str(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -929,8 +923,8 @@ def _safe_int(value: object) -> Optional[int]:
 def _scalar_value(value: Any) -> Any:
     if isinstance(value, np.generic):
         return _scalar_value(value.item())
-    if isinstance(value, bytes):
-        return value.rstrip(b"\x00").decode("utf-8", errors="replace")
+    if isinstance(value, (bytes, np.bytes_)):
+        return decode_null_terminated_text(value)
     if isinstance(value, np.ndarray):
         if value.ndim == 0:
             return _scalar_value(value.item())

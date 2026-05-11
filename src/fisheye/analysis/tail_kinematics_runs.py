@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 import time
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ import numpy as np
 import zarr
 
 from ..shared.detect_reason_codec import decode_reason_bytes
+from ..shared.json_safety import json_attr_safe
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -69,18 +69,7 @@ def _default_run_name() -> str:
     return f"tail_kinematics_{stamp}"
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    return value
+_json_safe = json_attr_safe
 
 
 def _encode_reasons(reasons: Sequence[object], *, width: int = REASON_BYTES_WIDTH) -> np.ndarray:

@@ -10,6 +10,7 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from .crop_geometry import bbox_img_xyxy_to_norm_cxcywh, bbox_norm_cxcywh_to_img_xyxy
 from .detect_reason_codec import read_reason_labels, update_reason_rows, write_reason_columns
+from .json_safety import json_attr_safe
 from .stage_provenance import build_stage_provenance
 from .type_conversions import as_int, clean_mapping, normalize_attr
 
@@ -107,16 +108,7 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _json_safe_attr_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe_attr_value(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe_attr_value(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return [_json_safe_attr_value(item) for item in value.tolist()]
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
+_json_safe_attr_value = json_attr_safe
 
 
 def _delete_if_present(group: zarr.Group, name: str) -> None:

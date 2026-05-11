@@ -34,6 +34,7 @@ from fisheye.analysis.megabouts_classifier_inputs import (
     build_megabouts_classifier_input_pack,
     summarize_input_pack,
 )
+from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
@@ -85,18 +86,7 @@ def _default_run_name() -> str:
     return f"megabouts_classifier_{stamp}"
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    return value
+_json_safe = json_attr_safe
 
 
 def _resolve_megabouts_repo(megabouts_repo: Optional[str | Path]) -> Optional[Path]:

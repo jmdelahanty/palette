@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, Mapping, TypeAlias
 from urllib.parse import unquote, urlparse
 
+import numpy as np
 import zarr
 
 from fisheye.shared.type_conversions import normalize_attr
@@ -29,6 +30,154 @@ def _group_names(parent: zarr.Group) -> list[str]:
     else:  # pragma: no cover - defensive fallback for fake group variants
         names = parent.keys()
     return sorted(str(name) for name in names)
+
+
+def normalize_zarr_path(path: str) -> str:
+    """Return a slash-normalized relative Zarr path."""
+
+    return "/".join(part for part in str(path).strip("/").split("/") if part)
+
+
+def zarr_attrs_dict(group: Any | None) -> dict[str, Any]:
+    """Best-effort plain dict copy of Zarr attrs with string keys."""
+
+    if group is None:
+        return {}
+    attrs = getattr(group, "attrs", {})
+    try:
+        return {str(key): value for key, value in attrs.items()}
+    except Exception:
+        return {}
+
+
+def safe_int(value: Any) -> int | None:
+    """Return ``int(value)`` when possible, otherwise ``None``."""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def zarr_group_keys(group: Any | None) -> list[str]:
+    """Return sorted child group names from a Zarr-like group."""
+
+    if group is None:
+        return []
+    keys_fn = getattr(group, "group_keys", None)
+    if callable(keys_fn):
+        try:
+            return sorted(str(key) for key in keys_fn())
+        except Exception:
+            return []
+    try:
+        return sorted(str(key) for key, value in group.items() if hasattr(value, "keys"))
+    except Exception:
+        return []
+
+
+def zarr_child_group(group: Any | None, path: str) -> Any | None:
+    """Return a nested child group, or ``None`` when unavailable."""
+
+    if group is None:
+        return None
+    current = group
+    for part in normalize_zarr_path(path).split("/"):
+        if not part:
+            continue
+        try:
+            if part not in current:
+                return None
+            current = current[part]
+        except Exception:
+            return None
+    return current if hasattr(current, "keys") or hasattr(current, "group_keys") else None
+
+
+def zarr_array_names(group: Any | None) -> list[str]:
+    """Return sorted child array names from a Zarr-like group."""
+
+    if group is None:
+        return []
+    try:
+        keys = list(group.keys())
+    except Exception:
+        return []
+    names: list[str] = []
+    for name in keys:
+        try:
+            value = group[name]
+        except Exception:
+            continue
+        if hasattr(value, "shape"):
+            names.append(str(name))
+    return sorted(names)
+
+
+def read_zarr_array_mapping(
+    group: Any | None,
+    *,
+    physical_prefix: str,
+    logical_prefix: str | None = None,
+    source_paths: dict[str, str] | None = None,
+    array_names: Sequence[str] | None = None,
+) -> dict[str, np.ndarray]:
+    """Materialize child arrays and optionally record logical-to-physical paths."""
+
+    if group is None:
+        return {}
+    names = list(array_names) if array_names is not None else zarr_array_names(group)
+    logical = physical_prefix if logical_prefix is None else logical_prefix
+    arrays: dict[str, np.ndarray] = {}
+    for name in names:
+        try:
+            if name not in group:
+                continue
+            value = group[name]
+        except Exception:
+            continue
+        if not hasattr(value, "shape"):
+            continue
+        try:
+            arrays[str(name)] = np.asarray(value[:])
+        except Exception:
+            continue
+        if source_paths is not None:
+            source_paths[f"{logical}/{name}"] = f"{physical_prefix}/{name}"
+    return arrays
+
+
+def first_array_length(
+    arrays: Mapping[str, np.ndarray],
+    names: Sequence[str],
+) -> int:
+    """Return the first non-scalar array length among named arrays."""
+
+    for name in names:
+        values = arrays.get(str(name))
+        if values is not None and values.shape:
+            return int(values.shape[0])
+    return 0
+
+
+def first_array_length_in_group(group: Any | None, names: Sequence[str]) -> int:
+    """Return the first non-scalar child-array length among named arrays."""
+
+    if group is None:
+        return 0
+    for name in names:
+        try:
+            if name not in group:
+                continue
+            node = group[name]
+        except Exception:
+            continue
+        shape = getattr(node, "shape", None)
+        if shape:
+            return int(shape[0])
+    return 0
 
 
 def _normalize_run_name(value: object) -> str | None:

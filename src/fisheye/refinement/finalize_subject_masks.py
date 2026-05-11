@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - depends on optional dependency
     HAVE_DISTRIBUTED = False
 
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from ..shared.json_safety import json_attr_safe
 from ..shared.provenance_attrs import (
     ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
     build_assignment_keypoint_attrs,
@@ -232,16 +233,7 @@ def _summaries_to_json_safe(summaries: Sequence[object]) -> list[dict[str, objec
     return payload
 
 
-def _json_safe(value: object) -> object:
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return value
+_json_safe = json_attr_safe
 
 
 @dataclass

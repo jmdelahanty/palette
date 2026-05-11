@@ -41,6 +41,11 @@ from fisheye.shared.coordinate_transform import (
     resolve_concentric_center_mm,
     visual_angle_deg,
 )
+from fisheye.shared.json_safety import (
+    decode_null_terminated_text,
+    json_attr_safe,
+    json_attr_safe_mapping,
+)
 from fisheye.shared.stage_provenance import (
     build_stage_provenance,
     write_stage_provenance,
@@ -139,26 +144,8 @@ def flatten_stimulus_params(params: Dict[str, Any]) -> Dict[str, Any]:
     return dict(params)
 
 
-def _json_safe_attr_value(value: Any) -> Any:
-    """Return a strict-JSON-safe value for Zarr attrs/provenance."""
-
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, np.ndarray):
-        return _json_safe_attr_value(value.tolist())
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe_attr_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe_attr_value(item) for item in value]
-    return value
-
-
-def _json_safe_attrs(attrs: Mapping[str, Any]) -> Dict[str, Any]:
-    return {str(key): _json_safe_attr_value(value) for key, value in attrs.items()}
+_json_safe_attr_value = json_attr_safe
+_json_safe_attrs = json_attr_safe_mapping
 
 
 # ---------------------------------------------------------------------------
@@ -342,18 +329,7 @@ def load_track_data(
 
 def _decode_text_value(value: Any) -> str:
     """Decode zarr string scalars, bytes, or fixed-width uint8 rows."""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace").rstrip("\x00")
-    if isinstance(value, str):
-        return value.rstrip("\x00")
-
-    arr = np.asarray(value)
-    if arr.dtype.kind in ("u", "i") and arr.ndim >= 1:
-        payload = bytes(int(item) for item in arr.ravel() if int(item) != 0)
-        return payload.decode("utf-8", errors="replace").rstrip("\x00")
-    if arr.dtype.kind == "S":
-        return bytes(arr.tobytes()).decode("utf-8", errors="replace").rstrip("\x00")
-    return str(value).rstrip("\x00")
+    return decode_null_terminated_text(value)
 
 
 def _decode_text_array(values: np.ndarray) -> np.ndarray:

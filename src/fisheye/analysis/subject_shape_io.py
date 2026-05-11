@@ -15,6 +15,17 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from ..shared.zarr_helpers import (
+    first_array_length as _shared_first_array_length,
+    first_array_length_in_group as _first_array_length_in_group,
+    normalize_zarr_path as _normalize_path,
+    read_zarr_array_mapping,
+    safe_int as _safe_int,
+    zarr_attrs_dict as _attrs_dict,
+    zarr_child_group as _child_group,
+    zarr_group_keys as _group_keys,
+)
+
 
 SUBJECT_SHAPE_RUN_PARENT = "analysis/subject_shape_runs"
 
@@ -138,130 +149,13 @@ class SubjectShapeRunTables:
         return values
 
 
-def _normalize_path(path: str) -> str:
-    return "/".join(part for part in str(path).strip("/").split("/") if part)
-
-
-def _attrs_dict(group: Any) -> dict[str, Any]:
-    attrs = getattr(group, "attrs", {})
-    try:
-        return {str(key): value for key, value in attrs.items()}
-    except Exception:
-        return {}
-
-
-def _safe_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _group_keys(group: Any) -> list[str]:
-    keys_fn = getattr(group, "group_keys", None)
-    if callable(keys_fn):
-        try:
-            return sorted(str(key) for key in keys_fn())
-        except Exception:
-            return []
-    try:
-        return sorted(str(key) for key, value in group.items() if hasattr(value, "keys"))
-    except Exception:
-        return []
-
-
-def _child_group(group: Any | None, path: str) -> Any | None:
-    if group is None:
-        return None
-    current = group
-    for part in _normalize_path(path).split("/"):
-        if not part:
-            continue
-        try:
-            if part not in current:
-                return None
-            current = current[part]
-        except Exception:
-            return None
-    return current if hasattr(current, "keys") or hasattr(current, "group_keys") else None
-
-
-def _array_names(group: Any | None) -> list[str]:
-    if group is None:
-        return []
-    try:
-        keys = list(group.keys())
-    except Exception:
-        return []
-    names: list[str] = []
-    for name in keys:
-        try:
-            value = group[name]
-        except Exception:
-            continue
-        if hasattr(value, "shape"):
-            names.append(str(name))
-    return sorted(names)
-
-
-def _read_array_mapping(
-    group: Any | None,
-    *,
-    physical_prefix: str,
-    logical_prefix: str,
-    source_paths: dict[str, str],
-    array_names: Optional[Sequence[str]] = None,
-) -> dict[str, np.ndarray]:
-    if group is None:
-        return {}
-    names = list(array_names) if array_names is not None else _array_names(group)
-    arrays: dict[str, np.ndarray] = {}
-    for name in names:
-        try:
-            if name not in group:
-                continue
-            value = group[name]
-        except Exception:
-            continue
-        if not hasattr(value, "shape"):
-            continue
-        try:
-            arrays[str(name)] = np.asarray(value[:])
-        except Exception:
-            continue
-        source_paths[f"{logical_prefix}/{name}"] = f"{physical_prefix}/{name}"
-    return arrays
-
-
 def first_array_length(
     arrays: Mapping[str, np.ndarray],
     names: tuple[str, ...] = SUBJECT_SHAPE_ROW_COUNT_COLUMNS,
 ) -> int:
     """Return the first non-scalar array length found among candidate names."""
 
-    for name in names:
-        values = arrays.get(name)
-        if values is not None and values.shape:
-            return int(values.shape[0])
-    return 0
-
-
-def _first_array_length_in_group(group: Any | None, names: tuple[str, ...]) -> int:
-    if group is None:
-        return 0
-    for name in names:
-        try:
-            if name not in group:
-                continue
-            node = group[name]
-        except Exception:
-            continue
-        shape = getattr(node, "shape", None)
-        if shape:
-            return int(shape[0])
-    return 0
+    return _shared_first_array_length(arrays, names)
 
 
 def _run_component_names(run_group: Any) -> tuple[str, ...]:
@@ -371,7 +265,7 @@ def load_subject_shape_run_tables(
             continue
         component_path = f"{run_path}/components/{component_name}"
         component_source_paths: dict[str, str] = {}
-        arrays = _read_array_mapping(
+        arrays = read_zarr_array_mapping(
             component_group,
             physical_prefix=component_path,
             logical_prefix=f"components/{component_name}",
@@ -402,7 +296,7 @@ def load_subject_shape_run_tables(
             continue
         relation_path = f"{run_path}/relations/{relation_name}"
         relation_source_paths: dict[str, str] = {}
-        arrays = _read_array_mapping(
+        arrays = read_zarr_array_mapping(
             relation_group,
             physical_prefix=relation_path,
             logical_prefix=f"relations/{relation_name}",
@@ -421,7 +315,7 @@ def load_subject_shape_run_tables(
         )
 
     body_frame_group = _child_group(run_group, "body_frame") if include_body_frame else None
-    body_frame = _read_array_mapping(
+    body_frame = read_zarr_array_mapping(
         body_frame_group,
         physical_prefix=f"{run_path}/body_frame",
         logical_prefix="body_frame",
@@ -429,7 +323,7 @@ def load_subject_shape_run_tables(
     )
 
     row_index_group = _child_group(run_group, "row_index") if include_row_index else None
-    row_index = _read_array_mapping(
+    row_index = read_zarr_array_mapping(
         row_index_group,
         physical_prefix=f"{run_path}/row_index",
         logical_prefix="row_index",
@@ -439,7 +333,7 @@ def load_subject_shape_run_tables(
     source_revision_group = (
         _child_group(run_group, "source_refined_subject_masks") if include_source_refined_subject_masks else None
     )
-    source_refined_subject_masks = _read_array_mapping(
+    source_refined_subject_masks = read_zarr_array_mapping(
         source_revision_group,
         physical_prefix=f"{run_path}/source_refined_subject_masks",
         logical_prefix="source_refined_subject_masks",

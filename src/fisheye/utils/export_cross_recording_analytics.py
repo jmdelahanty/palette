@@ -31,6 +31,7 @@ from fisheye.analysis.swim_bout_io import (
 )
 from fisheye.analysis.stimulus_response_io import resolve_stimulus_response_tables
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.json_safety import decode_null_terminated_text, json_attr_safe, strict_json_dumps
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.index_analytics_manifests import index_export_manifest
 from fisheye.utils.system import get_git_info
@@ -128,8 +129,8 @@ def _scalar_for_parquet(value: Any) -> Any:
 
     if isinstance(value, np.generic):
         value = value.item()
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value).rstrip(b"\x00").decode("utf-8", errors="ignore")
+    if isinstance(value, (bytes, bytearray, np.bytes_)):
+        return decode_null_terminated_text(value, errors="ignore")
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, (str, int, bool)) or value is None:
@@ -143,28 +144,11 @@ def _scalar_for_parquet(value: Any) -> Any:
     return str(value)
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value).rstrip(b"\x00").decode("utf-8", errors="ignore")
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return str(value)
+_json_safe = json_attr_safe
 
 
 def _json_dumps_safe(value: Any) -> str:
-    return json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"))
+    return strict_json_dumps(value)
 
 
 def _hash_payload(payload: Mapping[str, Any]) -> str:

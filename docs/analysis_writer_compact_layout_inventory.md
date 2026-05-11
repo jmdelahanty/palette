@@ -191,6 +191,31 @@ Most other writers are still hierarchical, but they are not equally urgent:
     with dense mask handle shape `(19235, 4, 512, 512)`, and the subject-shape
     dry-run path resolved 19,235 rows without writing.
 
+### Shared Resolver Helper Deduplication
+
+- A shared Zarr reader helper surface now exists in `fisheye.shared.zarr_helpers`
+  for the mechanical pieces repeated across resolver modules:
+  `normalize_zarr_path`, `zarr_attrs_dict`, `zarr_group_keys`,
+  `zarr_child_group`, `zarr_array_names`, `read_zarr_array_mapping`,
+  `first_array_length`, and `first_array_length_in_group`.
+- `eye_angle_io`, `subject_shape_io`, `refined_subject_masks_io`,
+  `stimulus_response_io`, and `swim_bout_io` now use these helpers for low-risk
+  path/group/array traversal while keeping domain-specific validation and
+  scalar/provenance conversion local.
+- A shared strict-JSON attr/spec helper surface now exists in
+  `fisheye.shared.json_safety`: `decode_fixed_width_bytes`,
+  `decode_null_terminated_text`, `json_attr_safe`, `json_attr_safe_mapping`,
+  and `strict_json_dumps`. Writer attrs, plot specs, reports, and
+  comparison/export payloads that used the common NumPy/bytes/path conversion
+  pattern now use this helper. A few scalar/fixed-width string readers also use
+  the shared null-terminated text decoder; event parsing, enum decoding, H5
+  payload decoding, probability decoding, and lineage canonicalization remain
+  local because their semantics differ.
+- Run-lineage fingerprints intentionally keep their separate canonicalizer in
+  `fisheye.shared.run_lineage_fingerprint`. Fingerprints need deterministic
+  Unicode normalization, transient-key filtering, and sorted canonical JSON;
+  those are stronger semantics than general attr safety.
+
 ### Needs Resolver Before Writer Changes
 
 No high-priority analysis writer family in this inventory remains completely

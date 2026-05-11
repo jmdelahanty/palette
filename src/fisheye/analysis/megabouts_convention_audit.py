@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional, Sequence
 import numpy as np
 import zarr
 
+from ..shared.json_safety import json_attr_safe
 from ..utils.zarr_io import open_zarr_root
 
 DEFAULT_MEGABOUTS_KEYPOINT_COUNT = 11
@@ -32,18 +33,7 @@ class MegaboutsAngleAuditArrays:
     valid: np.ndarray
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    return value
+_json_safe = json_attr_safe
 
 
 def _require_group(parent: zarr.Group, name: str) -> zarr.Group:

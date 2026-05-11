@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import math
 import sys
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
 )
+from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.analysis.stimulus_response_io import moving_grating_omr_steps
@@ -68,30 +68,11 @@ class TrackSeries:
     heading_degrees: np.ndarray
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return _json_safe(value.item())
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if value is None or isinstance(value, (str, int, bool)):
-        return value
-    return str(value)
+_json_safe = json_attr_safe
 
 
 def _artifact_signature(payload: Mapping[str, Any]) -> str:
-    data = json.dumps(
-        _json_safe(payload),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8")
+    data = strict_json_dumps(payload).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
 
 

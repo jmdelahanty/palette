@@ -15,6 +15,8 @@ from rich.console import Console
 from zarr.core.dtype import VariableLengthUTF8
 from zarr import Array as ZarrArray, Group as ZarrGroup
 
+from fisheye.shared.json_safety import decode_null_terminated_text
+
 
 DEFAULT_TIMESTAMP_DELTA_NS = 8_333_333  # ~8.33ms for 120 Hz stimulus rendering
 
@@ -89,10 +91,8 @@ def _to_string_list(data: np.ndarray) -> List[str]:
 
     strings: List[str] = []
     for value in data:
-        if isinstance(value, bytes):
-            strings.append(value.rstrip(b"\x00").decode("utf-8", errors="ignore"))
-        elif isinstance(value, str):
-            strings.append(value.rstrip("\x00"))
+        if isinstance(value, (bytes, np.bytes_, str)):
+            strings.append(decode_null_terminated_text(value, errors="ignore"))
         elif value is None:
             strings.append("")
         else:

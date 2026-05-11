@@ -109,6 +109,7 @@ from fisheye.shared.citrus_enums import (
     STIMULUS_MODE,
     STIMULUS_MODE_NAME_TO_ID,
 )
+from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
 
 
 def _log(console: Optional[Console], message: str) -> None:
@@ -127,26 +128,11 @@ def _normalize_attr_value(value):
     return value
 
 
-def _json_safe_value(value: Any) -> Any:
-    """Convert values to strict-JSON-safe Python primitives for Zarr attrs."""
-
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, float):
-        return value if np.isfinite(value) else None
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, np.ndarray):
-        return _json_safe_value(value.tolist())
-    if isinstance(value, dict):
-        return {str(key): _json_safe_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe_value(item) for item in value]
-    return str(value)
+_json_safe_value = json_attr_safe
 
 
 def _json_dumps_safe(value: Any) -> str:
-    return json.dumps(_json_safe_value(value), sort_keys=True, allow_nan=False)
+    return strict_json_dumps(value, separators=(",", ": "))
 
 
 def _update_attrs_json_safe(group: zarr.Group, attrs: Dict[str, Any]) -> None:

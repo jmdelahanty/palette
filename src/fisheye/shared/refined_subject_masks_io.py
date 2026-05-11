@@ -15,6 +15,14 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from .zarr_helpers import (
+    normalize_zarr_path as _normalize_path,
+    read_zarr_array_mapping,
+    zarr_attrs_dict as _attrs_dict,
+    zarr_child_group as _child_group,
+    zarr_group_keys as _group_keys,
+)
+
 
 REFINED_SUBJECT_MASKS_RUN_PARENT = "refined_subject_masks_runs"
 REFINED_SUBJECT_MASKS_ROW_LINEAGE_ARRAYS: tuple[str, ...] = (
@@ -182,96 +190,6 @@ class RefinedSubjectMasksRunTables:
         return self.masks_roi
 
 
-def _normalize_path(path: str) -> str:
-    return "/".join(part for part in str(path).strip("/").split("/") if part)
-
-
-def _attrs_dict(group: Any) -> dict[str, Any]:
-    attrs = getattr(group, "attrs", {})
-    try:
-        return {str(key): value for key, value in attrs.items()}
-    except Exception:
-        return {}
-
-
-def _group_keys(group: Any | None) -> list[str]:
-    if group is None:
-        return []
-    keys_fn = getattr(group, "group_keys", None)
-    if callable(keys_fn):
-        try:
-            return sorted(str(key) for key in keys_fn())
-        except Exception:
-            return []
-    try:
-        return sorted(str(key) for key, value in group.items() if hasattr(value, "keys"))
-    except Exception:
-        return []
-
-
-def _child_group(group: Any | None, path: str) -> Any | None:
-    if group is None:
-        return None
-    current = group
-    for part in _normalize_path(path).split("/"):
-        if not part:
-            continue
-        try:
-            if part not in current:
-                return None
-            current = current[part]
-        except Exception:
-            return None
-    return current if hasattr(current, "keys") or hasattr(current, "group_keys") else None
-
-
-def _array_names(group: Any | None) -> list[str]:
-    if group is None:
-        return []
-    try:
-        keys = list(group.keys())
-    except Exception:
-        return []
-    names: list[str] = []
-    for name in keys:
-        try:
-            value = group[name]
-        except Exception:
-            continue
-        if hasattr(value, "shape"):
-            names.append(str(name))
-    return sorted(names)
-
-
-def _read_array_mapping(
-    group: Any | None,
-    *,
-    physical_prefix: str,
-    logical_prefix: str,
-    source_paths: dict[str, str],
-    array_names: Optional[Sequence[str]] = None,
-) -> dict[str, np.ndarray]:
-    if group is None:
-        return {}
-    names = list(array_names) if array_names is not None else _array_names(group)
-    arrays: dict[str, np.ndarray] = {}
-    for name in names:
-        try:
-            if name not in group:
-                continue
-            value = group[name]
-        except Exception:
-            continue
-        if not hasattr(value, "shape"):
-            continue
-        try:
-            arrays[str(name)] = np.asarray(value[:])
-        except Exception:
-            continue
-        source_paths[f"{logical_prefix}/{name}"] = f"{physical_prefix}/{name}"
-    return arrays
-
-
 def _mask_labels(group: Any) -> tuple[str, ...]:
     labels_raw = _attrs_dict(group).get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
@@ -391,7 +309,7 @@ def load_refined_subject_masks_run_tables(
     available_channels = _available_channels(run_group, channel_count=channel_count)
     source_paths: dict[str, str] = {"run": run_path}
 
-    run_arrays = _read_array_mapping(
+    run_arrays = read_zarr_array_mapping(
         run_group,
         physical_prefix=run_path,
         logical_prefix="run",
@@ -402,7 +320,7 @@ def load_refined_subject_masks_run_tables(
         source_paths["masks_roi"] = f"{run_path}/masks_roi"
 
     metrics = (
-        _read_array_mapping(
+        read_zarr_array_mapping(
             _child_group(run_group, "metrics"),
             physical_prefix=f"{run_path}/metrics",
             logical_prefix="metrics",
@@ -432,32 +350,32 @@ def load_refined_subject_masks_run_tables(
                 continue
             component_path = f"{run_path}/components/{component_name}"
             component_source_paths: dict[str, str] = {}
-            arrays = _read_array_mapping(
+            arrays = read_zarr_array_mapping(
                 component_group,
                 physical_prefix=component_path,
                 logical_prefix=f"components/{component_name}",
                 source_paths=source_paths,
                 array_names=component_array_names,
             )
-            component_metrics = _read_array_mapping(
+            component_metrics = read_zarr_array_mapping(
                 _child_group(component_group, "metrics"),
                 physical_prefix=f"{component_path}/metrics",
                 logical_prefix=f"components/{component_name}/metrics",
                 source_paths=source_paths,
             )
-            qc = _read_array_mapping(
+            qc = read_zarr_array_mapping(
                 _child_group(component_group, "qc"),
                 physical_prefix=f"{component_path}/qc",
                 logical_prefix=f"components/{component_name}/qc",
                 source_paths=source_paths,
             )
-            geometry = _read_array_mapping(
+            geometry = read_zarr_array_mapping(
                 _child_group(component_group, "geometry"),
                 physical_prefix=f"{component_path}/geometry",
                 logical_prefix=f"components/{component_name}/geometry",
                 source_paths=source_paths,
             )
-            finalization_metrics = _read_array_mapping(
+            finalization_metrics = read_zarr_array_mapping(
                 _child_group(component_group, "finalization_metrics"),
                 physical_prefix=f"{component_path}/finalization_metrics",
                 logical_prefix=f"components/{component_name}/finalization_metrics",
@@ -494,7 +412,7 @@ def load_refined_subject_masks_run_tables(
                 continue
             relation_path = f"{run_path}/relations/{relation_name}"
             relation_source_paths: dict[str, str] = {}
-            relation_metrics = _read_array_mapping(
+            relation_metrics = read_zarr_array_mapping(
                 _child_group(relation_group, "metrics"),
                 physical_prefix=f"{relation_path}/metrics",
                 logical_prefix=f"relations/{relation_name}/metrics",

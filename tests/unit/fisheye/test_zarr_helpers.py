@@ -3,15 +3,36 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 import zarr
 
-from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.shared.zarr_helpers import (
+    first_array_length,
+    first_array_length_in_group,
+    normalize_zarr_path,
+    read_zarr_array_mapping,
+    resolve_zarr_run,
+    safe_int,
+    zarr_array_names,
+    zarr_attrs_dict,
+    zarr_child_group,
+    zarr_group_keys,
+)
+
+
+class _FakeArray:
+    def __init__(self, values: np.ndarray) -> None:
+        self._values = np.asarray(values)
+        self.shape = self._values.shape
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        return self._values[key]
 
 
 class _FakeGroup:
     def __init__(self, *, path: str = "") -> None:
-        self._children: dict[str, _FakeGroup] = {}
+        self._children: dict[str, Any] = {}
         self.attrs: dict[str, Any] = {}
         self.path = path
 
@@ -25,6 +46,11 @@ class _FakeGroup:
         child = _FakeGroup(path=child_path)
         self._children[name] = child
         return child
+
+    def create_array(self, name: str, values: np.ndarray) -> _FakeArray:
+        array = _FakeArray(values)
+        self._children[name] = array
+        return array
 
     def require_group(self, name: str) -> "_FakeGroup":
         if "/" in name:
@@ -45,7 +71,7 @@ class _FakeGroup:
             return None
 
     def group_keys(self):
-        return list(self._children.keys())
+        return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
 
     def keys(self):
         return list(self._children.keys())
@@ -57,9 +83,9 @@ class _FakeGroup:
         except Exception:
             return False
 
-    def __getitem__(self, key: str) -> "_FakeGroup":
+    def __getitem__(self, key: str) -> Any:
         if "/" in key:
-            current: _FakeGroup = self
+            current: Any = self
             for token in key.split("/"):
                 current = current._children[token]
             return current
@@ -73,6 +99,46 @@ def _build_root() -> _FakeGroup:
     runs.create_group("stimulus_002")
     runs.create_group("stimulus_003")
     return root
+
+
+def test_zarr_reader_helpers_normalize_attrs_groups_and_arrays() -> None:
+    root = _FakeGroup()
+    group = root.require_group("analysis/example/run_1")
+    group.attrs[1] = "one"
+    group.create_array("b_array", np.asarray([1, 2, 3], dtype=np.int32))
+    group.create_array("a_array", np.asarray([[1.0], [2.0]], dtype=np.float32))
+    group.create_group("child")
+
+    assert normalize_zarr_path("/analysis//example/run_1/") == "analysis/example/run_1"
+    assert zarr_attrs_dict(group) == {"1": "one"}
+    assert zarr_group_keys(group) == ["child"]
+    assert zarr_child_group(root, "analysis/example/run_1/child") is group["child"]
+    assert zarr_child_group(root, "analysis/example/missing") is None
+    assert zarr_array_names(group) == ["a_array", "b_array"]
+    assert safe_int("7") == 7
+    assert safe_int("not-int") is None
+
+
+def test_read_zarr_array_mapping_records_logical_source_paths() -> None:
+    root = _FakeGroup()
+    group = root.require_group("analysis/example/run_1")
+    group.create_array("kept", np.asarray([1, 2, 3], dtype=np.int64))
+    group.create_array("skipped", np.asarray([4, 5, 6], dtype=np.int64))
+    source_paths: dict[str, str] = {}
+
+    arrays = read_zarr_array_mapping(
+        group,
+        physical_prefix="analysis/example/run_1",
+        logical_prefix="logical/run",
+        source_paths=source_paths,
+        array_names=("kept", "missing"),
+    )
+
+    assert list(arrays) == ["kept"]
+    np.testing.assert_array_equal(arrays["kept"], [1, 2, 3])
+    assert source_paths == {"logical/run/kept": "analysis/example/run_1/kept"}
+    assert first_array_length(arrays, ("missing", "kept")) == 3
+    assert first_array_length_in_group(group, ("missing", "skipped")) == 3
 
 
 def test_resolve_zarr_run_uses_explicit_run_name() -> None:

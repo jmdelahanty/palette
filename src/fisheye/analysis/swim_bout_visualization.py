@@ -33,6 +33,7 @@ from fisheye.analysis.swim_bout_io import (
     load_default_swim_bout_tables,
     load_swim_bout_tables,
 )
+from fisheye.shared.json_safety import decode_null_terminated_text
 
 try:
     from PIL import Image, PngImagePlugin
@@ -48,7 +49,8 @@ DISPLAY_SPEED_LEVEL_ORDER = ("raw", "filtered", "smoothed", "averaged", "exponen
 def _decode_bytes(arr: np.ndarray) -> np.ndarray:
     """Decode byte-string columns to unicode strings."""
     if arr.dtype.kind == "S":
-        return arr.astype(str)
+        values = [decode_null_terminated_text(value) for value in arr.reshape(-1)]
+        return np.asarray(values, dtype=str).reshape(arr.shape)
     return arr
 
 

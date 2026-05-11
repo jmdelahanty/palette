@@ -13,6 +13,7 @@ import numpy as np
 import zarr
 
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
+from ..shared.json_safety import json_attr_safe
 from ..shared.provenance_attrs import (
     ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
     CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS,
@@ -63,16 +64,7 @@ _SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS = frozenset(
 )
 
 
-def _json_safe(value: object) -> object:
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return value
+_json_safe = json_attr_safe
 
 
 def _resolve_latest_parent_run(parent: Any, label: str) -> str:

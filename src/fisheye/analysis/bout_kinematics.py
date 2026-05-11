@@ -33,6 +33,7 @@ from fisheye.shared.plot_artifacts import (
     write_interactive_plot_spec_artifact,
     write_png_visualization_artifact,
 )
+from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
@@ -104,7 +105,7 @@ def _fixed_bytes(value: object, *, width: int = 64) -> bytes:
 
 def _decode_fixed_bytes(value: object) -> str:
     if isinstance(value, (bytes, np.bytes_)):
-        return bytes(value).rstrip(b"\x00").decode("utf-8", errors="replace")
+        return decode_null_terminated_text(value)
     return str(value)
 
 
