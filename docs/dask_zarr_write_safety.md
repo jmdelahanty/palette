@@ -130,11 +130,105 @@ The safe rule is therefore independent of compression:
 - Shards add another ownership layer; if sharding is enabled, workers must not
   race on the same physical shard either.
 
+## Where `dask.array.to_zarr()` Fits
+
+`dask.array.to_zarr()` is a good storage primitive when the output is already a
+Dask array with a fixed shape and a known chunk grid. It is not a replacement
+for Palette run finalization. The driver must still create the run group,
+define schema attrs, sanitize JSON metadata, write provenance, update `latest`,
+and validate the completed run.
+
+Use `to_zarr()` only when all of these are true:
+
+- output arrays are dense and fixed-shape before writing starts.
+- Dask chunks map cleanly onto physical Zarr chunks.
+- workers do not need to append variable-length rows.
+- workers do not mutate groups, attrs, `latest`, or consolidated metadata.
+- temporal boundary state is either absent or handled explicitly before the
+  array is written.
+
+Good current or near-term fits:
+
+- `tail_posture_view_runs`: dense, row-local arrays such as `head_xy`,
+  `head_yaw_rad`, `tail_keypoints_xy`, `tail_angle_rad`, `tail_angle_deg`,
+  `valid`, and status columns. This is the cleanest future `to_zarr()` target.
+- dense segmentation masks and probabilities in eye, swim-bladder, and subject
+  mask stages. Large `(rows, height, width[, channels])` mask/probability arrays
+  are a natural fit if worker chunks align to output chunks. Ragged contours,
+  labels, reason strings, attrs, and run pointers remain driver-owned.
+- compact eye-angle dense matrices such as `roi_angles`, `frame_angles`,
+  `roi_vectors`, and QA matrices. This is technically a fit, but the current
+  custom worker-chunk backend already owns this safely; smoothing, derivatives,
+  frame alignment, and final metadata should remain explicit.
+- `bout_kinematics` compact columns after bout boundaries are fixed. Individual
+  fixed-length metric columns could be written with `to_zarr()`, but a
+  driver-owned column writer is still simpler unless per-bout computation
+  becomes expensive enough to justify a Dask array backend.
+
+Poor fits without a larger redesign:
+
+- `detect_bouts_multi_level`: peak events, threshold components, gap merging,
+  and inter-bout intervals are temporal/event outputs with variable-length
+  tables. Use explicit segmentation and table assembly instead.
+- `track_kinematics` time chunks: outputs are dense, but hysteresis,
+  exponential responses, smoothing, displacement, acceleration, and heading
+  derivatives require boundary state. Do not use naive time-chunked
+  `to_zarr()` here.
+- raw detection outputs from traditional detectors: per-frame detection counts
+  are variable and need explicit row indexing/assembly before dense arrays can
+  be written.
+
+The practical rule is: prefer `to_zarr()` for dense array materialization, not
+for schema orchestration, provenance, variable-length event tables, or mutable
+review surfaces.
+
 ## Stage-Level Guidance
 
 Do not add Dask to a stage simply because the stage loops over frames, bouts, or
 windows. The stage must have both a compute partition and a write partition that
 are safe.
+
+### Temporal State Machines Are Not Row-Local
+
+Some downstream movement stages are temporal state machines: the output at row
+`t` depends on row `t - 1`, a running state, a future/past window, or a global
+event ordering. These stages are not safely parallelized by simply splitting the
+time axis into independent row chunks.
+
+Examples in the movement/bout stack:
+
+- `track_kinematics` hysteresis keeps a moving/stopped state and a low-count
+  debounce counter. The correct state at the first row of a chunk depends on
+  the frames before that chunk.
+- temporal smoothing and acceleration need neighbor samples around chunk
+  boundaries. Causal smoothing needs previous samples; centered smoothing needs
+  previous and future samples.
+- `detect_bouts_multi_level` peak-event detection needs local neighborhoods for
+  prominence, width, bases, and minimum peak distance. Threshold components and
+  gap merges can cross chunk boundaries.
+- exponential detector responses are recursive filters. The response value at a
+  chunk start depends on the previous response value unless the initial state is
+  explicitly carried forward.
+- inter-bout intervals and adjacent-bout constraints require globally ordered
+  bout rows after segmentation.
+
+For these stages, time-chunked parallelism is only safe if the implementation
+defines one of the following:
+
+- **state handoff**: each chunk receives the exact state produced by all
+  preceding chunks.
+- **halo/overlap plus trimming**: each chunk reads enough neighboring samples to
+  compute boundary rows correctly, then writes only the owned interior rows.
+- **stitch/merge semantics**: independently computed candidate events are
+  reconciled deterministically at chunk boundaries.
+- **serial finalization**: workers compute independent candidates or summaries,
+  and a single driver pass resolves ordering, boundary merges, attrs,
+  provenance, and writes.
+
+Any Dask implementation for these stages must include regression tests against
+the serial implementation, especially for events crossing worker boundaries.
+The expected target is semantic equivalence; bit-for-bit equivalence is
+preferred when the arithmetic order is unchanged.
 
 Recommended order for downstream movement analysis:
 
@@ -151,6 +245,20 @@ Recommended order for downstream movement analysis:
 - `detect_bouts_multi_level`: only parallelize internally after defining how
   peak events, threshold components, and gap merges are reconciled across chunk
   boundaries.
+
+Practical parallelism surfaces for the current movement/bout stack:
+
+| Stage | Safe first parallelism | Risky or deferred parallelism | Why |
+| --- | --- | --- | --- |
+| `track_kinematics` | archive-level, track-level, subject-level | time chunks | displacement, hysteresis, smoothing, heading deltas, and acceleration have temporal boundary state |
+| `detect_bouts_multi_level` | archive-level, track-level, speed-signal variant-level | time chunks | peak/event boundaries, gap merging, exponential responses, and inter-bout intervals need temporal context |
+| `bout_kinematics` | archive-level, track-level, per-bout row partitions | direct worker writes without chunk ownership | once bout boundaries are frozen, most per-bout metrics are independent; final table writes and attrs should remain driver-owned |
+
+For current single-fish recordings, archive-level parallelism via
+`run_movement_bout_batch_pipeline --jobs N` is the production-safe scaling
+surface. Internal Dask for movement/bout stages should be added only after
+profiling shows one archive is the bottleneck and the state/chunk contract above
+has tests.
 
 On the cluster, prefer recording-level parallelism before internal stage-level
 Dask. Independent recordings write independent Zarr stores, which is usually
