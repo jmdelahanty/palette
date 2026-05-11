@@ -27,6 +27,34 @@ Implementation status:
 - `fisheye.analysis.stimulus_response` supports
   `--layout compact_tabular_v2` as an explicit opt-in writer mode.
 
+## Dense Time-Series Decision
+
+Decision, 2026-05-11: compact-v2 does not persist dense per-frame or
+time-series stimulus-response tables by default. This is intentional, not a
+missing implementation slice.
+
+The compact stimulus-response run is the query-grade derived-response surface:
+per-fish, per-step, per-bout, per-window, early-window, and trial summaries.
+Dense traces for plotting and debugging should be reconstructed from upstream
+time-series sources through resolvers:
+
+- `analysis/track_kinematics_runs` for aligned position, heading, speed, and
+  movement validity traces.
+- `analysis/swim_bout_runs` for bout detector intervals and detector-response
+  signals.
+- `analysis/stimulus_runs` for frame alignment, step spans, and stimulus
+  metadata.
+- `analysis/eye_angle_runs` or other modality-specific runs when response
+  plots need dense eye/tail/pose traces.
+
+This avoids duplicating upstream physical signals into every
+`stimulus_response_runs/<run>` and prevents compact-v2 from recreating the old
+metadata-fanout problem with large per-frame tables. A future optional dense
+cache is allowed only if a named consumer needs it for performance. If added,
+it should be clearly marked as a cache or separate compact table family, carry
+source references/fingerprints, and not become the authoritative source for
+physical track, bout, eye-angle, or stimulus time-series.
+
 ## Current Hierarchical-V1 Shape
 
 Current writer: `src/fisheye/analysis/stimulus_response.py`.
@@ -195,10 +223,12 @@ Notes:
   metric-long OMR table. That preserves current reader/export ergonomics while
   still removing the per-step subtree fanout.
 - The high-volume per-frame and time-series tables are intentionally omitted
-  from compact-v2 for now: `grating_per_frame`, `grating_time_series`,
+  from compact-v2 by default: `grating_per_frame`, `grating_time_series`,
   `concentric_per_frame`, `concentric_time_series`,
   `concentric_radial_omr_per_frame`, `looming_per_frame`, and
   `looming_time_series`. The run records these in `compact_omitted_tables`.
+  Dense visual/debug traces are sourced from upstream time-series runs through
+  resolvers rather than duplicated here.
 - Looming remains a stimulus-response family, not a separate top-level run
   family. Its trial-scoped data belongs in `looming_trials` and
   `looming_per_trial_per_fish`.
@@ -228,8 +258,10 @@ Notes:
 
 ## Open Decisions
 
-- Whether `stimulus_per_frame` should be a required compact-v2 table or remain
-  optional for runs that only need summaries and bout/window metrics.
+- Whether a named UI or batch consumer needs an optional dense cache table for
+  performance. The default decision is no persisted dense time-series in
+  compact-v2; any future cache must be explicitly marked as cache/derived view
+  and sourced from upstream traces.
 - Whether family-specific per-fish metrics should be wide tables
   (`omr_per_fish`) or a metric-long table. Wide tables are easier for current
   Marimo/export code; metric-long tables can be better for schema evolution.
