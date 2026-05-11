@@ -1,10 +1,9 @@
 """Logical readers for ``analysis/subject_shape_runs``.
 
-Subject-shape runs currently store geometry under component-specific groups
-such as ``components/subject_body`` plus run-level ``body_frame`` and
-``relations`` groups. This module is the read boundary for those physical
-paths so consumers can request logical component/body-frame tables before any
-future compact layout work.
+Subject-shape consumers should read through this module rather than
+hard-coding component-specific groups such as ``components/subject_body`` plus
+run-level ``body_frame`` and ``relations`` groups. This keeps downstream code
+on a logical component/body-frame surface if the physical layout changes.
 """
 
 from __future__ import annotations

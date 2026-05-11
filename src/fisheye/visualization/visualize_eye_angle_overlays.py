@@ -30,6 +30,7 @@ import numpy as np
 import zarr
 from matplotlib.widgets import Button, Slider
 
+from fisheye.analysis.eye_angle_io import load_eye_angle_run_tables
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_EYE,
@@ -525,17 +526,18 @@ def _load_display_masks_and_geometry(
     return mask_source.masks_roi, geometry_source.ellipse_params
 
 
-def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[AngleRecord], Dict[int, str]]:
-    angles_grp = run_group["angles"]["roi"]
-    qa_grp = run_group["qa"]["roi"]
-    support = run_group.get("support")
+def _load_angles(root: zarr.Group, run_name: str, prefer_smoothed: bool) -> tuple[List[AngleRecord], Dict[int, str]]:
+    tables = load_eye_angle_run_tables(root, run_name=run_name)
+    angles_grp = tables.roi
+    qa_grp = tables.qa_roi
+    support = tables.support
 
-    reason_map_raw = run_group.attrs.get("reason_code_map", {}) or {}
+    reason_map_raw = tables.attrs.get("reason_code_map", {}) or {}
     reason_mapping = {int(k): str(v) for k, v in reason_map_raw.items()}
 
     def _pick_series(name: str, fallback: Optional[np.ndarray] = None) -> tuple[np.ndarray, bool]:
         raw = (
-            np.asarray(angles_grp[name][:], dtype=np.float32)
+            np.asarray(angles_grp[name], dtype=np.float32)
             if name in angles_grp
             else (
                 np.asarray(fallback, dtype=np.float32)
@@ -547,7 +549,7 @@ def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[Ang
             raise KeyError(f"Required dataset '{name}' missing in eye angle run.")
         smoothed_name = f"{name}_smoothed"
         smoothed = (
-            np.asarray(angles_grp[smoothed_name][:], dtype=np.float32)
+            np.asarray(angles_grp[smoothed_name], dtype=np.float32)
             if prefer_smoothed and smoothed_name in angles_grp
             else None
         )
@@ -577,7 +579,7 @@ def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[Ang
     )
 
     heading = (
-        np.asarray(angles_grp["heading_deg"][:], dtype=np.float32)
+        np.asarray(angles_grp["heading_deg"], dtype=np.float32)
         if "heading_deg" in angles_grp
         else np.full_like(left, np.nan, dtype=np.float32)
     )
@@ -598,23 +600,23 @@ def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[Ang
         ]
     )
 
-    valid_left = np.asarray(qa_grp["valid_left"][:], dtype=bool)
-    valid_right = np.asarray(qa_grp["valid_right"][:], dtype=bool)
-    valid_frame = np.asarray(qa_grp["valid_frame"][:], dtype=bool)
-    reason_codes = np.asarray(qa_grp["reason_codes"][:], dtype=np.uint16)
+    valid_left = np.asarray(qa_grp["valid_left"], dtype=bool)
+    valid_right = np.asarray(qa_grp["valid_right"], dtype=bool)
+    valid_frame = np.asarray(qa_grp["valid_frame"], dtype=bool)
+    reason_codes = np.asarray(qa_grp["reason_codes"], dtype=np.uint16)
 
     ellipse_major = (
-        np.asarray(support["ellipse_major"][:], dtype=np.float32)
+        np.asarray(support["ellipse_major"], dtype=np.float32)
         if support and "ellipse_major" in support
         else None
     )
     ellipse_minor = (
-        np.asarray(support["ellipse_minor"][:], dtype=np.float32)
+        np.asarray(support["ellipse_minor"], dtype=np.float32)
         if support and "ellipse_minor" in support
         else None
     )
     ellipse_ratio = (
-        np.asarray(support["ellipse_ratio"][:], dtype=np.float32)
+        np.asarray(support["ellipse_ratio"], dtype=np.float32)
         if support and "ellipse_ratio" in support
         else None
     )
@@ -750,7 +752,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     prefer_smoothed = args.angle_series == "smoothed"
 
-    angle_records, _ = _load_angles(run_group, prefer_smoothed)
+    angle_records, _ = _load_angles(root, str(eye_angle_run), prefer_smoothed)
     if len(angle_records) != roi_images.shape[0]:
         raise ValueError(
             f"Angle record count ({len(angle_records)}) does not match ROI count ({roi_images.shape[0]})."

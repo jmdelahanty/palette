@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
+from fisheye.analysis.eye_angle_io import load_eye_angle_run_tables
 from fisheye.shared.plot_artifacts import write_png_visualization_artifact
 from fisheye.shared.stage_provenance import build_stage_provenance
 from fisheye.utils.system import get_environment_info, get_git_info
@@ -99,34 +100,30 @@ def _save_png_bytes(path: Path, png_bytes: bytes) -> None:
 
 def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[str, object], Dict[str, np.ndarray]]:
     root = open_zarr_root(zarr_path, mode="r")
-    analysis = root.get("analysis")
-    if analysis is None or "eye_angle_runs" not in analysis:
-        raise ValueError("Archive is missing analysis/eye_angle_runs.")
-
-    parent = analysis["eye_angle_runs"]
-    if run_name is None:
-        run_name = parent.attrs.get("latest")
-        if not run_name:
-            raise ValueError("No eye_angle_runs found; specify --run.")
-    if run_name not in parent:
-        raise ValueError(f"Run '{run_name}' not found in analysis/eye_angle_runs.")
-
-    run_group = parent[run_name]
-    angles = run_group["angles"]
-    qa = run_group["qa"]
-    support = run_group.get("support")
-
-    roi_group = angles["roi"]
+    tables = load_eye_angle_run_tables(root, run_name=run_name or "latest")
+    run_name = tables.run_name
+    roi_group = tables.roi
+    frame_group = tables.frame
+    qa_roi_group = tables.qa_roi
+    qa_frame_group = tables.qa_frame
+    support = tables.support
 
     def _maybe(name: str) -> Optional[np.ndarray]:
-        return roi_group[name][:] if name in roi_group else None
+        value = roi_group.get(name)
+        return np.asarray(value) if value is not None else None
+
+    def _required(name: str) -> np.ndarray:
+        value = _maybe(name)
+        if value is None:
+            raise ValueError(f"Eye-angle run '{run_name}' is missing ROI angle '{name}'.")
+        return value
 
     roi_angles = {
-        "left": roi_group["left_deg"][:],
+        "left": _required("left_deg"),
         "left_smoothed": _maybe("left_deg_smoothed"),
-        "right": roi_group["right_deg"][:],
+        "right": _required("right_deg"),
         "right_smoothed": _maybe("right_deg_smoothed"),
-        "vergence": roi_group["vergence_deg"][:],
+        "vergence": _required("vergence_deg"),
         "vergence_smoothed": _maybe("vergence_deg_smoothed"),
         "left_signed": _maybe("left_signed_deg"),
         "left_signed_smoothed": _maybe("left_signed_deg_smoothed"),
@@ -259,23 +256,30 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
     }
 
     qa_roi = {
-        "valid_left": qa["roi"]["valid_left"][:],
-        "valid_right": qa["roi"]["valid_right"][:],
-        "valid_frame": qa["roi"]["valid_frame"][:],
-        "reason_codes": qa["roi"]["reason_codes"][:],
+        "valid_left": np.asarray(qa_roi_group["valid_left"]),
+        "valid_right": np.asarray(qa_roi_group["valid_right"]),
+        "valid_frame": np.asarray(qa_roi_group["valid_frame"]),
+        "reason_codes": np.asarray(qa_roi_group["reason_codes"]),
     }
 
     frame_data: Dict[str, Optional[np.ndarray]] = {}
     frame_deltas: Dict[str, Optional[np.ndarray]] = {}
-    if "frame" in angles:
-        frame_group = angles["frame"]
+    if frame_group:
         def _frame_maybe(name: str) -> Optional[np.ndarray]:
-            return frame_group[name][:] if name in frame_group else None
-        frame_data["left"] = frame_group["left_deg"][:]
+            value = frame_group.get(name)
+            return np.asarray(value) if value is not None else None
+
+        def _frame_required(name: str) -> np.ndarray:
+            value = _frame_maybe(name)
+            if value is None:
+                raise ValueError(f"Eye-angle run '{run_name}' is missing frame angle '{name}'.")
+            return value
+
+        frame_data["left"] = _frame_required("left_deg")
         frame_data["left_smoothed"] = _frame_maybe("left_deg_smoothed")
-        frame_data["right"] = frame_group["right_deg"][:]
+        frame_data["right"] = _frame_required("right_deg")
         frame_data["right_smoothed"] = _frame_maybe("right_deg_smoothed")
-        frame_data["vergence"] = frame_group["vergence_deg"][:]
+        frame_data["vergence"] = _frame_required("vergence_deg")
         frame_data["vergence_smoothed"] = _frame_maybe("vergence_deg_smoothed")
         frame_data["vergence_signed"] = _frame_maybe("vergence_signed_deg")
         frame_data["vergence_signed_smoothed"] = _frame_maybe("vergence_signed_deg_smoothed")
@@ -367,26 +371,26 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_deltas["mean_eye_vergence_gaze_smoothed"] = _frame_maybe("mean_eye_vergence_gaze_delta_deg_smoothed")
         frame_deltas["version_gaze"] = _frame_maybe("version_gaze_delta_deg")
         frame_deltas["version_gaze_smoothed"] = _frame_maybe("version_gaze_delta_deg_smoothed")
-    if "frame" in qa:
-        frame_data["frame_valid"] = qa["frame"]["valid_frame"][:]
-        frame_data["frame_reason"] = qa["frame"]["reason_codes"][:]
+    if qa_frame_group:
+        frame_data["frame_valid"] = np.asarray(qa_frame_group["valid_frame"])
+        frame_data["frame_reason"] = np.asarray(qa_frame_group["reason_codes"])
 
     support_data = {}
-    if support is not None:
+    if support:
         if "time_seconds" in support:
-            support_data["time_seconds"] = support["time_seconds"][:]
+            support_data["time_seconds"] = np.asarray(support["time_seconds"])
         if "frame_indices" in support:
-            support_data["frame_indices"] = support["frame_indices"][:]
+            support_data["frame_indices"] = np.asarray(support["frame_indices"])
         if "frame_time_seconds" in support:
-            support_data["frame_time_seconds"] = support["frame_time_seconds"][:]
+            support_data["frame_time_seconds"] = np.asarray(support["frame_time_seconds"])
         if "ellipse_major" in support:
-            support_data["ellipse_major"] = support["ellipse_major"][:]
+            support_data["ellipse_major"] = np.asarray(support["ellipse_major"])
         if "ellipse_minor" in support:
-            support_data["ellipse_minor"] = support["ellipse_minor"][:]
+            support_data["ellipse_minor"] = np.asarray(support["ellipse_minor"])
         if "ellipse_ratio" in support:
-            support_data["ellipse_ratio"] = support["ellipse_ratio"][:]
+            support_data["ellipse_ratio"] = np.asarray(support["ellipse_ratio"])
 
-    attrs = dict(run_group.attrs)
+    attrs = dict(tables.attrs)
     attrs["run_name"] = run_name
 
     data = {
@@ -450,8 +454,21 @@ def _default_angle_source(attrs: Mapping[str, object]) -> str:
     return "gaze"
 
 
-def _eye_angle_source_paths(run_name: str) -> Dict[str, str]:
+def _eye_angle_source_paths(run_name: str, attrs: Optional[Mapping[str, object]] = None) -> Dict[str, str]:
     run_path = f"analysis/eye_angle_runs/{run_name}"
+    attrs = attrs or {}
+    if str(attrs.get("layout") or attrs.get("storage_layout") or "") == "compact_dense_v2":
+        return {
+            "run": run_path,
+            "angles_roi": f"{run_path}/roi_angles",
+            "angles_frame": f"{run_path}/frame_angles",
+            "qa_roi": f"{run_path}/roi_qa",
+            "qa_frame": f"{run_path}/frame_qa",
+            "support": f"{run_path}/support",
+            "angle_channel_index": f"{run_path}/angle_channel_index",
+            "qa_channel_index": f"{run_path}/qa_channel_index",
+            "vector_channel_index": f"{run_path}/vector_channel_index",
+        }
     return {
         "run": run_path,
         "angles_roi": f"{run_path}/angles/roi",
@@ -510,7 +527,7 @@ def _write_eye_angle_png_artifact(
     command: Optional[str] = None,
 ) -> str:
     run_name = str(attrs.get("run_name") or run_group.name.rsplit("/", 1)[-1])
-    source_paths = _eye_angle_source_paths(run_name)
+    source_paths = _eye_angle_source_paths(run_name, attrs)
     source_runs = _eye_angle_source_runs(attrs)
     parameters = {
         "angle_source": angle_source,

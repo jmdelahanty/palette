@@ -23,6 +23,9 @@ from typing import Any, Optional, Sequence
 
 import zarr
 
+from fisheye.analysis.eye_angle_io import EyeAngleIOError, load_eye_angle_run_tables
+from fisheye.utils.zarr_io import open_zarr_root
+
 
 DEFAULT_TRACK_RUN = "tk_hyst4_low2_latch_s005"
 DEFAULT_EYE_ANGLE_RUN = "eye_angle_variant_schema_v7_batch_20260504"
@@ -192,7 +195,19 @@ def _swim_bout_logical_bouts_exist(zarr_path: Path, run_name: str) -> bool:
 
 def _eye_angle_frame_outputs_exist(zarr_path: Path, eye_angle_run: str) -> bool:
     base = zarr_path / "analysis" / "eye_angle_runs" / eye_angle_run / "angles" / "frame"
-    return all((base / name / "zarr.json").exists() for name in ("left_gaze_deg", "right_gaze_deg", "vergence_gaze_deg"))
+    required = ("left_gaze_deg", "right_gaze_deg", "vergence_gaze_deg")
+    if all((base / name / "zarr.json").exists() for name in required):
+        return True
+
+    # Compact-dense eye-angle runs do not materialize angles/frame/<name>
+    # groups. Use the logical resolver so skip-existing planning treats compact
+    # and hierarchical runs equivalently.
+    try:
+        root = open_zarr_root(zarr_path, mode="r")
+        tables = load_eye_angle_run_tables(root, run_name=eye_angle_run)
+    except (EyeAngleIOError, FileNotFoundError, KeyError, ValueError, OSError):
+        return False
+    return all(name in tables.frame for name in required)
 
 
 def build_archive_plan(

@@ -1,9 +1,8 @@
 """Logical readers for Palette eye-angle analysis runs.
 
-Eye-angle runs currently store many related arrays under
-``analysis/eye_angle_runs/<run>/angles/{roi,frame}``, with QA and support arrays
-in sibling groups. This module is the read boundary for those physical paths so
-consumers can ask for logical tables before any future compact layout work.
+Eye-angle consumers should read through this module rather than hard-coding
+physical Zarr paths. It exposes the same logical ROI/frame angle, QA, vector,
+and support tables for hierarchical-v1 runs and compact-dense-v2 runs.
 """
 
 from __future__ import annotations

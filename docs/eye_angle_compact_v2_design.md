@@ -173,16 +173,24 @@ Implemented in this slice:
   `frame_qa`, and channel-index groups.
 - `load_eye_gaze_frame_series(...)` reports compact backing channels in
   `source_eye_angle_arrays`.
+- `visualize_eye_angles.py`, `visualize_eye_angle_overlays.py`, Marimo
+  eye-angle plots, and bout-kinematics eye-gaze summaries read through the same
+  logical API instead of assuming `angles/{roi,frame}` exists physically.
+- `run_movement_bout_batch_pipeline.py` uses the logical API when checking
+  whether frame-level eye-gaze outputs already exist, so compact runs count as
+  valid existing inputs for bout-kinematics planning.
 - `eye_angle_analysis.py` has opt-in `--layout compact_dense_v2` writer support.
 - In-memory tests prove compact channels roundtrip to existing logical names
   and that writer-packed compact runs resolve through the same logical API.
 - Real canary generated on 2026-05-11:
   `analysis/eye_angle_runs/eye_angle_compact_dense_v2_canary_20260511_axisavail`.
+- Same-code hierarchical/compact parity passed on 2026-05-11 with
+  `eye_angle_hierarchical_v1_canary_20260511_samecode` versus
+  `eye_angle_compact_dense_v2_canary_20260511_axisavail`.
 
 Not implemented yet:
 
 - Compact-dense-v2 as the default writer layout.
-- Crimson compact eye-angle reader validation.
 
 ## Writer Migration Plan
 
@@ -198,13 +206,18 @@ Current status:
    availability flags.
 4. Focused unit tests and one real canary validate the resolver path, strict
    JSON metadata, and interactive/bout eye-gaze reader surfaces.
+5. Crimson compact-dense-v2 reader validation passed on 2026-05-11 against the
+   feeding canary. The Crimson loader resolved `roi_angles`, `frame_angles`,
+   `roi_vectors`, `roi_qa`, and `frame_qa` through channel-index groups,
+   respected `roi_available` / `frame_available`, loaded the compact run
+   selected as `latest`, and regression-tested the hierarchical v7 run.
 
 Remaining before making compact the default:
 
-1. Crimson compact eye-angle reader validation.
-2. A current-code hierarchical/compact parity canary if exact value parity is
-   required as a release gate. Older hierarchical canaries may differ because
-   they were produced by different schema/source revisions.
+1. Decide the operational default switch timing. Older hierarchical canaries
+   may differ from current compact canaries because they were produced by
+   different schema/source revisions; use the same-code parity pair above as
+   the release gate.
 
 ## Risks
 

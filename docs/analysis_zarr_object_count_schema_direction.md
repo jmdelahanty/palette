@@ -416,12 +416,14 @@ Current issue:
 
 - many deterministic representations are materialized as arrays
 - frame-aligned copies and smoothed/delta variants multiply object count
-- readers hardcode physical paths instead of using the variant schema
+- historical readers hardcoded physical paths; the active shared resolver now
+  supports both hierarchical-v1 and compact-dense-v2 read surfaces
 
 Direction:
 
-- canonical compact angle arrays plus variant resolver
-- optional compatibility materialization for old consumers only
+- canonical compact angle arrays plus resolver-first consumers
+- keep hierarchical-v1 only as explicit compatibility/debug output until
+  compact-dense-v2 becomes the operational default
 - interactive specs preferred over many persisted PNG snapshots
 
 ### `analysis/subject_shape_runs`

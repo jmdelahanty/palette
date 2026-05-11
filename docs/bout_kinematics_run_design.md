@@ -582,12 +582,14 @@ information for local convenience, but readers should treat `source_refs` as the
 canonical provenance mapping if the two ever disagree.
 
 The optional `eye_gaze` subgroup follows the same provenance rule. It consumes
-`analysis/eye_angle_runs/<run>/angles/frame/*_gaze_*` arrays, aligned by source
-frame index to the selected track-kinematics frames. Its `pre_*`, `post_*`, and
-`within_*` windows are the same resolved windows used for heading metrics. If a
-`vergence_threshold_deg` is configured, `*_converged_fraction` records the
-fraction of valid samples meeting or exceeding that threshold; otherwise those
-fields are `NaN`.
+logical frame-aligned gaze arrays from `analysis/eye_angle_runs/<run>` through
+`fisheye.analysis.eye_angle_io`, so the source can be either hierarchical-v1
+`angles/frame/*_gaze_*` arrays or compact-dense-v2 backing channels. Values are
+aligned by source frame index to the selected track-kinematics frames. Its
+`pre_*`, `post_*`, and `within_*` windows are the same resolved windows used for
+heading metrics. If a `vergence_threshold_deg` is configured,
+`*_converged_fraction` records the fraction of valid samples meeting or
+exceeding that threshold; otherwise those fields are `NaN`.
 
 ## Visualization Policy
 
