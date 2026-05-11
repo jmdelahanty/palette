@@ -113,6 +113,32 @@ def test_validate_plan_outputs_accepts_compact_bout_kinematics_eye_gaze(tmp_path
     assert mod._validate_plan_outputs(plan) == ("ok", "")
 
 
+def test_validate_eye_angle_only_plan_does_not_require_existing_bout_eye_gaze(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    plan = mod.ArchivePlan(
+        **{
+            **_plan(zarr_path).__dict__,
+            "run_eye_angles": True,
+            "run_bout_kinematics": False,
+            "include_eye_gaze": True,
+        }
+    )
+    _write_zarr_group(zarr_path / "analysis" / "eye_angle_runs" / "eye")
+    _write_zarr_group(zarr_path / "analysis" / "track_kinematics_runs" / "offline" / "tk")
+    _write_zarr_group(
+        zarr_path / "analysis" / "swim_bout_runs" / "bouts",
+        {"layout": "compact_tabular_v2"},
+    )
+    _write_zarr_group(zarr_path / "analysis" / "swim_bout_runs" / "bouts" / "tables" / "bouts")
+    _write_zarr_group(
+        zarr_path / "analysis" / "bout_kinematics_runs" / "bk",
+        {"layout": "compact_tabular_v2"},
+    )
+    _write_zarr_group(zarr_path / "analysis" / "bout_kinematics_runs" / "bk" / "movement_metrics")
+
+    assert mod._validate_plan_outputs(plan) == ("ok", "")
+
+
 def test_validate_plan_outputs_reports_missing_logical_swim_bouts(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     _write_common_outputs(zarr_path)
