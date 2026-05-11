@@ -910,10 +910,22 @@ def _load_bout_kinematics_metrics(
         return []
 
     run_attrs = _attrs_dict(bout_kin_group)
-    source_swim_bout_run = run_attrs.get("source_swim_bout_run")
-    source_swim_bout_speed_level = run_attrs.get("source_swim_bout_speed_level")
-    source_track_kinematics_run = run_attrs.get("source_track_kinematics_run")
-    track_id = _safe_int(run_attrs.get("source_track_id"))
+    source_refs = _parse_jsonish(run_attrs.get("source_refs"))
+    if not isinstance(source_refs, Mapping):
+        source_refs = {}
+    source_swim_bout_run = run_attrs.get("source_swim_bout_run") or source_refs.get(
+        "source_swim_bout_run"
+    )
+    source_swim_bout_speed_level = run_attrs.get("source_swim_bout_speed_level") or source_refs.get(
+        "source_swim_bout_speed_level"
+    )
+    source_track_kinematics_run = run_attrs.get("source_track_kinematics_run") or source_refs.get(
+        "source_track_kinematics_run"
+    )
+    source_track_id = run_attrs.get("source_track_id")
+    if source_track_id is None:
+        source_track_id = source_refs.get("source_track_id")
+    track_id = _safe_int(source_track_id)
     default_heading_level = run_attrs.get("default_heading_level")
     records_by_level, level_attrs_by_level, metrics_attrs_by_level = resolve_bout_kinematics_tables(
         bout_kin_group

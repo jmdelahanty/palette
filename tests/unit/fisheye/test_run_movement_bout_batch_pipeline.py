@@ -76,6 +76,43 @@ def test_validate_plan_outputs_accepts_hierarchical_swim_bout_run(tmp_path: Path
     assert mod._validate_plan_outputs(_plan(zarr_path)) == ("ok", "")
 
 
+def test_validate_plan_outputs_accepts_compact_bout_kinematics_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _write_zarr_group(zarr_path / "analysis" / "track_kinematics_runs" / "offline" / "tk")
+    _write_zarr_group(
+        zarr_path / "analysis" / "swim_bout_runs" / "bouts",
+        {"layout": "compact_tabular_v2"},
+    )
+    _write_zarr_group(zarr_path / "analysis" / "swim_bout_runs" / "bouts" / "tables" / "bouts")
+    _write_zarr_group(
+        zarr_path / "analysis" / "bout_kinematics_runs" / "bk",
+        {"layout": "compact_tabular_v2"},
+    )
+    _write_zarr_group(zarr_path / "analysis" / "bout_kinematics_runs" / "bk" / "movement_metrics")
+
+    assert mod._validate_plan_outputs(_plan(zarr_path)) == ("ok", "")
+
+
+def test_validate_plan_outputs_accepts_compact_bout_kinematics_eye_gaze(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    plan = mod.ArchivePlan(**{**_plan(zarr_path).__dict__, "include_eye_gaze": True})
+    _write_zarr_group(zarr_path / "analysis" / "track_kinematics_runs" / "offline" / "tk")
+    _write_zarr_group(zarr_path / "analysis" / "eye_angle_runs" / "eye")
+    _write_zarr_group(
+        zarr_path / "analysis" / "swim_bout_runs" / "bouts",
+        {"layout": "compact_tabular_v2"},
+    )
+    _write_zarr_group(zarr_path / "analysis" / "swim_bout_runs" / "bouts" / "tables" / "bouts")
+    _write_zarr_group(
+        zarr_path / "analysis" / "bout_kinematics_runs" / "bk",
+        {"layout": "compact_tabular_v2"},
+    )
+    _write_zarr_group(zarr_path / "analysis" / "bout_kinematics_runs" / "bk" / "movement_metrics")
+    _write_zarr_group(zarr_path / "analysis" / "bout_kinematics_runs" / "bk" / "eye_gaze_metrics")
+
+    assert mod._validate_plan_outputs(plan) == ("ok", "")
+
+
 def test_validate_plan_outputs_reports_missing_logical_swim_bouts(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     _write_common_outputs(zarr_path)

@@ -525,6 +525,38 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert movement_rows[0]["physical_active_duration_s"] == 0.12
 
 
+def test_export_cross_recording_analytics_uses_bout_kinematics_source_refs_fallback(
+    tmp_path: Path,
+) -> None:
+    source = _make_source_zarr(tmp_path / "recording_source_refs_analysis.zarr")
+    _convert_bout_kinematics_fixture_to_compact_v2(source)
+    root = zarr.open_group(str(source), mode="a")
+    bout_kin = root["analysis"]["bout_kinematics_runs"]["bout_kinematics_test"]
+    bout_kin.attrs["source_refs"] = {
+        "source_track_id": 0,
+        "source_track_kinematics_run": "tk_test",
+        "source_swim_bout_run": "bouts_test",
+        "source_swim_bout_speed_level": "speed_exponential",
+    }
+    for name in (
+        "source_track_id",
+        "source_track_kinematics_run",
+        "source_swim_bout_run",
+        "source_swim_bout_speed_level",
+    ):
+        del bout_kin.attrs[name]
+
+    output = tmp_path / "exports" / "palette_analytics"
+    manifest = export_sources([source], output_root=output, export_run_id="source_refs", jobs=1)
+
+    assert manifest["row_counts_by_table"]["bout_kinematics_metrics"] == 6
+    bout_kin_rows = _read_dataset(output, "bout_kinematics_metrics", "source_refs")
+    assert all(row["source_swim_bout_run"] == "bouts_test" for row in bout_kin_rows)
+    assert all(row["source_swim_bout_speed_level"] == "speed_exponential" for row in bout_kin_rows)
+    assert all(row["source_track_kinematics_run"] == "tk_test" for row in bout_kin_rows)
+    assert all(row["track_id"] == 0 for row in bout_kin_rows)
+
+
 def test_export_cross_recording_analytics_reads_compact_stimulus_response(tmp_path: Path) -> None:
     source = _make_source_zarr(tmp_path / "recording_compact_response_analysis.zarr")
     _replace_stimulus_response_fixture_with_compact_v2(source)

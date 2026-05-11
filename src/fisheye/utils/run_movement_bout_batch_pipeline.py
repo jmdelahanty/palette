@@ -198,6 +198,27 @@ def _swim_bout_logical_bouts_exist(zarr_path: Path, run_name: str) -> bool:
     return _exists(zarr_path, f"{run_rel}/bouts")
 
 
+def _bout_kinematics_logical_level_exists(zarr_path: Path, run_name: str, level_name: str) -> bool:
+    """Return whether a bout-kinematics run exposes a logical measurement level."""
+
+    run_rel = f"analysis/bout_kinematics_runs/{run_name}"
+    run_path = zarr_path / run_rel
+    if not _exists(zarr_path, run_rel):
+        return False
+
+    attrs = _attrs(run_path)
+    if attrs.get("layout") == "compact_tabular_v2":
+        if level_name == "movement":
+            return _exists(zarr_path, f"{run_rel}/movement_metrics")
+        if level_name == "eye_gaze":
+            return _exists(zarr_path, f"{run_rel}/eye_gaze_metrics")
+        if str(level_name).startswith("heading_"):
+            return _exists(zarr_path, f"{run_rel}/heading_metrics")
+        return False
+
+    return _exists(zarr_path, f"{run_rel}/{level_name}/per_bout_metrics")
+
+
 def _eye_angle_frame_outputs_exist(zarr_path: Path, eye_angle_run: str) -> bool:
     base = zarr_path / "analysis" / "eye_angle_runs" / eye_angle_run / "angles" / "frame"
     required = ("left_gaze_deg", "right_gaze_deg", "vergence_gaze_deg")
@@ -474,18 +495,18 @@ def _validate_plan_outputs(plan: ArchivePlan) -> tuple[str, str]:
     zarr_path = Path(plan.zarr_path)
     checks = [
         f"analysis/track_kinematics_runs/offline/{plan.track_run}",
-        f"analysis/bout_kinematics_runs/{plan.bout_kinematics_run}/movement/per_bout_metrics",
     ]
     if plan.include_eye_gaze:
-        checks.extend(
-            [
-                f"analysis/eye_angle_runs/{plan.eye_angle_run}",
-                f"analysis/bout_kinematics_runs/{plan.bout_kinematics_run}/eye_gaze/per_bout_metrics",
-            ]
-        )
+        checks.append(f"analysis/eye_angle_runs/{plan.eye_angle_run}")
     missing = [rel for rel in checks if not _exists(zarr_path, rel)]
     if not _swim_bout_logical_bouts_exist(zarr_path, plan.swim_bout_run):
         missing.append(f"analysis/swim_bout_runs/{plan.swim_bout_run} logical bouts")
+    if not _bout_kinematics_logical_level_exists(zarr_path, plan.bout_kinematics_run, "movement"):
+        missing.append(f"analysis/bout_kinematics_runs/{plan.bout_kinematics_run} logical movement metrics")
+    if plan.include_eye_gaze and not _bout_kinematics_logical_level_exists(
+        zarr_path, plan.bout_kinematics_run, "eye_gaze"
+    ):
+        missing.append(f"analysis/bout_kinematics_runs/{plan.bout_kinematics_run} logical eye_gaze metrics")
     if missing:
         return "failed", "missing " + ", ".join(missing)
     return "ok", ""
