@@ -250,6 +250,12 @@ This tool does not replace writer-side source revision capture. It is a gate and
 diagnostic surface for finding derived runs that need regeneration or better
 lineage metadata.
 
+For a graph view of the same source relationships, use
+`fisheye.utils.inspect_run_lineage_graph`. It builds a read-only run-lineage DAG
+from the same `source_refs` / `source_*_run` metadata and renders canonical
+node/edge JSON plus tree, Mermaid, or DOT projections. See
+[run_lineage_dag_inspector.md](run_lineage_dag_inspector.md).
+
 ## Swim Bout Segmentation vs Per-Bout Metrics
 
 `analysis/swim_bout_runs/<run>/<speed_level>/` is the bout segmentation
