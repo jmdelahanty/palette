@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -87,3 +88,26 @@ def test_validate_plan_outputs_reports_missing_logical_swim_bouts(tmp_path: Path
 
     assert status == "failed"
     assert "analysis/swim_bout_runs/bouts logical bouts" in detail
+
+
+def test_batch_eye_angle_defaults_are_compact_dense_v2() -> None:
+    parser = mod._build_parser()
+    args = parser.parse_args(["/tmp/example_analysis.zarr"])
+
+    assert args.eye_angle_run == "eye_angle_compact_dense_v2_batch_20260511"
+    assert mod.DEFAULT_EYE_ANGLE_LAYOUT == "compact_dense_v2"
+
+
+def test_eye_angle_command_pins_compact_layout() -> None:
+    plan = _plan(Path("/tmp/example_analysis.zarr"))
+    args = argparse.Namespace(
+        eye_angle_chunk_size=8192,
+        eye_angle_execution_backend=None,
+        eye_angle_scheduler="processes",
+        eye_angle_num_workers=24,
+    )
+
+    cmd = mod._eye_angle_command(plan, args)
+
+    layout_idx = cmd.index("--layout")
+    assert cmd[layout_idx + 1] == "compact_dense_v2"

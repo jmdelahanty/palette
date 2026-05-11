@@ -23,12 +23,17 @@ from typing import Any, Optional, Sequence
 
 import zarr
 
-from fisheye.analysis.eye_angle_io import EyeAngleIOError, load_eye_angle_run_tables
+from fisheye.analysis.eye_angle_io import (
+    EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2,
+    EyeAngleIOError,
+    load_eye_angle_run_tables,
+)
 from fisheye.utils.zarr_io import open_zarr_root
 
 
 DEFAULT_TRACK_RUN = "tk_hyst4_low2_latch_s005"
-DEFAULT_EYE_ANGLE_RUN = "eye_angle_variant_schema_v7_batch_20260504"
+DEFAULT_EYE_ANGLE_LAYOUT = EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+DEFAULT_EYE_ANGLE_RUN = "eye_angle_compact_dense_v2_batch_20260511"
 DEFAULT_SWIM_BOUT_RUN = "bouts_tk_hyst4_low2_latch_s005_peak_event_exp_tau025_prom4_dist010_w098"
 DEFAULT_BOUT_KINEMATICS_RUN = "bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_interbout"
 
@@ -369,6 +374,8 @@ def _eye_angle_command(plan: ArchivePlan, args: argparse.Namespace) -> list[str]
         plan.eye_angle_run,
         "--chunk-size",
         str(args.eye_angle_chunk_size),
+        "--layout",
+        DEFAULT_EYE_ANGLE_LAYOUT,
         "--quiet",
     ]
     if args.eye_angle_execution_backend:
