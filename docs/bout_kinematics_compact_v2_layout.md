@@ -143,3 +143,12 @@ consumer validation, and compact visualization artifact support were in place,
 from `hierarchical_v1` to `compact_tabular_v2`. Use
 `--layout hierarchical_v1` only when a legacy physical tree is specifically
 needed.
+
+Smoke-run policy, 2026-05-11: real-Zarr validation runs may be written with
+explicit `smoke` names, but should not remain the parent `latest` selection
+unless intentionally promoted. On the feeding canary, the compact eye-angle
+smoke run proved `--eye-angle-run latest` could resolve a compact-dense-v2
+source, then `analysis/bout_kinematics_runs.attrs["latest"]` was restored to
+`bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_compact_v2_canary_20260510`
+and metadata was reconsolidated. The smoke run remains available for explicit
+regression checks.

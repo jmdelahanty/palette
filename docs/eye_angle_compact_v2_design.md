@@ -189,6 +189,11 @@ Implemented in this slice:
 - Default-layout smoke generated without passing `--layout` on 2026-05-11:
   `analysis/eye_angle_runs/eye_angle_default_compact_smoke_20260511`
   (`layout = compact_dense_v2`).
+- After the smoke validation, the feeding canary parent
+  `analysis/eye_angle_runs.attrs["latest"]` was restored to
+  `eye_angle_compact_dense_v2_canary_20260511_axisavail` and metadata was
+  reconsolidated. The smoke run remains available by explicit run name but is
+  not the canonical latest selection.
 - Same-code hierarchical/compact parity passed on 2026-05-11 with
   `eye_angle_hierarchical_v1_canary_20260511_samecode` versus
   `eye_angle_compact_dense_v2_canary_20260511_axisavail`.

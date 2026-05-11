@@ -2,7 +2,7 @@
 
 <!-- design-meta
 status: draft
-last_updated: 2026-05-10
+last_updated: 2026-05-11
 -->
 
 ## Purpose
@@ -33,6 +33,27 @@ Most other writers are still hierarchical, but they are not equally urgent:
 - `stimulus_response_runs`, `eye_angle_runs`, `subject_shape_runs`, and
   `refined_subject_masks_runs` are the main remaining future migration
   candidates, but each now has at least an initial logical reader surface.
+
+## Smoke-Run Latest Policy
+
+Real-Zarr smoke runs are allowed when they validate writer defaults, GUI
+startup, or downstream reader compatibility. They should use explicit names
+containing `smoke` or another validation marker and should remain addressable by
+that concrete run name.
+
+Do not leave a smoke run as a parent `attrs["latest"]` unless the operator
+intentionally promotes it as the canonical run. After validation, restore
+`latest` to the intended canary or production-like run and reconsolidate
+metadata so direct-file readers and consolidated readers agree. On the feeding
+canary, the 2026-05-11 cleanup restored:
+
+- `analysis/eye_angle_runs.attrs["latest"]` to
+  `eye_angle_compact_dense_v2_canary_20260511_axisavail`.
+- `analysis/bout_kinematics_runs.attrs["latest"]` to
+  `bk_tk_hyst4_low2_latch_s005_peak_event_prom4_w098_compact_v2_canary_20260510`.
+
+The validation smoke runs remain present for explicit regression checks, but
+they are not the canonical default selection.
 
 ## Writer Inventory
 
