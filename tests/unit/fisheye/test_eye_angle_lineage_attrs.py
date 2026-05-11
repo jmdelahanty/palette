@@ -45,6 +45,14 @@ def test_eye_angle_archive_opener_uses_palette_zarr_policy(monkeypatch, tmp_path
     assert calls == [(zarr_path, "a")]
 
 
+def test_eye_angle_layout_default_is_compact_dense_v2() -> None:
+    parser = eye_angle_analysis.build_parser()
+    args = parser.parse_args(["archive.zarr"])
+
+    assert eye_angle_analysis.EYE_ANGLE_LAYOUT_DEFAULT == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+    assert args.layout == eye_angle_analysis.EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
+
+
 def test_eye_angle_definition_attrs_match_undirected_axis_vergence_math() -> None:
     attrs = _eye_angle_definition_attrs()
 

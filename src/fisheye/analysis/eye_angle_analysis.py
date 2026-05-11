@@ -96,6 +96,7 @@ EYE_ANGLE_ROW_AXIS = "keypoint_detection_rows"
 EYE_ANGLE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2 = "compact_dense_v2"
 EYE_ANGLE_LAYOUT_CHOICES = (EYE_ANGLE_LAYOUT_HIERARCHICAL_V1, EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2)
+EYE_ANGLE_LAYOUT_DEFAULT = EYE_ANGLE_LAYOUT_COMPACT_DENSE_V2
 MAJOR_AXIS_MARGINAL_DOT_THRESHOLD = 0.1
 
 _BASE_ROI_RESULT_FIELDS: tuple[tuple[str, str], ...] = (
@@ -1736,10 +1737,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--layout",
         choices=EYE_ANGLE_LAYOUT_CHOICES,
-        default=EYE_ANGLE_LAYOUT_HIERARCHICAL_V1,
+        default=EYE_ANGLE_LAYOUT_DEFAULT,
         help=(
-            "Output storage layout. hierarchical_v1 writes one array per logical field; "
-            "compact_dense_v2 packs completed angle/QA outputs into dense channel tables."
+            f"Output storage layout (default: {EYE_ANGLE_LAYOUT_DEFAULT}). "
+            "compact_dense_v2 packs completed angle/QA outputs into dense channel tables; "
+            "hierarchical_v1 writes one array per logical field for compatibility/debug runs."
         ),
     )
     return parser

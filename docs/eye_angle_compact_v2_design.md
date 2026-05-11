@@ -179,45 +179,47 @@ Implemented in this slice:
 - `run_movement_bout_batch_pipeline.py` uses the logical API when checking
   whether frame-level eye-gaze outputs already exist, so compact runs count as
   valid existing inputs for bout-kinematics planning.
-- `eye_angle_analysis.py` has opt-in `--layout compact_dense_v2` writer support.
+- `eye_angle_analysis.py` defaults to `--layout compact_dense_v2`;
+  `--layout hierarchical_v1` remains available for explicit compatibility or
+  debug runs.
 - In-memory tests prove compact channels roundtrip to existing logical names
   and that writer-packed compact runs resolve through the same logical API.
 - Real canary generated on 2026-05-11:
   `analysis/eye_angle_runs/eye_angle_compact_dense_v2_canary_20260511_axisavail`.
+- Default-layout smoke generated without passing `--layout` on 2026-05-11:
+  `analysis/eye_angle_runs/eye_angle_default_compact_smoke_20260511`
+  (`layout = compact_dense_v2`).
 - Same-code hierarchical/compact parity passed on 2026-05-11 with
   `eye_angle_hierarchical_v1_canary_20260511_samecode` versus
   `eye_angle_compact_dense_v2_canary_20260511_axisavail`.
-
-Not implemented yet:
-
-- Compact-dense-v2 as the default writer layout.
 
 ## Writer Migration Plan
 
 Current status:
 
-1. Hierarchical-v1 remains the default layout.
-2. `--layout compact_dense_v2` stacks completed hierarchical computation
+1. Compact-dense-v2 is the default layout as of 2026-05-11.
+2. `--layout hierarchical_v1` remains available as explicit compatibility/debug
+   output.
+3. `--layout compact_dense_v2` stacks completed hierarchical computation
    outputs into compact dense tables during finalization using deterministic
    channel-index order.
-3. `angle_channel_index`, `vector_channel_index`, and `qa_channel_index` store
+4. `angle_channel_index`, `vector_channel_index`, and `qa_channel_index` store
    fixed-width UTF-8 text metadata for names, representation, eye, value kind,
    units, source channels, formulas, compatibility aliases, and per-row-axis
    availability flags.
-4. Focused unit tests and one real canary validate the resolver path, strict
+5. Focused unit tests and one real canary validate the resolver path, strict
    JSON metadata, and interactive/bout eye-gaze reader surfaces.
-5. Crimson compact-dense-v2 reader validation passed on 2026-05-11 against the
+6. Crimson compact-dense-v2 reader validation passed on 2026-05-11 against the
    feeding canary. The Crimson loader resolved `roi_angles`, `frame_angles`,
    `roi_vectors`, `roi_qa`, and `frame_qa` through channel-index groups,
    respected `roi_available` / `frame_available`, loaded the compact run
    selected as `latest`, and regression-tested the hierarchical v7 run.
 
-Remaining before making compact the default:
+Default-switch release gate:
 
-1. Decide the operational default switch timing. Older hierarchical canaries
-   may differ from current compact canaries because they were produced by
-   different schema/source revisions; use the same-code parity pair above as
-   the release gate.
+- Same-code hierarchical/compact parity passed with the canary pair listed
+  above. Older hierarchical canaries may differ from current compact canaries
+  because they were produced by different schema/source revisions.
 
 ## Risks
 
