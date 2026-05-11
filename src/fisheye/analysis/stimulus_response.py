@@ -1553,6 +1553,7 @@ class LoomStepData:
 
 STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1 = "hierarchical_v1"
 STIMULUS_RESPONSE_LAYOUT_COMPACT_V2 = "compact_tabular_v2"
+STIMULUS_RESPONSE_LAYOUT_DEFAULT = STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
 STIMULUS_RESPONSE_SCHEMA_ID = "palette.stimulus_response"
 STIMULUS_RESPONSE_SCHEMA_VERSION = 2
 
@@ -1913,7 +1914,7 @@ def write_stimulus_response_run(
     parameters: Dict[str, Any],
     run_name: Optional[str] = None,
     overwrite: bool = False,
-    layout: str = STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1,
+    layout: str = STIMULUS_RESPONSE_LAYOUT_DEFAULT,
     console: Optional[Console] = None,
 ) -> str:
     """Write stimulus response run to zarr."""
@@ -2367,10 +2368,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--layout",
         choices=(STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1, STIMULUS_RESPONSE_LAYOUT_COMPACT_V2),
-        default=STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1,
+        default=STIMULUS_RESPONSE_LAYOUT_DEFAULT,
         help=(
-            "Physical Zarr layout to write. compact_tabular_v2 is opt-in and "
-            "currently omits high-volume per-frame/time-series compact tables."
+            "Physical Zarr layout to write. compact_tabular_v2 is the default "
+            "and intentionally omits high-volume per-frame/time-series compact tables."
         ),
     )
     parser.add_argument(

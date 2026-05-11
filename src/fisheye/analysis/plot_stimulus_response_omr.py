@@ -125,6 +125,87 @@ def _step_label(step: OMRStepSummary) -> str:
     return f"{step.step_index}"
 
 
+def _stimulus_response_layout(run_group: zarr.Group) -> str:
+    return str(run_group.attrs.get("layout") or run_group.attrs.get("storage_layout") or "hierarchical_v1")
+
+
+def _has_path(group: zarr.Group, path: str) -> bool:
+    try:
+        group[path]
+    except (KeyError, ValueError, TypeError):
+        return False
+    return True
+
+
+def _summary_source_paths(run_group: zarr.Group, run_path: str, layout: str) -> dict[str, str]:
+    if layout == "compact_tabular_v2":
+        paths = {
+            "run": run_path,
+        }
+        for name in (
+            "step_index",
+            "global_omr_per_fish",
+            "moving_grating_omr_per_fish",
+            "moving_grating_omr_per_bout",
+            "moving_grating_omr_windows",
+            "moving_grating_omr_early_windows",
+        ):
+            if name in run_group:
+                paths[name] = f"{run_path}/{name}"
+        return paths
+    paths = {
+        "run": run_path,
+        "steps": f"{run_path}/steps",
+    }
+    if _has_path(run_group, "global/omr"):
+        paths["global_omr"] = f"{run_path}/global/omr"
+    return paths
+
+
+def _summary_source_filters(steps: Sequence[OMRStepSummary], layout: str) -> dict[str, Any]:
+    step_indices = [int(step.step_index) for step in steps]
+    filters: dict[str, Any] = {
+        "step_indices": step_indices,
+        "stimulus_family": "moving_grating",
+        "metric_family": "moving_grating_omr",
+    }
+    if layout == "compact_tabular_v2":
+        filters["compact_tables_filtered_by"] = ["step_index", "metric_family"]
+    return filters
+
+
+def _step_spec_paths(
+    run_path: str,
+    step: OMRStepSummary,
+    layout: str,
+    source_paths: Mapping[str, Any],
+) -> dict[str, Any]:
+    if layout == "compact_tabular_v2":
+        return {
+            "step_path": source_paths.get("step_index", f"{run_path}/step_index"),
+            "omr_path": source_paths.get("moving_grating_omr_per_fish"),
+            "per_fish_path": source_paths.get("moving_grating_omr_per_fish"),
+            "per_bout_path": source_paths.get("moving_grating_omr_per_bout"),
+            "windows_path": source_paths.get("moving_grating_omr_windows"),
+            "early_windows_path": source_paths.get("moving_grating_omr_early_windows"),
+            "source_filters": {
+                "step_index": int(step.step_index),
+                "stimulus_family": "moving_grating",
+                "metric_family": "moving_grating_omr",
+            },
+        }
+    omr_path = f"{run_path}/steps/{step.step_key}/grating/omr"
+    return {
+        "step_path": f"{run_path}/steps/{step.step_key}",
+        "omr_path": omr_path,
+        "per_fish_path": f"{omr_path}/per_fish",
+        "per_bout_path": f"{omr_path}/per_bout",
+        "windows_path": f"{omr_path}/windows",
+        "early_windows_path": f"{omr_path}/early_windows",
+        "source_filters": {"step_index": int(step.step_index)},
+    }
+
+
 def load_omr_step_summaries(run_group: zarr.Group) -> list[OMRStepSummary]:
     """Load MOVING_GRATING OMR summaries from a stimulus_response run."""
 
@@ -602,21 +683,25 @@ def _build_interactive_spec(
     run_name: str,
     run_path: str,
     steps: Sequence[OMRStepSummary],
+    layout: str,
+    source_paths: Mapping[str, Any],
+    source_filters: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     step_specs = []
     for step in steps:
-        omr_path = f"{run_path}/steps/{step.step_key}/grating/omr"
+        step_paths = _step_spec_paths(run_path, step, layout, source_paths)
         step_specs.append(
             {
                 "step_index": step.step_index,
                 "step_name": step.step_name,
-                "step_path": f"{run_path}/steps/{step.step_key}",
-                "omr_path": omr_path,
+                "step_path": step_paths["step_path"],
+                "omr_path": step_paths["omr_path"],
                 "stimulus_direction_deg": step.stimulus_direction_deg,
-                "per_fish_path": f"{omr_path}/per_fish",
-                "per_bout_path": f"{omr_path}/per_bout",
-                "windows_path": f"{omr_path}/windows",
-                "early_windows_path": f"{omr_path}/early_windows",
+                "per_fish_path": step_paths["per_fish_path"],
+                "per_bout_path": step_paths["per_bout_path"],
+                "windows_path": step_paths["windows_path"],
+                "early_windows_path": step_paths["early_windows_path"],
+                "source_filters": step_paths["source_filters"],
                 "primary_fields": [
                     "omr_path_index",
                     "bout_path_index",
@@ -636,7 +721,10 @@ def _build_interactive_spec(
         "renderer": STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
         "run_name": run_name,
         "run_path": run_path,
+        "layout": layout,
         "artifact_family": "stimulus_response_omr_summary",
+        "source_paths": source_paths,
+        "source_filters": source_filters,
         "panels": [
             "direction_selectivity_by_step",
             "arena_axis_occupancy_opportunity",
@@ -656,16 +744,20 @@ def _build_bout_trajectory_interactive_spec(
     track: TrackSeries,
     kinematics_type: str,
     kinematics_run: str,
+    layout: str,
+    source_paths: Mapping[str, Any],
+    source_filters: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     step_specs = []
     for step in steps:
-        omr_path = f"{run_path}/steps/{step.step_key}/grating/omr"
+        step_paths = _step_spec_paths(run_path, step, layout, source_paths)
         step_specs.append(
             {
                 "step_index": step.step_index,
                 "step_name": step.step_name,
-                "step_path": f"{run_path}/steps/{step.step_key}",
-                "omr_per_bout_path": f"{omr_path}/per_bout",
+                "step_path": step_paths["step_path"],
+                "omr_per_bout_path": step_paths["per_bout_path"],
+                "source_filters": step_paths["source_filters"],
                 "stimulus_direction_deg": step.stimulus_direction_deg,
                 "start_frame": step.start_frame,
                 "end_frame": step.end_frame,
@@ -680,7 +772,10 @@ def _build_bout_trajectory_interactive_spec(
         "renderer": STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
         "run_name": run_name,
         "run_path": run_path,
+        "layout": layout,
         "artifact_family": "stimulus_response_omr_bout_trajectory",
+        "source_paths": source_paths,
+        "source_filters": source_filters,
         "track_id": int(track.fish_id),
         "track_path": track_path,
         "track_fields": ["frame_indices", "positions_mm", "heading_degrees", "smoothed_heading_degrees"],
@@ -712,6 +807,7 @@ def write_omr_summary_visualization(
         run_name=run_name,
     )
     run_path = f"analysis/stimulus_response_runs/{resolved_run}"
+    layout = _stimulus_response_layout(run_group)
     steps = load_omr_step_summaries(run_group)
     if not steps:
         raise ValueError(f"Stimulus response run has no OMR step groups: {resolved_run}")
@@ -726,11 +822,8 @@ def write_omr_summary_visualization(
         save_path.write_bytes(png_bytes)
         console.print(f"[green]Saved OMR summary PNG to {save_path}[/green]")
 
-    source_paths = {
-        "run": run_path,
-        "steps": f"{run_path}/steps",
-        "global_omr": f"{run_path}/global/omr",
-    }
+    source_paths = _summary_source_paths(run_group, run_path, layout)
+    source_filters = _summary_source_filters(steps, layout)
     source_runs = {
         "stimulus_response": resolved_run,
         "track_kinematics": run_group.attrs.get("source_track_kinematics_run"),
@@ -742,12 +835,15 @@ def write_omr_summary_visualization(
         "n_omr_steps": len(steps),
         "plot_schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
         "renderer": STIMULUS_RESPONSE_OMR_PLOT_RENDERER,
+        "layout": layout,
     }
     signature = _artifact_signature(
         {
             "schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
             "run_name": resolved_run,
+            "layout": layout,
             "source_paths": source_paths,
+            "source_filters": source_filters,
             "source_runs": source_runs,
             "parameters": parameters,
         }
@@ -764,6 +860,7 @@ def write_omr_summary_visualization(
         inputs={
             "zarr_path": str(zarr_path) if zarr_path is not None else None,
             "source_paths": source_paths,
+            "source_filters": source_filters,
             "source_runs": source_runs,
             "run_name": resolved_run,
         },
@@ -794,10 +891,18 @@ def write_omr_summary_visualization(
             "plot_schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
             "run_name": resolved_run,
             "n_omr_steps": len(steps),
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
-    spec = _build_interactive_spec(run_name=resolved_run, run_path=run_path, steps=steps)
+    spec = _build_interactive_spec(
+        run_name=resolved_run,
+        run_path=run_path,
+        steps=steps,
+        layout=layout,
+        source_paths=source_paths,
+        source_filters=source_filters,
+    )
     spec_result = write_interactive_plot_spec_artifact(
         run_group,
         OMR_SUMMARY_INTERACTIVE_ARTIFACT_NAME,
@@ -815,6 +920,7 @@ def write_omr_summary_visualization(
             "plot_schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
             "run_name": resolved_run,
             "n_omr_steps": len(steps),
+            "source_filters": source_filters,
             "provenance": provenance,
         },
     )
@@ -863,6 +969,10 @@ def write_omr_summary_visualization(
                 "track_positions": f"{track_path}/positions_mm",
                 "track_headings": f"{track_path}/heading_degrees",
             }
+            trajectory_source_filters = {
+                **source_filters,
+                "track_id": int(track.fish_id),
+            }
             trajectory_parameters = {
                 **parameters,
                 "track_id": int(track.fish_id),
@@ -874,7 +984,9 @@ def write_omr_summary_visualization(
                     "schema_id": STIMULUS_RESPONSE_OMR_PLOT_SCHEMA_ID,
                     "artifact_family": "stimulus_response_omr_bout_trajectory",
                     "run_name": resolved_run,
+                    "layout": layout,
                     "source_paths": trajectory_source_paths,
+                    "source_filters": trajectory_source_filters,
                     "source_runs": source_runs,
                     "parameters": trajectory_parameters,
                 }
@@ -886,6 +998,7 @@ def write_omr_summary_visualization(
                 inputs={
                     "zarr_path": str(zarr_path) if zarr_path is not None else None,
                     "source_paths": trajectory_source_paths,
+                    "source_filters": trajectory_source_filters,
                     "source_runs": source_runs,
                     "run_name": resolved_run,
                     "track_id": int(track.fish_id),
@@ -917,6 +1030,7 @@ def write_omr_summary_visualization(
                     "run_name": resolved_run,
                     "track_id": int(track.fish_id),
                     "n_omr_steps": len(steps),
+                    "source_filters": trajectory_source_filters,
                     "provenance": trajectory_provenance,
                 },
             )
@@ -927,6 +1041,9 @@ def write_omr_summary_visualization(
                 track=track,
                 kinematics_type=kinematics_type,
                 kinematics_run=kinematics_run,
+                layout=layout,
+                source_paths=trajectory_source_paths,
+                source_filters=trajectory_source_filters,
             )
             trajectory_spec_result = write_interactive_plot_spec_artifact(
                 run_group,
@@ -946,6 +1063,7 @@ def write_omr_summary_visualization(
                     "run_name": resolved_run,
                     "track_id": int(track.fish_id),
                     "n_omr_steps": len(steps),
+                    "source_filters": trajectory_source_filters,
                     "provenance": trajectory_provenance,
                 },
             )

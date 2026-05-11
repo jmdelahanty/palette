@@ -42,7 +42,10 @@ from fisheye.analysis.stimulus_response import (
     resolve_grating_direction,
     resolve_grating_speed_mm_s,
     resolve_loom_center_mm,
-    write_stimulus_response_run,
+    STIMULUS_RESPONSE_LAYOUT_COMPACT_V2,
+    STIMULUS_RESPONSE_LAYOUT_DEFAULT,
+    STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1,
+    write_stimulus_response_run as _write_stimulus_response_run,
 )
 from fisheye.analysis.stimulus_response_concentric_omr import (
     compute_step_concentric_radial_omr_metrics,
@@ -53,6 +56,13 @@ from fisheye.analysis.stimulus_response_concentric_omr import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+def write_stimulus_response_run(*args, **kwargs):
+    """Keep legacy structure tests on hierarchical-v1 unless they opt out."""
+
+    kwargs.setdefault("layout", STIMULUS_RESPONSE_LAYOUT_HIERARCHICAL_V1)
+    return _write_stimulus_response_run(*args, **kwargs)
 
 
 def _make_kinematics_zarr(
@@ -513,6 +523,31 @@ class TestComputeStepBaseMetrics:
 
 
 class TestWriteStimulusResponseRun:
+
+    def test_default_layout_is_compact_v2(self) -> None:
+        root = zarr.group()
+        tracks = _make_dense_tracks(n_frames=50, n_fish=1)
+        global_metrics = compute_global_metrics(tracks, fps=30.0, moving_threshold=2.0)
+        steps = [ProtocolStep(0, "test", "SOLID_BLACK", 4, 0, 50, 50 / 30.0)]
+        step_metrics = [compute_step_base_metrics(tracks, steps[0], fps=30.0, moving_threshold=2.0)]
+
+        run_name = _write_stimulus_response_run(
+            root,
+            global_metrics=global_metrics,
+            steps=steps,
+            step_metrics=step_metrics,
+            source_kinematics_run="test_kin",
+            source_kinematics_type="offline",
+            source_stimulus_run="test_stim",
+            parameters={},
+            run_name="default_layout",
+        )
+
+        sr = root["analysis"]["stimulus_response_runs"][run_name]
+        assert STIMULUS_RESPONSE_LAYOUT_DEFAULT == STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
+        assert sr.attrs["layout"] == STIMULUS_RESPONSE_LAYOUT_COMPACT_V2
+        assert "step_index" in sr
+        assert "steps" not in sr
 
     def test_roundtrip(self) -> None:
         root = zarr.group()

@@ -42,7 +42,7 @@ Most other writers are still hierarchical, but they are not equally urgent:
 | `analysis/swim_bout_runs` legacy statistics writer | Flat legacy run written by `swim_bout_statistics.py` | Not compact-v2 and not the canonical detector writer | Low | Treat as historical/reporting output. Do not use it as the model for future bout-segmentation storage. |
 | `analysis/track_kinematics_runs` | `online/offline/<run>/tracks/id_<track>/...`; also writes grouped `movement/speed/<level>/...` | Partial v2 grouping plus initial logical loader, not compact tabular | Medium | Do not rewrite immediately. Continue moving readers through `fisheye.analysis.track_kinematics_io` first. Future compact layout should use run-level track index plus ragged/CSR arrays instead of one subtree per track. |
 | `analysis/bout_kinematics_runs` | Compact-v2 tabular layout by default; hierarchical v1 remains explicit compatibility | Compact-v2 default as of 2026-05-11 | High, accepted | Keep resolver-first policy. Compact visualization artifacts use table paths plus logical source filters; use `--layout hierarchical_v1` only for legacy/debug compatibility. |
-| `analysis/stimulus_response_runs` | Hierarchical v1 by step/family, plus compact-tabular-v2 opt-in summary/bout/window tables | Compact-v2 implemented, not default | Medium-high | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. The first compact slice writes step/global/base/family per-fish/per-bout/window/trial tables and intentionally omits high-volume per-frame/time-series tables, so it should remain opt-in. See `stimulus_response_compact_v2_design.md`. |
+| `analysis/stimulus_response_runs` | Compact-tabular-v2 summary/bout/window/trial tables by default; hierarchical v1 remains explicit compatibility | Compact-v2 default as of 2026-05-11 | Medium-high, accepted | `stimulus_response_io.resolve_stimulus_response_tables(...)` covers hierarchical-v1 and compact-v2. Compact-v2 intentionally omits high-volume per-frame/time-series tables; reconstruct dense traces from upstream source runs or add explicit cache tables for named consumers. See `stimulus_response_compact_v2_design.md`. |
 | `analysis/eye_angle_runs` | `angles/roi`, `angles/frame`, `qa`, `support`; many persisted representations, aliases, smoothed and delta arrays | Logical resolver implemented; writer still materializes many arrays | Medium-high | Continue moving readers through `fisheye.analysis.eye_angle_io` before writer changes. Future migration should store canonical major/gaze/body-frame arrays plus transform metadata and keep accepted compatibility caches for established consumers. This is mostly a repack/derive migration, not a scientific recompute, when canonical arrays exist. |
 | `analysis/subject_shape_runs` | `components/<component>/...`, `relations/...`, `body_frame/...`, body-specific centerline/tail geometry | Logical resolver implemented; writer still hierarchical by component | Medium | Continue moving readers through `fisheye.analysis.subject_shape_io` before writer changes. Future layout should stack common component metrics along a component axis while keeping specialized body-only geometry in semantic groups. Do not flatten centerline/tail geometry into generic component tables. |
 | `refined_subject_masks_runs` | Dense `masks_roi` plus component-local metrics/QC/review groups | Logical resolver implemented; canonical dense masks remain appropriate | Medium | Keep `masks_roi` dense and handle-backed for readers. Future layout should stack common component metrics/QC as `(row, component)` arrays and reserve component groups for true component-specific authoring state. |
@@ -108,12 +108,16 @@ Most other writers are still hierarchical, but they are not equally urgent:
 ### Validated Compact Reader Target
 
 - `analysis/stimulus_response_runs`
-  - Writer exists behind `--layout compact_tabular_v2`.
+  - Default writer layout is `compact_tabular_v2` as of 2026-05-11.
   - A shared logical resolver reads hierarchical-v1 and compact-tabular-v2:
     `fisheye.analysis.stimulus_response_io.resolve_stimulus_response_tables(...)`.
   - The cross-recording exporter, the Marimo `track_kinematics_explorer.py`
     stimulus-response panels, and `plot_stimulus_response_omr.py` now use that
     resolver for the moving-grating OMR and concentric radial-OMR reader paths.
+  - Visualization artifacts support compact-v2 as of 2026-05-11. PNG and
+    interactive spec artifacts use compact table `source_paths` plus
+    `source_filters` for step/metric selection instead of hierarchical
+    `steps/step_<n>/grating/omr` paths.
   - Focused tests passed outside the sandbox on 2026-05-10:
     `test_stimulus_response_io.py`, `test_stimulus_response.py`,
     `test_plot_stimulus_response_omr.py`, and
@@ -125,11 +129,9 @@ Most other writers are still hierarchical, but they are not equally urgent:
   - The writer path now reads upstream track-kinematics inputs through
     `fisheye.analysis.track_kinematics_io.load_track_kinematics_track(...)`
     instead of hard-coding `tracks/id_<track>/...` arrays.
-  - Remaining before default switch:
-    - decide whether high-volume per-frame/time-series tables should stay
-      omitted, become optional, or be written in a separate compact table family;
-    - decide whether visualization artifact specs need logical table names before
-      allowing compact runs with `--write-zarr-artifacts`.
+  - High-volume per-frame/time-series tables remain intentionally omitted from
+    compact-v2 by default. They can be reconstructed from upstream source runs
+    or added later as explicit cache/derived-view tables for named consumers.
   - Design details live in
     `docs/stimulus_response_compact_v2_design.md`.
 
@@ -248,13 +250,11 @@ Marimo, Crimson, and export consumers are verified against both layouts.
    layout-aware reads, and keep `--layout hierarchical_v1` for explicit
    compatibility/debug output.
 
-3. **Stimulus response compact-v2 default decision.**
-   Keep opt-in for now because the compact writer intentionally omits
-   high-volume per-frame/time-series tables from the first compact slice.
-   The opt-in writer, resolver, export/Marimo/plot consumers, and a real canary
-   validation now exist. The remaining design decision is whether high-volume
-   per-frame/time-series outputs stay omitted, become optional, or move into a
-   separate compact table family before any default switch.
+3. **Keep stimulus-response compact-v2 as the accepted default.**
+   New stimulus-response runs now default to compact-v2. Dense per-frame and
+   time-series outputs stay omitted by design; reconstruct them from upstream
+   source runs or add explicit cache tables for named consumers. Keep
+   `--layout hierarchical_v1` for explicit compatibility/debug output.
 
 4. **Eye-angle canonical/variant repack.**
    Keep canonical major/gaze/body-frame arrays and variant metadata. Materialize

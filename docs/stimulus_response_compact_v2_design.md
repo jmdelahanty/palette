@@ -1,8 +1,8 @@
 # Stimulus Response Compact-V2 Design
 
 <!-- design-meta
-status: draft
-last_updated: 2026-05-10
+status: accepted
+last_updated: 2026-05-11
 -->
 
 ## Purpose
@@ -14,7 +14,8 @@ window/trial family. That fanout is now one of the largest sources of Zarr
 metadata objects.
 
 This document defines the resolver-first migration plan. Compact-tabular-v2 is
-implemented as an opt-in writer layout; it is not the writer default yet.
+the default writer layout as of 2026-05-11; hierarchical-v1 remains available
+as an explicit compatibility/debug layout.
 
 Implementation status:
 
@@ -24,8 +25,9 @@ Implementation status:
 - The cross-recording exporter, OMR plotter, and Marimo stimulus-response panels
   now use the resolver for the paths covered by moving-grating OMR and
   concentric radial OMR.
-- `fisheye.analysis.stimulus_response` supports
-  `--layout compact_tabular_v2` as an explicit opt-in writer mode.
+- `fisheye.analysis.stimulus_response` defaults to
+  `--layout compact_tabular_v2`. Use `--layout hierarchical_v1` only when a
+  legacy physical tree is explicitly required.
 
 ## Dense Time-Series Decision
 
@@ -113,15 +115,19 @@ Known readers now use the shared resolver for the paths needed by current
 moving-grating OMR and concentric radial OMR workflows:
 
 - `src/fisheye/utils/export_cross_recording_analytics.py`
-  reads `steps/step_<n>/per_fish`, then joins optional `grating/per_fish`,
-  `grating/omr/per_fish`, `concentric_grating/per_fish`, and
-  `concentric_grating/radial_omr/per_fish`.
+  reads logical per-step and per-fish tables from
+  `resolve_stimulus_response_tables(...)`, then joins optional grating,
+  moving-grating OMR, concentric, and concentric radial-OMR summaries.
 - `apps/marimo/track_kinematics_explorer.py`
   reads moving-grating OMR through `load_omr_step_summaries(...)` and has a
   local helper for concentric radial OMR tables.
 - `src/fisheye/analysis/plot_stimulus_response_omr.py`
-  reads `steps/step_<n>/grating/omr/{per_fish,per_bout,windows,early_windows}`
-  for PNG and interactive artifacts.
+  reads moving-grating OMR through the shared resolver for PNG and interactive
+  artifacts. Persisted artifact specs record layout-aware `source_paths`: for
+  compact-v2 these point at `moving_grating_omr_per_fish`,
+  `moving_grating_omr_per_bout`, `moving_grating_omr_windows`, and
+  `moving_grating_omr_early_windows`, with `source_filters` carrying the
+  selected `step_index` / `metric_family` constraints.
 
 Additional future readers should use
 `resolve_stimulus_response_tables(...)` rather than branching on physical Zarr
@@ -241,9 +247,12 @@ Notes:
 3. Add focused tests proving resolver parity on a hierarchical-v1 fixture. Done
    for the resolver, exporter, and OMR plotter on 2026-05-10.
 4. Add an opt-in `--layout compact_tabular_v2` writer mode. Done 2026-05-10.
-5. Write and validate one real canary run.
-6. Add Crimson/Marimo/export smoke checks for v2.
-7. Only then consider changing the writer default.
+5. Write and validate one real canary run. Done 2026-05-10.
+6. Add Crimson/Marimo/export smoke checks for v2. Done 2026-05-10/11 for
+   current Palette consumers; Crimson stimulus-response read support remains a
+   separate consumer contract when Crimson starts rendering these metrics.
+7. Change the writer default after compact visualization artifact specs became
+   layout-aware. Done 2026-05-11.
 
 ## Non-Goals
 
