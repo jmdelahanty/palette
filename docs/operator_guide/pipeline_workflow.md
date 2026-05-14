@@ -9,6 +9,10 @@ For the current source-of-truth contract across canonical, refined,
 compatibility, and cache surfaces, see
 [current_pipeline_contract.md](../current_pipeline_contract.md).
 
+For cluster migration status and implementation gaps across detect, pose,
+segmentation, and refinement stages, see
+[cluster_pipeline_migration_checklist.md](../cluster_pipeline_migration_checklist.md).
+
 Recommended pre-import order:
 
 1. organize recordings into the standard recording directory layout

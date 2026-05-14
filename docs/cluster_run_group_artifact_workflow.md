@@ -23,6 +23,9 @@ The cluster-safe pattern is:
 This document defines that workflow. It is a storage and provenance contract,
 not a new analysis schema.
 
+For the broader detect, pose, segmentation, and refinement migration checklist,
+see `docs/cluster_pipeline_migration_checklist.md`.
+
 ## Design Decision
 
 Cluster workers should not write directly into canonical analysis Zarrs on

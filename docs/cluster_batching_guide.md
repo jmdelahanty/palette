@@ -8,6 +8,7 @@ pre-filtering.
 Related contract:
 - `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
 - `docs/cluster_run_group_artifact_workflow.md`
+- `docs/cluster_pipeline_migration_checklist.md`
 - `docs/environment_setup.md`
 
 Janelia-specific cluster policy source:
