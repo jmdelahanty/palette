@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec "$HOME/miniconda3/envs/palette-py311/bin/python" "$@"
+if [[ -n "${PALETTE_PYTHON:-}" ]]; then
+  exec "$PALETTE_PYTHON" "$@"
+fi
+
+for candidate in \
+  "$HOME/miniconda3/envs/palette-py311/bin/python" \
+  "$HOME/miniforge3/envs/palette-py311/bin/python"
+do
+  if [[ -x "$candidate" ]]; then
+    exec "$candidate" "$@"
+  fi
+done
+
+echo "Could not find palette-py311 Python under \$HOME/miniconda3 or \$HOME/miniforge3." >&2
+echo "Set PALETTE_PYTHON=/path/to/python or create the palette-py311 env." >&2
+exit 127
