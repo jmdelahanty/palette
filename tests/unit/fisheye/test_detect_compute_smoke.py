@@ -111,9 +111,14 @@ def test_compute_smoke_runs_without_canonical_writes(monkeypatch, tmp_path: Path
     assert payload["stage_spans"]["video_open"]["seconds"] >= 0
     assert payload["inputs"]["frames_requested"] == 2
     assert payload["inputs"]["resize_source"] == "none"
+    assert payload["inputs"]["imgsz_applied"] is None
+    assert payload["model_optimization"]["cudnn_benchmark_enabled"] is None
+    assert payload["model_optimization"]["model_channels_last"] is False
     assert payload["summary"]["frames_processed"] == 2
     assert payload["summary"]["detections_total"] == 4
     assert payload["summary"]["first_batch"]["inference_seconds"] >= 0
+    assert payload["summary"]["first_batch"]["predict_return_seconds"] >= 0
+    assert payload["summary"]["first_batch"]["inference_cuda_sync_seconds"] >= 0
     assert payload["summary"]["steady_state_excluding_first_batch"]["batches_processed"] == 0
     assert payload["batches"][0]["tensor_shape"] == [2, 3, 8, 8]
     assert not (tmp_path / "detect_runs").exists()
@@ -210,4 +215,5 @@ def test_compute_smoke_uses_detection_resize_dims_when_video_resize_missing(
     payload = json.loads(output_json.read_text(encoding="utf-8"))
     assert payload["inputs"]["resize"] == [32, 16]
     assert payload["inputs"]["resize_source"] == "config_detection_resize_dims"
+    assert payload["inputs"]["imgsz_applied"] == [16, 32]
     assert payload["batches"][0]["tensor_shape"] == [2, 3, 16, 32]

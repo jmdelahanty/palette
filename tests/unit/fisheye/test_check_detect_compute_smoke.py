@@ -16,8 +16,13 @@ def _write_smoke_json(path: Path, **overrides) -> None:
             "fp16": True,
             "resize": [640, 640],
             "resize_source": "config_detection_resize_dims",
+            "imgsz_applied": 640,
             "video_path": "/data/video.mp4",
             "model_path": "/models/best.pt",
+        },
+        "model_optimization": {
+            "model_channels_last": True,
+            "cudnn_benchmark_enabled": True,
         },
         "environment": {"cuda_device_name": "NVIDIA L4"},
         "cluster": {
@@ -46,6 +51,8 @@ def _write_smoke_json(path: Path, **overrides) -> None:
             "decode_seconds_total": 0.5,
             "preprocess_seconds_total": 0.2,
             "inference_seconds_total": 0.1,
+            "predict_return_seconds_total": 0.08,
+            "inference_cuda_sync_seconds_total": 0.02,
             "total_seconds": 4.0,
             "end_to_end_fps": 1.0,
             "inference_fps": 40.0,
@@ -53,11 +60,15 @@ def _write_smoke_json(path: Path, **overrides) -> None:
                 "decode_seconds": 0.5,
                 "preprocess_seconds": 0.2,
                 "inference_seconds": 0.1,
+                "predict_return_seconds": 0.08,
+                "inference_cuda_sync_seconds": 0.02,
             },
             "steady_state_excluding_first_batch": {
                 "batches_processed": 0,
                 "frames_processed": 0,
                 "inference_fps": None,
+                "predict_return_seconds_mean": None,
+                "inference_cuda_sync_seconds_mean": None,
             },
         },
     }
@@ -76,6 +87,8 @@ def test_check_detect_compute_smoke_accepts_valid_report(tmp_path: Path, capsys)
     assert "validation: ok" in out
     assert "canonical_outputs_written: False" in out
     assert "job_id: 149842613" in out
+    assert "imgsz_applied: 640" in out
+    assert "model_optimization: channels_last=True cudnn_benchmark=True" in out
     assert "steady_state_excluding_first:" in out
     assert "backend: decord_gpu" in out
 
@@ -105,3 +118,5 @@ def test_check_detect_compute_smoke_can_emit_json_summary(tmp_path: Path, capsys
     assert summary["inference_fps"] == 40.0
     assert summary["job_id"] == "149842613"
     assert summary["first_batch_inference_seconds"] == 0.1
+    assert summary["first_batch_predict_return_seconds"] == 0.08
+    assert summary["first_batch_cuda_sync_seconds"] == 0.02

@@ -82,6 +82,22 @@ Decord startup still has a real one-time open cost for very large MP4s
 initialization rather than PRFS versus local storage, because local `/tmp` did
 not reduce it.
 
+2026-05-14 compute-smoke follow-up:
+
+- The compute-only detection smoke aligns with the production Decord-GPU tensor
+  path by explicitly resizing tensor inputs to `detection.resize_dims`,
+  passing the equivalent `imgsz`, enabling `torch.backends.cudnn.benchmark`,
+  and converting the YOLO model to channels-last on CUDA.
+- Be careful comparing historical `detect_yolo` per-batch inference timings
+  with compute-smoke timings. Production currently times `model.predict()` host
+  return without an explicit CUDA synchronization; some GPU work may synchronize
+  later during result extraction. The compute smoke reports both
+  `predict_return_seconds` and `inference_cuda_sync_seconds`, so it is better
+  suited for diagnosing true GPU latency.
+- For short smoke runs, use `steady_state_excluding_first_batch` rather than
+  aggregate `inference_fps` when judging model throughput, because the first
+  batch includes Ultralytics/PyTorch warmup effects.
+
 ## Metrics to collect
 
 - End-to-end detect FPS.

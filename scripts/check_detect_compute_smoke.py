@@ -58,6 +58,7 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     stage_spans = payload.get("stage_spans") or {}
     env = payload.get("environment") or {}
     cluster = payload.get("cluster") or {}
+    model_optimization = payload.get("model_optimization") or {}
     steady = summary.get("steady_state_excluding_first_batch") or {}
     first_batch = summary.get("first_batch") or {}
 
@@ -73,6 +74,12 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     print(f"device: {inputs.get('device')} fp16={inputs.get('fp16')}")
     print(f"cuda_device: {env.get('cuda_device_name')}")
     print(f"resize: {inputs.get('resize')} source={inputs.get('resize_source')}")
+    print(f"imgsz_applied: {inputs.get('imgsz_applied')}")
+    print(
+        "model_optimization: "
+        f"channels_last={model_optimization.get('model_channels_last')} "
+        f"cudnn_benchmark={model_optimization.get('cudnn_benchmark_enabled')}"
+    )
     print(f"video: {inputs.get('video_path')}")
     print(f"model: {inputs.get('model_path')}")
     print(f"frames_processed: {summary.get('frames_processed')}")
@@ -83,15 +90,21 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     print(f"decode_total_s: {_format_seconds(summary.get('decode_seconds_total'))}")
     print(f"preprocess_total_s: {_format_seconds(summary.get('preprocess_seconds_total'))}")
     print(f"inference_total_s: {_format_seconds(summary.get('inference_seconds_total'))}")
+    print(f"predict_return_total_s: {_format_seconds(summary.get('predict_return_seconds_total'))}")
+    print(f"inference_cuda_sync_total_s: {_format_seconds(summary.get('inference_cuda_sync_seconds_total'))}")
     print(f"total_s: {_format_seconds(summary.get('total_seconds'))}")
     print(f"end_to_end_fps: {_format_float(summary.get('end_to_end_fps'))}")
     print(f"inference_fps: {_format_float(summary.get('inference_fps'))}")
     print(f"first_batch_inference_s: {_format_seconds(first_batch.get('inference_seconds'))}")
+    print(f"first_batch_predict_return_s: {_format_seconds(first_batch.get('predict_return_seconds'))}")
+    print(f"first_batch_cuda_sync_s: {_format_seconds(first_batch.get('inference_cuda_sync_seconds'))}")
     print(
         "steady_state_excluding_first: "
         f"batches={steady.get('batches_processed')} "
         f"frames={steady.get('frames_processed')} "
-        f"inference_fps={_format_float(steady.get('inference_fps'))}"
+        f"inference_fps={_format_float(steady.get('inference_fps'))} "
+        f"predict_return_mean_s={_format_seconds(steady.get('predict_return_seconds_mean'))} "
+        f"cuda_sync_mean_s={_format_seconds(steady.get('inference_cuda_sync_seconds_mean'))}"
     )
     total_span = stage_spans.get("total") if isinstance(stage_spans, dict) else None
     if isinstance(total_span, dict):
@@ -143,6 +156,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "canonical_outputs_written": payload.get("canonical_outputs_written"),
             "decode_backend": _get_nested(payload, "inputs", "decode_backend"),
             "device": _get_nested(payload, "inputs", "device"),
+            "imgsz_applied": _get_nested(payload, "inputs", "imgsz_applied"),
             "job_id": _get_nested(payload, "cluster", "LSB_JOBID"),
             "host": _get_nested(payload, "cluster", "HOSTNAME"),
             "frames_processed": _get_nested(payload, "summary", "frames_processed"),
@@ -150,14 +164,38 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "total_seconds": _get_nested(payload, "summary", "total_seconds"),
             "end_to_end_fps": _get_nested(payload, "summary", "end_to_end_fps"),
             "inference_fps": _get_nested(payload, "summary", "inference_fps"),
+            "predict_return_seconds_total": _get_nested(
+                payload, "summary", "predict_return_seconds_total"
+            ),
+            "inference_cuda_sync_seconds_total": _get_nested(
+                payload, "summary", "inference_cuda_sync_seconds_total"
+            ),
             "first_batch_inference_seconds": _get_nested(
                 payload, "summary", "first_batch", "inference_seconds"
+            ),
+            "first_batch_predict_return_seconds": _get_nested(
+                payload, "summary", "first_batch", "predict_return_seconds"
+            ),
+            "first_batch_cuda_sync_seconds": _get_nested(
+                payload, "summary", "first_batch", "inference_cuda_sync_seconds"
             ),
             "steady_state_inference_fps": _get_nested(
                 payload,
                 "summary",
                 "steady_state_excluding_first_batch",
                 "inference_fps",
+            ),
+            "steady_state_predict_return_seconds_mean": _get_nested(
+                payload,
+                "summary",
+                "steady_state_excluding_first_batch",
+                "predict_return_seconds_mean",
+            ),
+            "steady_state_cuda_sync_seconds_mean": _get_nested(
+                payload,
+                "summary",
+                "steady_state_excluding_first_batch",
+                "inference_cuda_sync_seconds_mean",
             ),
         }
         print(json.dumps(summary, indent=2, sort_keys=True))

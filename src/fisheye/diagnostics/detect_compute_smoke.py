@@ -251,6 +251,40 @@ def _resolve_smoke_resize(
     return None, "none"
 
 
+def _resize_to_imgsz(resize: Optional[tuple[int, int]]) -> Optional[int | list[int]]:
+    """Convert preprocessing resize (width, height) to Ultralytics imgsz."""
+
+    if resize is None:
+        return None
+    width, height = int(resize[0]), int(resize[1])
+    if width == height:
+        return height
+    return [height, width]
+
+
+def _apply_model_runtime_optimizations(model: Any, device: torch.device) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "cudnn_benchmark_enabled": None,
+        "model_channels_last": False,
+        "model_channels_last_error": None,
+    }
+    if device.type != "cuda":
+        return payload
+
+    torch.backends.cudnn.benchmark = True
+    payload["cudnn_benchmark_enabled"] = bool(torch.backends.cudnn.benchmark)
+
+    inner_model = getattr(model, "model", None)
+    if inner_model is None:
+        return payload
+    try:
+        model.model = inner_model.to(memory_format=torch.channels_last)
+        payload["model_channels_last"] = True
+    except Exception as exc:  # pragma: no cover - model implementation dependent
+        payload["model_channels_last_error"] = str(exc)
+    return payload
+
+
 def _default_output_json() -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return Path("runs/diagnostics") / f"detect_compute_smoke_{timestamp}.json"
@@ -264,6 +298,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     config = stage._load_config(args.config.expanduser().resolve() if args.config else None)
     model_path = stage._resolve_model_path(args.model, config)
     resize, resize_source = _resolve_smoke_resize(args.resize, config)
+    imgsz_applied = _resize_to_imgsz(resize)
 
     detect_cfg = config.get("detection") or {}
     conf = float(args.conf if args.conf is not None else detect_cfg.get("conf_threshold", 0.40))
@@ -307,6 +342,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             "batches_requested": _count_batches(frame_start, frame_end, int(args.batch_size)),
             "resize": [int(resize[0]), int(resize[1])] if resize else None,
             "resize_source": resize_source,
+            "imgsz_applied": imgsz_applied,
             "conf_threshold": float(conf),
             "iou_threshold": float(iou),
             "max_det": int(max_det),
@@ -342,12 +378,14 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     except Exception:
         pass
     model.to(device_str)
+    model_optimization = _apply_model_runtime_optimizations(model, device)
     if use_fp16:
         model.half()
     if device.type == "cuda":
         torch.cuda.synchronize()
     model_load_seconds = _end_span(payload["stage_spans"], "model_load", t0)
     payload["stages"]["model_load_seconds"] = float(model_load_seconds)
+    payload["model_optimization"] = model_optimization
 
     t0 = _start_span(payload["stage_spans"], "video_open")
     reader_info = stage._resolve_backend_reader(video_path, args.decode_backend, frame_start)
@@ -359,6 +397,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     decode_seconds_total = 0.0
     preprocess_seconds_total = 0.0
     inference_seconds_total = 0.0
+    predict_return_seconds_total = 0.0
+    inference_cuda_sync_seconds_total = 0.0
 
     try:
         for batch_start in range(frame_start, frame_end, int(args.batch_size)):
@@ -386,19 +426,25 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 torch.cuda.synchronize()
             preprocess_seconds = time.perf_counter() - t_preprocess
 
+            predict_kwargs = {
+                "conf": conf,
+                "iou": iou,
+                "max_det": max_det,
+                "verbose": False,
+                "device": device_str,
+                "half": use_fp16,
+            }
+            if imgsz_applied is not None:
+                predict_kwargs["imgsz"] = imgsz_applied
+
             t_inference = time.perf_counter()
             with torch.inference_mode():
-                predictions = model.predict(
-                    processed,
-                    conf=conf,
-                    iou=iou,
-                    max_det=max_det,
-                    verbose=False,
-                    device=device_str,
-                    half=use_fp16,
-                )
+                predictions = model.predict(processed, **predict_kwargs)
+            predict_return_seconds = time.perf_counter() - t_inference
+            t_sync = time.perf_counter()
             if device.type == "cuda":
                 torch.cuda.synchronize()
+            inference_cuda_sync_seconds = time.perf_counter() - t_sync
             inference_seconds = time.perf_counter() - t_inference
             detections = stage._count_detections(predictions)
 
@@ -407,6 +453,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             decode_seconds_total += decode_seconds
             preprocess_seconds_total += preprocess_seconds
             inference_seconds_total += inference_seconds
+            predict_return_seconds_total += predict_return_seconds
+            inference_cuda_sync_seconds_total += inference_cuda_sync_seconds
 
             batch_payload = {
                 "batch_index": len(payload["batches"]),
@@ -416,6 +464,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 "decode_seconds": float(decode_seconds),
                 "preprocess_seconds": float(preprocess_seconds),
                 "inference_seconds": float(inference_seconds),
+                "predict_return_seconds": float(predict_return_seconds),
+                "inference_cuda_sync_seconds": float(inference_cuda_sync_seconds),
                 "detections_total": int(detections),
                 "tensor_shape": [int(v) for v in processed.shape],
                 "tensor_device": str(processed.device),
@@ -448,6 +498,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     decode_split = _split_first_and_steady_state(batch_rows, "decode_seconds")
     preprocess_split = _split_first_and_steady_state(batch_rows, "preprocess_seconds")
     inference_split = _split_first_and_steady_state(batch_rows, "inference_seconds")
+    predict_return_split = _split_first_and_steady_state(batch_rows, "predict_return_seconds")
+    inference_sync_split = _split_first_and_steady_state(batch_rows, "inference_cuda_sync_seconds")
     frames_excluding_first = sum(
         int(batch.get("frames_processed", 0)) for batch in batch_rows[1:]
     )
@@ -459,6 +511,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
         "decode_seconds_total": float(decode_seconds_total),
         "preprocess_seconds_total": float(preprocess_seconds_total),
         "inference_seconds_total": float(inference_seconds_total),
+        "predict_return_seconds_total": float(predict_return_seconds_total),
+        "inference_cuda_sync_seconds_total": float(inference_cuda_sync_seconds_total),
         "total_seconds": float(total_seconds),
         "end_to_end_fps": float(frames_processed / total_seconds) if total_seconds > 0 else 0.0,
         "inference_fps": (
@@ -470,6 +524,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             "decode_seconds": decode_split["first_batch_seconds"],
             "preprocess_seconds": preprocess_split["first_batch_seconds"],
             "inference_seconds": inference_split["first_batch_seconds"],
+            "predict_return_seconds": predict_return_split["first_batch_seconds"],
+            "inference_cuda_sync_seconds": inference_sync_split["first_batch_seconds"],
         },
         "steady_state_excluding_first_batch": {
             "batches_processed": int(len(batch_rows[1:])),
@@ -480,6 +536,10 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             "preprocess_seconds_mean": preprocess_split["steady_state_seconds_mean"],
             "inference_seconds_total": steady_inference_total,
             "inference_seconds_mean": inference_split["steady_state_seconds_mean"],
+            "predict_return_seconds_total": predict_return_split["steady_state_seconds_total"],
+            "predict_return_seconds_mean": predict_return_split["steady_state_seconds_mean"],
+            "inference_cuda_sync_seconds_total": inference_sync_split["steady_state_seconds_total"],
+            "inference_cuda_sync_seconds_mean": inference_sync_split["steady_state_seconds_mean"],
             "inference_fps": (
                 float(frames_excluding_first / steady_inference_total)
                 if steady_inference_total > 0
