@@ -51,6 +51,10 @@ The full copy to `/tmp` took `3m15s`, so copying the source video was net
 negative for this single-pass workload. The current default should be to stream
 from PRFS while keeping one Decord `VideoReader` open per video/job.
 
+The `/tmp` path in that benchmark was only a workstation-style comparison
+point. On Janelia compute nodes, use `/scratch/$USER/$LSB_JOBID` for
+node-local scratch outputs. Do not design cluster jobs around `/tmp`.
+
 Use node-local scratch for video payloads only when the workflow repeatedly
 reopens the same video, performs heavy random seeking, or a benchmark shows
 shared-storage throughput is limiting that stage. Scratch remains the preferred
@@ -153,6 +157,11 @@ scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings --recursive -
 Recursively finds `*_analysis.zarr` targets under the given root directory.
 No registry interaction at discovery time.
 
+For copied recording layouts, the detection planner prefers the local
+`<recording>/cams/*.mp4` beside the analysis Zarr before falling back to any
+`source_video_path` attrs stored inside the Zarr. This allows PRFS smoke copies
+to run even when their embedded source attrs still point at workstation paths.
+
 ### Registry mode
 
 ```bash
@@ -209,6 +218,11 @@ scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
   --recursive --apply \
   --registry /nvme1/palette_registry.sqlite
 
+# Apply — run detections with an explicit model path, bypassing model registry
+scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/palette_smoke \
+  --recursive --apply \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/best.pt
+
 # Registry mode — only process recordings not yet detected
 scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
   --source registry \
@@ -248,13 +262,57 @@ already have `detect_runs/latest` unless `--overwrite` is set.
 | `--mem-gb`         | `16`    | Memory per job in GB                             |
 | `--registry`       | `/nvme1/palette_registry.sqlite` | Registry path       |
 | `--config`         | `configs/fisheye/default.yaml` | Detection config     |
+| `--model`          | *(none)* | Explicit detect model path; bypasses registry model resolution |
 | `--set-id`         | *(none)* | Detect model set filter                         |
 | `--require-tuning` | off     | Skip zarrs without detection_tuning              |
 | `--overwrite`      | off     | Rerun even if detect_runs/latest exists          |
 | `--dry-run`        | off     | Print manifests + commands; do not submit        |
 
 **Execution model:** Each batch job calls `run_detections_batch --apply` with
-a batch of zarr paths. Model resolution happens inside the batch runner.
+a batch of zarr paths. By default, model resolution happens inside the batch
+runner through the registry. Passing `--model PATH` uses that explicit model
+for every batch target and does not require registry-backed model resolution;
+registry discovery still requires `--source registry` and a readable registry.
+
+**Current pilot write policy:** `run_detections_batch` currently writes detect
+run groups directly into the target analysis Zarr. This is acceptable only for
+low-concurrency smoke runs where one job owns one target archive at a time and
+the output is validated immediately.
+
+Do not use the direct-write path for the storage-behavior smoke. If the goal is
+to verify cluster throughput without NFS chunk-write pressure, run a compute-only
+smoke first: open the PRFS video, load the model, decode a small frame batch,
+and execute inference without writing predictions to the canonical analysis
+Zarr.
+
+Compute-only detection smoke:
+
+```bash
+scripts/py -m fisheye.diagnostics.detect_compute_smoke \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --decode-backend decord_gpu \
+  --batch-size 4 \
+  --max-batches 1 \
+  --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/detect_compute_smoke.json
+```
+
+The smoke writes only the JSON report. It must report
+`canonical_outputs_written=false`; if it writes `detect_runs` chunks, it is no
+longer the compute-only smoke. By default, the smoke honors
+`detection.resize_dims` from the detection config, so it should not accidentally
+run YOLO over full-resolution camera frames unless that is explicitly requested.
+For headless jobs, set `PALETTE_JOB_CACHE=/scratch/$USER/$LSB_JOBID/palette_cache`
+before running Palette commands; the smoke uses that location for Ultralytics
+config if `YOLO_CONFIG_DIR` is not already set.
+
+**Production write policy:** detection jobs should stream the input video from
+PRFS, write the new `analysis/detect_runs/detect_...` run group under a
+job-specific `/scratch/$USER/$LSB_JOBID` directory, validate it there, package
+that complete run group as a transfer artifact, and then use a serialized
+importer to promote the run group into the canonical analysis Zarr. The
+tarball is only a network-transfer optimization; the durable store remains
+Zarr. See `docs/cluster_run_group_artifact_workflow.md`.
 
 **Logs:** `<root>/logs/run_detections_batch/bsub_submissions/detect_<run_id>/`
 

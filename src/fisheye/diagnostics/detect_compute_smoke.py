@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""
+Compute-only detection smoke for cluster migration.
+
+This command verifies that a compute node can open a video, decode a bounded
+frame batch, preprocess it, load a YOLO model, and run inference. It
+intentionally does not create detect_runs or write canonical Zarr outputs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional, Sequence
+
+import torch
+
+
+def _default_cache_root() -> Path:
+    explicit = os.environ.get("PALETTE_JOB_CACHE")
+    if explicit:
+        return Path(explicit).expanduser()
+
+    scratch_user = os.environ.get("USER")
+    lsf_job_id = os.environ.get("LSB_JOBID")
+    if scratch_user and lsf_job_id:
+        return Path("/scratch") / scratch_user / lsf_job_id / "palette_cache"
+
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache:
+        return Path(xdg_cache).expanduser() / "palette"
+
+    return Path(tempfile.gettempdir()) / f"palette-{scratch_user or 'unknown'}-cache"
+
+
+def _ensure_headless_cache_env() -> None:
+    cache_root = _default_cache_root()
+    yolo_config = cache_root / "ultralytics"
+    try:
+        yolo_config.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "palette-ultralytics-cache"
+        fallback.mkdir(parents=True, exist_ok=True)
+        yolo_config = fallback
+    os.environ.setdefault("YOLO_CONFIG_DIR", str(yolo_config))
+
+
+_ensure_headless_cache_env()
+
+from fisheye.diagnostics import benchmark_detect_stage_split as stage
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be > 0")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be >= 0")
+    return parsed
+
+
+def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a bounded detection compute smoke without writing canonical "
+            "detect_runs or Zarr chunks."
+        )
+    )
+    parser.add_argument("video_path", type=Path, help="Input video path.")
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="YOLO model path (.pt). Required unless config model.path is set.",
+    )
+    parser.add_argument("--config", type=Path, default=None, help="Optional YAML config path.")
+    parser.add_argument(
+        "--decode-backend",
+        choices=stage.BACKEND_CHOICES,
+        default=stage.BACKEND_DECORD_GPU,
+        help="Decode backend to smoke.",
+    )
+    parser.add_argument("--start-frame", type=_non_negative_int, default=0)
+    parser.add_argument(
+        "--max-frames",
+        type=_non_negative_int,
+        default=0,
+        help="Maximum frames to process. 0 means use max-batches * batch-size.",
+    )
+    parser.add_argument(
+        "--max-batches",
+        type=_non_negative_int,
+        default=1,
+        help="Maximum batches to process. 0 means use max-frames only.",
+    )
+    parser.add_argument("--batch-size", type=_positive_int, default=4)
+    parser.add_argument(
+        "--resize",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("WIDTH", "HEIGHT"),
+        help=(
+            "Resize before inference. Defaults to config video.resize, then "
+            "detection.resize_dims when present."
+        ),
+    )
+    parser.add_argument("--conf", type=float, default=None, help="Confidence threshold.")
+    parser.add_argument("--iou", type=float, default=None, help="IoU threshold.")
+    parser.add_argument("--max-det", type=int, default=None, help="Max detections per frame.")
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cuda", "cpu"),
+        default="auto",
+        help="Inference device.",
+    )
+    parser.add_argument(
+        "--force-fp32",
+        action="store_true",
+        help="Disable FP16 even on CUDA.",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=None,
+        help="Output JSON path. Defaults to runs/diagnostics/detect_compute_smoke_<timestamp>.json.",
+    )
+    return parser.parse_args(argv)
+
+
+def _resolve_frame_end(start_frame: int, max_frames: int, max_batches: int, batch_size: int) -> int:
+    if max_frames == 0 and max_batches == 0:
+        raise ValueError(
+            "Compute smoke must be bounded; set --max-frames or --max-batches."
+        )
+
+    limits: list[int] = []
+    if max_frames > 0:
+        limits.append(start_frame + max_frames)
+    if max_batches > 0:
+        limits.append(start_frame + max_batches * batch_size)
+    frame_end = min(limits)
+    if frame_end <= start_frame:
+        raise ValueError("No frames selected after applying frame limits.")
+    return frame_end
+
+
+def _decoded_count(decoded: Any, backend: str) -> int:
+    if decoded is None:
+        return 0
+    if backend == stage.BACKEND_OPENCV:
+        return int(len(decoded))
+    return int(decoded.shape[0])
+
+
+def _count_batches(frame_start: int, frame_end: int, batch_size: int) -> int:
+    total = max(0, frame_end - frame_start)
+    return int((total + batch_size - 1) // batch_size)
+
+
+def _resolve_smoke_resize(
+    resize_arg: Optional[Sequence[int]],
+    config: Dict[str, Any],
+) -> tuple[Optional[tuple[int, int]], str]:
+    """Resolve preprocessing resize as (width, height)."""
+
+    if resize_arg is not None:
+        if len(resize_arg) != 2:
+            raise ValueError("--resize requires WIDTH HEIGHT")
+        return (int(resize_arg[0]), int(resize_arg[1])), "cli_resize"
+
+    video_resize = (config.get("video") or {}).get("resize")
+    if isinstance(video_resize, (list, tuple)) and len(video_resize) == 2:
+        return (int(video_resize[0]), int(video_resize[1])), "config_video_resize"
+
+    detection_resize = (config.get("detection") or {}).get("resize_dims")
+    if isinstance(detection_resize, (list, tuple)) and len(detection_resize) == 2:
+        # Config uses [height, width]; preprocessing helper expects [width, height].
+        height, width = int(detection_resize[0]), int(detection_resize[1])
+        return (width, height), "config_detection_resize_dims"
+
+    return None, "none"
+
+
+def _default_output_json() -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Path("runs/diagnostics") / f"detect_compute_smoke_{timestamp}.json"
+
+
+def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
+    video_path = args.video_path.expanduser().resolve()
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    config = stage._load_config(args.config.expanduser().resolve() if args.config else None)
+    model_path = stage._resolve_model_path(args.model, config)
+    resize, resize_source = _resolve_smoke_resize(args.resize, config)
+
+    detect_cfg = config.get("detection") or {}
+    conf = float(args.conf if args.conf is not None else detect_cfg.get("conf_threshold", 0.40))
+    iou = float(args.iou if args.iou is not None else detect_cfg.get("iou_threshold", 0.45))
+    max_det = int(args.max_det if args.max_det is not None else detect_cfg.get("max_det", 20))
+
+    if args.device == "auto":
+        device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device_str = args.device
+    if device_str == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("Requested CUDA but torch.cuda.is_available() is false")
+
+    device = torch.device(device_str)
+    use_fp16 = device.type == "cuda" and not args.force_fp32
+    dtype = torch.float16 if use_fp16 else torch.float32
+
+    frame_start = int(args.start_frame)
+    frame_end = _resolve_frame_end(
+        start_frame=frame_start,
+        max_frames=int(args.max_frames),
+        max_batches=int(args.max_batches),
+        batch_size=int(args.batch_size),
+    )
+
+    payload: Dict[str, Any] = {
+        "schema_version": 1,
+        "created_at_utc": stage._utc_now_iso(),
+        "status": "ok",
+        "canonical_outputs_written": False,
+        "canonical_zarr_write_policy": "compute_only_no_detect_runs_or_zarr_chunks",
+        "inputs": {
+            "video_path": str(video_path),
+            "video_size_bytes": int(video_path.stat().st_size),
+            "model_path": str(model_path),
+            "decode_backend": args.decode_backend,
+            "start_frame": frame_start,
+            "end_frame_exclusive": frame_end,
+            "frames_requested": int(frame_end - frame_start),
+            "batch_size": int(args.batch_size),
+            "batches_requested": _count_batches(frame_start, frame_end, int(args.batch_size)),
+            "resize": [int(resize[0]), int(resize[1])] if resize else None,
+            "resize_source": resize_source,
+            "conf_threshold": float(conf),
+            "iou_threshold": float(iou),
+            "max_det": int(max_det),
+            "device": device_str,
+            "fp16": bool(use_fp16),
+        },
+        "environment": stage._collect_environment(),
+        "stages": {},
+        "batches": [],
+    }
+
+    t_total = time.perf_counter()
+
+    print("Detection compute smoke:")
+    print(
+        f"- video={video_path} frames=[{frame_start}, {frame_end}) "
+        f"batch={args.batch_size} backend={args.decode_backend}"
+    )
+    print(
+        f"- model={model_path} device={device_str} fp16={use_fp16} "
+        f"resize={resize if resize else 'None'}"
+    )
+    print("- canonical Zarr writes: disabled")
+
+    t0 = time.perf_counter()
+    model = stage.YOLO(str(model_path))
+    try:
+        model.fuse()
+    except Exception:
+        pass
+    model.to(device_str)
+    if use_fp16:
+        model.half()
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    payload["stages"]["model_load_seconds"] = float(time.perf_counter() - t0)
+
+    t0 = time.perf_counter()
+    reader_info = stage._resolve_backend_reader(video_path, args.decode_backend, frame_start)
+    payload["stages"]["video_open_seconds"] = float(time.perf_counter() - t0)
+
+    frames_processed = 0
+    detections_total = 0
+    decode_seconds_total = 0.0
+    preprocess_seconds_total = 0.0
+    inference_seconds_total = 0.0
+
+    try:
+        for batch_start in range(frame_start, frame_end, int(args.batch_size)):
+            batch_end = min(batch_start + int(args.batch_size), frame_end)
+            indices = list(range(batch_start, batch_end))
+
+            t_decode = time.perf_counter()
+            decoded = stage._decode_batch(reader_info, indices)
+            if args.decode_backend == stage.BACKEND_DECORD_GPU and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            decode_seconds = time.perf_counter() - t_decode
+            actual_count = _decoded_count(decoded, args.decode_backend)
+            if actual_count <= 0:
+                break
+
+            t_preprocess = time.perf_counter()
+            processed = stage._preprocess_batch(
+                decoded=decoded,
+                backend=args.decode_backend,
+                device=device,
+                dtype=dtype,
+                resize=resize,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            preprocess_seconds = time.perf_counter() - t_preprocess
+
+            t_inference = time.perf_counter()
+            with torch.inference_mode():
+                predictions = model.predict(
+                    processed,
+                    conf=conf,
+                    iou=iou,
+                    max_det=max_det,
+                    verbose=False,
+                    device=device_str,
+                    half=use_fp16,
+                )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            inference_seconds = time.perf_counter() - t_inference
+            detections = stage._count_detections(predictions)
+
+            frames_processed += actual_count
+            detections_total += detections
+            decode_seconds_total += decode_seconds
+            preprocess_seconds_total += preprocess_seconds
+            inference_seconds_total += inference_seconds
+
+            batch_payload = {
+                "batch_index": len(payload["batches"]),
+                "frame_start": int(batch_start),
+                "frame_end_exclusive": int(batch_start + actual_count),
+                "frames_processed": int(actual_count),
+                "decode_seconds": float(decode_seconds),
+                "preprocess_seconds": float(preprocess_seconds),
+                "inference_seconds": float(inference_seconds),
+                "detections_total": int(detections),
+                "tensor_shape": [int(v) for v in processed.shape],
+                "tensor_device": str(processed.device),
+                "tensor_dtype": str(processed.dtype),
+            }
+            payload["batches"].append(batch_payload)
+            print(
+                "  batch {idx}: frames={frames} detections={detections} "
+                "decode={decode:.3f}s preprocess={prep:.3f}s inference={infer:.3f}s".format(
+                    idx=batch_payload["batch_index"],
+                    frames=actual_count,
+                    detections=detections,
+                    decode=decode_seconds,
+                    prep=preprocess_seconds,
+                    infer=inference_seconds,
+                )
+            )
+
+            del predictions
+            del processed
+            del decoded
+    finally:
+        stage._release_reader(reader_info)
+
+    total_seconds = time.perf_counter() - t_total
+    payload["summary"] = {
+        "frames_processed": int(frames_processed),
+        "batches_processed": int(len(payload["batches"])),
+        "detections_total": int(detections_total),
+        "decode_seconds_total": float(decode_seconds_total),
+        "preprocess_seconds_total": float(preprocess_seconds_total),
+        "inference_seconds_total": float(inference_seconds_total),
+        "total_seconds": float(total_seconds),
+        "end_to_end_fps": float(frames_processed / total_seconds) if total_seconds > 0 else 0.0,
+        "inference_fps": (
+            float(frames_processed / inference_seconds_total)
+            if inference_seconds_total > 0
+            else 0.0
+        ),
+    }
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    print(
+        "- summary: frames={frames} detections={detections} total={total:.3f}s "
+        "end_to_end_fps={fps:.2f}".format(
+            frames=frames_processed,
+            detections=detections_total,
+            total=total_seconds,
+            fps=payload["summary"]["end_to_end_fps"],
+        )
+    )
+    return payload
+
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    args = parse_args(argv)
+    payload = run_smoke(args)
+
+    output_json = args.output_json if args.output_json is not None else _default_output_json()
+    output_json = output_json.expanduser()
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"Wrote compute smoke JSON: {output_json}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

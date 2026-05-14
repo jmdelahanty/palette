@@ -78,6 +78,13 @@ recording-level parallelism with conservative per-job threading. A job array is
 appropriate only when each array task owns distinct recordings and writes
 distinct scratch packages.
 
+For single-pass detection specifically, do not copy full source videos to
+scratch by default. Stream the camera video from PRFS/NRS and write only the
+new detection output run group to job-local scratch. Copying a large MP4 to
+scratch is reserved for workflows that repeatedly reopen the same video, perform
+heavy random seeking, or have benchmark evidence that shared-storage streaming
+is the bottleneck.
+
 ## Non-Goals
 
 - Do not make tarballs the canonical data format.
@@ -108,6 +115,50 @@ The cluster job must not:
 - update consolidated metadata on the canonical archive;
 - write directly into an existing canonical run group;
 - update the registry as the source of truth for the completed run.
+
+For detection, the desired cluster job flow is:
+
+```text
+PRFS video + canonical analysis metadata
+  -> compute on cluster node
+  -> /scratch/$USER/$LSB_JOBID/palette_run_group_artifact/run_group/
+  -> validate scratch run group
+  -> package artifact as tar.zst or tar.gz
+  -> transfer package to PRFS
+  -> serialized importer promotes into analysis/detect_runs/
+```
+
+The current direct-write detection runner is a pilot path, not the final
+production path for broad cluster arrays.
+
+If the immediate question is "can the cluster decode and run the model?", use a
+compute-only smoke before writing any predicted chunks to PRFS/NRS. That smoke
+should open the PRFS video, load the selected model, decode a small batch of
+frames, run inference, and discard the predictions or write only a small JSON
+report. It must not write `detect_runs` chunks to the canonical analysis Zarr.
+
+Palette's concrete command for this is:
+
+```bash
+scripts/py -m fisheye.diagnostics.detect_compute_smoke \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --decode-backend decord_gpu \
+  --batch-size 4 \
+  --max-batches 1 \
+  --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/detect_compute_smoke.json
+```
+
+The smoke honors `detection.resize_dims` from the detection config when no
+explicit `--resize` is supplied. That keeps the compute path aligned with the
+normal detector and avoids accidentally using full camera-frame resolution.
+For LSF jobs, set `PALETTE_JOB_CACHE=/scratch/$USER/$LSB_JOBID/palette_cache`
+so Ultralytics and other headless tools do not write into `$HOME`.
+
+If the immediate question is "can we safely produce cluster detection outputs?",
+the smoke should use the artifact/import path below. Avoid a full direct-write
+detect smoke because it exercises the exact NFS chunk-write pattern this design
+is intended to eliminate.
 
 ### Importer
 
@@ -323,15 +374,24 @@ This document fills the gap between cluster compute and canonical Zarr mutation.
 
 ## First Implementation Slice
 
-1. Add a package writer for one run family, preferably detection or swim-bout
+1. Use `fisheye.diagnostics.detect_compute_smoke` to verify video open, model
+   load, small-batch decode, and inference without writing `detect_runs`
+   chunks.
+2. Add a package writer for one run family, preferably detection or swim-bout
    runs.
-2. Add a dry-run importer that validates a package and prints the planned
+3. Add a dry-run importer that validates a package and prints the planned
    canonical mutations.
-3. Add an apply mode that imports one package into one analysis archive.
-4. Add strict JSON and source-fingerprint checks.
-5. Add registry reconciliation after import, not during cluster compute.
+4. Add an apply mode that imports one package into one analysis archive.
+5. Add strict JSON and source-fingerprint checks.
+6. Add registry reconciliation after import, not during cluster compute.
 
 Detection is the most valuable first target for cluster execution because large
 video decode and inference are recording-local and expensive. Swim-bout and
 bout-kinematics packages are useful second targets because they exercise compact
 tabular run layouts with smaller transfer artifacts.
+
+The first detection implementation should target only the run group under
+`analysis/detect_runs/<run_name>`, not the entire analysis archive. It should
+read input video from PRFS/NRS, write that run group on
+`/scratch/$USER/$LSB_JOBID`, package the run group, and leave `latest`,
+consolidated metadata, and registry projection for the importer.

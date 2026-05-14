@@ -205,6 +205,33 @@ def test_build_plan_for_zarr_uses_source_video_path_from_copied_archive(tmp_path
     assert plan.video_path == source_video.resolve()
 
 
+def test_build_plan_for_zarr_prefers_copied_cams_over_stale_source_attrs(tmp_path: Path) -> None:
+    stale_source = tmp_path / "stale_source" / "cams" / "cam_old.mp4"
+    stale_source.parent.mkdir(parents=True, exist_ok=True)
+    stale_source.write_bytes(b"")
+
+    copied_recording = tmp_path / "copied_recording"
+    copied_video = copied_recording / "cams" / "cam_copied.mp4"
+    copied_video.parent.mkdir(parents=True, exist_ok=True)
+    copied_video.write_bytes(b"")
+
+    zarr_path = copied_recording / "zarr" / "copied_recording_analysis.zarr"
+    _write_root_metadata(zarr_path, attrs={"source_video_path": str(stale_source.resolve())})
+    _write_group_attrs(zarr_path, "analysis_metadata", {"detection_tuning": {"enabled": True}})
+    _write_group_attrs(zarr_path, "detect_runs", {"latest": None})
+
+    plan = mod._build_plan_for_zarr(  # noqa: SLF001
+        zarr_path=zarr_path,
+        skip_existing=False,
+        require_background=False,
+        require_tuning=False,
+    )
+
+    assert plan.status == mod.STATUS_OK
+    assert plan.recording_dir == copied_recording.resolve()
+    assert plan.video_path == copied_video.resolve()
+
+
 def test_main_dry_run_marks_registry_missing(monkeypatch, tmp_path: Path, capsys) -> None:
     zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
     zarr_path.mkdir(parents=True, exist_ok=True)
@@ -235,6 +262,158 @@ def test_main_dry_run_marks_registry_missing(monkeypatch, tmp_path: Path, capsys
     assert rc == 0
     out = capsys.readouterr().out
     assert "registry_missing" in out
+
+
+def test_main_dry_run_with_explicit_model_does_not_require_registry(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    recording_dir = zarr_path.parent.parent
+    video_path = recording_dir / "cams" / "cam_1.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"")
+    model_path = tmp_path / "best.pt"
+    model_path.write_bytes(b"model")
+
+    plan = mod.DetectPlan(
+        zarr_path=zarr_path.resolve(),
+        recording_dir=recording_dir.resolve(),
+        video_path=video_path.resolve(),
+        status=mod.STATUS_OK,
+    )
+
+    monkeypatch.setattr(mod, "_resolve_input_paths", lambda *_args, **_kwargs: [tmp_path])
+    monkeypatch.setattr(mod, "_discover_analysis_zarrs", lambda *_args, **_kwargs: [zarr_path.resolve()])
+    monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: [plan])
+
+    def _unexpected_resolve(**_kwargs):
+        raise AssertionError("_resolve_registry_models_for_plans should not be called with --model")
+
+    monkeypatch.setattr(mod, "_resolve_registry_models_for_plans", _unexpected_resolve)
+
+    missing_registry = tmp_path / "missing_registry.sqlite"
+    rc = mod.main([
+        "--dry-run", "--json", "--no-log",
+        "--registry", str(missing_registry),
+        "--model", str(model_path),
+        str(tmp_path),
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "registry_missing" not in out
+    assert '"status": "ok"' in out
+
+
+def test_main_apply_with_explicit_model_skips_registry_resolution(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    recording_dir = zarr_path.parent.parent
+    video_path = recording_dir / "cams" / "cam_1.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"")
+    model_path = tmp_path / "best.pt"
+    model_path.write_bytes(b"model")
+
+    plan = mod.DetectPlan(
+        zarr_path=zarr_path.resolve(),
+        recording_dir=recording_dir.resolve(),
+        video_path=video_path.resolve(),
+        status=mod.STATUS_OK,
+    )
+
+    monkeypatch.setattr(mod, "_resolve_input_paths", lambda *_args, **_kwargs: [tmp_path])
+    monkeypatch.setattr(mod, "_discover_analysis_zarrs", lambda *_args, **_kwargs: [zarr_path.resolve()])
+    monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: [plan])
+
+    def _unexpected_resolve(**_kwargs):
+        raise AssertionError("_resolve_registry_models_for_plans should not be called with --model")
+
+    monkeypatch.setattr(mod, "_resolve_registry_models_for_plans", _unexpected_resolve)
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_run_detect_plan(**kwargs):  # noqa: ANN003
+        calls.append(kwargs)
+        resolved_model = kwargs["resolved_model"]
+        return mod.DetectRegistryResult(
+            ok=True,
+            status="ok",
+            recording_dir=str(recording_dir.resolve()),
+            output_zarr=str(zarr_path.resolve()),
+            registry_path=str((tmp_path / "missing_registry.sqlite").resolve()),
+            video_path=str(video_path.resolve()),
+            selected_model_path=resolved_model.model_path,
+            detect_run="detect_explicit",
+            resolved_at_utc=None,
+            resolution_payload=resolved_model.payload,
+        )
+
+    monkeypatch.setattr(mod, "_run_detect_plan", _fake_run_detect_plan)
+
+    rc = mod.main([
+        "--apply", "--json", "--no-log",
+        "--registry", str(tmp_path / "missing_registry.sqlite"),
+        "--model", str(model_path),
+        str(tmp_path),
+    ])
+
+    assert rc == 0
+    assert len(calls) == 1
+    resolved_model = calls[0]["resolved_model"]
+    assert resolved_model.model_path == str(model_path.resolve())
+    assert resolved_model.payload["mode"] == "explicit"
+    assert resolved_model.payload["selected"]["model_path"] == str(model_path.resolve())
+
+
+def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    recording_dir = zarr_path.parent.parent
+    video_path = recording_dir / "cams" / "cam_1.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"")
+    model_path = tmp_path / "best.pt"
+    model_path.write_bytes(b"model")
+
+    plan = mod.DetectPlan(
+        zarr_path=zarr_path.resolve(),
+        recording_dir=recording_dir.resolve(),
+        video_path=video_path.resolve(),
+        status=mod.STATUS_OK,
+    )
+
+    monkeypatch.setattr(mod, "detect_yolo", lambda **_kwargs: "detect_explicit")
+
+    def _unexpected_provenance(**_kwargs):
+        raise AssertionError("registry model-resolution provenance should be skipped for explicit models")
+
+    monkeypatch.setattr(mod, "_write_detect_model_resolution_provenance", _unexpected_provenance)
+
+    result = mod._run_detect_plan(  # noqa: SLF001
+        plan=plan,
+        resolved_model=mod.ResolvedModel(
+            model_path=str(model_path.resolve()),
+            payload={
+                "mode": "explicit",
+                "selected": {"model_path": str(model_path.resolve()), "run_id": None, "set_id": None},
+            },
+        ),
+        write_raw_video_metadata=False,
+        overwrite_raw_video_metadata=False,
+        config=None,
+        conf=None,
+        iou=None,
+        max_det=None,
+        batch_size=None,
+        resize_dims=None,
+        imgsz=None,
+        cpu=False,
+        registry_path=tmp_path / "missing_registry.sqlite",
+    )
+
+    assert result.ok is True
+    assert result.detect_run == "detect_explicit"
 
 
 # ---------------------------------------------------------------------------

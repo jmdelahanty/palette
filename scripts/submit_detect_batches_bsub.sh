@@ -9,6 +9,7 @@ NCORES=4
 MEM_GB=16
 CONFIG="configs/fisheye/default.yaml"
 REGISTRY="/nvme1/palette_registry.sqlite"
+MODEL=""
 SCHEDULER="threads"
 NUM_WORKERS=""
 SET_ID=""
@@ -39,6 +40,7 @@ Options:
   --mem-gb N                Memory per job in GB (default: 16)
   --config PATH             Detect config path (default: configs/fisheye/default.yaml)
   --registry PATH           Registry sqlite path (default: /nvme1/palette_registry.sqlite)
+  --model PATH              Explicit detect model path; bypass registry model resolution
   --scheduler NAME          Legacy pass-through option for batch runner compatibility
   --num-workers N           Legacy pass-through option for batch runner compatibility
   --set-id ID               Optional detect set filter for registry model resolution
@@ -69,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --mem-gb) MEM_GB="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
+    --model) MODEL="$2"; shift 2;;
     --scheduler) SCHEDULER="$2"; shift 2;;
     --num-workers) NUM_WORKERS="$2"; shift 2;;
     --set-id) SET_ID="$2"; shift 2;;
@@ -209,6 +212,9 @@ fi
 analysis_count=$(wc -l < "$RUN_DIR/recordings.txt" | tr -d ' ')
 
 EXTRA_ARGS=(--apply --no-dask-progress --registry "$REGISTRY" --top-k "$TOP_K" --config "$CONFIG")
+if [[ -n "$MODEL" ]]; then
+  EXTRA_ARGS+=(--model "$MODEL")
+fi
 if [[ -n "$SCHEDULER" ]]; then
   EXTRA_ARGS+=(--scheduler "$SCHEDULER")
 fi
@@ -261,8 +267,8 @@ if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
 
-printf -v BSUB_CMD 'bsub %q ' "${BSUB_ARGS[@]}"
-BSUB_CMD+="bash "
+printf -v BSUB_ARGS_SHELL '%q ' "${BSUB_ARGS[@]}"
+BSUB_CMD="bsub ${BSUB_ARGS_SHELL}bash "
 BSUB_CMD+="$(printf '%q' "$JOB_SCRIPT") "
 BSUB_CMD+="$(printf '%q' "$RUN_DIR")"
 
@@ -272,6 +278,7 @@ echo "Run dir: $RUN_DIR"
 echo "Source: $SOURCE"
 echo "Root: $ROOT"
 echo "Registry: $REGISTRY"
+echo "Model: ${MODEL:-<registry resolution>}"
 echo "Analysis zarrs: $analysis_count"
 echo "Batch size: $BATCH_SIZE"
 echo "Batches: $batch_count"

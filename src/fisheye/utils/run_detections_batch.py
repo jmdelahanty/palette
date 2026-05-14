@@ -67,6 +67,7 @@ class DetectPlan:
     video_path: Optional[Path]
     status: str
     reason: Optional[str] = None
+    camera_id: Optional[str] = None
     detect_present: bool = False
     background_present: bool = False
     tuning_present: bool = False
@@ -263,6 +264,7 @@ def _build_plan_for_zarr(
     require_tuning: bool,
 ) -> DetectPlan:
     context = infer_recording_context(zarr_path)
+    local_recording_dir = _infer_recording_dir(zarr_path)
     recording_dir = context.recording_dir
     if not _is_analysis_zarr(zarr_path):
         return DetectPlan(
@@ -319,9 +321,16 @@ def _build_plan_for_zarr(
             tuning_present=tuning_present,
         )
 
-    video_path, video_reason = _resolve_video_path(recording_dir)
+    video_path, video_reason = _resolve_video_path(local_recording_dir)
+    if video_path is not None:
+        recording_dir = local_recording_dir
+    elif context.recording_dir != local_recording_dir:
+        video_path, video_reason = _resolve_video_path(context.recording_dir)
+        if video_path is not None:
+            recording_dir = context.recording_dir
     if video_path is None and context.source_video_path is not None and context.source_video_path.exists():
         video_path = context.source_video_path
+        recording_dir = context.recording_dir
         video_reason = None
     if video_path is None:
         return DetectPlan(
@@ -378,7 +387,14 @@ def _build_plans(
     return plans
 
 
-def _apply_registry_prereq(plans: Sequence[DetectPlan], *, registry_path: Path) -> List[DetectPlan]:
+def _apply_registry_prereq(
+    plans: Sequence[DetectPlan],
+    *,
+    registry_path: Path,
+    require_registry: bool = True,
+) -> List[DetectPlan]:
+    if not require_registry:
+        return list(plans)
     if registry_path.exists():
         return list(plans)
 
@@ -394,6 +410,7 @@ def _apply_registry_prereq(plans: Sequence[DetectPlan], *, registry_path: Path) 
                 video_path=plan.video_path,
                 status=STATUS_MISSING,
                 reason=REASON_REGISTRY_MISSING,
+                camera_id=plan.camera_id,
                 detect_present=plan.detect_present,
                 background_present=plan.background_present,
                 tuning_present=plan.tuning_present,
@@ -552,6 +569,84 @@ def _resolve_registry_models_for_plans(
     )
 
 
+def _build_explicit_model_payload(
+    *,
+    plan: DetectPlan,
+    model_path: Path,
+    config: Optional[str],
+    conf: Optional[float],
+    iou: Optional[float],
+    max_det: Optional[int],
+    batch_size: Optional[int],
+    resize_dims: Optional[list[int]],
+    imgsz: Optional[list[int]],
+    cpu: bool,
+) -> dict[str, object]:
+    selected = {
+        "model_path": str(model_path),
+        "source": "explicit_cli",
+        "run_id": None,
+        "set_id": None,
+    }
+    return {
+        "mode": "explicit",
+        "task": "detect",
+        "selected": selected,
+        "candidates": [selected],
+        "parameters": {
+            "config": config,
+            "conf": conf,
+            "iou": iou,
+            "max_det": max_det,
+            "batch_size": batch_size,
+            "resize_dims": resize_dims,
+            "imgsz": imgsz,
+            "cpu": bool(cpu),
+        },
+        "inputs": {
+            "recording_dir": str(plan.recording_dir),
+            "video_path": str(plan.video_path) if plan.video_path else None,
+            "output_zarr": str(plan.zarr_path),
+        },
+        "artifacts": {
+            "selected_model": selected,
+        },
+    }
+
+
+def _resolve_explicit_models_for_plans(
+    *,
+    plans: Sequence[DetectPlan],
+    model_path: Path,
+    config: Optional[str],
+    conf: Optional[float],
+    iou: Optional[float],
+    max_det: Optional[int],
+    batch_size: Optional[int],
+    resize_dims: Optional[list[int]],
+    imgsz: Optional[list[int]],
+    cpu: bool,
+) -> dict[str, ResolvedModel]:
+    return {
+        str(plan.zarr_path.resolve()): ResolvedModel(
+            model_path=str(model_path),
+            payload=_build_explicit_model_payload(
+                plan=plan,
+                model_path=model_path,
+                config=config,
+                conf=conf,
+                iou=iou,
+                max_det=max_det,
+                batch_size=batch_size,
+                resize_dims=resize_dims,
+                imgsz=imgsz,
+                cpu=cpu,
+            ),
+        )
+        for plan in plans
+    }
+
+
 def _run_detect_plan(
     *,
     plan: DetectPlan,
@@ -601,11 +696,12 @@ def _run_detect_plan(
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
         )
-        _write_detect_model_resolution_provenance(
-            zarr_path=plan.zarr_path,
-            run_name=run_name,
-            payload=resolved_model.payload,
-        )
+        if resolved_model.payload.get("mode") == "registry":
+            _write_detect_model_resolution_provenance(
+                zarr_path=plan.zarr_path,
+                run_name=run_name,
+                payload=resolved_model.payload,
+            )
     except Exception as exc:
         return DetectRegistryResult(
             ok=False,
@@ -689,6 +785,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--require-unique", action="store_true", help="Fail if top model scores tie.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of candidate models to persist in provenance.")
     parser.add_argument("--include-non-success", action="store_true", help="Allow non-success model rows in selection.")
+    parser.add_argument(
+        "--model",
+        type=Path,
+        help="Explicit YOLO detect model path. Bypasses registry model resolution.",
+    )
 
     parser.add_argument("--config", type=str, default=None, help="Optional detect config path.")
     parser.add_argument("--conf", type=float, default=None, help="Optional detect confidence threshold override.")
@@ -749,6 +850,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     inputs = _resolve_input_paths(args.paths, args.file_list or [])
     registry_path = (args.registry or Path("/nvme1/palette_registry.sqlite")).expanduser().resolve()
+    explicit_model_path: Optional[Path] = None
+    if args.model is not None:
+        explicit_model_path = args.model.expanduser()
+        if args.apply and not explicit_model_path.exists():
+            print(f"Explicit model does not exist: {explicit_model_path}", file=sys.stderr)
+            return 1
+        explicit_model_path = explicit_model_path.resolve()
 
     skip_existing = not args.overwrite
     require_background = bool(args.require_background) and not bool(args.no_require_background)
@@ -796,6 +904,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 require_background=require_background,
                 require_tuning=bool(args.require_tuning),
                 registry=str(registry_path),
+                model_source=("explicit" if explicit_model_path is not None else "registry"),
+                explicit_model=str(explicit_model_path) if explicit_model_path is not None else None,
                 set_id=args.set_id,
                 require_unique=bool(args.require_unique),
                 include_non_success=bool(args.include_non_success),
@@ -841,7 +951,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         require_background=require_background,
         require_tuning=bool(args.require_tuning),
     )
-    plans = _apply_registry_prereq(plans, registry_path=registry_path)
+    plans = _apply_registry_prereq(
+        plans,
+        registry_path=registry_path,
+        require_registry=(explicit_model_path is None),
+    )
 
     if not args.apply:
         console = Console() if Console is not None else None
@@ -934,9 +1048,39 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     resolved_models_by_plan: dict[str, ResolvedModel] = {}
     if runnable_plans:
-        if not args.json:
+        if explicit_model_path is not None:
+            if not args.json:
+                print(
+                    "Using explicit detect model for "
+                    f"{len(runnable_plans)} recording plan(s): {explicit_model_path}"
+                )
+            resolved_models_by_plan = _resolve_explicit_models_for_plans(
+                plans=runnable_plans,
+                model_path=explicit_model_path,
+                config=args.config,
+                conf=args.conf,
+                iou=args.iou,
+                max_det=args.max_det,
+                batch_size=args.batch_size,
+                resize_dims=args.resize_dims,
+                imgsz=args.imgsz,
+                cpu=bool(args.cpu),
+            )
+            if logger is not None:
+                logger.log(
+                    "model_resolution_summary",
+                    zarr="-",
+                    status=STATUS_OK,
+                    mode="explicit",
+                    selected_model_path=str(explicit_model_path),
+                    total=len(runnable_plans),
+                    resolved=len(resolved_models_by_plan),
+                    failed=0,
+                )
+        elif not args.json:
             print(f"Pre-resolving registry models for {len(runnable_plans)} recording plan(s)...")
 
+    if runnable_plans and explicit_model_path is None:
         def _emit_model_resolution_event(event_payload: dict[str, object]) -> None:
             event_name = str(event_payload.get("event", "model_resolution_event"))
             if logger is not None:

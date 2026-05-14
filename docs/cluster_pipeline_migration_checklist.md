@@ -73,6 +73,13 @@ This is intentionally lower than the final production bar. The run-group
 artifact workflow remains the target for larger, high-concurrency production
 runs.
 
+For detection, the intended production shape is: stream the source video from
+PRFS/NRS, write the new detect run group to
+`/scratch/$USER/$LSB_JOBID`, package that run group as a transfer artifact, and
+promote it into the canonical analysis Zarr through a serialized importer. Do
+not treat `/tmp` as the cluster scratch target, and do not make the tarball the
+canonical data format.
+
 ## Stage Checklist
 
 ### 0. Environment And Inputs
@@ -102,10 +109,20 @@ Ready for pilot:
 - [x] LSF submitter exists.
 - [x] Decord-GPU tensor resize bug fixed.
 - [x] Decode/storage policy documented.
+- [x] Explicit `--model` path is supported for cluster smoke runs that do not
+  have registry model metadata available on the cluster.
+- [x] Compute-only detection smoke CLI exists:
+  `scripts/py -m fisheye.diagnostics.detect_compute_smoke`.
 
 Remaining:
 
-- [ ] Run one real cluster detection smoke on the sickyfish PRFS recording.
+- [ ] Run a compute-only cluster detection smoke on the sickyfish PRFS
+  recording: PRFS video open, model load, small-batch decode, inference, and no
+  canonical `detect_runs` writes.
+- [ ] Add minimal scratch run-group artifact/import path for detection before a
+  full output-writing cluster smoke.
+- [ ] Run one real cluster detection artifact/import smoke on the sickyfish PRFS
+  recording.
 - [ ] Verify detect output strict JSON and schema.
 - [ ] Verify run provenance includes model, decode backend, timings, git
   commit, host, and CUDA device.
@@ -320,7 +337,8 @@ Short-term:
 
 Production target:
 
-- cluster job writes complete run-group artifact on scratch;
+- cluster job writes complete run-group artifact on
+  `/scratch/$USER/$LSB_JOBID`;
 - serialized importer validates and promotes into canonical Zarr;
 - importer updates `latest`, consolidated metadata, and registry projection.
 
@@ -366,18 +384,23 @@ Implementation tasks:
 
 ## Recommended Implementation Order
 
-1. Run one manual cluster detect smoke from PRFS on the sickyfish recording.
-2. Validate the detect run on the workstation: strict JSON, registry, and
+1. Run a compute-only cluster detect smoke from PRFS on the sickyfish recording
+   without writing `detect_runs` chunks to canonical Zarr.
+2. Implement the minimal detect run-group artifact/import path using
+   `/scratch/$USER/$LSB_JOBID`, `.incoming`, and `.failed`.
+3. Run one manual cluster detect artifact/import smoke from PRFS on the
+   sickyfish recording.
+4. Validate the detect run on the workstation: strict JSON, registry, and
    viewer/notebook readiness.
-3. Add the shared LSF provenance helper.
-4. Add `submit_refine_detect_batches_bsub.sh`.
-5. Add `submit_refine_keypoints_batches_bsub.sh`.
-6. Add `submit_subject_mask_batches_bsub.sh`.
-7. Add registry discovery/status for refined stages that are missing from the
+5. Add the shared LSF provenance helper.
+6. Add `submit_refine_detect_batches_bsub.sh`.
+7. Add `submit_refine_keypoints_batches_bsub.sh`.
+8. Add `submit_subject_mask_batches_bsub.sh`.
+9. Add registry discovery/status for refined stages that are missing from the
    first-four-stage DAG.
-8. Implement run-group artifact packer and validator.
-9. Implement serialized run-group importer.
-10. Switch broad production cluster jobs from direct write to artifact/import.
+10. Generalize run-group artifact packer and validator beyond detection.
+11. Generalize serialized run-group importer beyond detection.
+12. Switch broad production cluster jobs from direct write to artifact/import.
 
 ## Open Questions
 
@@ -405,4 +428,3 @@ The migration is ready for a small production batch when:
 - documented submit commands exist for every stage used in the batch;
 - no stage requires repeated full-video copies to local scratch for normal
   single-pass processing.
-
