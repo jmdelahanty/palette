@@ -55,11 +55,20 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     inputs = payload.get("inputs") or {}
     summary = payload.get("summary") or {}
     stages = payload.get("stages") or {}
+    stage_spans = payload.get("stage_spans") or {}
     env = payload.get("environment") or {}
+    cluster = payload.get("cluster") or {}
+    steady = summary.get("steady_state_excluding_first_batch") or {}
+    first_batch = summary.get("first_batch") or {}
 
     print(f"path: {path}")
     print(f"status: {payload.get('status')}")
     print(f"canonical_outputs_written: {payload.get('canonical_outputs_written')}")
+    print(f"job_id: {cluster.get('LSB_JOBID')}")
+    print(f"host: {cluster.get('HOSTNAME')}")
+    print(f"queue: {cluster.get('LSB_QUEUE')} slots={cluster.get('LSB_DJOB_NUMPROC')}")
+    print(f"cuda_visible_devices: {cluster.get('CUDA_VISIBLE_DEVICES')}")
+    print(f"palette_job_cache: {cluster.get('PALETTE_JOB_CACHE')}")
     print(f"backend: {inputs.get('decode_backend')}")
     print(f"device: {inputs.get('device')} fp16={inputs.get('fp16')}")
     print(f"cuda_device: {env.get('cuda_device_name')}")
@@ -77,6 +86,17 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     print(f"total_s: {_format_seconds(summary.get('total_seconds'))}")
     print(f"end_to_end_fps: {_format_float(summary.get('end_to_end_fps'))}")
     print(f"inference_fps: {_format_float(summary.get('inference_fps'))}")
+    print(f"first_batch_inference_s: {_format_seconds(first_batch.get('inference_seconds'))}")
+    print(
+        "steady_state_excluding_first: "
+        f"batches={steady.get('batches_processed')} "
+        f"frames={steady.get('frames_processed')} "
+        f"inference_fps={_format_float(steady.get('inference_fps'))}"
+    )
+    total_span = stage_spans.get("total") if isinstance(stage_spans, dict) else None
+    if isinstance(total_span, dict):
+        print(f"total_start_utc: {total_span.get('start_utc')}")
+        print(f"total_end_utc: {total_span.get('end_utc')}")
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -123,11 +143,22 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "canonical_outputs_written": payload.get("canonical_outputs_written"),
             "decode_backend": _get_nested(payload, "inputs", "decode_backend"),
             "device": _get_nested(payload, "inputs", "device"),
+            "job_id": _get_nested(payload, "cluster", "LSB_JOBID"),
+            "host": _get_nested(payload, "cluster", "HOSTNAME"),
             "frames_processed": _get_nested(payload, "summary", "frames_processed"),
             "detections_total": _get_nested(payload, "summary", "detections_total"),
             "total_seconds": _get_nested(payload, "summary", "total_seconds"),
             "end_to_end_fps": _get_nested(payload, "summary", "end_to_end_fps"),
             "inference_fps": _get_nested(payload, "summary", "inference_fps"),
+            "first_batch_inference_seconds": _get_nested(
+                payload, "summary", "first_batch", "inference_seconds"
+            ),
+            "steady_state_inference_fps": _get_nested(
+                payload,
+                "summary",
+                "steady_state_excluding_first_batch",
+                "inference_fps",
+            ),
         }
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:

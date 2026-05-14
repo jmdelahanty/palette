@@ -47,6 +47,11 @@ class _FakeYOLO:
 
 
 def test_compute_smoke_runs_without_canonical_writes(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LSB_JOBID", "12345")
+    monkeypatch.setenv("LSB_QUEUE", "gpu_l4")
+    monkeypatch.setenv("LSB_DJOB_NUMPROC", "8")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("PALETTE_JOB_CACHE", str(tmp_path / "cache"))
     video_path = tmp_path / "input.mp4"
     model_path = tmp_path / "best.pt"
     output_json = tmp_path / "smoke.json"
@@ -96,10 +101,20 @@ def test_compute_smoke_runs_without_canonical_writes(monkeypatch, tmp_path: Path
     assert payload["status"] == "ok"
     assert payload["canonical_outputs_written"] is False
     assert payload["canonical_zarr_write_policy"] == "compute_only_no_detect_runs_or_zarr_chunks"
+    assert payload["cluster"]["LSB_JOBID"] == "12345"
+    assert payload["cluster"]["LSB_QUEUE"] == "gpu_l4"
+    assert payload["cluster"]["LSB_DJOB_NUMPROC"] == "8"
+    assert payload["cluster"]["CUDA_VISIBLE_DEVICES"] == "0"
+    assert payload["stage_spans"]["total"]["start_utc"]
+    assert payload["stage_spans"]["total"]["end_utc"]
+    assert payload["stage_spans"]["model_load"]["seconds"] >= 0
+    assert payload["stage_spans"]["video_open"]["seconds"] >= 0
     assert payload["inputs"]["frames_requested"] == 2
     assert payload["inputs"]["resize_source"] == "none"
     assert payload["summary"]["frames_processed"] == 2
     assert payload["summary"]["detections_total"] == 4
+    assert payload["summary"]["first_batch"]["inference_seconds"] >= 0
+    assert payload["summary"]["steady_state_excluding_first_batch"]["batches_processed"] == 0
     assert payload["batches"][0]["tensor_shape"] == [2, 3, 8, 8]
     assert not (tmp_path / "detect_runs").exists()
 

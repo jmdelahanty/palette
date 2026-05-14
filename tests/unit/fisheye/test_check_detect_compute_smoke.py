@@ -20,6 +20,21 @@ def _write_smoke_json(path: Path, **overrides) -> None:
             "model_path": "/models/best.pt",
         },
         "environment": {"cuda_device_name": "NVIDIA L4"},
+        "cluster": {
+            "LSB_JOBID": "149842613",
+            "HOSTNAME": "e11u08",
+            "LSB_QUEUE": "gpu_l4",
+            "LSB_DJOB_NUMPROC": "8",
+            "CUDA_VISIBLE_DEVICES": "0",
+            "PALETTE_JOB_CACHE": "/scratch/delahantyj/149842613/palette_cache",
+        },
+        "stage_spans": {
+            "total": {
+                "start_utc": "2026-05-14T20:00:00+00:00",
+                "end_utc": "2026-05-14T20:01:00+00:00",
+                "seconds": 60.0,
+            },
+        },
         "stages": {
             "video_open_seconds": 1.0,
             "model_load_seconds": 2.0,
@@ -34,6 +49,16 @@ def _write_smoke_json(path: Path, **overrides) -> None:
             "total_seconds": 4.0,
             "end_to_end_fps": 1.0,
             "inference_fps": 40.0,
+            "first_batch": {
+                "decode_seconds": 0.5,
+                "preprocess_seconds": 0.2,
+                "inference_seconds": 0.1,
+            },
+            "steady_state_excluding_first_batch": {
+                "batches_processed": 0,
+                "frames_processed": 0,
+                "inference_fps": None,
+            },
         },
     }
     payload.update(overrides)
@@ -50,6 +75,8 @@ def test_check_detect_compute_smoke_accepts_valid_report(tmp_path: Path, capsys)
     out = capsys.readouterr().out
     assert "validation: ok" in out
     assert "canonical_outputs_written: False" in out
+    assert "job_id: 149842613" in out
+    assert "steady_state_excluding_first:" in out
     assert "backend: decord_gpu" in out
 
 
@@ -76,3 +103,5 @@ def test_check_detect_compute_smoke_can_emit_json_summary(tmp_path: Path, capsys
     assert summary["ok"] is True
     assert summary["frames_processed"] == 4
     assert summary["inference_fps"] == 40.0
+    assert summary["job_id"] == "149842613"
+    assert summary["first_batch_inference_seconds"] == 0.1

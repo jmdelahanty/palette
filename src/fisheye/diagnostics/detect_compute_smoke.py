@@ -168,6 +168,65 @@ def _count_batches(frame_start: int, frame_end: int, batch_size: int) -> int:
     return int((total + batch_size - 1) // batch_size)
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _collect_cluster_context() -> Dict[str, Any]:
+    keys = (
+        "LSB_JOBID",
+        "LSB_JOBNAME",
+        "LSB_QUEUE",
+        "LSB_DJOB_NUMPROC",
+        "LSB_HOSTS",
+        "HOSTNAME",
+        "CUDA_VISIBLE_DEVICES",
+        "PALETTE_JOB_CACHE",
+        "YOLO_CONFIG_DIR",
+        "MPLBACKEND",
+        "TMPDIR",
+        "USER",
+    )
+    payload: Dict[str, Any] = {key: os.environ.get(key) for key in keys}
+    user = os.environ.get("USER")
+    job_id = os.environ.get("LSB_JOBID")
+    payload["scratch_job_dir"] = (
+        str(Path("/scratch") / user / job_id) if user and job_id else None
+    )
+    return payload
+
+
+def _start_span(stages: Dict[str, Any], name: str) -> float:
+    stage_payload = stages.setdefault(name, {})
+    stage_payload["start_utc"] = _now_iso()
+    return time.perf_counter()
+
+
+def _end_span(stages: Dict[str, Any], name: str, start: float) -> float:
+    elapsed = time.perf_counter() - start
+    stage_payload = stages.setdefault(name, {})
+    stage_payload["end_utc"] = _now_iso()
+    stage_payload["seconds"] = float(elapsed)
+    return elapsed
+
+
+def _split_first_and_steady_state(
+    batches: Sequence[Dict[str, Any]],
+    field: str,
+) -> Dict[str, Any]:
+    values = [float(batch[field]) for batch in batches if field in batch]
+    first = values[0] if values else None
+    steady = values[1:]
+    return {
+        "first_batch_seconds": first,
+        "steady_state_batches": len(steady),
+        "steady_state_seconds_total": float(sum(steady)),
+        "steady_state_seconds_mean": (
+            float(sum(steady) / len(steady)) if steady else None
+        ),
+    }
+
+
 def _resolve_smoke_resize(
     resize_arg: Optional[Sequence[int]],
     config: Dict[str, Any],
@@ -255,11 +314,15 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             "fp16": bool(use_fp16),
         },
         "environment": stage._collect_environment(),
+        "cluster": _collect_cluster_context(),
+        "stage_spans": {},
         "stages": {},
         "batches": [],
     }
 
     t_total = time.perf_counter()
+    total_start_utc = _now_iso()
+    payload["stage_spans"]["total"] = {"start_utc": total_start_utc}
 
     print("Detection compute smoke:")
     print(
@@ -272,7 +335,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     )
     print("- canonical Zarr writes: disabled")
 
-    t0 = time.perf_counter()
+    t0 = _start_span(payload["stage_spans"], "model_load")
     model = stage.YOLO(str(model_path))
     try:
         model.fuse()
@@ -283,11 +346,13 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
         model.half()
     if device.type == "cuda":
         torch.cuda.synchronize()
-    payload["stages"]["model_load_seconds"] = float(time.perf_counter() - t0)
+    model_load_seconds = _end_span(payload["stage_spans"], "model_load", t0)
+    payload["stages"]["model_load_seconds"] = float(model_load_seconds)
 
-    t0 = time.perf_counter()
+    t0 = _start_span(payload["stage_spans"], "video_open")
     reader_info = stage._resolve_backend_reader(video_path, args.decode_backend, frame_start)
-    payload["stages"]["video_open_seconds"] = float(time.perf_counter() - t0)
+    video_open_seconds = _end_span(payload["stage_spans"], "video_open", t0)
+    payload["stages"]["video_open_seconds"] = float(video_open_seconds)
 
     frames_processed = 0
     detections_total = 0
@@ -376,6 +441,17 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
         stage._release_reader(reader_info)
 
     total_seconds = time.perf_counter() - t_total
+    total_end_utc = _now_iso()
+    payload["stage_spans"]["total"]["end_utc"] = total_end_utc
+    payload["stage_spans"]["total"]["seconds"] = float(total_seconds)
+    batch_rows = payload["batches"]
+    decode_split = _split_first_and_steady_state(batch_rows, "decode_seconds")
+    preprocess_split = _split_first_and_steady_state(batch_rows, "preprocess_seconds")
+    inference_split = _split_first_and_steady_state(batch_rows, "inference_seconds")
+    frames_excluding_first = sum(
+        int(batch.get("frames_processed", 0)) for batch in batch_rows[1:]
+    )
+    steady_inference_total = float(inference_split["steady_state_seconds_total"])
     payload["summary"] = {
         "frames_processed": int(frames_processed),
         "batches_processed": int(len(payload["batches"])),
@@ -390,6 +466,26 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             if inference_seconds_total > 0
             else 0.0
         ),
+        "first_batch": {
+            "decode_seconds": decode_split["first_batch_seconds"],
+            "preprocess_seconds": preprocess_split["first_batch_seconds"],
+            "inference_seconds": inference_split["first_batch_seconds"],
+        },
+        "steady_state_excluding_first_batch": {
+            "batches_processed": int(len(batch_rows[1:])),
+            "frames_processed": int(frames_excluding_first),
+            "decode_seconds_total": decode_split["steady_state_seconds_total"],
+            "decode_seconds_mean": decode_split["steady_state_seconds_mean"],
+            "preprocess_seconds_total": preprocess_split["steady_state_seconds_total"],
+            "preprocess_seconds_mean": preprocess_split["steady_state_seconds_mean"],
+            "inference_seconds_total": steady_inference_total,
+            "inference_seconds_mean": inference_split["steady_state_seconds_mean"],
+            "inference_fps": (
+                float(frames_excluding_first / steady_inference_total)
+                if steady_inference_total > 0
+                else None
+            ),
+        },
     }
 
     if device.type == "cuda":
