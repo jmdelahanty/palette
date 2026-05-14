@@ -149,6 +149,11 @@ scripts/py -m fisheye.diagnostics.detect_compute_smoke \
   --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/detect_compute_smoke.json
 ```
 
+For LSF, use `scripts/submit_detect_compute_smoke_bsub.sh` rather than a long
+quoted `bsub` command. It writes a job script first, sets
+`PALETTE_JOB_CACHE=/scratch/$USER/$LSB_JOBID/palette_cache`, and stores the JSON
+as `<run_dir>/<run_label>.<LSB_JOBID>.json`.
+
 The smoke honors `detection.resize_dims` from the detection config when no
 explicit `--resize` is supplied. That keeps the compute path aligned with the
 normal detector and avoids accidentally using full camera-frame resolution.

@@ -297,6 +297,25 @@ scripts/py -m fisheye.diagnostics.detect_compute_smoke \
   --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/detect_compute_smoke.json
 ```
 
+For LSF submission, prefer the wrapper instead of embedding the full command in
+one quoted `bsub` string:
+
+```bash
+scripts/submit_detect_compute_smoke_bsub.sh \
+  --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --config configs/fisheye/yolo_detect_config.yaml \
+  --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
+  --batch-size 16 \
+  --max-batches 100 \
+  --run-label <camera>_aligned
+```
+
+The wrapper writes a per-run job script and uses an output path of the form
+`<run_dir>/<run_label>.<LSB_JOBID>.json`. This avoids shell line-continuation
+failures where `--output-json` receives only the log directory and the intended
+JSON filename is executed as a separate command.
+
 The smoke writes only the JSON report. It must report
 `canonical_outputs_written=false`; if it writes `detect_runs` chunks, it is no
 longer the compute-only smoke. By default, the smoke honors
