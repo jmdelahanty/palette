@@ -113,6 +113,10 @@ chunk files into one sequential transfer. Treat tarball transfer as a transport
 optimization, not as the canonical storage format: unpack or merge into the
 canonical Zarr only after validation.
 
+For the higher-level cluster contract around scratch-written run groups,
+immutable transfer artifacts, and serialized canonical imports, see
+`docs/cluster_run_group_artifact_workflow.md`.
+
 ## Chunked Writes And Read-Modify-Write
 
 Partial chunk writes can incur read-modify-write even for ordinary chunked

@@ -7,6 +7,10 @@ pre-filtering.
 
 Related contract:
 - `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
+- `docs/cluster_run_group_artifact_workflow.md`
+
+Janelia-specific cluster policy source:
+- `https://hpc.int.janelia.org/docs/ai-agent-hints`
 
 ---
 
@@ -572,6 +576,11 @@ If `bsub` exists → LSF (the submit scripts require this).
 - Keep the number of simultaneous writers low.
 - If local scratch is available, consider writing locally and copying back
   in large chunks.
+- For long-running cluster jobs that create new analysis runs, prefer the
+  run-group artifact workflow in
+  `docs/cluster_run_group_artifact_workflow.md`: write complete run groups on
+  scratch, package them, and import into the canonical Zarr with a serialized
+  importer.
 
 ## Headless logs (Rich output)
 

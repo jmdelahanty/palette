@@ -12,6 +12,26 @@ The goal is to avoid forcing one storage layout to serve all three jobs.
 
 ## Why This Policy Exists
 
+Palette deliberately uses a hybrid storage model rather than treating one file
+format as the answer to every layer:
+
+- Citrus/Orange acquisition snapshots may remain H5/HDF5 where the acquisition
+  stack already emits them.
+- Palette recording analysis archives remain Zarr because they contain chunked,
+  heterogeneous arrays that need partial reads by frame, ROI, track, channel,
+  and time window.
+- Cross-recording analytics should use Parquet/DuckDB exports because those
+  questions are table-shaped and query-oriented.
+- Cluster transfer and storage-tier movement should use packed artifacts or
+  run-group packages when many small Zarr files would be inefficient to move.
+
+HDF5 would make single-file transfer and whole-archive checksums simpler, but
+it would push Palette toward single-writer bottlenecks and coarse-grained
+mutation exactly where recording-level distributed processing and run-family
+imports matter. Zarr remains the right canonical analysis store, provided the
+repository controls metadata fanout, chunk/shard policy, and mutation
+lifecycle.
+
 Sharding helps when the problem is "too many tiny files are slow to move or
 slow to serve over NFS." It does **not** automatically make the live mutable
 editing path better:
@@ -300,6 +320,39 @@ Avoid this for bulk outputs:
 ```text
 many workers inserting individual chunks directly into the home Zarr over the network
 ```
+
+## Deferred Consolidated-Metadata Policy
+
+Direct child metadata remains the correctness baseline for mutable Palette
+stores. Readers that need correctness against actively edited local stores must
+be able to discover groups and attrs from direct `zarr.json` metadata, or by
+opening with consolidated metadata disabled. Consolidated metadata is a
+performance and portability surface, not the only source of truth.
+
+The preferred future writer policy is to refresh consolidated metadata at the
+end of a successful mutation, after all arrays, groups, direct attrs, indexes,
+and parent `latest` attrs have been written and validated. Consolidation should
+be part of a shared finalization helper, not something each worker or inner loop
+does independently.
+
+Planned helper behavior:
+
+- write direct metadata first and make direct readers correct before
+  consolidation runs;
+- consolidate only after a complete run group is present and selected metadata
+  such as `latest` has been updated;
+- record consolidation provenance such as `metadata_consolidation_policy`,
+  `metadata_consolidated_at_utc`, `metadata_consolidation_status`, and any
+  warning/error text;
+- treat consolidation failure as a warning when direct metadata is valid, not as
+  a reason to roll back otherwise valid analysis data;
+- keep external consumers on a fallback path that can read direct metadata when
+  consolidated metadata is stale or absent.
+
+This policy is intentionally deferred because Palette still has many mutable
+writers and legacy stores. The near-term rule is: do not trust consolidated
+metadata for correctness on mutable analysis stores, but design new writers so a
+single finalization step can safely make consolidated metadata fresh later.
 
 ## Recommended Near-Term Implementation Order
 
