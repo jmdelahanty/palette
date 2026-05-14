@@ -36,6 +36,52 @@ Purpose: compare Decord-based decode against native decode paths (including Crim
 - Detect params: fixed `conf`, `iou`, `max_det`, `batch_size`, and resize dims.
 - Hardware: single machine/GPU per run, no competing heavy jobs.
 
+## Current Cluster Decode Finding
+
+2026-05-14 smoke benchmark on a Janelia L4 compute node:
+
+- Video: `sickyfish_2026_02_23_16_23_35_cam2010093.mp4`
+- Size: `172,841,839,775` bytes
+- Resolution: `4512x4512`
+- Frames tested: `1000`
+- Resize: `640x640`
+- Command shape:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_video_decode \
+  <video.mp4> \
+  --frames 1000 \
+  --resize 640 640 \
+  --batch-sizes 1 4 8 16
+```
+
+Results:
+
+| Source path | OpenCV CPU | Decord CPU | Decord GPU single | Decord GPU batch=1 | Decord GPU batch=4 | Decord GPU batch=8 | Decord GPU batch=16 |
+|-------------|------------|------------|-------------------|--------------------|--------------------|--------------------|---------------------|
+| PRFS `/groups/...` | 27.8 fps | 28.8 fps | 100.2 fps | 96.6 fps | 97.5 fps | 93.9 fps | 90.1 fps |
+| local `/tmp/...` copy | 28.0 fps | 30.9 fps | 100.7 fps | 96.4 fps | 97.0 fps | 94.1 fps | 90.9 fps |
+
+The full-video copy to `/tmp` took `3m15s` and did not materially improve
+sustained decode throughput. For this workload, streaming from PRFS was
+effectively equivalent to local `/tmp` once the reader was open.
+
+Operational policy from this measurement:
+
+- Do not copy full videos to node-local scratch by default for single-pass
+  detection.
+- Keep one Decord `VideoReader` open per video/job; avoid reopening per batch.
+- Use scratch for workflows that repeatedly reopen the same video, do heavy
+  random seeks, or show measured PRFS throughput limits.
+- The cluster environment validator's Decord GPU smoke is an environment check,
+  not a sustained throughput benchmark. Use this benchmark utility for PRFS vs
+  scratch decisions.
+
+Decord startup still has a real one-time open cost for very large MP4s
+(`~19-22s` in this smoke). That cost appears dominated by container/Decord/FFmpeg
+initialization rather than PRFS versus local storage, because local `/tmp` did
+not reduce it.
+
 ## Metrics to collect
 
 - End-to-end detect FPS.

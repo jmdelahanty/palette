@@ -34,6 +34,31 @@ writes** instead of many short tasks.
 - Prefer **threads** for IO‑heavy steps (background/detect on sampled imports).
 - Avoid parallelizing more than the filesystem can sustain.
 
+## Video Decode Storage Policy
+
+For single-pass detection, do not copy full source videos to node-local scratch
+by default. A 2026-05-14 L4-node smoke benchmark on a `172 GB`, `4512x4512`
+sickyfish MP4 found sustained Decord-GPU decode throughput was effectively the
+same from PRFS and from a local `/tmp` copy:
+
+| Source path | Decord GPU single-frame decode |
+|-------------|--------------------------------|
+| PRFS `/groups/...` | `100.2 fps` |
+| local `/tmp/...` copy | `100.7 fps` |
+
+The full copy to `/tmp` took `3m15s`, so copying the source video was net
+negative for this single-pass workload. The current default should be to stream
+from PRFS while keeping one Decord `VideoReader` open per video/job.
+
+Use node-local scratch for video payloads only when the workflow repeatedly
+reopens the same video, performs heavy random seeking, or a benchmark shows
+shared-storage throughput is limiting that stage. Scratch remains the preferred
+place for temporary outputs and run-group artifacts; this policy is only about
+pre-copying large input videos.
+
+For the benchmark protocol and current measurements, see
+`docs/detect_decode_backend_benchmark_todo.md`.
+
 ## Analysis-Stage Scaling Policy
 
 For downstream analysis stages such as track kinematics, swim-bout detection,
