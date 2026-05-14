@@ -17,6 +17,13 @@ manifests or `metadata_json`. That makes frequent questions harder than they sho
 Goal: keep JSON as full provenance, while promoting a small set of high-value fields into
 typed columns for fast filtering.
 
+For trained-model input shape normalization, see
+[`model_input_shape_registry_design.md`](model_input_shape_registry_design.md).
+That design extends this export-focused registry surface by making
+`training_models` own the trained `.pt` artifact input contract while keeping
+`onnx_models` and `tensorrt_models` responsible for export-specific input
+contracts.
+
 
 ## Current registry shape (canonical)
 - `training_runs`: run lifecycle + config/manifest/model/metrics links.
@@ -27,6 +34,20 @@ typed columns for fast filtering.
 Legacy:
 - `model_exports` exists for compatibility/backfill history and should not be treated as the
   long-term query surface.
+
+Operationally, the preferred detection-training path is:
+
+1. Build a registry-selected training config and manifest.
+2. Train with `fisheye.training.train_detection` while passing `--manifest`,
+   `--set-id`, and `--registry`.
+3. Keep registry logging enabled.
+4. Use `--export-trt` for deployment builds; this implies ONNX export.
+
+The run directory remains the complete artifact bundle. The registry is the
+fast query/index surface, not the only source of truth. The JSON manifests
+written beside ONNX and TensorRT artifacts retain full build provenance,
+including paths, hashes, input shape, output contract, export command, and build
+environment.
 
 
 ## Design principles

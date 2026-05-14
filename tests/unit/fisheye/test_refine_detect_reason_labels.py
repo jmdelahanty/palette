@@ -2,8 +2,12 @@ import numpy as np
 import pytest
 
 from fisheye.refinement.refine_detect import (
+    _apply_dish_mask_quality_gate,
+    _build_sparse_refined_inputs_from_filtered,
+    _filtered_reason_from_quality_label,
     _reject_deprecated_interpolation_overrides,
     _resolve_detection_quality_labels,
+    _select_per_frame_top_k_raw_indices,
     get_refinement_parameters,
 )
 
@@ -157,3 +161,133 @@ def test_resolve_detection_quality_labels_rejects_length_mismatch() -> None:
             allow_missing_reason="test",
             console=None,
         )
+
+
+def test_per_frame_top_k_keeps_highest_score_and_marks_duplicates() -> None:
+    raw_frame_indices = np.asarray([0, 0, 0, 1, 1], dtype=np.int32)
+    raw_scores = np.asarray([0.30, 0.90, 0.50, 0.20, 0.80], dtype=np.float32)
+    raw_bboxes = np.asarray(
+        [
+            [0.10, 0.10, 0.10, 0.10],
+            [0.20, 0.20, 0.10, 0.10],
+            [0.30, 0.30, 0.10, 0.10],
+            [0.40, 0.40, 0.10, 0.10],
+            [0.50, 0.50, 0.10, 0.10],
+        ],
+        dtype=np.float64,
+    )
+    raw_class_ids = np.zeros(raw_frame_indices.shape[0], dtype=np.int32)
+    quality_labels = np.zeros(raw_frame_indices.shape[0], dtype=np.int8)
+
+    selected, duplicate, stats = _select_per_frame_top_k_raw_indices(
+        raw_frame_indices=raw_frame_indices,
+        raw_scores=raw_scores,
+        candidate_raw_indices=np.flatnonzero(quality_labels == 0).astype(np.int32),
+        per_frame_top_k=1,
+        score_field="scores",
+    )
+
+    assert selected.tolist() == [1, 4]
+    assert duplicate.tolist() == [0, 2, 3]
+    assert stats["duplicate_rows"] == 3
+    assert stats["frames_with_duplicates"] == 2
+
+    payload = _build_sparse_refined_inputs_from_filtered(
+        raw_bboxes=raw_bboxes,
+        raw_scores=raw_scores,
+        raw_frame_indices=raw_frame_indices,
+        raw_class_ids=raw_class_ids,
+        detection_quality_labels=quality_labels,
+        interp_bboxes=raw_bboxes[selected],
+        interp_scores=raw_scores[selected],
+        interp_frame_indices=raw_frame_indices[selected],
+        interp_class_ids=raw_class_ids[selected],
+        selected_source_detect_row_index=selected,
+        duplicate_source_detect_row_index=duplicate,
+    )
+
+    assert payload["instance_frame_indices"].tolist() == [0, 1]
+    assert payload["instance_source_detect_row_index"].tolist() == [1, 4]
+    assert payload["source_detection_decision_labels"].tolist() == [
+        "duplicate",
+        "accepted",
+        "duplicate",
+        "duplicate",
+        "accepted",
+    ]
+    assert payload["source_detection_reason_labels"].tolist() == [
+        "per_frame_top_k_excluded",
+        "clean",
+        "per_frame_top_k_excluded",
+        "per_frame_top_k_excluded",
+        "clean",
+    ]
+
+
+def test_dish_mask_gate_marks_clean_outside_candidates_before_top_k() -> None:
+    raw_frame_indices = np.asarray([0, 0, 1], dtype=np.int32)
+    raw_scores = np.asarray([0.99, 0.80, 0.75], dtype=np.float32)
+    raw_bboxes = np.asarray(
+        [
+            [0.04, 0.80, 0.05, 0.05],  # high-confidence false positive outside the dish
+            [0.50, 0.50, 0.05, 0.05],
+            [0.55, 0.50, 0.05, 0.05],
+        ],
+        dtype=np.float64,
+    )
+    raw_class_ids = np.zeros(raw_frame_indices.shape[0], dtype=np.int32)
+    quality_labels = np.zeros(raw_frame_indices.shape[0], dtype=np.int8)
+
+    gated_labels, gate_stats = _apply_dish_mask_quality_gate(
+        bbox_coords=raw_bboxes,
+        detection_quality_labels=quality_labels,
+        mask_spec={
+            "enabled": True,
+            "shape": "circle",
+            "center_norm": [0.5, 0.5],
+            "radius_norm_x": 0.3,
+            "radius_norm_y": 0.3,
+            "source": "analysis_metadata.dish_mask",
+        },
+    )
+
+    assert gate_stats["outside_clean_rows"] == 1
+    assert gated_labels.tolist() == [5, 0, 0]
+    assert _filtered_reason_from_quality_label(5) == "outside_dish_mask"
+
+    selected, duplicate, stats = _select_per_frame_top_k_raw_indices(
+        raw_frame_indices=raw_frame_indices,
+        raw_scores=raw_scores,
+        candidate_raw_indices=np.flatnonzero(gated_labels == 0).astype(np.int32),
+        per_frame_top_k=1,
+        score_field="scores",
+    )
+
+    assert selected.tolist() == [1, 2]
+    assert duplicate.tolist() == []
+    assert stats["candidate_rows"] == 2
+
+    payload = _build_sparse_refined_inputs_from_filtered(
+        raw_bboxes=raw_bboxes,
+        raw_scores=raw_scores,
+        raw_frame_indices=raw_frame_indices,
+        raw_class_ids=raw_class_ids,
+        detection_quality_labels=gated_labels,
+        interp_bboxes=raw_bboxes[selected],
+        interp_scores=raw_scores[selected],
+        interp_frame_indices=raw_frame_indices[selected],
+        interp_class_ids=raw_class_ids[selected],
+        selected_source_detect_row_index=selected,
+        duplicate_source_detect_row_index=duplicate,
+    )
+
+    assert payload["source_detection_decision_labels"].tolist() == [
+        "filtered",
+        "accepted",
+        "accepted",
+    ]
+    assert payload["source_detection_reason_labels"].tolist() == [
+        "outside_dish_mask",
+        "clean",
+        "clean",
+    ]

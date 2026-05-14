@@ -34,6 +34,7 @@ from ..shared.refined_detect_curation import (
     has_curated_refined_source_detections_projection,
     has_curated_refined_detect_surface,
 )
+from ..shared.zarr_helpers import open_zarr_group_direct
 from ..utils.system import build_invocation_record
 
 
@@ -341,6 +342,13 @@ def _manual_group_name(refined_group: Optional[zarr.Group]) -> Optional[str]:
     if "manual" in refined_group:
         return "manual"
     return None
+
+
+def _group_path(group: zarr.Group) -> str:
+    path = getattr(group, "path", "")
+    if isinstance(path, (bytes, bytearray)):
+        path = path.decode("utf-8", "ignore")
+    return str(path).strip("/")
 
 
 _ARENA_NUMBER_RE = re.compile(r"arena[_-]?(\d+)", re.IGNORECASE)
@@ -943,7 +951,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         if not zarr_path.exists():
             raise FileNotFoundError(f"Zarr path not found: {zarr_path}")
         phase_started = perf_counter()
-        root = zarr.open_group(str(zarr_path), mode="r")
+        root = open_zarr_group_direct(zarr_path, mode="r")
         _log_timing(args.timing, f"{dataset_label}: open zarr group", phase_started)
 
         array_path = get_downsample_array_path(root, format_hint=args.input_format)
@@ -974,6 +982,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         detection_source_present = False
         manual_edited_bboxes = 0
         source_detection_decision_counts: Dict[str, int] = {}
+        refined_group: Optional[zarr.Group] = None
 
         if "crop_runs" in root and root["crop_runs"].attrs.get("latest"):
             crop_run = root["crop_runs"].attrs.get("latest")
@@ -999,11 +1008,48 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 raise ValueError(f"detect_runs/{detect_run} missing bbox_norm_coords in {zarr_path.name}.")
             bbox_array_path = f"detect_runs/{detect_run}/bbox_norm_coords"
             frame_indices_present = "frame_indices" in detect_group
+        elif args.source_type == "refined":
+            refined_group = _resolve_refined_group(root, None)
+            if refined_group is None or not has_curated_refined_detect_surface(refined_group):
+                raise ValueError(f"No crop_runs, detect_runs, or curated refined detect surface found in {zarr_path.name}.")
+            detection_source_type = "refined"
         else:
             raise ValueError(f"No crop_runs or detect_runs found in {zarr_path.name}.")
 
-        refined_group = _resolve_refined_group(root, crop_group)
+        if refined_group is None:
+            refined_group = _resolve_refined_group(
+                root,
+                None if args.source_type == "refined" else crop_group,
+            )
         manual_group = _manual_group_name(refined_group)
+        if args.source_type == "refined":
+            if refined_group is None or not has_curated_refined_detect_surface(refined_group):
+                skipped.append(f"{zarr_path.name}: refined detect surface missing")
+                _log_timing(args.timing, f"{dataset_label}: skipped (refined detect surface missing)", dataset_started)
+                continue
+            refined_path = _group_path(refined_group)
+            if not refined_path:
+                raise ValueError(f"{zarr_path.name}: refined detect group path could not be resolved.")
+            instances_path = f"{refined_path}/instances"
+            instances_group = root[instances_path]
+            if "bbox_norm_coords" not in instances_group:
+                raise ValueError(f"{instances_path} missing bbox_norm_coords in {zarr_path.name}.")
+            bbox_array_path = f"{instances_path}/bbox_norm_coords"
+            detection_source_type = "refined"
+            detection_source_path = instances_path
+            # Refined training labels come from the canonical curated surface,
+            # not from historical crop metadata that may point at an older run.
+            crop_run = None
+            crop_group = None
+            frame_indices_present = "frame_indices" in instances_group
+            detection_source_present = False
+            if "source_kind_codes" in instances_group:
+                phase_started = perf_counter()
+                source_kind_codes = np.asarray(instances_group["source_kind_codes"][:], dtype=np.int16)
+                unique, counts = np.unique(source_kind_codes, return_counts=True)
+                detection_source_counts = {str(int(k)): int(v) for k, v in zip(unique.tolist(), counts.tolist())}
+                includes_interpolated = bool(np.any(source_kind_codes == 2))
+                _log_timing(args.timing, f"{dataset_label}: read source_kind_codes", phase_started)
         if (
             detection_source_type == "refined"
             and refined_group is not None
@@ -1040,7 +1086,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 skipped.append(f"{zarr_path.name}: detect review not approved")
                 _log_timing(args.timing, f"{dataset_label}: skipped (detect review not approved)", dataset_started)
                 continue
-            if crop_group is None or crop_state != "approved":
+            if crop_group is not None and crop_state != "approved":
                 skipped.append(f"{zarr_path.name}: crop review not approved")
                 _log_timing(args.timing, f"{dataset_label}: skipped (crop review not approved)", dataset_started)
                 continue

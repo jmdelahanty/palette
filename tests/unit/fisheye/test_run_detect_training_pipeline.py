@@ -160,9 +160,13 @@ def test_export_merged_auto_sets_out_manifest_when_missing(tmp_path: Path, monke
     export_cli = calls["export"]
     manifest_path = Path(prepare_cli[prepare_cli.index("--out-manifest") + 1])
     expected_manifest_path = dataset_root / "detect_detect_smoke_v001" / "detect_detect_smoke_v001.manifest.json"
+    expected_source_manifest_path = (
+        dataset_root / "detect_detect_smoke_v001" / "detect_detect_smoke_v001.source.manifest.json"
+    )
     assert manifest_path.resolve() == expected_manifest_path.resolve()
+    assert expected_source_manifest_path.exists()
     assert "--manifest" in export_cli
-    assert str(manifest_path) in export_cli
+    assert str(expected_source_manifest_path) in export_cli
 
 
 def test_train_runs_detection_after_preflight(tmp_path: Path, monkeypatch) -> None:
@@ -485,6 +489,63 @@ def test_build_dataset_invokes_export_and_aggregator(tmp_path: Path, monkeypatch
     assert "--manifest" in calls["export"] and str(out_manifest) in calls["export"]
     assert "--registry" in calls["export"] and str(registry_path) in calls["export"]
     assert "--merge" in calls["export"]
+
+
+def test_registry_selection_dedupes_duplicate_zarr_paths(tmp_path: Path, monkeypatch) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "dataset_1.zarr"
+    db = Registry(registry_path)
+    _seed_dataset(db, "dataset_1", zarr_path)
+    _seed_dataset(db, "dataset_1:zpathhash", zarr_path)
+    db.upsert_detection_data_profile(
+        dataset_id="dataset_1:zpathhash",
+        profile_run="profile_1",
+        recording_id="recording_1",
+        zarr_use="training",
+        detection_type="instances",
+        detection_path="refined_detect_runs/refined_1/instances",
+        profile_created_utc="2026-05-13T00:00:00+00:00",
+        frames_total=10,
+        frames_with_detections=10,
+        coverage_percent=100.0,
+        detections_total=10,
+        detections_per_frame_p50=1.0,
+        detections_per_frame_p90=1.0,
+        w_p10=0.1,
+        w_p50=0.2,
+        w_p90=0.3,
+        h_p10=0.1,
+        h_p50=0.2,
+        h_p90=0.3,
+        area_p10=0.01,
+        area_p50=0.02,
+        area_p90=0.03,
+        aspect_ratio_p10=0.8,
+        aspect_ratio_p50=1.0,
+        aspect_ratio_p90=1.2,
+        edge_proximity_rate=0.0,
+        rig_id=None,
+        camera_id=None,
+        arena_id=None,
+        dish_design=None,
+        canvas_name=None,
+        protocol_name=None,
+        profile_json=None,
+    )
+    db.close()
+
+    calls: dict[str, list[str]] = {}
+
+    def fake_prepare(cli: list[str]) -> None:
+        calls["prepare"] = list(cli)
+
+    monkeypatch.setattr(pipeline.pdt, "main", fake_prepare)
+
+    rc = pipeline.main(["--registry", str(registry_path)])
+
+    assert rc == 0
+    prepare_cli = calls["prepare"]
+    assert prepare_cli.count(str(zarr_path)) == 1
 
 
 def test_build_dataset_cannot_be_combined_with_dry_run(tmp_path: Path) -> None:

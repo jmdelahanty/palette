@@ -41,8 +41,12 @@
 
 ## Medium-priority improvements
 
-- [ ] Make `consolidated_metadata` the explicit source of truth, but optionally
-  support a “materialize child attrs” helper for inspection/debug.
+- [ ] Record consolidated-metadata freshness as finalization provenance, while
+  keeping direct child metadata as the correctness source of truth for mutable
+  Palette stores.
+  - Future writers should refresh consolidated metadata after successful
+    mutations, but readers must still tolerate stale or absent consolidated
+    metadata on local working archives.
 - [ ] Add provenance validation utility:
   - Scan recordings and report missing provenance fields per run type
 - [ ] Store explicit run lineage per step:
@@ -55,8 +59,11 @@
 
 ## Open decisions
 
-- [ ] Should we mirror consolidated metadata into child `zarr.json` files, or keep
-  only consolidated metadata and require readers to merge?
+- [ ] Define the exact finalization helper API for refreshing consolidated
+  metadata after writer mutations.
+  - Direct child `zarr.json` metadata remains required for mutable stores.
+  - Consolidated metadata is a freshness/performance surface for finalized and
+    transferred stores, not the only reader contract.
 - [ ] Standardize `provenance` schema across all run types in `src/fisheye/shared/zarr/schema.py`.
 - [ ] Decide which environment details are required vs optional.
 

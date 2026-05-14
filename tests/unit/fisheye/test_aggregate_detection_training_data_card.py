@@ -12,6 +12,17 @@ from fisheye.registry.db import Registry
 from fisheye.utils import aggregate_detection_training_data_card as mod
 
 
+def test_refined_manifest_source_matches_instances_profile_surface() -> None:
+    assert mod._detection_source_type_matches_manifest(
+        manifest_source_type="refined",
+        profile_detection_type="instances",
+    )
+    assert not mod._detection_source_type_matches_manifest(
+        manifest_source_type="manual",
+        profile_detection_type="instances",
+    )
+
+
 def _seed_dataset(registry: Registry, *, dataset_id: str, recording_id: str, zarr_path: Path) -> None:
     zarr_path.mkdir(parents=True, exist_ok=True)
     registry.upsert_dataset(

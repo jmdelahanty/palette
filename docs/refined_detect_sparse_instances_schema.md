@@ -456,6 +456,19 @@ The resolved detect source should conceptually be:
 
 rather than `manual`, `filtered`, or `interpolated`.
 
+For `state=approved` and `intended_use=training`, `accept_detect_review` and
+interactive `detect_review` approval also materialize a detection-data profile
+from the resolved source. Current sparse runs should therefore produce:
+
+- `analysis/detection_profile_runs/<profile_run>/attrs["source_detection_path"]`
+  equal to `refined_detect_runs/<run>/instances`
+- source-content fingerprint attrs for the profiled arrays
+- run-lineage fingerprint attrs for the profile run itself
+- a best-effort registry projection update when the Zarr is registered
+
+This keeps save/edit mutable, keeps approval explicit, and makes the approved
+training surface queryable without requiring a separate manual registry sync.
+
 ## Consumer Rules
 
 ### General detect readers

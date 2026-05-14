@@ -34,7 +34,12 @@ def _write_base_detect_config(path: Path) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
-def _create_minimal_detect_zarr(path: Path, *, session_uuid: str = "session_smoke_001") -> None:
+def _create_minimal_detect_zarr(
+    path: Path,
+    *,
+    session_uuid: str = "session_smoke_001",
+    include_crop: bool = True,
+) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["session_uuid"] = session_uuid
 
@@ -69,28 +74,29 @@ def _create_minimal_detect_zarr(path: Path, *, session_uuid: str = "session_smok
     refined.attrs["source_detect_run"] = "detect_smoke_001"
     refined.attrs["detect_review_status"] = {"state": "approved", "resolved_group": "refined"}
 
-    crop_parent = root.create_group("crop_runs")
-    crop_parent.attrs["latest"] = "crop_smoke_001"
-    crop_group = crop_parent.create_group("crop_smoke_001")
-    crop_group.attrs["detection_source_type"] = "refined"
-    crop_group.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_smoke_001/instances"
-    crop_group.attrs["detect_review_status"] = {"state": "approved"}
-    crop_group.attrs["crop_review_status"] = {"state": "approved"}
-    crop_group.create_array(
-        "bbox_norm_coords",
-        data=np.array([[0.5, 0.5, 0.2, 0.2]], dtype=np.float32),
-        chunks=(1, 4),
-    )
-    crop_group.create_array(
-        "detection_source",
-        data=np.array([0], dtype=np.int8),
-        chunks=(1,),
-    )
-    crop_group.create_array(
-        "frame_indices",
-        data=np.array([0], dtype=np.int64),
-        chunks=(1,),
-    )
+    if include_crop:
+        crop_parent = root.create_group("crop_runs")
+        crop_parent.attrs["latest"] = "crop_smoke_001"
+        crop_group = crop_parent.create_group("crop_smoke_001")
+        crop_group.attrs["detection_source_type"] = "refined"
+        crop_group.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_smoke_001/instances"
+        crop_group.attrs["detect_review_status"] = {"state": "approved"}
+        crop_group.attrs["crop_review_status"] = {"state": "approved"}
+        crop_group.create_array(
+            "bbox_norm_coords",
+            data=np.array([[0.5, 0.5, 0.2, 0.2]], dtype=np.float32),
+            chunks=(1, 4),
+        )
+        crop_group.create_array(
+            "detection_source",
+            data=np.array([0], dtype=np.int8),
+            chunks=(1,),
+        )
+        crop_group.create_array(
+            "frame_indices",
+            data=np.array([0], dtype=np.int64),
+            chunks=(1,),
+        )
 
 
 def test_prepare_detect_training_persists_invocation_metadata(monkeypatch, tmp_path: Path) -> None:
@@ -209,6 +215,105 @@ def test_prepare_detect_training_preserves_set_id_with_explicit_out_config(monke
             ("detect_smoke_set_v001",),
         ).fetchone()
     assert row is not None
+
+
+def test_prepare_detect_training_uses_refined_surface_without_crop_for_sampled_training_zarr(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sampled_training.zarr"
+    _create_minimal_detect_zarr(zarr_path, include_crop=False)
+
+    base_config_path = tmp_path / "detect_config.yaml"
+    _write_base_detect_config(base_config_path)
+
+    monkeypatch.chdir(tmp_path)
+    out_config = tmp_path / "custom" / "detect_custom.yaml"
+    prepare_detect_training.main(
+        [
+            str(zarr_path),
+            "--base-config",
+            str(base_config_path),
+            "--source-type",
+            "refined",
+            "--out-config",
+            str(out_config),
+        ]
+    )
+
+    manifest = json.loads(out_config.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    dataset = manifest["datasets"][0]
+    assert dataset.get("crop_run") is None
+    assert dataset["detection_source_type"] == "refined"
+    assert dataset["bbox_array_path"] == (
+        "refined_detect_runs/refined_detect_smoke_001/instances/bbox_norm_coords"
+    )
+    assert dataset["detection_source_path"] == "refined_detect_runs/refined_detect_smoke_001/instances"
+    assert dataset["manual_edited_bboxes"] == 1
+
+
+def test_prepare_detect_training_refined_source_ignores_stale_crop_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sampled_training.zarr"
+    _create_minimal_detect_zarr(zarr_path, include_crop=True)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["crop_runs"]["crop_smoke_001"].attrs["detect_review_status_ref"] = (
+        "refined_detect_runs/refined_detect_smoke_001"
+    )
+    refined_parent = root["refined_detect_runs"]
+    refined_parent.attrs["latest"] = "refined_detect_smoke_002"
+    refined = refined_parent.create_group("refined_detect_smoke_002")
+    instances = refined.create_group("instances")
+    instances.create_array("refined_row_ids", data=np.array([0, 1], dtype=np.int64), chunks=(2,))
+    instances.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32), chunks=(2,))
+    instances.create_array("frame_offsets", data=np.array([0, 1, 2], dtype=np.int64), chunks=(3,))
+    instances.create_array(
+        "bbox_img_xyxy",
+        data=np.array([[2.0, 2.0, 8.0, 8.0], [3.0, 3.0, 9.0, 9.0]], dtype=np.float64),
+        chunks=(2, 4),
+    )
+    instances.create_array(
+        "bbox_norm_coords",
+        data=np.array([[0.5, 0.5, 0.2, 0.2], [0.6, 0.6, 0.2, 0.2]], dtype=np.float64),
+        chunks=(2, 4),
+    )
+    instances.create_array("source_kind_codes", data=np.array([1, 1], dtype=np.int8), chunks=(2,))
+    instances.create_array("manual_edit_flags", data=np.array([True, True], dtype=bool), chunks=(2,))
+    instances.create_array("source_detect_row_index", data=np.array([0, 1], dtype=np.int32), chunks=(2,))
+    instances.create_array("frame_counts", data=np.array([1, 1], dtype=np.int32), chunks=(2,))
+    refined.attrs["source_detect_run"] = "detect_smoke_001"
+    refined.attrs["detect_review_status"] = {"state": "approved", "resolved_group": "refined"}
+
+    base_config_path = tmp_path / "detect_config.yaml"
+    _write_base_detect_config(base_config_path)
+
+    monkeypatch.chdir(tmp_path)
+    out_config = tmp_path / "custom" / "detect_custom.yaml"
+    prepare_detect_training.main(
+        [
+            str(zarr_path),
+            "--base-config",
+            str(base_config_path),
+            "--source-type",
+            "refined",
+            "--out-config",
+            str(out_config),
+        ]
+    )
+
+    manifest = json.loads(out_config.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    dataset = manifest["datasets"][0]
+    assert dataset.get("crop_run") is None
+    assert dataset["detection_source_type"] == "refined"
+    assert dataset["bbox_array_path"] == (
+        "refined_detect_runs/refined_detect_smoke_002/instances/bbox_norm_coords"
+    )
+    assert dataset["detection_source_path"] == "refined_detect_runs/refined_detect_smoke_002/instances"
+    assert dataset["total_bboxes"] == 2
+    assert dataset["manual_edited_bboxes"] == 2
 
 
 def test_prepare_detect_training_manifest_prefers_canonical_registry_dataset_id(

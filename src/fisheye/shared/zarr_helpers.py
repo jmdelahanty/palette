@@ -214,11 +214,23 @@ def _open_mode(root: zarr.Group) -> str:
     return "r"
 
 
-def _open_group_direct(path: Path, *, mode: str) -> zarr.Group:
+def open_zarr_group_direct(path: str | Path, *, mode: str) -> zarr.Group:
+    """Open a local Zarr group without using consolidated metadata.
+
+    Palette writers often create new run groups and update ``latest`` attrs
+    during review/finalization workflows. Direct metadata reads avoid stale
+    consolidated-metadata views in local mutable stores.
+    """
+
+    resolved = Path(path)
     try:
-        return zarr.open_group(str(path), mode=mode, use_consolidated=False)
+        return zarr.open_group(str(resolved), mode=mode, use_consolidated=False)
     except TypeError:
-        return zarr.open_group(str(path), mode=mode, consolidated=False)
+        return zarr.open_group(str(resolved), mode=mode, consolidated=False)
+
+
+def _open_group_direct(path: Path, *, mode: str) -> zarr.Group:
+    return open_zarr_group_direct(path, mode=mode)
 
 
 def _direct_group_names(path: Path | None) -> list[str]:

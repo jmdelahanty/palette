@@ -554,6 +554,63 @@ def test_write_curated_refined_detect_surfaces_preserves_multi_instance_frames()
     assert "status_codes" not in refined
 
 
+def test_write_curated_refined_detect_surfaces_uses_detect_frame_source_dimensions() -> None:
+    root = _FakeGroup()
+
+    raw = root.create_group("raw_video")
+    raw.attrs["video_width"] = 4512
+    raw.attrs["video_height"] = 4512
+    raw.attrs["total_frames"] = 3
+
+    detect_parent = root.create_group("detect_runs")
+    detect_parent.attrs["latest"] = "detect_seed"
+    detect_group = detect_parent.create_group("detect_seed")
+    detect_group.attrs["frame_source_shape"] = [3, 640, 640]
+    detect_group.attrs["frame_source_path"] = "raw_video/images_ds"
+    _write_sparse_group(
+        detect_group,
+        frame_indices=np.asarray([0], dtype=np.int32),
+        bbox_norm_coords=np.asarray([[0.5, 0.5, 0.25, 0.25]], dtype=np.float64),
+        scores=np.asarray([0.85], dtype=np.float32),
+        class_ids=np.asarray([0], dtype=np.int32),
+        reason_labels=np.asarray(["raw"], dtype=object),
+    )
+
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_seed"
+    refined = refined_parent.create_group("refined_detect_seed")
+    refined.attrs["source_detect_run"] = "detect_seed"
+    refined.attrs["coverage_frames_total"] = 3
+
+    write_curated_refined_detect_surfaces(
+        root,  # type: ignore[arg-type]
+        refined_run_name="refined_detect_seed",
+        instance_frame_indices=np.asarray([0], dtype=np.int32),
+        instance_bbox_norm_coords=np.asarray([[0.5, 0.5, 0.25, 0.25]], dtype=np.float64),
+        instance_source_kind_labels=np.asarray(["raw_detect"], dtype=object),
+        instance_reason_labels=np.asarray(["clean"], dtype=object),
+        instance_source_detect_row_index=np.asarray([0], dtype=np.int32),
+        instance_confidence_scores=np.asarray([0.85], dtype=np.float32),
+        instance_class_ids=np.asarray([0], dtype=np.int32),
+        source_detection_source_detect_row_index=np.asarray([0], dtype=np.int32),
+        source_detection_frame_indices=np.asarray([0], dtype=np.int32),
+        source_detection_bbox_norm_coords=np.asarray([[0.5, 0.5, 0.25, 0.25]], dtype=np.float64),
+        source_detection_decision_labels=np.asarray(["accepted"], dtype=object),
+        source_detection_reason_labels=np.asarray(["clean"], dtype=object),
+        source_detection_confidence_scores=np.asarray([0.85], dtype=np.float32),
+        source_detection_class_ids=np.asarray([0], dtype=np.int32),
+    )
+
+    np.testing.assert_allclose(
+        refined["instances"]["bbox_img_xyxy"][:],
+        np.asarray([[240.0, 240.0, 400.0, 400.0]], dtype=np.float64),
+    )
+    np.testing.assert_allclose(
+        refined["source_detections"]["bbox_img_xyxy"][:],
+        np.asarray([[240.0, 240.0, 400.0, 400.0]], dtype=np.float64),
+    )
+
+
 def test_write_curated_refined_detect_surfaces_reuses_existing_sparse_groups_on_rerun() -> None:
     root = _build_root(group_cls=_OpaqueExistingGroup)
 

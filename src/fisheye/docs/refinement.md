@@ -22,6 +22,15 @@ consuming raw detect quality labels and writing sparse `instances/` plus
 
 Core semantics:
 
+- Raw `detect_runs/<run>` outputs are immutable model/blob outputs. Spatial
+  cleanup belongs in the refined run, not by rewriting raw predictions.
+- If `analysis_metadata.attrs["dish_mask"]` exists, refinement applies it as a
+  bbox-center gate after raw quality labels are resolved and before curated
+  `instances/` are selected. Outside-dish candidates remain auditable in
+  `source_detections` with reason `outside_dish_mask`.
+- `--per-frame-top-k` is a curated-surface selection policy. Non-top clean
+  candidates remain in `source_detections` as `duplicate` with reason
+  `per_frame_top_k_excluded`.
 - `status_codes` is the machine-readable row state:
   - `present`
   - `missing`
@@ -36,6 +45,11 @@ Core semantics:
   state.
 - current sparse-first runs should normally resolve review status to
   `resolved_group="refined"`, not to legacy subgroup names
+
+`ambiguous` means the dense/single-slot compatibility view cannot represent a
+frame as one obvious detection, usually because there are multiple source
+candidates or multiple curated instances for that frame. It is a review/UI
+state, not a biological label and not automatically a failed detection.
 
 `fisheye.tune.detect_review` now supports:
 

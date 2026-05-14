@@ -197,6 +197,32 @@ def test_default_set_name_uses_mixed_rigs_token_for_multiple_rigs() -> None:
     assert len(name.rsplit("_", 1)[-1]) == 8
 
 
+def test_dedupe_rows_by_zarr_path_prefers_quality_and_profile_row(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "dataset.zarr"
+    rows = [
+        {"dataset_id": "dataset_base", "zarr_path": str(zarr_path)},
+        {"dataset_id": "dataset_base:zpathhash", "zarr_path": str(zarr_path)},
+    ]
+
+    deduped, skipped = wrapper._dedupe_rows_by_zarr_path(
+        rows,
+        selected_quality_rows_by_dataset={
+            "dataset_base": {"review_state": "approved"},
+            "dataset_base:zpathhash": {"review_state": "approved"},
+        },
+        profile_dataset_ids={"dataset_base:zpathhash"},
+    )
+
+    assert [row["dataset_id"] for row in deduped] == ["dataset_base:zpathhash"]
+    assert skipped == [
+        {
+            "dataset_id": "dataset_base",
+            "zarr_path": str(zarr_path),
+            "kept_dataset_id": "dataset_base:zpathhash",
+        }
+    ]
+
+
 def test_auto_out_manifest_is_set_when_out_config_is_given(tmp_path: Path, monkeypatch) -> None:
     registry_path = tmp_path / "registry.sqlite"
     out_config = tmp_path / "prep" / "detect.yaml"

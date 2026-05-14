@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import List, Optional
@@ -55,6 +56,40 @@ def _require_manifest_set_id(manifest_path: Path) -> str:
             "Use --set-name (recommended) so preflight writes set_id."
         )
     return set_id
+
+
+def _preserve_merge_source_manifest(
+    *,
+    preflight_manifest_path: Path,
+    merge_out_dir: Optional[Path],
+) -> Path:
+    """Keep the source-selection manifest distinct from the merged manifest.
+
+    Merged exports write ``<set_id>.manifest.json`` in the merge output
+    directory. When the preflight manifest already has that path, preserve the
+    source-selection manifest under ``<set_id>.source.manifest.json`` so root
+    provenance hashes continue to refer to immutable content.
+    """
+
+    merged_config, merged_manifest = _resolve_merged_training_paths(
+        preflight_manifest_path=preflight_manifest_path,
+        merge_out_dir=merge_out_dir,
+    )
+    del merged_config
+    try:
+        same_path = preflight_manifest_path.resolve() == merged_manifest.resolve()
+    except FileNotFoundError:
+        same_path = preflight_manifest_path.absolute() == merged_manifest.absolute()
+    if not same_path:
+        return preflight_manifest_path
+
+    source_manifest = preflight_manifest_path.with_name(
+        f"{preflight_manifest_path.stem.removesuffix('.manifest')}.source.manifest.json"
+    )
+    source_manifest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(preflight_manifest_path, source_manifest)
+    print(f"Preserved source manifest: {source_manifest}")
+    return source_manifest
 
 
 def _run_training(
@@ -514,6 +549,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not rows:
         raise SystemExit("No datasets remain after refined detect review filtering.")
 
+    profile_dataset_ids = prepare_from_registry._profile_dataset_ids_for_rows(registry, rows)
+    rows, duplicate_rows = prepare_from_registry._dedupe_rows_by_zarr_path(
+        rows,
+        selected_quality_rows_by_dataset=selected_quality_rows_by_dataset,
+        profile_dataset_ids=profile_dataset_ids,
+    )
+    if duplicate_rows:
+        print(
+            f"Skipped {len(duplicate_rows)} duplicate registry row(s) that point to an already-selected Zarr path:"
+        )
+        for duplicate in duplicate_rows[:20]:
+            print(
+                f"  - {duplicate['dataset_id']} -> {duplicate['zarr_path']} "
+                f"(kept {duplicate['kept_dataset_id']})"
+            )
+        if len(duplicate_rows) > 20:
+            print(f"  ... {len(duplicate_rows) - 20} more duplicate(s) omitted.")
+    if not rows:
+        raise SystemExit("No datasets remain after duplicate Zarr-path filtering.")
+
     zarr_paths = [Path(row["zarr_path"]) for row in rows]
 
     if quality_gate_active:
@@ -659,6 +714,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         manifest_path = Path(args.out_manifest)
         if not manifest_path.exists():
             raise SystemExit(f"Expected manifest not found after preflight: {manifest_path}")
+        manifest_path = _preserve_merge_source_manifest(
+            preflight_manifest_path=manifest_path,
+            merge_out_dir=args.merge_out_dir,
+        )
         export_cli: List[str] = [
             "--manifest",
             str(manifest_path),

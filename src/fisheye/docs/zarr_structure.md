@@ -404,7 +404,8 @@ Common attrs on `refined_detect_runs/<run>`:
 - `source_detect_run`, `source_quality_run`
 - `refinement_timestamp`, `processing_time_seconds`
 - `operations`
-- `parameters`
+- `parameters` (includes curated selection policy such as `dish_mask_gate` and
+  `top_k_selection` when used)
 - `coverage_frames_total` (frame universe used for coverage percent)
 - `coverage_frame_source` (`full` or `sampled`)
 - `coverage_frames_full` (full frame count when sampled coverage is used)
@@ -423,7 +424,7 @@ Parent attrs on `refined_detect_runs/`:
 
 `detect_review_status` payload fields (may be extended over time):
 - `state` (e.g., approved/needs_review)
-- `method` (manual/retune/auto)
+- `method` (manual/algorithmic/hybrid/spotcheck)
 - `intended_use` (training/analysis/etc.)
 - `timestamp`
 - `resolved_group` (`refined` for current runs; legacy runs may still use manual/interpolated/filtered/raw)
@@ -446,6 +447,9 @@ Current review/runtime note:
   per `(frame, arena_id)`
 - unconstrained multiple curated detections inside the same arena/ROI are not
   yet supported by the manual detect-review UI
+- `ambiguous` in dense/single-slot views means the frame cannot be represented
+  as one obvious detection, usually because multiple source candidates or
+  multiple curated instances exist for that frame
 
 ### Sparse Curated Read Surfaces
 

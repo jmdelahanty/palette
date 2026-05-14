@@ -128,6 +128,213 @@ def test_subject_mask_training_run_populates_model_discovery_metadata(tmp_path: 
     registry.close()
 
 
+def test_training_model_input_shape_fields_from_final_metrics(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    model_path = tmp_path / "best.pt"
+    model_path.write_text("weights", encoding="utf-8")
+
+    registry.record_training_run(
+        run_id="detect_run_640",
+        set_id="detect_set",
+        task_type="detect",
+        config_path=None,
+        manifest_path=None,
+        model_path=model_path,
+        metrics_path=None,
+        model_sha256="model_sha",
+        status="success",
+        final_metrics={
+            "stage": "completed",
+            "imgsz_h": 640,
+            "imgsz_w": 640,
+        },
+    )
+
+    row = registry.conn.execute(
+        """
+        SELECT
+            input_shape,
+            input_layout,
+            input_channels,
+            img_h,
+            img_w,
+            max_batch,
+            dynamic_shapes,
+            input_dtype,
+            input_color_space,
+            input_shape_source,
+            input_shape_status
+        FROM training_models
+        WHERE run_id = ?;
+        """,
+        ("detect_run_640",),
+    ).fetchone()
+    assert row is not None
+    assert json.loads(row["input_shape"]) == [1, 3, 640, 640]
+    assert row["input_layout"] == "NCHW"
+    assert row["input_channels"] == 3
+    assert row["img_h"] == 640
+    assert row["img_w"] == 640
+    assert row["max_batch"] == 1
+    assert row["dynamic_shapes"] == 0
+    assert row["input_dtype"] == "float32"
+    assert row["input_color_space"] == "rgb"
+    assert row["input_shape_source"] == "final_metrics.imgsz_h_imgsz_w"
+    assert row["input_shape_status"] == "inferred_from_imgsz"
+
+    view_row = registry.conn.execute(
+        """
+        SELECT artifact_kind, task_type, artifact_path, input_shape, img_h, img_w
+        FROM model_input_shapes
+        WHERE run_id = ? AND artifact_kind = 'training';
+        """,
+        ("detect_run_640",),
+    ).fetchone()
+    assert view_row is not None
+    assert view_row["task_type"] == "detect"
+    assert view_row["artifact_path"] == str(model_path)
+    assert json.loads(view_row["input_shape"]) == [1, 3, 640, 640]
+    assert view_row["img_h"] == 640
+    assert view_row["img_w"] == 640
+    registry.close()
+
+
+def test_model_input_shapes_view_keeps_artifacts_separate(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    model_path = tmp_path / "best.pt"
+    onnx_path = tmp_path / "best.onnx"
+    trt_path = tmp_path / "best_fp16.engine"
+    model_path.write_text("weights", encoding="utf-8")
+    onnx_path.write_text("onnx", encoding="utf-8")
+    trt_path.write_text("trt", encoding="utf-8")
+
+    registry.record_training_run(
+        run_id="detect_run_exports",
+        set_id="detect_set",
+        task_type="detect",
+        config_path=None,
+        manifest_path=None,
+        model_path=model_path,
+        metrics_path=None,
+        status="success",
+        final_metrics={"effective_imgsz": [640, 640]},
+    )
+    registry.record_onnx_model(
+        run_id="detect_run_exports",
+        set_id="detect_set",
+        detection_model_run_id="detect_run_exports",
+        path=onnx_path,
+        sha256="onnx_sha",
+        manifest_path=None,
+        manifest_sha256=None,
+        input_shape="[1, 3, 640, 640]",
+        img_h=640,
+        img_w=640,
+        max_batch=1,
+        dynamic_shapes=False,
+    )
+    registry.record_tensorrt_model(
+        run_id="detect_run_exports",
+        set_id="detect_set",
+        detection_model_run_id="detect_run_exports",
+        onnx_run_id="detect_run_exports",
+        precision="fp16",
+        path=trt_path,
+        sha256="trt_sha",
+        manifest_path=None,
+        manifest_sha256=None,
+        input_shape="[1, 3, 640, 640]",
+        img_h=640,
+        img_w=640,
+        max_batch=8,
+        dynamic_shapes=False,
+    )
+
+    rows = registry.conn.execute(
+        """
+        SELECT artifact_kind, artifact_precision, artifact_path, max_batch
+        FROM model_input_shapes
+        WHERE run_id = ?
+        ORDER BY artifact_kind;
+        """,
+        ("detect_run_exports",),
+    ).fetchall()
+    assert [row["artifact_kind"] for row in rows] == ["onnx", "tensorrt", "training"]
+    assert {row["artifact_path"] for row in rows} == {
+        str(model_path),
+        str(onnx_path),
+        str(trt_path),
+    }
+    assert [row["artifact_precision"] for row in rows if row["artifact_kind"] == "tensorrt"] == ["fp16"]
+    assert [row["max_batch"] for row in rows if row["artifact_kind"] == "tensorrt"] == [8]
+    registry.close()
+
+
+def test_model_input_shape_migration_backfills_and_flags_export_conflict(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.record_training_run(
+        run_id="detect_conflict",
+        set_id="detect_set",
+        task_type="detect",
+        config_path=None,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+        final_metrics={"imgsz_h": 640, "imgsz_w": 640},
+    )
+    registry.record_onnx_model(
+        run_id="detect_conflict",
+        set_id="detect_set",
+        detection_model_run_id="detect_conflict",
+        path=tmp_path / "conflict.onnx",
+        sha256=None,
+        manifest_path=None,
+        manifest_sha256=None,
+        input_shape="[1, 3, 320, 320]",
+        img_h=320,
+        img_w=320,
+    )
+    registry.conn.execute(
+        """
+        UPDATE training_models
+        SET input_shape = NULL,
+            input_layout = NULL,
+            input_channels = NULL,
+            img_h = NULL,
+            img_w = NULL,
+            max_batch = NULL,
+            dynamic_shapes = NULL,
+            input_dtype = NULL,
+            input_color_space = NULL,
+            input_shape_source = NULL,
+            input_shape_status = NULL
+        WHERE run_id = ?;
+        """,
+        ("detect_conflict",),
+    )
+
+    registry._migration_049_model_input_shape_registry()
+
+    row = registry.conn.execute(
+        """
+        SELECT input_shape, img_h, img_w, input_shape_status, metadata_json
+        FROM training_models
+        WHERE run_id = ?;
+        """,
+        ("detect_conflict",),
+    ).fetchone()
+    assert row is not None
+    assert json.loads(row["input_shape"]) == [1, 3, 640, 640]
+    assert row["img_h"] == 640
+    assert row["img_w"] == 640
+    assert row["input_shape_status"] == "conflict"
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["input_shape_conflict"]["export"]["img_h"] == 320
+    assert metadata["input_shape_conflict"]["training"]["img_h"] == 640
+    registry.close()
+
+
 def test_subject_mask_model_discovery_backfill_preserves_existing_metadata(
     tmp_path: Path,
 ) -> None:

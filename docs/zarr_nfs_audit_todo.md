@@ -18,7 +18,10 @@ Related policy sketch:
 - kvikIO/GDS import path uses `use_sharding`; default `false` means **chunk-only**.
 - Derived arrays (crops, detections, keypoints, masks, etc.) are chunked, not sharded.
 - Many call sites open Zarr directly instead of using `open_zarr_root`.
-- No explicit consolidated-metadata step is run after writes.
+- No explicit consolidated-metadata finalization step is run after most writes.
+- Direct `zarr.json` metadata is currently the correctness path for mutable
+  local stores; consolidated metadata may be stale and readers need a direct
+  metadata fallback.
 
 ## Current measured observations (2026-04-03)
 
@@ -66,6 +69,13 @@ Implication:
 4. Explore sharding for `crop_runs` (large, high-count arrays).
 5. Decide on a default sharding policy for NFS (target shard size in MB).
 6. Evaluate consolidated metadata support and add optional finalize step.
+   - Add a shared `finalize_zarr_mutation`-style helper for writers.
+   - Consolidate only after arrays, direct attrs, indexes, and parent `latest`
+     attrs are complete.
+   - Record consolidation freshness/status in provenance.
+   - Ensure consolidation is never done by parallel workers writing chunks.
+   - Add an audit command that reports missing/stale consolidated metadata but
+     validates direct metadata as the authoritative mutable-store surface.
 7. Route all open calls through `open_zarr_root` for future store changes.
 8. Benchmark movement to external storage:
    - raw `.zarr` directory copy
@@ -113,6 +123,9 @@ Implication:
 - Add an audit/report path that flags arrays which violate the canonical chunk
   contract for their stage family.
 - Define file-count warning thresholds for finalized online stores.
+- Define consolidated-metadata freshness policy for finalized and transfer
+  artifacts, while keeping direct metadata authoritative for mutable working
+  stores.
 
 ## Success criteria
 

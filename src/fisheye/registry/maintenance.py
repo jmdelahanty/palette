@@ -3731,10 +3731,7 @@ def _backfill_detect_quality(
             continue
 
         try:
-            try:
-                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-            except TypeError:
-                root = zarr.open_group(str(zarr_path), mode="r")
+            root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
             extracted_rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
         except Exception:
             summary["datasets_errors"] += 1

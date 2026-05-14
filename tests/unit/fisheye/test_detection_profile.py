@@ -269,10 +269,16 @@ def test_write_detection_profile_writes_run_attrs_and_latest_pointer() -> None:
     assert run_group.attrs["schema_version"] == "v1"
     assert run_group.attrs["source_detection_path"] == "detect_runs/detect_001"
     assert run_group.attrs["source_detection_type"] == "detect"
+    assert len(run_group.attrs["source_detection_content_hash"]) == 64
+    assert run_group.attrs["source_detection_content_fingerprint_schema_id"].startswith("palette.")
+    assert "bbox_norm_coords" in run_group.attrs["source_detection_content_hash_arrays"]
+    assert run_group.attrs["fingerprint_status"] == "complete"
+    assert len(run_group.attrs["source_fingerprint"]) == 64
     assert run_group.attrs["source_resolution"] == "full"
     assert run_group.attrs["source_frame_count"] == 6
     assert run_group.attrs["source_frame_count_full"] is None
     assert isinstance(run_group.attrs["profile_summary"], dict)
+    assert run_group.attrs["profile_summary"]["source"]["content_hash"] == run_group.attrs["source_detection_content_hash"]
 
 
 def test_write_detection_profile_reuses_existing_runs_parent() -> None:

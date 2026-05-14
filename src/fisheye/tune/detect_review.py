@@ -1,9 +1,9 @@
 """
 Manual review tool for detection runs.
 
-Current refined detect review still operates through a single-instance-per-frame
-compatibility view on refined_detect_runs/<run>.
-Legacy sparse archives still write edits to refined_detect_runs/<run>/<output_group>.
+Current refined detect review edits the canonical sparse
+refined_detect_runs/<run>/instances surface through a single-instance-per-frame
+compatibility view. Legacy subgroup reads remain fallback-only.
 """
 
 from __future__ import annotations
@@ -41,6 +41,11 @@ from fisheye.shared.refined_detect_curation import (
     write_curated_refined_detect_surfaces,
 )
 from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.utils.accept_detect_review import (
+    _pick_refined_parent_name,
+    _write_profile_and_sync_registry,
+)
 from fisheye.utils.system import get_environment_info
 
 
@@ -1263,8 +1268,13 @@ def run_manual_review(
     reviewer: Optional[str] = None,
     review_notes: Optional[str] = None,
     update_curated: bool = True,
+    profile_run: Optional[str] = None,
+    overwrite_profile: bool = False,
+    skip_detection_profile: bool = False,
+    registry: Optional[Path] = None,
+    sync_registry: bool = True,
 ) -> None:
-    root = zarr.open_group(zarr_path, mode="a")
+    root = open_zarr_group_direct(zarr_path, mode="a")
 
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is None:
@@ -1393,7 +1403,7 @@ def run_manual_review(
         arena_definitions = []
         arena_roi_lookup: Dict[int, Tuple[int, int, int, int]] = {}
 
-    def _apply_review_status() -> None:
+    def _apply_review_status() -> Dict[str, object]:
         resolved = resolve_detect_review_target(
             root,
             refined_run_name=refined_run_name,
@@ -1416,6 +1426,41 @@ def run_manual_review(
         refined_run.attrs["detect_review_status"] = payload
         refined_parent.attrs["detect_review_status_latest"] = refined_run_name
         print(f"Set detect_review_status on refined_detect_runs/{refined_run_name}")
+        return payload
+
+    def _finalize_detection_profile_if_approved(
+        status_payload: Mapping[str, object],
+        *,
+        profile_target_group: Optional[str],
+    ) -> None:
+        if skip_detection_profile:
+            print("Detection profile: skipped by --skip-detection-profile")
+            return
+        if review_state != "approved" or review_intended_use != "training":
+            return
+        refined_parent_name = _pick_refined_parent_name(root)
+        if refined_parent_name is None:
+            print("Detection profile: skipped; refined detect parent not found")
+            return
+        result = _write_profile_and_sync_registry(
+            root=root,
+            zarr_path=Path(zarr_path),
+            refined_parent_name=refined_parent_name,
+            refined_run_name=refined_run_name,
+            refined_run=refined_run,
+            target_group=profile_target_group,
+            resolved_group=str(status_payload.get("resolved_group") or ""),
+            profile_run=profile_run,
+            overwrite_profile=overwrite_profile,
+            registry_path=registry,
+            sync_registry=sync_registry,
+            dry_run=False,
+        )
+        print(f"Detection profile: {result.get('status')}")
+        print(f"Detection profile run: {result.get('profile_run') or '—'}")
+        registry_sync = result.get("registry_sync")
+        if isinstance(registry_sync, Mapping):
+            print(f"Detection profile registry sync: {registry_sync.get('status')}")
 
     def _current_review_key() -> object:
         current_row = int(review_rows[idx_pos])
@@ -1666,7 +1711,11 @@ def run_manual_review(
     if not manual_changes:
         print("No manual changes recorded.")
         if approve_on_exit:
-            _apply_review_status()
+            status_payload = _apply_review_status()
+            _finalize_detection_profile_if_approved(
+                status_payload,
+                profile_target_group=variant,
+            )
         return
 
     if dense_payload is not None:
@@ -1678,9 +1727,6 @@ def run_manual_review(
                 f"Note: output_group='{output_group}' is ignored for refined runs; "
                 "manual edits are written to the canonical curated surface."
             )
-
-        if approve_on_exit:
-            _apply_review_status()
 
         if review_axis == "frame_arena":
             arena_manual_changes = {
@@ -1785,7 +1831,12 @@ def run_manual_review(
         )
         print(f"Saved manual detections to refined_detect_runs/{refined_run_name} (canonical curated surface)")
         if approve_on_exit:
+            status_payload = _apply_review_status()
             print(f"Applied detect_review_status to refined_detect_runs/{refined_run_name}")
+            _finalize_detection_profile_if_approved(
+                status_payload,
+                profile_target_group=variant,
+            )
         return
 
     # Build updated detection arrays
@@ -1897,7 +1948,11 @@ def run_manual_review(
             source_group=output_group,
         )
     if approve_on_exit:
-        _apply_review_status()
+        status_payload = _apply_review_status()
+        _finalize_detection_profile_if_approved(
+            status_payload,
+            profile_target_group=output_group,
+        )
 
 
 def _detect_frames_with_params(
@@ -2026,7 +2081,7 @@ def run_retune_interactive(
     target_frames: Optional[np.ndarray] = None,
 ) -> None:
     console = Console()
-    root = zarr.open_group(zarr_path, mode="a")
+    root = open_zarr_group_direct(zarr_path, mode="a")
 
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is None:
@@ -2220,7 +2275,7 @@ def run_retune_review(
     param_source_override: Optional[str] = None,
 ) -> None:
     console = Console()
-    root = zarr.open_group(zarr_path, mode="a")
+    root = open_zarr_group_direct(zarr_path, mode="a")
 
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is None:
@@ -2620,6 +2675,36 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("--reviewer", help="Reviewer name (defaults to $USER).")
     parser.add_argument("--review-notes", help="Optional review notes.")
     parser.add_argument(
+        "--profile-run",
+        help=(
+            "Optional detection-profile run name to write when approving training labels. "
+            "By default a timestamped run name is generated."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite-profile",
+        action="store_true",
+        help="Allow replacing an existing detection-profile run named by --profile-run.",
+    )
+    parser.add_argument(
+        "--skip-detection-profile",
+        action="store_true",
+        help="Do not materialize analysis/detection_profile_runs when approving for training.",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "Optional registry SQLite path for automatic detection-profile sync. "
+            "Defaults to PALETTE_REGISTRY_PATH/config only when that path already exists."
+        ),
+    )
+    parser.add_argument(
+        "--no-registry-sync",
+        action="store_true",
+        help="Write the Zarr detection profile but do not sync registry projection rows.",
+    )
+    parser.add_argument(
         "--no-update-curated",
         action="store_true",
         help="Skip updating the canonical refined-detect root arrays after manual saves.",
@@ -2681,6 +2766,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             reviewer=args.reviewer,
             review_notes=args.review_notes,
             update_curated=not args.no_update_curated,
+            profile_run=args.profile_run,
+            overwrite_profile=args.overwrite_profile,
+            skip_detection_profile=args.skip_detection_profile,
+            registry=args.registry,
+            sync_registry=not args.no_registry_sync,
         )
 
 

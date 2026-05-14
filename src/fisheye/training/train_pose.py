@@ -1472,9 +1472,13 @@ def main(args) -> int:
 
     if args.log_registry:
         metrics_path = results.save_dir / "results.csv"
+        effective_img_h, effective_img_w = _normalize_imgsz(training_params.get("imgsz"))
         final_metrics_payload = dict(final_validation_metrics or {})
         final_metrics_payload.setdefault("stage", "completed")
         final_metrics_payload.setdefault("status_detail", "training_complete")
+        final_metrics_payload.setdefault("imgsz_h", int(effective_img_h))
+        final_metrics_payload.setdefault("imgsz_w", int(effective_img_w))
+        final_metrics_payload.setdefault("effective_imgsz", [int(effective_img_h), int(effective_img_w)])
         if export_artifacts:
             final_metrics_payload["export_onnx"] = bool(export_artifacts.get("onnx_path"))
             final_metrics_payload["export_trt"] = bool(export_artifacts.get("engine_path"))

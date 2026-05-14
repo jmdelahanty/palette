@@ -2861,6 +2861,21 @@ class Registry:
                 "eye_shape_source_freshness_recording_step_status_wide_view",
                 self._migration_048_eye_shape_source_freshness_recording_step_status_wide_view,
             ),
+            (
+                49,
+                "model_input_shape_registry",
+                self._migration_049_model_input_shape_registry,
+            ),
+            (
+                50,
+                "detect_quality_current_reviewed_preference",
+                self._migration_050_detect_quality_current_reviewed_preference,
+            ),
+            (
+                51,
+                "training_image_profile_registry",
+                self._migration_051_training_image_profile_registry,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -2904,6 +2919,22 @@ class Registry:
             LIMIT 1;
             """,
             (str(table_name),),
+        ).fetchone()
+        return row is not None
+
+    def _sqlite_object_exists(self, object_name: str, *, object_types: Sequence[str] = ("table", "view")) -> bool:
+        allowed_types = {str(item) for item in object_types if item}
+        if not allowed_types:
+            return False
+        placeholders = ", ".join("?" for _ in allowed_types)
+        row = self.conn.execute(
+            f"""
+            SELECT 1
+            FROM sqlite_master
+            WHERE type IN ({placeholders}) AND name=?
+            LIMIT 1;
+            """,
+            (*sorted(allowed_types), str(object_name)),
         ).fetchone()
         return row is not None
 
@@ -3384,6 +3415,17 @@ class Registry:
                 best_metric_name TEXT,
                 best_metric_value REAL,
                 best_epoch INTEGER,
+                input_shape TEXT,
+                input_layout TEXT,
+                input_channels INTEGER,
+                img_h INTEGER,
+                img_w INTEGER,
+                max_batch INTEGER,
+                dynamic_shapes INTEGER,
+                input_dtype TEXT,
+                input_color_space TEXT,
+                input_shape_source TEXT,
+                input_shape_status TEXT,
                 final_metrics_json TEXT,
                 metadata_json TEXT,
                 created_utc TEXT,
@@ -3955,6 +3997,17 @@ class Registry:
                 "metrics_path": "TEXT",
                 "metrics_sha256": "TEXT",
                 "status": "TEXT",
+                "input_shape": "TEXT",
+                "input_layout": "TEXT",
+                "input_channels": "INTEGER",
+                "img_h": "INTEGER",
+                "img_w": "INTEGER",
+                "max_batch": "INTEGER",
+                "dynamic_shapes": "INTEGER",
+                "input_dtype": "TEXT",
+                "input_color_space": "TEXT",
+                "input_shape_source": "TEXT",
+                "input_shape_status": "TEXT",
                 "final_metrics_json": "TEXT",
                 "metadata_json": "TEXT",
                 "created_utc": "TEXT",
@@ -6839,6 +6892,62 @@ class Registry:
             """
         )
 
+    def _refresh_detect_quality_current_view(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS detect_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW detect_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    dq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dq.dataset_id, COALESCE(dq.detect_method, '')
+                        ORDER BY
+                            CASE
+                                WHEN dq.review_state IS NOT NULL
+                                  OR dq.review_intended_use IS NOT NULL
+                                  OR dq.review_timestamp_utc IS NOT NULL
+                                THEN 0
+                                ELSE 1
+                            END ASC,
+                            COALESCE(dq.review_timestamp_utc, dq.refined_created_utc, dq.quality_updated_utc) DESC,
+                            COALESCE(dq.refined_created_utc, '') DESC,
+                            dq.refined_run DESC
+                    ) AS _rn
+                FROM detect_quality dq
+            )
+            SELECT
+                dataset_id,
+                refined_run,
+                refined_created_utc,
+                source_detect_run,
+                detect_method,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_notes,
+                review_timestamp_utc,
+                review_resolved_group,
+                total_detections,
+                real_detections,
+                interpolated_detections,
+                interpolated_detections_rate,
+                quality_updated_utc,
+                zarr_mtime_ns
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS refined_detect_review_current;")
+        cur.execute(
+            """
+            CREATE VIEW refined_detect_review_current AS
+            SELECT * FROM detect_quality_current;
+            """
+        )
+
     def _migration_022_detection_data_profile_registry(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -6946,8 +7055,8 @@ class Registry:
                 SELECT
                     ddp.dataset_id AS dataset_id,
                     ddp.profile_run AS profile_run,
-                    dcc.recording_id AS recording_id,
-                    dcc.zarr_use AS zarr_use,
+                    COALESCE(dcc.recording_id, tip.recording_id) AS recording_id,
+                    COALESCE(dcc.zarr_use, tip.zarr_use) AS zarr_use,
                     ddp.detection_type AS detection_type,
                     ddp.detection_path AS detection_path,
                     ddp.profile_created_utc AS profile_created_utc,
@@ -9562,6 +9671,636 @@ class Registry:
 
         self._migration_020_recording_step_status_wide_view()
 
+    def _migration_049_model_input_shape_registry(self) -> None:
+        """Normalize trained-model input shape metadata and expose a shared view."""
+
+        if not self._table_exists("training_models"):
+            return
+        self._ensure_training_model_input_shape_columns()
+        self._backfill_training_model_input_shapes()
+        self._refresh_model_input_shapes_view()
+
+    def _migration_050_detect_quality_current_reviewed_preference(self) -> None:
+        """Prefer reviewed refined-detect rows over newer unreviewed attempts."""
+
+        if not self._table_exists("detect_quality"):
+            return
+        self._ensure_columns(
+            "detect_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
+        self._refresh_detect_quality_current_view()
+
+    def _migration_051_training_image_profile_registry(self) -> None:
+        """Register image-domain training profiles for dataset-lake queries."""
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS training_image_profile (
+                dataset_id TEXT NOT NULL,
+                profile_run TEXT NOT NULL,
+                recording_id TEXT,
+                zarr_use TEXT,
+                source_frame_array TEXT,
+                profile_created_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                frames_total INTEGER,
+                frames_profiled INTEGER,
+                mean_intensity_p50 REAL,
+                contrast_p50 REAL,
+                sharpness_p50 REAL,
+                clip_dark_rate_mean REAL,
+                clip_bright_rate_mean REAL,
+                illumination_center_edge_p50 REAL,
+                illumination_slope_x_p50 REAL,
+                illumination_slope_y_p50 REAL,
+                fish_bg_contrast_p50 REAL,
+                rig_id TEXT,
+                camera_id TEXT,
+                arena_id TEXT,
+                dish_design TEXT,
+                canvas_name TEXT,
+                protocol_name TEXT,
+                genotype TEXT,
+                dpf_at_acquisition INTEGER,
+                profile_json TEXT,
+                PRIMARY KEY (dataset_id, profile_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "training_image_profile",
+            {
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "source_frame_array": "TEXT",
+                "profile_created_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+                "frames_total": "INTEGER",
+                "frames_profiled": "INTEGER",
+                "mean_intensity_p50": "REAL",
+                "contrast_p50": "REAL",
+                "sharpness_p50": "REAL",
+                "clip_dark_rate_mean": "REAL",
+                "clip_bright_rate_mean": "REAL",
+                "illumination_center_edge_p50": "REAL",
+                "illumination_slope_x_p50": "REAL",
+                "illumination_slope_y_p50": "REAL",
+                "fish_bg_contrast_p50": "REAL",
+                "rig_id": "TEXT",
+                "camera_id": "TEXT",
+                "arena_id": "TEXT",
+                "dish_design": "TEXT",
+                "canvas_name": "TEXT",
+                "protocol_name": "TEXT",
+                "genotype": "TEXT",
+                "dpf_at_acquisition": "INTEGER",
+                "profile_json": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_image_profile_recording_created "
+            "ON training_image_profile(recording_id, profile_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_image_profile_scope "
+            "ON training_image_profile(zarr_use, source_frame_array);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_image_profile_domain_metrics "
+            "ON training_image_profile(mean_intensity_p50, contrast_p50, sharpness_p50);"
+        )
+        cur.execute("DROP VIEW IF EXISTS training_image_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW training_image_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    tip.dataset_id AS dataset_id,
+                    tip.profile_run AS profile_run,
+                    dcc.recording_id AS recording_id,
+                    dcc.zarr_use AS zarr_use,
+                    tip.source_frame_array AS source_frame_array,
+                    tip.profile_created_utc AS profile_created_utc,
+                    tip.zarr_mtime_ns AS zarr_mtime_ns,
+                    tip.updated_utc AS updated_utc,
+                    tip.frames_total AS frames_total,
+                    tip.frames_profiled AS frames_profiled,
+                    tip.mean_intensity_p50 AS mean_intensity_p50,
+                    tip.contrast_p50 AS contrast_p50,
+                    tip.sharpness_p50 AS sharpness_p50,
+                    tip.clip_dark_rate_mean AS clip_dark_rate_mean,
+                    tip.clip_bright_rate_mean AS clip_bright_rate_mean,
+                    tip.illumination_center_edge_p50 AS illumination_center_edge_p50,
+                    tip.illumination_slope_x_p50 AS illumination_slope_x_p50,
+                    tip.illumination_slope_y_p50 AS illumination_slope_y_p50,
+                    tip.fish_bg_contrast_p50 AS fish_bg_contrast_p50,
+                    COALESCE(dcc.rig_id, tip.rig_id) AS rig_id,
+                    COALESCE(dcc.camera_id, tip.camera_id) AS camera_id,
+                    COALESCE(dcc.arena_id, tip.arena_id) AS arena_id,
+                    COALESCE(dcc.dish_design, tip.dish_design) AS dish_design,
+                    COALESCE(dcc.canvas_name, tip.canvas_name) AS canvas_name,
+                    COALESCE(dcc.protocol_name, tip.protocol_name) AS protocol_name,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.genotype
+                        ELSE COALESCE(dcc.genotype, tip.genotype)
+                    END AS genotype,
+                    CASE
+                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.dpf_at_acquisition
+                        ELSE COALESCE(dcc.dpf_at_acquisition, tip.dpf_at_acquisition)
+                    END AS dpf_at_acquisition,
+                    tip.profile_json AS profile_json,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY tip.dataset_id
+                        ORDER BY
+                            COALESCE(tip.profile_created_utc, tip.updated_utc) DESC,
+                            tip.profile_run DESC
+                    ) AS _rn
+                FROM training_image_profile tip
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = tip.dataset_id
+            )
+            SELECT
+                dataset_id,
+                profile_run,
+                recording_id,
+                zarr_use,
+                source_frame_array,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                frames_total,
+                frames_profiled,
+                mean_intensity_p50,
+                contrast_p50,
+                sharpness_p50,
+                clip_dark_rate_mean,
+                clip_bright_rate_mean,
+                illumination_center_edge_p50,
+                illumination_slope_x_p50,
+                illumination_slope_y_p50,
+                fish_bg_contrast_p50,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                genotype,
+                dpf_at_acquisition,
+                profile_json
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+    def _ensure_training_model_input_shape_columns(self) -> None:
+        self._ensure_columns(
+            "training_models",
+            {
+                "input_shape": "TEXT",
+                "input_layout": "TEXT",
+                "input_channels": "INTEGER",
+                "img_h": "INTEGER",
+                "img_w": "INTEGER",
+                "max_batch": "INTEGER",
+                "dynamic_shapes": "INTEGER",
+                "input_dtype": "TEXT",
+                "input_color_space": "TEXT",
+                "input_shape_source": "TEXT",
+                "input_shape_status": "TEXT",
+            },
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_models_input_shape ON training_models(task_type, img_h, img_w);"
+        )
+
+    def _shape_fields_from_training_payloads(
+        self,
+        *,
+        task_type: Optional[str],
+        final_metrics: Optional[Mapping[str, Any]],
+        metadata: Optional[Mapping[str, Any]],
+        input_shape: Any = None,
+        input_layout: Optional[str] = None,
+        input_channels: Optional[int] = None,
+        img_h: Optional[int] = None,
+        img_w: Optional[int] = None,
+        max_batch: Optional[int] = None,
+        dynamic_shapes: Optional[bool | int] = None,
+        input_dtype: Optional[str] = None,
+        input_color_space: Optional[str] = None,
+        input_shape_source: Optional[str] = None,
+        input_shape_status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        final = dict(final_metrics or {})
+        meta = dict(metadata or {})
+        task = (
+            _normalize_task_type(task_type)
+            or _normalize_task_type(meta.get("task_type"))
+            or _infer_task_type(
+                set_id=None,
+                run_id=None,
+                model_path=None,
+                explicit=task_type,
+            )
+        )
+
+        resolved_source = input_shape_source
+        resolved_status = input_shape_status
+        resolved_shape = input_shape
+        resolved_imgsz: Any = None
+
+        if resolved_shape is not None or img_h is not None or img_w is not None:
+            resolved_source = resolved_source or "explicit"
+            resolved_status = resolved_status or "explicit"
+        else:
+            for source_name, mapping in (
+                ("final_metrics", final),
+                ("metadata", meta),
+            ):
+                shape_candidate = mapping.get("input_shape") or mapping.get("model_input_shape")
+                if shape_candidate is not None:
+                    resolved_shape = shape_candidate
+                    resolved_source = resolved_source or f"{source_name}.input_shape"
+                    resolved_status = resolved_status or "explicit"
+                    break
+                if mapping.get("imgsz_h") is not None and mapping.get("imgsz_w") is not None:
+                    resolved_imgsz = [mapping.get("imgsz_h"), mapping.get("imgsz_w")]
+                    resolved_source = resolved_source or f"{source_name}.imgsz_h_imgsz_w"
+                    resolved_status = resolved_status or "inferred_from_imgsz"
+                    break
+                for key in ("effective_imgsz", "imgsz", "model_imgsz"):
+                    if mapping.get(key) is not None:
+                        resolved_imgsz = mapping.get(key)
+                        resolved_source = resolved_source or f"{source_name}.{key}"
+                        resolved_status = resolved_status or "inferred_from_imgsz"
+                        break
+                if resolved_imgsz is not None:
+                    break
+                training_history = _coerce_mapping(mapping.get("training_history"))
+                if training_history is not None:
+                    for key in ("effective_imgsz", "imgsz"):
+                        if training_history.get(key) is not None:
+                            resolved_imgsz = training_history.get(key)
+                            resolved_source = resolved_source or f"{source_name}.training_history.{key}"
+                            resolved_status = resolved_status or "inferred_from_imgsz"
+                            break
+                if resolved_imgsz is not None:
+                    break
+                training_params = _coerce_mapping(mapping.get("training_params"))
+                if training_params is not None and training_params.get("imgsz") is not None:
+                    resolved_imgsz = training_params.get("imgsz")
+                    resolved_source = resolved_source or f"{source_name}.training_params.imgsz"
+                    resolved_status = resolved_status or "inferred_from_imgsz"
+                    break
+
+        (
+            shape_text,
+            resolved_img_h,
+            resolved_img_w,
+            resolved_max_batch,
+            resolved_dynamic,
+        ) = self._resolve_shape_fields(input_shape=resolved_shape, imgsz=resolved_imgsz)
+
+        img_h_norm = self._int_or_none(img_h) if img_h is not None else resolved_img_h
+        img_w_norm = self._int_or_none(img_w) if img_w is not None else resolved_img_w
+        channels_norm = self._int_or_none(input_channels)
+        if channels_norm is None and shape_text:
+            shape_list = self._shape_to_list(shape_text)
+            if shape_list and len(shape_list) >= 2:
+                channels_norm = self._int_or_none(shape_list[1])
+        if channels_norm is None and task in {"detect", "pose"} and (img_h_norm is not None or img_w_norm is not None):
+            channels_norm = 3
+
+        if shape_text is None and img_h_norm is not None and img_w_norm is not None and channels_norm is not None:
+            shape_text = _json_dumps([1, int(channels_norm), int(img_h_norm), int(img_w_norm)])
+            resolved_max_batch = resolved_max_batch if resolved_max_batch is not None else 1
+            resolved_dynamic = resolved_dynamic if resolved_dynamic is not None else 0
+
+        if max_batch is not None:
+            resolved_max_batch = self._int_or_none(max_batch)
+        if dynamic_shapes is not None:
+            resolved_dynamic = int(bool(dynamic_shapes))
+
+        layout_norm = str(input_layout).strip() if input_layout else None
+        if not layout_norm and shape_text:
+            shape_list = self._shape_to_list(shape_text)
+            if shape_list and len(shape_list) == 4:
+                layout_norm = "NCHW"
+
+        dtype_norm = str(input_dtype).strip() if input_dtype else None
+        if not dtype_norm:
+            dtype_value = meta.get("input_dtype") or final.get("input_dtype")
+            dtype_norm = str(dtype_value).strip() if dtype_value else None
+
+        color_norm = str(input_color_space).strip().lower() if input_color_space else None
+        if not color_norm:
+            color_value = meta.get("input_color_space") or final.get("input_color_space")
+            color_norm = str(color_value).strip().lower() if color_value else None
+        if not color_norm and task in {"detect", "pose"} and channels_norm == 3:
+            color_norm = "rgb"
+
+        if not dtype_norm and task in {"detect", "pose"} and shape_text:
+            dtype_norm = "float32"
+
+        if shape_text is None and img_h_norm is None and img_w_norm is None:
+            resolved_status = resolved_status or "unknown"
+            resolved_source = resolved_source or None
+        else:
+            resolved_status = resolved_status or "explicit"
+            resolved_source = resolved_source or "explicit"
+
+        return {
+            "input_shape": shape_text,
+            "input_layout": layout_norm,
+            "input_channels": channels_norm,
+            "img_h": img_h_norm,
+            "img_w": img_w_norm,
+            "max_batch": resolved_max_batch,
+            "dynamic_shapes": resolved_dynamic,
+            "input_dtype": dtype_norm,
+            "input_color_space": color_norm,
+            "input_shape_source": resolved_source,
+            "input_shape_status": resolved_status,
+        }
+
+    def _export_input_shape_fallback(
+        self,
+        run_id: str,
+        *,
+        task_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        row = self.conn.execute(
+            """
+            SELECT input_shape, img_h, img_w, max_batch, dynamic_shapes
+            FROM onnx_models
+            WHERE run_id = ?
+              AND (input_shape IS NOT NULL OR img_h IS NOT NULL OR img_w IS NOT NULL)
+            ORDER BY created_utc DESC
+            LIMIT 1;
+            """,
+            (str(run_id),),
+        ).fetchone()
+        source = "onnx_models"
+        if row is None:
+            row = self.conn.execute(
+                """
+                SELECT input_shape, img_h, img_w, max_batch, dynamic_shapes
+                FROM tensorrt_models
+                WHERE run_id = ?
+                  AND (input_shape IS NOT NULL OR img_h IS NOT NULL OR img_w IS NOT NULL)
+                ORDER BY created_utc DESC
+                LIMIT 1;
+                """,
+                (str(run_id),),
+            ).fetchone()
+            source = "tensorrt_models"
+        if row is None:
+            return None
+        fields = self._shape_fields_from_training_payloads(
+            task_type=task_type,
+            final_metrics=None,
+            metadata=None,
+            input_shape=row["input_shape"],
+            img_h=row["img_h"],
+            img_w=row["img_w"],
+            max_batch=row["max_batch"],
+            dynamic_shapes=row["dynamic_shapes"],
+            input_shape_source=f"{source}.input_shape",
+            input_shape_status="export_backfill",
+        )
+        return fields
+
+    @staticmethod
+    def _shape_fields_conflict(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        for key in ("img_h", "img_w", "input_channels"):
+            lval = left.get(key)
+            rval = right.get(key)
+            if lval is not None and rval is not None and int(lval) != int(rval):
+                return True
+        return False
+
+    def _backfill_training_model_input_shapes(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT
+                tm.run_id,
+                tm.final_metrics_json,
+                tm.metadata_json,
+                tm.task_type AS model_task_type,
+                tr.task_type AS run_task_type,
+                tm.input_shape,
+                tm.input_layout,
+                tm.input_channels,
+                tm.img_h,
+                tm.img_w,
+                tm.max_batch,
+                tm.dynamic_shapes,
+                tm.input_dtype,
+                tm.input_color_space,
+                tm.input_shape_source,
+                tm.input_shape_status
+            FROM training_models tm
+            LEFT JOIN training_runs tr ON tr.run_id = tm.run_id;
+            """
+        ).fetchall()
+        for row in rows:
+            final_payload = _json_loads(row["final_metrics_json"])
+            metadata_payload = _json_loads(row["metadata_json"])
+            final_metrics = final_payload if isinstance(final_payload, Mapping) else {}
+            metadata = metadata_payload if isinstance(metadata_payload, Mapping) else {}
+            task_type = (
+                _normalize_task_type(row["model_task_type"])
+                or _normalize_task_type(metadata.get("task_type"))
+                or _normalize_task_type(row["run_task_type"])
+            )
+            fields = self._shape_fields_from_training_payloads(
+                task_type=task_type,
+                final_metrics=final_metrics,
+                metadata=metadata,
+                input_shape=row["input_shape"],
+                input_layout=row["input_layout"],
+                input_channels=row["input_channels"],
+                img_h=row["img_h"],
+                img_w=row["img_w"],
+                max_batch=row["max_batch"],
+                dynamic_shapes=row["dynamic_shapes"],
+                input_dtype=row["input_dtype"],
+                input_color_space=row["input_color_space"],
+                input_shape_source=row["input_shape_source"],
+                input_shape_status=row["input_shape_status"],
+            )
+            export_fields = self._export_input_shape_fallback(str(row["run_id"]), task_type=task_type)
+            if fields["input_shape"] is None and export_fields is not None:
+                fields = export_fields
+            elif export_fields is not None and self._shape_fields_conflict(fields, export_fields):
+                fields["input_shape_status"] = "conflict"
+                conflict = {
+                    "training": {
+                        "input_shape": fields.get("input_shape"),
+                        "img_h": fields.get("img_h"),
+                        "img_w": fields.get("img_w"),
+                        "input_channels": fields.get("input_channels"),
+                        "source": fields.get("input_shape_source"),
+                    },
+                    "export": {
+                        "input_shape": export_fields.get("input_shape"),
+                        "img_h": export_fields.get("img_h"),
+                        "img_w": export_fields.get("img_w"),
+                        "input_channels": export_fields.get("input_channels"),
+                        "source": export_fields.get("input_shape_source"),
+                    },
+                }
+                metadata["input_shape_conflict"] = conflict
+
+            self.conn.execute(
+                """
+                UPDATE training_models
+                SET input_shape = ?,
+                    input_layout = ?,
+                    input_channels = ?,
+                    img_h = ?,
+                    img_w = ?,
+                    max_batch = ?,
+                    dynamic_shapes = ?,
+                    input_dtype = ?,
+                    input_color_space = ?,
+                    input_shape_source = ?,
+                    input_shape_status = ?,
+                    metadata_json = ?
+                WHERE run_id = ?;
+                """,
+                (
+                    fields["input_shape"],
+                    fields["input_layout"],
+                    fields["input_channels"],
+                    fields["img_h"],
+                    fields["img_w"],
+                    fields["max_batch"],
+                    fields["dynamic_shapes"],
+                    fields["input_dtype"],
+                    fields["input_color_space"],
+                    fields["input_shape_source"],
+                    fields["input_shape_status"],
+                    _json_dumps(metadata),
+                    str(row["run_id"]),
+                ),
+            )
+
+    def _refresh_model_input_shapes_view(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS model_input_shapes;")
+        cur.execute(
+            """
+            CREATE VIEW model_input_shapes AS
+            SELECT
+                'training' AS artifact_kind,
+                tm.run_id AS run_id,
+                tm.set_id AS set_id,
+                COALESCE(tm.task_type, tr.task_type) AS task_type,
+                tm.model_path AS artifact_path,
+                tm.model_sha256 AS artifact_sha256,
+                NULL AS artifact_precision,
+                tm.input_shape AS input_shape,
+                tm.input_layout AS input_layout,
+                tm.input_channels AS input_channels,
+                tm.img_h AS img_h,
+                tm.img_w AS img_w,
+                tm.max_batch AS max_batch,
+                tm.dynamic_shapes AS dynamic_shapes,
+                tm.input_dtype AS input_dtype,
+                tm.input_color_space AS input_color_space,
+                tm.input_shape_source AS input_shape_source,
+                tm.input_shape_status AS input_shape_status,
+                tm.created_utc AS created_utc
+            FROM training_models tm
+            LEFT JOIN training_runs tr ON tr.run_id = tm.run_id
+
+            UNION ALL
+
+            SELECT
+                'onnx' AS artifact_kind,
+                om.run_id AS run_id,
+                om.set_id AS set_id,
+                COALESCE(tm.task_type, tr.task_type) AS task_type,
+                om.path AS artifact_path,
+                om.sha256 AS artifact_sha256,
+                NULL AS artifact_precision,
+                om.input_shape AS input_shape,
+                CASE WHEN om.input_shape IS NOT NULL THEN 'NCHW' ELSE NULL END AS input_layout,
+                CASE WHEN json_valid(om.input_shape)
+                    THEN CAST(json_extract(om.input_shape, '$[1]') AS INTEGER)
+                    ELSE NULL
+                END AS input_channels,
+                om.img_h AS img_h,
+                om.img_w AS img_w,
+                om.max_batch AS max_batch,
+                om.dynamic_shapes AS dynamic_shapes,
+                NULL AS input_dtype,
+                CASE
+                    WHEN COALESCE(tm.task_type, tr.task_type) IN ('detect', 'pose')
+                         AND json_valid(om.input_shape)
+                         AND CAST(json_extract(om.input_shape, '$[1]') AS INTEGER) = 3
+                    THEN 'rgb'
+                    ELSE NULL
+                END AS input_color_space,
+                'onnx_models.input_shape' AS input_shape_source,
+                CASE
+                    WHEN om.input_shape IS NOT NULL OR om.img_h IS NOT NULL OR om.img_w IS NOT NULL THEN 'explicit'
+                    ELSE 'unknown'
+                END AS input_shape_status,
+                om.created_utc AS created_utc
+            FROM onnx_models om
+            LEFT JOIN training_models tm ON tm.run_id = om.run_id
+            LEFT JOIN training_runs tr ON tr.run_id = om.run_id
+
+            UNION ALL
+
+            SELECT
+                'tensorrt' AS artifact_kind,
+                trt.run_id AS run_id,
+                trt.set_id AS set_id,
+                COALESCE(tm.task_type, tr.task_type) AS task_type,
+                trt.path AS artifact_path,
+                trt.sha256 AS artifact_sha256,
+                trt.precision AS artifact_precision,
+                trt.input_shape AS input_shape,
+                CASE WHEN trt.input_shape IS NOT NULL THEN 'NCHW' ELSE NULL END AS input_layout,
+                CASE WHEN json_valid(trt.input_shape)
+                    THEN CAST(json_extract(trt.input_shape, '$[1]') AS INTEGER)
+                    ELSE NULL
+                END AS input_channels,
+                trt.img_h AS img_h,
+                trt.img_w AS img_w,
+                trt.max_batch AS max_batch,
+                trt.dynamic_shapes AS dynamic_shapes,
+                NULL AS input_dtype,
+                CASE
+                    WHEN COALESCE(tm.task_type, tr.task_type) IN ('detect', 'pose')
+                         AND json_valid(trt.input_shape)
+                         AND CAST(json_extract(trt.input_shape, '$[1]') AS INTEGER) = 3
+                    THEN 'rgb'
+                    ELSE NULL
+                END AS input_color_space,
+                'tensorrt_models.input_shape' AS input_shape_source,
+                CASE
+                    WHEN trt.input_shape IS NOT NULL OR trt.img_h IS NOT NULL OR trt.img_w IS NOT NULL THEN 'explicit'
+                    ELSE 'unknown'
+                END AS input_shape_status,
+                trt.created_utc AS created_utc
+            FROM tensorrt_models trt
+            LEFT JOIN training_models tm ON tm.run_id = trt.run_id
+            LEFT JOIN training_runs tr ON tr.run_id = trt.run_id;
+            """
+        )
+
     def _ensure_analytics_manifest_tables(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -11517,6 +12256,133 @@ class Registry:
         )
         self.conn.commit()
 
+    def upsert_training_image_profile(
+        self,
+        *,
+        dataset_id: str,
+        profile_run: str,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        source_frame_array: Optional[str],
+        profile_created_utc: Optional[str],
+        frames_total: Optional[int],
+        frames_profiled: Optional[int],
+        mean_intensity_p50: Optional[float],
+        contrast_p50: Optional[float],
+        sharpness_p50: Optional[float],
+        clip_dark_rate_mean: Optional[float],
+        clip_bright_rate_mean: Optional[float],
+        illumination_center_edge_p50: Optional[float],
+        illumination_slope_x_p50: Optional[float],
+        illumination_slope_y_p50: Optional[float],
+        fish_bg_contrast_p50: Optional[float],
+        rig_id: Optional[str],
+        camera_id: Optional[str],
+        arena_id: Optional[str],
+        dish_design: Optional[str],
+        canvas_name: Optional[str],
+        protocol_name: Optional[str],
+        profile_json: Optional[str],
+        genotype: Optional[str] = None,
+        dpf_at_acquisition: Optional[int] = None,
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
+        duplicate_context_update_sql = self._profile_duplicate_context_update_sql(
+            "training_image_profile",
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
+        payload = self._apply_profile_duplicate_context_write_policy(
+            {
+                "dataset_id": str(dataset_id),
+                "profile_run": str(profile_run),
+                "recording_id": recording_id,
+                "zarr_use": zarr_use,
+                "source_frame_array": source_frame_array,
+                "profile_created_utc": profile_created_utc,
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc or _utc_now(),
+                "frames_total": frames_total,
+                "frames_profiled": frames_profiled,
+                "mean_intensity_p50": mean_intensity_p50,
+                "contrast_p50": contrast_p50,
+                "sharpness_p50": sharpness_p50,
+                "clip_dark_rate_mean": clip_dark_rate_mean,
+                "clip_bright_rate_mean": clip_bright_rate_mean,
+                "illumination_center_edge_p50": illumination_center_edge_p50,
+                "illumination_slope_x_p50": illumination_slope_x_p50,
+                "illumination_slope_y_p50": illumination_slope_y_p50,
+                "fish_bg_contrast_p50": fish_bg_contrast_p50,
+                "rig_id": rig_id,
+                "camera_id": camera_id,
+                "arena_id": arena_id,
+                "dish_design": dish_design,
+                "canvas_name": canvas_name,
+                "protocol_name": protocol_name,
+                "genotype": genotype,
+                "dpf_at_acquisition": dpf_at_acquisition,
+                "profile_json": profile_json,
+            },
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
+        self.conn.execute(
+            f"""
+            INSERT INTO training_image_profile (
+                dataset_id, profile_run, recording_id, zarr_use,
+                source_frame_array, profile_created_utc,
+                zarr_mtime_ns, updated_utc,
+                frames_total, frames_profiled,
+                mean_intensity_p50, contrast_p50, sharpness_p50,
+                clip_dark_rate_mean, clip_bright_rate_mean,
+                illumination_center_edge_p50, illumination_slope_x_p50, illumination_slope_y_p50,
+                fish_bg_contrast_p50,
+                rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                genotype, dpf_at_acquisition,
+                profile_json
+            )
+            VALUES (
+                :dataset_id, :profile_run, :recording_id, :zarr_use,
+                :source_frame_array, :profile_created_utc,
+                :zarr_mtime_ns, :updated_utc,
+                :frames_total, :frames_profiled,
+                :mean_intensity_p50, :contrast_p50, :sharpness_p50,
+                :clip_dark_rate_mean, :clip_bright_rate_mean,
+                :illumination_center_edge_p50, :illumination_slope_x_p50, :illumination_slope_y_p50,
+                :fish_bg_contrast_p50,
+                :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                :genotype, :dpf_at_acquisition,
+                :profile_json
+            )
+            ON CONFLICT(dataset_id, profile_run) DO UPDATE SET
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                source_frame_array=excluded.source_frame_array,
+                profile_created_utc=excluded.profile_created_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc,
+                frames_total=excluded.frames_total,
+                frames_profiled=excluded.frames_profiled,
+                mean_intensity_p50=excluded.mean_intensity_p50,
+                contrast_p50=excluded.contrast_p50,
+                sharpness_p50=excluded.sharpness_p50,
+                clip_dark_rate_mean=excluded.clip_dark_rate_mean,
+                clip_bright_rate_mean=excluded.clip_bright_rate_mean,
+                illumination_center_edge_p50=excluded.illumination_center_edge_p50,
+                illumination_slope_x_p50=excluded.illumination_slope_x_p50,
+                illumination_slope_y_p50=excluded.illumination_slope_y_p50,
+                fish_bg_contrast_p50=excluded.fish_bg_contrast_p50,
+                {duplicate_context_update_sql}
+                profile_json=excluded.profile_json;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
     def upsert_keypoint_data_profile(
         self,
         *,
@@ -12963,6 +13829,13 @@ class Registry:
         review_intended_use: Optional[str] = None,
         max_interpolated_detections_rate: Optional[float] = None,
     ) -> List[sqlite3.Row]:
+        if not self._sqlite_object_exists(view_name):
+            # `refined_detect_review_current` is a newer semantic alias for
+            # `detect_quality_current`. Some long-lived registries have the
+            # migration marked applied but are missing the alias view, so keep
+            # registry-gated training selection working without mutating the DB.
+            if view_name == "refined_detect_review_current" and self._sqlite_object_exists("detect_quality_current"):
+                view_name = "detect_quality_current"
         sql = [f"SELECT * FROM {view_name} WHERE 1=1"]
         params: List[Any] = []
 
@@ -13100,6 +13973,40 @@ class Registry:
         if min_coverage_percent is not None:
             sql.append("AND coverage_percent IS NOT NULL AND coverage_percent >= ?")
             params.append(float(min_coverage_percent))
+        sql.append("ORDER BY dataset_id")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_training_image_profile_latest(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        min_frames_profiled: Optional[int] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM training_image_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if min_frames_profiled is not None:
+            sql.append("AND frames_profiled IS NOT NULL AND frames_profiled >= ?")
+            params.append(int(min_frames_profiled))
         sql.append("ORDER BY dataset_id")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
@@ -14157,6 +15064,17 @@ class Registry:
         final_metrics: Optional[Dict[str, Any]],
         task_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        input_shape: Any = None,
+        input_layout: Optional[str] = None,
+        input_channels: Optional[int] = None,
+        img_h: Optional[int] = None,
+        img_w: Optional[int] = None,
+        max_batch: Optional[int] = None,
+        dynamic_shapes: Optional[bool | int] = None,
+        input_dtype: Optional[str] = None,
+        input_color_space: Optional[str] = None,
+        input_shape_source: Optional[str] = None,
+        input_shape_status: Optional[str] = None,
     ) -> None:
         resolved_task_type = (
             _normalize_task_type(task_type)
@@ -14177,6 +15095,22 @@ class Registry:
             final_metrics=final_metrics,
             metadata=metadata_payload,
         )
+        input_fields = self._shape_fields_from_training_payloads(
+            task_type=resolved_task_type,
+            final_metrics=final_metrics,
+            metadata=metadata_payload,
+            input_shape=input_shape,
+            input_layout=input_layout,
+            input_channels=input_channels,
+            img_h=img_h,
+            img_w=img_w,
+            max_batch=max_batch,
+            dynamic_shapes=dynamic_shapes,
+            input_dtype=input_dtype,
+            input_color_space=input_color_space,
+            input_shape_source=input_shape_source,
+            input_shape_status=input_shape_status,
+        )
         payload = {
             "run_id": str(run_id),
             "set_id": str(set_id) if set_id else None,
@@ -14194,6 +15128,17 @@ class Registry:
             "best_metric_name": fields["best_metric_name"],
             "best_metric_value": fields["best_metric_value"],
             "best_epoch": fields["best_epoch"],
+            "input_shape": input_fields["input_shape"],
+            "input_layout": input_fields["input_layout"],
+            "input_channels": input_fields["input_channels"],
+            "img_h": input_fields["img_h"],
+            "img_w": input_fields["img_w"],
+            "max_batch": input_fields["max_batch"],
+            "dynamic_shapes": input_fields["dynamic_shapes"],
+            "input_dtype": input_fields["input_dtype"],
+            "input_color_space": input_fields["input_color_space"],
+            "input_shape_source": input_fields["input_shape_source"],
+            "input_shape_status": input_fields["input_shape_status"],
             "final_metrics_json": _json_dumps(final_metrics),
             "metadata_json": _json_dumps(metadata_payload),
             "created_utc": _utc_now(),
@@ -14204,13 +15149,19 @@ class Registry:
                 run_id, set_id, model_path, model_sha256, metrics_path, metrics_sha256,
                 status, task_type, label_schema_id, coverage_class, component_coverage_key,
                 mask_labels_json, component_groups_json, best_metric_name, best_metric_value,
-                best_epoch, final_metrics_json, metadata_json, created_utc
+                best_epoch, input_shape, input_layout, input_channels, img_h, img_w,
+                max_batch, dynamic_shapes, input_dtype, input_color_space,
+                input_shape_source, input_shape_status,
+                final_metrics_json, metadata_json, created_utc
             )
             VALUES (
                 :run_id, :set_id, :model_path, :model_sha256, :metrics_path, :metrics_sha256,
                 :status, :task_type, :label_schema_id, :coverage_class, :component_coverage_key,
                 :mask_labels_json, :component_groups_json, :best_metric_name, :best_metric_value,
-                :best_epoch, :final_metrics_json, :metadata_json, :created_utc
+                :best_epoch, :input_shape, :input_layout, :input_channels, :img_h, :img_w,
+                :max_batch, :dynamic_shapes, :input_dtype, :input_color_space,
+                :input_shape_source, :input_shape_status,
+                :final_metrics_json, :metadata_json, :created_utc
             )
             ON CONFLICT(run_id) DO UPDATE SET
                 set_id=excluded.set_id,
@@ -14228,6 +15179,17 @@ class Registry:
                 best_metric_name=excluded.best_metric_name,
                 best_metric_value=excluded.best_metric_value,
                 best_epoch=excluded.best_epoch,
+                input_shape=excluded.input_shape,
+                input_layout=excluded.input_layout,
+                input_channels=excluded.input_channels,
+                img_h=excluded.img_h,
+                img_w=excluded.img_w,
+                max_batch=excluded.max_batch,
+                dynamic_shapes=excluded.dynamic_shapes,
+                input_dtype=excluded.input_dtype,
+                input_color_space=excluded.input_color_space,
+                input_shape_source=excluded.input_shape_source,
+                input_shape_status=excluded.input_shape_status,
                 final_metrics_json=excluded.final_metrics_json,
                 metadata_json=excluded.metadata_json,
                 created_utc=excluded.created_utc;

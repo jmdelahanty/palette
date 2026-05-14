@@ -466,6 +466,39 @@ def test_detect_quality_current_falls_back_to_lexical_refined_run_when_timestamp
     registry.close()
 
 
+def test_detect_quality_current_prefers_reviewed_row_over_newer_unreviewed_row(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    reviewed = _detect_quality_record(
+        refined_run="refined_reviewed",
+        refined_created_utc="2026-02-10T00:00:00+00:00",
+        review_timestamp_utc="2026-02-10T00:01:00+00:00",
+        quality_updated_utc="2026-02-10T01:00:00+00:00",
+    )
+    unreviewed = _detect_quality_record(
+        refined_run="refined_newer_unreviewed",
+        refined_created_utc="2026-02-10T00:30:00+00:00",
+        review_timestamp_utc=None,
+        quality_updated_utc="2026-02-10T01:00:00+00:00",
+    )
+    unreviewed["review_state"] = None
+    unreviewed["review_intended_use"] = None
+    unreviewed["review_method"] = None
+    unreviewed["review_timestamp_utc"] = None
+    registry.replace_detect_quality(
+        "dataset_detect",
+        [reviewed, unreviewed],
+    )
+    row = registry.query_detect_quality_current(
+        dataset_ids=["dataset_detect"],
+        detect_method="yolo",
+    )[0]
+    assert str(row["refined_run"]) == "refined_reviewed"
+    assert row["review_state"] == "approved"
+    assert row["review_intended_use"] == "training"
+    registry.close()
+
+
 def test_refined_detect_review_current_alias_matches_detect_quality_current(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
@@ -499,6 +532,38 @@ def test_refined_detect_review_current_alias_matches_detect_quality_current(tmp_
         ("dataset_detect",),
     ).fetchone()["n"]
     assert int(alias_count) == 1
+    registry.close()
+
+
+def test_refined_detect_review_current_query_falls_back_when_alias_view_missing(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    registry.upsert_detect_quality(
+        dataset_id="dataset_detect",
+        refined_run="refined_001",
+        refined_created_utc="2026-02-10T00:00:00+00:00",
+        source_detect_run="detect_001",
+        detect_method="yolo",
+        review_state="approved",
+        review_intended_use="training",
+        review_reviewer="reviewer_detect",
+        review_timestamp_utc="2026-02-10T00:01:00+00:00",
+        review_resolved_group="refined",
+        total_detections=4,
+        real_detections=4,
+        interpolated_detections=0,
+        interpolated_detections_rate=0.0,
+        review_method="manual",
+        review_notes="approved curated refined surface",
+    )
+    registry.conn.execute("DROP VIEW refined_detect_review_current;")
+    registry.conn.commit()
+
+    rows = registry.query_refined_detect_review_current(dataset_ids=["dataset_detect"], detect_method="yolo")
+
+    assert len(rows) == 1
+    assert rows[0]["review_state"] == "approved"
+    assert rows[0]["review_intended_use"] == "training"
     registry.close()
 
 

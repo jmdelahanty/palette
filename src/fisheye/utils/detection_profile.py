@@ -12,10 +12,14 @@ import zarr
 
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.refined_detect_review import DEFAULT_DETECT_GROUP_PREFERENCE, resolve_refined_detect_group
+from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
 
 
 SCHEMA_NAME = "detection_dataset_profile"
 SCHEMA_VERSION = "v1"
+SOURCE_CONTENT_FINGERPRINT_SCHEMA_ID = "palette.detection_profile.source_content_fingerprint"
+SOURCE_CONTENT_FINGERPRINT_SCHEMA_VERSION = 1
+SOURCE_CONTENT_FINGERPRINT_CANONICALIZATION = "sha256_detection_source_arrays_v1"
 
 GEOMETRY_PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99)
 
@@ -70,6 +74,7 @@ class DetectionProfileWriteResult:
     run_name: str
     source_detection_path: str
     source_detection_type: str
+    source_detection_content_hash: str
     profile_summary: dict[str, Any]
 
 
@@ -268,6 +273,57 @@ def _histogram_counts(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return counts.astype(np.int64, copy=False)
 
 
+def _array_content_digest_payload(group: zarr.Group) -> tuple[str, list[str]]:
+    """Return a stable hash for arrays that can affect a detection profile.
+
+    The profile itself is computed from ``frame_indices`` and
+    ``bbox_norm_coords``. We also include common row-selection/provenance arrays
+    when present so edits that change the selected refined surface invalidate
+    the profile even if bbox geometry is coincidentally unchanged.
+    """
+
+    import hashlib
+
+    array_names = (
+        "frame_indices",
+        "bbox_norm_coords",
+        "frame_counts",
+        "scores",
+        "confidence_scores",
+        "class_ids",
+        "entity_ids",
+        "refined_row_ids",
+        "status_codes",
+        "source_kind_codes",
+        "source_detect_row_index",
+        "manual_edit_flags",
+        "detection_source",
+        "decision_codes",
+        "reason_bytes",
+        "reason_codes",
+    )
+    hasher = hashlib.sha256()
+    included: list[str] = []
+    for name in array_names:
+        if name not in group:
+            continue
+        arr = np.asarray(group[name][:])
+        included.append(name)
+        hasher.update(name.encode("utf-8"))
+        hasher.update(b"\x00")
+        hasher.update(str(arr.dtype).encode("utf-8"))
+        hasher.update(b"\x00")
+        hasher.update(json.dumps([int(v) for v in arr.shape], separators=(",", ":")).encode("ascii"))
+        hasher.update(b"\x00")
+        if arr.dtype.kind in {"O", "U", "S"}:
+            payload = json.dumps(arr.tolist(), ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        else:
+            payload = np.ascontiguousarray(arr).tobytes()
+        hasher.update(payload)
+        hasher.update(b"\x00")
+    return hasher.hexdigest(), included
+
+
 def _extract_subject_snapshot(root: zarr.Group) -> dict[str, Any]:
     analysis_meta = root.get("analysis_metadata")
     if analysis_meta is None:
@@ -390,8 +446,8 @@ def resolve_detection_source(
         parts = source_path.split("/")
         if len(parts) >= 2 and parts[0] == "detect_runs":
             return _detect_only(parts[1])
-        if len(parts) >= 3 and parts[0] in {"refined_detect_runs", "refined_runs"}:
-            parent_name, refined_name, group_name = parts[0], parts[1], parts[2]
+        if len(parts) >= 2 and parts[0] in {"refined_detect_runs", "refined_runs"}:
+            parent_name, refined_name = parts[0], parts[1]
             parent = root.get(parent_name)
             if parent is None or refined_name not in parent:
                 raise DetectionSourceError(f"refined run not found: {refined_name}")
@@ -399,6 +455,19 @@ def resolve_detection_source(
             manual_latest = _normalize_text(refined_group.attrs.get("manual_review_latest"))
             source_detect = _normalize_text(refined_group.attrs.get("source_detect_run"))
             review_state, review_method, review_use, review_timestamp = _resolve_review_fields(refined_group)
+            if len(parts) == 2:
+                return ResolvedDetectionSource(
+                    detection_path=source_path,
+                    detection_type="refined",
+                    detect_run=source_detect,
+                    refined_run=refined_name,
+                    manual_group=None,
+                    review_state=review_state,
+                    review_method=review_method,
+                    review_intended_use=review_use,
+                    review_timestamp_utc=review_timestamp,
+                )
+            group_name = parts[2]
             detection_type = "manual" if group_name in {"manual", manual_latest} else group_name
             return ResolvedDetectionSource(
                 detection_path=source_path,
@@ -633,6 +702,9 @@ def build_detection_profile_summary(
         refined_run=refined_run,
     )
     bbox, frame_indices = _load_detection_arrays(root, source)
+    source_detection_content_hash, source_content_arrays = _array_content_digest_payload(
+        root[source.detection_path]
+    )
     frames_total, frame_source, frames_full = _resolve_frame_universe(root, source, frame_indices)
 
     if frames_total > 0:
@@ -698,6 +770,11 @@ def build_detection_profile_summary(
             "review_method": source.review_method,
             "review_intended_use": source.review_intended_use,
             "review_timestamp_utc": source.review_timestamp_utc,
+            "content_fingerprint_schema_id": SOURCE_CONTENT_FINGERPRINT_SCHEMA_ID,
+            "content_fingerprint_schema_version": SOURCE_CONTENT_FINGERPRINT_SCHEMA_VERSION,
+            "content_fingerprint_canonicalization": SOURCE_CONTENT_FINGERPRINT_CANONICALIZATION,
+            "content_hash": source_detection_content_hash,
+            "content_hash_arrays": source_content_arrays,
         },
         "coverage": {
             "frames_total": int(frames_total),
@@ -781,7 +858,7 @@ def write_detection_profile(
         parent_path = _normalize_text(getattr(parent, "path", None))
         child_path = f"{parent_path}/{name}" if parent_path else name
         try:
-            return zarr.open_group(store=store, path=child_path, mode="a")
+            return zarr.open_group(store=store, path=child_path, mode="a", use_consolidated=False)
         except TypeError:
             # Older zarr signatures may not support kw-only store/path.
             try:
@@ -843,6 +920,11 @@ def write_detection_profile(
             "source_zarr_use": dataset.get("zarr_use"),
             "source_detection_path": source.get("detection_path"),
             "source_detection_type": source.get("detection_type"),
+            "source_detection_content_hash": source.get("content_hash"),
+            "source_detection_content_fingerprint_schema_id": SOURCE_CONTENT_FINGERPRINT_SCHEMA_ID,
+            "source_detection_content_fingerprint_schema_version": SOURCE_CONTENT_FINGERPRINT_SCHEMA_VERSION,
+            "source_detection_content_fingerprint_canonicalization": SOURCE_CONTENT_FINGERPRINT_CANONICALIZATION,
+            "source_detection_content_hash_arrays": source.get("content_hash_arrays"),
             "source_resolution": frame_source,
             "source_frame_count": int(coverage.get("frames_total") or 0),
             "source_frame_count_full": (
@@ -854,12 +936,38 @@ def write_detection_profile(
             "profile_summary": summary,
         }
     )
+    lineage_payload = build_run_lineage_payload(
+        run_family="detection_profile_run",
+        analysis_schema={"schema_name": SCHEMA_NAME, "schema_version": SCHEMA_VERSION},
+        method="detection_profile",
+        method_version=SCHEMA_VERSION,
+        source_refs={
+            "source_detection_path": source.get("detection_path"),
+            "source_detection_type": source.get("detection_type"),
+            "source_dataset_id": dataset.get("dataset_id"),
+            "source_recording_id": dataset.get("recording_id"),
+            "source_zarr_use": dataset.get("zarr_use"),
+        },
+        source_fingerprints={
+            "source_detection_content_hash": source.get("content_hash"),
+            "source_detection_content_fingerprint_schema_id": SOURCE_CONTENT_FINGERPRINT_SCHEMA_ID,
+            "source_detection_content_fingerprint_schema_version": SOURCE_CONTENT_FINGERPRINT_SCHEMA_VERSION,
+        },
+        parameters=merged_config,
+    )
+    write_run_lineage_attrs(
+        run_group,
+        lineage_payload,
+        fingerprint_status="complete",
+        overwrite=True,
+    )
     runs_parent.attrs["latest"] = run_name
 
     return DetectionProfileWriteResult(
         run_name=run_name,
         source_detection_path=str(source.get("detection_path") or ""),
         source_detection_type=str(source.get("detection_type") or ""),
+        source_detection_content_hash=str(source.get("content_hash") or ""),
         profile_summary=summary,
     )
 
@@ -876,4 +984,7 @@ __all__ = [
     "infer_zarr_use",
     "resolve_detection_source",
     "write_detection_profile",
+    "SOURCE_CONTENT_FINGERPRINT_SCHEMA_ID",
+    "SOURCE_CONTENT_FINGERPRINT_SCHEMA_VERSION",
+    "SOURCE_CONTENT_FINGERPRINT_CANONICALIZATION",
 ]

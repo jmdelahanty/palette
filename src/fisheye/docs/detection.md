@@ -18,6 +18,10 @@ Naming split:
 - `detect_quality` reports describe raw detect artifacts.
 - Refined detect approval/review metadata lives on refined runs and in the
   registry gating surfaces, not in `quality_reports`.
+- Dish-mask spatial gating is also a refined-run policy. It does not mutate
+  `detect_quality` labels or raw model predictions; refinement preserves those
+  raw candidates in `source_detections` and marks outside-dish rows with
+  reason `outside_dish_mask`.
 
 ## Two Label Systems
 

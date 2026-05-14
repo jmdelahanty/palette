@@ -213,6 +213,28 @@ def _select_profile_rows(
     return profile_by_dataset
 
 
+def _detection_source_type_matches_manifest(
+    *,
+    manifest_source_type: Optional[str],
+    profile_detection_type: Optional[str],
+) -> bool:
+    """Return whether a profile row describes the manifest detection source.
+
+    Curated refined detections are stored under a compact `instances` surface in
+    newer sampled training Zarrs. The manifest-level source remains `refined`,
+    while the detection profile records the concrete storage surface. Treat that
+    as a storage-detail alias, not a semantic mismatch.
+    """
+
+    if manifest_source_type is None or profile_detection_type is None:
+        return True
+    if manifest_source_type == profile_detection_type:
+        return True
+    if manifest_source_type == "refined" and profile_detection_type == "instances":
+        return True
+    return False
+
+
 def _load_legacy_profile_row(
     registry: Registry,
     *,
@@ -668,9 +690,10 @@ def _build_detection_training_data_card(
         detection_type = _normalize_text(row.get("detection_type"))
         if (
             not allow_detection_type_mismatch
-            and item.detection_source_type is not None
-            and detection_type is not None
-            and item.detection_source_type != detection_type
+            and not _detection_source_type_matches_manifest(
+                manifest_source_type=item.detection_source_type,
+                profile_detection_type=detection_type,
+            )
         ):
             type_mismatches.append(
                 f"{item.dataset_id}:{item.detection_source_type}!={detection_type}"

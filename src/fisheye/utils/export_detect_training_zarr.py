@@ -27,6 +27,7 @@ from zarr.core.dtype import VariableLengthUTF8
 from fisheye.diagnostics.prepare_detect_training import DatasetManifest, TrainingManifest
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.utils.system import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_name, get_downsample_array_path
 
@@ -181,7 +182,7 @@ def _export_dataset(plan: ExportPlan, *, overwrite: bool, run_name: str, manifes
 
     plan.dest_zarr.parent.mkdir(parents=True, exist_ok=True)
 
-    src_root = zarr.open_group(str(plan.source_zarr), mode="r")
+    src_root = open_zarr_group_direct(plan.source_zarr, mode="r")
     dest_root = zarr.open_group(str(plan.dest_zarr), mode="w")
 
     raw_src = src_root["raw_video"]
@@ -946,7 +947,7 @@ def _discover_merge_sources(
 
     for ordinal, dataset in enumerate(manifest.datasets):
         source_zarr = Path(dataset.zarr_path)
-        root = zarr.open_group(str(source_zarr), mode="r")
+        root = open_zarr_group_direct(source_zarr, mode="r")
         if "raw_video" not in root:
             raise KeyError(f"{source_zarr}: missing raw_video group.")
         raw = root["raw_video"]
@@ -1198,7 +1199,7 @@ def _export_merged(
             if copy_progress is not None and copy_task_id is not None:
                 copy_progress.update(copy_task_id, description=f"Copying {spec.dataset_name}")
 
-            root = zarr.open_group(str(spec.source_zarr), mode="r")
+            root = open_zarr_group_direct(spec.source_zarr, mode="r")
             bbox = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
             local_total = int(bbox.shape[0])
             source_refined_row_ids, source_detect_row_index = _resolve_source_row_identity(

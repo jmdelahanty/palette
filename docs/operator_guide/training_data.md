@@ -1,9 +1,11 @@
 # Training Data
 
-This guide covers how to create labeled training datasets from your analysis
-Zarrs and how to train detection, pose, and segmentation models. It assumes
-you have already run the [analysis pipeline](pipeline_workflow.md) and have
-Zarrs with detections, keypoints, and/or masks.
+This guide covers how to create labeled training datasets from analysis Zarrs or
+sampled training Zarrs, and how to train detection, pose, and segmentation
+models. The normal analysis-Zarr path assumes you have already run the
+[analysis pipeline](pipeline_workflow.md) and have Zarrs with detections,
+keypoints, and/or masks. Recording-only sampled training Zarrs need an initial
+prediction seed before review.
 
 ## Overview
 
@@ -19,7 +21,7 @@ There are four model types you can train:
 Each follows the same pattern:
 
 ```
-analysis zarrs with labels
+analysis zarrs with labels OR sampled training zarrs with seeded labels
        |
        v
   1. review & approve labels (interactive)
@@ -56,12 +58,98 @@ artifact labeling already happened earlier via `detect_quality` plus
 acceptable for downstream use.
 
 Modes:
-- Default: browse detections and set approval status
+- Default: browse detections, make manual corrections, and optionally approve
+  on exit with `a`
 - `--retune`: adjust blob detection parameters (traditional method only)
-- `--manual`: draw or erase bounding box corrections
 
-Keyboard shortcuts in the UI: **a** (approve), **n** (needs review),
-**r** (reject), **p** (pending).
+Keyboard shortcuts in the UI: **n** / **p** (next/previous), **c** (clear
+detection for this frame/slot), **r** (reset current edit), **a** (approve),
+**q** (save changes and quit).
+
+For a sampled training Zarr that starts from raw frames only, create the initial
+detection labels first:
+
+```bash
+scripts/py -m fisheye.utils.predict_training_detections \
+  /path/to/training.zarr \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-run-id <registered_detect_run_id> \
+  --run-name detect_seed_<model_or_date> \
+  --apply
+
+scripts/py -m fisheye.refinement.refine_detect \
+  /path/to/training.zarr \
+  --detect-run detect_seed_<model_or_date>
+```
+
+`refine_detect` detects sampled training imports from `raw_video` metadata or
+`raw_video/original_frame_indices`. In this mode it runs as a passthrough
+initializer: it writes the canonical `refined_detect_runs/<run>/instances`
+surface, disables jump/blip filters, and does not require a detect-quality
+report. The refinement step still applies a tuned
+`analysis_metadata.attrs["dish_mask"]` when one is present, just as it does for
+full analysis Zarrs: outside-dish seed detections are retained in
+`source_detections` for audit but excluded from the approved `instances` surface
+as `outside_dish_mask`. After that, review the refined surface with
+`detect_review` and approve either in the UI (`a`) or with
+`accept_detect_review --state approved --intended-use training`.
+Approval for `intended_use=training` materializes the canonical detection data
+profile (`analysis/detection_profile_runs/<run>`) and attempts to sync the
+registry projection automatically when the dataset is registered. The profile
+stores bbox center heatmaps, size/aspect histograms, source-content hashes, and
+run-lineage fingerprints used by training data cards.
+
+After approval, run the training image profile when you want to compare image
+statistics across training Zarrs before retraining:
+
+```bash
+scripts/py -m fisheye.utils.training_image_profile \
+  /path/to/training.zarr \
+  --apply \
+  --sync-registry \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+This writes `analysis/training_image_profile_runs/<run>` and records intensity,
+contrast, sharpness, clipping, illumination-gradient, and optional
+fish/background contrast metrics. It complements the detection data profile:
+detection profiles describe label geometry; training image profiles describe the
+sampled pixels. See `docs/training_image_profile_schema_contract.md`.
+
+For one-fish-per-frame training Zarrs, add `--per-frame-top-k 1` if the seed
+detector produces multiple candidates per sampled frame. This keeps only the
+highest-confidence candidate in `instances` while retaining the lower-scoring
+raw candidates in `source_detections` as `duplicate` rows for audit/review.
+
+For a resumable queue of pending detection-training archives:
+
+```bash
+scripts/py -m fisheye.utils.review_detect_batch \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training \
+  --path-contains _training.zarr \
+  --queue-output /tmp/pending_detect_training_zarrs.txt \
+  --details-output /tmp/pending_detect_training_zarrs.tsv \
+  --state-file /tmp/detect_review_batch_state.json \
+  --all \
+  --reviewer "$USER"
+```
+
+Resume after interruption with the same state file:
+
+```bash
+scripts/py -m fisheye.utils.review_detect_batch \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training \
+  --path-contains _training.zarr \
+  --state-file /tmp/detect_review_batch_state.json \
+  --resume \
+  --all \
+  --reviewer "$USER"
+```
+
+This wrapper does not bulk-approve labels; it opens `detect_review` one Zarr at
+a time and records progress for restart.
 
 ### Keypoint review
 
@@ -113,6 +201,35 @@ approved, and writes two files:
 
 ### Detection training prep
 
+Prefer the registry-driven wrapper when building real training sets. It queries
+the registry for matching source Zarrs, gates on refined-detect review status,
+then calls the lower-level preparer with the resolved path list.
+
+```bash
+scripts/py -m fisheye.utils.prepare_detect_training_from_registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains fish_2026 \
+  --source-type refined \
+  --input-format gray \
+  --require-review-state approved \
+  --require-review-intended-use training \
+  --dry-run
+```
+
+Remove `--dry-run` or use `run_detect_training_pipeline --build-dataset` to
+write the config, manifest, and optional merged training Zarr. The registry
+selector deduplicates multiple registry rows that point at the same physical
+Zarr path and prefers rows that have both an approved refined-detect quality
+projection and a detection data profile.
+
+Sampled recording-only training Zarrs usually do not have `crop_runs`. For
+`--source-type refined`, the preparer reads the approved
+`refined_detect_runs/<run>/instances` surface directly; crop approval is not
+required for this sampled-training path because there is no crop stage to
+approve.
+
+The direct path-based preparer is still useful for explicit lists or debugging:
+
 ```bash
 scripts/py -m fisheye.diagnostics.prepare_detect_training \
   /path/to/zarr1.zarr /path/to/zarr2.zarr \
@@ -143,18 +260,112 @@ Key options:
   current canonical curated surface; `filtered`, `interpolated`, and `manual`
   are legacy compatibility options.
 - `--input-format`: frame format (`gray` or `rgb`)
-- `--require-review-state` / `--require-review-intended-use`: gate on refined
-  detect review metadata from the registry's refined detect review surface
-- `--max-interpolated-detections-rate`: legacy compatibility gate for older
-  refined archives that still carry interpolation-heavy outputs
-- `--allow-unapproved`: skip review-state checks (not recommended for
-  production training)
+- `--require-review-state` / `--require-review-intended-use`: registry-wrapper
+  gates on refined-detect review metadata; use these on
+  `prepare_detect_training_from_registry` or `run_detect_training_pipeline`
+- `--max-interpolated-detections-rate`: registry-wrapper compatibility gate for
+  older refined archives that still carry interpolation-heavy outputs
+- `--allow-unapproved`: direct-preparer escape hatch to skip on-disk review
+  checks; not recommended for production training
+
+### Detection model input size
+
+When seeding labels on sampled training Zarrs, choose the frame source that
+matches the model input size when possible. The registry can report this for
+trained/exported detection models:
+
+- `training_runs.final_metrics_json` can include `imgsz_h` and `imgsz_w` for
+  the trained `.pt` model.
+- `onnx_models` and `tensorrt_models` record exported `input_shape`, `img_h`,
+  and `img_w`.
+- `detect_model_performance_latest` records the `inference_width` and
+  `inference_height` used by model-backed detection runs.
+
+For example, to inspect current detection model dimensions:
+
+```bash
+sqlite3 /nvme1/palette_registry.sqlite \
+  "select run_id,set_id,model_path,substr(final_metrics_json,1,500) \
+   from training_runs \
+   where task_type='detect' and status='success';"
+
+sqlite3 /nvme1/palette_registry.sqlite \
+  "select run_id,set_id,path,input_shape,img_h,img_w \
+   from onnx_models \
+   where path like '%detect%';"
+```
+
+The current `detect_cedar_shadow_v007` detector is registered with
+`imgsz_h=640`, `imgsz_w=640`, and ONNX/TensorRT `input_shape=[1, 3, 640, 640]`.
+For sampled training Zarrs that already contain `raw_video/images_ds` at
+`640x640`, prefer that array for label seeding instead of reading
+`raw_video/images_full` and resizing again. If the stored downsampled frame
+shape does not match the model, use the full-resolution array and let the
+inference path perform the documented resize/letterbox transform.
+
+Registry schema migration 49 normalizes the trained model input contract
+directly on `training_models` and exposes a shared `model_input_shapes` query
+view:
+
+```bash
+sqlite3 /nvme1/palette_registry.sqlite \
+  "select artifact_kind,run_id,task_type,artifact_path,input_shape,img_h,img_w \
+   from model_input_shapes \
+   where task_type='detect' and img_h=640 and img_w=640;"
+```
+
+See
+[`../model_input_shape_registry_design.md`](../model_input_shape_registry_design.md)
+for the schema and backfill plan.
+
+### Seed detection labels on a training Zarr
+
+Use `predict_training_detections` to run a registered detector directly over
+frames stored inside a training Zarr. The utility resolves the model input
+shape through `model_input_shapes`, prefers `raw_video/images_ds_rgb` or
+`raw_video/images_ds` when the stored frame shape matches the detector, and
+falls back to `raw_video/images_full` with YOLO resizing when needed.
+
+Dry-run first:
+
+```bash
+scripts/py -m fisheye.utils.predict_training_detections \
+  /path/to/training.zarr \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-run-id omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb
+```
+
+Write the initial `detect_runs/<run>` labels:
+
+```bash
+scripts/py -m fisheye.utils.predict_training_detections \
+  /path/to/training.zarr \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-run-id omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb \
+  --run-name detect_seed_v007 \
+  --apply
+```
+
+The written run records the selected model, `input_shape_status`, frame source
+array, sampled-frame mapping (`source_frame_indices` when available), and
+prediction parameters in run attrs and stage provenance.
+
+For sampled training imports, refined detection image-space boxes are computed
+in the same frame-source basis as the seed detect run. If
+`predict_training_detections` selected `raw_video/images_ds` at `640x640`,
+then `refined_detect_runs/<run>/instances/bbox_img_xyxy` is also in that
+`640x640` review-frame basis; full-resolution source dimensions remain
+available under `raw_video` metadata.
+
+Refinement, not prediction, is responsible for applying the dish-mask spatial
+gate. This keeps raw model predictions immutable while making the curated
+training surface respect the tuned dish geometry.
 
 ### Listing existing versions
 
 ```bash
-scripts/py src/fisheye/utils/list_training_versions.py
-scripts/py src/fisheye/utils/list_training_versions.py --name my_detect_set
+scripts/py -m fisheye.utils.list_training_versions
+scripts/py -m fisheye.utils.list_training_versions --name my_detect_set
 ```
 
 ---
@@ -261,6 +472,90 @@ scripts/py -m fisheye.training.train_detection \
   --no-log-registry
 ```
 
+For production detection runs, prefer leaving registry logging enabled and pass
+the manifest and set ID explicitly. Long-running GPU jobs should be launched in
+`tmux` or an equivalent scheduler job, not as a foreground Codex/tool process,
+because a client/session interruption can terminate foreground child processes.
+
+Example: train from a merged registry-built dataset and export through FP16
+TensorRT in one run:
+
+```bash
+tmux new-session -d -s palette_detect_train_v002 '
+cd /home/delahantyj@hhmi.org/gitrepos/palette &&
+env MPLCONFIGDIR=/tmp/matplotlib-training \
+    ULTRALYTICS_CONFIG_DIR=/tmp/ultralytics-training \
+  scripts/py -m fisheye.training.train_detection \
+    /nvme1/training/datasets/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002.yaml \
+    --manifest /nvme1/training/datasets/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002.manifest.json \
+    --set-id detect_all_available_detect_training_v002 \
+    --registry /nvme1/palette_registry.sqlite \
+    --project /nvme1/models/detect/detect_all_available_detect_training_v002 \
+    --run-name detect_all_available_detect_training_v002_yolo11n_trt_YYYYMMDD \
+    --export-trt \
+    --trt-precision fp16 \
+    --trtexec /usr/local/TensorRT-10.0.1.6/bin/trtexec \
+    --trt-profiling \
+    > /tmp/detect_all_available_detect_training_v002_train_trt_YYYYMMDD.log 2>&1
+'
+```
+
+Monitor:
+
+```bash
+tmux attach -t palette_detect_train_v002
+tail -f /tmp/detect_all_available_detect_training_v002_train_trt_YYYYMMDD.log
+```
+
+Expected detection-training outputs:
+
+- `weights/best.pt` and `weights/last.pt`: trained Ultralytics weights.
+- `results.csv`, plots, and validation images in the run directory.
+- `<timestamp>_detection_training_report.yaml`: effective config, source
+  manifest summary, final metrics, and artifact paths.
+- `inputs/`: snapshotted config and manifest used for the run.
+- `exports/onnx/<run_id>.onnx` and
+  `exports/onnx/<run_id>.onnx.manifest.json` when ONNX export is enabled.
+- `exports/tensorrt/<run_id>_<precision>.engine` and
+  `exports/tensorrt/<run_id>_<precision>.tensorrt.manifest.json` when
+  TensorRT export succeeds.
+- Registry rows in `training_runs`, `training_models`, `onnx_models`, and
+  `tensorrt_models` when `--no-log-registry` is not used.
+
+Operational checks before launching a TensorRT run:
+
+```bash
+scripts/py -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'
+/usr/local/TensorRT-10.0.1.6/bin/trtexec --version
+```
+
+Post-run artifact check:
+
+```bash
+RUN=/nvme1/models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_YYYYMMDD
+find "$RUN" -maxdepth 4 -type f \( -name best.pt -o -name results.csv -o -name "*.onnx" -o -name "*.engine" -o -name "*.manifest.json" \) | sort
+```
+
+Strict JSON check for export manifests:
+
+```bash
+scripts/py - <<'PY'
+import json
+from pathlib import Path
+root = Path("/path/to/training/run")
+bad = []
+for p in root.rglob("*.json"):
+    try:
+        json.loads(p.read_text())
+    except Exception as exc:
+        bad.append((p, exc))
+print("bad_json", len(bad))
+for path, exc in bad[:20]:
+    print(path, exc)
+raise SystemExit(1 if bad else 0)
+PY
+```
+
 ### Pose / keypoints
 
 ```bash
@@ -347,7 +642,8 @@ scripts/py -m fisheye.training.onnx_to_tensorrt \
 
 If you want to create training Zarrs from scratch (rather than using analysis
 Zarrs from the pipeline), you can do a sampled import that grabs every Nth
-frame:
+frame. See [sampled_import.md](sampled_import.md) for the full operator guide,
+including the recording-only/video-only path.
 
 ```bash
 scripts/py -m fisheye.capture.import_video /path/to/video.mp4 \
@@ -364,13 +660,18 @@ datasets without importing entire videos.
 ### Batch sampled import
 
 ```bash
-scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --dry-run
 ```
 
 Remove `--dry-run` and add `--apply` to execute.
+
+For organized recording-only directories that have camera videos but no H5 or
+protocol source, use `scripts/py -m fisheye.utils.intake_video_only_recording`
+instead. That wrapper stamps `experiment_context_status = "absent"` and can
+register the resulting training Zarr in the registry.
 
 ---
 

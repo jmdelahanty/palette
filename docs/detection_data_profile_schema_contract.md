@@ -52,6 +52,16 @@ This is not a many-writer model:
 - derived state is refreshable and may be rebuilt.
 
 Operational refresh policy:
+- Current training-label approval should materialize the detection profile
+  immediately. `accept_detect_review --state approved --intended-use training`
+  and interactive `detect_review` approval (`a` with `--review-intended-use
+  training`) write a profile for the approved refined source unless
+  `--skip-detection-profile` is passed.
+- After writing that profile, approval attempts to sync the latest profile into
+  the registry projection automatically when a registry path is available
+  (`--registry`, `PALETTE_REGISTRY_PATH`, or configured registry path that
+  already exists). If the Zarr is not registered, the Zarr profile remains the
+  source of truth and the registry sync reports `missing_dataset`.
 - If lineage fields are missing/stale in registry projection rows:
   `scripts/py -m fisheye.utils.sync_detection_profile_registry --registry <registry.sqlite> --zarr-use any --apply`
 - If lineage fields are also desired in historical on-disk profile payloads:
@@ -105,10 +115,27 @@ This follows existing `analysis/<analysis_type>_runs/<run_name>/` conventions.
     `source_detection_path = refined_detect_runs/<run>/instances`.
   - `manual|interpolated|filtered` are historical compatibility values for
     legacy sparse archives.
+- `source_detection_content_hash`: SHA-256 hash of the detection arrays used by
+  the profile.
+- `source_detection_content_fingerprint_schema_id`:
+  `"palette.detection_profile.source_content_fingerprint"`.
+- `source_detection_content_fingerprint_schema_version`: integer schema version.
+- `source_detection_content_fingerprint_canonicalization`:
+  `"sha256_detection_source_arrays_v1"`.
+- `source_detection_content_hash_arrays`: array names included in the source
+  content hash.
 - `source_resolution`: `full|sampled`
 - `source_frame_count`: frame universe used for coverage denominator
 - `source_frame_count_full`: full frame count when sampled universe is used (nullable)
 - `profile_config`: dict (grid size, edge margin, histogram bins, etc.)
+- Run-lineage attrs from `fisheye.shared.run_lineage_fingerprint`, including
+  `source_fingerprint`, `source_lineage_hash`, `lineage_hash`,
+  `fingerprint_status`, and `lineage_payload_json`.
+
+The source-content hash is not the same as `source_fingerprint`.
+`source_detection_content_hash` fingerprints the detection arrays read by the
+profile. `source_fingerprint` fingerprints the profile run lineage: schema,
+method, source reference, source-content hash, and profile parameters.
 
 ### Required Data Payload (JSON)
 
@@ -139,7 +166,12 @@ Canonical JSON shape:
     "review_state": "approved",
     "review_method": "manual",
     "review_intended_use": "training",
-    "review_timestamp_utc": "2026-02-23T11:58:00+00:00"
+    "review_timestamp_utc": "2026-02-23T11:58:00+00:00",
+    "content_fingerprint_schema_id": "palette.detection_profile.source_content_fingerprint",
+    "content_fingerprint_schema_version": 1,
+    "content_fingerprint_canonicalization": "sha256_detection_source_arrays_v1",
+    "content_hash": "64-character sha256 hex",
+    "content_hash_arrays": ["frame_indices", "bbox_norm_coords", "frame_counts"]
   },
   "coverage": {
     "frames_total": 231,

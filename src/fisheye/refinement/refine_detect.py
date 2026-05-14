@@ -17,7 +17,7 @@ import sys
 from json import JSONDecodeError, loads as json_loads
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Mapping, Optional, Tuple, Any
 from rich.console import Console
 
 from ..utils.metadata import get_total_frames, get_detection_method
@@ -26,10 +26,12 @@ from ..shared.refined_detect_curation import write_curated_refined_detect_surfac
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
+from ..shared.zarr_helpers import open_zarr_group_direct
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 _REFINED_DETECT_STATUS_SOURCE = "runtime_refine_detect"
+_DISH_MASK_QUALITY_LABEL = 5
 _DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE = (
     "Interpolation overrides are deprecated and unsupported for refine_detect. "
     "The current sparse-first refine_detect workflow always runs with interpolation disabled."
@@ -145,6 +147,206 @@ def _get_sampled_frame_count(root: zarr.Group, detect_group: Optional[zarr.Group
     return None
 
 
+def _coerce_mapping(value: object) -> Optional[Mapping[str, object]]:
+    parsed = _parse_mapping(value)
+    if parsed is not None:
+        return parsed
+    return value if isinstance(value, Mapping) else None
+
+
+def _shape_hw_from_sequence(value: object) -> Optional[Tuple[float, float]]:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        # Frame/source shapes are stored as [n, h, w] or [h, w].
+        if len(value) >= 3:
+            return float(value[-2]), float(value[-1])
+        return float(value[0]), float(value[1])
+    except Exception:
+        return None
+
+
+def _detect_frame_shape_hw(root: zarr.Group, detect_group: zarr.Group) -> Optional[Tuple[float, float]]:
+    frame_source_shape = detect_group.attrs.get("frame_source_shape")
+    shape = _shape_hw_from_sequence(frame_source_shape)
+    if shape is not None:
+        return shape
+
+    inference_h = detect_group.attrs.get("inference_height")
+    inference_w = detect_group.attrs.get("inference_width")
+    try:
+        if inference_h is not None and inference_w is not None:
+            return float(inference_h), float(inference_w)
+    except Exception:
+        pass
+
+    raw = root.get("raw_video")
+    if raw is not None:
+        for key in ("images_ds", "images_ds_rgb", "images_full"):
+            if key in raw:
+                shape = _shape_hw_from_sequence(raw[key].shape)
+                if shape is not None:
+                    return shape
+    return None
+
+
+def _read_dish_mask_spec(root: zarr.Group, detect_group: zarr.Group) -> Optional[Dict[str, object]]:
+    analysis_meta = root.get("analysis_metadata")
+    if analysis_meta is None or "dish_mask" not in analysis_meta.attrs:
+        return None
+    mask_data = _coerce_mapping(analysis_meta.attrs.get("dish_mask"))
+    if not mask_data:
+        return None
+
+    shape = str(
+        mask_data.get("shape")
+        or ("circle" if "detected_circle" in mask_data else "")
+        or ("rectangle" if "rectangle" in mask_data else "")
+    ).strip().lower()
+    if shape not in {"circle", "rectangle"}:
+        return None
+
+    metrics = _coerce_mapping(mask_data.get("metrics")) or {}
+    mask_hw = _shape_hw_from_sequence(metrics.get("image_shape"))
+    if mask_hw is None:
+        mask_hw = _detect_frame_shape_hw(root, detect_group)
+    if mask_hw is None:
+        return None
+    mask_h, mask_w = mask_hw
+    if mask_h <= 0 or mask_w <= 0:
+        return None
+
+    if shape == "circle":
+        circle = _coerce_mapping(mask_data.get("detected_circle"))
+        if circle is not None:
+            center = circle.get("center")
+            radius = circle.get("radius")
+            if isinstance(center, (list, tuple)) and len(center) >= 2 and radius is not None:
+                try:
+                    cx_px = float(center[0])
+                    cy_px = float(center[1])
+                    r_px = float(radius)
+                except Exception:
+                    cx_px = cy_px = r_px = float("nan")
+                if np.isfinite([cx_px, cy_px, r_px]).all() and r_px > 0:
+                    return {
+                        "enabled": True,
+                        "shape": "circle",
+                        "center_norm": [cx_px / mask_w, cy_px / mask_h],
+                        "radius_norm_x": r_px / mask_w,
+                        "radius_norm_y": r_px / mask_h,
+                        "source": "analysis_metadata.dish_mask",
+                    }
+
+        center_norm = metrics.get("center_norm")
+        radius_norm = metrics.get("radius_norm")
+        if isinstance(center_norm, (list, tuple)) and len(center_norm) >= 2 and radius_norm is not None:
+            try:
+                cx = float(center_norm[0])
+                cy = float(center_norm[1])
+                r = float(radius_norm)
+                if np.isfinite([cx, cy, r]).all() and r > 0:
+                    return {
+                        "enabled": True,
+                        "shape": "circle",
+                        "center_norm": [cx, cy],
+                        "radius_norm_x": r,
+                        "radius_norm_y": r,
+                        "source": "analysis_metadata.dish_mask",
+                    }
+            except Exception:
+                pass
+        return None
+
+    rectangle = _coerce_mapping(mask_data.get("rectangle"))
+    if rectangle is None:
+        return None
+    roi = rectangle.get("roi")
+    if not isinstance(roi, (list, tuple)) or len(roi) < 4:
+        return None
+    try:
+        x, y, w, h = [float(v) for v in roi[:4]]
+    except Exception:
+        return None
+    if not np.isfinite([x, y, w, h]).all() or w <= 0 or h <= 0:
+        return None
+    return {
+        "enabled": True,
+        "shape": "rectangle",
+        "x_min_norm": x / mask_w,
+        "y_min_norm": y / mask_h,
+        "x_max_norm": (x + w) / mask_w,
+        "y_max_norm": (y + h) / mask_h,
+        "source": "analysis_metadata.dish_mask",
+    }
+
+
+def _dish_mask_inside_bbox_centers(bbox_coords: np.ndarray, spec: Mapping[str, object]) -> np.ndarray:
+    bboxes = np.asarray(bbox_coords, dtype=np.float64).reshape(-1, 4)
+    if bboxes.shape[0] == 0:
+        return np.zeros((0,), dtype=bool)
+    centers = bboxes[:, :2]
+    finite = np.isfinite(centers).all(axis=1)
+    shape = str(spec.get("shape") or "")
+    if shape == "circle":
+        center = np.asarray(spec.get("center_norm"), dtype=np.float64).reshape(2)
+        rx = float(spec.get("radius_norm_x") or 0)
+        ry = float(spec.get("radius_norm_y") or 0)
+        if rx <= 0 or ry <= 0:
+            return np.zeros((bboxes.shape[0],), dtype=bool)
+        dx = (centers[:, 0] - float(center[0])) / rx
+        dy = (centers[:, 1] - float(center[1])) / ry
+        return finite & ((dx * dx + dy * dy) <= 1.0)
+    if shape == "rectangle":
+        x_min = float(spec.get("x_min_norm") or 0)
+        y_min = float(spec.get("y_min_norm") or 0)
+        x_max = float(spec.get("x_max_norm") or 0)
+        y_max = float(spec.get("y_max_norm") or 0)
+        return (
+            finite
+            & (centers[:, 0] >= x_min)
+            & (centers[:, 0] <= x_max)
+            & (centers[:, 1] >= y_min)
+            & (centers[:, 1] <= y_max)
+        )
+    return finite
+
+
+def _apply_dish_mask_quality_gate(
+    *,
+    bbox_coords: np.ndarray,
+    detection_quality_labels: np.ndarray,
+    mask_spec: Optional[Mapping[str, object]],
+) -> Tuple[np.ndarray, Dict[str, object]]:
+    labels = np.asarray(detection_quality_labels, dtype=np.int8).reshape(-1).copy()
+    stats: Dict[str, object] = {
+        "enabled": False,
+        "source": None,
+        "shape": None,
+        "candidate_rows": int(labels.shape[0]),
+        "outside_rows": 0,
+        "outside_clean_rows": 0,
+    }
+    if not mask_spec or not bool(mask_spec.get("enabled", False)):
+        return labels, stats
+
+    inside = _dish_mask_inside_bbox_centers(bbox_coords, mask_spec)
+    outside = ~inside
+    clean_outside = outside & (labels == 0)
+    labels[clean_outside] = np.int8(_DISH_MASK_QUALITY_LABEL)
+    stats.update(
+        {
+            "enabled": True,
+            "source": mask_spec.get("source"),
+            "shape": mask_spec.get("shape"),
+            "candidate_rows": int(labels.shape[0]),
+            "outside_rows": int(np.sum(outside)),
+            "outside_clean_rows": int(np.sum(clean_outside)),
+        }
+    )
+    return labels, stats
+
+
 def _quality_guardrail_error(detect_run: str, reason: str, quality_run: Optional[str] = None) -> ValueError:
     target = f"quality run '{quality_run}'" if quality_run else "latest quality run"
     return ValueError(
@@ -248,6 +450,9 @@ def filter_detections(
         blip_mask = detection_quality_labels == 2
         keep_mask &= ~blip_mask
         drop_reasons['blips'] = int(np.sum(blip_mask))
+    dish_mask = detection_quality_labels == _DISH_MASK_QUALITY_LABEL
+    if np.any(dish_mask):
+        drop_reasons['outside_dish_mask'] = int(np.sum(dish_mask))
     
     # Only keep clean detections (label=0)
     # This also excludes multi-detections (label=4) if present
@@ -277,6 +482,98 @@ def filter_detections(
         filtered_frame_indices,
         filtered_class_ids,
         drop_stats,
+    )
+
+
+def _select_per_frame_top_k_raw_indices(
+    *,
+    raw_frame_indices: np.ndarray,
+    raw_scores: np.ndarray,
+    candidate_raw_indices: np.ndarray,
+    per_frame_top_k: Optional[int],
+    score_field: str = "scores",
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Select the top scoring raw candidates per frame.
+
+    Returns selected raw row indices, duplicate raw row indices, and a small
+    provenance/statistics payload. Candidate rows are expected to already be
+    eligible for refinement, e.g. clean after quality filtering.
+    """
+
+    candidates = np.asarray(candidate_raw_indices, dtype=np.int32).reshape(-1)
+    if per_frame_top_k is None:
+        return (
+            candidates,
+            np.empty((0,), dtype=np.int32),
+            {
+                "enabled": False,
+                "per_frame_top_k": None,
+                "score_field": str(score_field),
+                "candidate_rows": int(candidates.shape[0]),
+                "selected_rows": int(candidates.shape[0]),
+                "duplicate_rows": 0,
+                "frames_with_duplicates": 0,
+            },
+        )
+    if int(per_frame_top_k) < 1:
+        raise ValueError("--per-frame-top-k must be a positive integer.")
+    if str(score_field) != "scores":
+        raise ValueError("Only --top-k-score-field scores is currently supported.")
+
+    k = int(per_frame_top_k)
+    frame_indices = np.asarray(raw_frame_indices, dtype=np.int32).reshape(-1)
+    scores = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
+    if frame_indices.shape[0] != scores.shape[0]:
+        raise ValueError("raw_frame_indices and raw_scores must agree on row count.")
+    if candidates.size == 0:
+        return (
+            candidates,
+            np.empty((0,), dtype=np.int32),
+            {
+                "enabled": True,
+                "per_frame_top_k": k,
+                "score_field": str(score_field),
+                "candidate_rows": 0,
+                "selected_rows": 0,
+                "duplicate_rows": 0,
+                "frames_with_duplicates": 0,
+            },
+        )
+    if int(np.min(candidates)) < 0 or int(np.max(candidates)) >= frame_indices.shape[0]:
+        raise ValueError("candidate_raw_indices contains out-of-range rows.")
+
+    selected: list[int] = []
+    duplicate: list[int] = []
+    candidate_frames = frame_indices[candidates]
+    frames_with_duplicates = 0
+    for frame in np.unique(candidate_frames):
+        rows = candidates[candidate_frames == frame]
+        row_scores = scores[rows]
+        rank_scores = np.where(np.isfinite(row_scores), row_scores, -np.inf)
+        # Primary key: score descending. Tie-breaker: source row ascending for determinism.
+        order = np.lexsort((rows, -rank_scores))
+        ranked = rows[order]
+        keep = ranked[:k]
+        drop = ranked[k:]
+        selected.extend(int(row) for row in keep.tolist())
+        duplicate.extend(int(row) for row in drop.tolist())
+        if drop.size:
+            frames_with_duplicates += 1
+
+    selected_arr = np.asarray(sorted(selected), dtype=np.int32)
+    duplicate_arr = np.asarray(sorted(duplicate), dtype=np.int32)
+    return (
+        selected_arr,
+        duplicate_arr,
+        {
+            "enabled": True,
+            "per_frame_top_k": k,
+            "score_field": str(score_field),
+            "candidate_rows": int(candidates.shape[0]),
+            "selected_rows": int(selected_arr.shape[0]),
+            "duplicate_rows": int(duplicate_arr.shape[0]),
+            "frames_with_duplicates": int(frames_with_duplicates),
+        },
     )
 
 
@@ -503,6 +800,8 @@ def interpolate_detections(
 
 
 def _filtered_reason_from_quality_label(label: int) -> str:
+    if label == _DISH_MASK_QUALITY_LABEL:
+        return "outside_dish_mask"
     if label == 4:
         return "multi_detection"
     if label == 2:
@@ -523,6 +822,8 @@ def _build_sparse_refined_inputs_from_filtered(
     interp_scores: np.ndarray,
     interp_frame_indices: np.ndarray,
     interp_class_ids: np.ndarray,
+    selected_source_detect_row_index: Optional[np.ndarray] = None,
+    duplicate_source_detect_row_index: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     raw_bboxes_arr = np.asarray(raw_bboxes, dtype=np.float64).reshape(-1, 4)
     raw_scores_arr = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
@@ -551,26 +852,45 @@ def _build_sparse_refined_inputs_from_filtered(
         raise ValueError("Filtered detect arrays must agree on row count.")
 
     kept_raw_indices = np.flatnonzero(quality_labels_arr == 0).astype(np.int32, copy=False)
-    if kept_raw_indices.shape[0] != filtered_frame_indices_arr.shape[0]:
+    selected_raw_indices = (
+        np.asarray(selected_source_detect_row_index, dtype=np.int32).reshape(-1)
+        if selected_source_detect_row_index is not None
+        else kept_raw_indices
+    )
+    duplicate_raw_indices = (
+        np.asarray(duplicate_source_detect_row_index, dtype=np.int32).reshape(-1)
+        if duplicate_source_detect_row_index is not None
+        else np.empty((0,), dtype=np.int32)
+    )
+    if selected_raw_indices.shape[0] != filtered_frame_indices_arr.shape[0]:
         raise ValueError(
-            "Filtered detection rows do not match the raw keep-mask derived from detection_quality_labels."
+            "Filtered detection rows do not match selected source-detect rows."
         )
+    if selected_raw_indices.size:
+        if int(np.min(selected_raw_indices)) < 0 or int(np.max(selected_raw_indices)) >= raw_bboxes_arr.shape[0]:
+            raise ValueError("selected_source_detect_row_index contains out-of-range rows.")
+    if duplicate_raw_indices.size:
+        if int(np.min(duplicate_raw_indices)) < 0 or int(np.max(duplicate_raw_indices)) >= raw_bboxes_arr.shape[0]:
+            raise ValueError("duplicate_source_detect_row_index contains out-of-range rows.")
 
     source_decision_labels = np.full(raw_frame_indices_arr.shape[0], "filtered", dtype=object)
     source_reason_labels = np.asarray(
         [_filtered_reason_from_quality_label(int(label)) for label in quality_labels_arr.tolist()],
         dtype=object,
     )
-    if kept_raw_indices.size:
-        source_decision_labels[kept_raw_indices] = "accepted"
-        source_reason_labels[kept_raw_indices] = "clean"
+    if duplicate_raw_indices.size:
+        source_decision_labels[duplicate_raw_indices] = "duplicate"
+        source_reason_labels[duplicate_raw_indices] = "per_frame_top_k_excluded"
+    if selected_raw_indices.size:
+        source_decision_labels[selected_raw_indices] = "accepted"
+        source_reason_labels[selected_raw_indices] = "clean"
 
     return {
         "instance_frame_indices": filtered_frame_indices_arr,
         "instance_bbox_norm_coords": filtered_bboxes_arr,
         "instance_source_kind_labels": np.full(filtered_frame_indices_arr.shape[0], "raw_detect", dtype=object),
         "instance_reason_labels": np.full(filtered_frame_indices_arr.shape[0], "clean", dtype=object),
-        "instance_source_detect_row_index": kept_raw_indices,
+        "instance_source_detect_row_index": selected_raw_indices,
         "instance_manual_edit_flags": np.zeros(filtered_frame_indices_arr.shape[0], dtype=bool),
         "instance_confidence_scores": filtered_scores_arr,
         "instance_class_ids": filtered_class_ids_arr,
@@ -631,6 +951,8 @@ def create_refined_run(
     show_visuals: bool = False,
     visuals_dpi: int = 150,
     require_detect_quality: bool = True,
+    per_frame_top_k: Optional[int] = None,
+    top_k_score_field: str = "scores",
 ) -> str:
     """
     Create a refined detection run with sparse-first curated detect surfaces.
@@ -646,6 +968,8 @@ def create_refined_run(
         remove_blips: Remove blip artifacts (overrides config)
         console: Rich console for output
         require_detect_quality: Require usable detect_quality labels for refinement
+        per_frame_top_k: Optional max accepted detections per frame after quality filtering
+        top_k_score_field: Score field used for top-k ranking; currently only "scores"
         
     Returns:
         Name of created refined run
@@ -710,8 +1034,8 @@ def create_refined_run(
     interp_method = 'disabled'
     refine_mode = "standard"
     
-    # Open zarr
-    root = zarr.open(zarr_path, mode='a')
+    # Open mutable stores directly so a newly written run is not hidden by stale consolidated metadata.
+    root = open_zarr_group_direct(zarr_path, mode='a')
     
     # Get detect run
     if detect_run is None:
@@ -749,11 +1073,24 @@ def create_refined_run(
         refine_mode = "passthrough"
         param_source = "sampled_import_guard"
 
+    dish_mask_spec = _read_dish_mask_spec(root, detect_group)
+    detection_quality_labels, dish_mask_gate = _apply_dish_mask_quality_gate(
+        bbox_coords=bbox_coords,
+        detection_quality_labels=detection_quality_labels,
+        mask_spec=dish_mask_spec,
+    )
+
     console.print(f"Parameters source: [cyan]{param_source}[/cyan]")
     console.print("  Interpolation: disabled")
     console.print(f"  Filters: {filters}")
     if sampled_import:
         console.print("  Refine mode: passthrough (sampled import)")
+    if dish_mask_gate.get("enabled"):
+        console.print(
+            "  Dish mask gate: "
+            f"{dish_mask_gate.get('outside_clean_rows')} clean detections outside "
+            f"{dish_mask_gate.get('shape')} mask"
+        )
 
     # Get total frames using unified metadata helper
     num_frames = get_total_frames(root, detect_group)
@@ -818,6 +1155,45 @@ def create_refined_run(
         num_frames,
         filters,
     )
+
+    selected_source_detect_row_index = np.flatnonzero(detection_quality_labels == 0).astype(np.int32, copy=False)
+    duplicate_source_detect_row_index = np.empty((0,), dtype=np.int32)
+    top_k_selection = {
+        "enabled": False,
+        "per_frame_top_k": None,
+        "score_field": str(top_k_score_field),
+        "candidate_rows": int(selected_source_detect_row_index.shape[0]),
+        "selected_rows": int(selected_source_detect_row_index.shape[0]),
+        "duplicate_rows": 0,
+        "frames_with_duplicates": 0,
+    }
+    if per_frame_top_k is not None:
+        (
+            selected_source_detect_row_index,
+            duplicate_source_detect_row_index,
+            top_k_selection,
+        ) = _select_per_frame_top_k_raw_indices(
+            raw_frame_indices=frame_indices,
+            raw_scores=scores,
+            candidate_raw_indices=np.flatnonzero(detection_quality_labels == 0).astype(np.int32, copy=False),
+            per_frame_top_k=per_frame_top_k,
+            score_field=top_k_score_field,
+        )
+        filtered_bboxes = bbox_coords[selected_source_detect_row_index]
+        filtered_scores = scores[selected_source_detect_row_index]
+        filtered_frame_indices = frame_indices[selected_source_detect_row_index].astype("i4", copy=False)
+        filtered_class_ids = class_ids[selected_source_detect_row_index].astype("i4", copy=False)
+        filtered_counts = np.bincount(filtered_frame_indices, minlength=num_frames).astype("i4", copy=False)
+        nonclean_dropped = int(np.sum(detection_quality_labels != 0))
+        duplicate_dropped = int(duplicate_source_detect_row_index.shape[0])
+        drop_stats["kept"] = int(selected_source_detect_row_index.shape[0])
+        drop_stats["total_dropped"] = nonclean_dropped + duplicate_dropped
+        drop_stats.setdefault("reasons", {})["per_frame_top_k_duplicate"] = duplicate_dropped
+        console.print(
+            "  Top-k selection: "
+            f"kept {top_k_selection['selected_rows']}/{top_k_selection['candidate_rows']} "
+            f"clean candidates with top {top_k_selection['per_frame_top_k']} by {top_k_selection['score_field']}"
+        )
     
     console.print(f"  Kept: {drop_stats['kept']} detections")
     console.print(f"  Dropped: {drop_stats['total_dropped']} detections")
@@ -838,6 +1214,8 @@ def create_refined_run(
         interp_scores=filtered_scores,
         interp_frame_indices=filtered_frame_indices,
         interp_class_ids=filtered_class_ids,
+        selected_source_detect_row_index=selected_source_detect_row_index,
+        duplicate_source_detect_row_index=duplicate_source_detect_row_index,
     )
 
     # Calculate coverage comparison
@@ -890,6 +1268,8 @@ def create_refined_run(
         'sampled_import_meta': sampled_meta,
         'detect_quality_guardrail_requested': bool(require_detect_quality),
         'detect_quality_guardrail_enforced': bool(require_quality_for_run),
+        'dish_mask_gate': dish_mask_gate,
+        'top_k_selection': top_k_selection,
     }
 
     refined_group.attrs['source_detect_run'] = detect_run
@@ -986,7 +1366,13 @@ def create_refined_run(
         source_context={
             "source_detect_run": detect_run,
             "quality_run": resolved_quality_run or "N/A",
-            "selection_policy": "quality_filtered_sparse_instances_no_interpolation",
+            "selection_policy": (
+                "quality_filtered_per_frame_top_k_sparse_instances_no_interpolation"
+                if top_k_selection.get("enabled")
+                else "quality_filtered_sparse_instances_no_interpolation"
+            ),
+            "dish_mask_gate": dish_mask_gate,
+            "top_k_selection": top_k_selection,
         },
     )
 
@@ -1098,6 +1484,10 @@ Examples:
 
   # Specify source runs
   scripts/py -m fisheye.refinement.refine_detect data.zarr --detect-run detect_2025-10-03_20-28-11
+
+  # Keep only the top confidence candidate per frame while preserving all raw candidates
+  # in source_detections.
+  scripts/py -m fisheye.refinement.refine_detect data.zarr --per-frame-top-k 1
         """
     )
     
@@ -1126,6 +1516,18 @@ Examples:
         '--allow-missing-quality',
         action='store_true',
         help='Allow refinement without detect_quality labels (legacy fallback).',
+    )
+    parser.add_argument(
+        '--per-frame-top-k',
+        type=int,
+        default=None,
+        help='Accept only the top K clean detections per frame into instances; non-top clean rows remain in source_detections as duplicate.',
+    )
+    parser.add_argument(
+        '--top-k-score-field',
+        default='scores',
+        choices=['scores'],
+        help='Score field used for --per-frame-top-k ranking (default: scores).',
     )
     
     args = parser.parse_args()
@@ -1156,6 +1558,8 @@ Examples:
             show_visuals=args.show_visuals,
             visuals_dpi=args.visuals_dpi,
             require_detect_quality=not args.allow_missing_quality,
+            per_frame_top_k=args.per_frame_top_k,
+            top_k_score_field=args.top_k_score_field,
         )
         
         print(f"\n✓ Created refined run: {run_name}")

@@ -71,7 +71,7 @@ recordings/<session_uuid_protocol>/
 you can batch import sampled training Zarrs using:
 
 ```bash
-scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --dry-run
@@ -80,7 +80,7 @@ scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
 Apply the imports:
 
 ```bash
-scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --apply
@@ -89,7 +89,7 @@ scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
 Optional: rich-formatted dry-run output:
 
 ```bash
-scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --dry-run \
@@ -103,7 +103,7 @@ Defaults:
 Optional registry registration:
 
 ```bash
-scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --apply \
@@ -113,7 +113,7 @@ scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
 Optional: mirror stimulus H5 into the Zarr (when available):
 
 ```bash
-scripts/py src/fisheye/utils/import_recordings_training.py /nvme1/recordings \
+scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
   --recursive \
   --frame-step 100 \
   --apply \
@@ -143,6 +143,22 @@ scripts/py -m fisheye.tune.detect_review /path/to/output/detect_runs.zarr
 scripts/py -m fisheye.tracking.arena_assignment /path/to/output/detect_runs.zarr
 scripts/py -m fisheye.visualization.detection_visualizer /path/to/output/detect_runs.zarr
 ```
+
+For sampled training Zarrs, approved detection review writes the detection data
+profile. Add the image-domain profile when comparing new recordings against the
+existing training pool:
+
+```bash
+scripts/py -m fisheye.utils.training_image_profile \
+  /path/to/training_sample.zarr \
+  --apply \
+  --sync-registry \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+This captures brightness, contrast, sharpness, clipping, illumination, and
+fish/background contrast metrics in
+`analysis/training_image_profile_runs/<run>`.
 
 ### 4) Crop full-resolution ROIs for pose/segmentation
 Cropping uses `raw_video` if present, otherwise `source_video_path` stored in metadata.
@@ -183,14 +199,51 @@ This writes:
 List versions:
 
 ```bash
-scripts/py src/fisheye/utils/list_training_versions.py
-scripts/py src/fisheye/utils/list_training_versions.py --name detect_base
+scripts/py -m fisheye.utils.list_training_versions
+scripts/py -m fisheye.utils.list_training_versions --name detect_base
 ```
 
 ### 6) Train + iterate
 - Train from the generated config + manifest.
 - Use the new model to re-run detection on additional videos.
 - Refine, QC, and add to the next training iteration.
+
+For production training, treat the config and manifest as the immutable inputs
+to the run. Pass both to the trainer explicitly, keep registry logging enabled,
+and write outputs to a stable project directory:
+
+```bash
+scripts/py -m fisheye.training.train_detection \
+  /nvme1/training/datasets/<set_id>/<set_id>.yaml \
+  --manifest /nvme1/training/datasets/<set_id>/<set_id>.manifest.json \
+  --set-id <set_id> \
+  --registry /nvme1/palette_registry.sqlite \
+  --project /nvme1/models/detect/<set_id> \
+  --run-name <set_id>_yolo11n_trt_YYYYMMDD \
+  --export-trt \
+  --trt-precision fp16 \
+  --trtexec /usr/local/TensorRT-10.0.1.6/bin/trtexec \
+  --trt-profiling
+```
+
+Run long GPU jobs under `tmux`, `screen`, or a cluster scheduler. Do not rely
+on a foreground Codex/tool session to keep a multi-hour training job alive:
+
+```bash
+tmux new-session -d -s palette_detect_train '
+cd /home/delahantyj@hhmi.org/gitrepos/palette &&
+env MPLCONFIGDIR=/tmp/matplotlib-training \
+    ULTRALYTICS_CONFIG_DIR=/tmp/ultralytics-training \
+  scripts/py -m fisheye.training.train_detection ... \
+    > /tmp/palette_detect_train.log 2>&1
+'
+tail -f /tmp/palette_detect_train.log
+```
+
+The detection trainer snapshots the run inputs under `<run>/inputs`, writes a
+training report YAML, and records registry rows for the training run plus model
+exports unless `--no-log-registry` is passed. With `--export-trt`, ONNX export
+is implied and TensorRT export runs after training completes or early-stops.
 
 ## Operational Notes
 - **Avoid full imports** unless you truly need all frames. Detection runs can stay lightweight.
@@ -253,7 +306,23 @@ Notes:
 - `--build-dataset` is a convenience alias for `--export-merged` + `--aggregate-training-data-card`.
 - `--export-merged` requires `--out-manifest` (the export step consumes that manifest).
 - `--export-merged` cannot be combined with `--dry-run` because preflight dry-run does not write files.
+- If the preflight source manifest would collide with the merged manifest path,
+  the wrapper preserves the source-selection manifest as
+  `<set_id>.source.manifest.json`. The merged Zarr root provenance points at
+  that immutable source manifest and stores its SHA-256 hash.
 - `fisheye.utils.prepare_detect_training_from_registry` is prepare-only and no longer launches merge/train.
+- Registry-selected detection exports gate on `refined_detect_review_current`,
+  which is the semantic current reviewed-refined surface. The current view
+  prefers explicitly reviewed rows over newer unreviewed refined attempts, so a
+  cleanup/refinement rerun does not silently displace an approved training
+  surface.
+- Registry-selected detection exports deduplicate source Zarrs by physical path
+  before calling the lower-level preparer. This avoids double-counting labels
+  when historical rescans have both base and path-hash dataset IDs for the same
+  Zarr.
+- Sampled recording-only training Zarrs can be exported with `--source-type
+  refined` directly from `refined_detect_runs/<run>/instances`; they do not need
+  `crop_runs` or crop-review approval.
 - `--aggregate-training-data-card` uses the preflight manifest dataset list and
   `detection_data_profile_latest` rows to write `<set_id>.data_card.json`.
 - Data-card aggregation now also writes plot PNGs by default to

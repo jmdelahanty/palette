@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.registry.db import Registry
 from fisheye.utils import accept_detect_review as mod
 
 
@@ -15,7 +16,19 @@ def _make_zarr(path: Path, *, with_group: str = "interpolated") -> Path:
     parent.attrs["latest"] = "refined_1"
     run = parent.create_group("refined_1")
     if with_group:
-        run.create_group(with_group)
+        group = run.create_group(with_group)
+        group.create_array("frame_indices", data=np.asarray([0, 1], dtype=np.int32))
+        group.create_array(
+            "bbox_norm_coords",
+            data=np.asarray(
+                [
+                    [0.5, 0.5, 0.2, 0.2],
+                    [0.4, 0.4, 0.1, 0.1],
+                ],
+                dtype=np.float64,
+            ),
+        )
+        group.create_array("frame_counts", data=np.asarray([1, 1], dtype=np.int32))
     return path
 
 
@@ -74,6 +87,17 @@ def test_accept_detect_review_writes_status_and_latest(tmp_path: Path) -> None:
     assert status["timestamp"] == status["timestamp_utc"]
     assert status["resolved_group"] == "interpolated"
     assert parent.attrs["detect_review_status_latest"] == "refined_1"
+    profile_parent = root["analysis/detection_profile_runs"]
+    profile_run = profile_parent.attrs["latest"]
+    profile_group = profile_parent[profile_run]
+    assert profile_group.attrs["source_detection_path"] == "refined_detect_runs/refined_1/interpolated"
+    assert profile_group.attrs["source_detection_type"] == "interpolated"
+    assert profile_group.attrs["fingerprint_status"] == "complete"
+    assert len(profile_group.attrs["source_fingerprint"]) == 64
+    summary = profile_group.attrs["profile_summary"]
+    assert summary["source"]["review_state"] == "approved"
+    assert summary["source"]["review_intended_use"] == "training"
+    assert len(summary["source"]["content_hash"]) == 64
 
 
 def test_accept_detect_review_dry_run_does_not_write(tmp_path: Path) -> None:
@@ -149,3 +173,52 @@ def test_accept_detect_review_prefers_curated_root_when_present(tmp_path: Path) 
     root = zarr.open_group(store=zarr_path, mode="r")
     status = dict(root["refined_detect_runs"]["refined_1"].attrs["detect_review_status"])
     assert status["resolved_group"] == "refined"
+    profile_group = root["analysis/detection_profile_runs"][
+        root["analysis/detection_profile_runs"].attrs["latest"]
+    ]
+    assert profile_group.attrs["source_detection_path"] == "refined_detect_runs/refined_1"
+
+
+def test_accept_detect_review_syncs_detection_profile_registry(tmp_path: Path) -> None:
+    zarr_path = _make_zarr(tmp_path / "registered.zarr", with_group="interpolated")
+    registry_path = tmp_path / "registry.sqlite"
+    registry = Registry(registry_path)
+    registry.upsert_dataset(
+        "dataset_detect_review",
+        session_uuid="session_detect_review",
+        zarr_path=zarr_path,
+        recording_id="recording_detect_review",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.close()
+
+    rc = mod.main(
+        [
+            str(zarr_path),
+            "--state",
+            "approved",
+            "--method",
+            "manual",
+            "--intended-use",
+            "training",
+            "--reviewer",
+            "operator4",
+            "--registry",
+            str(registry_path),
+        ]
+    )
+    assert rc == 0
+
+    registry = Registry(registry_path)
+    try:
+        rows = registry.query_detection_data_profile_latest(dataset_ids=["dataset_detect_review"])
+    finally:
+        registry.close()
+    assert len(rows) == 1
+    row = dict(rows[0])
+    assert row["detection_type"] == "interpolated"
+    assert row["detection_path"] == "refined_detect_runs/refined_1/interpolated"
+    assert row["recording_id"] == "recording_detect_review"
+    assert row["zarr_use"] == "training"
+    assert row["coverage_percent"] == 100.0

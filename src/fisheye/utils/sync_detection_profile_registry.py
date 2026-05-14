@@ -131,6 +131,27 @@ def _latest_profile_summary(root: zarr.Group) -> tuple[Optional[str], Optional[d
     return run_name, summary, None
 
 
+def _profile_summary(
+    root: zarr.Group,
+    profile_run: Optional[str],
+) -> tuple[Optional[str], Optional[dict[str, Any]], Optional[str]]:
+    if profile_run is None:
+        return _latest_profile_summary(root)
+    analysis = _get_group(root, "analysis")
+    if analysis is None:
+        return profile_run, None, "analysis group missing"
+    runs_parent = _get_group(analysis, "detection_profile_runs")
+    if runs_parent is None:
+        return profile_run, None, "analysis/detection_profile_runs missing"
+    run_group = _get_group(runs_parent, str(profile_run))
+    if run_group is None:
+        return profile_run, None, f"profile run missing: {profile_run}"
+    summary = _coerce_mapping(run_group.attrs.get("profile_summary"))
+    if summary is None:
+        return profile_run, None, f"profile_summary missing or invalid on run: {profile_run}"
+    return str(profile_run), summary, None
+
+
 def _load_profile_run_attrs(root: zarr.Group, profile_run: Optional[str]) -> dict[str, Any]:
     if profile_run is None:
         return {}
@@ -255,6 +276,146 @@ def _build_profile_payload(
         "dpf_at_acquisition": dpf_at_acquisition,
         "profile_json": _to_json_text(summary),
         "zarr_mtime_ns": zarr_mtime_ns,
+    }
+
+
+def _dataset_row_for_zarr(
+    registry: Registry,
+    zarr_path: Path,
+    *,
+    dataset_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    if dataset_id:
+        row = registry.conn.execute(
+            "SELECT * FROM datasets WHERE dataset_id = ? LIMIT 1;",
+            (str(dataset_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    candidates = [str(zarr_path)]
+    try:
+        resolved = str(zarr_path.resolve())
+    except OSError:
+        resolved = None
+    if resolved and resolved not in candidates:
+        candidates.append(resolved)
+    for candidate in candidates:
+        row = registry.conn.execute(
+            "SELECT * FROM datasets WHERE zarr_path = ? LIMIT 1;",
+            (candidate,),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+    return None
+
+
+def _upsert_detection_profile_payload(registry: Registry, payload: Mapping[str, Any]) -> None:
+    registry.upsert_detection_data_profile(
+        dataset_id=str(payload["dataset_id"]),
+        profile_run=str(payload["profile_run"]),
+        recording_id=_normalize_text(payload.get("recording_id")),
+        zarr_use=_normalize_text(payload.get("zarr_use")),
+        detection_type=_normalize_text(payload.get("detection_type")),
+        detection_path=_normalize_text(payload.get("detection_path")),
+        profile_created_utc=_normalize_text(payload.get("profile_created_utc")),
+        frames_total=_as_int(payload.get("frames_total")),
+        frames_with_detections=_as_int(payload.get("frames_with_detections")),
+        coverage_percent=_as_float(payload.get("coverage_percent")),
+        detections_total=_as_int(payload.get("detections_total")),
+        detections_per_frame_p50=_as_float(payload.get("detections_per_frame_p50")),
+        detections_per_frame_p90=_as_float(payload.get("detections_per_frame_p90")),
+        w_p10=_as_float(payload.get("w_p10")),
+        w_p50=_as_float(payload.get("w_p50")),
+        w_p90=_as_float(payload.get("w_p90")),
+        h_p10=_as_float(payload.get("h_p10")),
+        h_p50=_as_float(payload.get("h_p50")),
+        h_p90=_as_float(payload.get("h_p90")),
+        area_p10=_as_float(payload.get("area_p10")),
+        area_p50=_as_float(payload.get("area_p50")),
+        area_p90=_as_float(payload.get("area_p90")),
+        aspect_ratio_p10=_as_float(payload.get("aspect_ratio_p10")),
+        aspect_ratio_p50=_as_float(payload.get("aspect_ratio_p50")),
+        aspect_ratio_p90=_as_float(payload.get("aspect_ratio_p90")),
+        edge_proximity_rate=_as_float(payload.get("edge_proximity_rate")),
+        rig_id=_normalize_text(payload.get("rig_id")),
+        camera_id=_normalize_text(payload.get("camera_id")),
+        arena_id=_normalize_text(payload.get("arena_id")),
+        dish_design=_normalize_text(payload.get("dish_design")),
+        canvas_name=_normalize_text(payload.get("canvas_name")),
+        protocol_name=_normalize_text(payload.get("protocol_name")),
+        genotype=_normalize_text(payload.get("genotype")),
+        dpf_at_acquisition=_as_int(payload.get("dpf_at_acquisition")),
+        profile_json=_normalize_text(payload.get("profile_json")),
+        zarr_mtime_ns=_as_int(payload.get("zarr_mtime_ns")),
+    )
+
+
+def sync_latest_detection_profile_for_zarr(
+    registry: Registry,
+    zarr_path: Path,
+    *,
+    root: Optional[zarr.Group] = None,
+    dataset_id: Optional[str] = None,
+    profile_run: Optional[str] = None,
+    apply: bool = True,
+) -> dict[str, Any]:
+    """Sync one Zarr's detection profile into registry projection rows.
+
+    This helper is used by approval/finalization commands so users do not need
+    to remember a separate ``sync_detection_profile_registry`` invocation.
+    """
+
+    row = _dataset_row_for_zarr(registry, zarr_path, dataset_id=dataset_id)
+    if row is None:
+        return {
+            "status": "missing_dataset",
+            "zarr_path": str(zarr_path),
+            "profile_run": profile_run,
+            "reason": "zarr_path is not registered",
+        }
+
+    resolved_dataset_id = _normalize_text(row.get("dataset_id"))
+    if not resolved_dataset_id:
+        return {
+            "status": "error",
+            "zarr_path": str(zarr_path),
+            "profile_run": profile_run,
+            "reason": "registry dataset row has no dataset_id",
+        }
+
+    opened_root = root if root is not None else _open_root(zarr_path)
+    selected_profile_run, summary, summary_error = _profile_summary(opened_root, profile_run)
+    if summary is None:
+        return {
+            "status": "missing_profile",
+            "dataset_id": resolved_dataset_id,
+            "zarr_path": str(zarr_path),
+            "profile_run": selected_profile_run,
+            "reason": summary_error,
+        }
+
+    payload = _build_profile_payload(
+        dataset_id=resolved_dataset_id,
+        fallback_recording_id=_normalize_text(row.get("recording_id")),
+        fallback_zarr_use=_normalize_text(row.get("zarr_use")),
+        fallback_genotype=_normalize_text(row.get("genotype")),
+        fallback_dpf_at_acquisition=_as_int(row.get("dpf_at_acquisition")),
+        profile_run=str(selected_profile_run),
+        summary=summary,
+        run_attrs=_load_profile_run_attrs(opened_root, selected_profile_run),
+        zarr_path=zarr_path,
+    )
+    if apply:
+        _upsert_detection_profile_payload(registry, payload)
+        status = "updated"
+    else:
+        status = "would_upsert"
+    return {
+        "status": status,
+        "dataset_id": resolved_dataset_id,
+        "zarr_path": str(zarr_path),
+        "profile_run": selected_profile_run,
+        "payload": payload,
     }
 
 

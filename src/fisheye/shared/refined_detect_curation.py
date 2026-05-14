@@ -674,10 +674,106 @@ def _resolve_bound_source_detect_group(
     return detect_parent[source_detect_run], source_detect_run
 
 
+def _shape_hw(shape: Any) -> Tuple[Optional[int], Optional[int]]:
+    try:
+        dims = tuple(int(dim) for dim in shape)
+    except Exception:
+        return None, None
+    if len(dims) == 3:
+        return dims[1], dims[2]
+    if len(dims) == 4:
+        return dims[1], dims[2]
+    return None, None
+
+
+def _positive_width_height(width: Any, height: Any) -> Tuple[Optional[int], Optional[int]]:
+    w = as_int(width)
+    h = as_int(height)
+    if w is not None and h is not None and w > 0 and h > 0:
+        return w, h
+    return None, None
+
+
+def _resolve_image_dimensions(
+    root: zarr.Group,
+    *,
+    detect_group: Optional[zarr.Group] = None,
+    refined_run: Optional[zarr.Group] = None,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Resolve image-space dimensions for detection bbox conversion.
+
+    Analysis Zarrs normally carry root ``width``/``height`` attrs. Sampled
+    training Zarrs may only carry dimensions under ``raw_video`` and seeded
+    detections may be normalized to ``raw_video/images_ds``. Prefer the bound
+    detect run's frame-source shape when present so refined training labels stay
+    in the same image space as the reviewed frames.
+    """
+
+    bound_detect_group = detect_group
+    if bound_detect_group is None and refined_run is not None:
+        bound_detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
+
+    if bound_detect_group is not None:
+        source_shape = bound_detect_group.attrs.get("frame_source_shape")
+        height, width = _shape_hw(source_shape)
+        if width is not None and height is not None and width > 0 and height > 0:
+            return width, height
+        width, height = _positive_width_height(
+            bound_detect_group.attrs.get("inference_width"),
+            bound_detect_group.attrs.get("inference_height"),
+        )
+        if width is not None and height is not None:
+            return width, height
+
+    width, height = _positive_width_height(root.attrs.get("inference_width"), root.attrs.get("inference_height"))
+    if width is not None and height is not None:
+        return width, height
+
+    width, height = _positive_width_height(root.attrs.get("width"), root.attrs.get("height"))
+    if width is not None and height is not None:
+        return width, height
+
+    raw = root.get("raw_video")
+    if raw is not None:
+        width, height = _positive_width_height(raw.attrs.get("video_width"), raw.attrs.get("video_height"))
+        if width is not None and height is not None:
+            return width, height
+        resolution = raw.attrs.get("original_resolution")
+        if isinstance(resolution, (list, tuple)) and len(resolution) >= 2:
+            height = as_int(resolution[0])
+            width = as_int(resolution[1])
+            if width is not None and height is not None and width > 0 and height > 0:
+                return width, height
+        for name in ("images_full", "images_ds_rgb", "images_ds"):
+            if name in raw:
+                height, width = _shape_hw(raw[name].shape)
+                if width is not None and height is not None and width > 0 and height > 0:
+                    return width, height
+
+    return None, None
+
+
 def _resolved_total_frames(root: zarr.Group, refined_run: zarr.Group) -> int:
     total_frames = as_int(root.attrs.get("total_frames"))
+    if total_frames is None:
+        total_frames = as_int(root.attrs.get("n_frames"))
     if total_frames is not None and total_frames >= 0:
         return int(total_frames)
+    total_frames = as_int(refined_run.attrs.get("coverage_frames_total"))
+    if total_frames is not None and total_frames >= 0:
+        return int(total_frames)
+    detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
+    if detect_group is not None:
+        for name in ("frame_counts", "n_detections"):
+            if name in detect_group:
+                return int(detect_group[name].shape[0])
+    raw = root.get("raw_video")
+    if raw is not None:
+        total_frames = as_int(raw.attrs.get("total_frames"))
+        if total_frames is None:
+            total_frames = as_int(raw.attrs.get("n_frames"))
+        if total_frames is not None and total_frames >= 0:
+            return int(total_frames)
     if has_sparse_curated_refined_detect_instances_arrays(refined_run):
         instances = _get_child_group_if_present(refined_run, "instances")
         if instances is not None and "frame_counts" in instances:
@@ -788,9 +884,8 @@ def _write_source_detections_projection(
     refined_run: zarr.Group,
 ) -> None:
     subgroup = _get_or_create_child_group(refined_run, "source_detections")
-    width = as_int(root.attrs.get("width"))
-    height = as_int(root.attrs.get("height"))
     detect_group, source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
+    width, height = _resolve_image_dimensions(root, detect_group=detect_group, refined_run=refined_run)
 
     if detect_group is None or width is None or height is None or width <= 0 or height <= 0:
         empty_int32 = np.zeros((0,), dtype=np.int32)
@@ -1559,8 +1654,7 @@ def _sync_dense_curated_refined_root_from_sparse_views(
     root: zarr.Group,
     refined_run: zarr.Group,
 ) -> None:
-    width = as_int(root.attrs.get("width"))
-    height = as_int(root.attrs.get("height"))
+    width, height = _resolve_image_dimensions(root, refined_run=refined_run)
     if width is None or height is None or width <= 0 or height <= 0:
         raise ValueError("Root attrs must include positive width and height.")
 
@@ -1847,16 +1941,14 @@ def write_curated_refined_detect_surfaces(
     env_info: Optional[Mapping[str, Any]] = None,
     source_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    width = as_int(root.attrs.get("width"))
-    height = as_int(root.attrs.get("height"))
-    if width is None or height is None or width <= 0 or height <= 0:
-        raise ValueError("Root attrs must include positive width and height.")
-
     refined_parent, _ = _resolve_refined_parent(root)
     resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(refined_parent.attrs.get("latest"))
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
     refined_run = _open_named_child_group(refined_parent, resolved_refined_run_name, mode="a")
+    width, height = _resolve_image_dimensions(root, refined_run=refined_run)
+    if width is None or height is None or width <= 0 or height <= 0:
+        raise ValueError("Root attrs must include positive width and height.")
     total_frames = _resolved_total_frames(root, refined_run)
 
     instance_frame_indices_arr = np.asarray(instance_frame_indices, dtype=np.int32).reshape(-1)

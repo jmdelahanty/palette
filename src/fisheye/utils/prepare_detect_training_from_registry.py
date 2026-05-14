@@ -20,6 +20,7 @@ from fisheye.shared.refined_detect_curation import (
 )
 from fisheye.shared.refined_detect_resolution import resolve_detection_read_source
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
 
 
 def _add_arg(argv: List[str], flag: str, value: Optional[object]) -> None:
@@ -330,17 +331,89 @@ def _format_detect_quality_summary_line(
     )
 
 
+def _row_zarr_path_key(row: Mapping[str, Any]) -> str:
+    return str(Path(str(row["zarr_path"])).expanduser().resolve())
+
+
+def _profile_dataset_ids_for_rows(registry: Registry, rows: Sequence[Mapping[str, Any]]) -> set[str]:
+    dataset_ids = sorted({str(row["dataset_id"]) for row in rows if row["dataset_id"]})
+    if not dataset_ids:
+        return set()
+    placeholders = ", ".join("?" for _ in dataset_ids)
+    try:
+        profile_rows = registry.conn.execute(
+            f"""
+            SELECT DISTINCT dataset_id
+            FROM detection_data_profile_latest
+            WHERE dataset_id IN ({placeholders});
+            """,
+            dataset_ids,
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(row["dataset_id"]) for row in profile_rows if row["dataset_id"]}
+
+
+def _dedupe_rows_by_zarr_path(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    selected_quality_rows_by_dataset: Mapping[str, Mapping[str, Any]],
+    profile_dataset_ids: set[str],
+) -> tuple[list[Mapping[str, Any]], list[dict[str, str]]]:
+    """Select one registry row per physical Zarr path.
+
+    Older rescans may leave multiple dataset IDs for the same source Zarr. For
+    training export, duplicate physical Zarrs would duplicate labels, so prefer
+    the row that has both the approved quality gate and a detection data profile.
+    """
+
+    best_by_path: dict[str, Mapping[str, Any]] = {}
+    skipped: list[dict[str, str]] = []
+
+    def _score(row: Mapping[str, Any]) -> tuple[int, int, int, str]:
+        dataset_id = str(row["dataset_id"])
+        return (
+            1 if dataset_id in selected_quality_rows_by_dataset else 0,
+            1 if dataset_id in profile_dataset_ids else 0,
+            1 if ":" in dataset_id else 0,
+            dataset_id,
+        )
+
+    for row in rows:
+        key = _row_zarr_path_key(row)
+        current = best_by_path.get(key)
+        if current is None:
+            best_by_path[key] = row
+            continue
+        candidate_score = _score(row)
+        current_score = _score(current)
+        if candidate_score > current_score:
+            skipped.append(
+                {
+                    "dataset_id": str(current["dataset_id"]),
+                    "zarr_path": str(current["zarr_path"]),
+                    "kept_dataset_id": str(row["dataset_id"]),
+                }
+            )
+            best_by_path[key] = row
+        else:
+            skipped.append(
+                {
+                    "dataset_id": str(row["dataset_id"]),
+                    "zarr_path": str(row["zarr_path"]),
+                    "kept_dataset_id": str(current["dataset_id"]),
+                }
+            )
+
+    return list(best_by_path.values()), skipped
+
+
 def _resolve_detect_quality_from_zarr(
     zarr_path: Path,
     *,
     expected_refined_run: str,
 ) -> dict[str, Any]:
-    import zarr  # local import to keep module import-light for CLI help usage
-
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-    except TypeError:
-        root = zarr.open_group(str(zarr_path), mode="r")
+    root = open_zarr_group_direct(zarr_path, mode="r")
 
     refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
     if refined_parent is None:
@@ -743,10 +816,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         )
 
-    registry.close()
-
     if not rows:
+        registry.close()
         raise SystemExit("No datasets remain after refined detect review filtering.")
+
+    profile_dataset_ids = _profile_dataset_ids_for_rows(registry, rows)
+    rows, duplicate_rows = _dedupe_rows_by_zarr_path(
+        rows,
+        selected_quality_rows_by_dataset=selected_quality_rows_by_dataset,
+        profile_dataset_ids=profile_dataset_ids,
+    )
+    if duplicate_rows:
+        print(f"Skipped {len(duplicate_rows)} duplicate registry row(s) for already-selected Zarr paths:")
+        for duplicate in duplicate_rows[:20]:
+            print(
+                f"  - {duplicate['dataset_id']} -> kept {duplicate['kept_dataset_id']} "
+                f"for {duplicate['zarr_path']}"
+            )
+        if len(duplicate_rows) > 20:
+            print(f"  ... {len(duplicate_rows) - 20} more duplicate row(s) omitted.")
+
+    registry.close()
 
     zarr_paths = [Path(row["zarr_path"]) for row in rows]
 
