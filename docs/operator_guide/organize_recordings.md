@@ -110,6 +110,153 @@ scripts/py -m fisheye.utils.organize_recordings \
 `--require-done` skips any batch that doesn't have a `TRANSFER_DONE` marker,
 so in-progress transfers won't be touched.
 
+### Video-only batches without H5
+
+Some recording batches contain camera videos and camera metadata CSVs but no
+Citrus H5/protocol file. These are valid recording-only inputs, but the
+organizer cannot infer the recording context from an H5. Use a separate
+operator-reviewed CSV with one row per intended recording:
+
+```bash
+scripts/py -m fisheye.utils.draft_video_only_organizer_manifest \
+  "$PALETTE_STAGING_ROOT/2026_05_05_17_45_30" \
+  --output /tmp/2026_05_05_17_45_30_video_only_manifest.csv \
+  --dish-design cedar \
+  --num-dishes 1 \
+  --fish-per-dish 1
+```
+
+The draft helper discovers `Cam*.mp4`, fills `camera_id` from the filename,
+links `Cam<id>_meta.csv` when present, and reads `recording_id` /
+`timestamp_utc` from `recording_snapshot.json` when available. Fields that the
+software cannot know, such as `dish_design`, genotype, dpf, or fish count, can
+be provided as CLI flags or edited in the CSV before apply. For interactive
+manual entry, add `--prompt-metadata`; for unattended/reproducible work, prefer
+explicit flags.
+
+For Orange video-only batches, use encoded-video metadata as the ingest frame
+count source. `Cam*_meta.csv` rows and `Cam*_keyframe.json.total_frames` should
+match and are authoritative for video import. `ptp_sync_summary.json`
+`frame_count` is Orange acquisition/sync telemetry counted since the camera
+stream started; it can include frames outside the recording-local encoded video
+and is not expected to equal the MP4 frame count.
+
+If the camera MP4 was shortened after acquisition, for example with:
+
+```bash
+ffmpeg -i "$f" -map 0 -t 11:00:00 -c copy "first_11h/${f%.mp4}_first11h.mp4"
+```
+
+the camera CSV and keyframe JSON must be repaired to match the encoded MP4
+before import. Do not treat the mismatch as a harmless warning: downstream
+frame-indexed datasets assume one camera metadata row per encoded frame.
+
+After organizing and sidecar backfill, dry-run the repair:
+
+```bash
+scripts/py -m fisheye.utils.repair_trimmed_video_sidecars \
+  "$PALETTE_RECORDINGS_ROOT" \
+  --name-prefix sleepyfish_2026_05_05_17_45_30 \
+  --dry-run
+```
+
+Then apply:
+
+```bash
+scripts/py -m fisheye.utils.repair_trimmed_video_sidecars \
+  "$PALETTE_RECORDINGS_ROOT" \
+  --name-prefix sleepyfish_2026_05_05_17_45_30 \
+  --apply
+```
+
+The repair tool probes each MP4 for its encoded frame count, trims
+`cams/*_meta.csv` to that many rows, updates `cams/*_keyframe.json`
+`total_frames` and `keyframe_frames`, stores original sidecars under
+`derived/original_sidecars/`, appends a `metadata_repairs` manifest entry, and
+reruns video preflight so stale row-count failures do not block import.
+For very large HEVC files where the decode smoke is slow or hangs, add
+`--video-preflight-decode-backend none`; this still checks probe metadata,
+sampled timing/GOP metadata, and camera-CSV frame alignment.
+
+When present, video-only organization preserves optional sidecars without
+requiring them:
+
+- camera stream sidecars are moved into `cams/`: `Cam<id>_keyframe.json` sits
+  beside the MP4 and `Cam*_meta.csv` because it describes encoded frame count
+  and seek/keyframe structure
+- per-camera diagnostics are moved into `derived/`: `Cam<id>_pipeline_perf.csv`
+  and `Cam<id>_acquisition_cadence_probe.csv`
+- shared session files are copied into each recording's `raw/`:
+  `ptp_sync_summary.json` and `recording_snapshot_runtime.json`
+- missing optional sidecars do not fail the plan
+- the camera MP4, `Cam<id>_meta.csv`, and `Cam<id>_keyframe.json` form the
+  primary `cams/` payload when the keyframe summary is available
+
+The CSV consumed by `organize_recordings --video-only --metadata-csv` is not the
+same as the generated `recording_manifest.json`. It is a staging/intake table.
+The accepted schema is:
+
+| Column | Required | Meaning |
+| --- | --- | --- |
+| `source_video` | yes* | Source camera video. Relative paths are resolved against the staging source or CSV directory. |
+| `video_path` | yes* | Alias accepted instead of `source_video`. |
+| `camera_video` | yes* | Alias accepted instead of `source_video`. |
+| `source_camera_metadata_csv` | no | Per-frame camera metadata CSV sidecar. |
+| `camera_metadata_csv` | no | Alias accepted instead of `source_camera_metadata_csv`. |
+| `camera_id` | recommended | Camera serial/id; inferred from `Cam<id>.mp4` if omitted. |
+| `session_uuid` | recommended | Stable session identity; defaults to `recording_id` or video stem if omitted. |
+| `recording_id` | recommended | Stable recording identity; defaults to `session_uuid` if omitted. |
+| `recording_name` | recommended | Destination folder name before filename sanitization; defaults to `session_uuid`. |
+| `session_start_iso8601_utc` | recommended | Acquisition start time when known. |
+| `recording_type` | no | Defaults to `behavior`. |
+| `recording_subtype` | no | Defaults to `free`. |
+| `behavior_mode` | no | Defaults to `free`. |
+| `artifact_schema_id` | no | Defaults to `video_only_v1`. |
+| `dish_design` | recommended | Dish/chamber design. Missing values are surfaced in the plan. |
+| `rig_id` | no | Rig/system identifier. |
+| `arena_id` | no | Arena/chamber identifier. |
+| `canvas_name` | no | Display/canvas name, if relevant. |
+| `protocol_name` | no | Manual protocol label, if known. |
+| `protocol_name_from_definition` | no | Defaults to `protocol_name` when omitted. |
+| `genotype` | no | Subject genotype/cross label when known. |
+| `dpf_at_acquisition` | no | Integer days post fertilization. |
+| `num_dishes` | recommended | Number of dishes in view. |
+| `fish_per_dish` | recommended | Expected fish per dish. |
+
+`source_video`, `video_path`, and `camera_video` are aliases; one of the three
+must be present. The same is true for `source_camera_metadata_csv` and
+`camera_metadata_csv`, but that sidecar is optional.
+
+After reviewing the CSV:
+
+```bash
+scripts/py -m fisheye.utils.organize_recordings \
+  "$PALETTE_STAGING_ROOT/2026_05_05_17_45_30" \
+  --video-only \
+  --metadata-csv /tmp/2026_05_05_17_45_30_video_only_manifest.csv \
+  --dest-root "$PALETTE_RECORDINGS_ROOT" \
+  --write-manifest \
+  --rename-cams \
+  --dry-run
+```
+
+If a video-only batch was already organized before optional sidecar handling was
+available, repair the existing recording folders instead of rerunning normal
+organization:
+
+```bash
+scripts/py -m fisheye.utils.backfill_video_only_sidecars \
+  "$PALETTE_STAGING_ROOT/2026_05_05_17_45_30" \
+  --metadata-csv /tmp/2026_05_05_17_45_30_video_only_manifest.csv \
+  --dest-root "$PALETTE_RECORDINGS_ROOT" \
+  --dry-run
+```
+
+After reviewing the plan, replace `--dry-run` with `--apply`. This copies
+shared sidecars into each recording, moves the keyframe summary to `cams/`,
+moves per-camera diagnostic sidecars to `derived/`, and patches
+`recording_manifest.json` `files.raw` / `files.cams` / `files.derived`.
+
 ## Step 3: Apply the organization
 
 Once the dry-run looks correct, apply it:

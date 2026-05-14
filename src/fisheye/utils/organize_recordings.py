@@ -53,6 +53,7 @@ JsonLogger = SharedJsonLogger
 class PlannedFile:
     source: Path
     dest_name: str
+    action: str = "move"
 
 
 @dataclass
@@ -207,12 +208,13 @@ def _extend_cam_roots(
 
 
 def _unique_planned(files: List[PlannedFile]) -> List[PlannedFile]:
-    seen: Set[Path] = set()
+    seen: Set[Tuple[Path, str, str]] = set()
     unique: List[PlannedFile] = []
     for planned in files:
-        if planned.source in seen:
+        key = (planned.source, planned.dest_name, planned.action)
+        if key in seen:
             continue
-        seen.add(planned.source)
+        seen.add(key)
         unique.append(planned)
     return unique
 
@@ -317,6 +319,37 @@ def _build_video_only_plan(
         else:
             cam_files.append(PlannedFile(camera_csv_path, camera_csv_path.name))
 
+    raw_files: List[PlannedFile] = []
+    derived_files: List[PlannedFile] = []
+    if camera_id:
+        keyframe_sidecar = video_path.with_name(f"Cam{camera_id}_keyframe.json")
+        if keyframe_sidecar.exists():
+            if rename_cams:
+                dest_name = f"Cam{camera_id}_{session_tag}_keyframe.json"
+            else:
+                dest_name = keyframe_sidecar.name
+            cam_files.append(PlannedFile(keyframe_sidecar, dest_name))
+
+        for suffix in ("pipeline_perf.csv", "acquisition_cadence_probe.csv"):
+            sidecar = video_path.with_name(f"Cam{camera_id}_{suffix}")
+            if sidecar.exists():
+                if rename_cams:
+                    dest_name = f"Cam{camera_id}_{session_tag}_{suffix}"
+                else:
+                    dest_name = sidecar.name
+                derived_files.append(PlannedFile(sidecar, dest_name))
+
+    for shared_name, dest_name in (
+        ("ptp_sync_summary.json", "ptp_sync_summary.json"),
+        ("recording_snapshot.json", "recording_snapshot_runtime.json"),
+        ("recording_snapshot", "recording_snapshot_runtime.json"),
+    ):
+        shared_path = video_path.parent / shared_name
+        if shared_path.exists():
+            raw_files.append(PlannedFile(shared_path, dest_name, action="copy"))
+            if shared_name.startswith("recording_snapshot"):
+                break
+
     meta: Dict[str, str] = {
         "session_uuid": session_uuid,
         "recording_id": row.get("recording_id") or session_uuid,
@@ -358,9 +391,9 @@ def _build_video_only_plan(
         name=folder_name,
         source_dir=video_path.parent,
         dest_dir=dest_dir,
-        raw_files=[],
+        raw_files=_unique_planned(raw_files),
         cam_files=_unique_planned(cam_files),
-        derived_files=[],
+        derived_files=_unique_planned(derived_files),
         camera_id=str(camera_id) if camera_id else None,
         meta=meta,
         missing=missing,
@@ -690,7 +723,11 @@ def _apply_plan(
             dest_dir.mkdir(parents=True, exist_ok=True)
             for planned in files:
                 src = planned.source
-                if src in moved:
+                should_copy = planned.action == "copy"
+                if planned.action not in {"move", "copy"}:
+                    record_warning(f"Unknown planned file action '{planned.action}' for {src}")
+                    continue
+                if not should_copy and src in moved:
                     record_warning(f"Skipping duplicate source: {src}")
                     continue
                 if not src.exists():
@@ -703,22 +740,28 @@ def _apply_plan(
                 if dest.exists():
                     record_warning(f"Destination exists, skipping: {dest}")
                     continue
-                print(f"Move: {src} -> {dest}")
+                verb = "Copy" if should_copy else "Move"
+                print(f"{verb}: {src} -> {dest}")
                 try:
-                    shutil.move(str(src), str(dest))
+                    if should_copy:
+                        shutil.copy2(str(src), str(dest))
+                    else:
+                        shutil.move(str(src), str(dest))
                 except Exception as exc:
-                    record_warning(f"Failed to move {src} -> {dest}: {exc}")
+                    record_warning(f"Failed to {planned.action} {src} -> {dest}: {exc}")
                     continue
-                moved.add(src)
+                if not should_copy:
+                    moved.add(src)
                 planned_destinations.add(dest)
                 moved_count += 1
                 if logger:
                     logger.log(
-                        "file_moved",
+                        "file_copied" if should_copy else "file_moved",
                         recording_name=plan.name,
                         session_uuid=session_uuid,
                         source=str(src),
                         dest=str(dest),
+                        action=planned.action,
                     )
                 if dest.suffix.lower() == ".mp4":
                     record_video_keyframe_status(

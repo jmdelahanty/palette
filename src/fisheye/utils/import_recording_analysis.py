@@ -8,6 +8,7 @@ This module intentionally excludes detect/refine orchestration. Use
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -56,6 +57,35 @@ RecordingAnalysisResult = RecordingImportResult
 EventLogger = Callable[[str], None]
 
 
+def _load_recording_manifest(recording_dir: Path) -> dict[str, object]:
+    manifest_path = recording_dir / "recording_manifest.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _manifest_text(manifest: dict[str, object], *keys: str) -> Optional[str]:
+    nested_meta = manifest.get("meta")
+    candidates: list[object] = []
+    for key in keys:
+        candidates.append(manifest.get(key))
+        if isinstance(nested_meta, dict):
+            candidates.append(nested_meta.get(key))
+    for value in candidates:
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", "ignore")
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 def stimulus_runs_present(zarr_path: Path) -> bool:
     try:
         root = zarr.open(str(zarr_path), mode="r")
@@ -79,15 +109,38 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> None:
     root = zarr.open_group(str(plan.zarr_path), mode=mode)
     attrs = dict(root.attrs)
     recording_id = plan.recording_dir.name
+    manifest = _load_recording_manifest(plan.recording_dir)
     attrs["zarr_purpose"] = "analysis"
-    attrs.setdefault("session_uuid", recording_id)
+    attrs.setdefault("session_uuid", _manifest_text(manifest, "session_uuid") or recording_id)
     attrs.setdefault("recording_id", recording_id)
-    attrs.setdefault("recording_name", recording_id)
+    attrs.setdefault("recording_name", _manifest_text(manifest, "recording_name") or recording_id)
     attrs.setdefault("recording_path", str(plan.recording_dir))
-    attrs.setdefault("recording_type", "behavior")
-    attrs.setdefault("recording_subtype", "free")
-    attrs.setdefault("behavior_mode", "free")
+    attrs.setdefault("recording_type", _manifest_text(manifest, "recording_type") or "behavior")
+    attrs.setdefault("recording_subtype", _manifest_text(manifest, "recording_subtype") or "free")
+    attrs.setdefault("behavior_mode", _manifest_text(manifest, "behavior_mode") or "free")
     attrs.setdefault("artifact_schema_id", "recording_analysis_v1")
+    for key in (
+        "camera_id",
+        "rig_id",
+        "arena_id",
+        "canvas_name",
+        "protocol_name",
+        "protocol_name_from_definition",
+        "dish_design",
+        "genotype",
+        "dpf_at_acquisition",
+        "num_dishes",
+        "fish_per_dish",
+        "session_start_iso8601_utc",
+    ):
+        value = _manifest_text(manifest, key)
+        if value:
+            attrs.setdefault(key, value)
+    manifest_recording_id = _manifest_text(manifest, "recording_id")
+    if manifest_recording_id and manifest_recording_id != recording_id:
+        attrs.setdefault("organizer_recording_id", manifest_recording_id)
+    if manifest:
+        attrs.setdefault("recording_manifest_path", str(plan.recording_dir / "recording_manifest.json"))
     attrs.setdefault("source_video", plan.cam_video.name)
     attrs.setdefault("source_video_path", str(plan.cam_video))
     attrs.setdefault("source_path", str(plan.cam_video))

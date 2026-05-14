@@ -189,6 +189,12 @@ def build_manifest_payload(
     video_path: Path,
     metadata: VideoOnlyRecordingMetadata,
 ) -> dict[str, Any]:
+    camera_files = [_to_posix_relpath(video_path, start=recording_dir)]
+    for suffix in ("_meta.csv", "_keyframe.json"):
+        sidecar = video_path.with_name(f"{video_path.stem}{suffix}")
+        if sidecar.exists():
+            camera_files.append(_to_posix_relpath(sidecar, start=recording_dir))
+
     payload: dict[str, Any] = {
         "session_uuid": metadata.session_uuid,
         "recording_name": metadata.recording_name,
@@ -201,7 +207,7 @@ def build_manifest_payload(
         "stimulus_runs_available": False,
         "experiment_context_status_detail": EXPERIMENT_CONTEXT_STATUS_DETAIL,
         "files": {
-            "cams": [_to_posix_relpath(video_path, start=recording_dir)],
+            "cams": camera_files,
         },
     }
     optional_fields = {

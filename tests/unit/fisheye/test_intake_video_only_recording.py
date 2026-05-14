@@ -115,6 +115,8 @@ def test_build_manifest_payload_uses_relative_camera_video_path(tmp_path: Path) 
     video_path = recording_dir / "cams" / "Cam2010093.mp4"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"fake")
+    (recording_dir / "cams" / "Cam2010093_meta.csv").write_text("frame_id,timestamp,timestamp_sys\n", encoding="utf-8")
+    (recording_dir / "cams" / "Cam2010093_keyframe.json").write_text("{}", encoding="utf-8")
 
     payload = mod.build_manifest_payload(
         recording_dir=recording_dir,
@@ -128,7 +130,11 @@ def test_build_manifest_payload_uses_relative_camera_video_path(tmp_path: Path) 
     assert payload["stimulus_runs_available"] is False
     assert payload["dish_design"] == "cedar"
     assert payload["protocol_name_from_definition"] == "ManualProtocol"
-    assert payload["files"]["cams"] == ["cams/Cam2010093.mp4"]
+    assert payload["files"]["cams"] == [
+        "cams/Cam2010093.mp4",
+        "cams/Cam2010093_meta.csv",
+        "cams/Cam2010093_keyframe.json",
+    ]
 
 
 def test_main_runs_import_and_writes_manifest_and_experiment_setup(
@@ -140,6 +146,8 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
     video_path = recording_dir / "cams" / "Cam2010093.mp4"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"fake")
+    (recording_dir / "cams" / "Cam2010093_meta.csv").write_text("frame_id,timestamp,timestamp_sys\n", encoding="utf-8")
+    (recording_dir / "cams" / "Cam2010093_keyframe.json").write_text("{}", encoding="utf-8")
 
     zarr_path = recording_dir / "zarr" / "colleague_set_001_training.zarr"
 
@@ -207,4 +215,8 @@ def test_main_runs_import_and_writes_manifest_and_experiment_setup(
     manifest_path = recording_dir / "recording_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["artifact_schema_id"] == "video_only_v1"
-    assert manifest["files"]["cams"] == ["cams/Cam2010093.mp4"]
+    assert manifest["files"]["cams"] == [
+        "cams/Cam2010093.mp4",
+        "cams/Cam2010093_meta.csv",
+        "cams/Cam2010093_keyframe.json",
+    ]

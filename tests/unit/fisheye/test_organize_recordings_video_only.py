@@ -11,6 +11,11 @@ from fisheye.utils import organize_recordings
 def test_build_video_only_plan_defaults_and_renames_cam_file(tmp_path: Path) -> None:
     video_path = tmp_path / "Cam2010093.mp4"
     video_path.write_bytes(b"video")
+    (tmp_path / "Cam2010093_keyframe.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "Cam2010093_pipeline_perf.csv").write_text("metric,value\n", encoding="utf-8")
+    (tmp_path / "Cam2010093_acquisition_cadence_probe.csv").write_text("metric,value\n", encoding="utf-8")
+    (tmp_path / "ptp_sync_summary.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "recording_snapshot.json").write_text("{}", encoding="utf-8")
 
     plan = organize_recordings._build_video_only_plan(
         {
@@ -30,6 +35,16 @@ def test_build_video_only_plan_defaults_and_renames_cam_file(tmp_path: Path) -> 
     assert plan.meta["behavior_mode"] == "free"
     assert plan.meta["artifact_schema_id"] == "video_only_v1"
     assert plan.cam_files[0].dest_name == "Cam2010093_2026-03-09_colleague_set_001.mp4"
+    assert plan.cam_files[1].dest_name == "Cam2010093_2026-03-09_colleague_set_001_keyframe.json"
+    assert [file.dest_name for file in plan.raw_files] == [
+        "ptp_sync_summary.json",
+        "recording_snapshot_runtime.json",
+    ]
+    assert all(file.action == "copy" for file in plan.raw_files)
+    assert [file.dest_name for file in plan.derived_files] == [
+        "Cam2010093_2026-03-09_colleague_set_001_pipeline_perf.csv",
+        "Cam2010093_2026-03-09_colleague_set_001_acquisition_cadence_probe.csv",
+    ]
 
 
 def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, monkeypatch) -> None:
@@ -37,6 +52,16 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
     source_root.mkdir()
     video_path = source_root / "Cam2010093.mp4"
     video_path.write_bytes(b"video")
+    keyframe_path = source_root / "Cam2010093_keyframe.json"
+    keyframe_path.write_text("{}", encoding="utf-8")
+    pipeline_perf_path = source_root / "Cam2010093_pipeline_perf.csv"
+    pipeline_perf_path.write_text("metric,value\n", encoding="utf-8")
+    cadence_probe_path = source_root / "Cam2010093_acquisition_cadence_probe.csv"
+    cadence_probe_path.write_text("metric,value\n", encoding="utf-8")
+    ptp_path = source_root / "ptp_sync_summary.json"
+    ptp_path.write_text("{}", encoding="utf-8")
+    snapshot_path = source_root / "recording_snapshot.json"
+    snapshot_path.write_text("{}", encoding="utf-8")
 
     metadata_csv = tmp_path / "video_only_metadata.csv"
     with metadata_csv.open("w", encoding="utf-8", newline="") as handle:
@@ -106,6 +131,18 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
     moved_video = dest_dir / "cams" / "Cam2010093_2026-03-09_colleague_set_001.mp4"
     assert moved_video.exists()
     assert not video_path.exists()
+    assert (dest_dir / "raw" / "ptp_sync_summary.json").exists()
+    assert (dest_dir / "raw" / "recording_snapshot_runtime.json").exists()
+    assert ptp_path.exists()
+    assert snapshot_path.exists()
+    assert (dest_dir / "cams" / "Cam2010093_2026-03-09_colleague_set_001_keyframe.json").exists()
+    assert (dest_dir / "derived" / "Cam2010093_2026-03-09_colleague_set_001_pipeline_perf.csv").exists()
+    assert (
+        dest_dir / "derived" / "Cam2010093_2026-03-09_colleague_set_001_acquisition_cadence_probe.csv"
+    ).exists()
+    assert not keyframe_path.exists()
+    assert not pipeline_perf_path.exists()
+    assert not cadence_probe_path.exists()
 
     manifest_path = dest_dir / "recording_manifest.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -117,4 +154,15 @@ def test_main_video_only_apply_moves_file_and_writes_manifest(tmp_path: Path, mo
     assert payload["protocol_name_from_definition"] == "ManualProtocol"
     assert payload["num_dishes"] == "1"
     assert payload["fish_per_dish"] == "1"
-    assert payload["files"]["cams"] == ["cams/Cam2010093_2026-03-09_colleague_set_001.mp4"]
+    assert payload["files"]["cams"] == [
+        "cams/Cam2010093_2026-03-09_colleague_set_001.mp4",
+        "cams/Cam2010093_2026-03-09_colleague_set_001_keyframe.json",
+    ]
+    assert payload["files"]["raw"] == [
+        "raw/ptp_sync_summary.json",
+        "raw/recording_snapshot_runtime.json",
+    ]
+    assert payload["files"]["derived"] == [
+        "derived/Cam2010093_2026-03-09_colleague_set_001_pipeline_perf.csv",
+        "derived/Cam2010093_2026-03-09_colleague_set_001_acquisition_cadence_probe.csv",
+    ]

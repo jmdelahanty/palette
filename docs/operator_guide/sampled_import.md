@@ -65,6 +65,111 @@ You can always import again with a smaller step if you need more frames.
 
 ---
 
+## Recording-only / video-only imports
+
+Use `fisheye.utils.intake_video_only_recording` when the recording directory
+was organized from camera videos only and has no H5/protocol source. This
+wrapper calls the sampled import path, then stamps the Zarr with recording
+metadata such as `recording_id`, `dish_design`, `camera_id`, and
+`experiment_context_status = "absent"`.
+
+Example:
+
+```bash
+scripts/py -m fisheye.utils.intake_video_only_recording \
+  /nvme1/recordings/<recording>/cams/Cam2010093_<recording>.mp4 \
+  --recording-dir /nvme1/recordings/<recording> \
+  --zarr-path /nvme1/recordings/<recording>/zarr/<recording>_training.zarr \
+  --frame-step 5000 \
+  --skip-tail-frames 0 \
+  --session-uuid <recording> \
+  --recording-id <recording> \
+  --recording-name <recording> \
+  --protocol-name sleepyfish \
+  --dish-design palm \
+  --camera-id 2010093 \
+  --num-dishes 1 \
+  --fish-per-dish 1 \
+  --register \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+Run the same command with `--dry-run` first if you want to inspect the plan
+without writing the Zarr or registry row.
+
+If the organized recording already has `recording_manifest.json`, do not pass
+`--write-manifest` during training-Zarr intake. The organizer-owned recording
+manifest is the richer source of truth. Use `--write-manifest` only when you
+are intentionally creating a minimal manifest for a standalone video-only
+recording.
+
+For very long recordings, choose `--frame-step` from a target sample count
+rather than reusing `100` blindly:
+
+```text
+frame_step ~= source_frame_count / target_sample_count
+```
+
+For example, an 11-hour 30 fps video has about 1,188,000 frames. A target of
+roughly 240 sampled frames gives `frame_step ~= 5000`. This keeps the training
+Zarr comparable in size to short-recording sampled imports.
+
+### Video-only validation checks
+
+After import, check:
+
+- root attrs include `zarr_purpose = "training"`,
+  `experiment_context_status = "absent"`, and
+  `stimulus_runs_available = false`;
+- `raw_video` attrs include the expected `frame_step` and sampled
+  `total_frames`;
+- `raw_video/original_frame_indices` exists when `frame_step > 1`;
+- strict JSON parsing of all `zarr.json` metadata files succeeds;
+- the registry has one `datasets` row with `zarr_use = "training"` if
+  `--register` was used.
+
+For detection-label seeding, compare the trained model input dimensions against
+the arrays stored in `raw_video`. Model dimensions are queryable from the
+registry through `model_input_shapes`. If a sampled Zarr already has a
+downsampled frame array matching the model size, use that representation for
+initial detection seeding. The helper command is:
+
+```bash
+scripts/py -m fisheye.utils.predict_training_detections /path/to/training.zarr \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-run-id <registered_detect_run_id> \
+  --run-name detect_seed_<model_or_date> \
+  --apply
+```
+
+Then initialize the curated refined-detect surface for review:
+
+```bash
+scripts/py -m fisheye.refinement.refine_detect /path/to/training.zarr \
+  --detect-run detect_seed_<model_or_date> \
+  --per-frame-top-k 1
+```
+
+For sampled training imports, `refine_detect` runs in passthrough mode: it does
+not require `detect_quality`, disables artifact filters, and writes
+`refined_detect_runs/<run>/instances` for manual review/approval. The normal
+refinement dish-mask gate still applies when
+`analysis_metadata.attrs["dish_mask"]` is present: raw out-of-dish candidates
+remain in `source_detections`, but they are filtered from `instances` with
+reason `outside_dish_mask`. Use `--per-frame-top-k 1` for one-fish-per-frame
+training Zarrs when you want the highest-confidence in-dish seed detection as
+the initial reviewed candidate while preserving lower-confidence raw candidates
+as `source_detections` rows.
+
+The GPU import path may print a warning that a buffer does not support
+`__cuda_array_interface__` and is falling back to a slower copy path. Treat
+that as a performance warning, not a failed import, unless the process exits
+non-zero. On systems with kvikIO/GDS enabled, provenance should still record
+`import_method = "kvikio_zarr"` and `gds_enabled = true` when the core write
+path used GDS.
+
+---
+
 ## Batch import across recordings
 
 If you have organized recordings (from the
@@ -107,6 +212,10 @@ recordings/<session>/
 It extracts the camera ID from the H5 metadata and matches it to a video in
 `cams/`. If there's only one MP4 in `cams/`, it uses that regardless of camera
 ID.
+
+For video-only recordings without H5/protocol metadata, use
+`intake_video_only_recording` directly as shown above, or add a dedicated batch
+wrapper only after deciding the metadata policy for that batch.
 
 ### Batch-specific options
 

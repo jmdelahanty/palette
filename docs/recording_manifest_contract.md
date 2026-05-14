@@ -139,9 +139,28 @@ Recommended manifest content:
   `protocol_name_from_definition`)
 - include `dish_design` when manually known
 - include at least one `camera_video` entry under `files.cams`
+- when available, keep the camera frame table and keyframe summary beside the
+  video under `files.cams` as the camera stream bundle: `Cam*.mp4`,
+  `Cam*_meta.csv`, `Cam*_keyframe.json`
+- keep session-level raw context in `files.raw` (`ptp_sync_summary.json`,
+  `recording_snapshot_runtime.json`) and secondary diagnostics/repair backups
+  in `files.derived`
 
 `video_only_v1` does not currently trigger the `behavior_v1` required-artifact
 integrity check, so missing H5/CSV sidecars are tolerated.
+
+### Video-only Organizer CSV
+
+`fisheye.utils.organize_recordings --video-only --metadata-csv` consumes an
+operator-authored CSV before it writes `recording_manifest.json`. This CSV is an
+intake aid, not a persisted contract artifact. Its schema is documented in
+[`docs/operator_guide/organize_recordings.md`](operator_guide/organize_recordings.md#video-only-batches-without-h5).
+
+Use `fisheye.utils.draft_video_only_organizer_manifest` to draft this CSV from a
+staging directory. The helper can fill discoverable values from `Cam*.mp4`,
+`Cam*_meta.csv`, and `recording_snapshot.json`; operator-known values such as
+`dish_design`, `genotype`, `dpf_at_acquisition`, `num_dishes`, and
+`fish_per_dish` should be supplied by flags or edited in the CSV before apply.
 
 ## Zarr Artifact Naming Convention
 
@@ -219,7 +238,19 @@ Notes:
   "camera_id": "2010093",
   "protocol_name_from_definition": "ManualProtocol",
   "files": {
-    "cams": ["cams/Cam2010093.mp4"]
+    "cams": [
+      "cams/Cam2010093.mp4",
+      "cams/Cam2010093_meta.csv",
+      "cams/Cam2010093_keyframe.json"
+    ],
+    "raw": [
+      "raw/ptp_sync_summary.json",
+      "raw/recording_snapshot_runtime.json"
+    ],
+    "derived": [
+      "derived/Cam2010093_pipeline_perf.csv",
+      "derived/Cam2010093_acquisition_cadence_probe.csv"
+    ]
   }
 }
 ```
