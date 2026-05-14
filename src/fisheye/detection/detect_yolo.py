@@ -363,6 +363,27 @@ def _resize_dims_to_imgsz(value: Optional[list[int]]) -> Optional[int | list[int
     return [int(value[0]), int(value[1])]
 
 
+def _actual_input_resize_dims(
+    requested_resize_dims: Optional[list[int]],
+    pre_resize_dims: Optional[list[int]],
+    *,
+    decord_on_gpu: bool,
+) -> Optional[list[int]]:
+    """
+    Return the frame dimensions that will be explicitly fed to YOLO.
+
+    Ultralytics applies imgsz preprocessing for numpy/list inputs, but torch
+    tensor inputs are treated as already prepared. The Decord-GPU path feeds
+    torch tensors, so canonical detection.resize_dims must be applied there
+    explicitly or inference silently runs at source-video resolution.
+    """
+    if decord_on_gpu and requested_resize_dims is not None:
+        return [int(requested_resize_dims[0]), int(requested_resize_dims[1])]
+    if pre_resize_dims is not None:
+        return [int(pre_resize_dims[0]), int(pre_resize_dims[1])]
+    return None
+
+
 def detect_yolo(
     video_path: str,
     model_path: Optional[str] = None,
@@ -531,10 +552,10 @@ def detect_yolo(
         console.print(f"  YOLO imgsz applied: {imgsz_applied}")
     if pre_resize_dims:
         console.print(
-            f"  Frame pre-resize (legacy video.resize): {pre_resize_dims[1]}×{pre_resize_dims[0]}"
+            f"  Legacy frame pre-resize (video.resize): {pre_resize_dims[1]}×{pre_resize_dims[0]}"
         )
     else:
-        console.print("  Frame pre-resize: None (use original)")
+        console.print("  Legacy frame pre-resize: None")
     if legacy_video_resize_ignored:
         console.print(
             "[yellow]  Note:[/yellow] Ignored legacy video.resize because canonical detection resize_dims/imgsz was set."
@@ -606,12 +627,21 @@ def detect_yolo(
         console.print(f"[green]✓[/green] Using OpenCV decoder")
         video_reader_type = 'opencv'
         use_decord = False
+
+    decord_on_gpu = bool(decord_info and decord_info.get('on_gpu'))
+    effective_input_resize_dims = _actual_input_resize_dims(
+        requested_resize_dims,
+        pre_resize_dims,
+        decord_on_gpu=decord_on_gpu,
+    )
     
     # Determine dimensions for normalization (actual or resized)
-    if pre_resize_dims:
-        inference_height, inference_width = pre_resize_dims
+    if effective_input_resize_dims:
+        inference_height, inference_width = effective_input_resize_dims
         console.print(f"[green]✓[/green] Video: {n_frames} frames, {fps:.1f} fps, {width}×{height}")
-        console.print(f"[cyan]  Will resize to {inference_width}×{inference_height} for inference[/cyan]")
+        console.print(f"[cyan]  Will feed {inference_width}×{inference_height} frames to YOLO[/cyan]")
+        if decord_on_gpu and requested_resize_dims is not None:
+            console.print("[cyan]  Decord GPU tensor path: applying canonical resize before predict[/cyan]")
     else:
         inference_width, inference_height = width, height
         console.print(f"[green]✓[/green] Video: {n_frames} frames, {fps:.1f} fps, {width}×{height}")
@@ -696,7 +726,7 @@ def detect_yolo(
             # Processing info
             'inference_width': inference_width,
             'inference_height': inference_height,
-            'resized_for_inference': pre_resize_dims is not None,
+            'resized_for_inference': effective_input_resize_dims is not None,
             
             # Git provenance
             'git_commit_hash': git_info.get('commit_hash', 'unknown'),
@@ -828,7 +858,7 @@ def detect_yolo(
     root.attrs['inference_resolution'] = [int(inference_width), int(inference_height)]
     root.attrs['inference_width'] = int(inference_width)
     root.attrs['inference_height'] = int(inference_height)
-    root.attrs['resized_for_inference'] = pre_resize_dims is not None
+    root.attrs['resized_for_inference'] = effective_input_resize_dims is not None
     root.attrs['resize_dims_requested'] = (
         [int(requested_resize_dims[0]), int(requested_resize_dims[1])]
         if requested_resize_dims is not None
@@ -840,6 +870,16 @@ def detect_yolo(
     root.attrs['pre_resize_dims'] = (
         [int(pre_resize_dims[0]), int(pre_resize_dims[1])]
         if pre_resize_dims is not None
+        else None
+    )
+    root.attrs['effective_input_resize_dims'] = (
+        [int(effective_input_resize_dims[0]), int(effective_input_resize_dims[1])]
+        if effective_input_resize_dims is not None
+        else None
+    )
+    root.attrs['tensor_resize_dims'] = (
+        [int(effective_input_resize_dims[0]), int(effective_input_resize_dims[1])]
+        if decord_on_gpu and effective_input_resize_dims is not None
         else None
     )
     if source_zarr_path is not None:
@@ -909,8 +949,6 @@ def detect_yolo(
     read_times = []
     processing_start = time.time()
     
-    decord_on_gpu = bool(decord_info and decord_info.get('on_gpu'))
-    
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -968,10 +1006,10 @@ def detect_yolo(
                         chunk = frames_chw[start:end]
                         try:
                             chunk = chunk.to(device=device, dtype=dtype, non_blocking=True).contiguous(memory_format=torch.channels_last)
-                            if pre_resize_dims:
+                            if effective_input_resize_dims:
                                 chunk = F.interpolate(
                                     chunk,
-                                    size=pre_resize_dims,
+                                    size=effective_input_resize_dims,
                                     mode='bilinear',
                                     align_corners=False
                                 )
@@ -1179,6 +1217,12 @@ def detect_yolo(
             'imgsz_applied': imgsz_applied,
             'imgsz_legacy_input': cli_imgsz_legacy,
             'pre_resize_dims': pre_resize_dims,
+            'effective_input_resize_dims': effective_input_resize_dims,
+            'tensor_resize_dims': (
+                effective_input_resize_dims
+                if decord_on_gpu and effective_input_resize_dims is not None
+                else None
+            ),
             'legacy_video_resize_dims': legacy_video_resize_dims,
         },
         'summary_statistics': stats,

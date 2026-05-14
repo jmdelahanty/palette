@@ -111,3 +111,31 @@ export OPENMP_NUM_THREADS=$LSB_DJOB_NUMPROC
 ```
 
 Then run the create/validation commands above.
+
+### Cluster Validation Script
+
+After the environment is created, PyTorch CUDA is fixed to the `pytorch`
+channel build, and Decord has been built on the cluster, run:
+
+```bash
+scripts/validate_cluster_palette_env.sh
+```
+
+If a smoke MP4 is available, also verify Decord GPU decode:
+
+```bash
+scripts/validate_cluster_palette_env.sh --video /path/to/example.mp4
+```
+
+The script checks that:
+
+- `scripts/py` resolves the `palette-py311` interpreter.
+- PyTorch sees the assigned CUDA device.
+- NumPy remains in the Palette-supported range (`<2.3`).
+- Decord imports and `libdecord.so` resolves FFmpeg libraries from the selected
+  conda environment.
+- Decord is linked against `libnvcuvid` for NVDEC-capable GPU decode.
+- Core packages such as OpenCV, Ultralytics, Zarr, PyArrow, and Polars import.
+
+This script is non-mutating. It validates the environment but does not install
+packages or rebuild Decord.

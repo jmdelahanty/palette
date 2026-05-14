@@ -6,6 +6,12 @@ Purpose: compare Decord-based decode against native decode paths (including Crim
 
 - Recent detect run timing showed decode/read cost larger than model inference cost.
 - Before adding major inference-engine complexity, we should measure whether decode backend changes provide bigger gains.
+- 2026-05-14 follow-up: the Decord GPU path feeds torch tensors to
+  Ultralytics. For tensor inputs, canonical `detection.resize_dims` must be
+  applied explicitly before `model.predict`; passing `imgsz` alone can leave
+  inference running on source-resolution tensors. This is especially expensive
+  for `4512x4512` recordings and can make `.pt` inference appear anomalously
+  slow even when the model itself is fast.
 
 ## Scope
 
@@ -34,6 +40,7 @@ Purpose: compare Decord-based decode against native decode paths (including Crim
 
 - End-to-end detect FPS.
 - Decode/read ms per batch.
+- Explicit preprocess/resize ms per batch.
 - Inference ms per batch.
 - Write ms per batch.
 - GPU utilization and VRAM usage.
@@ -55,6 +62,9 @@ Purpose: compare Decord-based decode against native decode paths (including Crim
 2. Add backend selector abstraction for decode path (where feasible).
 3. Add Crimson adapter path (decode-only or decode+detect feed) for apples-to-apples timing.
 4. Add a report script/table formatter for side-by-side comparison.
+5. Split production timing provenance into read, preprocess/resize, predict,
+   postprocess, and write phases so CUDA synchronization artifacts do not hide
+   where time is actually spent.
 
 ## Decision rule
 
