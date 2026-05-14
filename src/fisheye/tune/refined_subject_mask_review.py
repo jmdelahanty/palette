@@ -1731,9 +1731,19 @@ def _open_or_create_refined_subject_run(
         metric_chunks_2 = _refined_metric_chunks_lastdim(total_rois, 2)
         metric_chunks_4 = _refined_metric_chunks_lastdim(total_rois, 4)
         metrics = run_group.require_group("metrics")
-        masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
+        metric_names = ("mask_present", "area_px", "centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid")
+        needs_metric_backfill = any(name not in metrics for name in metric_names)
+        components_group = run_group.get("components")
+        needs_component_backfill = not (
+            components_group is not None and all(component_name in components_group for component_name in component_names)
+        )
+        masks_np: np.ndarray | None = None
+        if needs_metric_backfill or needs_component_backfill:
+            masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
         geometry_metrics = None
         if "mask_present" not in metrics or "area_px" not in metrics:
+            if masks_np is None:
+                masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
             mask_present, area_px = _compute_mask_metrics(masks_np)
             if "mask_present" not in metrics:
                 metrics.create_array("mask_present", data=mask_present, chunks=metric_chunks, overwrite=True)
@@ -1745,6 +1755,8 @@ def _open_or_create_refined_subject_run(
             or "bbox_xyxy" not in metrics
             or "bbox_valid" not in metrics
         ):
+            if masks_np is None:
+                masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
             geometry_metrics = _compute_geometry_metrics(masks_np)
             if "centroid_xy" not in metrics:
                 metrics.create_array(
@@ -1781,32 +1793,35 @@ def _open_or_create_refined_subject_run(
                 chunks=metric_chunks,
                 overwrite=True,
             )
-        mask_present_arr = np.asarray(metrics["mask_present"][:], dtype=bool)
-        area_px_arr = np.asarray(metrics["area_px"][:], dtype=np.float32)
-        edit_applied_arr = np.asarray(run_group["edit_applied"][:], dtype=bool)
-        for comp_idx, component_name in enumerate(component_names):
-            component_masks = np.asarray(masks_np[:, comp_idx], dtype=np.uint8)
-            component_metrics = _compute_component_topology_metrics(component_masks)
-            component_metrics.update(_compute_component_sigma_noise_metrics(component_masks))
-            component_metrics.update(_compute_component_curvature_var_metrics(component_masks))
-            component_metrics.update(_compute_component_shape_qc_metrics(component_masks))
-            _ensure_component_group(
-                run_group,
-                component_name,
-                total_rois,
-                mask_present_arr[:, comp_idx],
-                area_px_arr[:, comp_idx],
-                edit_applied_arr[:, comp_idx],
-                component_metrics=component_metrics,
-                source_masks=_component_masks_from_source(source, component_name),
-                current_masks=np.asarray(masks_np[:, comp_idx], dtype=np.uint8),
-            )
-            _ensure_refined_component_provenance(
-                run_group,
-                source=source,
-                component_name=component_name,
-                created_at_utc=str(run_group.attrs.get("created_at_utc") or _utc_now()),
-            )
+        if needs_component_backfill:
+            if masks_np is None:
+                masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
+            mask_present_arr = np.asarray(metrics["mask_present"][:], dtype=bool)
+            area_px_arr = np.asarray(metrics["area_px"][:], dtype=np.float32)
+            edit_applied_arr = np.asarray(run_group["edit_applied"][:], dtype=bool)
+            for comp_idx, component_name in enumerate(component_names):
+                component_masks = np.asarray(masks_np[:, comp_idx], dtype=np.uint8)
+                component_metrics = _compute_component_topology_metrics(component_masks)
+                component_metrics.update(_compute_component_sigma_noise_metrics(component_masks))
+                component_metrics.update(_compute_component_curvature_var_metrics(component_masks))
+                component_metrics.update(_compute_component_shape_qc_metrics(component_masks))
+                _ensure_component_group(
+                    run_group,
+                    component_name,
+                    total_rois,
+                    mask_present_arr[:, comp_idx],
+                    area_px_arr[:, comp_idx],
+                    edit_applied_arr[:, comp_idx],
+                    component_metrics=component_metrics,
+                    source_masks=_component_masks_from_source(source, component_name),
+                    current_masks=np.asarray(masks_np[:, comp_idx], dtype=np.uint8),
+                )
+                _ensure_refined_component_provenance(
+                    run_group,
+                    source=source,
+                    component_name=component_name,
+                    created_at_utc=str(run_group.attrs.get("created_at_utc") or _utc_now()),
+                )
         return RefinedSubjectMaskRun(
             run_name=target_run,
             parent=refined_parent,

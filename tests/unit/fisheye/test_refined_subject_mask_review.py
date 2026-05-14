@@ -632,6 +632,33 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert provenance["inputs"]["source_keypoint_group"] == "refined_keypoints_runs"
 
 
+def test_prepare_existing_refined_subject_run_skips_eager_component_metric_backfill(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+
+    mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    def fail_component_metric_backfill(_masks: np.ndarray) -> dict[str, np.ndarray]:
+        raise AssertionError("existing refined runs should not eagerly recompute component metrics")
+
+    monkeypatch.setattr(mod, "_compute_component_topology_metrics", fail_component_metric_backfill)
+
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body",),
+    )
+
+    assert refined.run_name == "refined_subject_masks_001"
+    assert refined.component_names == ("subject_body", "swim_bladder")
+
+
 def test_prepare_refined_subject_run_defaults_to_available_source_components(monkeypatch) -> None:
     root = _build_subject_review_root()
     _patch_review_provenance(monkeypatch)

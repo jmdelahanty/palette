@@ -395,6 +395,24 @@ def test_build_plans_from_registry_uses_subject_row_when_refined_absent(tmp_path
     assert ok[0].stage_label == "subject_mask_runs -> new refined run"
 
 
+def test_filter_stale_registry_plans_marks_missing_source_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recordings" / "stale_training.zarr"
+    (zarr_path / "subject_mask_runs" / "current_subject").mkdir(parents=True)
+    plan = mod.ReviewPlan(
+        zarr_path=zarr_path,
+        subject_run="missing_registry_subject",
+        refined_run=None,
+        review_state=None,
+        status="ok",
+        stage_label="subject_mask_runs -> new refined run",
+    )
+
+    [filtered] = mod._filter_stale_registry_plans([plan])
+
+    assert filtered.status == "filtered"
+    assert filtered.reason == "registry source subject_mask_runs/missing_registry_subject missing on disk"
+
+
 def test_build_plans_from_registry_honors_explicit_refined_run(tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.sqlite"
     zarr_path = tmp_path / "recordings" / "f_training.zarr"

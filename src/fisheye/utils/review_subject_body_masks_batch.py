@@ -749,6 +749,38 @@ def _plan_counts(plans: List[ReviewPlan]) -> dict[str, int]:
     return counts
 
 
+def _filter_stale_registry_plan(plan: ReviewPlan) -> ReviewPlan:
+    if plan.status != "ok" or not plan.zarr_path.exists():
+        return plan
+    if plan.subject_run and not (plan.zarr_path / SOURCE_STAGE / str(plan.subject_run)).is_dir():
+        return ReviewPlan(
+            zarr_path=plan.zarr_path,
+            subject_run=plan.subject_run,
+            refined_run=plan.refined_run,
+            review_state=plan.review_state,
+            status="filtered",
+            reason=f"registry source {SOURCE_STAGE}/{plan.subject_run} missing on disk",
+            stage_label=plan.stage_label,
+            roi_indices=plan.roi_indices,
+        )
+    if plan.refined_run and not (plan.zarr_path / REFINED_STAGE / str(plan.refined_run)).is_dir():
+        return ReviewPlan(
+            zarr_path=plan.zarr_path,
+            subject_run=plan.subject_run,
+            refined_run=plan.refined_run,
+            review_state=plan.review_state,
+            status="filtered",
+            reason=f"registry target {REFINED_STAGE}/{plan.refined_run} missing on disk",
+            stage_label=plan.stage_label,
+            roi_indices=plan.roi_indices,
+        )
+    return plan
+
+
+def _filter_stale_registry_plans(plans: List[ReviewPlan]) -> List[ReviewPlan]:
+    return [_filter_stale_registry_plan(plan) for plan in plans]
+
+
 def _viewer_cmd(args: argparse.Namespace, plan: ReviewPlan) -> List[str]:
     display_scale = max(1, int(args.scale_percent)) / 100.0
     cmd: List[str] = [
@@ -927,13 +959,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             zarr_use=str(args.zarr_use),
         )
     elif args.registry:
-        plans = _build_plans_from_registry(
-            Path(args.registry),
-            roots=explicit_paths,
-            subject_run=args.subject_run,
-            refined_run=args.refined_run,
-            status_filter=str(args.status),
-            zarr_use=str(args.zarr_use),
+        plans = _filter_stale_registry_plans(
+            _build_plans_from_registry(
+                Path(args.registry),
+                roots=explicit_paths,
+                subject_run=args.subject_run,
+                refined_run=args.refined_run,
+                status_filter=str(args.status),
+                zarr_use=str(args.zarr_use),
+            )
         )
     else:
         plans = _build_plans(
