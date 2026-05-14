@@ -104,6 +104,26 @@ if [[ -z "$MODEL" ]]; then
   exit 2
 fi
 
+if [[ "$DRY_RUN" != "1" ]]; then
+  if [[ ! -f "$VIDEO" ]]; then
+    echo "Video file not found: $VIDEO" >&2
+    exit 2
+  fi
+  if [[ ! -f "$MODEL" ]]; then
+    if [[ -d "$MODEL" ]]; then
+      echo "Model path is a directory, expected a model file: $MODEL" >&2
+      echo "Did the path get split across lines before weights/best.pt?" >&2
+    else
+      echo "Model file not found: $MODEL" >&2
+    fi
+    exit 2
+  fi
+  if [[ ! -f "$CONFIG" ]]; then
+    echo "Config file not found: $CONFIG" >&2
+    exit 2
+  fi
+fi
+
 if [[ -z "$LOG_DIR" ]]; then
   LOG_DIR="runs/diagnostics/detect_compute_smoke_bsub"
 fi
