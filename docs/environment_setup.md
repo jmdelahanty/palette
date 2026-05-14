@@ -25,7 +25,10 @@ scripts/py -c 'import torch; print(torch.__version__, torch.cuda.is_available(),
 
 `scripts/py` searches both `$HOME/miniconda3/envs/palette-py311/bin/python` and
 `$HOME/miniforge3/envs/palette-py311/bin/python`. Set `PALETTE_PYTHON` only if
-your environment lives somewhere else.
+your environment lives somewhere else. The wrapper also prepends the selected
+environment's `lib/` directory to `LD_LIBRARY_PATH` before launching Python, so
+native wheels such as Decord can resolve conda-provided shared libraries without
+requiring `conda activate`.
 
 ## Local Decord Wheel
 
@@ -37,6 +40,17 @@ $HOME/miniforge3/envs/palette-py311/bin/python -m pip install ./decord-0.6.0-cp3
 ```
 
 Use the matching Miniconda path if applicable.
+
+The wheel is linked against FFmpeg 4.x (`libavformat.so.58`), so
+`environment.yml` pins `ffmpeg=4.4.*`. If Decord fails with
+`OSError: libavformat.so.58: cannot open shared object file`, repair an
+existing environment with:
+
+```bash
+conda install -n palette-py311 -c conda-forge 'ffmpeg=4.4.*'
+git pull --ff-only
+scripts/py -c 'import decord; print("decord ok")'
+```
 
 ## Failed Or Partial Environments
 

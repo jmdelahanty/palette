@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+run_python() {
+  local python_bin="$1"
+  shift
+
+  local env_prefix
+  local env_lib
+  env_prefix="$(cd "$(dirname "$python_bin")/.." && pwd)"
+  env_lib="$env_prefix/lib"
+  if [[ -d "$env_lib" ]]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+      *":$env_lib:"*) ;;
+      *) export LD_LIBRARY_PATH="$env_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+    esac
+  fi
+
+  exec "$python_bin" "$@"
+}
+
 if [[ -n "${PALETTE_PYTHON:-}" ]]; then
-  exec "$PALETTE_PYTHON" "$@"
+  run_python "$PALETTE_PYTHON" "$@"
 fi
 
 for candidate in \
@@ -10,7 +28,7 @@ for candidate in \
   "$HOME/miniforge3/envs/palette-py311/bin/python"
 do
   if [[ -x "$candidate" ]]; then
-    exec "$candidate" "$@"
+    run_python "$candidate" "$@"
   fi
 done
 
