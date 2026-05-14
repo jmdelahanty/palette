@@ -8,9 +8,14 @@ pre-filtering.
 Related contract:
 - `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
 - `docs/cluster_run_group_artifact_workflow.md`
+- `docs/environment_setup.md`
 
 Janelia-specific cluster policy source:
 - `https://hpc.int.janelia.org/docs/ai-agent-hints`
+
+For Palette environment creation, use the portable `environment.yml` workflow
+documented in `docs/environment_setup.md`. Do not use exact workstation export
+snapshots as the default cluster install input.
 
 ---
 
