@@ -21,11 +21,10 @@ dependencies:
   - pytorch-cuda=12.4
 
   # Numeric / image / tabular stack.
-  - "numpy>=2,<3"
+  - "numpy>=2,<2.3"
   - scipy
   - scikit-image
   - scikit-learn
-  - opencv
   - pyarrow
   - polars
   - pandas
@@ -53,6 +52,7 @@ dependencies:
   # Pure-Python or pip-first tools. Do not pin torch/torchvision here.
   - pip:
       - ultralytics==8.3.169
+      - opencv-python-headless
       - marimo
       - pybaselines
       - textual

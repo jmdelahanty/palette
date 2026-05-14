@@ -42,14 +42,30 @@ $HOME/miniforge3/envs/palette-py311/bin/python -m pip install ./decord-0.6.0-cp3
 Use the matching Miniconda path if applicable.
 
 The wheel is linked against FFmpeg 4.x (`libavformat.so.58`), so
-`environment.yml` pins `ffmpeg=4.4.*`. If Decord fails with
-`OSError: libavformat.so.58: cannot open shared object file`, repair an
-existing environment with:
+`environment.yml` pins `ffmpeg=4.4.*`. The environment uses pip
+`opencv-python-headless` instead of conda `opencv` because conda OpenCV builds
+pull newer FFmpeg packages that conflict with Decord's FFmpeg 4.x ABI.
+
+If Decord fails with `OSError: libavformat.so.58: cannot open shared object
+file`, the simplest repair is to rebuild from the updated environment file:
 
 ```bash
-conda install -n palette-py311 -c conda-forge 'ffmpeg=4.4.*'
 git pull --ff-only
-scripts/py -c 'import decord; print("decord ok")'
+conda env remove -n palette-py311 -y
+conda env create -n palette-py311 -f environment.yml
+$HOME/miniforge3/envs/palette-py311/bin/python -m pip install -e .
+$HOME/miniforge3/envs/palette-py311/bin/python -m pip install ./decord-0.6.0-cp311-cp311-linux_x86_64.whl
+scripts/py -c 'import cv2, decord; print("cv2/decord ok")'
+```
+
+To repair an existing environment in place instead:
+
+```bash
+git pull --ff-only
+conda remove -n palette-py311 -y opencv py-opencv libopencv
+conda install -n palette-py311 -c conda-forge 'numpy>=2,<2.3' 'ffmpeg=4.4.*'
+$HOME/miniforge3/envs/palette-py311/bin/python -m pip install opencv-python-headless
+scripts/py -c 'import cv2, decord; print("cv2/decord ok")'
 ```
 
 ## Failed Or Partial Environments
