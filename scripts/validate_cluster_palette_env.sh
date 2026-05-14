@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/validate_cluster_palette_env.sh [--video PATH]
+Usage: scripts/validate_cluster_palette_env.sh [--video PATH] [--count-video-frames]
 
 Validate a Palette cluster environment from the repository root.
 
@@ -17,9 +17,11 @@ Checks:
   - optional Decord GPU VideoReader smoke with --video
 
 Notes:
-  - The video smoke decodes only the first few frames.
+  - The video smoke decodes frame 0 by default.
   - Prefer a short clip for --video; opening long MP4s can be slow if
     Decord/FFmpeg scans or builds seek metadata during VideoReader setup.
+  - Pass --count-video-frames to also call len(VideoReader), which may be
+    slower on long MP4s but validates frame-count/index behavior.
 
 Examples:
   scripts/validate_cluster_palette_env.sh
@@ -28,6 +30,7 @@ EOF
 }
 
 video_path=""
+count_video_frames=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --video)
@@ -37,6 +40,10 @@ while [[ $# -gt 0 ]]; do
       fi
       video_path="$2"
       shift 2
+      ;;
+    --count-video-frames)
+      count_video_frames=1
+      shift
       ;;
     -h|--help)
       usage
@@ -146,9 +153,10 @@ if [[ -n "$video_path" ]]; then
     exit 1
   fi
   echo "== Decord GPU video smoke =="
-  echo "This smoke opens the video on gpu(0), counts frames, then decodes only the first few frames."
-  echo "For long MP4s, the VideoReader open/count step may be slow before any frame decode occurs."
-  "$py" - "$video_path" <<'PY'
+  echo "This smoke opens the video on gpu(0), then decodes frame 0 as a CUDA torch tensor."
+  echo "Frame counting is skipped by default; pass --count-video-frames to call len(VideoReader)."
+  echo "For long MP4s, VideoReader open may still be slow if Decord/FFmpeg scans metadata."
+  "$py" - "$video_path" "$count_video_frames" <<'PY'
 import sys
 import time
 from pathlib import Path
@@ -157,6 +165,7 @@ import decord
 from decord import VideoReader, gpu
 
 video = sys.argv[1]
+count_video_frames = sys.argv[2] == "1"
 video_path = Path(video)
 decord.bridge.set_bridge("torch")
 
@@ -168,14 +177,18 @@ vr = VideoReader(video, ctx=gpu(0))
 open_elapsed = time.perf_counter() - start
 print(f"opening_videoreader=ok elapsed_s={open_elapsed:.3f}", flush=True)
 
-print("counting_frames=started", flush=True)
-start = time.perf_counter()
-n = len(vr)
-count_elapsed = time.perf_counter() - start
-print(f"counting_frames=ok frames={n} elapsed_s={count_elapsed:.3f}", flush=True)
-if n <= 0:
-    raise SystemExit(f"VideoReader opened but reported no frames: {video}")
-indices = list(range(min(4, n)))
+if count_video_frames:
+    print("counting_frames=started", flush=True)
+    start = time.perf_counter()
+    n = len(vr)
+    count_elapsed = time.perf_counter() - start
+    print(f"counting_frames=ok frames={n} elapsed_s={count_elapsed:.3f}", flush=True)
+    if n <= 0:
+        raise SystemExit(f"VideoReader opened but reported no frames: {video}")
+else:
+    print("counting_frames=skipped", flush=True)
+
+indices = [0]
 
 print(f"decoding_batch=started indices={indices}", flush=True)
 start = time.perf_counter()
