@@ -16,6 +16,11 @@ Checks:
   - core Python dependencies import
   - optional Decord GPU VideoReader smoke with --video
 
+Notes:
+  - The video smoke decodes only the first few frames.
+  - Prefer a short clip for --video; opening long MP4s can be slow if
+    Decord/FFmpeg scans or builds seek metadata during VideoReader setup.
+
 Examples:
   scripts/validate_cluster_palette_env.sh
   scripts/validate_cluster_palette_env.sh --video /groups/.../example.mp4
@@ -141,27 +146,47 @@ if [[ -n "$video_path" ]]; then
     exit 1
   fi
   echo "== Decord GPU video smoke =="
+  echo "This smoke opens the video on gpu(0), counts frames, then decodes only the first few frames."
+  echo "For long MP4s, the VideoReader open/count step may be slow before any frame decode occurs."
   "$py" - "$video_path" <<'PY'
 import sys
+import time
+from pathlib import Path
 
 import decord
 from decord import VideoReader, gpu
 
 video = sys.argv[1]
+video_path = Path(video)
 decord.bridge.set_bridge("torch")
+
+print(f"video={video}", flush=True)
+print(f"video_size_bytes={video_path.stat().st_size}", flush=True)
+print("opening_videoreader=started ctx=gpu(0)", flush=True)
+start = time.perf_counter()
 vr = VideoReader(video, ctx=gpu(0))
+open_elapsed = time.perf_counter() - start
+print(f"opening_videoreader=ok elapsed_s={open_elapsed:.3f}", flush=True)
+
+print("counting_frames=started", flush=True)
+start = time.perf_counter()
 n = len(vr)
+count_elapsed = time.perf_counter() - start
+print(f"counting_frames=ok frames={n} elapsed_s={count_elapsed:.3f}", flush=True)
 if n <= 0:
     raise SystemExit(f"VideoReader opened but reported no frames: {video}")
 indices = list(range(min(4, n)))
+
+print(f"decoding_batch=started indices={indices}", flush=True)
+start = time.perf_counter()
 batch = vr.get_batch(indices)
+decode_elapsed = time.perf_counter() - start
 device = getattr(batch, "device", None)
-print(f"video={video}")
-print(f"frames={n}")
-print(f"batch_shape={tuple(batch.shape)} device={device} dtype={batch.dtype}")
+print(f"decoding_batch=ok elapsed_s={decode_elapsed:.3f}", flush=True)
+print(f"batch_shape={tuple(batch.shape)} device={device} dtype={batch.dtype}", flush=True)
 if device is None or getattr(device, "type", None) != "cuda":
     raise SystemExit("Decord GPU smoke did not return a CUDA torch tensor.")
-print("decord_gpu_video=ok")
+print("decord_gpu_video=ok", flush=True)
 PY
 else
   echo "Skipping Decord GPU video smoke; pass --video /path/to/file.mp4 to run it."
