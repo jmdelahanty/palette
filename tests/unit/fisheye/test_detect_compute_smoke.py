@@ -47,6 +47,23 @@ class _FakeYOLO:
         return [_FakePrediction(2) for _ in range(int(batch.shape[0]))]
 
 
+class _FakePynvvcReader:
+    source_height = 4
+
+    def __init__(self, total_frames: int) -> None:
+        self.total_frames = total_frames
+        self.next_frame = 0
+
+    def decode_next(self, count: int) -> list[torch.Tensor]:
+        frames = []
+        for _ in range(count):
+            if self.next_frame >= self.total_frames:
+                break
+            frames.append(torch.full((6, 4), self.next_frame, dtype=torch.uint8))
+            self.next_frame += 1
+        return frames
+
+
 def test_compute_smoke_runs_without_canonical_writes(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LSB_JOBID", "12345")
     monkeypatch.setenv("LSB_QUEUE", "gpu_l4")
@@ -154,6 +171,41 @@ def test_pynvvc_luma_rgb_preprocess_uses_luma_plane_only() -> None:
     assert torch.all((batch >= 0.0) & (batch <= 1.0))
 
 
+def test_pynvvc_producer_pipeline_processes_batches() -> None:
+    reader = _FakePynvvcReader(total_frames=4)
+    model = _FakeYOLO("fake.pt")
+    payload = {"batches": []}
+
+    result = mod._run_pynvvc_producer_pipeline(
+        reader=reader,  # type: ignore[arg-type]
+        frame_start=0,
+        frame_end=4,
+        batch_size=2,
+        pipeline_depth=1,
+        payload=payload,
+        model=model,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        resize=(2, 2),
+        predict_kwargs={
+            "conf": 0.4,
+            "iou": 0.45,
+            "max_det": 20,
+            "verbose": False,
+            "device": "cpu",
+            "half": False,
+        },
+    )
+
+    assert result["frames_processed"] == 4
+    assert result["detections_total"] == 8
+    assert result["timing_policy"] == "producer_consumer_no_per_batch_global_cuda_sync"
+    assert len(payload["batches"]) == 2
+    assert payload["batches"][0]["queue_wait_seconds"] >= 0
+    assert payload["batches"][0]["tensor_shape"] == [2, 3, 2, 2]
+    assert len(model.predict_calls) == 2
+
+
 def test_compute_smoke_requires_bounded_frame_selection(tmp_path: Path) -> None:
     args = SimpleNamespace(
         video_path=tmp_path / "input.mp4",
@@ -175,6 +227,32 @@ def test_compute_smoke_requires_bounded_frame_selection(tmp_path: Path) -> None:
     args.model.write_bytes(b"model")
 
     with pytest.raises(ValueError, match="must be bounded"):
+        mod.run_smoke(args)
+
+
+def test_compute_smoke_rejects_producer_pipeline_for_non_pynvvc(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        video_path=tmp_path / "input.mp4",
+        model=tmp_path / "best.pt",
+        config=None,
+        decode_backend="decord_cpu",
+        start_frame=0,
+        max_frames=2,
+        max_batches=0,
+        batch_size=2,
+        resize=None,
+        conf=None,
+        iou=None,
+        max_det=None,
+        device="cpu",
+        force_fp32=True,
+        pipeline_mode="producer",
+        pipeline_depth=2,
+    )
+    args.video_path.write_bytes(b"video")
+    args.model.write_bytes(b"model")
+
+    with pytest.raises(RuntimeError, match="valid only"):
         mod.run_smoke(args)
 
 

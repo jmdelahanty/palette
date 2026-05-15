@@ -64,6 +64,7 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     model_optimization = payload.get("model_optimization") or {}
     steady = summary.get("steady_state_excluding_first_batch") or {}
     first_batch = summary.get("first_batch") or {}
+    pipeline = summary.get("pipeline") or {}
 
     print(f"path: {path}")
     print(f"status: {payload.get('status')}")
@@ -74,6 +75,14 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     print(f"cuda_visible_devices: {cluster.get('CUDA_VISIBLE_DEVICES')}")
     print(f"palette_job_cache: {cluster.get('PALETTE_JOB_CACHE')}")
     print(f"backend: {inputs.get('decode_backend')}")
+    pipeline_mode = inputs.get("pipeline_mode") or "legacy_sequential"
+    pipeline_depth = inputs.get("pipeline_depth") or "n/a"
+    timing_policy = inputs.get("timing_policy") or "legacy_per_batch_sync"
+    print(
+        "pipeline: "
+        f"mode={pipeline_mode} depth={pipeline_depth} "
+        f"timing={timing_policy}"
+    )
     print(f"device: {inputs.get('device')} fp16={inputs.get('fp16')}")
     print(f"cuda_device: {env.get('cuda_device_name')}")
     print(f"resize: {inputs.get('resize')} source={inputs.get('resize_source')}")
@@ -109,6 +118,13 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
         f"predict_return_mean_s={_format_seconds(steady.get('predict_return_seconds_mean'))} "
         f"cuda_sync_mean_s={_format_seconds(steady.get('inference_cuda_sync_seconds_mean'))}"
     )
+    if pipeline:
+        print(
+            "pipeline_metrics: "
+            f"queue_wait_s={_format_seconds(pipeline.get('queue_wait_seconds_total'))} "
+            f"consumer_s={_format_seconds(pipeline.get('consumer_seconds_total'))} "
+            f"final_cuda_sync_s={_format_seconds(pipeline.get('final_cuda_sync_seconds'))}"
+        )
     total_span = stage_spans.get("total") if isinstance(stage_spans, dict) else None
     if isinstance(total_span, dict):
         print(f"total_start_utc: {total_span.get('start_utc')}")
@@ -158,6 +174,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "status": payload.get("status"),
             "canonical_outputs_written": payload.get("canonical_outputs_written"),
             "decode_backend": _get_nested(payload, "inputs", "decode_backend"),
+            "pipeline_mode": _get_nested(payload, "inputs", "pipeline_mode"),
+            "pipeline_depth": _get_nested(payload, "inputs", "pipeline_depth"),
+            "timing_policy": _get_nested(payload, "inputs", "timing_policy"),
             "device": _get_nested(payload, "inputs", "device"),
             "imgsz_applied": _get_nested(payload, "inputs", "imgsz_applied"),
             "job_id": _get_nested(payload, "cluster", "LSB_JOBID"),
@@ -199,6 +218,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "summary",
                 "steady_state_excluding_first_batch",
                 "inference_cuda_sync_seconds_mean",
+            ),
+            "pipeline_queue_wait_seconds_total": _get_nested(
+                payload, "summary", "pipeline", "queue_wait_seconds_total"
+            ),
+            "pipeline_consumer_seconds_total": _get_nested(
+                payload, "summary", "pipeline", "consumer_seconds_total"
+            ),
+            "pipeline_final_cuda_sync_seconds": _get_nested(
+                payload, "summary", "pipeline", "final_cuda_sync_seconds"
             ),
         }
         print(json.dumps(summary, indent=2, sort_keys=True))

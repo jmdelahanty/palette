@@ -13,9 +13,12 @@ import argparse
 import json
 import os
 import tempfile
+import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from queue import Full, Queue
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 import torch
@@ -58,6 +61,9 @@ from fisheye.diagnostics import benchmark_detect_stage_split as stage
 
 BACKEND_PYNVVC_LUMA_RGB = "pynvvc_luma_rgb"
 BACKEND_CHOICES = (*stage.BACKEND_CHOICES, BACKEND_PYNVVC_LUMA_RGB)
+PIPELINE_SEQUENTIAL = "sequential"
+PIPELINE_PRODUCER = "producer"
+PIPELINE_CHOICES = (PIPELINE_SEQUENTIAL, PIPELINE_PRODUCER)
 
 
 def _positive_int(value: str) -> int:
@@ -135,6 +141,22 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Disable FP16 even on CUDA.",
     )
     parser.add_argument(
+        "--pipeline-mode",
+        choices=PIPELINE_CHOICES,
+        default=PIPELINE_SEQUENTIAL,
+        help=(
+            "Execution mode. 'producer' overlaps sequential PyNvVideoCodec decode "
+            "with YOLO inference and is currently valid only with --decode-backend "
+            f"{BACKEND_PYNVVC_LUMA_RGB}."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-depth",
+        type=_positive_int,
+        default=2,
+        help="Maximum decoded batches buffered by producer mode (default: 2).",
+    )
+    parser.add_argument(
         "--output-json",
         type=Path,
         default=None,
@@ -166,6 +188,16 @@ def _decoded_count(decoded: Any, backend: str) -> int:
     if backend == stage.BACKEND_OPENCV:
         return int(len(decoded))
     return int(decoded.shape[0])
+
+
+@dataclass
+class _DecodedBatch:
+    batch_index: int
+    frame_start: int
+    frames_requested: int
+    frames_decoded: int
+    decoded: list[torch.Tensor]
+    decode_seconds: float
 
 
 class _PynvvcLumaRgbReader:
@@ -383,6 +415,217 @@ def _apply_model_runtime_optimizations(model: Any, device: torch.device) -> Dict
     return payload
 
 
+def _build_predict_kwargs(
+    *,
+    conf: float,
+    iou: float,
+    max_det: int,
+    device_str: str,
+    use_fp16: bool,
+    imgsz_applied: Optional[int | list[int]],
+) -> Dict[str, Any]:
+    predict_kwargs: Dict[str, Any] = {
+        "conf": conf,
+        "iou": iou,
+        "max_det": max_det,
+        "verbose": False,
+        "device": device_str,
+        "half": use_fp16,
+    }
+    if imgsz_applied is not None:
+        predict_kwargs["imgsz"] = imgsz_applied
+    return predict_kwargs
+
+
+def _run_pynvvc_producer_pipeline(
+    *,
+    reader: _PynvvcLumaRgbReader,
+    frame_start: int,
+    frame_end: int,
+    batch_size: int,
+    pipeline_depth: int,
+    payload: Dict[str, Any],
+    model: Any,
+    device: torch.device,
+    dtype: torch.dtype,
+    resize: tuple[int, int],
+    predict_kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Overlap sequential PyNvVideoCodec decode with model inference.
+
+    The producer owns the demuxer/decoder and buffers raw NV12 CUDA tensors.
+    The consumer preprocesses and runs YOLO. We intentionally avoid per-batch
+    global CUDA synchronization here because that would serialize producer
+    decode with consumer inference and hide the overlap this mode is testing.
+    """
+
+    result_queue: Queue[Any] = Queue(maxsize=max(1, int(pipeline_depth)))
+    stop_event = threading.Event()
+    sentinel = object()
+
+    def _put(item: Any) -> bool:
+        while not stop_event.is_set():
+            try:
+                result_queue.put(item, timeout=0.1)
+                return True
+            except Full:
+                continue
+        return False
+
+    def _produce() -> None:
+        try:
+            batch_index = 0
+            for batch_start in range(frame_start, frame_end, batch_size):
+                if stop_event.is_set():
+                    break
+                batch_end = min(batch_start + batch_size, frame_end)
+                frames_requested = int(batch_end - batch_start)
+                t_decode = time.perf_counter()
+                decoded = reader.decode_next(frames_requested)
+                decode_seconds = time.perf_counter() - t_decode
+                frames_decoded = len(decoded)
+                if frames_decoded <= 0:
+                    break
+                if not _put(
+                    _DecodedBatch(
+                        batch_index=batch_index,
+                        frame_start=int(batch_start),
+                        frames_requested=frames_requested,
+                        frames_decoded=frames_decoded,
+                        decoded=decoded,
+                        decode_seconds=float(decode_seconds),
+                    )
+                ):
+                    break
+                batch_index += 1
+                if frames_decoded < frames_requested:
+                    break
+        except BaseException as exc:  # pragma: no cover - defensive thread handoff
+            _put(exc)
+        finally:
+            _put(sentinel)
+
+    producer_thread = threading.Thread(
+        target=_produce,
+        name="pynvvc-decode-producer",
+        daemon=True,
+    )
+    producer_thread.start()
+
+    frames_processed = 0
+    detections_total = 0
+    decode_seconds_total = 0.0
+    preprocess_seconds_total = 0.0
+    inference_seconds_total = 0.0
+    predict_return_seconds_total = 0.0
+    inference_cuda_sync_seconds_total = 0.0
+    queue_wait_seconds_total = 0.0
+    consumer_seconds_total = 0.0
+
+    try:
+        while True:
+            t_queue_wait = time.perf_counter()
+            item = result_queue.get()
+            queue_wait_seconds = time.perf_counter() - t_queue_wait
+            queue_wait_seconds_total += queue_wait_seconds
+            if item is sentinel:
+                break
+            if isinstance(item, BaseException):
+                stop_event.set()
+                raise item
+            batch = item
+
+            t_consumer = time.perf_counter()
+            t_preprocess = time.perf_counter()
+            processed = _preprocess_pynvvc_luma_rgb(
+                batch.decoded,
+                source_height=reader.source_height,
+                device=device,
+                dtype=dtype,
+                resize=resize,
+            )
+            preprocess_seconds = time.perf_counter() - t_preprocess
+
+            t_inference = time.perf_counter()
+            with torch.inference_mode():
+                predictions = model.predict(processed, **predict_kwargs)
+            predict_return_seconds = time.perf_counter() - t_inference
+            inference_cuda_sync_seconds = 0.0
+            inference_seconds = time.perf_counter() - t_inference
+            detections = stage._count_detections(predictions)
+            consumer_seconds = time.perf_counter() - t_consumer
+
+            actual_count = int(batch.frames_decoded)
+            frames_processed += actual_count
+            detections_total += detections
+            decode_seconds_total += float(batch.decode_seconds)
+            preprocess_seconds_total += preprocess_seconds
+            inference_seconds_total += inference_seconds
+            predict_return_seconds_total += predict_return_seconds
+            inference_cuda_sync_seconds_total += inference_cuda_sync_seconds
+            consumer_seconds_total += consumer_seconds
+
+            batch_payload = {
+                "batch_index": int(batch.batch_index),
+                "frame_start": int(batch.frame_start),
+                "frame_end_exclusive": int(batch.frame_start + actual_count),
+                "frames_processed": int(actual_count),
+                "frames_requested": int(batch.frames_requested),
+                "decode_seconds": float(batch.decode_seconds),
+                "queue_wait_seconds": float(queue_wait_seconds),
+                "preprocess_seconds": float(preprocess_seconds),
+                "inference_seconds": float(inference_seconds),
+                "predict_return_seconds": float(predict_return_seconds),
+                "inference_cuda_sync_seconds": float(inference_cuda_sync_seconds),
+                "consumer_seconds": float(consumer_seconds),
+                "detections_total": int(detections),
+                "tensor_shape": [int(v) for v in processed.shape],
+                "tensor_device": str(processed.device),
+                "tensor_dtype": str(processed.dtype),
+            }
+            payload["batches"].append(batch_payload)
+            print(
+                "  batch {idx}: frames={frames} detections={detections} "
+                "decode={decode:.3f}s queue_wait={wait:.3f}s "
+                "preprocess={prep:.3f}s inference={infer:.3f}s".format(
+                    idx=batch_payload["batch_index"],
+                    frames=actual_count,
+                    detections=detections,
+                    decode=float(batch.decode_seconds),
+                    wait=queue_wait_seconds,
+                    prep=preprocess_seconds,
+                    infer=inference_seconds,
+                )
+            )
+
+            del predictions
+            del processed
+            del batch.decoded
+    finally:
+        stop_event.set()
+        producer_thread.join(timeout=5.0)
+
+    final_cuda_sync_seconds = 0.0
+    if device.type == "cuda":
+        t_final_sync = time.perf_counter()
+        torch.cuda.synchronize()
+        final_cuda_sync_seconds = time.perf_counter() - t_final_sync
+
+    return {
+        "frames_processed": int(frames_processed),
+        "detections_total": int(detections_total),
+        "decode_seconds_total": float(decode_seconds_total),
+        "preprocess_seconds_total": float(preprocess_seconds_total),
+        "inference_seconds_total": float(inference_seconds_total),
+        "predict_return_seconds_total": float(predict_return_seconds_total),
+        "inference_cuda_sync_seconds_total": float(inference_cuda_sync_seconds_total),
+        "queue_wait_seconds_total": float(queue_wait_seconds_total),
+        "consumer_seconds_total": float(consumer_seconds_total),
+        "final_cuda_sync_seconds": float(final_cuda_sync_seconds),
+        "timing_policy": "producer_consumer_no_per_batch_global_cuda_sync",
+    }
+
+
 def _default_output_json() -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return Path("runs/diagnostics") / f"detect_compute_smoke_{timestamp}.json"
@@ -413,6 +656,13 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     device = torch.device(device_str)
     use_fp16 = device.type == "cuda" and not args.force_fp32
     dtype = torch.float16 if use_fp16 else torch.float32
+    pipeline_mode = getattr(args, "pipeline_mode", PIPELINE_SEQUENTIAL)
+    pipeline_depth = int(getattr(args, "pipeline_depth", 2))
+    if pipeline_mode != PIPELINE_SEQUENTIAL and args.decode_backend != BACKEND_PYNVVC_LUMA_RGB:
+        raise RuntimeError(
+            f"--pipeline-mode {pipeline_mode!r} is currently valid only with "
+            f"--decode-backend {BACKEND_PYNVVC_LUMA_RGB}."
+        )
     if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
         if device.type != "cuda":
             raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires CUDA device inference.")
@@ -453,6 +703,13 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             "max_det": int(max_det),
             "device": device_str,
             "fp16": bool(use_fp16),
+            "pipeline_mode": pipeline_mode,
+            "pipeline_depth": pipeline_depth,
+            "timing_policy": (
+                "producer_consumer_no_per_batch_global_cuda_sync"
+                if pipeline_mode == PIPELINE_PRODUCER
+                else "sequential_per_batch_global_cuda_sync"
+            ),
         },
         "environment": stage._collect_environment(),
         "cluster": _collect_cluster_context(),
@@ -515,112 +772,146 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     inference_seconds_total = 0.0
     predict_return_seconds_total = 0.0
     inference_cuda_sync_seconds_total = 0.0
+    pipeline_metrics: Dict[str, Any] = {}
+    predict_kwargs = _build_predict_kwargs(
+        conf=conf,
+        iou=iou,
+        max_det=max_det,
+        device_str=device_str,
+        use_fp16=use_fp16,
+        imgsz_applied=imgsz_applied,
+    )
 
     try:
-        for batch_start in range(frame_start, frame_end, int(args.batch_size)):
-            batch_end = min(batch_start + int(args.batch_size), frame_end)
-            indices = list(range(batch_start, batch_end))
-
-            t_decode = time.perf_counter()
-            if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
-                decoded = reader_info["reader"].decode_next(len(indices))
-            else:
-                decoded = stage._decode_batch(reader_info, indices)
-            if (
-                args.decode_backend in {stage.BACKEND_DECORD_GPU, BACKEND_PYNVVC_LUMA_RGB}
-                and torch.cuda.is_available()
-            ):
-                torch.cuda.synchronize()
-            decode_seconds = time.perf_counter() - t_decode
-            if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
-                actual_count = len(decoded)
-            else:
-                actual_count = _decoded_count(decoded, args.decode_backend)
-            if actual_count <= 0:
-                break
-
-            t_preprocess = time.perf_counter()
-            if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
-                processed = _preprocess_pynvvc_luma_rgb(
-                    decoded,
-                    source_height=reader_info["reader"].source_height,
-                    device=device,
-                    dtype=dtype,
-                    resize=resize,
-                )
-            else:
-                processed = stage._preprocess_batch(
-                    decoded=decoded,
-                    backend=args.decode_backend,
-                    device=device,
-                    dtype=dtype,
-                    resize=resize,
-                )
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            preprocess_seconds = time.perf_counter() - t_preprocess
-
-            predict_kwargs = {
-                "conf": conf,
-                "iou": iou,
-                "max_det": max_det,
-                "verbose": False,
-                "device": device_str,
-                "half": use_fp16,
-            }
-            if imgsz_applied is not None:
-                predict_kwargs["imgsz"] = imgsz_applied
-
-            t_inference = time.perf_counter()
-            with torch.inference_mode():
-                predictions = model.predict(processed, **predict_kwargs)
-            predict_return_seconds = time.perf_counter() - t_inference
-            t_sync = time.perf_counter()
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            inference_cuda_sync_seconds = time.perf_counter() - t_sync
-            inference_seconds = time.perf_counter() - t_inference
-            detections = stage._count_detections(predictions)
-
-            frames_processed += actual_count
-            detections_total += detections
-            decode_seconds_total += decode_seconds
-            preprocess_seconds_total += preprocess_seconds
-            inference_seconds_total += inference_seconds
-            predict_return_seconds_total += predict_return_seconds
-            inference_cuda_sync_seconds_total += inference_cuda_sync_seconds
-
-            batch_payload = {
-                "batch_index": len(payload["batches"]),
-                "frame_start": int(batch_start),
-                "frame_end_exclusive": int(batch_start + actual_count),
-                "frames_processed": int(actual_count),
-                "decode_seconds": float(decode_seconds),
-                "preprocess_seconds": float(preprocess_seconds),
-                "inference_seconds": float(inference_seconds),
-                "predict_return_seconds": float(predict_return_seconds),
-                "inference_cuda_sync_seconds": float(inference_cuda_sync_seconds),
-                "detections_total": int(detections),
-                "tensor_shape": [int(v) for v in processed.shape],
-                "tensor_device": str(processed.device),
-                "tensor_dtype": str(processed.dtype),
-            }
-            payload["batches"].append(batch_payload)
-            print(
-                "  batch {idx}: frames={frames} detections={detections} "
-                "decode={decode:.3f}s preprocess={prep:.3f}s inference={infer:.3f}s".format(
-                    idx=batch_payload["batch_index"],
-                    frames=actual_count,
-                    detections=detections,
-                    decode=decode_seconds,
-                    prep=preprocess_seconds,
-                    infer=inference_seconds,
-                )
+        if pipeline_mode == PIPELINE_PRODUCER:
+            if resize is None:
+                raise RuntimeError(f"{PIPELINE_PRODUCER} mode requires a resolved resize.")
+            pipeline_result = _run_pynvvc_producer_pipeline(
+                reader=reader_info["reader"],
+                frame_start=frame_start,
+                frame_end=frame_end,
+                batch_size=int(args.batch_size),
+                pipeline_depth=pipeline_depth,
+                payload=payload,
+                model=model,
+                device=device,
+                dtype=dtype,
+                resize=resize,
+                predict_kwargs=predict_kwargs,
             )
+            frames_processed = int(pipeline_result["frames_processed"])
+            detections_total = int(pipeline_result["detections_total"])
+            decode_seconds_total = float(pipeline_result["decode_seconds_total"])
+            preprocess_seconds_total = float(pipeline_result["preprocess_seconds_total"])
+            inference_seconds_total = float(pipeline_result["inference_seconds_total"])
+            predict_return_seconds_total = float(
+                pipeline_result["predict_return_seconds_total"]
+            )
+            inference_cuda_sync_seconds_total = float(
+                pipeline_result["inference_cuda_sync_seconds_total"]
+            )
+            pipeline_metrics = {
+                "mode": pipeline_mode,
+                "depth": pipeline_depth,
+                "queue_wait_seconds_total": pipeline_result["queue_wait_seconds_total"],
+                "consumer_seconds_total": pipeline_result["consumer_seconds_total"],
+                "final_cuda_sync_seconds": pipeline_result["final_cuda_sync_seconds"],
+                "timing_policy": pipeline_result["timing_policy"],
+            }
+        else:
+            for batch_start in range(frame_start, frame_end, int(args.batch_size)):
+                batch_end = min(batch_start + int(args.batch_size), frame_end)
+                indices = list(range(batch_start, batch_end))
 
-            del predictions
-            del processed
-            del decoded
+                t_decode = time.perf_counter()
+                if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+                    decoded = reader_info["reader"].decode_next(len(indices))
+                else:
+                    decoded = stage._decode_batch(reader_info, indices)
+                if (
+                    args.decode_backend in {stage.BACKEND_DECORD_GPU, BACKEND_PYNVVC_LUMA_RGB}
+                    and torch.cuda.is_available()
+                ):
+                    torch.cuda.synchronize()
+                decode_seconds = time.perf_counter() - t_decode
+                if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+                    actual_count = len(decoded)
+                else:
+                    actual_count = _decoded_count(decoded, args.decode_backend)
+                if actual_count <= 0:
+                    break
+
+                t_preprocess = time.perf_counter()
+                if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+                    processed = _preprocess_pynvvc_luma_rgb(
+                        decoded,
+                        source_height=reader_info["reader"].source_height,
+                        device=device,
+                        dtype=dtype,
+                        resize=resize,
+                    )
+                else:
+                    processed = stage._preprocess_batch(
+                        decoded=decoded,
+                        backend=args.decode_backend,
+                        device=device,
+                        dtype=dtype,
+                        resize=resize,
+                    )
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                preprocess_seconds = time.perf_counter() - t_preprocess
+
+                t_inference = time.perf_counter()
+                with torch.inference_mode():
+                    predictions = model.predict(processed, **predict_kwargs)
+                predict_return_seconds = time.perf_counter() - t_inference
+                t_sync = time.perf_counter()
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                inference_cuda_sync_seconds = time.perf_counter() - t_sync
+                inference_seconds = time.perf_counter() - t_inference
+                detections = stage._count_detections(predictions)
+
+                frames_processed += actual_count
+                detections_total += detections
+                decode_seconds_total += decode_seconds
+                preprocess_seconds_total += preprocess_seconds
+                inference_seconds_total += inference_seconds
+                predict_return_seconds_total += predict_return_seconds
+                inference_cuda_sync_seconds_total += inference_cuda_sync_seconds
+
+                batch_payload = {
+                    "batch_index": len(payload["batches"]),
+                    "frame_start": int(batch_start),
+                    "frame_end_exclusive": int(batch_start + actual_count),
+                    "frames_processed": int(actual_count),
+                    "decode_seconds": float(decode_seconds),
+                    "preprocess_seconds": float(preprocess_seconds),
+                    "inference_seconds": float(inference_seconds),
+                    "predict_return_seconds": float(predict_return_seconds),
+                    "inference_cuda_sync_seconds": float(inference_cuda_sync_seconds),
+                    "detections_total": int(detections),
+                    "tensor_shape": [int(v) for v in processed.shape],
+                    "tensor_device": str(processed.device),
+                    "tensor_dtype": str(processed.dtype),
+                }
+                payload["batches"].append(batch_payload)
+                print(
+                    "  batch {idx}: frames={frames} detections={detections} "
+                    "decode={decode:.3f}s preprocess={prep:.3f}s inference={infer:.3f}s".format(
+                        idx=batch_payload["batch_index"],
+                        frames=actual_count,
+                        detections=detections,
+                        decode=decode_seconds,
+                        prep=preprocess_seconds,
+                        infer=inference_seconds,
+                    )
+                )
+
+                del predictions
+                del processed
+                del decoded
     finally:
         _release_reader_info(reader_info)
 
@@ -681,6 +972,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             ),
         },
     }
+    if pipeline_metrics:
+        payload["summary"]["pipeline"] = pipeline_metrics
 
     if device.type == "cuda":
         torch.cuda.empty_cache()

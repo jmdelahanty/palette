@@ -16,6 +16,8 @@ MAX_BATCHES=20
 MAX_FRAMES=0
 START_FRAME=0
 DEVICE="auto"
+PIPELINE_MODE="sequential"
+PIPELINE_DEPTH=2
 RUN_ID=""
 RUN_LABEL=""
 CONF=""
@@ -52,6 +54,8 @@ Options:
   --max-frames N           Max frames to process; 0 means use max-batches (default: 0)
   --start-frame N          First frame index (default: 0)
   --device {auto,cuda,cpu} Inference device (default: auto)
+  --pipeline-mode NAME     Execution mode (default: sequential; experimental: producer)
+  --pipeline-depth N       Decoded-batch queue depth for producer mode (default: 2)
   --conf FLOAT             Optional confidence threshold
   --iou FLOAT              Optional IoU threshold
   --max-det N              Optional max detections per frame
@@ -81,6 +85,8 @@ while [[ $# -gt 0 ]]; do
     --max-frames) MAX_FRAMES="$2"; shift 2;;
     --start-frame) START_FRAME="$2"; shift 2;;
     --device) DEVICE="$2"; shift 2;;
+    --pipeline-mode) PIPELINE_MODE="$2"; shift 2;;
+    --pipeline-depth) PIPELINE_DEPTH="$2"; shift 2;;
     --conf) CONF="$2"; shift 2;;
     --iou) IOU="$2"; shift 2;;
     --max-det) MAX_DET="$2"; shift 2;;
@@ -155,6 +161,8 @@ SMOKE_ARGS=(
   --max-batches "$MAX_BATCHES"
   --batch-size "$BATCH_SIZE"
   --device "$DEVICE"
+  --pipeline-mode "$PIPELINE_MODE"
+  --pipeline-depth "$PIPELINE_DEPTH"
 )
 if [[ -n "$CONF" ]]; then SMOKE_ARGS+=(--conf "$CONF"); fi
 if [[ -n "$IOU" ]]; then SMOKE_ARGS+=(--iou "$IOU"); fi

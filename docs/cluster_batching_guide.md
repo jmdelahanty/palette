@@ -69,6 +69,12 @@ experimental `pynvvc_luma_rgb` backend to test whether direct PyNvVideoCodec
 NVDEC streaming avoids that startup cost. Keep Decord as the production default
 until detection output parity is validated.
 
+When testing PyNvVideoCodec on the cluster, `--pipeline-mode producer` can be
+used to overlap sequential decode with YOLO inference. Treat this as a
+diagnostic/benchmark mode: the honest comparison metric is end-to-end wall-clock
+FPS, not per-stage timings, because per-batch global CUDA synchronization is
+disabled to allow overlap.
+
 For the benchmark protocol and current measurements, see
 `docs/detect_decode_backend_benchmark_todo.md`.
 

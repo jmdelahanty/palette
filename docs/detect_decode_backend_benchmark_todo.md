@@ -105,6 +105,20 @@ replicates luma into RGB channels, and feeds tensor batches to YOLO. It is
 intended for grayscale detection smoke/profiling only until output parity is
 validated against the production Decord RGB path.
 
+`--pipeline-mode producer` adds a bounded producer/consumer diagnostic for this
+backend. The producer owns sequential PyNvVideoCodec demux/decode and buffers a
+small number of decoded NV12 batches; the consumer preprocesses and runs YOLO.
+This mode deliberately avoids per-batch global CUDA synchronization, because
+that synchronization serializes decode and inference. Its per-stage timings are
+therefore host/queue timings, while `summary.total_seconds` and
+`summary.end_to_end_fps` remain the primary throughput metrics.
+
+CUDA streams are not a substitute for synchronization; they move the required
+synchronization to explicit event handoff points. The current producer mode does
+not put preprocessing on a separate stream yet. If that is added, it must record
+events between preprocess and inference and keep source/output tensors alive
+until their producing streams have finished.
+
 2026-05-14 compute-smoke follow-up:
 
 - The compute-only detection smoke aligns with the production Decord-GPU tensor
@@ -130,6 +144,8 @@ scripts/submit_detect_compute_smoke_bsub.sh \
   --config configs/fisheye/yolo_detect_config.yaml \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
   --decode-backend pynvvc_luma_rgb \
+  --pipeline-mode producer \
+  --pipeline-depth 2 \
   --batch-size 16 \
   --max-batches 100 \
   --run-label sickyfish_cam2010093_pynvvc_luma
