@@ -51,7 +51,7 @@ def test_strict_json_report_rejects_non_finite_json(tmp_path: Path) -> None:
 
 
 def test_build_detection_artifact_packages_detect_run_group(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     video = tmp_path / "video.mp4"
     video.write_bytes(b"fake")
@@ -61,6 +61,7 @@ def test_build_detection_artifact_packages_detect_run_group(
     tarball = tmp_path / "artifact.tar.gz"
 
     def fake_detect_yolo(**kwargs):
+        print("model summary should not contaminate summary stdout")
         scratch_zarr = Path(kwargs["output_zarr"])
         run_group = scratch_zarr / "detect_runs" / "detect_fake"
         _write_group(run_group)
@@ -110,7 +111,12 @@ def test_build_detection_artifact_packages_detect_run_group(
         "required_arrays": "pass",
         "strict_json": "pass",
     }
+    assert manifest["artifact_timing"]["copy_run_group_seconds_total"] >= 0.0
     assert manifest["provenance"]["decoder_backend"] == "pynvvc_nv12_rgb"
+    assert summary["artifact_timing"]["tarball_seconds_total"] >= 0.0
+    captured = capsys.readouterr()
+    assert "model summary should not contaminate summary stdout" not in captured.out
+    assert "model summary should not contaminate summary stdout" in captured.err
     assert tarball.exists()
     with tarfile.open(tarball, "r:gz") as tar:
         names = set(tar.getnames())

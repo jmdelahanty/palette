@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -12,6 +13,7 @@ import re
 import shutil
 import sys
 import tarfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
@@ -258,6 +260,8 @@ def build_detection_artifact(
 
     artifact_dir.mkdir(parents=True)
     work_dir.mkdir(parents=True)
+    artifact_start = time.perf_counter()
+    artifact_timing: dict[str, Any] = {"schema_version": 1}
     scratch_zarr = work_dir / "detect_output.zarr"
     command_list = list(command) if command is not None else sys.argv
     command_text = " ".join(command_list)
@@ -273,35 +277,50 @@ def build_detection_artifact(
     )
     (artifact_dir / "logs" / "command.log").write_text(command_text + "\n", encoding="utf-8")
 
-    run_name = _detect_yolo(
-        video_path=str(video_path),
-        model_path=str(model_path) if model_path is not None else None,
-        output_zarr=str(scratch_zarr),
-        config_path=str(config_path) if config_path is not None else None,
-        conf_threshold=conf_threshold,
-        iou_threshold=iou_threshold,
-        max_det=max_det,
-        batch_size=batch_size,
-        resize_dims=list(resize_dims) if resize_dims is not None else None,
-        imgsz=list(imgsz) if imgsz is not None else None,
-        decode_backend=decode_backend,
-        console=_stderr_console(),
-        use_gpu=use_gpu,
-        write_raw_video_metadata=False,
-        overwrite_raw_video_metadata=False,
-    )
+    detect_start = time.perf_counter()
+    with contextlib.redirect_stdout(sys.stderr):
+        run_name = _detect_yolo(
+            video_path=str(video_path),
+            model_path=str(model_path) if model_path is not None else None,
+            output_zarr=str(scratch_zarr),
+            config_path=str(config_path) if config_path is not None else None,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+            max_det=max_det,
+            batch_size=batch_size,
+            resize_dims=list(resize_dims) if resize_dims is not None else None,
+            imgsz=list(imgsz) if imgsz is not None else None,
+            decode_backend=decode_backend,
+            console=_stderr_console(),
+            use_gpu=use_gpu,
+            write_raw_video_metadata=False,
+            overwrite_raw_video_metadata=False,
+        )
+    artifact_timing["detect_yolo_seconds_total"] = time.perf_counter() - detect_start
 
     source_run_group = scratch_zarr / RUN_FAMILY / run_name
     if not source_run_group.exists():
         raise FileNotFoundError(f"detect run group was not written: {source_run_group}")
+    copy_start = time.perf_counter()
     run_group_dir = _copy_run_group(source_run_group, artifact_dir)
+    artifact_timing["copy_run_group_seconds_total"] = time.perf_counter() - copy_start
 
+    strict_start = time.perf_counter()
     strict_report = strict_json_report(run_group_dir)
+    artifact_timing["strict_json_validation_seconds_total"] = time.perf_counter() - strict_start
+    arrays_start = time.perf_counter()
     arrays_report = required_arrays_report(run_group_dir)
+    artifact_timing["required_array_validation_seconds_total"] = time.perf_counter() - arrays_start
+    validation_write_start = time.perf_counter()
     _write_json(artifact_dir / "validation" / "strict_json_report.json", strict_report)
     _write_json(artifact_dir / "validation" / "array_presence_report.json", arrays_report)
+    artifact_timing["validation_report_write_seconds_total"] = (
+        time.perf_counter() - validation_write_start
+    )
 
+    hash_start = time.perf_counter()
     run_group_hash = tree_hash(run_group_dir)
+    artifact_timing["run_group_tree_hash_seconds_total"] = time.perf_counter() - hash_start
     git_info = get_git_info()
     timing = _extract_timing(source_run_group)
     manifest = {
@@ -330,6 +349,7 @@ def build_detection_artifact(
             "scratch_zarr": str(scratch_zarr),
         },
         "timing": timing,
+        "artifact_timing": artifact_timing,
         "checksums": {"run_group_tree_hash": run_group_hash},
         "validation": {
             "strict_json": strict_report["status"],
@@ -337,9 +357,14 @@ def build_detection_artifact(
             "canonical_write": "not_performed",
         },
     }
+    manifest_write_start = time.perf_counter()
     _write_json(artifact_dir / "artifact_manifest.json", manifest)
+    artifact_timing["manifest_write_seconds_total"] = time.perf_counter() - manifest_write_start
 
+    tarball_start = time.perf_counter()
     tarball_path = _make_tarball(artifact_dir, tarball_output)
+    artifact_timing["tarball_seconds_total"] = time.perf_counter() - tarball_start
+    artifact_timing["artifact_seconds_total"] = time.perf_counter() - artifact_start
     summary = {
         "status": (
             "ok"
@@ -352,6 +377,7 @@ def build_detection_artifact(
         "run_name": run_name,
         "target_group_path": f"{RUN_FAMILY}/{run_name}",
         "manifest_path": str(artifact_dir / "artifact_manifest.json"),
+        "artifact_timing": artifact_timing,
         "strict_json": strict_report,
         "required_arrays": arrays_report,
     }

@@ -426,3 +426,9 @@ scripts/submit_detect_artifact_bsub.sh \
   --model <weights/best.pt> \
   --output-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts
 ```
+
+The artifact runner prints a strict JSON summary to stdout. That summary
+includes `artifact_timing` for the detection call, run-group copy, validation,
+hashing, and tarball creation. The LSF wrapper captures it as
+`<label>.<JOBID>.summary.json` and writes a sibling
+`<label>.<JOBID>.transfer.json` with the scratch-to-PRFS tarball copy timing.

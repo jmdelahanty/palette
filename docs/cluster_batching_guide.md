@@ -436,7 +436,10 @@ copies only the completed `detect_runs/<run_name>` group into
 `palette_run_group_artifact/run_group/`, writes `artifact_manifest.json` plus
 validation reports, and creates a `.tar.gz`. It records
 `latest_policy=do_not_set_latest` and never mutates the canonical analysis
-Zarr. To submit this as one LSF job and copy the resulting tarball back to PRFS:
+Zarr. The stdout summary is strict JSON and includes `artifact_timing` for the
+scratch Zarr detection call, run-group copy, validation, hashing, and tarball
+creation. To submit this as one LSF job and copy the resulting tarball back to
+PRFS:
 
 ```bash
 scripts/submit_detect_artifact_bsub.sh \
@@ -450,7 +453,8 @@ scripts/submit_detect_artifact_bsub.sh \
 
 Importer support remains a separate serialized step. Until that importer is in
 place, these packages are durable transfer artifacts, not canonical completed
-analysis runs.
+analysis runs. The LSF wrapper also writes `<label>.<JOBID>.transfer.json` next
+to the tarball with the scratch-to-PRFS copy timing.
 
 **Logs:** `<root>/logs/run_detections_batch/bsub_submissions/detect_<run_id>/`
 

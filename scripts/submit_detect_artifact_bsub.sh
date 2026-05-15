@@ -171,8 +171,24 @@ echo "summary_json=\$SUMMARY_JSON"
 scripts/py -m fisheye.utils.run_detection_artifact ${ARTIFACT_ARGS_SHELL}--artifact-dir "\$ARTIFACT_DIR" --work-dir "\$WORK_DIR" --tarball-output "\$SCRATCH_TARBALL" > "\$SUMMARY_JSON"
 
 FINAL_TARBALL="\${RUN_DIR}/\${RUN_LABEL}.\${JOB_ID}.tar.gz"
+TRANSFER_JSON="\${RUN_DIR}/\${RUN_LABEL}.\${JOB_ID}.transfer.json"
+copy_start_ns="\$(date +%s%N)"
 cp "\$SCRATCH_TARBALL" "\$FINAL_TARBALL"
+copy_end_ns="\$(date +%s%N)"
+copy_seconds="\$(awk -v s="\$copy_start_ns" -v e="\$copy_end_ns" 'BEGIN { printf "%.6f", (e - s) / 1000000000 }')"
+cat > "\$TRANSFER_JSON" <<TRANSFERJSON
+{
+  "schema_version": 1,
+  "job_id": "\$JOB_ID",
+  "scratch_tarball": "\$SCRATCH_TARBALL",
+  "final_tarball": "\$FINAL_TARBALL",
+  "summary_json": "\$SUMMARY_JSON",
+  "copy_tarball_seconds": \$copy_seconds
+}
+TRANSFERJSON
 echo "final_tarball=\$FINAL_TARBALL"
+echo "transfer_json=\$TRANSFER_JSON"
+echo "copy_tarball_seconds=\$copy_seconds"
 JOBSCRIPT
 chmod +x "$JOB_SCRIPT"
 
