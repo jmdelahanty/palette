@@ -80,6 +80,11 @@ treat producer mode as a diagnostic only. The honest comparison metric is
 end-to-end wall-clock FPS, not per-stage timings, because per-batch global CUDA
 synchronization is disabled to allow overlap.
 
+Persisted production `detect_yolo` runs include a `timing_summary` attr and
+flat timing attrs for read/decode, preprocess/resize, predict, postprocess,
+array assembly, and Zarr write. Use those persisted timings to confirm that a
+cluster production run has the same bottleneck profile as the compute smoke.
+
 For the benchmark protocol and current measurements, see
 `docs/detect_decode_backend_benchmark_todo.md`.
 

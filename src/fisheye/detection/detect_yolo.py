@@ -432,6 +432,13 @@ def _actual_input_resize_dims(
     return None
 
 
+def _record_timing(timings: Dict[str, float], key: str, start: float) -> float:
+    """Accumulate a stage duration from a perf-counter start timestamp."""
+    elapsed = time.perf_counter() - start
+    timings[key] = float(timings.get(key, 0.0) + elapsed)
+    return elapsed
+
+
 def detect_yolo(
     video_path: str,
     model_path: Optional[str] = None,
@@ -1060,6 +1067,14 @@ def detect_yolo(
     # Performance tracking
     inference_times = []
     read_times = []
+    stage_timings = {
+        'read_decode_seconds_total': 0.0,
+        'preprocess_resize_seconds_total': 0.0,
+        'predict_seconds_total': 0.0,
+        'postprocess_seconds_total': 0.0,
+        'array_assembly_seconds_total': 0.0,
+        'zarr_write_seconds_total': 0.0,
+    }
     processing_start = time.time()
     
     with Progress(
@@ -1088,15 +1103,19 @@ def detect_yolo(
                 batch_end = min(batch_start + batch_size, n_frames)
                 indices = list(range(batch_start, batch_end))
 
-                read_start = time.time()
+                read_start = time.perf_counter()
                 decoded_frames = pynvvc_reader.decode_next(len(indices))
-                read_times.append(time.time() - read_start)
+                read_elapsed = _record_timing(
+                    stage_timings, 'read_decode_seconds_total', read_start
+                )
+                read_times.append(read_elapsed)
 
                 actual_count = len(decoded_frames)
                 if actual_count <= 0:
                     break
                 actual_indices = indices[:actual_count]
 
+                preprocess_start = time.perf_counter()
                 if decode_backend_effective == BACKEND_PYNVVC_NV12_RGB:
                     processed = preprocess_nv12_rgb(
                         decoded_frames,
@@ -1113,14 +1132,24 @@ def detect_yolo(
                         dtype=dtype,
                         resize_hw=effective_input_resize_dims,
                     )
+                _record_timing(
+                    stage_timings, 'preprocess_resize_seconds_total', preprocess_start
+                )
 
-                inference_start = time.time()
+                inference_start = time.perf_counter()
                 with torch.inference_mode():
                     results = model.predict(processed, **predict_kwargs)
-                inference_times.append(time.time() - inference_start)
+                inference_elapsed = _record_timing(
+                    stage_timings, 'predict_seconds_total', inference_start
+                )
+                inference_times.append(inference_elapsed)
 
+                postprocess_start = time.perf_counter()
                 for batch_i, result in enumerate(results):
                     accumulate_results(result, actual_indices[batch_i])
+                _record_timing(
+                    stage_timings, 'postprocess_seconds_total', postprocess_start
+                )
 
                 del results
                 del processed
@@ -1152,9 +1181,12 @@ def detect_yolo(
                 indices = list(range(batch_start, batch_end))
                 
                 if prefetched is None:
-                    read_start = time.time()
+                    read_start = time.perf_counter()
                     current_batch = vr.get_batch(indices)
-                    read_times.append(time.time() - read_start)
+                    read_elapsed = _record_timing(
+                        stage_timings, 'read_decode_seconds_total', read_start
+                    )
+                    read_times.append(read_elapsed)
                 else:
                     current_batch = prefetched
                 
@@ -1165,9 +1197,12 @@ def detect_yolo(
                     next_end = min(next_start + batch_size, n_frames)
                     next_indices = list(range(next_start, next_end))
                     if not decord_on_gpu or torch.cuda.is_available():
-                        prefetch_start = time.time()
+                        prefetch_start = time.perf_counter()
                         prefetched = vr.get_batch(next_indices)
-                        read_times.append(time.time() - prefetch_start)
+                        prefetch_elapsed = _record_timing(
+                            stage_timings, 'read_decode_seconds_total', prefetch_start
+                        )
+                        read_times.append(prefetch_elapsed)
                 
                 if decord_on_gpu:
                     import torch.nn.functional as F
@@ -1184,6 +1219,7 @@ def detect_yolo(
                         end = min(start + chunk_size, total)
                         chunk = frames_chw[start:end]
                         try:
+                            preprocess_start = time.perf_counter()
                             chunk = chunk.to(device=device, dtype=dtype, non_blocking=True).contiguous(memory_format=torch.channels_last)
                             if effective_input_resize_dims:
                                 chunk = F.interpolate(
@@ -1193,10 +1229,18 @@ def detect_yolo(
                                     align_corners=False
                                 )
                             chunk = chunk.mul_(1.0 / 255.0)
+                            _record_timing(
+                                stage_timings,
+                                'preprocess_resize_seconds_total',
+                                preprocess_start,
+                            )
                             
-                            inference_start = time.time()
+                            inference_start = time.perf_counter()
                             preds = model.predict(chunk, **predict_kwargs)
-                            inference_times.append(time.time() - inference_start)
+                            inference_elapsed = _record_timing(
+                                stage_timings, 'predict_seconds_total', inference_start
+                            )
+                            inference_times.append(inference_elapsed)
                             results.extend(preds)
                             start = end
                         except torch.cuda.OutOfMemoryError:
@@ -1211,24 +1255,35 @@ def detect_yolo(
                     del frames_chw
                 else:
                     frames_nd = current_batch.asnumpy() if hasattr(current_batch, "asnumpy") else np.asarray(current_batch)
+                    preprocess_start = time.perf_counter()
                     if pre_resize_dims:
                         batch_frames_np = [
                             cv2.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0]))) for frame in frames_nd
                         ]
                     else:
                         batch_frames_np = [np.asarray(frame) for frame in frames_nd]
+                    _record_timing(
+                        stage_timings, 'preprocess_resize_seconds_total', preprocess_start
+                    )
                     del frames_nd
                 
-                    inference_start = time.time()
+                    inference_start = time.perf_counter()
                     results = model.predict(batch_frames_np, **predict_kwargs)
-                    inference_times.append(time.time() - inference_start)
+                    inference_elapsed = _record_timing(
+                        stage_timings, 'predict_seconds_total', inference_start
+                    )
+                    inference_times.append(inference_elapsed)
                 
+                postprocess_start = time.perf_counter()
                 for batch_i, result in enumerate(results):
                     accumulate_results(result, indices[batch_i])
+                _record_timing(
+                    stage_timings, 'postprocess_seconds_total', postprocess_start
+                )
                 
                 del current_batch
                 if not decord_on_gpu:
-                    del batch_frames_np, frames_nd
+                    del batch_frames_np
                 
                 frame_idx += len(indices)
                 batch_count += 1
@@ -1250,19 +1305,26 @@ def detect_yolo(
             # OpenCV frame-by-frame processing
             while True:
                 # Time frame reading
-                read_start = time.time()
+                read_start = time.perf_counter()
                 ret, frame = cap.read()
-                read_times.append(time.time() - read_start)
+                read_elapsed = _record_timing(
+                    stage_timings, 'read_decode_seconds_total', read_start
+                )
+                read_times.append(read_elapsed)
                 
                 if not ret:
                     break
                 
+                preprocess_start = time.perf_counter()
                 # Resize if specified
                 if pre_resize_dims:
                     frame = cv2.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0])))
                 
                 # Convert BGR to RGB
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                _record_timing(
+                    stage_timings, 'preprocess_resize_seconds_total', preprocess_start
+                )
                 batch_frames.append(frame_rgb)
                 batch_indices.append(frame_idx)
                 frame_idx += 1
@@ -1270,12 +1332,14 @@ def detect_yolo(
                 # Process batch when full or at end
                 if len(batch_frames) == batch_size or frame_idx == n_frames:
                     # Time inference
-                    inference_start = time.time()
+                    inference_start = time.perf_counter()
                     
                     # Run inference
                     results = model.predict(batch_frames, **predict_kwargs)
                     
-                    inference_time = time.time() - inference_start
+                    inference_time = _record_timing(
+                        stage_timings, 'predict_seconds_total', inference_start
+                    )
                     inference_times.append(inference_time)
                     
                     # Calculate FPS
@@ -1283,8 +1347,12 @@ def detect_yolo(
                     current_fps = frame_idx / elapsed if elapsed > 0 else 0
                     
                     # Extract detections
+                    postprocess_start = time.perf_counter()
                     for batch_i, result in enumerate(results):
                         accumulate_results(result, batch_indices[batch_i])
+                    _record_timing(
+                        stage_timings, 'postprocess_seconds_total', postprocess_start
+                    )
                     
                     batch_size_actual = len(batch_frames)
                     
@@ -1329,6 +1397,7 @@ def detect_yolo(
     
     # Convert to arrays
     console.print("\n[bold]Saving detections to zarr...[/bold]")
+    assembly_start = time.perf_counter()
     if batch_results:
         frame_indices = np.concatenate([res[0] for res in batch_results])
         bbox_coords = np.concatenate([res[1] for res in batch_results])
@@ -1346,6 +1415,7 @@ def detect_yolo(
         frame_counts = np.bincount(frame_indices, minlength=n_frames).astype(np.int32, copy=False)
     else:
         frame_counts = np.zeros(n_frames, dtype=np.int32)
+    _record_timing(stage_timings, 'array_assembly_seconds_total', assembly_start)
     
     preferred_det_chunk = max(1024, max(1, batch_size) * 8)
     det_chunk = max(1, min(max(1, total_detections), preferred_det_chunk, 16384))
@@ -1353,12 +1423,14 @@ def detect_yolo(
     counts_chunk = max(1, min(n_frames, preferred_count_chunk, 16384))
     
     # Save to zarr
+    zarr_write_start = time.perf_counter()
     detect_group.create_array('frame_indices', data=frame_indices, chunks=(det_chunk,), overwrite=True)
     detect_group.create_array('bbox_norm_coords', data=bbox_coords, chunks=(det_chunk, 4), overwrite=True)
     detect_group.create_array('scores', data=scores, chunks=(det_chunk,), overwrite=True)
     detect_group.create_array('class_ids', data=class_ids, chunks=(det_chunk,), overwrite=True)
     detect_group.create_array('n_detections', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
     detect_group.create_array('frame_counts', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
+    _record_timing(stage_timings, 'zarr_write_seconds_total', zarr_write_start)
     
     # Calculate statistics
     frames_with_detections = np.sum(frame_counts > 0)
@@ -1374,6 +1446,25 @@ def detect_yolo(
         'mean_confidence': float(np.mean(scores)) if len(scores) > 0 else 0.0,
         'min_confidence': float(np.min(scores)) if len(scores) > 0 else 0.0,
         'max_confidence': float(np.max(scores)) if len(scores) > 0 else 0.0,
+    }
+    timing_summary = {
+        'schema_version': 1,
+        'timing_policy': 'wall_clock_no_per_batch_cuda_sync',
+        'decode_backend_requested': decode_backend_requested,
+        'decode_backend_effective': decode_backend_effective,
+        'video_reader_type': video_reader_type,
+        'frames_processed': int(frame_idx),
+        'batches_processed': int(len(inference_times)),
+        'processing_seconds_total': float(total_time),
+        'processing_fps': float(frame_idx / total_time) if total_time > 0 else 0.0,
+        'read_decode_seconds_total': float(stage_timings['read_decode_seconds_total']),
+        'preprocess_resize_seconds_total': float(stage_timings['preprocess_resize_seconds_total']),
+        'predict_seconds_total': float(stage_timings['predict_seconds_total']),
+        'postprocess_seconds_total': float(stage_timings['postprocess_seconds_total']),
+        'array_assembly_seconds_total': float(stage_timings['array_assembly_seconds_total']),
+        'zarr_write_seconds_total': float(stage_timings['zarr_write_seconds_total']),
+        'predict_avg_batch_ms': float(avg_inference * 1000.0) if inference_times else 0.0,
+        'read_decode_avg_batch_ms': float(np.mean(read_times) * 1000.0) if read_times else 0.0,
     }
     
     # Store metadata
@@ -1412,6 +1503,7 @@ def detect_yolo(
             'decode_backend_effective': decode_backend_effective,
         },
         'summary_statistics': stats,
+        'timing_summary': timing_summary,
         'git_commit': git_info.get('commit_hash', 'unknown'),
         'git_branch': git_info.get('branch', 'unknown'),
         'hostname': env_info['platform']['hostname']
@@ -1431,6 +1523,12 @@ def detect_yolo(
     detect_group.attrs['inference_average_fps'] = float(n_frames / total_time) if total_time > 0 else 0.0
     detect_group.attrs['inference_avg_batch_ms'] = float(avg_inference * 1000.0) if inference_times else 0.0
     detect_group.attrs['inference_avg_read_ms'] = float(np.mean(read_times) * 1000.0) if read_times else 0.0
+    detect_group.attrs['read_decode_seconds_total'] = timing_summary['read_decode_seconds_total']
+    detect_group.attrs['preprocess_resize_seconds_total'] = timing_summary['preprocess_resize_seconds_total']
+    detect_group.attrs['predict_seconds_total'] = timing_summary['predict_seconds_total']
+    detect_group.attrs['postprocess_seconds_total'] = timing_summary['postprocess_seconds_total']
+    detect_group.attrs['array_assembly_seconds_total'] = timing_summary['array_assembly_seconds_total']
+    detect_group.attrs['zarr_write_seconds_total'] = timing_summary['zarr_write_seconds_total']
     detect_group.attrs['decode_backend_requested'] = decode_backend_requested
     detect_group.attrs['decode_backend_effective'] = decode_backend_effective
     detect_group.attrs['video_reader_type'] = video_reader_type
@@ -1469,6 +1567,7 @@ def detect_yolo(
             "device": "cuda" if use_gpu else "cpu",
         },
     )
+    provenance_record["timing"] = dict(timing_summary)
     write_stage_provenance(detect_group, provenance_record)
     
     # Mark as latest

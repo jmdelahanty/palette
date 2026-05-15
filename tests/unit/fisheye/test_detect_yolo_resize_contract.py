@@ -25,6 +25,16 @@ def test_normalize_decode_backend_rejects_unknown_backend() -> None:
         mod._normalize_decode_backend("not_a_backend")  # noqa: SLF001
 
 
+def test_record_timing_accumulates_perf_counter_elapsed(monkeypatch) -> None:
+    timings = {"read_decode_seconds_total": 1.0}
+    monkeypatch.setattr(mod.time, "perf_counter", lambda: 12.5)
+
+    elapsed = mod._record_timing(timings, "read_decode_seconds_total", 10.0)  # noqa: SLF001
+
+    assert elapsed == pytest.approx(2.5)
+    assert timings["read_decode_seconds_total"] == pytest.approx(3.5)
+
+
 def test_detect_yolo_rejects_conflicting_resize_dims_and_imgsz() -> None:
     with pytest.raises(ValueError, match="Conflicting CLI overrides"):
         mod.detect_yolo(

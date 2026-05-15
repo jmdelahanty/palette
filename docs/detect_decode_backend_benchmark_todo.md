@@ -154,6 +154,10 @@ until their producing streams have finished.
   be the default correctness path. Re-run fixed-frame backend parity with
   `pynvvc_nv12_rgb`; if that passes, a second optional check can compare two
   persisted `detect_runs` with `fisheye.diagnostics.compare_detection_runs`.
+- Production `detect_yolo` writes `timing_summary` plus flat timing attrs for
+  `read_decode`, `preprocess_resize`, `predict`, `postprocess`,
+  `array_assembly`, and `zarr_write`, so backend comparisons can be audited from
+  persisted detect runs rather than compute-smoke JSON alone.
 
 Example LSF smoke using the sequential PyNvVideoCodec NV12/RGB backend:
 
@@ -251,9 +255,10 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 2. Add backend selector abstraction for decode path (where feasible).
 3. Add Crimson adapter path (decode-only or decode+detect feed) for apples-to-apples timing.
 4. Add a report script/table formatter for side-by-side comparison.
-5. Split production timing provenance into read, preprocess/resize, predict,
-   postprocess, and write phases so CUDA synchronization artifacts do not hide
-   where time is actually spent.
+5. Done for `detect_yolo`: split production timing provenance into read,
+   preprocess/resize, predict, postprocess, array assembly, and Zarr write
+   phases so CUDA synchronization artifacts do not hide where time is actually
+   spent.
 
 ## Decision rule
 
