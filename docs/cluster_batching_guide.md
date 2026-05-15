@@ -67,8 +67,10 @@ it indexes keyframes before returning a `VideoReader`. For sequential
 start-at-frame-0 compute smokes on grayscale detection models, the
 `pynvvc_nv12_rgb` backend avoids that startup cost by streaming through
 PyNvVideoCodec/NVDEC and doing NV12-to-RGB tensor preprocessing on CUDA. The
-production `auto` backend remains Decord/OpenCV until NV12/RGB parity is
-accepted; request `pynvvc_nv12_rgb` explicitly for controlled validation runs.
+production `auto` backend now prefers `pynvvc_nv12_rgb` when CUDA,
+PyNvVideoCodec, and resize dims are available, and falls back to Decord/OpenCV
+otherwise. Request `pynvvc_nv12_rgb` explicitly only when you want to force the
+candidate path during controlled validation runs.
 `pynvvc_luma_rgb` remains available as an explicit faster diagnostic variant,
 but it should not be the default correctness path unless parity is accepted for
 that recording family.
