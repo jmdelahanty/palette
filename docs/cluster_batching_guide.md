@@ -409,12 +409,48 @@ scripts/py -m fisheye.diagnostics.compare_detection_runs \
 ```
 
 **Production write policy:** detection jobs should stream the input video from
-PRFS, write the new `analysis/detect_runs/detect_...` run group under a
+PRFS, write the new `detect_runs/detect_...` run group under a
 job-specific `/scratch/$USER/$LSB_JOBID` directory, validate it there, package
 that complete run group as a transfer artifact, and then use a serialized
 importer to promote the run group into the canonical analysis Zarr. The
 tarball is only a network-transfer optimization; the durable store remains
 Zarr. See `docs/cluster_run_group_artifact_workflow.md`.
+
+First implementation slice:
+
+```bash
+scripts/py -m fisheye.utils.run_detection_artifact \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
+  --target-zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --config configs/fisheye/yolo_detect_config.yaml \
+  --decode-backend auto \
+  --batch-size 16 \
+  --artifact-dir /scratch/$USER/$LSB_JOBID/palette_run_group_artifact \
+  --work-dir /scratch/$USER/$LSB_JOBID/work \
+  --tarball-output /scratch/$USER/$LSB_JOBID/<recording>.<jobid>.tar.gz
+```
+
+The artifact runner writes predictions into a scratch-only temporary Zarr,
+copies only the completed `detect_runs/<run_name>` group into
+`palette_run_group_artifact/run_group/`, writes `artifact_manifest.json` plus
+validation reports, and creates a `.tar.gz`. It records
+`latest_policy=do_not_set_latest` and never mutates the canonical analysis
+Zarr. To submit this as one LSF job and copy the resulting tarball back to PRFS:
+
+```bash
+scripts/submit_detect_artifact_bsub.sh \
+  --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
+  --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --output-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts \
+  --decode-backend auto \
+  --batch-size 16
+```
+
+Importer support remains a separate serialized step. Until that importer is in
+place, these packages are durable transfer artifacts, not canonical completed
+analysis runs.
 
 **Logs:** `<root>/logs/run_detections_batch/bsub_submissions/detect_<run_id>/`
 

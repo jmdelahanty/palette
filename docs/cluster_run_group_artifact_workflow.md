@@ -36,7 +36,7 @@ separate import step.
 The unit of exchange is a complete run-group package. Examples:
 
 ```text
-analysis/detect_runs/detect_...
+detect_runs/detect_...
 analysis/swim_bout_runs/bouts_...
 analysis/bout_kinematics_runs/bk_...
 analysis/eye_angle_runs/eye_angle_...
@@ -125,7 +125,7 @@ PRFS video + canonical analysis metadata
   -> validate scratch run group
   -> package artifact as tar.zst or tar.gz
   -> transfer package to PRFS
-  -> serialized importer promotes into analysis/detect_runs/
+  -> serialized importer promotes into detect_runs/
 ```
 
 The current direct-write detection runner is a pilot path, not the final
@@ -382,8 +382,10 @@ This document fills the gap between cluster compute and canonical Zarr mutation.
 1. Use `fisheye.diagnostics.detect_compute_smoke` to verify video open, model
    load, small-batch decode, and inference without writing `detect_runs`
    chunks.
-2. Add a package writer for one run family, preferably detection or swim-bout
-   runs.
+2. Done for detection: `fisheye.utils.run_detection_artifact` writes YOLO
+   predictions into a scratch-only temporary Zarr, extracts the completed
+   `detect_runs/<run_name>` group into `palette_run_group_artifact/run_group/`,
+   writes manifest/validation reports, and packages the result as `.tar.gz`.
 3. Add a dry-run importer that validates a package and prints the planned
    canonical mutations.
 4. Add an apply mode that imports one package into one analysis archive.
@@ -395,8 +397,32 @@ video decode and inference are recording-local and expensive. Swim-bout and
 bout-kinematics packages are useful second targets because they exercise compact
 tabular run layouts with smaller transfer artifacts.
 
-The first detection implementation should target only the run group under
-`analysis/detect_runs/<run_name>`, not the entire analysis archive. It should
+The first detection implementation targets only the run group under
+`detect_runs/<run_name>`, not the entire analysis archive. It should
 read input video from PRFS/NRS, write that run group on
 `/scratch/$USER/$LSB_JOBID`, package the run group, and leave `latest`,
 consolidated metadata, and registry projection for the importer.
+
+Current detection artifact command shape:
+
+```bash
+scripts/py -m fisheye.utils.run_detection_artifact \
+  <camera.mp4> \
+  --target-zarr <recording_analysis.zarr> \
+  --model <weights/best.pt> \
+  --config configs/fisheye/yolo_detect_config.yaml \
+  --decode-backend auto \
+  --artifact-dir /scratch/$USER/$LSB_JOBID/palette_run_group_artifact \
+  --work-dir /scratch/$USER/$LSB_JOBID/work \
+  --tarball-output /scratch/$USER/$LSB_JOBID/<recording>.<jobid>.tar.gz
+```
+
+LSF wrapper:
+
+```bash
+scripts/submit_detect_artifact_bsub.sh \
+  --zarr <recording_analysis.zarr> \
+  --video <camera.mp4> \
+  --model <weights/best.pt> \
+  --output-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts
+```
