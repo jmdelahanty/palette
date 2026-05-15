@@ -55,6 +55,16 @@ def _device_of(value: Any) -> Optional[str]:
     return None if device is None else str(device)
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
 def _cuda_interface_summary(frame: Any) -> Optional[Dict[str, Any]]:
     cuda_method = getattr(frame, "cuda", None)
     if not callable(cuda_method):
@@ -153,8 +163,7 @@ def run_probe(args: argparse.Namespace) -> Dict[str, Any]:
         method = getattr(demuxer, name, None)
         if callable(method):
             try:
-                value = method()
-                demux_meta[name] = str(value) if name == "GetNvCodecId" else value
+                demux_meta[name] = _json_safe(method())
             except Exception as exc:
                 demux_meta[f"{name}_error"] = _format_exc(exc)
     payload["demuxer"] = demux_meta
