@@ -248,7 +248,13 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 
 ## Operator notes
 
-- Keep current Decord path as default until benchmark conclusion.
-- Treat `pynvvc_luma_rgb` as an experimental sequential smoke backend; it is
-  not yet the production detector backend.
+- Production `detect_yolo` now defaults to `--decode-backend auto`.
+- `auto` prefers `pynvvc_luma_rgb` on CUDA when PyNvVideoCodec is available
+  and canonical resize dims are configured, because that path avoids Decord's
+  long-video keyframe-index startup scan.
+- Decord remains the fallback path when PyNvVideoCodec, CUDA, or resize dims
+  are unavailable, and it remains available explicitly through
+  `--decode-backend decord_gpu` or `--decode-backend decord_cpu`.
+- Do not remove the Decord fallback until fixed-frame prediction parity and at
+  least one persisted `detect_run` comparison pass on representative videos.
 - Treat Crimson/native path as experimental behind explicit flag.
