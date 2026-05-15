@@ -360,6 +360,8 @@ scripts/submit_detect_decode_backend_parity_bsub.sh \
   --backend-b pynvvc_nv12_rgb \
   --frames 0 100 500 1000 1500 \
   --batch-size 16 \
+  --max-bbox-diff 0.01 \
+  --max-score-diff 0.05 \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
   --run-label <camera>_decode_parity
 ```

@@ -60,6 +60,8 @@ from fisheye.diagnostics.detect_compute_smoke import _resize_to_imgsz
 
 
 BACKEND_CHOICES = (*stage.BACKEND_CHOICES, *PYNVVC_BACKENDS)
+DEFAULT_MAX_BBOX_DIFF = 0.01
+DEFAULT_MAX_SCORE_DIFF = 0.05
 
 
 def _positive_int(value: str) -> int:
@@ -98,8 +100,8 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-det", type=int, default=None)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     parser.add_argument("--force-fp32", action="store_true")
-    parser.add_argument("--max-bbox-diff", type=float, default=None)
-    parser.add_argument("--max-score-diff", type=float, default=None)
+    parser.add_argument("--max-bbox-diff", type=float, default=DEFAULT_MAX_BBOX_DIFF)
+    parser.add_argument("--max-score-diff", type=float, default=DEFAULT_MAX_SCORE_DIFF)
     parser.add_argument("--fail-on-count-mismatch", action="store_true")
     parser.add_argument("--output-json", type=Path, default=None)
     return parser.parse_args(argv)

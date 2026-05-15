@@ -14,6 +14,8 @@ BACKEND_A="decord_gpu"
 BACKEND_B="pynvvc_nv12_rgb"
 BATCH_SIZE=16
 DEVICE="auto"
+MAX_BBOX_DIFF="0.01"
+MAX_SCORE_DIFF="0.05"
 RUN_ID=""
 RUN_LABEL=""
 FRAMES=()
@@ -43,6 +45,8 @@ Options:
   --backend-b NAME         Candidate backend (default: pynvvc_nv12_rgb)
   --batch-size N           Frames per decode/preprocess batch (default: 16)
   --device {auto,cuda,cpu} Inference device (default: auto)
+  --max-bbox-diff FLOAT    Fail when normalized bbox drift exceeds this (default: 0.01)
+  --max-score-diff FLOAT   Fail when score drift exceeds this (default: 0.05)
   --force-fp32             Disable FP16
   --run-id ID              Stable run id instead of UTC timestamp
   --run-label LABEL        Output basename; default is video stem
@@ -66,6 +70,8 @@ while [[ $# -gt 0 ]]; do
     --backend-b) BACKEND_B="$2"; shift 2;;
     --batch-size) BATCH_SIZE="$2"; shift 2;;
     --device) DEVICE="$2"; shift 2;;
+    --max-bbox-diff) MAX_BBOX_DIFF="$2"; shift 2;;
+    --max-score-diff) MAX_SCORE_DIFF="$2"; shift 2;;
     --force-fp32) FORCE_FP32=1; shift;;
     --run-id) RUN_ID="$2"; shift 2;;
     --run-label) RUN_LABEL="$2"; shift 2;;
@@ -141,6 +147,8 @@ PARITY_ARGS=(
   --backend-b "$BACKEND_B"
   --batch-size "$BATCH_SIZE"
   --device "$DEVICE"
+  --max-bbox-diff "$MAX_BBOX_DIFF"
+  --max-score-diff "$MAX_SCORE_DIFF"
   --fail-on-count-mismatch
   --frames "${FRAMES[@]}"
 )

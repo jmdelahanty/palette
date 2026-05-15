@@ -187,6 +187,8 @@ scripts/submit_detect_decode_backend_parity_bsub.sh \
   --backend-b pynvvc_nv12_rgb \
   --frames 0 100 500 1000 1500 \
   --batch-size 16 \
+  --max-bbox-diff 0.01 \
+  --max-score-diff 0.05 \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
   --run-label sickyfish_cam2010093_decode_parity
 ```
@@ -202,6 +204,8 @@ scripts/py -m fisheye.diagnostics.compare_detect_decode_backend_predictions \
   --backend-b pynvvc_nv12_rgb \
   --frames 0 100 500 1000 1500 \
   --batch-size 16 \
+  --max-bbox-diff 0.01 \
+  --max-score-diff 0.05 \
   --fail-on-count-mismatch \
   --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/detect_decode_backend_parity_sickyfish_cam2010093.json
 ```

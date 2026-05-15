@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
+DEFAULT_MAX_BBOX_DIFF = 0.01
+DEFAULT_MAX_SCORE_DIFF = 0.05
+
+
 def _get_nested(payload: dict[str, Any], *keys: str) -> Any:
     current: Any = payload
     for key in keys:
@@ -121,8 +125,18 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("json_path", type=Path, help="Path to backend parity JSON report.")
     parser.add_argument("--json", action="store_true", help="Emit a machine-readable summary.")
-    parser.add_argument("--max-bbox-diff", type=float, default=None)
-    parser.add_argument("--max-score-diff", type=float, default=None)
+    parser.add_argument(
+        "--max-bbox-diff",
+        type=float,
+        default=DEFAULT_MAX_BBOX_DIFF,
+        help=f"Maximum normalized bbox coordinate drift (default: {DEFAULT_MAX_BBOX_DIFF}).",
+    )
+    parser.add_argument(
+        "--max-score-diff",
+        type=float,
+        default=DEFAULT_MAX_SCORE_DIFF,
+        help=f"Maximum confidence-score drift (default: {DEFAULT_MAX_SCORE_DIFF}).",
+    )
     parser.add_argument(
         "--allow-count-mismatch",
         action="store_true",

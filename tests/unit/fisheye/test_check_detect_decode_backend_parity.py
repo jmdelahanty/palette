@@ -56,3 +56,17 @@ def test_check_detect_decode_backend_parity_fails_count_mismatch(tmp_path: Path,
     out = capsys.readouterr().out
     assert "validation: failed" in out
     assert "count_mismatch_frames is 1" in out
+
+
+def test_check_detect_decode_backend_parity_fails_bbox_drift_by_default(
+    tmp_path: Path, capsys
+) -> None:
+    path = tmp_path / "parity.json"
+    path.write_text(json.dumps(_payload(bbox_abs_diff_max=0.053906)), encoding="utf-8")
+
+    rc = mod.main([str(path)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "validation: failed" in out
+    assert "bbox_abs_diff_max 0.053906 exceeds 0.01" in out
