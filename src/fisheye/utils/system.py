@@ -646,10 +646,22 @@ def get_environment_summary() -> Dict[str, Any]:
         Dict with environment type, key packages, and stats
     """
     all_packages = get_software_versions()
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    conda_default_env = os.environ.get("CONDA_DEFAULT_ENV")
+    environment_name = conda_default_env or "none"
+    if conda_prefix and Path(sys.prefix).name and environment_name in {"", "base", "none"}:
+        # `scripts/py` can run an env Python without `conda activate`, leaving
+        # CONDA_DEFAULT_ENV as `base`. sys.prefix is the authoritative runtime.
+        environment_name = Path(sys.prefix).name
     
     summary = {
         'environment_type': 'conda' if os.environ.get('CONDA_PREFIX') else 'pip',
-        'environment_name': os.environ.get('CONDA_DEFAULT_ENV', 'none'),
+        'environment_name': environment_name,
+        'conda_default_env': conda_default_env,
+        'conda_prefix': conda_prefix,
+        'python_executable': sys.executable,
+        'sys_prefix': sys.prefix,
+        'base_prefix': sys.base_prefix,
         'python_version': platform.python_version(),
         'total_packages': len(all_packages),
     }

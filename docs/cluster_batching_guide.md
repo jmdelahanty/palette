@@ -438,8 +438,10 @@ validation reports, and creates a `.tar.gz`. It records
 `latest_policy=do_not_set_latest` and never mutates the canonical analysis
 Zarr. The stdout summary is strict JSON and includes `artifact_timing` for the
 scratch Zarr detection call, run-group copy, validation, hashing, and tarball
-creation. To submit this as one LSF job and copy the resulting tarball back to
-PRFS:
+creation. The artifact manifest records the command, git state, LSF job
+metadata, GPU/device details, runtime Python executable/prefix, key packages,
+and selected scheduler/GPU environment variables. To submit this as one LSF job
+and copy the resulting tarball back to PRFS:
 
 ```bash
 scripts/submit_detect_artifact_bsub.sh \

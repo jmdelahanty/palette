@@ -236,8 +236,33 @@ Each artifact must include `artifact_manifest.json`. Required fields:
     "palette_git_commit": "...",
     "command": "scripts/py -m ...",
     "hostname": "...",
-    "cluster_job_id": "...",
-    "cluster_task_id": "...",
+    "cluster": {
+      "LSB_JOBID": "...",
+      "LSB_JOBNAME": "...",
+      "LSB_QUEUE": "...",
+      "LSB_DJOB_NUMPROC": "...",
+      "CUDA_VISIBLE_DEVICES": "..."
+    },
+    "runtime": {
+      "platform": {
+        "hostname": "...",
+        "system": "Linux",
+        "release": "...",
+        "machine": "x86_64",
+        "lsf": {"job_id": "...", "queue": "..."}
+      },
+      "gpu": {
+        "available": true,
+        "backend": "cuda",
+        "devices": [{"index": 0, "name": "NVIDIA L4"}]
+      },
+      "environment": {
+        "environment_name": "palette-py311",
+        "python_executable": "/path/to/env/bin/python",
+        "key_packages": {}
+      },
+      "env_vars": {"CUDA_VISIBLE_DEVICES": "..."}
+    },
     "cuda_device": "...",
     "decoder_backend": "decord_gpu"
   },
@@ -260,6 +285,12 @@ Each artifact must include `artifact_manifest.json`. Required fields:
 
 Numeric fields that are not applicable should be `null`, not `NaN` or
 `Infinity`.
+
+The run group itself should also carry canonical `provenance` attrs. For
+cluster-produced detection artifacts this includes the normal local provenance
+fields plus scheduler details, richer machine/platform details, and GPU device
+metadata so the imported run remains self-describing after the transfer package
+is discarded.
 
 ## Import Algorithm
 

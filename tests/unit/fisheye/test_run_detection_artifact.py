@@ -88,6 +88,26 @@ def test_build_detection_artifact_packages_detect_run_group(
             "is_dirty": False,
         },
     )
+    monkeypatch.setattr(
+        mod,
+        "get_environment_info",
+        lambda **kwargs: {
+            "environment": {
+                "environment_name": "palette-py311",
+                "python_executable": "/fake/env/bin/python",
+            },
+            "platform": {
+                "hostname": "cluster-node",
+                "lsf": {"job_id": "123", "queue": "gpu_l4"},
+            },
+            "gpu": {
+                "available": True,
+                "backend": "cuda",
+                "devices": [{"index": 0, "name": "NVIDIA L4"}],
+            },
+            "env_vars": {"CUDA_VISIBLE_DEVICES": "0"},
+        },
+    )
 
     summary = mod.build_detection_artifact(
         video_path=video,
@@ -113,6 +133,12 @@ def test_build_detection_artifact_packages_detect_run_group(
     }
     assert manifest["artifact_timing"]["copy_run_group_seconds_total"] >= 0.0
     assert manifest["provenance"]["decoder_backend"] == "pynvvc_nv12_rgb"
+    assert manifest["provenance"]["runtime"]["gpu"]["devices"][0]["name"] == "NVIDIA L4"
+    assert manifest["provenance"]["runtime"]["platform"]["lsf"]["queue"] == "gpu_l4"
+    assert (
+        manifest["provenance"]["runtime"]["environment"]["python_executable"]
+        == "/fake/env/bin/python"
+    )
     assert summary["artifact_timing"]["tarball_seconds_total"] >= 0.0
     captured = capsys.readouterr()
     assert "model summary should not contaminate summary stdout" not in captured.out

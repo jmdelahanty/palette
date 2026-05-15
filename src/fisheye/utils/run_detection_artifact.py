@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from fisheye.utils.system import get_git_info
+from fisheye.utils.system import get_environment_info, get_git_info
 
 try:
     from rich.console import Console
@@ -263,6 +263,12 @@ def build_detection_artifact(
     artifact_start = time.perf_counter()
     artifact_timing: dict[str, Any] = {"schema_version": 1}
     scratch_zarr = work_dir / "detect_output.zarr"
+    runtime_environment = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(scratch_zarr),
+        collect_ip=False,
+        capture_env_vars=True,
+    )
     command_list = list(command) if command is not None else sys.argv
     command_text = " ".join(command_list)
     _write_json(
@@ -272,6 +278,7 @@ def build_detection_artifact(
             "command": command_text,
             "hostname": platform.node(),
             "cluster": _cluster_provenance(),
+            "runtime": runtime_environment,
             "scratch_zarr": str(scratch_zarr),
         },
     )
@@ -345,6 +352,7 @@ def build_detection_artifact(
             "command": command_text,
             "hostname": platform.node(),
             "cluster": _cluster_provenance(),
+            "runtime": runtime_environment,
             "decoder_backend": decode_backend or "auto",
             "scratch_zarr": str(scratch_zarr),
         },

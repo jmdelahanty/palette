@@ -1547,6 +1547,8 @@ def detect_yolo(
     detect_group.attrs['decode_backend_effective'] = decode_backend_effective
     detect_group.attrs['video_reader_type'] = video_reader_type
 
+    platform_info = env_info.get("platform") or {}
+    scheduler_info = platform_info.get("lsf") or platform_info.get("slurm")
     provenance_record = build_stage_provenance(
         stage="detect",
         command=" ".join(sys.argv),
@@ -1561,12 +1563,21 @@ def detect_yolo(
         },
         environment=env_info.get("environment"),
         platform={
-            "hostname": env_info["platform"].get("hostname"),
-            "system": env_info["platform"].get("system"),
-            "release": env_info["platform"].get("release"),
-            "python_version": env_info["platform"].get("python_version"),
-            "machine": env_info["platform"].get("machine"),
+            "hostname": platform_info.get("hostname"),
+            "fqdn": platform_info.get("fqdn"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "version": platform_info.get("version"),
+            "machine": platform_info.get("machine"),
+            "processor": platform_info.get("processor"),
+            "cpu_cores": platform_info.get("cpu_cores"),
+            "cpu_details": platform_info.get("cpu_details"),
+            "memory": platform_info.get("memory"),
+            "disk": platform_info.get("disk"),
+            "python_version": platform_info.get("python_version"),
+            "python_implementation": platform_info.get("python_implementation"),
         },
+        scheduler=scheduler_info,
         parameters=dict(detect_group.attrs.get("parameters") or {}),
         inputs={
             "frame_source": "external",
@@ -1579,6 +1590,7 @@ def detect_yolo(
             "model_path": str(model_path.absolute()),
             "model_name": model_path.name,
             "device": "cuda" if use_gpu else "cpu",
+            "gpu": env_info.get("gpu"),
         },
     )
     provenance_record["timing"] = dict(timing_summary)

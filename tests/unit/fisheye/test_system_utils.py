@@ -8,10 +8,11 @@ import sys
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from fisheye.utils import system as system_mod
 from fisheye.utils.system import (
     _which, _run, _find_git_root,
     get_git_info, get_platform_info, get_gpu_info,
-    get_environment_info
+    get_environment_info, get_environment_summary
 )
 
 class TestHelperFunctions:
@@ -102,3 +103,16 @@ class TestSystemInfo:
         
         # Should not have all packages
         assert 'all_packages' not in info
+
+    def test_environment_summary_uses_runtime_prefix_when_conda_env_is_stale(self, monkeypatch):
+        """scripts/py can run palette-py311 while CONDA_DEFAULT_ENV still says base."""
+        monkeypatch.setenv("CONDA_PREFIX", "/fake/miniforge3")
+        monkeypatch.setenv("CONDA_DEFAULT_ENV", "base")
+        monkeypatch.setattr(sys, "prefix", "/fake/miniforge3/envs/palette-py311")
+        monkeypatch.setattr(system_mod, "get_software_versions", lambda: {"python": "3.11", "torch": "2.5.1"})
+
+        summary = get_environment_summary()
+
+        assert summary["environment_name"] == "palette-py311"
+        assert summary["conda_default_env"] == "base"
+        assert summary["python_executable"] == sys.executable
