@@ -22,7 +22,6 @@ from queue import Full, Queue
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 import torch
-import torch.nn.functional as F
 
 
 def _default_cache_root() -> Path:
@@ -57,9 +56,11 @@ def _ensure_headless_cache_env() -> None:
 _ensure_headless_cache_env()
 
 from fisheye.diagnostics import benchmark_detect_stage_split as stage
+from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_LUMA_RGB
+from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
+from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
 
 
-BACKEND_PYNVVC_LUMA_RGB = "pynvvc_luma_rgb"
 BACKEND_CHOICES = (*stage.BACKEND_CHOICES, BACKEND_PYNVVC_LUMA_RGB)
 PIPELINE_SEQUENTIAL = "sequential"
 PIPELINE_PRODUCER = "producer"
@@ -200,64 +201,6 @@ class _DecodedBatch:
     decode_seconds: float
 
 
-class _PynvvcLumaRgbReader:
-    """Sequential PyNvVideoCodec reader that emits raw NV12 CUDA tensors."""
-
-    def __init__(self, video_path: Path, *, start_frame: int, gpu_id: int = 0) -> None:
-        if start_frame != 0:
-            raise ValueError(
-                f"{BACKEND_PYNVVC_LUMA_RGB} is sequential-only in this smoke; "
-                "--start-frame must be 0."
-            )
-        try:
-            import PyNvVideoCodec as nvc  # type: ignore
-        except Exception as exc:  # pragma: no cover - environment dependent
-            raise RuntimeError(
-                f"PyNvVideoCodec import failed; cannot use {BACKEND_PYNVVC_LUMA_RGB}: {exc}"
-            ) from exc
-
-        self.nvc = nvc
-        self.demuxer = nvc.CreateDemuxer(filename=str(video_path))
-        self.decoder = nvc.CreateDecoder(
-            gpuid=int(gpu_id),
-            codec=self.demuxer.GetNvCodecId(),
-            usedevicememory=True,
-        )
-        self.packet_iter = iter(self.demuxer)
-        self.source_height = int(self.demuxer.Height())
-        self.source_width = int(self.demuxer.Width())
-        self.codec = str(self.demuxer.GetNvCodecId())
-        self.frame_rate = float(self.demuxer.FrameRate())
-        self._eof = False
-        self._pending_frames: list[torch.Tensor] = []
-
-    def decode_next(self, count: int) -> list[torch.Tensor]:
-        frames: list[torch.Tensor] = []
-        if self._pending_frames:
-            take = min(count, len(self._pending_frames))
-            frames.extend(self._pending_frames[:take])
-            self._pending_frames = self._pending_frames[take:]
-        while len(frames) < count and not self._eof:
-            try:
-                packet = next(self.packet_iter)
-            except StopIteration:
-                self._eof = True
-                break
-            for frame in self.decoder.Decode(packet):
-                tensor = torch.from_dlpack(frame)
-                if len(frames) < count:
-                    frames.append(tensor)
-                else:
-                    self._pending_frames.append(tensor)
-        return frames
-
-    def close(self) -> None:
-        self._pending_frames = []
-        self.packet_iter = iter(())
-        del self.decoder
-        del self.demuxer
-
-
 def _preprocess_pynvvc_luma_rgb(
     raw_frames: Sequence[torch.Tensor],
     *,
@@ -266,24 +209,14 @@ def _preprocess_pynvvc_luma_rgb(
     dtype: torch.dtype,
     resize: Optional[tuple[int, int]],
 ) -> torch.Tensor:
-    if resize is None:
-        raise ValueError(f"{BACKEND_PYNVVC_LUMA_RGB} requires a resolved resize.")
-
-    width, height = int(resize[0]), int(resize[1])
-    y_planes = [frame[:source_height, :].contiguous() for frame in raw_frames]
-    luma = torch.stack(y_planes, dim=0).unsqueeze(1).to(
+    resize_hw = (int(resize[1]), int(resize[0])) if resize is not None else None
+    return preprocess_luma_rgb(
+        raw_frames,
+        source_height=source_height,
         device=device,
         dtype=dtype,
-        non_blocking=True,
+        resize_hw=resize_hw,
     )
-    resized = F.interpolate(
-        luma,
-        size=(height, width),
-        mode="bilinear",
-        align_corners=False,
-    )
-    rgb = resized.expand(-1, 3, -1, -1).mul(1.0 / 255.0)
-    return rgb.contiguous(memory_format=torch.channels_last)
 
 
 def _release_reader_info(reader_info: Dict[str, Any]) -> None:
@@ -439,7 +372,7 @@ def _build_predict_kwargs(
 
 def _run_pynvvc_producer_pipeline(
     *,
-    reader: _PynvvcLumaRgbReader,
+    reader: PynvvcLumaRgbReader,
     frame_start: int,
     frame_end: int,
     batch_size: int,
@@ -751,7 +684,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
 
     t0 = _start_span(payload["stage_spans"], "video_open")
     if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
-        pynvvc_reader = _PynvvcLumaRgbReader(video_path, start_frame=frame_start, gpu_id=0)
+        pynvvc_reader = PynvvcLumaRgbReader(video_path, start_frame=frame_start, gpu_id=0)
         reader_info = {"backend": BACKEND_PYNVVC_LUMA_RGB, "reader": pynvvc_reader}
         payload["inputs"]["pynvvc"] = {
             "codec": pynvvc_reader.codec,

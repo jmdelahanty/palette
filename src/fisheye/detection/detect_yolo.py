@@ -40,14 +40,42 @@ from rich.panel import Panel
 from rich.markup import escape
 from ultralytics import YOLO
 
+from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_LUMA_RGB
+from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
+from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.schema import get_run_group
 from fisheye.utils.import_video_metadata import write_video_metadata
 from fisheye.utils.system import get_environment_info, get_git_info
 
 
+DECODE_BACKEND_AUTO = "auto"
+DECODE_BACKEND_DECORD_GPU = "decord_gpu"
+DECODE_BACKEND_DECORD_CPU = "decord_cpu"
+DECODE_BACKEND_OPENCV = "opencv"
+DECODE_BACKEND_CHOICES = (
+    DECODE_BACKEND_AUTO,
+    BACKEND_PYNVVC_LUMA_RGB,
+    DECODE_BACKEND_DECORD_GPU,
+    DECODE_BACKEND_DECORD_CPU,
+    DECODE_BACKEND_OPENCV,
+)
+
+
 def _decord_available() -> bool:
     return decord is not None and VideoReader is not None and cpu is not None
+
+
+def _normalize_decode_backend(value: Optional[str]) -> str:
+    if value is None:
+        return DECODE_BACKEND_AUTO
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return DECODE_BACKEND_AUTO
+    if normalized not in DECODE_BACKEND_CHOICES:
+        choices = ", ".join(DECODE_BACKEND_CHOICES)
+        raise ValueError(f"Unsupported decode backend {value!r}; expected one of: {choices}")
+    return normalized
 
 
 def _collect_zarr_metadata(zarr_path: Path, console: Optional[Console] = None) -> Dict[str, Any]:
@@ -248,6 +276,22 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
     return meta
 
 
+def _read_cv2_video_properties(video_path: Path) -> Tuple[int, float, int, int]:
+    """Return (n_frames, fps, width, height) using OpenCV metadata only."""
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video metadata: {video_path}")
+    try:
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+    return n_frames, fps, width, height
+
+
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load configuration from YAML file."""
     import yaml
@@ -368,16 +412,17 @@ def _actual_input_resize_dims(
     pre_resize_dims: Optional[list[int]],
     *,
     decord_on_gpu: bool,
+    tensor_input: bool = False,
 ) -> Optional[list[int]]:
     """
     Return the frame dimensions that will be explicitly fed to YOLO.
 
     Ultralytics applies imgsz preprocessing for numpy/list inputs, but torch
-    tensor inputs are treated as already prepared. The Decord-GPU path feeds
-    torch tensors, so canonical detection.resize_dims must be applied there
-    explicitly or inference silently runs at source-video resolution.
+    tensor inputs are treated as already prepared. Tensor-backed decoder paths
+    must apply canonical detection.resize_dims explicitly or inference silently
+    runs at source-video resolution.
     """
-    if decord_on_gpu and requested_resize_dims is not None:
+    if (decord_on_gpu or tensor_input) and requested_resize_dims is not None:
         return [int(requested_resize_dims[0]), int(requested_resize_dims[1])]
     if pre_resize_dims is not None:
         return [int(pre_resize_dims[0]), int(pre_resize_dims[1])]
@@ -395,6 +440,7 @@ def detect_yolo(
     batch_size: Optional[int] = None,
     resize_dims: Optional[list[int] | tuple[int, int]] = None,
     imgsz: Optional[int | list[int] | tuple[int, int]] = None,
+    decode_backend: Optional[str] = None,
     console: Optional[Console] = None,
     use_gpu: Optional[bool] = None,
     write_raw_video_metadata: bool = False,
@@ -417,6 +463,8 @@ def detect_yolo(
         batch_size: Frames to process at once (overrides config)
         resize_dims: Canonical inference size [h, w]; mapped to YOLO imgsz
         imgsz: Legacy YOLO inference size alias; normalized into resize_dims
+        decode_backend: Decoder backend (`auto`, `pynvvc_luma_rgb`, `decord_gpu`,
+            `decord_cpu`, or `opencv`)
         console: Rich console
         use_gpu: Use GPU for inference (overrides config)
         write_raw_video_metadata: Create/update raw_video attrs (no frames) for registry/provenance
@@ -487,6 +535,11 @@ def detect_yolo(
 
     # Get video processing parameters
     video_config = config.get('video', {})
+    decode_backend_requested = _normalize_decode_backend(
+        decode_backend
+        if decode_backend is not None
+        else detect_config.get("decode_backend", video_config.get("decode_backend"))
+    )
     legacy_video_resize_dims = _normalize_legacy_video_resize(video_config.get("resize"))
     legacy_video_resize_ignored = False
     if requested_resize_dims is not None:
@@ -541,6 +594,7 @@ def detect_yolo(
     console.print(f"  IoU threshold: {iou_threshold}")
     console.print(f"  Max detections: {max_det}")
     console.print(f"  Batch size: {batch_size}")
+    console.print(f"  Decode backend requested: {decode_backend_requested}")
     if requested_resize_dims is not None:
         console.print(
             f"  Resize dims (canonical): {requested_resize_dims[0]}×{requested_resize_dims[1]} "
@@ -603,18 +657,76 @@ def detect_yolo(
     # Open video to get metadata
     console.print("\n[bold]Opening video...[/bold]")
     
-    decord_info = _init_decord_reader(video_path, prefer_gpu=bool(use_gpu), console=console)
-    vr = decord_info['reader'] if decord_info else None
+    decord_info: Optional[Dict[str, Any]] = None
+    vr = None
     cap = None
-    
-    if decord_info:
+    pynvvc_reader: Optional[PynvvcLumaRgbReader] = None
+    use_pynvvc = False
+    use_decord = False
+    decode_backend_effective = DECODE_BACKEND_OPENCV
+
+    def _open_pynvvc_reader() -> PynvvcLumaRgbReader:
+        if not use_gpu or not torch.cuda.is_available():
+            raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires CUDA inference.")
+        if requested_resize_dims is None:
+            raise RuntimeError(
+                f"{BACKEND_PYNVVC_LUMA_RGB} requires detection.resize_dims or --resize-dims; "
+                "it emits tensor inputs that must be explicitly resized before YOLO."
+            )
+        return PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
+
+    if decode_backend_requested in {DECODE_BACKEND_AUTO, BACKEND_PYNVVC_LUMA_RGB}:
+        if decode_backend_requested == BACKEND_PYNVVC_LUMA_RGB or (
+            use_gpu and torch.cuda.is_available() and requested_resize_dims is not None
+        ):
+            try:
+                pynvvc_reader = _open_pynvvc_reader()
+                n_frames, fps_cv2, width_cv2, height_cv2 = _read_cv2_video_properties(video_path)
+                width = int(pynvvc_reader.source_width or width_cv2)
+                height = int(pynvvc_reader.source_height or height_cv2)
+                fps = float(pynvvc_reader.frame_rate or fps_cv2)
+                if n_frames <= 0:
+                    raise RuntimeError("OpenCV metadata did not report a positive frame count.")
+                video_reader_type = BACKEND_PYNVVC_LUMA_RGB
+                decode_backend_effective = BACKEND_PYNVVC_LUMA_RGB
+                use_pynvvc = True
+                console.print(f"[green]✓[/green] Using PyNvVideoCodec luma→RGB CUDA decoder")
+            except Exception as exc:
+                if pynvvc_reader is not None:
+                    pynvvc_reader.close()
+                    pynvvc_reader = None
+                if decode_backend_requested == BACKEND_PYNVVC_LUMA_RGB:
+                    raise
+                console.print(
+                    f"[yellow]PyNvVideoCodec decoder unavailable ({escape(str(exc))}); "
+                    "falling back to Decord/OpenCV[/yellow]"
+                )
+
+    if not use_pynvvc and decode_backend_requested != DECODE_BACKEND_OPENCV:
+        prefer_decord_gpu = bool(use_gpu) and decode_backend_requested != DECODE_BACKEND_DECORD_CPU
+        decord_info = _init_decord_reader(video_path, prefer_gpu=prefer_decord_gpu, console=console)
+        if (
+            decode_backend_requested == DECODE_BACKEND_DECORD_GPU
+            and decord_info is not None
+            and not bool(decord_info.get("on_gpu"))
+        ):
+            raise RuntimeError("Requested decord_gpu, but Decord fell back to CPU.")
+        if decord_info is None and decode_backend_requested in {
+            DECODE_BACKEND_DECORD_GPU,
+            DECODE_BACKEND_DECORD_CPU,
+        }:
+            raise RuntimeError(f"Requested {decode_backend_requested}, but Decord is unavailable.")
+
+    if not use_pynvvc and decord_info:
+        vr = decord_info['reader']
         n_frames = len(vr)
         width = decord_info['width']
         height = decord_info['height']
         fps = decord_info['fps']
         video_reader_type = decord_info['type']
+        decode_backend_effective = str(decord_info['type'])
         use_decord = True
-    else:
+    elif not use_pynvvc:
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             raise ValueError(f"Could not open video: {video_path}")
@@ -626,13 +738,15 @@ def detect_yolo(
         
         console.print(f"[green]✓[/green] Using OpenCV decoder")
         video_reader_type = 'opencv'
-        use_decord = False
+        decode_backend_effective = DECODE_BACKEND_OPENCV
 
     decord_on_gpu = bool(decord_info and decord_info.get('on_gpu'))
+    tensor_input_path = bool(decord_on_gpu or use_pynvvc)
     effective_input_resize_dims = _actual_input_resize_dims(
         requested_resize_dims,
         pre_resize_dims,
         decord_on_gpu=decord_on_gpu,
+        tensor_input=use_pynvvc,
     )
     
     # Determine dimensions for normalization (actual or resized)
@@ -640,8 +754,8 @@ def detect_yolo(
         inference_height, inference_width = effective_input_resize_dims
         console.print(f"[green]✓[/green] Video: {n_frames} frames, {fps:.1f} fps, {width}×{height}")
         console.print(f"[cyan]  Will feed {inference_width}×{inference_height} frames to YOLO[/cyan]")
-        if decord_on_gpu and requested_resize_dims is not None:
-            console.print("[cyan]  Decord GPU tensor path: applying canonical resize before predict[/cyan]")
+        if tensor_input_path and requested_resize_dims is not None:
+            console.print("[cyan]  Tensor decoder path: applying canonical resize before predict[/cyan]")
     else:
         inference_width, inference_height = width, height
         console.print(f"[green]✓[/green] Video: {n_frames} frames, {fps:.1f} fps, {width}×{height}")
@@ -879,9 +993,12 @@ def detect_yolo(
     )
     root.attrs['tensor_resize_dims'] = (
         [int(effective_input_resize_dims[0]), int(effective_input_resize_dims[1])]
-        if decord_on_gpu and effective_input_resize_dims is not None
+        if tensor_input_path and effective_input_resize_dims is not None
         else None
     )
+    root.attrs['decode_backend_requested'] = decode_backend_requested
+    root.attrs['decode_backend_effective'] = decode_backend_effective
+    root.attrs['video_reader_type'] = video_reader_type
     if source_zarr_path is not None:
         root.attrs['source_zarr_path'] = str(source_zarr_path)
 
@@ -963,7 +1080,64 @@ def detect_yolo(
         
         batch_count = 0
         
-        if use_decord:
+        if use_pynvvc:
+            if pynvvc_reader is None:
+                raise RuntimeError("PyNvVideoCodec reader was not initialized.")
+            if effective_input_resize_dims is None:
+                raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires a resolved tensor resize.")
+            device = torch.device('cuda' if use_gpu and torch.cuda.is_available() else 'cpu')
+            dtype = torch.float16 if model_fp16 else torch.float32
+
+            for batch_start in range(0, n_frames, batch_size):
+                batch_end = min(batch_start + batch_size, n_frames)
+                indices = list(range(batch_start, batch_end))
+
+                read_start = time.time()
+                decoded_frames = pynvvc_reader.decode_next(len(indices))
+                read_times.append(time.time() - read_start)
+
+                actual_count = len(decoded_frames)
+                if actual_count <= 0:
+                    break
+                actual_indices = indices[:actual_count]
+
+                processed = preprocess_luma_rgb(
+                    decoded_frames,
+                    source_height=pynvvc_reader.source_height,
+                    device=device,
+                    dtype=dtype,
+                    resize_hw=effective_input_resize_dims,
+                )
+
+                inference_start = time.time()
+                with torch.inference_mode():
+                    results = model.predict(processed, **predict_kwargs)
+                inference_times.append(time.time() - inference_start)
+
+                for batch_i, result in enumerate(results):
+                    accumulate_results(result, actual_indices[batch_i])
+
+                del results
+                del processed
+                del decoded_frames
+
+                frame_idx += actual_count
+                batch_count += 1
+
+                elapsed = time.time() - processing_start
+                current_fps = frame_idx / elapsed if elapsed > 0 else 0
+                progress.update(task, advance=actual_count, fps=current_fps)
+
+                if batch_count % 100 == 0:
+                    avg_inference = np.mean(inference_times[-100:])
+                    avg_read = np.mean(read_times[-100:])
+                    console.print(f"[dim]Batch {batch_count}: read={avg_read*1000:.1f}ms, "
+                                f"inference={avg_inference*1000:.1f}ms, fps={current_fps:.1f}[/dim]")
+
+                if actual_count < len(indices):
+                    break
+
+        elif use_decord:
             # Double-buffered decode: prefetch next batch while current inference runs.
             batch_starts = list(range(0, n_frames, batch_size))
             prefetched = None
@@ -1126,6 +1300,11 @@ def detect_yolo(
             
             cap.release()
 
+    if use_pynvvc and pynvvc_reader is not None:
+        pynvvc_reader.close()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     if use_decord and vr is not None:
         del vr
         if decord_on_gpu and torch.cuda.is_available():
@@ -1220,10 +1399,12 @@ def detect_yolo(
             'effective_input_resize_dims': effective_input_resize_dims,
             'tensor_resize_dims': (
                 effective_input_resize_dims
-                if decord_on_gpu and effective_input_resize_dims is not None
+                if tensor_input_path and effective_input_resize_dims is not None
                 else None
             ),
             'legacy_video_resize_dims': legacy_video_resize_dims,
+            'decode_backend_requested': decode_backend_requested,
+            'decode_backend_effective': decode_backend_effective,
         },
         'summary_statistics': stats,
         'git_commit': git_info.get('commit_hash', 'unknown'),
@@ -1245,6 +1426,9 @@ def detect_yolo(
     detect_group.attrs['inference_average_fps'] = float(n_frames / total_time) if total_time > 0 else 0.0
     detect_group.attrs['inference_avg_batch_ms'] = float(avg_inference * 1000.0) if inference_times else 0.0
     detect_group.attrs['inference_avg_read_ms'] = float(np.mean(read_times) * 1000.0) if read_times else 0.0
+    detect_group.attrs['decode_backend_requested'] = decode_backend_requested
+    detect_group.attrs['decode_backend_effective'] = decode_backend_effective
+    detect_group.attrs['video_reader_type'] = video_reader_type
 
     provenance_record = build_stage_provenance(
         stage="detect",
@@ -1271,6 +1455,8 @@ def detect_yolo(
             "frame_source": "external",
             "source_video_path": root.attrs.get("source_video_path"),
             "source_zarr_path": detect_group.attrs.get("source_zarr_path"),
+            "decode_backend_requested": decode_backend_requested,
+            "decode_backend_effective": decode_backend_effective,
         },
         artifacts={
             "model_path": str(model_path.absolute()),
@@ -1387,6 +1573,15 @@ Examples:
         default=None,
         help='Legacy alias for YOLO inference size; normalized into --resize-dims',
     )
+    parser.add_argument(
+        '--decode-backend',
+        choices=DECODE_BACKEND_CHOICES,
+        default=None,
+        help=(
+            "Video decode backend. Default auto prefers PyNvVideoCodec luma/RGB "
+            "on CUDA when available and otherwise falls back to Decord/OpenCV."
+        ),
+    )
     parser.add_argument('--cpu', action='store_true', 
                        help='Force CPU inference')
     parser.add_argument(
@@ -1414,6 +1609,7 @@ Examples:
             batch_size=args.batch_size,
             resize_dims=args.resize_dims,
             imgsz=args.imgsz,
+            decode_backend=args.decode_backend,
             use_gpu=not args.cpu if args.cpu else None,
             write_raw_video_metadata=args.write_raw_video_metadata,
             overwrite_raw_video_metadata=args.overwrite_raw_video_metadata,

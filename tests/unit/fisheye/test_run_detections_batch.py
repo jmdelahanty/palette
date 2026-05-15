@@ -356,6 +356,7 @@ def test_main_apply_with_explicit_model_skips_registry_resolution(monkeypatch, t
         "--apply", "--json", "--no-log",
         "--registry", str(tmp_path / "missing_registry.sqlite"),
         "--model", str(model_path),
+        "--decode-backend", "pynvvc_luma_rgb",
         str(tmp_path),
     ])
 
@@ -365,6 +366,8 @@ def test_main_apply_with_explicit_model_skips_registry_resolution(monkeypatch, t
     assert resolved_model.model_path == str(model_path.resolve())
     assert resolved_model.payload["mode"] == "explicit"
     assert resolved_model.payload["selected"]["model_path"] == str(model_path.resolve())
+    assert calls[0]["decode_backend"] == "pynvvc_luma_rgb"
+    assert resolved_model.payload["parameters"]["decode_backend"] == "pynvvc_luma_rgb"
 
 
 def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatch, tmp_path: Path) -> None:
@@ -408,6 +411,7 @@ def test_run_detect_plan_skips_registry_provenance_for_explicit_model(monkeypatc
         batch_size=None,
         resize_dims=None,
         imgsz=None,
+        decode_backend=None,
         cpu=False,
         registry_path=tmp_path / "missing_registry.sqlite",
     )

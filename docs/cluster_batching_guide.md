@@ -64,16 +64,18 @@ pre-copying large input videos.
 
 For very large MP4s, Decord can still have a large one-time open cost because
 it indexes keyframes before returning a `VideoReader`. For sequential
-start-at-frame-0 compute smokes on grayscale detection models, prefer the
-experimental `pynvvc_luma_rgb` backend to test whether direct PyNvVideoCodec
-NVDEC streaming avoids that startup cost. Keep Decord as the production default
-until detection output parity is validated.
+start-at-frame-0 compute smokes on grayscale detection models, the
+`pynvvc_luma_rgb` backend avoids that startup cost by streaming through
+PyNvVideoCodec/NVDEC and using the NV12 luma plane replicated to RGB. The
+production `auto` backend may choose this path on CUDA when PyNvVideoCodec and
+canonical resize dims are available; otherwise it falls back to Decord/OpenCV.
 
 When testing PyNvVideoCodec on the cluster, `--pipeline-mode producer` can be
-used to overlap sequential decode with YOLO inference. Treat this as a
-diagnostic/benchmark mode: the honest comparison metric is end-to-end wall-clock
-FPS, not per-stage timings, because per-batch global CUDA synchronization is
-disabled to allow overlap.
+used to overlap sequential decode with YOLO inference. Current smoke results
+show the simple sequential PyNvVideoCodec path is faster than producer mode, so
+treat producer mode as a diagnostic only. The honest comparison metric is
+end-to-end wall-clock FPS, not per-stage timings, because per-batch global CUDA
+synchronization is disabled to allow overlap.
 
 For the benchmark protocol and current measurements, see
 `docs/detect_decode_backend_benchmark_todo.md`.
@@ -338,6 +340,44 @@ run YOLO over full-resolution camera frames unless that is explicitly requested.
 For headless jobs, set `PALETTE_JOB_CACHE=/scratch/$USER/$LSB_JOBID/palette_cache`
 before running Palette commands; the smoke uses that location for Ultralytics
 config if `YOLO_CONFIG_DIR` is not already set.
+
+Production detection accepts
+`--decode-backend auto|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`. Use
+`auto` for normal cluster jobs. Use explicit `pynvvc_luma_rgb` when you want to
+force the fast sequential NVDEC/luma path for a controlled smoke or batch. Until
+the luma/RGB approximation is accepted for a recording family, compare a PyNv
+candidate against a Decord/OpenCV reference on explicit fixed frames:
+
+```bash
+scripts/submit_detect_decode_backend_parity_bsub.sh \
+  --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --config configs/fisheye/yolo_detect_config.yaml \
+  --backend-a decord_gpu \
+  --backend-b pynvvc_luma_rgb \
+  --frames 0 100 500 1000 1500 \
+  --batch-size 16 \
+  --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
+  --run-label <camera>_decode_parity
+```
+
+Validate the parity report with:
+
+```bash
+scripts/py scripts/check_detect_decode_backend_parity.py \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/<camera>_decode_parity.<JOBID>.json
+```
+
+After writing two persisted detect runs, compare the stored artifacts:
+
+```bash
+scripts/py -m fisheye.diagnostics.compare_detection_runs \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
+  --run-a detect_decord_reference \
+  --run-b detect_pynvvc_candidate \
+  --frames 0 100 500 1000 1500 \
+  --fail-on-count-mismatch
+```
 
 **Production write policy:** detection jobs should stream the input video from
 PRFS, write the new `analysis/detect_runs/detect_...` run group under a

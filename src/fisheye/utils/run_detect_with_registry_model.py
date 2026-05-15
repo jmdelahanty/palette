@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import zarr
 
+from fisheye.detection.detect_yolo import DECODE_BACKEND_CHOICES
 from fisheye.detection.detect_yolo import detect_yolo
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.registry_stage_complete import emit_stage_completion
@@ -308,6 +309,7 @@ def _build_payload_args(
     batch_size: Optional[int],
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
+    decode_backend: Optional[str],
 ) -> argparse.Namespace:
     return argparse.Namespace(
         set_id=set_id,
@@ -323,6 +325,7 @@ def _build_payload_args(
         batch_size=batch_size,
         resize_dims=resize_dims,
         imgsz=imgsz,
+        decode_backend=decode_backend,
     )
 
 
@@ -344,6 +347,7 @@ def run_detect_with_registry_model(
     batch_size: Optional[int] = None,
     resize_dims: Optional[list[int]] = None,
     imgsz: Optional[list[int]] = None,
+    decode_backend: Optional[str] = None,
     cpu: bool = False,
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
@@ -432,6 +436,7 @@ def run_detect_with_registry_model(
         batch_size=batch_size,
         resize_dims=resize_dims,
         imgsz=imgsz,
+        decode_backend=decode_backend,
     )
 
     payload = _resolution_payload(
@@ -481,6 +486,7 @@ def run_detect_with_registry_model(
             batch_size=batch_size,
             resize_dims=resize_dims,
             imgsz=imgsz,
+            decode_backend=decode_backend,
             use_gpu=(False if cpu else None),
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
@@ -590,6 +596,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Legacy alias for YOLO inference size; normalized into --resize-dims.",
     )
+    parser.add_argument(
+        "--decode-backend",
+        choices=DECODE_BACKEND_CHOICES,
+        default=None,
+        help="Video decode backend passed to detect_yolo.",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument(
         "--write-raw-video-metadata",
@@ -621,6 +633,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         batch_size=args.batch_size,
         resize_dims=args.resize_dims,
         imgsz=args.imgsz,
+        decode_backend=args.decode_backend,
         cpu=bool(args.cpu),
         write_raw_video_metadata=bool(args.write_raw_video_metadata),
         overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),

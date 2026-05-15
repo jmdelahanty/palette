@@ -9,6 +9,15 @@ def test_decord_gpu_tensor_path_uses_canonical_resize_dims() -> None:
     ) == [640, 640]
 
 
+def test_non_decord_tensor_path_uses_canonical_resize_dims() -> None:
+    assert _actual_input_resize_dims(
+        [640, 640],
+        None,
+        decord_on_gpu=False,
+        tensor_input=True,
+    ) == [640, 640]
+
+
 def test_numpy_path_leaves_canonical_resize_to_ultralytics() -> None:
     assert (
         _actual_input_resize_dims(

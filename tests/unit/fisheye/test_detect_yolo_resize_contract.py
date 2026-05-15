@@ -14,6 +14,16 @@ def test_resize_dims_to_imgsz_returns_scalar_for_square_and_list_for_rectangular
     assert mod._resize_dims_to_imgsz([768, 1280]) == [768, 1280]  # noqa: SLF001
 
 
+def test_normalize_decode_backend_defaults_to_auto() -> None:
+    assert mod._normalize_decode_backend(None) == "auto"  # noqa: SLF001
+    assert mod._normalize_decode_backend("") == "auto"  # noqa: SLF001
+
+
+def test_normalize_decode_backend_rejects_unknown_backend() -> None:
+    with pytest.raises(ValueError, match="Unsupported decode backend"):
+        mod._normalize_decode_backend("not_a_backend")  # noqa: SLF001
+
+
 def test_detect_yolo_rejects_conflicting_resize_dims_and_imgsz() -> None:
     with pytest.raises(ValueError, match="Conflicting CLI overrides"):
         mod.detect_yolo(

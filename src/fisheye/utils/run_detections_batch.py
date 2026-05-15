@@ -14,6 +14,7 @@ from typing import Callable, Iterable, List, Optional, Sequence
 from fisheye.cli.shared_args import add_apply_dry_run_args
 from fisheye.cli.shared_args import add_log_args
 from fisheye.cli.shared_args import add_registry_discovery_args
+from fisheye.detection.detect_yolo import DECODE_BACKEND_CHOICES
 from fisheye.detection.detect_yolo import detect_yolo
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
@@ -469,6 +470,7 @@ def _resolve_registry_model_for_plan(
     batch_size: Optional[int],
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
+    decode_backend: Optional[str],
     cpu: bool,
 ) -> ResolvedModel:
     if plan.video_path is None:
@@ -509,6 +511,7 @@ def _resolve_registry_model_for_plan(
         batch_size=batch_size,
         resize_dims=resize_dims,
         imgsz=imgsz,
+        decode_backend=decode_backend,
     )
     payload = _build_detect_resolution_payload(
         args=payload_args,
@@ -541,6 +544,7 @@ def _resolve_registry_models_for_plans(
     batch_size: Optional[int],
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
+    decode_backend: Optional[str],
     cpu: bool,
     on_event: Optional[Callable[[dict[str, object]], None]] = None,
 ) -> tuple[dict[str, ResolvedModel], dict[str, str]]:
@@ -559,6 +563,7 @@ def _resolve_registry_models_for_plans(
             batch_size=batch_size,
             resize_dims=resize_dims,
             imgsz=imgsz,
+            decode_backend=decode_backend,
             cpu=cpu,
         )
 
@@ -580,6 +585,7 @@ def _build_explicit_model_payload(
     batch_size: Optional[int],
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
+    decode_backend: Optional[str],
     cpu: bool,
 ) -> dict[str, object]:
     selected = {
@@ -601,6 +607,7 @@ def _build_explicit_model_payload(
             "batch_size": batch_size,
             "resize_dims": resize_dims,
             "imgsz": imgsz,
+            "decode_backend": decode_backend,
             "cpu": bool(cpu),
         },
         "inputs": {
@@ -625,6 +632,7 @@ def _resolve_explicit_models_for_plans(
     batch_size: Optional[int],
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
+    decode_backend: Optional[str],
     cpu: bool,
 ) -> dict[str, ResolvedModel]:
     return {
@@ -640,6 +648,7 @@ def _resolve_explicit_models_for_plans(
                 batch_size=batch_size,
                 resize_dims=resize_dims,
                 imgsz=imgsz,
+                decode_backend=decode_backend,
                 cpu=cpu,
             ),
         )
@@ -660,6 +669,7 @@ def _run_detect_plan(
     batch_size: Optional[int],
     resize_dims: Optional[list[int]],
     imgsz: Optional[list[int]],
+    decode_backend: Optional[str],
     cpu: bool,
     registry_path: Path,
 ) -> DetectRegistryResult:
@@ -692,6 +702,7 @@ def _run_detect_plan(
             batch_size=batch_size,
             resize_dims=resize_dims,
             imgsz=imgsz,
+            decode_backend=decode_backend,
             use_gpu=(False if cpu else None),
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
@@ -810,6 +821,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Legacy alias for YOLO inference size; normalized into --resize-dims.",
     )
+    parser.add_argument(
+        "--decode-backend",
+        choices=DECODE_BACKEND_CHOICES,
+        default=None,
+        help="Video decode backend passed to detect_yolo.",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument(
         "--write-raw-video-metadata",
@@ -916,6 +933,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 batch_size=args.batch_size,
                 resize_dims=args.resize_dims,
                 imgsz=args.imgsz,
+                decode_backend=args.decode_backend,
                 cpu=bool(args.cpu),
             )
 
@@ -1064,6 +1082,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 batch_size=args.batch_size,
                 resize_dims=args.resize_dims,
                 imgsz=args.imgsz,
+                decode_backend=args.decode_backend,
                 cpu=bool(args.cpu),
             )
             if logger is not None:
@@ -1130,6 +1149,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             batch_size=args.batch_size,
             resize_dims=args.resize_dims,
             imgsz=args.imgsz,
+            decode_backend=args.decode_backend,
             cpu=bool(args.cpu),
             on_event=_emit_model_resolution_event,
         )
@@ -1194,6 +1214,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             batch_size=args.batch_size,
             resize_dims=args.resize_dims,
             imgsz=args.imgsz,
+            decode_backend=args.decode_backend,
             cpu=bool(args.cpu),
             registry_path=registry_path,
         )

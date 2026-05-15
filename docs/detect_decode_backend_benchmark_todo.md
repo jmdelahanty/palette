@@ -135,6 +135,24 @@ until their producing streams have finished.
   aggregate `inference_fps` when judging model throughput, because the first
   batch includes Ultralytics/PyTorch warmup effects.
 
+2026-05-15 PyNvVideoCodec follow-up:
+
+- The simple sequential `pynvvc_luma_rgb` backend is the current preferred
+  cluster path for high-resolution grayscale detection. On the sickyfish
+  PRFS smoke video, it avoided the Decord `VideoReader` open scan and processed
+  1600 frames at 72.9 end-to-end FPS.
+- The producer/consumer experiment was tested and is not currently beneficial.
+  On the same 1600-frame smoke, producer mode dropped to 62.7 end-to-end FPS
+  because queue wait/coordination outweighed overlap benefits.
+- Production `detect_yolo` now accepts `--decode-backend auto|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
+  The `auto` backend may use `pynvvc_luma_rgb` when CUDA, PyNvVideoCodec, and
+  canonical resize dims are available; otherwise it falls back to Decord/OpenCV.
+- `pynvvc_luma_rgb` currently uses the NV12 luma plane replicated to RGB. Before
+  making it the only backend, compare fixed-frame backend predictions with
+  `fisheye.diagnostics.compare_detect_decode_backend_predictions`. If those
+  pass, a second optional check can compare two persisted `detect_runs` with
+  `fisheye.diagnostics.compare_detection_runs`.
+
 Example LSF smoke using the sequential PyNvVideoCodec luma backend:
 
 ```bash
@@ -144,8 +162,6 @@ scripts/submit_detect_compute_smoke_bsub.sh \
   --config configs/fisheye/yolo_detect_config.yaml \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
   --decode-backend pynvvc_luma_rgb \
-  --pipeline-mode producer \
-  --pipeline-depth 2 \
   --batch-size 16 \
   --max-batches 100 \
   --run-label sickyfish_cam2010093_pynvvc_luma
@@ -156,6 +172,43 @@ Validate the result:
 ```bash
 scripts/py scripts/check_detect_compute_smoke.py \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/sickyfish_cam2010093_pynvvc_luma.<JOBID>.json
+```
+
+Fixed-frame backend parity command:
+
+```bash
+scripts/submit_detect_decode_backend_parity_bsub.sh \
+  --video /groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
+  --config configs/fisheye/yolo_detect_config.yaml \
+  --backend-a decord_gpu \
+  --backend-b pynvvc_luma_rgb \
+  --frames 0 100 500 1000 1500 \
+  --batch-size 16 \
+  --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
+  --run-label sickyfish_cam2010093_decode_parity
+```
+
+The underlying Python command is:
+
+```bash
+scripts/py -m fisheye.diagnostics.compare_detect_decode_backend_predictions \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
+  --config configs/fisheye/yolo_detect_config.yaml \
+  --backend-a decord_gpu \
+  --backend-b pynvvc_luma_rgb \
+  --frames 0 100 500 1000 1500 \
+  --batch-size 16 \
+  --fail-on-count-mismatch \
+  --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/detect_decode_backend_parity_sickyfish_cam2010093.json
+```
+
+Validate the parity JSON:
+
+```bash
+scripts/py scripts/check_detect_decode_backend_parity.py \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/sickyfish_cam2010093_decode_parity.<JOBID>.json
 ```
 
 ## Metrics to collect

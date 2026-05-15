@@ -294,6 +294,8 @@ def test_main_runs_detect_resolution_and_writes_provenance(
             "--resize-dims",
             "768",
             "1280",
+            "--decode-backend",
+            "pynvvc_luma_rgb",
         ]
     )
 
@@ -311,6 +313,7 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     assert detect_kwargs.get("output_zarr") == str(output_path.resolve())
     assert detect_kwargs.get("resize_dims") == [768, 1280]
     assert detect_kwargs.get("imgsz") is None
+    assert detect_kwargs.get("decode_backend") == "pynvvc_luma_rgb"
 
     assert calls.get("write_zarr_path") == output_path.resolve()
     assert calls.get("write_run_name") == "detect_001"
