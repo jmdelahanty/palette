@@ -191,6 +191,8 @@ scripts/py scripts/report_detect_compute_smokes.py \
 Fixed-frame backend parity command:
 
 ```bash
+scripts/validate_cluster_palette_env.sh --require-pynvvc
+
 scripts/submit_detect_decode_backend_parity_bsub.sh \
   --video /groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4 \
   --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \

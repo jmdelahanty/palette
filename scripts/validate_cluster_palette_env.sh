@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/validate_cluster_palette_env.sh [--video PATH] [--count-video-frames]
+Usage: scripts/validate_cluster_palette_env.sh [--video PATH] [--count-video-frames] [--require-pynvvc]
 
 Validate a Palette cluster environment from the repository root.
 
@@ -14,6 +14,7 @@ Checks:
   - Decord imports and libdecord.so links against the selected conda env FFmpeg
   - libnvcuvid is linked for NVDEC-capable Decord builds
   - core Python dependencies import
+  - PyNvVideoCodec and NVIDIA video-driver libraries are reported
   - optional Decord GPU VideoReader smoke with --video
 
 Notes:
@@ -22,15 +23,18 @@ Notes:
     Decord/FFmpeg scans or builds seek metadata during VideoReader setup.
   - Pass --count-video-frames to also call len(VideoReader), which may be
     slower on long MP4s but validates frame-count/index behavior.
+  - Pass --require-pynvvc for PyNvVideoCodec parity/default-promotion work.
 
 Examples:
   scripts/validate_cluster_palette_env.sh
+  scripts/validate_cluster_palette_env.sh --require-pynvvc
   scripts/validate_cluster_palette_env.sh --video /groups/.../example.mp4
 EOF
 }
 
 video_path=""
 count_video_frames=0
+require_pynvvc=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --video)
@@ -43,6 +47,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --count-video-frames)
       count_video_frames=1
+      shift
+      ;;
+    --require-pynvvc)
+      require_pynvvc=1
       shift
       ;;
     -h|--help)
@@ -70,6 +78,7 @@ echo "== Palette Cluster Environment Validation =="
 echo "repo=$repo_root"
 echo "host=$(hostname)"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "require_pynvvc=${require_pynvvc}"
 echo
 
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -82,8 +91,11 @@ else
 fi
 
 echo "== Python / CUDA / imports =="
-"$py" - <<'PY'
+PALETTE_REQUIRE_PYNVVC="$require_pynvvc" "$py" - <<'PY'
+import ctypes.util
 import importlib
+import importlib.util
+import os
 import pathlib
 import subprocess
 import sys
@@ -144,6 +156,37 @@ if "libnvcuvid" not in ldd.stdout:
         "libdecord.so is not linked against libnvcuvid; rebuild Decord with USE_CUDA=ON for NVDEC."
     )
 print("decord_linkage=ok")
+
+require_pynvvc = os.environ.get("PALETTE_REQUIRE_PYNVVC") == "1"
+print(f"pynvvc_required={require_pynvvc}")
+nvcuvid = ctypes.util.find_library("nvcuvid")
+nvidia_encode = ctypes.util.find_library("nvidia-encode")
+print(f"libnvcuvid_find_library={nvcuvid}")
+print(f"libnvidia_encode_find_library={nvidia_encode}")
+pynvvc_spec = importlib.util.find_spec("PyNvVideoCodec")
+print(f"PyNvVideoCodec_available={pynvvc_spec is not None}")
+if pynvvc_spec is None:
+    message = "PyNvVideoCodec is not importable; install it before using pynvvc_* backends."
+    if require_pynvvc:
+        raise SystemExit(message)
+    print(f"warning: {message}")
+else:
+    try:
+        import PyNvVideoCodec as nvc  # type: ignore
+    except Exception as exc:
+        message = f"PyNvVideoCodec import failed: {exc}"
+        if require_pynvvc:
+            raise SystemExit(message)
+        print(f"warning: {message}")
+    else:
+        print(f"PyNvVideoCodec_import=ok module={getattr(nvc, '__file__', '<unknown>')}")
+
+if require_pynvvc and not nvcuvid:
+    raise SystemExit("libnvcuvid was not found; PyNvVideoCodec NVDEC cannot run.")
+if require_pynvvc and not nvidia_encode:
+    raise SystemExit(
+        "libnvidia-encode was not found; PyNvVideoCodec import currently requires it on this environment."
+    )
 PY
 echo
 

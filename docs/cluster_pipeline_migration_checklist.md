@@ -33,7 +33,7 @@ Palette already has the first layer of cluster support:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Environment validation | present | `scripts/validate_cluster_palette_env.sh` checks Python, CUDA, PyTorch, Decord, FFmpeg linkage, and optional Decord GPU decode. |
+| Environment validation | present | `scripts/validate_cluster_palette_env.sh` checks Python, CUDA, PyTorch, Decord, FFmpeg linkage, reports PyNvVideoCodec/NVIDIA video-library availability, and can require PyNv with `--require-pynvvc`. |
 | Detect submitter | present | `scripts/submit_detect_batches_bsub.sh` wraps `fisheye.utils.run_detections_batch`. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
 | Keypoint submitter | present | `scripts/submit_keypoints_batches_bsub.sh` wraps `fisheye.utils.run_keypoints_batch`. |
@@ -89,6 +89,7 @@ canonical data format.
 - [x] Build Decord against conda FFmpeg and CUDA/NVDEC.
 - [x] Add `scripts/validate_cluster_palette_env.sh`.
 - [x] Confirm Decord GPU smoke returns CUDA tensors.
+- [x] Add explicit PyNvVideoCodec/NVIDIA video-library validation for PyNv parity jobs.
 - [x] Benchmark PRFS versus local `/tmp` video decode throughput.
 - [ ] Add a short operator runbook for rebuilding Decord on cluster nodes.
 - [ ] Decide whether this environment should remain conda-based or move to

@@ -121,6 +121,13 @@ channel build, and Decord has been built on the cluster, run:
 scripts/validate_cluster_palette_env.sh
 ```
 
+For PyNvVideoCodec backend parity or default-promotion work, require the PyNv
+stack explicitly:
+
+```bash
+scripts/validate_cluster_palette_env.sh --require-pynvvc
+```
+
 If a smoke MP4 is available, also verify Decord GPU decode:
 
 ```bash
@@ -134,6 +141,9 @@ The script checks that:
 - NumPy remains in the Palette-supported range (`<2.3`).
 - Decord imports and `libdecord.so` resolves FFmpeg libraries from the selected
   conda environment.
+- PyNvVideoCodec availability and NVIDIA video-driver libraries are reported;
+  with `--require-pynvvc`, missing PyNvVideoCodec, `libnvcuvid`, or
+  `libnvidia-encode` fails validation.
 - Decord is linked against `libnvcuvid` for NVDEC-capable GPU decode.
 - Core packages such as OpenCV, Ultralytics, Zarr, PyArrow, and Polars import.
 
