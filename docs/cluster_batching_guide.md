@@ -307,7 +307,7 @@ Compute-only detection smoke:
 scripts/py -m fisheye.diagnostics.detect_compute_smoke \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/cams/<camera>.mp4 \
   --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
-  --decode-backend decord_gpu \
+  --decode-backend auto \
   --batch-size 4 \
   --max-batches 1 \
   --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/detect_compute_smoke.json

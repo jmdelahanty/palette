@@ -100,8 +100,6 @@ def test_compute_smoke_runs_without_canonical_writes(monkeypatch, tmp_path: Path
             str(video_path),
             "--model",
             str(model_path),
-            "--decode-backend",
-            "decord_cpu",
             "--device",
             "cpu",
             "--batch-size",
@@ -127,6 +125,8 @@ def test_compute_smoke_runs_without_canonical_writes(monkeypatch, tmp_path: Path
     assert payload["stage_spans"]["total"]["end_utc"]
     assert payload["stage_spans"]["model_load"]["seconds"] >= 0
     assert payload["stage_spans"]["video_open"]["seconds"] >= 0
+    assert payload["inputs"]["decode_backend_requested"] == "auto"
+    assert payload["inputs"]["decode_backend"] == "decord_cpu"
     assert payload["inputs"]["frames_requested"] == 2
     assert payload["inputs"]["resize_source"] == "none"
     assert payload["inputs"]["imgsz_applied"] is None

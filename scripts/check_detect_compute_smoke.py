@@ -75,6 +75,11 @@ def _print_summary(path: Path, payload: dict[str, Any]) -> None:
     print(f"cuda_visible_devices: {cluster.get('CUDA_VISIBLE_DEVICES')}")
     print(f"palette_job_cache: {cluster.get('PALETTE_JOB_CACHE')}")
     print(f"backend: {inputs.get('decode_backend')}")
+    if (
+        inputs.get("decode_backend_requested")
+        and inputs.get("decode_backend_requested") != inputs.get("decode_backend")
+    ):
+        print(f"backend_requested: {inputs.get('decode_backend_requested')}")
     pipeline_mode = inputs.get("pipeline_mode") or "legacy_sequential"
     pipeline_depth = inputs.get("pipeline_depth") or "n/a"
     timing_policy = inputs.get("timing_policy") or "legacy_per_batch_sync"
@@ -174,6 +179,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "status": payload.get("status"),
             "canonical_outputs_written": payload.get("canonical_outputs_written"),
             "decode_backend": _get_nested(payload, "inputs", "decode_backend"),
+            "decode_backend_requested": _get_nested(
+                payload, "inputs", "decode_backend_requested"
+            ),
             "pipeline_mode": _get_nested(payload, "inputs", "pipeline_mode"),
             "pipeline_depth": _get_nested(payload, "inputs", "pipeline_depth"),
             "timing_policy": _get_nested(payload, "inputs", "timing_policy"),
