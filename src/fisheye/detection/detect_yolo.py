@@ -685,8 +685,17 @@ def detect_yolo(
             )
         return PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
 
-    if decode_backend_requested in PYNVVC_BACKENDS:
-        pynvvc_backend = decode_backend_requested
+    auto_pynvvc_candidate = (
+        decode_backend_requested == DECODE_BACKEND_AUTO
+        and bool(use_gpu)
+        and requested_resize_dims is not None
+    )
+    if decode_backend_requested in PYNVVC_BACKENDS or auto_pynvvc_candidate:
+        pynvvc_backend = (
+            BACKEND_PYNVVC_NV12_RGB
+            if decode_backend_requested == DECODE_BACKEND_AUTO
+            else decode_backend_requested
+        )
         try:
             pynvvc_reader = _open_pynvvc_reader(pynvvc_backend)
             n_frames, fps_cv2, width_cv2, height_cv2 = _read_cv2_video_properties(video_path)
@@ -703,7 +712,12 @@ def detect_yolo(
             if pynvvc_reader is not None:
                 pynvvc_reader.close()
                 pynvvc_reader = None
-            raise
+            if decode_backend_requested != DECODE_BACKEND_AUTO:
+                raise
+            console.print(
+                "[yellow]Warning:[/yellow] auto could not use PyNvVideoCodec "
+                f"{pynvvc_backend}; falling back to Decord/OpenCV."
+            )
 
     if not use_pynvvc and decode_backend_requested != DECODE_BACKEND_OPENCV:
         prefer_decord_gpu = bool(use_gpu) and decode_backend_requested != DECODE_BACKEND_DECORD_CPU
@@ -1682,8 +1696,8 @@ Examples:
         choices=DECODE_BACKEND_CHOICES,
         default=None,
         help=(
-            "Video decode backend. Default auto uses Decord/OpenCV. Use "
-            "pynvvc_nv12_rgb explicitly after backend parity is accepted."
+            "Video decode backend. Default auto prefers pynvvc_nv12_rgb "
+            "when CUDA and resize are available, then falls back to Decord/OpenCV."
         ),
     )
     parser.add_argument('--cpu', action='store_true', 

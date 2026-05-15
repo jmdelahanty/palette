@@ -351,9 +351,10 @@ config if `YOLO_CONFIG_DIR` is not already set.
 
 Production detection accepts
 `--decode-backend auto|pynvvc_nv12_rgb|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
-Use `auto` for normal cluster jobs until the PyNv parity gate passes. Use
-explicit `pynvvc_nv12_rgb` when you want to force the sequential NVDEC/NV12-RGB
-path for a controlled smoke or batch.
+Use `auto` for normal cluster jobs; it prefers `pynvvc_nv12_rgb` when
+PyNvVideoCodec, CUDA, and resize dims are available, then falls back to
+Decord/OpenCV. Use explicit `pynvvc_nv12_rgb` when you want to force the
+sequential NVDEC/NV12-RGB path for a controlled smoke or batch.
 Compare a PyNv candidate against a Decord/OpenCV reference on explicit fixed
 frames before treating it as accepted for a recording family:
 

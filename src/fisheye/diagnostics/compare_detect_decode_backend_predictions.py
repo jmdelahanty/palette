@@ -145,7 +145,10 @@ def _decode_pynvvc_frames(
             for offset, tensor in enumerate(decoded):
                 frame_index = current_frame + offset
                 if frame_index in selected:
-                    selected_raw[frame_index] = tensor
+                    # PyNvVideoCodec can reuse decoder surfaces as sequential
+                    # decode advances. Clone selected fixed-frame samples so a
+                    # later decode cannot mutate earlier comparison inputs.
+                    selected_raw[frame_index] = tensor.clone()
             current_frame += len(decoded)
 
         missing = [frame for frame in frames if frame not in selected_raw]

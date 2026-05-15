@@ -105,8 +105,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         choices=BACKEND_CHOICES,
         default=BACKEND_AUTO,
         help=(
-            "Decode backend to smoke. Default auto uses Decord/OpenCV; use "
-            "pynvvc_nv12_rgb explicitly after backend parity is accepted."
+            "Decode backend to smoke. Default auto prefers pynvvc_nv12_rgb "
+            "when CUDA and resize are available, then falls back to Decord/OpenCV."
         ),
     )
     parser.add_argument("--start-frame", type=_non_negative_int, default=0)
@@ -631,7 +631,9 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     decode_backend_effective = decode_backend_requested
     if decode_backend_requested == BACKEND_AUTO:
         decode_backend_effective = (
-            stage.BACKEND_DECORD_GPU if device.type == "cuda" else stage.BACKEND_DECORD_CPU
+            BACKEND_PYNVVC_NV12_RGB
+            if device.type == "cuda" and resize is not None
+            else (stage.BACKEND_DECORD_GPU if device.type == "cuda" else stage.BACKEND_DECORD_CPU)
         )
 
     if pipeline_mode != PIPELINE_SEQUENTIAL and decode_backend_effective not in PYNVVC_BACKENDS:

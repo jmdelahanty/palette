@@ -147,13 +147,13 @@ until their producing streams have finished.
   because queue wait/coordination outweighed overlap benefits.
 - Production `detect_yolo` now accepts
   `--decode-backend auto|pynvvc_nv12_rgb|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
-  Until the NV12/RGB parity gate passes, `auto` remains the safe Decord/OpenCV
-  path and PyNvVideoCodec must be requested explicitly.
+  The default `auto` path now prefers `pynvvc_nv12_rgb` when CUDA and resize
+  settings are available, then falls back to Decord/OpenCV.
 - A fixed-frame `decord_gpu` vs `pynvvc_luma_rgb` parity run matched detection
   counts/classes but showed non-trivial box/score drift, so luma/RGB should not
-  be the default correctness path. Re-run fixed-frame backend parity with
-  `pynvvc_nv12_rgb`; if that passes, a second optional check can compare two
-  persisted `detect_runs` with `fisheye.diagnostics.compare_detection_runs`.
+  be the default correctness path. A corrected fixed-frame `decord_gpu` vs
+  `pynvvc_nv12_rgb` parity run on frames `0 100 500 1000 1500` passed with
+  bbox max drift `0.00156` and score max drift `0.00732`.
 - Production `detect_yolo` writes `timing_summary` plus flat timing attrs for
   `read_decode`, `preprocess_resize`, `predict`, `postprocess`,
   `array_assembly`, and `zarr_write`, so backend comparisons can be audited from
@@ -275,9 +275,9 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 ## Operator notes
 
 - Production `detect_yolo` now defaults to `--decode-backend auto`.
-- `auto` remains Decord/OpenCV until the `pynvvc_nv12_rgb` parity gate passes.
-  The PyNv path avoids Decord's long-video keyframe-index startup scan, but it
-  must be requested explicitly while validation is pending.
+- `auto` prefers `pynvvc_nv12_rgb` when PyNvVideoCodec, CUDA, and resize dims
+  are available. The PyNv path avoids Decord's long-video keyframe-index startup
+  scan. It falls back to Decord/OpenCV when those prerequisites are unavailable.
 - Decord remains the fallback path when PyNvVideoCodec, CUDA, or resize dims
   are unavailable, and it remains available explicitly through
   `--decode-backend decord_gpu` or `--decode-backend decord_cpu`.
