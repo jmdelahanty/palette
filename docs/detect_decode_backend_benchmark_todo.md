@@ -253,7 +253,8 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 
 1. Done: add benchmark runner script that emits one JSON summary per run.
 2. Done: add backend selector abstraction for decode path (where feasible).
-3. Add Crimson adapter path (decode-only or decode+detect feed) for apples-to-apples timing.
+3. External Crimson handoff: add Crimson/native adapter path (decode-only or
+   decode+detect feed) for apples-to-apples timing.
 4. Done: add a report script/table formatter for side-by-side comparison.
 5. Done for `detect_yolo`: split production timing provenance into read,
    preprocess/resize, predict, postprocess, array assembly, and Zarr write
@@ -277,3 +278,46 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 - Do not remove the Decord fallback until fixed-frame prediction parity and at
   least one persisted `detect_run` comparison pass on representative videos.
 - Treat Crimson/native path as experimental behind explicit flag.
+
+## Crimson/native adapter handoff
+
+Palette should not treat the Crimson/native FFmpeg/NVDEC path as part of the
+default backend decision until Crimson exposes a headless timing surface that
+can be compared with Palette compute-smoke JSON. The Crimson repo currently
+owns this item.
+
+Minimum Crimson-side acceptance criteria:
+
+1. Add a headless decode-only timing command or smoke script that can run on the
+   same PRFS MP4 fixture without launching an interactive UI.
+2. Emit JSON with at least: video path, frame count or sampled frame list,
+   open/init seconds, decode seconds, frames decoded, end-to-end FPS, GPU name,
+   decoder implementation, and git commit.
+3. Keep the Crimson path behind an explicit diagnostic flag/script; do not make
+   it a Palette production dependency.
+4. Compare the resulting JSON next to Palette compute-smoke reports with
+   `scripts/report_detect_compute_smokes.py` or a Crimson-side equivalent.
+5. Use the Crimson timing only as an additional candidate in the backend
+   decision; Palette default promotion still requires Palette output parity.
+
+Suggested Crimson prompt:
+
+```text
+Work in /home/delahantyj@hhmi.org/gitrepos/crimson-ui-monolith.
+Read-only first, then implement only if the worktree is clean or changes are
+clearly isolated from existing uncommitted work.
+
+Goal: add a headless native decode timing smoke for the sickyfish PRFS MP4 so
+Palette can compare Crimson/FFmpeg/NVDEC startup and sequential decode timing
+against Palette Decord/PyNvVideoCodec compute-smoke JSON.
+
+Fixture:
+/groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4
+
+Required JSON fields: video_path, frames_requested or frames_decoded,
+open_seconds, decode_seconds, total_seconds, end_to_end_fps, gpu_name,
+decoder_backend, crimson_git_commit, status, and any errors.
+
+Keep this behind an explicit diagnostic command or script. Do not change normal
+redgui startup behavior.
+```
