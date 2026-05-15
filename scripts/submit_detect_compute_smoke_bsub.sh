@@ -48,7 +48,7 @@ Options:
   --gpus N                 GPU count (default: 1)
   --walltime H:MM          LSF wall time (default: 1:00)
   --decode-backend NAME    Backend passed to compute smoke
-                            (default: auto; prefers pynvvc_nv12_rgb on CUDA)
+                            (default: auto; uses Decord/OpenCV)
   --batch-size N           Frames per inference batch (default: 16)
   --max-batches N          Max batches to process (default: 20)
   --max-frames N           Max frames to process; 0 means use max-batches (default: 0)

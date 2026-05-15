@@ -147,8 +147,8 @@ until their producing streams have finished.
   because queue wait/coordination outweighed overlap benefits.
 - Production `detect_yolo` now accepts
   `--decode-backend auto|pynvvc_nv12_rgb|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
-  The `auto` backend may use `pynvvc_nv12_rgb` when CUDA, PyNvVideoCodec, and
-  canonical resize dims are available; otherwise it falls back to Decord/OpenCV.
+  Until the NV12/RGB parity gate passes, `auto` remains the safe Decord/OpenCV
+  path and PyNvVideoCodec must be requested explicitly.
 - A fixed-frame `decord_gpu` vs `pynvvc_luma_rgb` parity run matched detection
   counts/classes but showed non-trivial box/score drift, so luma/RGB should not
   be the default correctness path. Re-run fixed-frame backend parity with
@@ -255,9 +255,9 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 ## Operator notes
 
 - Production `detect_yolo` now defaults to `--decode-backend auto`.
-- `auto` prefers `pynvvc_nv12_rgb` on CUDA when PyNvVideoCodec is available
-  and canonical resize dims are configured, because that path avoids Decord's
-  long-video keyframe-index startup scan.
+- `auto` remains Decord/OpenCV until the `pynvvc_nv12_rgb` parity gate passes.
+  The PyNv path avoids Decord's long-video keyframe-index startup scan, but it
+  must be requested explicitly while validation is pending.
 - Decord remains the fallback path when PyNvVideoCodec, CUDA, or resize dims
   are unavailable, and it remains available explicitly through
   `--decode-backend decord_gpu` or `--decode-backend decord_cpu`.

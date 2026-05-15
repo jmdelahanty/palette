@@ -67,8 +67,8 @@ it indexes keyframes before returning a `VideoReader`. For sequential
 start-at-frame-0 compute smokes on grayscale detection models, the
 `pynvvc_nv12_rgb` backend avoids that startup cost by streaming through
 PyNvVideoCodec/NVDEC and doing NV12-to-RGB tensor preprocessing on CUDA. The
-production `auto` backend may choose this path on CUDA when PyNvVideoCodec and
-canonical resize dims are available; otherwise it falls back to Decord/OpenCV.
+production `auto` backend remains Decord/OpenCV until NV12/RGB parity is
+accepted; request `pynvvc_nv12_rgb` explicitly for controlled validation runs.
 `pynvvc_luma_rgb` remains available as an explicit faster diagnostic variant,
 but it should not be the default correctness path unless parity is accepted for
 that recording family.
@@ -346,8 +346,9 @@ config if `YOLO_CONFIG_DIR` is not already set.
 
 Production detection accepts
 `--decode-backend auto|pynvvc_nv12_rgb|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
-Use `auto` for normal cluster jobs. Use explicit `pynvvc_nv12_rgb` when you want
-to force the sequential NVDEC/NV12-RGB path for a controlled smoke or batch.
+Use `auto` for normal cluster jobs until the PyNv parity gate passes. Use
+explicit `pynvvc_nv12_rgb` when you want to force the sequential NVDEC/NV12-RGB
+path for a controlled smoke or batch.
 Compare a PyNv candidate against a Decord/OpenCV reference on explicit fixed
 frames before treating it as accepted for a recording family:
 

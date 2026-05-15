@@ -678,37 +678,25 @@ def detect_yolo(
             )
         return PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
 
-    if decode_backend_requested in {DECODE_BACKEND_AUTO, *PYNVVC_BACKENDS}:
-        pynvvc_backend = (
-            BACKEND_PYNVVC_NV12_RGB
-            if decode_backend_requested == DECODE_BACKEND_AUTO
-            else decode_backend_requested
-        )
-        if decode_backend_requested in PYNVVC_BACKENDS or (
-            use_gpu and torch.cuda.is_available() and requested_resize_dims is not None
-        ):
-            try:
-                pynvvc_reader = _open_pynvvc_reader(pynvvc_backend)
-                n_frames, fps_cv2, width_cv2, height_cv2 = _read_cv2_video_properties(video_path)
-                width = int(pynvvc_reader.source_width or width_cv2)
-                height = int(pynvvc_reader.source_height or height_cv2)
-                fps = float(pynvvc_reader.frame_rate or fps_cv2)
-                if n_frames <= 0:
-                    raise RuntimeError("OpenCV metadata did not report a positive frame count.")
-                video_reader_type = pynvvc_backend
-                decode_backend_effective = pynvvc_backend
-                use_pynvvc = True
-                console.print(f"[green]✓[/green] Using PyNvVideoCodec {pynvvc_backend} CUDA decoder")
-            except Exception as exc:
-                if pynvvc_reader is not None:
-                    pynvvc_reader.close()
-                    pynvvc_reader = None
-                if decode_backend_requested in PYNVVC_BACKENDS:
-                    raise
-                console.print(
-                    f"[yellow]PyNvVideoCodec decoder unavailable ({escape(str(exc))}); "
-                    "falling back to Decord/OpenCV[/yellow]"
-                )
+    if decode_backend_requested in PYNVVC_BACKENDS:
+        pynvvc_backend = decode_backend_requested
+        try:
+            pynvvc_reader = _open_pynvvc_reader(pynvvc_backend)
+            n_frames, fps_cv2, width_cv2, height_cv2 = _read_cv2_video_properties(video_path)
+            width = int(pynvvc_reader.source_width or width_cv2)
+            height = int(pynvvc_reader.source_height or height_cv2)
+            fps = float(pynvvc_reader.frame_rate or fps_cv2)
+            if n_frames <= 0:
+                raise RuntimeError("OpenCV metadata did not report a positive frame count.")
+            video_reader_type = pynvvc_backend
+            decode_backend_effective = pynvvc_backend
+            use_pynvvc = True
+            console.print(f"[green]✓[/green] Using PyNvVideoCodec {pynvvc_backend} CUDA decoder")
+        except Exception:
+            if pynvvc_reader is not None:
+                pynvvc_reader.close()
+                pynvvc_reader = None
+            raise
 
     if not use_pynvvc and decode_backend_requested != DECODE_BACKEND_OPENCV:
         prefer_decord_gpu = bool(use_gpu) and decode_backend_requested != DECODE_BACKEND_DECORD_CPU
@@ -1595,8 +1583,8 @@ Examples:
         choices=DECODE_BACKEND_CHOICES,
         default=None,
         help=(
-            "Video decode backend. Default auto prefers PyNvVideoCodec NV12/RGB "
-            "on CUDA when available and otherwise falls back to Decord/OpenCV."
+            "Video decode backend. Default auto uses Decord/OpenCV. Use "
+            "pynvvc_nv12_rgb explicitly after backend parity is accepted."
         ),
     )
     parser.add_argument('--cpu', action='store_true', 
