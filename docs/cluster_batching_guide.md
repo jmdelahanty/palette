@@ -372,6 +372,11 @@ scripts/submit_detect_decode_backend_parity_bsub.sh \
   --run-label <camera>_decode_parity
 ```
 
+For `pynvvc_*` candidates, the submitter runs
+`scripts/validate_cluster_palette_env.sh --require-pynvvc` inside the LSF job
+before prediction comparison. This catches missing PyNvVideoCodec or NVIDIA
+video-driver libraries before the parity script starts.
+
 Validate the parity report with:
 
 ```bash

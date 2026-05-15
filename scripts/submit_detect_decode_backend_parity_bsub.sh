@@ -20,6 +20,7 @@ RUN_ID=""
 RUN_LABEL=""
 FRAMES=()
 FORCE_FP32=0
+SKIP_ENV_CHECK=0
 DRY_RUN=0
 
 usage() {
@@ -48,6 +49,7 @@ Options:
   --max-bbox-diff FLOAT    Fail when normalized bbox drift exceeds this (default: 0.01)
   --max-score-diff FLOAT   Fail when score drift exceeds this (default: 0.05)
   --force-fp32             Disable FP16
+  --skip-env-check         Do not run cluster env preflight inside the LSF job
   --run-id ID              Stable run id instead of UTC timestamp
   --run-label LABEL        Output basename; default is video stem
   --dry-run                Print files and submit command; do not submit
@@ -73,6 +75,7 @@ while [[ $# -gt 0 ]]; do
     --max-bbox-diff) MAX_BBOX_DIFF="$2"; shift 2;;
     --max-score-diff) MAX_SCORE_DIFF="$2"; shift 2;;
     --force-fp32) FORCE_FP32=1; shift;;
+    --skip-env-check) SKIP_ENV_CHECK=1; shift;;
     --run-id) RUN_ID="$2"; shift 2;;
     --run-label) RUN_LABEL="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
@@ -156,9 +159,20 @@ if [[ "$FORCE_FP32" == "1" ]]; then PARITY_ARGS+=(--force-fp32); fi
 
 printf -v PARITY_ARGS_SHELL '%q ' "${PARITY_ARGS[@]}"
 
+REQUIRE_PYNVVC=0
+if [[ "$BACKEND_A" == pynvvc_* || "$BACKEND_B" == pynvvc_* ]]; then
+  REQUIRE_PYNVVC=1
+fi
+RUN_ENV_CHECK=1
+if [[ "$SKIP_ENV_CHECK" == "1" ]]; then
+  RUN_ENV_CHECK=0
+fi
+
 JOB_SCRIPT="${RUN_DIR}/run_detect_decode_backend_parity.sh"
 RUN_DIR_Q="$(printf '%q' "$RUN_DIR")"
 SAFE_LABEL_Q="$(printf '%q' "$SAFE_LABEL")"
+RUN_ENV_CHECK_Q="$(printf '%q' "$RUN_ENV_CHECK")"
+REQUIRE_PYNVVC_Q="$(printf '%q' "$REQUIRE_PYNVVC")"
 
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -168,6 +182,8 @@ cd "$(pwd)"
 
 RUN_DIR=${RUN_DIR_Q}
 RUN_LABEL=${SAFE_LABEL_Q}
+RUN_ENV_CHECK=${RUN_ENV_CHECK_Q}
+REQUIRE_PYNVVC=${REQUIRE_PYNVVC_Q}
 JOB_ID="\${LSB_JOBID:-manual}"
 OUTPUT_JSON="\${RUN_DIR}/\${RUN_LABEL}.\${JOB_ID}.json"
 
@@ -185,6 +201,18 @@ echo "host=\$(hostname)"
 echo "job_id=\$JOB_ID"
 echo "palette_job_cache=\$PALETTE_JOB_CACHE"
 echo "output_json=\$OUTPUT_JSON"
+echo "run_env_check=\$RUN_ENV_CHECK"
+echo "require_pynvvc=\$REQUIRE_PYNVVC"
+
+if [[ "\$RUN_ENV_CHECK" == "1" ]]; then
+  if [[ "\$REQUIRE_PYNVVC" == "1" ]]; then
+    scripts/validate_cluster_palette_env.sh --require-pynvvc
+  else
+    scripts/validate_cluster_palette_env.sh
+  fi
+else
+  echo "Skipping environment preflight by request."
+fi
 
 scripts/py -m fisheye.diagnostics.compare_detect_decode_backend_predictions ${PARITY_ARGS_SHELL}--output-json "\$OUTPUT_JSON"
 JOBSCRIPT
@@ -211,6 +239,7 @@ echo "Job script: $JOB_SCRIPT"
 echo "Expected JSON: ${RUN_DIR}/${SAFE_LABEL}.<JOBID>.json"
 echo "Output log: ${RUN_DIR}/<JOBID>.out"
 echo "Error log: ${RUN_DIR}/<JOBID>.err"
+echo "Environment check: run=${RUN_ENV_CHECK} require_pynvvc=${REQUIRE_PYNVVC}"
 echo "Parity command: scripts/py -m fisheye.diagnostics.compare_detect_decode_backend_predictions ${PARITY_ARGS_SHELL}--output-json <json>"
 echo "Submit command: $BSUB_CMD"
 

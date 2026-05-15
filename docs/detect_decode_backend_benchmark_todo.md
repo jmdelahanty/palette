@@ -207,6 +207,10 @@ scripts/submit_detect_decode_backend_parity_bsub.sh \
   --run-label sickyfish_cam2010093_decode_parity
 ```
 
+The submitter also runs `scripts/validate_cluster_palette_env.sh --require-pynvvc`
+inside the LSF job whenever either backend starts with `pynvvc_`; use
+`--skip-env-check` only for low-level debugging.
+
 The underlying Python command is:
 
 ```bash
