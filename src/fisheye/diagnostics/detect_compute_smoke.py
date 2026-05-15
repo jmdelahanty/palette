@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 
 
 def _default_cache_root() -> Path:
@@ -55,6 +56,10 @@ _ensure_headless_cache_env()
 from fisheye.diagnostics import benchmark_detect_stage_split as stage
 
 
+BACKEND_PYNVVC_LUMA_RGB = "pynvvc_luma_rgb"
+BACKEND_CHOICES = (*stage.BACKEND_CHOICES, BACKEND_PYNVVC_LUMA_RGB)
+
+
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -86,7 +91,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, help="Optional YAML config path.")
     parser.add_argument(
         "--decode-backend",
-        choices=stage.BACKEND_CHOICES,
+        choices=BACKEND_CHOICES,
         default=stage.BACKEND_DECORD_GPU,
         help="Decode backend to smoke.",
     )
@@ -161,6 +166,99 @@ def _decoded_count(decoded: Any, backend: str) -> int:
     if backend == stage.BACKEND_OPENCV:
         return int(len(decoded))
     return int(decoded.shape[0])
+
+
+class _PynvvcLumaRgbReader:
+    """Sequential PyNvVideoCodec reader that emits raw NV12 CUDA tensors."""
+
+    def __init__(self, video_path: Path, *, start_frame: int, gpu_id: int = 0) -> None:
+        if start_frame != 0:
+            raise ValueError(
+                f"{BACKEND_PYNVVC_LUMA_RGB} is sequential-only in this smoke; "
+                "--start-frame must be 0."
+            )
+        try:
+            import PyNvVideoCodec as nvc  # type: ignore
+        except Exception as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                f"PyNvVideoCodec import failed; cannot use {BACKEND_PYNVVC_LUMA_RGB}: {exc}"
+            ) from exc
+
+        self.nvc = nvc
+        self.demuxer = nvc.CreateDemuxer(filename=str(video_path))
+        self.decoder = nvc.CreateDecoder(
+            gpuid=int(gpu_id),
+            codec=self.demuxer.GetNvCodecId(),
+            usedevicememory=True,
+        )
+        self.packet_iter = iter(self.demuxer)
+        self.source_height = int(self.demuxer.Height())
+        self.source_width = int(self.demuxer.Width())
+        self.codec = str(self.demuxer.GetNvCodecId())
+        self.frame_rate = float(self.demuxer.FrameRate())
+        self._eof = False
+        self._pending_frames: list[torch.Tensor] = []
+
+    def decode_next(self, count: int) -> list[torch.Tensor]:
+        frames: list[torch.Tensor] = []
+        if self._pending_frames:
+            take = min(count, len(self._pending_frames))
+            frames.extend(self._pending_frames[:take])
+            self._pending_frames = self._pending_frames[take:]
+        while len(frames) < count and not self._eof:
+            try:
+                packet = next(self.packet_iter)
+            except StopIteration:
+                self._eof = True
+                break
+            for frame in self.decoder.Decode(packet):
+                tensor = torch.from_dlpack(frame)
+                if len(frames) < count:
+                    frames.append(tensor)
+                else:
+                    self._pending_frames.append(tensor)
+        return frames
+
+    def close(self) -> None:
+        self._pending_frames = []
+        self.packet_iter = iter(())
+        del self.decoder
+        del self.demuxer
+
+
+def _preprocess_pynvvc_luma_rgb(
+    raw_frames: Sequence[torch.Tensor],
+    *,
+    source_height: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    resize: Optional[tuple[int, int]],
+) -> torch.Tensor:
+    if resize is None:
+        raise ValueError(f"{BACKEND_PYNVVC_LUMA_RGB} requires a resolved resize.")
+
+    width, height = int(resize[0]), int(resize[1])
+    y_planes = [frame[:source_height, :].contiguous() for frame in raw_frames]
+    luma = torch.stack(y_planes, dim=0).unsqueeze(1).to(
+        device=device,
+        dtype=dtype,
+        non_blocking=True,
+    )
+    resized = F.interpolate(
+        luma,
+        size=(height, width),
+        mode="bilinear",
+        align_corners=False,
+    )
+    rgb = resized.expand(-1, 3, -1, -1).mul(1.0 / 255.0)
+    return rgb.contiguous(memory_format=torch.channels_last)
+
+
+def _release_reader_info(reader_info: Dict[str, Any]) -> None:
+    if reader_info["backend"] == BACKEND_PYNVVC_LUMA_RGB:
+        reader_info["reader"].close()
+        return
+    stage._release_reader(reader_info)
 
 
 def _count_batches(frame_start: int, frame_end: int, batch_size: int) -> int:
@@ -315,6 +413,13 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     device = torch.device(device_str)
     use_fp16 = device.type == "cuda" and not args.force_fp32
     dtype = torch.float16 if use_fp16 else torch.float32
+    if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+        if device.type != "cuda":
+            raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires CUDA device inference.")
+        if resize is None:
+            raise RuntimeError(
+                f"{BACKEND_PYNVVC_LUMA_RGB} requires detection.resize_dims or --resize."
+            )
 
     frame_start = int(args.start_frame)
     frame_end = _resolve_frame_end(
@@ -388,7 +493,18 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     payload["model_optimization"] = model_optimization
 
     t0 = _start_span(payload["stage_spans"], "video_open")
-    reader_info = stage._resolve_backend_reader(video_path, args.decode_backend, frame_start)
+    if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+        pynvvc_reader = _PynvvcLumaRgbReader(video_path, start_frame=frame_start, gpu_id=0)
+        reader_info = {"backend": BACKEND_PYNVVC_LUMA_RGB, "reader": pynvvc_reader}
+        payload["inputs"]["pynvvc"] = {
+            "codec": pynvvc_reader.codec,
+            "frame_rate": pynvvc_reader.frame_rate,
+            "source_width": pynvvc_reader.source_width,
+            "source_height": pynvvc_reader.source_height,
+            "preprocess_mode": "luma_rgb",
+        }
+    else:
+        reader_info = stage._resolve_backend_reader(video_path, args.decode_backend, frame_start)
     video_open_seconds = _end_span(payload["stage_spans"], "video_open", t0)
     payload["stages"]["video_open_seconds"] = float(video_open_seconds)
 
@@ -406,22 +522,40 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             indices = list(range(batch_start, batch_end))
 
             t_decode = time.perf_counter()
-            decoded = stage._decode_batch(reader_info, indices)
-            if args.decode_backend == stage.BACKEND_DECORD_GPU and torch.cuda.is_available():
+            if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+                decoded = reader_info["reader"].decode_next(len(indices))
+            else:
+                decoded = stage._decode_batch(reader_info, indices)
+            if (
+                args.decode_backend in {stage.BACKEND_DECORD_GPU, BACKEND_PYNVVC_LUMA_RGB}
+                and torch.cuda.is_available()
+            ):
                 torch.cuda.synchronize()
             decode_seconds = time.perf_counter() - t_decode
-            actual_count = _decoded_count(decoded, args.decode_backend)
+            if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+                actual_count = len(decoded)
+            else:
+                actual_count = _decoded_count(decoded, args.decode_backend)
             if actual_count <= 0:
                 break
 
             t_preprocess = time.perf_counter()
-            processed = stage._preprocess_batch(
-                decoded=decoded,
-                backend=args.decode_backend,
-                device=device,
-                dtype=dtype,
-                resize=resize,
-            )
+            if args.decode_backend == BACKEND_PYNVVC_LUMA_RGB:
+                processed = _preprocess_pynvvc_luma_rgb(
+                    decoded,
+                    source_height=reader_info["reader"].source_height,
+                    device=device,
+                    dtype=dtype,
+                    resize=resize,
+                )
+            else:
+                processed = stage._preprocess_batch(
+                    decoded=decoded,
+                    backend=args.decode_backend,
+                    device=device,
+                    dtype=dtype,
+                    resize=resize,
+                )
             if device.type == "cuda":
                 torch.cuda.synchronize()
             preprocess_seconds = time.perf_counter() - t_preprocess
@@ -488,7 +622,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             del processed
             del decoded
     finally:
-        stage._release_reader(reader_info)
+        _release_reader_info(reader_info)
 
     total_seconds = time.perf_counter() - t_total
     total_end_utc = _now_iso()

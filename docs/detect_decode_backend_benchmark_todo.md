@@ -27,7 +27,9 @@ Purpose: compare Decord-based decode against native decode paths (including Crim
 1. Decord GPU decode (`detect_yolo` current primary path).
 2. Decord CPU decode.
 3. OpenCV decode fallback.
-4. Crimson/native FFmpeg decode path (external integration path).
+4. PyNvVideoCodec sequential NVDEC luma path (`pynvvc_luma_rgb`,
+   experimental compute-smoke path).
+5. Crimson/native FFmpeg decode path (external integration path).
 
 ## Benchmark fixture
 
@@ -82,6 +84,27 @@ Decord startup still has a real one-time open cost for very large MP4s
 initialization rather than PRFS versus local storage, because local `/tmp` did
 not reduce it.
 
+Important follow-up: for the same `172 GB` MP4, Decord's one-time open cost was
+much larger in production-scale compute-smoke runs (`~214-246s`). Source review
+showed Decord's `VideoReader` unconditionally indexes keyframes by scanning
+packets before returning. This makes Decord a poor fit for "start at frame 0,
+stream sequentially once" jobs on very large MP4s.
+
+2026-05-14 PyNvVideoCodec sequential probe on the same recording:
+
+- Demuxer startup: `~0.03s`
+- Decoder startup: `~0.13s`
+- First frame: `~0.06s`
+- Sequential decode: `1600` frames in `~13.5s` (`~118 fps`)
+- Luma-to-RGB resize/preprocess: `~1900 fps` for `640x640`, batch `16`
+
+`pynvvc_luma_rgb` is now available in
+`fisheye.diagnostics.detect_compute_smoke` as an experimental backend. It
+streams sequentially from frame `0`, reads the NV12 luma plane, resizes on CUDA,
+replicates luma into RGB channels, and feeds tensor batches to YOLO. It is
+intended for grayscale detection smoke/profiling only until output parity is
+validated against the production Decord RGB path.
+
 2026-05-14 compute-smoke follow-up:
 
 - The compute-only detection smoke aligns with the production Decord-GPU tensor
@@ -97,6 +120,27 @@ not reduce it.
 - For short smoke runs, use `steady_state_excluding_first_batch` rather than
   aggregate `inference_fps` when judging model throughput, because the first
   batch includes Ultralytics/PyTorch warmup effects.
+
+Example LSF smoke using the sequential PyNvVideoCodec luma backend:
+
+```bash
+scripts/submit_detect_compute_smoke_bsub.sh \
+  --video /groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
+  --config configs/fisheye/yolo_detect_config.yaml \
+  --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
+  --decode-backend pynvvc_luma_rgb \
+  --batch-size 16 \
+  --max-batches 100 \
+  --run-label sickyfish_cam2010093_pynvvc_luma
+```
+
+Validate the result:
+
+```bash
+scripts/py scripts/check_detect_compute_smoke.py \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/sickyfish_cam2010093_pynvvc_luma.<JOBID>.json
+```
 
 ## Metrics to collect
 
@@ -136,4 +180,6 @@ not reduce it.
 ## Operator notes
 
 - Keep current Decord path as default until benchmark conclusion.
+- Treat `pynvvc_luma_rgb` as an experimental sequential smoke backend; it is
+  not yet the production detector backend.
 - Treat Crimson/native path as experimental behind explicit flag.

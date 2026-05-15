@@ -93,6 +93,27 @@ def test_check_detect_compute_smoke_accepts_valid_report(tmp_path: Path, capsys)
     assert "backend: decord_gpu" in out
 
 
+def test_check_detect_compute_smoke_accepts_pynvvc_luma_backend(
+    tmp_path: Path, capsys
+) -> None:
+    report = tmp_path / "smoke.json"
+    _write_smoke_json(
+        report,
+        inputs={
+            "decode_backend": "pynvvc_luma_rgb",
+            "device": "cuda",
+            "fp16": True,
+        },
+    )
+
+    rc = mod.main([str(report)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "validation: ok" in out
+    assert "backend: pynvvc_luma_rgb" in out
+
+
 def test_check_detect_compute_smoke_rejects_canonical_write(tmp_path: Path, capsys) -> None:
     report = tmp_path / "smoke.json"
     _write_smoke_json(report, canonical_outputs_written=True)

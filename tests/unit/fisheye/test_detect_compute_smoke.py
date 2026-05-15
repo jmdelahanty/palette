@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from fisheye.diagnostics import detect_compute_smoke as mod
 
@@ -129,6 +130,28 @@ def test_compute_smoke_runs_without_canonical_writes(monkeypatch, tmp_path: Path
     assert fake_model.device == "cpu"
     assert fake_model.predict_calls[0][1]["device"] == "cpu"
     assert fake_model.predict_calls[0][1]["half"] is False
+
+
+def test_pynvvc_luma_rgb_preprocess_uses_luma_plane_only() -> None:
+    source_height = 4
+    source_width = 4
+    nv12_frame = torch.arange(source_height * 3 // 2 * source_width, dtype=torch.uint8).reshape(
+        source_height * 3 // 2, source_width
+    )
+
+    batch = mod._preprocess_pynvvc_luma_rgb(
+        [nv12_frame],
+        source_height=source_height,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        resize=(2, 2),
+    )
+
+    assert list(batch.shape) == [1, 3, 2, 2]
+    assert batch.is_contiguous(memory_format=torch.channels_last)
+    assert torch.equal(batch[:, 0], batch[:, 1])
+    assert torch.equal(batch[:, 1], batch[:, 2])
+    assert torch.all((batch >= 0.0) & (batch <= 1.0))
 
 
 def test_compute_smoke_requires_bounded_frame_selection(tmp_path: Path) -> None:

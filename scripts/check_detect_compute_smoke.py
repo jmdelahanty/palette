@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+CUDA_DECODE_BACKENDS = {"decord_gpu", "pynvvc_luma_rgb"}
+
 
 def _get_nested(payload: dict[str, Any], *keys: str) -> Any:
     current: Any = payload
@@ -37,10 +39,11 @@ def _validate_payload(payload: dict[str, Any]) -> list[str]:
         failures.append(f"status is {payload.get('status')!r}, expected 'ok'")
     if payload.get("canonical_outputs_written") is not False:
         failures.append("canonical_outputs_written is not false")
-    if _get_nested(payload, "inputs", "decode_backend") != "decord_gpu":
+    decode_backend = _get_nested(payload, "inputs", "decode_backend")
+    if decode_backend not in CUDA_DECODE_BACKENDS:
         failures.append(
             "decode_backend is "
-            f"{_get_nested(payload, 'inputs', 'decode_backend')!r}, expected 'decord_gpu'"
+            f"{decode_backend!r}, expected one of {sorted(CUDA_DECODE_BACKENDS)!r}"
         )
     if _get_nested(payload, "inputs", "device") != "cuda":
         failures.append(f"device is {_get_nested(payload, 'inputs', 'device')!r}, expected 'cuda'")

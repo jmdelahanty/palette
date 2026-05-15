@@ -48,8 +48,9 @@ same from PRFS and from a local `/tmp` copy:
 | local `/tmp/...` copy | `100.7 fps` |
 
 The full copy to `/tmp` took `3m15s`, so copying the source video was net
-negative for this single-pass workload. The current default should be to stream
-from PRFS while keeping one Decord `VideoReader` open per video/job.
+negative for this single-pass workload. For Decord-based jobs, the current
+default should be to stream from PRFS while keeping one `VideoReader` open per
+video/job.
 
 The `/tmp` path in that benchmark was only a workstation-style comparison
 point. On Janelia compute nodes, use `/scratch/$USER/$LSB_JOBID` for
@@ -60,6 +61,13 @@ reopens the same video, performs heavy random seeking, or a benchmark shows
 shared-storage throughput is limiting that stage. Scratch remains the preferred
 place for temporary outputs and run-group artifacts; this policy is only about
 pre-copying large input videos.
+
+For very large MP4s, Decord can still have a large one-time open cost because
+it indexes keyframes before returning a `VideoReader`. For sequential
+start-at-frame-0 compute smokes on grayscale detection models, prefer the
+experimental `pynvvc_luma_rgb` backend to test whether direct PyNvVideoCodec
+NVDEC streaming avoids that startup cost. Keep Decord as the production default
+until detection output parity is validated.
 
 For the benchmark protocol and current measurements, see
 `docs/detect_decode_backend_benchmark_todo.md`.
