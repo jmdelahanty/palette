@@ -251,10 +251,10 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 
 ## Integration tasks
 
-1. Add benchmark runner script that emits one JSON summary per run.
-2. Add backend selector abstraction for decode path (where feasible).
+1. Done: add benchmark runner script that emits one JSON summary per run.
+2. Done: add backend selector abstraction for decode path (where feasible).
 3. Add Crimson adapter path (decode-only or decode+detect feed) for apples-to-apples timing.
-4. Add a report script/table formatter for side-by-side comparison.
+4. Done: add a report script/table formatter for side-by-side comparison.
 5. Done for `detect_yolo`: split production timing provenance into read,
    preprocess/resize, predict, postprocess, array assembly, and Zarr write
    phases so CUDA synchronization artifacts do not hide where time is actually
