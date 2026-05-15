@@ -11,7 +11,7 @@ MEM_GB=120
 GPUS=1
 WALLTIME="1:00"
 BACKEND_A="decord_gpu"
-BACKEND_B="pynvvc_luma_rgb"
+BACKEND_B="pynvvc_nv12_rgb"
 BATCH_SIZE=16
 DEVICE="auto"
 RUN_ID=""
@@ -40,7 +40,7 @@ Options:
   --gpus N                 GPU count (default: 1)
   --walltime H:MM          LSF wall time (default: 1:00)
   --backend-a NAME         Reference backend (default: decord_gpu)
-  --backend-b NAME         Candidate backend (default: pynvvc_luma_rgb)
+  --backend-b NAME         Candidate backend (default: pynvvc_nv12_rgb)
   --batch-size N           Frames per decode/preprocess batch (default: 16)
   --device {auto,cuda,cpu} Inference device (default: auto)
   --force-fp32             Disable FP16

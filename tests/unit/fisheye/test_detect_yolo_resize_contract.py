@@ -17,6 +17,7 @@ def test_resize_dims_to_imgsz_returns_scalar_for_square_and_list_for_rectangular
 def test_normalize_decode_backend_defaults_to_auto() -> None:
     assert mod._normalize_decode_backend(None) == "auto"  # noqa: SLF001
     assert mod._normalize_decode_backend("") == "auto"  # noqa: SLF001
+    assert mod._normalize_decode_backend("pynvvc_nv12_rgb") == "pynvvc_nv12_rgb"  # noqa: SLF001
 
 
 def test_normalize_decode_backend_rejects_unknown_backend() -> None:

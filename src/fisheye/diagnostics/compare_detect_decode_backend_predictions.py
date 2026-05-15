@@ -15,8 +15,11 @@ import numpy as np
 import torch
 
 from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_LUMA_RGB
+from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_NV12_RGB
+from fisheye.shared.pynvvc_luma_rgb import PYNVVC_BACKENDS
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
+from fisheye.shared.pynvvc_luma_rgb import preprocess_nv12_rgb
 
 def _default_cache_root() -> Path:
     explicit = os.environ.get("PALETTE_JOB_CACHE")
@@ -56,7 +59,7 @@ from fisheye.diagnostics.detect_compute_smoke import _resolve_smoke_resize
 from fisheye.diagnostics.detect_compute_smoke import _resize_to_imgsz
 
 
-BACKEND_CHOICES = (*stage.BACKEND_CHOICES, BACKEND_PYNVVC_LUMA_RGB)
+BACKEND_CHOICES = (*stage.BACKEND_CHOICES, *PYNVVC_BACKENDS)
 
 
 def _positive_int(value: str) -> int:
@@ -79,7 +82,7 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", type=Path, default=None, help="YOLO model path.")
     parser.add_argument("--config", type=Path, default=None, help="Optional YOLO detect config.")
     parser.add_argument("--backend-a", choices=BACKEND_CHOICES, default=stage.BACKEND_DECORD_GPU)
-    parser.add_argument("--backend-b", choices=BACKEND_CHOICES, default=BACKEND_PYNVVC_LUMA_RGB)
+    parser.add_argument("--backend-b", choices=BACKEND_CHOICES, default=BACKEND_PYNVVC_NV12_RGB)
     parser.add_argument("--frames", nargs="+", type=_non_negative_int, required=True)
     parser.add_argument("--batch-size", type=_positive_int, default=16)
     parser.add_argument(
@@ -112,6 +115,7 @@ def _selected_frames(frames: Sequence[int]) -> list[int]:
 def _decode_pynvvc_frames(
     *,
     video_path: Path,
+    backend: str,
     frames: Sequence[int],
     batch_size: int,
     device: torch.device,
@@ -144,17 +148,28 @@ def _decode_pynvvc_frames(
 
         missing = [frame for frame in frames if frame not in selected_raw]
         if missing:
-            raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} did not decode selected frames: {missing}")
+            raise RuntimeError(f"{backend} did not decode selected frames: {missing}")
 
         ordered = [selected_raw[int(frame)] for frame in frames]
         t0 = time.perf_counter()
-        processed = preprocess_luma_rgb(
-            ordered,
-            source_height=reader.source_height,
-            device=device,
-            dtype=dtype,
-            resize_hw=resize_hw,
-        )
+        if backend == BACKEND_PYNVVC_NV12_RGB:
+            processed = preprocess_nv12_rgb(
+                ordered,
+                source_height=reader.source_height,
+                device=device,
+                dtype=dtype,
+                resize_hw=resize_hw,
+            )
+            preprocess_mode = "nv12_rgb_bt601_limited"
+        else:
+            processed = preprocess_luma_rgb(
+                ordered,
+                source_height=reader.source_height,
+                device=device,
+                dtype=dtype,
+                resize_hw=resize_hw,
+            )
+            preprocess_mode = "luma_rgb"
         preprocess_seconds = time.perf_counter() - t0
         return processed, {
             "decode_seconds": float(decode_seconds),
@@ -163,6 +178,7 @@ def _decode_pynvvc_frames(
             "source_height": int(reader.source_height),
             "frame_rate": float(reader.frame_rate),
             "codec": reader.codec,
+            "preprocess_mode": preprocess_mode,
         }
     finally:
         reader.close()
@@ -227,14 +243,15 @@ def _decode_backend_frames(
     dtype: torch.dtype,
     resize: tuple[int, int] | None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    if backend == BACKEND_PYNVVC_LUMA_RGB:
+    if backend in PYNVVC_BACKENDS:
         if device.type != "cuda":
-            raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires CUDA.")
+            raise RuntimeError(f"{backend} requires CUDA.")
         if resize is None:
-            raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires a resolved resize.")
+            raise RuntimeError(f"{backend} requires a resolved resize.")
         width, height = resize
         return _decode_pynvvc_frames(
             video_path=video_path,
+            backend=backend,
             frames=frames,
             batch_size=batch_size,
             device=device,

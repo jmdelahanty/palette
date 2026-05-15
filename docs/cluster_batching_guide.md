@@ -65,10 +65,13 @@ pre-copying large input videos.
 For very large MP4s, Decord can still have a large one-time open cost because
 it indexes keyframes before returning a `VideoReader`. For sequential
 start-at-frame-0 compute smokes on grayscale detection models, the
-`pynvvc_luma_rgb` backend avoids that startup cost by streaming through
-PyNvVideoCodec/NVDEC and using the NV12 luma plane replicated to RGB. The
+`pynvvc_nv12_rgb` backend avoids that startup cost by streaming through
+PyNvVideoCodec/NVDEC and doing NV12-to-RGB tensor preprocessing on CUDA. The
 production `auto` backend may choose this path on CUDA when PyNvVideoCodec and
 canonical resize dims are available; otherwise it falls back to Decord/OpenCV.
+`pynvvc_luma_rgb` remains available as an explicit faster diagnostic variant,
+but it should not be the default correctness path unless parity is accepted for
+that recording family.
 
 When testing PyNvVideoCodec on the cluster, `--pipeline-mode producer` can be
 used to overlap sequential decode with YOLO inference. Current smoke results
@@ -342,11 +345,11 @@ before running Palette commands; the smoke uses that location for Ultralytics
 config if `YOLO_CONFIG_DIR` is not already set.
 
 Production detection accepts
-`--decode-backend auto|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`. Use
-`auto` for normal cluster jobs. Use explicit `pynvvc_luma_rgb` when you want to
-force the fast sequential NVDEC/luma path for a controlled smoke or batch. Until
-the luma/RGB approximation is accepted for a recording family, compare a PyNv
-candidate against a Decord/OpenCV reference on explicit fixed frames:
+`--decode-backend auto|pynvvc_nv12_rgb|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
+Use `auto` for normal cluster jobs. Use explicit `pynvvc_nv12_rgb` when you want
+to force the sequential NVDEC/NV12-RGB path for a controlled smoke or batch.
+Compare a PyNv candidate against a Decord/OpenCV reference on explicit fixed
+frames before treating it as accepted for a recording family:
 
 ```bash
 scripts/submit_detect_decode_backend_parity_bsub.sh \
@@ -354,7 +357,7 @@ scripts/submit_detect_decode_backend_parity_bsub.sh \
   --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --backend-a decord_gpu \
-  --backend-b pynvvc_luma_rgb \
+  --backend-b pynvvc_nv12_rgb \
   --frames 0 100 500 1000 1500 \
   --batch-size 16 \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \

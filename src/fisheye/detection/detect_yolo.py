@@ -41,8 +41,11 @@ from rich.markup import escape
 from ultralytics import YOLO
 
 from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_LUMA_RGB
+from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_NV12_RGB
+from fisheye.shared.pynvvc_luma_rgb import PYNVVC_BACKENDS
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
+from fisheye.shared.pynvvc_luma_rgb import preprocess_nv12_rgb
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.schema import get_run_group
 from fisheye.utils.import_video_metadata import write_video_metadata
@@ -55,7 +58,7 @@ DECODE_BACKEND_DECORD_CPU = "decord_cpu"
 DECODE_BACKEND_OPENCV = "opencv"
 DECODE_BACKEND_CHOICES = (
     DECODE_BACKEND_AUTO,
-    BACKEND_PYNVVC_LUMA_RGB,
+    *PYNVVC_BACKENDS,
     DECODE_BACKEND_DECORD_GPU,
     DECODE_BACKEND_DECORD_CPU,
     DECODE_BACKEND_OPENCV,
@@ -463,8 +466,8 @@ def detect_yolo(
         batch_size: Frames to process at once (overrides config)
         resize_dims: Canonical inference size [h, w]; mapped to YOLO imgsz
         imgsz: Legacy YOLO inference size alias; normalized into resize_dims
-        decode_backend: Decoder backend (`auto`, `pynvvc_luma_rgb`, `decord_gpu`,
-            `decord_cpu`, or `opencv`)
+        decode_backend: Decoder backend (`auto`, `pynvvc_nv12_rgb`,
+            `pynvvc_luma_rgb`, `decord_gpu`, `decord_cpu`, or `opencv`)
         console: Rich console
         use_gpu: Use GPU for inference (overrides config)
         write_raw_video_metadata: Create/update raw_video attrs (no frames) for registry/provenance
@@ -665,37 +668,42 @@ def detect_yolo(
     use_decord = False
     decode_backend_effective = DECODE_BACKEND_OPENCV
 
-    def _open_pynvvc_reader() -> PynvvcLumaRgbReader:
+    def _open_pynvvc_reader(backend: str) -> PynvvcLumaRgbReader:
         if not use_gpu or not torch.cuda.is_available():
-            raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires CUDA inference.")
+            raise RuntimeError(f"{backend} requires CUDA inference.")
         if requested_resize_dims is None:
             raise RuntimeError(
-                f"{BACKEND_PYNVVC_LUMA_RGB} requires detection.resize_dims or --resize-dims; "
+                f"{backend} requires detection.resize_dims or --resize-dims; "
                 "it emits tensor inputs that must be explicitly resized before YOLO."
             )
         return PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
 
-    if decode_backend_requested in {DECODE_BACKEND_AUTO, BACKEND_PYNVVC_LUMA_RGB}:
-        if decode_backend_requested == BACKEND_PYNVVC_LUMA_RGB or (
+    if decode_backend_requested in {DECODE_BACKEND_AUTO, *PYNVVC_BACKENDS}:
+        pynvvc_backend = (
+            BACKEND_PYNVVC_NV12_RGB
+            if decode_backend_requested == DECODE_BACKEND_AUTO
+            else decode_backend_requested
+        )
+        if decode_backend_requested in PYNVVC_BACKENDS or (
             use_gpu and torch.cuda.is_available() and requested_resize_dims is not None
         ):
             try:
-                pynvvc_reader = _open_pynvvc_reader()
+                pynvvc_reader = _open_pynvvc_reader(pynvvc_backend)
                 n_frames, fps_cv2, width_cv2, height_cv2 = _read_cv2_video_properties(video_path)
                 width = int(pynvvc_reader.source_width or width_cv2)
                 height = int(pynvvc_reader.source_height or height_cv2)
                 fps = float(pynvvc_reader.frame_rate or fps_cv2)
                 if n_frames <= 0:
                     raise RuntimeError("OpenCV metadata did not report a positive frame count.")
-                video_reader_type = BACKEND_PYNVVC_LUMA_RGB
-                decode_backend_effective = BACKEND_PYNVVC_LUMA_RGB
+                video_reader_type = pynvvc_backend
+                decode_backend_effective = pynvvc_backend
                 use_pynvvc = True
-                console.print(f"[green]✓[/green] Using PyNvVideoCodec luma→RGB CUDA decoder")
+                console.print(f"[green]✓[/green] Using PyNvVideoCodec {pynvvc_backend} CUDA decoder")
             except Exception as exc:
                 if pynvvc_reader is not None:
                     pynvvc_reader.close()
                     pynvvc_reader = None
-                if decode_backend_requested == BACKEND_PYNVVC_LUMA_RGB:
+                if decode_backend_requested in PYNVVC_BACKENDS:
                     raise
                 console.print(
                     f"[yellow]PyNvVideoCodec decoder unavailable ({escape(str(exc))}); "
@@ -1084,7 +1092,7 @@ def detect_yolo(
             if pynvvc_reader is None:
                 raise RuntimeError("PyNvVideoCodec reader was not initialized.")
             if effective_input_resize_dims is None:
-                raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires a resolved tensor resize.")
+                raise RuntimeError(f"{decode_backend_effective} requires a resolved tensor resize.")
             device = torch.device('cuda' if use_gpu and torch.cuda.is_available() else 'cpu')
             dtype = torch.float16 if model_fp16 else torch.float32
 
@@ -1101,13 +1109,22 @@ def detect_yolo(
                     break
                 actual_indices = indices[:actual_count]
 
-                processed = preprocess_luma_rgb(
-                    decoded_frames,
-                    source_height=pynvvc_reader.source_height,
-                    device=device,
-                    dtype=dtype,
-                    resize_hw=effective_input_resize_dims,
-                )
+                if decode_backend_effective == BACKEND_PYNVVC_NV12_RGB:
+                    processed = preprocess_nv12_rgb(
+                        decoded_frames,
+                        source_height=pynvvc_reader.source_height,
+                        device=device,
+                        dtype=dtype,
+                        resize_hw=effective_input_resize_dims,
+                    )
+                else:
+                    processed = preprocess_luma_rgb(
+                        decoded_frames,
+                        source_height=pynvvc_reader.source_height,
+                        device=device,
+                        dtype=dtype,
+                        resize_hw=effective_input_resize_dims,
+                    )
 
                 inference_start = time.time()
                 with torch.inference_mode():
@@ -1578,7 +1595,7 @@ Examples:
         choices=DECODE_BACKEND_CHOICES,
         default=None,
         help=(
-            "Video decode backend. Default auto prefers PyNvVideoCodec luma/RGB "
+            "Video decode backend. Default auto prefers PyNvVideoCodec NV12/RGB "
             "on CUDA when available and otherwise falls back to Decord/OpenCV."
         ),
     )

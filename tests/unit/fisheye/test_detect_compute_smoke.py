@@ -171,6 +171,28 @@ def test_pynvvc_luma_rgb_preprocess_uses_luma_plane_only() -> None:
     assert torch.all((batch >= 0.0) & (batch <= 1.0))
 
 
+def test_pynvvc_nv12_rgb_preprocess_converts_neutral_gray() -> None:
+    source_height = 2
+    y = torch.full((source_height, 2), 126, dtype=torch.uint8)
+    uv = torch.full((1, 2), 128, dtype=torch.uint8)
+    nv12_frame = torch.cat((y, uv), dim=0)
+
+    batch = mod._preprocess_pynvvc_frames(
+        [nv12_frame],
+        backend=mod.BACKEND_PYNVVC_NV12_RGB,
+        source_height=source_height,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        resize=(2, 2),
+    )
+
+    assert list(batch.shape) == [1, 3, 2, 2]
+    assert batch.is_contiguous(memory_format=torch.channels_last)
+    assert torch.allclose(batch[:, 0], batch[:, 1])
+    assert torch.allclose(batch[:, 1], batch[:, 2])
+    assert torch.all((batch >= 0.0) & (batch <= 1.0))
+
+
 def test_pynvvc_producer_pipeline_processes_batches() -> None:
     reader = _FakePynvvcReader(total_frames=4)
     model = _FakeYOLO("fake.pt")
@@ -187,6 +209,7 @@ def test_pynvvc_producer_pipeline_processes_batches() -> None:
         device=torch.device("cpu"),
         dtype=torch.float32,
         resize=(2, 2),
+        decode_backend=mod.BACKEND_PYNVVC_LUMA_RGB,
         predict_kwargs={
             "conf": 0.4,
             "iou": 0.45,

@@ -35,6 +35,11 @@ def test_prediction_rows_normalizes_xyxy_boxes() -> None:
     assert rows[0]["class_ids"] == [1]
 
 
+def test_parse_args_defaults_candidate_to_nv12_backend() -> None:
+    args = mod._parse_args(["video.mp4", "--frames", "0"])  # noqa: SLF001
+    assert args.backend_b == "pynvvc_nv12_rgb"
+
+
 def test_compare_rows_reports_mismatches_and_diffs() -> None:
     rows_a = [
         {"frame": 0, "count": 1, "boxes_norm": [[0.1, 0.2, 0.3, 0.4]], "scores": [0.9], "class_ids": [0]},

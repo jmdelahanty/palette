@@ -27,8 +27,8 @@ Purpose: compare Decord-based decode against native decode paths (including Crim
 1. Decord GPU decode (`detect_yolo` current primary path).
 2. Decord CPU decode.
 3. OpenCV decode fallback.
-4. PyNvVideoCodec sequential NVDEC luma path (`pynvvc_luma_rgb`,
-   experimental compute-smoke path).
+4. PyNvVideoCodec sequential NVDEC path (`pynvvc_nv12_rgb` default candidate;
+   `pynvvc_luma_rgb` fast diagnostic variant).
 5. Crimson/native FFmpeg decode path (external integration path).
 
 ## Benchmark fixture
@@ -95,15 +95,17 @@ stream sequentially once" jobs on very large MP4s.
 - Demuxer startup: `~0.03s`
 - Decoder startup: `~0.13s`
 - First frame: `~0.06s`
-- Sequential decode: `1600` frames in `~13.5s` (`~118 fps`)
+- Sequential luma decode: `1600` frames in `~13.5s` (`~118 fps`)
 - Luma-to-RGB resize/preprocess: `~1900 fps` for `640x640`, batch `16`
+- NV12-to-RGB resize/preprocess: `~680 fps` for `640x640`, batch `16`
 
-`pynvvc_luma_rgb` is now available in
-`fisheye.diagnostics.detect_compute_smoke` as an experimental backend. It
-streams sequentially from frame `0`, reads the NV12 luma plane, resizes on CUDA,
-replicates luma into RGB channels, and feeds tensor batches to YOLO. It is
-intended for grayscale detection smoke/profiling only until output parity is
-validated against the production Decord RGB path.
+`pynvvc_nv12_rgb` and `pynvvc_luma_rgb` are available in
+`fisheye.diagnostics.detect_compute_smoke`. Both stream sequentially from frame
+`0` through PyNvVideoCodec/NVDEC and feed tensor batches to YOLO. The NV12/RGB
+backend performs BT.601 limited-range color conversion after resizing the Y, U,
+and V planes and is the correctness-oriented default candidate. The luma/RGB
+backend replicates the NV12 luma plane into RGB channels and remains a fast
+diagnostic variant.
 
 `--pipeline-mode producer` adds a bounded producer/consumer diagnostic for this
 backend. The producer owns sequential PyNvVideoCodec demux/decode and buffers a
@@ -137,23 +139,23 @@ until their producing streams have finished.
 
 2026-05-15 PyNvVideoCodec follow-up:
 
-- The simple sequential `pynvvc_luma_rgb` backend is the current preferred
-  cluster path for high-resolution grayscale detection. On the sickyfish
-  PRFS smoke video, it avoided the Decord `VideoReader` open scan and processed
-  1600 frames at 72.9 end-to-end FPS.
+- The simple sequential `pynvvc_luma_rgb` backend avoided the Decord
+  `VideoReader` open scan and processed 1600 frames at 72.9 end-to-end FPS on
+  the sickyfish PRFS smoke video.
 - The producer/consumer experiment was tested and is not currently beneficial.
   On the same 1600-frame smoke, producer mode dropped to 62.7 end-to-end FPS
   because queue wait/coordination outweighed overlap benefits.
-- Production `detect_yolo` now accepts `--decode-backend auto|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
-  The `auto` backend may use `pynvvc_luma_rgb` when CUDA, PyNvVideoCodec, and
+- Production `detect_yolo` now accepts
+  `--decode-backend auto|pynvvc_nv12_rgb|pynvvc_luma_rgb|decord_gpu|decord_cpu|opencv`.
+  The `auto` backend may use `pynvvc_nv12_rgb` when CUDA, PyNvVideoCodec, and
   canonical resize dims are available; otherwise it falls back to Decord/OpenCV.
-- `pynvvc_luma_rgb` currently uses the NV12 luma plane replicated to RGB. Before
-  making it the only backend, compare fixed-frame backend predictions with
-  `fisheye.diagnostics.compare_detect_decode_backend_predictions`. If those
-  pass, a second optional check can compare two persisted `detect_runs` with
-  `fisheye.diagnostics.compare_detection_runs`.
+- A fixed-frame `decord_gpu` vs `pynvvc_luma_rgb` parity run matched detection
+  counts/classes but showed non-trivial box/score drift, so luma/RGB should not
+  be the default correctness path. Re-run fixed-frame backend parity with
+  `pynvvc_nv12_rgb`; if that passes, a second optional check can compare two
+  persisted `detect_runs` with `fisheye.diagnostics.compare_detection_runs`.
 
-Example LSF smoke using the sequential PyNvVideoCodec luma backend:
+Example LSF smoke using the sequential PyNvVideoCodec NV12/RGB backend:
 
 ```bash
 scripts/submit_detect_compute_smoke_bsub.sh \
@@ -161,17 +163,17 @@ scripts/submit_detect_compute_smoke_bsub.sh \
   --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
-  --decode-backend pynvvc_luma_rgb \
+  --decode-backend pynvvc_nv12_rgb \
   --batch-size 16 \
   --max-batches 100 \
-  --run-label sickyfish_cam2010093_pynvvc_luma
+  --run-label sickyfish_cam2010093_pynvvc_nv12
 ```
 
 Validate the result:
 
 ```bash
 scripts/py scripts/check_detect_compute_smoke.py \
-  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/sickyfish_cam2010093_pynvvc_luma.<JOBID>.json
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/sickyfish_cam2010093_pynvvc_nv12.<JOBID>.json
 ```
 
 Fixed-frame backend parity command:
@@ -182,7 +184,7 @@ scripts/submit_detect_decode_backend_parity_bsub.sh \
   --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --backend-a decord_gpu \
-  --backend-b pynvvc_luma_rgb \
+  --backend-b pynvvc_nv12_rgb \
   --frames 0 100 500 1000 1500 \
   --batch-size 16 \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
@@ -197,7 +199,7 @@ scripts/py -m fisheye.diagnostics.compare_detect_decode_backend_predictions \
   --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --backend-a decord_gpu \
-  --backend-b pynvvc_luma_rgb \
+  --backend-b pynvvc_nv12_rgb \
   --frames 0 100 500 1000 1500 \
   --batch-size 16 \
   --fail-on-count-mismatch \
@@ -249,7 +251,7 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
 ## Operator notes
 
 - Production `detect_yolo` now defaults to `--decode-backend auto`.
-- `auto` prefers `pynvvc_luma_rgb` on CUDA when PyNvVideoCodec is available
+- `auto` prefers `pynvvc_nv12_rgb` on CUDA when PyNvVideoCodec is available
   and canonical resize dims are configured, because that path avoids Decord's
   long-video keyframe-index startup scan.
 - Decord remains the fallback path when PyNvVideoCodec, CUDA, or resize dims

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-CUDA_DECODE_BACKENDS = {"decord_gpu", "pynvvc_luma_rgb"}
+CUDA_DECODE_BACKENDS = {"decord_gpu", "pynvvc_luma_rgb", "pynvvc_nv12_rgb"}
 
 
 def _get_nested(payload: dict[str, Any], *keys: str) -> Any:

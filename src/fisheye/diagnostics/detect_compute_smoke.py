@@ -57,12 +57,15 @@ _ensure_headless_cache_env()
 
 from fisheye.diagnostics import benchmark_detect_stage_split as stage
 from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_LUMA_RGB
+from fisheye.shared.pynvvc_luma_rgb import BACKEND_PYNVVC_NV12_RGB
+from fisheye.shared.pynvvc_luma_rgb import PYNVVC_BACKENDS
 from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
 from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
+from fisheye.shared.pynvvc_luma_rgb import preprocess_nv12_rgb
 
 
 BACKEND_AUTO = "auto"
-BACKEND_CHOICES = (BACKEND_AUTO, *stage.BACKEND_CHOICES, BACKEND_PYNVVC_LUMA_RGB)
+BACKEND_CHOICES = (BACKEND_AUTO, *stage.BACKEND_CHOICES, *PYNVVC_BACKENDS)
 PIPELINE_SEQUENTIAL = "sequential"
 PIPELINE_PRODUCER = "producer"
 PIPELINE_CHOICES = (PIPELINE_SEQUENTIAL, PIPELINE_PRODUCER)
@@ -102,7 +105,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         choices=BACKEND_CHOICES,
         default=BACKEND_AUTO,
         help=(
-            "Decode backend to smoke. Default auto prefers pynvvc_luma_rgb "
+            "Decode backend to smoke. Default auto prefers pynvvc_nv12_rgb "
             "on CUDA when resize dims are available, then falls back to Decord."
         ),
     )
@@ -151,8 +154,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=PIPELINE_SEQUENTIAL,
         help=(
             "Execution mode. 'producer' overlaps sequential PyNvVideoCodec decode "
-            "with YOLO inference and is currently valid only with --decode-backend "
-            f"{BACKEND_PYNVVC_LUMA_RGB}."
+            "with YOLO inference and is currently valid only with PyNvVideoCodec "
+            "backends."
         ),
     )
     parser.add_argument(
@@ -223,8 +226,35 @@ def _preprocess_pynvvc_luma_rgb(
     )
 
 
+def _preprocess_pynvvc_frames(
+    raw_frames: Sequence[torch.Tensor],
+    *,
+    backend: str,
+    source_height: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    resize: Optional[tuple[int, int]],
+) -> torch.Tensor:
+    resize_hw = (int(resize[1]), int(resize[0])) if resize is not None else None
+    if backend == BACKEND_PYNVVC_NV12_RGB:
+        return preprocess_nv12_rgb(
+            raw_frames,
+            source_height=source_height,
+            device=device,
+            dtype=dtype,
+            resize_hw=resize_hw,
+        )
+    return preprocess_luma_rgb(
+        raw_frames,
+        source_height=source_height,
+        device=device,
+        dtype=dtype,
+        resize_hw=resize_hw,
+    )
+
+
 def _release_reader_info(reader_info: Dict[str, Any]) -> None:
-    if reader_info["backend"] == BACKEND_PYNVVC_LUMA_RGB:
+    if reader_info["backend"] in PYNVVC_BACKENDS:
         reader_info["reader"].close()
         return
     stage._release_reader(reader_info)
@@ -386,6 +416,7 @@ def _run_pynvvc_producer_pipeline(
     device: torch.device,
     dtype: torch.dtype,
     resize: tuple[int, int],
+    decode_backend: str,
     predict_kwargs: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Overlap sequential PyNvVideoCodec decode with model inference.
@@ -474,8 +505,9 @@ def _run_pynvvc_producer_pipeline(
 
             t_consumer = time.perf_counter()
             t_preprocess = time.perf_counter()
-            processed = _preprocess_pynvvc_luma_rgb(
+            processed = _preprocess_pynvvc_frames(
                 batch.decoded,
+                backend=decode_backend,
                 source_height=reader.source_height,
                 device=device,
                 dtype=dtype,
@@ -599,23 +631,23 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     decode_backend_effective = decode_backend_requested
     if decode_backend_requested == BACKEND_AUTO:
         if device.type == "cuda" and resize is not None:
-            decode_backend_effective = BACKEND_PYNVVC_LUMA_RGB
+            decode_backend_effective = BACKEND_PYNVVC_NV12_RGB
         elif device.type == "cuda":
             decode_backend_effective = stage.BACKEND_DECORD_GPU
         else:
             decode_backend_effective = stage.BACKEND_DECORD_CPU
 
-    if pipeline_mode != PIPELINE_SEQUENTIAL and decode_backend_effective != BACKEND_PYNVVC_LUMA_RGB:
+    if pipeline_mode != PIPELINE_SEQUENTIAL and decode_backend_effective not in PYNVVC_BACKENDS:
         raise RuntimeError(
             f"--pipeline-mode {pipeline_mode!r} is currently valid only with "
-            f"--decode-backend {BACKEND_PYNVVC_LUMA_RGB}."
+            f"a PyNvVideoCodec backend."
         )
-    if decode_backend_effective == BACKEND_PYNVVC_LUMA_RGB:
+    if decode_backend_effective in PYNVVC_BACKENDS:
         if device.type != "cuda":
-            raise RuntimeError(f"{BACKEND_PYNVVC_LUMA_RGB} requires CUDA device inference.")
+            raise RuntimeError(f"{decode_backend_effective} requires CUDA device inference.")
         if resize is None:
             raise RuntimeError(
-                f"{BACKEND_PYNVVC_LUMA_RGB} requires detection.resize_dims or --resize."
+                f"{decode_backend_effective} requires detection.resize_dims or --resize."
             )
 
     frame_start = int(args.start_frame)
@@ -700,16 +732,20 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
     payload["model_optimization"] = model_optimization
 
     t0 = _start_span(payload["stage_spans"], "video_open")
-    if decode_backend_effective == BACKEND_PYNVVC_LUMA_RGB:
+    if decode_backend_effective in PYNVVC_BACKENDS:
         try:
             pynvvc_reader = PynvvcLumaRgbReader(video_path, start_frame=frame_start, gpu_id=0)
-            reader_info = {"backend": BACKEND_PYNVVC_LUMA_RGB, "reader": pynvvc_reader}
+            reader_info = {"backend": decode_backend_effective, "reader": pynvvc_reader}
             payload["inputs"]["pynvvc"] = {
                 "codec": pynvvc_reader.codec,
                 "frame_rate": pynvvc_reader.frame_rate,
                 "source_width": pynvvc_reader.source_width,
                 "source_height": pynvvc_reader.source_height,
-                "preprocess_mode": "luma_rgb",
+                "preprocess_mode": (
+                    "nv12_rgb_bt601_limited"
+                    if decode_backend_effective == BACKEND_PYNVVC_NV12_RGB
+                    else "luma_rgb"
+                ),
             }
         except Exception:
             if decode_backend_requested != BACKEND_AUTO:
@@ -718,7 +754,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             if pipeline_mode != PIPELINE_SEQUENTIAL:
                 raise RuntimeError(
                     f"--pipeline-mode {pipeline_mode!r} requires "
-                    f"{BACKEND_PYNVVC_LUMA_RGB}; auto could not open that backend."
+                    f"a PyNvVideoCodec backend; auto could not open that backend."
                 )
             payload["inputs"]["decode_backend"] = decode_backend_effective
             reader_info = stage._resolve_backend_reader(
@@ -763,6 +799,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 device=device,
                 dtype=dtype,
                 resize=resize,
+                decode_backend=decode_backend_effective,
                 predict_kwargs=predict_kwargs,
             )
             frames_processed = int(pipeline_result["frames_processed"])
@@ -790,17 +827,17 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                 indices = list(range(batch_start, batch_end))
 
                 t_decode = time.perf_counter()
-                if decode_backend_effective == BACKEND_PYNVVC_LUMA_RGB:
+                if decode_backend_effective in PYNVVC_BACKENDS:
                     decoded = reader_info["reader"].decode_next(len(indices))
                 else:
                     decoded = stage._decode_batch(reader_info, indices)
                 if (
-                    decode_backend_effective in {stage.BACKEND_DECORD_GPU, BACKEND_PYNVVC_LUMA_RGB}
+                    decode_backend_effective in {stage.BACKEND_DECORD_GPU, *PYNVVC_BACKENDS}
                     and torch.cuda.is_available()
                 ):
                     torch.cuda.synchronize()
                 decode_seconds = time.perf_counter() - t_decode
-                if decode_backend_effective == BACKEND_PYNVVC_LUMA_RGB:
+                if decode_backend_effective in PYNVVC_BACKENDS:
                     actual_count = len(decoded)
                 else:
                     actual_count = _decoded_count(decoded, decode_backend_effective)
@@ -808,9 +845,10 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                     break
 
                 t_preprocess = time.perf_counter()
-                if decode_backend_effective == BACKEND_PYNVVC_LUMA_RGB:
-                    processed = _preprocess_pynvvc_luma_rgb(
+                if decode_backend_effective in PYNVVC_BACKENDS:
+                    processed = _preprocess_pynvvc_frames(
                         decoded,
+                        backend=decode_backend_effective,
                         source_height=reader_info["reader"].source_height,
                         device=device,
                         dtype=dtype,

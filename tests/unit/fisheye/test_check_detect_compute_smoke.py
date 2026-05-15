@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts import check_detect_compute_smoke as mod
 
 
@@ -93,14 +95,15 @@ def test_check_detect_compute_smoke_accepts_valid_report(tmp_path: Path, capsys)
     assert "backend: decord_gpu" in out
 
 
-def test_check_detect_compute_smoke_accepts_pynvvc_luma_backend(
-    tmp_path: Path, capsys
+@pytest.mark.parametrize("backend", ["pynvvc_luma_rgb", "pynvvc_nv12_rgb"])
+def test_check_detect_compute_smoke_accepts_pynvvc_backends(
+    backend: str, tmp_path: Path, capsys
 ) -> None:
     report = tmp_path / "smoke.json"
     _write_smoke_json(
         report,
         inputs={
-            "decode_backend": "pynvvc_luma_rgb",
+            "decode_backend": backend,
             "device": "cuda",
             "fp16": True,
         },
@@ -111,7 +114,7 @@ def test_check_detect_compute_smoke_accepts_pynvvc_luma_backend(
     assert rc == 0
     out = capsys.readouterr().out
     assert "validation: ok" in out
-    assert "backend: pynvvc_luma_rgb" in out
+    assert f"backend: {backend}" in out
 
 
 def test_check_detect_compute_smoke_rejects_canonical_write(tmp_path: Path, capsys) -> None:
