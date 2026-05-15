@@ -57,9 +57,23 @@ def _short_path(path: Path) -> str:
     return f"{name[:20]}...{name[-20:]}"
 
 
-def _row_from_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+def _is_crimson_decode_payload(payload: dict[str, Any]) -> bool:
+    return any(
+        key in payload
+        for key in (
+            "decoder_backend",
+            "crimson_git_commit",
+            "frames_decoded",
+            "open_seconds",
+            "decode_seconds",
+        )
+    )
+
+
+def _row_from_palette_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     failures = check_detect_compute_smoke._validate_payload(payload)  # noqa: SLF001
     return {
+        "source": "palette_compute_smoke",
         "path": str(path),
         "file": _short_path(path),
         "ok": not failures,
@@ -94,6 +108,56 @@ def _row_from_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             payload, "summary", "first_batch", "predict_return_seconds"
         ),
     }
+
+
+def _row_from_crimson_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    failures: list[str] = []
+    if payload.get("status") != "ok":
+        failures.append(f"status is {payload.get('status')!r}, expected 'ok'")
+    if _as_int(payload.get("frames_decoded") or payload.get("frames_requested")) is None:
+        failures.append("frames_decoded/frames_requested is missing")
+    if _as_float(payload.get("total_seconds")) is None:
+        failures.append("total_seconds is missing")
+    if _as_float(payload.get("end_to_end_fps")) is None:
+        failures.append("end_to_end_fps is missing")
+    backend = payload.get("decoder_backend") or payload.get("backend")
+    if not backend:
+        failures.append("decoder_backend is missing")
+    return {
+        "source": "crimson_decode_smoke",
+        "path": str(path),
+        "file": _short_path(path),
+        "ok": not failures,
+        "failures": failures,
+        "status": payload.get("status"),
+        "backend": backend,
+        "backend_requested": None,
+        "pipeline": "decode_only",
+        "timing_policy": payload.get("timing_policy"),
+        "device": "cuda" if payload.get("gpu_name") else None,
+        "host": payload.get("host") or payload.get("hostname"),
+        "job": payload.get("job_id"),
+        "frames": payload.get("frames_decoded") or payload.get("frames_requested"),
+        "batches": None,
+        "detections": None,
+        "total_s": payload.get("total_seconds"),
+        "e2e_fps": payload.get("end_to_end_fps"),
+        "inference_fps": None,
+        "steady_inference_fps": None,
+        "video_open_s": payload.get("open_seconds") or payload.get("init_seconds"),
+        "decode_s": payload.get("decode_seconds"),
+        "preprocess_s": None,
+        "predict_return_s": None,
+        "first_predict_s": None,
+        "gpu_name": payload.get("gpu_name"),
+        "git_commit": payload.get("crimson_git_commit"),
+    }
+
+
+def _row_from_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    if _is_crimson_decode_payload(payload):
+        return _row_from_crimson_payload(path, payload)
+    return _row_from_palette_payload(path, payload)
 
 
 def _load_rows(paths: Iterable[Path]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -133,6 +197,7 @@ def _sort_rows(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
 def _render_markdown(rows: list[dict[str, Any]]) -> str:
     headers = [
         "ok",
+        "source",
         "backend",
         "pipeline",
         "frames",
@@ -155,6 +220,7 @@ def _render_markdown(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         values = [
             "yes" if row["ok"] else "no",
+            str(row.get("source") or "-"),
             str(row.get("backend") or "-"),
             str(row.get("pipeline") or "-"),
             _fmt_int(row.get("frames")),

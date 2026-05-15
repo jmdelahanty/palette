@@ -385,13 +385,14 @@ scripts/py scripts/check_detect_decode_backend_parity.py \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/<camera>_decode_parity.<JOBID>.json
 ```
 
-When comparing compute-smoke runs, use the multi-report formatter rather than
-reading individual JSON files by hand:
+When comparing compute-smoke or Crimson/native decode-smoke runs, use the
+multi-report formatter rather than reading individual JSON files by hand:
 
 ```bash
 scripts/py scripts/report_detect_compute_smokes.py \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<decord-run>/*.json \
-  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<pynvvc-run>/*.json
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<pynvvc-run>/*.json \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<crimson-decode-run>/*.json
 ```
 
 After writing two persisted detect runs, compare the stored artifacts:

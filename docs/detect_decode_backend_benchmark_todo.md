@@ -302,7 +302,8 @@ Minimum Crimson-side acceptance criteria:
 3. Keep the Crimson path behind an explicit diagnostic flag/script; do not make
    it a Palette production dependency.
 4. Compare the resulting JSON next to Palette compute-smoke reports with
-   `scripts/report_detect_compute_smokes.py` or a Crimson-side equivalent.
+   `scripts/report_detect_compute_smokes.py`; the formatter accepts both
+   Palette compute-smoke JSON and the Crimson decode-smoke fields listed above.
 5. Use the Crimson timing only as an additional candidate in the backend
    decision; Palette default promotion still requires Palette output parity.
 

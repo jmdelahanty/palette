@@ -49,9 +49,12 @@ def test_report_detect_compute_smokes_sorts_by_end_to_end_fps(
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "| ok | backend | pipeline | frames |" in out
+    assert "| ok | source | backend | pipeline | frames |" in out
     assert out.index("pynvvc_nv12_rgb") < out.index("decord_gpu")
-    assert "| yes | pynvvc_nv12_rgb | sequential | 160 | 3.20 | 50.00 |" in out
+    assert (
+        "| yes | palette_compute_smoke | pynvvc_nv12_rgb | sequential | 160 | 3.20 | 50.00 |"
+        in out
+    )
 
 
 def test_report_detect_compute_smokes_json_marks_failed_rows(
@@ -66,3 +69,51 @@ def test_report_detect_compute_smokes_json_marks_failed_rows(
     payload = json.loads(capsys.readouterr().out)
     assert payload["rows"][0]["ok"] is False
     assert "decode_backend is 'opencv'" in payload["rows"][0]["failures"][0]
+
+
+def test_report_detect_compute_smokes_accepts_crimson_decode_json(
+    tmp_path: Path, capsys
+) -> None:
+    report = tmp_path / "crimson_decode.json"
+    report.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "decoder_backend": "crimson_ffmpeg_nvdec",
+                "frames_decoded": 160,
+                "open_seconds": 0.4,
+                "decode_seconds": 1.2,
+                "total_seconds": 1.8,
+                "end_to_end_fps": 88.8,
+                "gpu_name": "NVIDIA L4",
+                "crimson_git_commit": "abc123",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = mod.main([str(report)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "crimson_decode_smoke" in out
+    assert "crimson_ffmpeg_nvdec" in out
+    assert "| yes | crimson_decode_smoke | crimson_ffmpeg_nvdec | decode_only | 160 | 1.80 | 88.80 |" in out
+
+
+def test_report_detect_compute_smokes_flags_incomplete_crimson_json(
+    tmp_path: Path, capsys
+) -> None:
+    report = tmp_path / "crimson_bad.json"
+    report.write_text(
+        json.dumps({"status": "ok", "decoder_backend": "crimson_ffmpeg_nvdec"}),
+        encoding="utf-8",
+    )
+
+    rc = mod.main([str(report), "--json"])
+
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"][0]["source"] == "crimson_decode_smoke"
+    assert payload["rows"][0]["ok"] is False
+    assert "frames_decoded/frames_requested is missing" in payload["rows"][0]["failures"]
