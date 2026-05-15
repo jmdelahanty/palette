@@ -176,6 +176,14 @@ scripts/py scripts/check_detect_compute_smoke.py \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<run-dir>/sickyfish_cam2010093_pynvvc_nv12.<JOBID>.json
 ```
 
+Compare multiple compute-smoke JSON reports side by side:
+
+```bash
+scripts/py scripts/report_detect_compute_smokes.py \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<decord-run>/*.json \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/logs/<pynvvc-run>/*.json
+```
+
 Fixed-frame backend parity command:
 
 ```bash
