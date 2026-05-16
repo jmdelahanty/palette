@@ -58,6 +58,7 @@ from ..shared.crop_roi_layout import (
     crop_roi_layout_attrs,
     normalize_crop_roi_storage,
 )
+from ..shared.roi_pixel_contract import crop_run_pixel_contract
 from ..shared.type_conversions import normalize_attr
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -182,6 +183,23 @@ def _infer_crop_run_storage_mode(run_group: zarr.Group) -> str:
     if "roi_images" in run_group:
         return "materialized"
     return "geometry_only"
+
+
+def _set_crop_pixel_contract_attrs(
+    crop_group: zarr.Group,
+    *,
+    crop_storage_mode: str,
+    video_source_type: str | None,
+    acceleration: str | None,
+) -> dict[str, object]:
+    contract = crop_run_pixel_contract(
+        crop_storage_mode=crop_storage_mode,
+        video_source_type=video_source_type,
+        acceleration=acceleration,
+    )
+    crop_group.attrs["roi_image_representation"] = contract.get("image_representation")
+    crop_group.attrs["roi_pixel_contract"] = contract
+    return contract
 
 
 def _coerce_existing_crop_pointer(
@@ -1222,6 +1240,13 @@ def materialize_external_roi_cache(
     roi_images = cache_root.create_array("roi_images", **roi_create_kwargs)
     cache_root.attrs.update(crop_roi_layout_attrs(layout))
     cache_root.attrs["cache_layout_profile"] = SCRATCH_ROI_CACHE_LAYOUT_PROFILE
+    pixel_contract = crop_run_pixel_contract(
+        crop_storage_mode="materialized",
+        video_source_type="external",
+        acceleration="gpu" if use_gpu else "cpu",
+    )
+    cache_root.attrs["roi_image_representation"] = pixel_contract.get("image_representation")
+    cache_root.attrs["roi_pixel_contract"] = pixel_contract
 
     decode_seconds = 0.0
     compute_seconds = 0.0
@@ -1355,6 +1380,8 @@ def materialize_external_roi_cache(
         "roi_use_sharding": bool(layout.roi_use_sharding),
         "roi_layout_profile": SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
         "gpu_chunk_frames": int(gpu_chunk_frames),
+        "roi_image_representation": pixel_contract.get("image_representation"),
+        "roi_pixel_contract": pixel_contract,
         "video_path": str(video_path),
         "cache_path": str(cache_path),
         "verbose": bool(verbose),
@@ -1741,6 +1768,12 @@ def crop_from_external_video(
             crop_group.attrs['detect_review_status'] = review_status
         if selection_policy:
             crop_group.attrs['detection_selection_policy'] = selection_policy
+        _set_crop_pixel_contract_attrs(
+            crop_group,
+            crop_storage_mode=crop_storage_mode,
+            video_source_type="external",
+            acceleration=str(crop_group.attrs.get("acceleration") or ""),
+        )
         crop_group.attrs['crop_signature'] = build_crop_signature(crop_group.attrs)
         effective_backend = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
         crop_group.attrs['write_backend'] = effective_backend
@@ -1794,6 +1827,13 @@ def crop_from_external_video(
         if crop_storage_mode != "geometry_only" and not actual_use_gpu:
             console.print("[cyan]Using CPU video decoder...[/cyan]")
 
+        _set_crop_pixel_contract_attrs(
+            crop_group,
+            crop_storage_mode=crop_storage_mode,
+            video_source_type="external",
+            acceleration=str(crop_group.attrs.get("acceleration") or ""),
+        )
+        crop_group.attrs['crop_signature'] = build_crop_signature(crop_group.attrs)
         provenance_record = _build_crop_stage_provenance(
             created_at_utc=str(crop_group.attrs.get("created_at_utc")),
             command=" ".join(sys.argv),
@@ -1808,6 +1848,8 @@ def crop_from_external_video(
                 "roi_chunk_len": crop_group.attrs.get("roi_chunk_len"),
                 "roi_use_sharding": crop_group.attrs.get("roi_use_sharding"),
                 "roi_shard_len": crop_group.attrs.get("roi_shard_len"),
+                "roi_image_representation": crop_group.attrs.get("roi_image_representation"),
+                "roi_pixel_contract": crop_group.attrs.get("roi_pixel_contract"),
             },
             parameter_source=str(crop_group.attrs.get("parameter_source") or "config"),
             inputs={
@@ -3176,11 +3218,21 @@ def crop_detections(
         crop_group.attrs['detect_review_status'] = review_status
     if selection_policy:
         crop_group.attrs['detection_selection_policy'] = selection_policy
+    _set_crop_pixel_contract_attrs(
+        crop_group,
+        crop_storage_mode=crop_storage_mode_resolved,
+        video_source_type="zarr",
+        acceleration="cpu",
+    )
     provenance_record = _build_crop_stage_provenance(
         created_at_utc=str(crop_group.attrs.get("created_at_utc")),
         command=" ".join(sys.argv),
         env_info=env_info,
-        parameters=crop_params,
+        parameters={
+            **dict(crop_params),
+            "roi_image_representation": crop_group.attrs.get("roi_image_representation"),
+            "roi_pixel_contract": crop_group.attrs.get("roi_pixel_contract"),
+        },
         parameter_source=param_source,
         inputs={
             "source_detect_run": detect_run_name,
@@ -3643,6 +3695,8 @@ def _roi_cache_worker_main(argv: Optional[List[str]] = None) -> int:
                 "cache_roi_storage": result.get("roi_storage"),
                 "cache_roi_use_sharding": result.get("roi_use_sharding"),
                 "cache_gpu_chunk_frames": result.get("gpu_chunk_frames"),
+                "roi_image_representation": result.get("roi_image_representation"),
+                "roi_pixel_contract": result.get("roi_pixel_contract"),
                 "roi_cache_worker_result": json.dumps(result, sort_keys=True, default=str),
             }
         )

@@ -46,7 +46,7 @@ Options:
   --gpus N                       GPU count; 0 omits -gpu (default: 0)
   --walltime H:MM                LSF wall time (default: 2:00)
   --batch-size N                 ROI rows written per cache-builder batch (default: 1024)
-  --decode-backend NAME          auto|pynvvc_luma|read_slice (default: auto)
+  --decode-backend NAME          auto|pynvvc_luma|read_slice (default: auto; fast sequential PyNv when available)
   --roi-live-acceleration NAME   CropImageSource live-read acceleration: cpu|gpu|auto (default: cpu)
   --roi-live-gpu-chunk-frames N  GPU live-read frame chunk size (default: 32)
   --sha256                       Record payload sha256 in the manifest

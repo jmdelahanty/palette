@@ -22,7 +22,7 @@ from ..diagnostics.preview_eye_mask_background_subtraction import (
     _resolve_run_name,
 )
 from ..shared.crop_image_source import CropImageSource
-from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -485,6 +485,7 @@ def segment_subject_masks_from_root(
             crop_group.attrs,
             source_crop_storage_mode=crop_source.storage_mode,
         )
+        crop_pixel_attrs = build_source_roi_pixel_attrs(crop_source)
 
         run_group.attrs.update(
             {
@@ -496,10 +497,11 @@ def segment_subject_masks_from_root(
                 "config": asdict(cfg),
                 "source_crop_run": str(crop_run),
                 **crop_snapshot_attrs,
+                **crop_pixel_attrs,
                 "source_roi_read_mode": crop_source.roi_read_mode,
                 "roi_cache_policy": crop_source.roi_cache_policy,
                 "source_roi_cache_used": bool(crop_source.roi_cache_used),
-                "source_roi_cache_backend": crop_source.roi_cache_backend,
+                "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
                 "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
                 "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
                 "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -632,6 +634,7 @@ def segment_subject_masks_from_root(
         provenance_inputs = {
             "source_crop_run": str(crop_run),
             **crop_snapshot_attrs,
+            **crop_pixel_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),

@@ -390,6 +390,9 @@ backend was not explicitly forced, `auto` falls back to the generic `read_slice`
 path. Use `--decode-backend pynvvc_luma` when the job should fail instead of
 falling back.
 
+`read_slice` is retained as a compatibility/reference backend, not the intended
+long-video cluster materialization path.
+
 Each JSONL record reports rows and bytes written, elapsed time, ETA, aggregate
 ROI throughput, and per-batch timing for decode/read, crop, contiguous
 conversion, serialization, and file write. The submit wrapper also passes
@@ -425,6 +428,166 @@ metadata overhead and make sequential copy/staging cheap. Zarr may still win for
 tooling compatibility, chunk-local random access, or compressed/sharded storage.
 Benchmarks should compare both backends on PRFS direct reads and node-local
 staged reads before changing workflow defaults.
+
+## Crop Pixel Contract
+
+Downstream pose and segmentation jobs should receive the same logical crop data
+they received from local materialized crop runs:
+
+```text
+shape: [roi, roi_height, roi_width]
+dtype: uint8
+layout: C-order
+semantics: grayscale ROI pixels
+coordinates: crop_runs/<run>/roi_coordinates_full top-left coordinates
+padding: zero outside source-frame bounds
+row order: crop_runs/<run> row order
+```
+
+The cache format is an implementation detail. Pose and segmentation consumers
+should continue to read through `CropImageSource` and should not parse flat
+binary payloads directly.
+
+Future crop runs record this in attrs as:
+
+- `roi_image_representation`: currently `uint8_grayscale_roi_v1`.
+- `roi_pixel_contract`: structured conversion metadata with contract name,
+  source-frame representation, dtype/shape/order, padding behavior, and
+  production status.
+
+Downstream pose and segmentation runs copy the effective reader/cache contract
+as:
+
+- `source_roi_image_representation`
+- `source_roi_pixel_contract_name`
+- `source_roi_pixel_contract`
+
+Those downstream attrs describe the pixels actually consumed. For example, a
+geometry-only crop run may have a deferred contract, while a flat cache consumed
+through `--roi-cache-manifest` records `nv12_luma_plane_uint8` from the cache
+manifest.
+
+The current flat-cache PyNvVideoCodec backend is `pynvvc_luma`. It crops the
+decoded NV12 Y plane directly. That is fast and likely close for grayscale
+camera videos, but it is not automatically byte-identical to every historical
+materialization path:
+
+- OpenCV CPU crop paths have used `cv2.COLOR_BGR2GRAY`.
+- Decord GPU crop paths have used RGB channel mean.
+- `pynvvc_luma` uses the raw NV12 luma plane.
+- Detection inference uses `pynvvc_nv12_rgb` as the correctness-oriented PyNv
+  backend, because YOLO expects RGB-like input and fixed-frame parity favored
+  NV12-to-RGB over luma replication.
+
+This means `pynvvc_luma` is acceptable as a throughput/materialization smoke,
+but it should remain provisional for production pose/segmentation caches until
+crop-pixel parity is measured and accepted.
+
+## Crop Pixel Parity Checklist
+
+Before making a PyNv flat ROI cache the default input surface for pose or
+segmentation:
+
+- [x] Define and record explicit crop/cache pixel-contract metadata for future
+  crop runs and downstream pose/segmentation runs.
+- [ ] Decide the accepted production grayscale contract for runtime analysis
+  crops: OpenCV weighted grayscale, Decord historical mean grayscale, raw NV12
+  luma, or a new explicit conversion.
+- [x] Add a fixed-row parity utility that compares the canonical
+  `CropImageSource` reader path against a flat ROI cache for the same
+  archive/crop run.
+- [x] Add a training-zarr parity utility that compares stored
+  `crop_runs/<run>/roi_images` against crops reconstructed from the original
+  MP4 with the sequential PyNv luma path.
+- [ ] Sample rows from early, middle, and late frames, plus at least one
+  near-boundary padded crop if available.
+- [ ] Report byte equality, max absolute difference, mean absolute difference,
+  p95 absolute difference, and a small image-diff artifact for mismatches.
+- [x] Record `pixel_contract`, `decode_backend_effective`, source video
+  identity, crop run, and conversion details in the flat-cache manifest.
+- [ ] If `pynvvc_luma` is not acceptable, implement a production backend such as
+  `pynvvc_legacy_gray` or `pynvvc_nv12_gray` that exactly matches the selected
+  contract.
+- [ ] If strict parity requires a different conversion, update
+  `--decode-backend auto` to prefer the parity-accepted sequential PyNv backend,
+  not the slow `read_slice` path.
+- [ ] Add a wrapper validation mode that can fail a cache job when parity
+  exceeds configured tolerances.
+- [ ] Run one downstream pose/keypoint smoke and one segmentation smoke using
+  `--roi-cache-manifest` from the flat cache.
+- [ ] Keep `read_slice`/materialized Zarr as fallback until parity and downstream
+  consumer smokes pass on more than one recording.
+
+Working interpretation as of 2026-05-16: flat-cache mechanics and throughput are
+promising, but the production decision is not complete until the crop-pixel
+contract and parity checks are in place.
+
+Strict parity check:
+
+```bash
+scripts/py -m fisheye.diagnostics.check_flat_roi_cache_pixel_parity \
+  /path/to/recording_analysis.zarr \
+  --roi-cache-manifest /misc/public/palette_cache/<workflow>/roi_cache/<label>.flat_roi_cache.json \
+  --reference-roi-live-acceleration gpu \
+  --sample-count 64 \
+  --output-json /path/to/parity_report.json
+```
+
+The default thresholds are strict byte equality. A nonzero result means the flat
+cache does not match the currently configured `CropImageSource` path and should
+not be used for pose/segmentation quality validation until the conversion policy
+is chosen and implemented.
+
+## Training Zarr Comparison
+
+It is possible to compare existing training crops against the new PyNv workflow,
+but only when the training rows can be mapped back to the original video frames
+and crop geometry.
+
+Straightforward case:
+
+- A per-recording training zarr still has `crop_runs/<run>/roi_images`,
+  `frame_indices`, `roi_coordinates_full`, ROI size, and a readable
+  `source_video_path`.
+- If `raw_video/original_frame_indices` is present, crop `frame_indices` are
+  local sampled-frame indices and must be mapped through that array before
+  decoding the source video.
+- Use the training parity diagnostic to decode the source video with
+  PyNvVideoCodec, reconstruct the same ROI rows, and compare against stored
+  `roi_images`.
+
+Example:
+
+```bash
+scripts/py -m fisheye.diagnostics.check_training_crop_pynvvc_pixel_parity \
+  /path/to/recording_training.zarr \
+  --crop-run crop_2026-02-03_23-34-39 \
+  --sample-count 64 \
+  --output-json /tmp/training_crop_pynvvc_parity.json
+```
+
+For small per-recording training zarrs, `--all-rows` is appropriate. For long
+sampled videos, remember that the PyNv path is sequential; selecting a row from
+a late source frame requires decoding up to that frame.
+
+Merged/exported training zarrs need more care:
+
+- The exported `roi_images` are copied from source training zarrs.
+- If the export preserved source archive/run/row lineage, compare by grouping
+  rows back to each source archive and then running the same row-level parity
+  check.
+- If that lineage is absent or source videos are no longer reachable, strict
+  pixel parity cannot be reconstructed; only weaker distributional checks or
+  model-output comparisons are possible.
+
+Recommended acceptance gate:
+
+- First run pixel parity: byte equality when the intended contract is identical,
+  or explicit tolerances when accepting a different grayscale contract such as
+  NV12 luma.
+- Then run model-output parity on a fixed row sample: pose keypoint coordinates,
+  confidences, and segmentation probabilities/masks. This catches cases where
+  small pixel differences matter to the trained model.
 
 ## Source Video Path Portability
 

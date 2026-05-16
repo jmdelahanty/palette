@@ -22,6 +22,7 @@ from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
     build_source_keypoints_attrs,
+    build_source_roi_pixel_attrs,
     resolve_source_keypoints_run,
 )
 from ..shared.crop_image_source import CropImageSource
@@ -896,6 +897,7 @@ def main(
         crop_group.attrs,
         source_crop_storage_mode=crop_source.storage_mode,
     )
+    crop_pixel_attrs = build_source_roi_pixel_attrs(crop_source)
     run_group.attrs.update(
         {
             "method": "unet_eye_mask_segmenter",
@@ -908,10 +910,11 @@ def main(
             "source_crop_run": crop_run_name,
             "detection_source_path": crop_group.attrs.get("detection_source_path"),
             **crop_snapshot_attrs,
+            **crop_pixel_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
-            "source_roi_cache_backend": crop_source.roi_cache_backend,
+            "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
             "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -997,10 +1000,11 @@ def main(
             "frame_source": crop_source.frame_source_kind,
             "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
             **crop_snapshot_attrs,
+            **crop_pixel_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),
-            "roi_cache_backend": crop_source.roi_cache_backend,
+            "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
             "roi_cache_key": crop_source.roi_cache_key,
             "roi_cache_path": crop_source.roi_cache_path,
             "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,

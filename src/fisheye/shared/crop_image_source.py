@@ -8,7 +8,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
@@ -22,6 +22,12 @@ from fisheye.shared.crop_roi_layout import (
     crop_roi_layout_attrs,
 )
 from fisheye.shared.flat_roi_cache import crop_run_name_from_manifest, open_flat_roi_cache
+from fisheye.shared.roi_pixel_contract import (
+    ROI_IMAGE_REPRESENTATION,
+    crop_image_source_live_pixel_contract,
+    crop_run_pixel_contract,
+    normalize_pixel_contract,
+)
 from fisheye.shared.type_conversions import normalize_attr
 
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
@@ -300,6 +306,39 @@ def _normalize_roi_batch(batch: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported ROI batch shape: {arr.shape}")
 
 
+def _image_representation_from_contract(contract: Mapping[str, Any] | None) -> str:
+    if contract is None:
+        return ROI_IMAGE_REPRESENTATION
+    return str(contract.get("image_representation") or ROI_IMAGE_REPRESENTATION)
+
+
+def _resolve_crop_group_pixel_contract(
+    crop_group: zarr.Group,
+    *,
+    crop_storage_mode: str,
+    video_source_type: object,
+    acceleration: object,
+    frame_source_kind: str,
+    roi_live_acceleration_effective: str | None,
+) -> dict[str, Any]:
+    stored = (
+        normalize_pixel_contract(crop_group.attrs.get("roi_pixel_contract"))
+        or normalize_pixel_contract(crop_group.attrs.get("crop_pixel_contract"))
+    )
+    if stored is not None and crop_storage_mode == "materialized":
+        return stored
+    if crop_storage_mode == "materialized":
+        return crop_run_pixel_contract(
+            crop_storage_mode=crop_storage_mode,
+            video_source_type=str(video_source_type or ""),
+            acceleration=str(acceleration or ""),
+        )
+    return crop_image_source_live_pixel_contract(
+        frame_source_kind=frame_source_kind,
+        roi_live_acceleration_effective=roi_live_acceleration_effective,
+    )
+
+
 def _crop_from_top_left(
     frame: np.ndarray,
     top_left_xy: Sequence[int | np.integer],
@@ -507,6 +546,8 @@ class CropImageSource:
     roi_cache_key: str | None = None
     roi_cache_path: str | None = None
     roi_cache_backend: str | None = None
+    roi_image_representation: str | None = ROI_IMAGE_REPRESENTATION
+    roi_pixel_contract: dict[str, Any] | None = None
     roi_live_acceleration_requested: str | None = None
     roi_live_acceleration_effective: str | None = None
     roi_live_acceleration_fallback_reason: str | None = None
@@ -629,6 +670,14 @@ class CropImageSource:
                             live_acceleration_fallback_reason = gpu_reason
             roi_read_mode = "geometry_only_live"
 
+        roi_pixel_contract = _resolve_crop_group_pixel_contract(
+            crop_group,
+            crop_storage_mode=storage_mode,
+            video_source_type=crop_group.attrs.get("video_source_type"),
+            acceleration=crop_group.attrs.get("acceleration"),
+            frame_source_kind=frame_source_kind,
+            roi_live_acceleration_effective=live_acceleration_effective,
+        )
         source = cls(
             root=root,
             crop_group=crop_group,
@@ -642,6 +691,8 @@ class CropImageSource:
             frame_shape=frame_shape,
             roi_read_mode=roi_read_mode,
             roi_cache_policy=normalized_cache_policy,
+            roi_image_representation=_image_representation_from_contract(roi_pixel_contract),
+            roi_pixel_contract=roi_pixel_contract,
             roi_live_acceleration_requested=(
                 normalized_live_acceleration if storage_mode == "geometry_only" else None
             ),
@@ -789,6 +840,12 @@ class CropImageSource:
         self.roi_cache_path = str(cache_arr.manifest_path)
         self.roi_cache_backend = "flat_bin_v1"
         self.roi_read_mode = "flat_bin_roi_cache"
+        builder = cache_arr.manifest.get("builder")
+        if isinstance(builder, dict):
+            contract = normalize_pixel_contract(builder.get("pixel_contract"))
+            if contract is not None:
+                self.roi_pixel_contract = contract
+                self.roi_image_representation = _image_representation_from_contract(contract)
 
     def _should_use_roi_cache(self) -> bool:
         if self.storage_mode != "geometry_only":
@@ -862,6 +919,8 @@ class CropImageSource:
                     "roi_shape": [int(self.roi_shape[0]), int(self.roi_shape[1])],
                     "total_rois": int(self.total_rois),
                     "crop_signature": self.crop_group.attrs.get("crop_signature"),
+                    "roi_image_representation": self.roi_image_representation,
+                    "roi_pixel_contract": self.roi_pixel_contract,
                 }
             )
             if console is not None and hasattr(console, "print"):
@@ -904,6 +963,8 @@ class CropImageSource:
                         "cache_roi_use_sharding": cache_result.get("roi_use_sharding"),
                         "cache_layout_profile": cache_result.get("roi_layout_profile", SCRATCH_ROI_CACHE_LAYOUT_PROFILE),
                         "cache_gpu_chunk_frames": cache_result.get("gpu_chunk_frames"),
+                        "roi_image_representation": cache_result.get("roi_image_representation"),
+                        "roi_pixel_contract": cache_result.get("roi_pixel_contract"),
                     }
                 )
             else:
@@ -966,6 +1027,10 @@ class CropImageSource:
         self.roi_cache_path = str(cache_path)
         self.roi_cache_backend = "zarr"
         self.roi_read_mode = "temporary_cache"
+        contract = normalize_pixel_contract(cache_group.attrs.get("roi_pixel_contract"))
+        if contract is not None:
+            self.roi_pixel_contract = contract
+            self.roi_image_representation = _image_representation_from_contract(contract)
 
     def _build_roi_cache_key(self, archive_path: Path) -> str:
         payload = {

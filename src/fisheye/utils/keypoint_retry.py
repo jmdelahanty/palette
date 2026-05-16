@@ -18,7 +18,7 @@ from ..pose.heading import compute_heading_from_attrs
 from ..pose.schema import resolve_keypoint_labels_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import read_reason_labels
-from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _as_text
 from ..shared.zarr.schema import get_run_group
@@ -657,6 +657,7 @@ def retry_failed_keypoints_yolo(
             source_crop_storage_mode=crop_source.storage_mode,
         )
         run_attrs.update(crop_snapshot_attrs)
+        run_attrs.update(build_source_roi_pixel_attrs(crop_source))
         run_attrs["source_roi_read_mode"] = crop_source.roi_read_mode
         run_attrs["roi_cache_policy"] = crop_source.roi_cache_policy
         run_attrs["source_roi_cache_used"] = bool(crop_source.roi_cache_used)

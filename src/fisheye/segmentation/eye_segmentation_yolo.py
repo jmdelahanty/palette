@@ -29,6 +29,7 @@ from ..shared.crop_image_source import CropImageSource
 from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
     build_source_keypoints_attrs,
+    build_source_roi_pixel_attrs,
     resolve_source_keypoints_run,
 )
 from ..shared.registry_stage_complete import emit_stage_completion
@@ -1210,10 +1211,11 @@ def segment_eye_masks_yolo(
                 crop_group.attrs,
                 source_crop_storage_mode=crop_source.storage_mode,
             ),
+            **build_source_roi_pixel_attrs(crop_source),
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
-            "source_roi_cache_backend": crop_source.roi_cache_backend,
+            "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
             **build_source_keypoints_attrs(resolved_keypoints_run, include_legacy_alias=True),
             "total_rois": total_rois,
             "successful_eyes": total_successful_eyes,
@@ -1273,10 +1275,11 @@ def segment_eye_masks_yolo(
                     crop_group.attrs,
                     source_crop_storage_mode=crop_source.storage_mode,
                 ),
+                **build_source_roi_pixel_attrs(crop_source),
                 "source_roi_read_mode": crop_source.roi_read_mode,
                 "roi_cache_policy": crop_source.roi_cache_policy,
                 "roi_cache_used": bool(crop_source.roi_cache_used),
-                "roi_cache_backend": crop_source.roi_cache_backend,
+                "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
                 "roi_cache_key": crop_source.roi_cache_key,
                 "roi_cache_path": crop_source.roi_cache_path,
                 "source_keypoints_run": resolved_keypoints_run,

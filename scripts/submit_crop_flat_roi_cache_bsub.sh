@@ -71,7 +71,7 @@ Cache options:
   --cache-gpus N                    GPU count for cache job; 0 omits -gpu (default: 0)
   --cache-walltime H:MM             Wall time for cache job (default: 2:00)
   --cache-batch-size N              ROI rows per cache-builder batch (default: 1024)
-  --cache-decode-backend NAME       auto|pynvvc_luma|read_slice (default: auto)
+  --cache-decode-backend NAME       auto|pynvvc_luma|read_slice (default: auto; fast sequential PyNv when available)
   --roi-live-acceleration NAME      cpu|gpu|auto for geometry-only live ROI reads (default: cpu)
   --roi-live-gpu-chunk-frames N     GPU live-read frame chunk size (default: 32)
   --sha256                          Record payload sha256 in manifest

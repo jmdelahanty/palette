@@ -18,6 +18,8 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.roi_pixel_contract import flat_cache_pixel_contract_for_backend
+
 FLAT_ROI_CACHE_SCHEMA = "palette_roi_cache_flat_bin_v1"
 FLAT_ROI_CACHE_LAYOUT = "flat_bin_v1"
 FLAT_ROI_CACHE_PROGRESS_SCHEMA = "palette_roi_cache_flat_bin_progress_v1"
@@ -309,6 +311,7 @@ def _build_manifest(
             "duration_seconds": float(duration_seconds),
             "decode_backend_requested": str(decode_backend_requested),
             "decode_backend_effective": str(decode_backend_effective),
+            "pixel_contract": flat_cache_pixel_contract_for_backend(decode_backend_effective),
             "timing": dict(timing_summary),
             "format_note": (
                 "flat_bin_v1 stores all ROI rows contiguously as raw uint8 bytes. "
@@ -317,7 +320,6 @@ def _build_manifest(
             ),
         },
     }
-
 
 def _write_flat_cache_payload(
     *,

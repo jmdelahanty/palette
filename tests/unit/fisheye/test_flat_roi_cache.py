@@ -7,6 +7,7 @@ import pytest
 import zarr
 
 from fisheye.shared import flat_roi_cache as flat_cache_mod
+from fisheye.diagnostics.check_flat_roi_cache_pixel_parity import check_flat_roi_cache_pixel_parity
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.flat_roi_cache import (
     FLAT_ROI_CACHE_LAYOUT,
@@ -74,6 +75,14 @@ def _make_geometry_only_crop_archive(tmp_path: Path) -> tuple[Path, np.ndarray]:
     return zarr_path, expected
 
 
+def _manifest_payload_path(manifest: dict) -> Path:
+    manifest_path = Path(str(manifest["manifest_path"]))
+    payload = Path(str(manifest["array"]["bin_path"]))
+    if payload.is_absolute():
+        return payload
+    return manifest_path.parent / payload
+
+
 class _FakePynvvcReader:
     def __init__(self, frames: list[np.ndarray]) -> None:
         import torch
@@ -129,6 +138,7 @@ def test_build_flat_roi_cache_roundtrips_through_manifest(tmp_path: Path) -> Non
     assert manifest["builder"]["timing"]["bytes"] == int(roi_images.size)
     assert manifest["builder"]["timing"]["read_seconds_total"] >= 0
     assert manifest["builder"]["timing"]["write_seconds_total"] >= 0
+    assert manifest["builder"]["pixel_contract"]["name"] == "crop_image_source_uint8_grayscale"
 
     assert progress_events[0]["event"] == "start"
     assert progress_events[-1]["event"] == "complete"
@@ -171,9 +181,60 @@ def test_crop_image_source_reads_flat_roi_cache_manifest(tmp_path: Path) -> None
         assert source.roi_read_mode == "flat_bin_roi_cache"
         assert source.roi_cache_used is True
         assert source.roi_cache_backend == "flat_bin_v1"
+        assert source.roi_image_representation == "uint8_grayscale_roi_v1"
+        assert source.roi_pixel_contract is not None
+        assert source.roi_pixel_contract["name"] == "crop_image_source_uint8_grayscale"
         np.testing.assert_array_equal(source.read_indices([4, 0, 2]), roi_images[[4, 0, 2]])
     finally:
         source.close()
+
+
+def test_flat_roi_cache_pixel_parity_passes_for_matching_cache(tmp_path: Path) -> None:
+    zarr_path, _roi_images = _make_materialized_crop_archive(tmp_path)
+    manifest = build_flat_roi_cache(
+        zarr_path=zarr_path,
+        output_dir=tmp_path / "cache",
+        batch_size=2,
+    )
+
+    report = check_flat_roi_cache_pixel_parity(
+        zarr_path=zarr_path,
+        roi_cache_manifest=manifest["manifest_path"],
+        rows=[0, 2, 4],
+    )
+
+    assert report["status"] == "ok"
+    assert report["diff"]["byte_equal"] is True
+    assert report["diff"]["max_abs_diff"] == 0
+    assert report["source"]["cache_manifest_builder"]["pixel_contract"]["name"] == (
+        "crop_image_source_uint8_grayscale"
+    )
+
+
+def test_flat_roi_cache_pixel_parity_fails_for_mismatched_cache(tmp_path: Path) -> None:
+    zarr_path, _roi_images = _make_materialized_crop_archive(tmp_path)
+    manifest = build_flat_roi_cache(
+        zarr_path=zarr_path,
+        output_dir=tmp_path / "cache",
+        batch_size=2,
+    )
+    payload_path = _manifest_payload_path(manifest)
+    with payload_path.open("r+b") as handle:
+        handle.seek(0)
+        first = handle.read(1)
+        handle.seek(0)
+        handle.write(bytes([(first[0] + 1) % 256]))
+
+    report = check_flat_roi_cache_pixel_parity(
+        zarr_path=zarr_path,
+        roi_cache_manifest=manifest["manifest_path"],
+        rows=[0, 2, 4],
+    )
+
+    assert report["status"] == "fail"
+    assert report["diff"]["byte_equal"] is False
+    assert report["diff"]["max_abs_diff"] == 1
+    assert report["diff"]["mismatched_rows"] == 1
 
 
 def test_flat_roi_cache_rejects_wrong_shape(tmp_path: Path) -> None:
@@ -215,6 +276,7 @@ def test_build_flat_roi_cache_pynvvc_luma_streams_rows_in_source_order(
     )
 
     assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
+    assert manifest["builder"]["pixel_contract"]["name"] == "nv12_luma_plane_uint8"
     assert manifest["builder"]["timing"]["decoded_frames"] == 3
     assert manifest["builder"]["timing"]["rows"] == 3
     assert any(
@@ -222,6 +284,39 @@ def test_build_flat_roi_cache_pynvvc_luma_streams_rows_in_source_order(
         and event.get("batch", {}).get("decode_backend") == "pynvvc_luma"
         for event in progress_events
     )
+    cache = open_flat_roi_cache(manifest["manifest_path"], expected_shape=expected.shape)
+    try:
+        np.testing.assert_array_equal(cache[:], expected)
+    finally:
+        cache.close()
+
+
+def test_build_flat_roi_cache_auto_prefers_pynvvc_luma_for_geometry_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path, expected = _make_geometry_only_crop_archive(tmp_path)
+    frames = [
+        np.arange(4 * 5, dtype=np.uint8).reshape(4, 5) + np.uint8(frame_idx * 20)
+        for frame_idx in range(3)
+    ]
+
+    monkeypatch.setattr(
+        flat_cache_mod,
+        "_open_pynvvc_luma_reader",
+        lambda _video_path: _FakePynvvcReader(frames),
+    )
+
+    manifest = build_flat_roi_cache(
+        zarr_path=zarr_path,
+        output_dir=tmp_path / "cache",
+        batch_size=2,
+        roi_decode_backend="auto",
+        roi_live_acceleration="cpu",
+    )
+
+    assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
+    assert manifest["builder"]["pixel_contract"]["name"] == "nv12_luma_plane_uint8"
     cache = open_flat_roi_cache(manifest["manifest_path"], expected_shape=expected.shape)
     try:
         np.testing.assert_array_equal(cache[:], expected)

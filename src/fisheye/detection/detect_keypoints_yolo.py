@@ -26,7 +26,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRe
 from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
-from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
+from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -705,6 +705,7 @@ def detect_keypoints_yolo(
         crop_group.attrs,
         source_crop_storage_mode=crop_source.storage_mode,
     )
+    crop_pixel_attrs = build_source_roi_pixel_attrs(crop_source)
 
     run_group.attrs.update({
         "method": "yolo_pose",
@@ -715,10 +716,11 @@ def detect_keypoints_yolo(
         "device": model_device,
         "source_crop_run": latest_crop,
         **crop_snapshot_attrs,
+        **crop_pixel_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "source_roi_cache_used": bool(crop_source.roi_cache_used),
-        "source_roi_cache_backend": crop_source.roi_cache_backend,
+        "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
         "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -795,10 +797,11 @@ def detect_keypoints_yolo(
         inputs={
             "source_crop_run": latest_crop,
             **crop_snapshot_attrs,
+            **crop_pixel_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),
-            "roi_cache_backend": crop_source.roi_cache_backend,
+            "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
             "roi_cache_key": crop_source.roi_cache_key,
             "roi_cache_path": crop_source.roi_cache_path,
             "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
@@ -831,10 +834,11 @@ def detect_keypoints_yolo(
         "run_group": "keypoints_runs",
         "source_crop_run": latest_crop,
         **crop_snapshot_attrs,
+        **crop_pixel_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),
-        "roi_cache_backend": crop_source.roi_cache_backend,
+        "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
         "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,

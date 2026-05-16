@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional
 
+from .roi_pixel_contract import ROI_IMAGE_REPRESENTATION, normalize_pixel_contract
 from .type_conversions import as_int, normalize_attr
 
 CANONICAL_SOURCE_KEYPOINTS_RUN_ATTR = "source_keypoints_run"
@@ -19,11 +20,16 @@ CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR = "source_detect_review_status_re
 SOURCE_CROP_STORAGE_MODE_ATTR = "source_crop_storage_mode"
 SOURCE_CROP_SIGNATURE_ATTR = "source_crop_signature"
 SOURCE_CROP_REVISION_ATTR = "source_crop_revision"
+SOURCE_ROI_IMAGE_REPRESENTATION_ATTR = "source_roi_image_representation"
+SOURCE_ROI_PIXEL_CONTRACT_ATTR = "source_roi_pixel_contract"
+SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR = "source_roi_pixel_contract_name"
 CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS = (
     SOURCE_CROP_STORAGE_MODE_ATTR,
     SOURCE_CROP_SIGNATURE_ATTR,
     SOURCE_CROP_REVISION_ATTR,
     CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR,
+    SOURCE_ROI_IMAGE_REPRESENTATION_ATTR,
+    SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR,
 )
 
 
@@ -108,6 +114,41 @@ def build_source_crop_snapshot_attrs(
         if review_status_ref is not None:
             payload[CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR] = review_status_ref
 
+    representation = normalize_attr(attrs.get("roi_image_representation"))
+    if representation is not None:
+        payload[SOURCE_ROI_IMAGE_REPRESENTATION_ATTR] = representation
+
+    contract = normalize_pixel_contract(attrs.get("roi_pixel_contract") or attrs.get("crop_pixel_contract"))
+    if contract is not None:
+        payload[SOURCE_ROI_PIXEL_CONTRACT_ATTR] = contract
+        contract_name = normalize_attr(contract.get("name"))
+        if contract_name is not None:
+            payload[SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR] = contract_name
+
+    return payload
+
+
+def build_source_roi_pixel_attrs(roi_source: Any = None) -> Dict[str, Any]:
+    """Build attrs describing the actual ROI pixels consumed by a reader."""
+
+    if roi_source is None:
+        return {}
+
+    contract = normalize_pixel_contract(getattr(roi_source, "roi_pixel_contract", None))
+    representation = normalize_attr(getattr(roi_source, "roi_image_representation", None))
+    if representation is None and contract is not None:
+        representation = normalize_attr(contract.get("image_representation"))
+    if representation is None:
+        representation = ROI_IMAGE_REPRESENTATION
+
+    payload: Dict[str, Any] = {
+        SOURCE_ROI_IMAGE_REPRESENTATION_ATTR: representation,
+    }
+    if contract is not None:
+        payload[SOURCE_ROI_PIXEL_CONTRACT_ATTR] = contract
+        name = normalize_attr(contract.get("name"))
+        if name is not None:
+            payload[SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR] = name
     return payload
 
 
@@ -131,5 +172,17 @@ def extract_source_crop_snapshot_attrs(attrs: Optional[Mapping[str, Any]]) -> Di
     review_status_ref = normalize_attr(attr_map.get(CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR))
     if review_status_ref is not None:
         payload[CANONICAL_SOURCE_DETECT_REVIEW_STATUS_REF_ATTR] = review_status_ref
+
+    representation = normalize_attr(attr_map.get(SOURCE_ROI_IMAGE_REPRESENTATION_ATTR))
+    if representation is not None:
+        payload[SOURCE_ROI_IMAGE_REPRESENTATION_ATTR] = representation
+
+    contract = normalize_pixel_contract(attr_map.get(SOURCE_ROI_PIXEL_CONTRACT_ATTR))
+    if contract is not None:
+        payload[SOURCE_ROI_PIXEL_CONTRACT_ATTR] = contract
+
+    contract_name = normalize_attr(attr_map.get(SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR))
+    if contract_name is not None:
+        payload[SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR] = contract_name
 
     return payload

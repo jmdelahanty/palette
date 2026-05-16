@@ -183,6 +183,10 @@ Attributes:
 - `detect_review_status_ref` (refined run path where review status lives)
 - `detection_selection_policy` (policy label used for auto source selection)
 - `crop_signature` (signature of crop inputs: source path/type, ROI size, parameters hash)
+- `roi_image_representation` and `roi_pixel_contract` describe the model-facing
+  ROI pixel surface. The current representation is `uint8_grayscale_roi_v1`;
+  the contract records the conversion path, for example OpenCV BGR-to-gray,
+  Decord channel mean, geometry-only deferred pixels, or PyNv flat-cache luma.
 - `crop_review_status` (review status payload for this crop run, optional)
 - `crop_review_signature` (signature snapshot stored when crop review was set)
 - `source_refined_row_ids_available`, `source_refined_row_id_policy`, and

@@ -23,7 +23,11 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
-from ..shared.provenance_attrs import build_assignment_keypoint_attrs, build_source_crop_snapshot_attrs
+from ..shared.provenance_attrs import (
+    build_assignment_keypoint_attrs,
+    build_source_crop_snapshot_attrs,
+    build_source_roi_pixel_attrs,
+)
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
@@ -992,16 +996,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         crop_group.attrs,
         source_crop_storage_mode=crop_source.storage_mode,
     )
+    crop_pixel_attrs = build_source_roi_pixel_attrs(crop_source)
     run_group.attrs.update(
         {
             "method": "unet_subject_mask_segmenter",
             "run_semantics": "unet_subject_mask_inference",
             "source_crop_run": crop_run_name,
             **crop_snapshot_attrs,
+            **crop_pixel_attrs,
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
-            "source_roi_cache_backend": crop_source.roi_cache_backend,
+            "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
             "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -1113,10 +1119,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     provenance_inputs = {
         "source_crop_run": str(crop_run_name),
         **crop_snapshot_attrs,
+        **crop_pixel_attrs,
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),
-        "roi_cache_backend": crop_source.roi_cache_backend,
+        "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
         "roi_cache_key": crop_source.roi_cache_key,
         "roi_cache_path": crop_source.roi_cache_path,
         "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,

@@ -206,6 +206,9 @@ Ready for pilot:
 - [x] GPU decode path exists for external video crop generation.
 - [x] `decode_seconds`, `compute_seconds`, and `write_seconds` style profiling
   exists in crop code paths.
+- [x] Sequential PyNvVideoCodec flat-cache materialization path exists
+  (`pynvvc_luma`) and avoids the Decord open/random-access behavior that made
+  the first long-video cache smoke impractical.
 
 Remaining:
 
@@ -214,9 +217,35 @@ Remaining:
 - [ ] Verify crop source resolution prefers the refined canonical surface.
 - [ ] Verify the crop status JSON, flat cache manifest, published payload size,
   and `open_flat_roi_cache` validation.
-- [ ] Add detailed phase telemetry for cache build and publish: video open,
+- [x] Add detailed phase telemetry for cache build and publish: video open,
   decode, crop extraction, local write, PRFS copy, manifest publish, and
   validation.
+- [x] Add explicit crop/cache pixel-contract metadata for future crop runs and
+  downstream pose/segmentation runs (`roi_image_representation`,
+  `roi_pixel_contract`, `source_roi_image_representation`,
+  `source_roi_pixel_contract_name`, `source_roi_pixel_contract`).
+- [ ] Decide the accepted production crop pixel contract for pose/segmentation
+  input caches. Current materialized readers expose grayscale `uint8` ROI crops,
+  but historical paths differ in conversion details: OpenCV weighted grayscale,
+  Decord GPU channel mean, and current PyNv luma-plane cropping.
+- [x] Add a crop-pixel parity utility for the canonical `CropImageSource` path
+  versus flat ROI caches. It reports byte equality, max/mean/p95 absolute
+  difference, and top mismatched rows for fixed ROI rows.
+- [x] Add a training-zarr parity utility for comparing stored
+  `crop_runs/<run>/roi_images` against PyNvVideoCodec luma crops reconstructed
+  from the original video, including `raw_video/original_frame_indices` mapping
+  for sampled training zarrs.
+- [ ] Run `fisheye.diagnostics.check_flat_roi_cache_pixel_parity` on each new
+  flat ROI cache before using it for pose/segmentation quality validation.
+- [ ] Run `fisheye.diagnostics.check_training_crop_pynvvc_pixel_parity` on at
+  least one existing per-recording training zarr before accepting `pynvvc_luma`
+  as a model-facing crop cache contract.
+- [ ] Decide whether `pynvvc_luma` is acceptable for production
+  pose/segmentation caches or implement a canonical backend such as
+  `pynvvc_legacy_gray` / `pynvvc_nv12_gray`.
+- [ ] If `pynvvc_luma` fails strict crop-pixel parity, implement a parity-safe
+  sequential PyNv backend and make `--decode-backend auto` prefer that backend
+  rather than falling back to slow `read_slice` for long-video workflows.
 - [ ] Benchmark direct PRFS flat-cache reads versus staging the flat cache to
   node-local scratch before downstream GPU inference.
 - [ ] Decide whether materialized crop outputs still need scratch package/import

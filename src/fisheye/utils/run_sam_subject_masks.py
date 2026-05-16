@@ -21,7 +21,11 @@ import zarr
 from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.inference_timing import InferenceTimingProfiler
-from fisheye.shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_keypoints_attrs
+from fisheye.shared.provenance_attrs import (
+    build_source_crop_snapshot_attrs,
+    build_source_keypoints_attrs,
+    build_source_roi_pixel_attrs,
+)
 from fisheye.shared.row_lineage import copy_row_lineage_arrays
 from fisheye.shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -1618,7 +1622,9 @@ def write_sam_subject_mask_run(
     )
     source_roi_cache_policy = source_crop_source.roi_cache_policy if source_crop_source is not None else "never"
     source_roi_cache_used = bool(source_crop_source.roi_cache_used) if source_crop_source is not None else False
-    source_roi_cache_backend = source_crop_source.roi_cache_backend if source_crop_source is not None else None
+    source_roi_cache_backend = (
+        getattr(source_crop_source, "roi_cache_backend", None) if source_crop_source is not None else None
+    )
     source_roi_cache_key = source_crop_source.roi_cache_key if source_crop_source is not None else None
     source_roi_cache_path = source_crop_source.roi_cache_path if source_crop_source is not None else None
     source_roi_live_acceleration_requested = (
@@ -1642,11 +1648,13 @@ def write_sam_subject_mask_run(
         source_crop_group.attrs,
         source_crop_storage_mode=source_crop_storage_mode,
     )
+    crop_pixel_attrs = build_source_roi_pixel_attrs(source_crop_source)
 
     run_group.attrs.update(
         {
             "source_crop_run": inputs.crop_run,
             **crop_snapshot_attrs,
+            **crop_pixel_attrs,
             "source_roi_read_mode": source_roi_read_mode,
             "roi_cache_policy": source_roi_cache_policy,
             "source_roi_cache_used": source_roi_cache_used,
@@ -1837,6 +1845,7 @@ def write_sam_subject_mask_run(
         inputs={
             "source_crop_run": inputs.crop_run,
             **crop_snapshot_attrs,
+            **crop_pixel_attrs,
             "source_roi_read_mode": source_roi_read_mode,
             "roi_cache_policy": source_roi_cache_policy,
             "roi_cache_used": source_roi_cache_used,
@@ -2194,9 +2203,10 @@ def inspect_sam_subject_archive(
             "crop_run": inputs.crop_run,
             "source_crop_storage_mode": inputs.crop_source.storage_mode,
             "source_roi_read_mode": inputs.crop_source.roi_read_mode,
+            **build_source_roi_pixel_attrs(inputs.crop_source),
             "roi_cache_policy": inputs.crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(inputs.crop_source.roi_cache_used),
-            "source_roi_cache_backend": inputs.crop_source.roi_cache_backend,
+            "source_roi_cache_backend": getattr(inputs.crop_source, "roi_cache_backend", None),
             "source_roi_live_acceleration_requested": inputs.crop_source.roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": inputs.crop_source.roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": inputs.crop_source.roi_live_acceleration_fallback_reason,
