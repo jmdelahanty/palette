@@ -8,6 +8,7 @@ from typing import Any
 
 ROI_PIXEL_CONTRACT_SCHEMA = "palette_roi_pixel_contract_v1"
 ROI_IMAGE_REPRESENTATION = "uint8_grayscale_roi_v1"
+ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME = "orange_mono_pynvvc_luma_uint8_v1"
 
 
 def roi_pixel_contract(
@@ -60,6 +61,21 @@ def flat_cache_pixel_contract_for_backend(decode_backend: str) -> dict[str, Any]
         name=f"{decode_backend}_uint8_grayscale",
         color_conversion="backend-specific grayscale conversion",
         production_status="unknown",
+    )
+
+
+def orange_mono_pynvvc_luma_pixel_contract() -> dict[str, Any]:
+    """Return the source-aligned crop-pixel contract for Orange mono videos."""
+
+    return roi_pixel_contract(
+        name=ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
+        color_conversion=(
+            "PyNvVideoCodec decoded NV12 surface; crop the Y/luma plane directly. "
+            "For Orange monochrome recordings, the camera intensity image is encoded "
+            "into NV12 Y with neutral chroma, so no RGB reconstruction is applied."
+        ),
+        production_status="source_aligned_training_migration_candidate",
+        source_frame_representation="Orange mono NV12 Y plane decoded by PyNvVideoCodec",
     )
 
 
@@ -190,4 +206,3 @@ def normalize_pixel_contract(value: Any) -> dict[str, Any] | None:
     if not payload.get("image_representation"):
         payload["image_representation"] = ROI_IMAGE_REPRESENTATION
     return payload
-

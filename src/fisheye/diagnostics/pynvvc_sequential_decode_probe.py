@@ -333,7 +333,9 @@ def run_probe(args: argparse.Namespace) -> Dict[str, Any]:
                         payload["first_frame"]["dlpack_tensor_dtype"] = _dtype_of(tensor)
                         payload["first_frame"]["dlpack_tensor_device"] = _device_of(tensor)
                     if args.preprocess_mode == PREPROCESS_NONE:
-                        del tensor
+                        # Keep the no-preprocess path as a lightweight DLPack
+                        # conversion check without retaining tensors for a batch.
+                        tensor = None
                 except Exception as exc:
                     if len(dlpack_errors) < 5:
                         dlpack_errors.append(_format_exc(exc))
