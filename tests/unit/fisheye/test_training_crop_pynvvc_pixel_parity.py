@@ -113,7 +113,7 @@ def test_training_crop_pynvvc_pixel_parity_maps_original_frame_indices(
     assert report["source"]["stored_crop_pixel_contract"]["name"] == (
         "raw_video_images_full_to_uint8_grayscale"
     )
-    assert report["source"]["pynvvc_pixel_contract"]["name"] == "nv12_luma_plane_uint8"
+    assert report["source"]["candidate_pixel_contract"]["name"] == "nv12_luma_plane_uint8"
 
 
 def test_training_crop_pynvvc_pixel_parity_reports_mismatch(
@@ -136,3 +136,31 @@ def test_training_crop_pynvvc_pixel_parity_reports_mismatch(
     assert report["diff"]["byte_equal"] is False
     assert report["diff"]["max_abs_diff"] == 3
     assert report["diff"]["mismatched_rows"] == 1
+
+
+def test_training_crop_pynvvc_pixel_parity_can_test_limited_to_full_range_candidate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path, frames = _make_training_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    roi_images = root["crop_runs/crop_001/roi_images"]
+    raw = np.asarray(roi_images[:], dtype=np.float32)
+    roi_images[:] = np.clip((raw - 16.0) * (255.0 / 219.0), 0.0, 255.0).round().astype(np.uint8)
+    monkeypatch.setattr(
+        parity_mod,
+        "_open_pynvvc_luma_reader",
+        lambda _video_path: _FakePynvvcReader(frames),
+    )
+
+    report = check_training_crop_pynvvc_pixel_parity(
+        zarr_path=zarr_path,
+        rows=[0, 1, 2],
+        candidate_pixel_mode="luma_limited_to_full_range",
+    )
+
+    assert report["status"] == "ok"
+    assert report["inputs"]["candidate_pixel_mode"] == "luma_limited_to_full_range"
+    assert report["source"]["candidate_pixel_contract"]["name"] == (
+        "nv12_luma_limited_to_full_range_uint8"
+    )

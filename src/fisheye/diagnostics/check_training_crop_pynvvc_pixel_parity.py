@@ -27,10 +27,12 @@ from fisheye.shared.roi_pixel_contract import (
     crop_run_pixel_contract,
     flat_cache_pixel_contract_for_backend,
     normalize_pixel_contract,
+    roi_pixel_contract,
 )
 
 
 SOURCE_FRAME_INDEX_MODES = ("auto", "direct", "original_frame_indices")
+CANDIDATE_PIXEL_MODES = ("raw_luma", "luma_limited_to_full_range")
 
 
 def _open_pynvvc_luma_reader(video_path: Path) -> Any:
@@ -367,6 +369,7 @@ def _decode_pynvvc_luma_rows(
     roi_shape: tuple[int, int],
     video_shape: tuple[int, int],
     decode_chunk_frames: int,
+    candidate_pixel_mode: str,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     import torch
 
@@ -376,6 +379,7 @@ def _decode_pynvvc_luma_rows(
             "video_open_seconds": 0.0,
             "decode_seconds": 0.0,
             "crop_seconds": 0.0,
+            "transform_seconds": 0.0,
             "contiguous_seconds": 0.0,
             "decoded_frames": 0,
             "frames_with_selected_rows": 0,
@@ -401,6 +405,7 @@ def _decode_pynvvc_luma_rows(
         decoded_frames = 0
         decode_seconds = 0.0
         crop_seconds = 0.0
+        transform_seconds = 0.0
         contiguous_seconds = 0.0
         produced: dict[int, np.ndarray] = {}
 
@@ -431,6 +436,12 @@ def _decode_pynvvc_luma_rows(
                 crop_seconds += time.perf_counter() - started
 
                 started = time.perf_counter()
+                crops = _apply_candidate_pixel_mode(crops, candidate_pixel_mode)
+                if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
+                    torch.cuda.synchronize()
+                transform_seconds += time.perf_counter() - started
+
+                started = time.perf_counter()
                 crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
                 contiguous_seconds += time.perf_counter() - started
                 for local_idx, row in enumerate(roi_rows):
@@ -442,6 +453,7 @@ def _decode_pynvvc_luma_rows(
             "video_open_seconds": float(video_open_seconds),
             "decode_seconds": float(decode_seconds),
             "crop_seconds": float(crop_seconds),
+            "transform_seconds": float(transform_seconds),
             "contiguous_seconds": float(contiguous_seconds),
             "decoded_frames": int(decoded_frames),
             "frames_with_selected_rows": int(len(frame_to_rows)),
@@ -449,6 +461,35 @@ def _decode_pynvvc_luma_rows(
         }
     finally:
         reader.close()
+
+
+def _apply_candidate_pixel_mode(crops: Any, mode: str) -> Any:
+    import torch
+
+    if mode == "raw_luma":
+        return crops
+    if mode == "luma_limited_to_full_range":
+        # Common video-range YUV expansion: limited-range luma [16, 235] -> full-range [0, 255].
+        return torch.clamp((crops.to(torch.float32) - 16.0) * (255.0 / 219.0), 0.0, 255.0).round().to(
+            torch.uint8
+        )
+    raise ValueError(f"Unsupported candidate pixel mode: {mode}")
+
+
+def _candidate_pixel_contract(mode: str) -> dict[str, Any]:
+    if mode == "raw_luma":
+        return flat_cache_pixel_contract_for_backend("pynvvc_luma")
+    if mode == "luma_limited_to_full_range":
+        return roi_pixel_contract(
+            name="nv12_luma_limited_to_full_range_uint8",
+            color_conversion=(
+                "PyNvVideoCodec raw NV12 Y/luma plane cropped, then expanded from "
+                "limited video range [16,235] to full uint8 range [0,255]"
+            ),
+            production_status="diagnostic_candidate",
+            source_frame_representation="PyNvVideoCodec decoded NV12 surface",
+        )
+    raise ValueError(f"Unsupported candidate pixel mode: {mode}")
 
 
 def _stored_crop_pixel_contract(crop_group: Any) -> dict[str, Any]:
@@ -478,6 +519,7 @@ def check_training_crop_pynvvc_pixel_parity(
     boundary_sample_count: int = 4,
     source_frame_index_mode: str = "auto",
     decode_chunk_frames: int = 32,
+    candidate_pixel_mode: str = "raw_luma",
     max_abs_diff: int = 0,
     max_mean_abs_diff: float = 0.0,
     max_p95_abs_diff: float = 0.0,
@@ -485,6 +527,8 @@ def check_training_crop_pynvvc_pixel_parity(
 ) -> dict[str, Any]:
     if source_frame_index_mode not in SOURCE_FRAME_INDEX_MODES:
         raise ValueError(f"Unsupported source_frame_index_mode: {source_frame_index_mode}")
+    if candidate_pixel_mode not in CANDIDATE_PIXEL_MODES:
+        raise ValueError(f"Unsupported candidate_pixel_mode: {candidate_pixel_mode}")
 
     archive_path = Path(zarr_path).expanduser().resolve()
     started_total = time.perf_counter()
@@ -548,6 +592,7 @@ def check_training_crop_pynvvc_pixel_parity(
         roi_shape=roi_shape,
         video_shape=video_shape,
         decode_chunk_frames=decode_chunk_frames,
+        candidate_pixel_mode=candidate_pixel_mode,
     )
     present_rows = [row for row in selected_rows if row in produced]
     missing_rows = [row for row in selected_rows if row not in produced]
@@ -610,6 +655,7 @@ def check_training_crop_pynvvc_pixel_parity(
             "boundary_sample_count": int(boundary_sample_count),
             "source_frame_index_mode_requested": str(source_frame_index_mode),
             "decode_chunk_frames": int(decode_chunk_frames),
+            "candidate_pixel_mode": str(candidate_pixel_mode),
         },
         "source": {
             "total_rois": int(total_rois),
@@ -617,7 +663,7 @@ def check_training_crop_pynvvc_pixel_parity(
             "roi_images_shape": [int(v) for v in roi_images.shape],
             "video_shape": [int(video_shape[0]), int(video_shape[1])],
             "stored_crop_pixel_contract": _json_safe(_stored_crop_pixel_contract(crop_group)),
-            "pynvvc_pixel_contract": _json_safe(flat_cache_pixel_contract_for_backend("pynvvc_luma")),
+            "candidate_pixel_contract": _json_safe(_candidate_pixel_contract(candidate_pixel_mode)),
         },
         "frame_index_mapping": {
             **frame_mapping_payload,
@@ -674,6 +720,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--decode-chunk-frames", type=_positive_int, default=32)
+    parser.add_argument(
+        "--candidate-pixel-mode",
+        choices=CANDIDATE_PIXEL_MODES,
+        default="raw_luma",
+        help=(
+            "PyNv candidate pixel transform to compare against stored roi_images. "
+            "raw_luma is the current fast flat-cache candidate; "
+            "luma_limited_to_full_range tests a video-range expansion hypothesis."
+        ),
+    )
     parser.add_argument("--max-abs-diff", type=int, default=0)
     parser.add_argument("--max-mean-abs-diff", type=float, default=0.0)
     parser.add_argument("--max-p95-abs-diff", type=float, default=0.0)
@@ -697,6 +753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         boundary_sample_count=args.boundary_sample_count,
         source_frame_index_mode=args.source_frame_index_mode,
         decode_chunk_frames=args.decode_chunk_frames,
+        candidate_pixel_mode=args.candidate_pixel_mode,
         max_abs_diff=args.max_abs_diff,
         max_mean_abs_diff=args.max_mean_abs_diff,
         max_p95_abs_diff=args.max_p95_abs_diff,
@@ -715,6 +772,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"status: {payload['status']}")
         print(f"crop_run: {payload['inputs']['crop_run']}")
         print(f"frame_index_mapping: {mapping['mode']}")
+        print(f"candidate_pixel_mode: {payload['inputs']['candidate_pixel_mode']}")
         print(
             "selected_source_frames: "
             f"{mapping['selected_source_frame_min']}..{mapping['selected_source_frame_max']} "
@@ -730,6 +788,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"open={float(timing['video_open_seconds']):.3f}s "
             f"decode={float(timing['decode_seconds']):.3f}s "
             f"crop={float(timing['crop_seconds']):.3f}s "
+            f"transform={float(timing['transform_seconds']):.3f}s "
             f"decoded_frames={timing['decoded_frames']}"
         )
         if payload["failures"]:
