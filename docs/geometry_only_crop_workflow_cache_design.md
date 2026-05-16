@@ -562,9 +562,14 @@ Example:
 scripts/py -m fisheye.diagnostics.check_training_crop_pynvvc_pixel_parity \
   /path/to/recording_training.zarr \
   --crop-run crop_2026-02-03_23-34-39 \
+  --video-path /path/to/source_video.mp4 \
   --sample-count 64 \
   --output-json /tmp/training_crop_pynvvc_parity.json
 ```
+
+`--video-path` is optional when the zarr's `source_video_path` is readable from
+the current machine. Use it for copied PRFS smoke inputs whose stored attrs
+still point at the original workstation path.
 
 For small per-recording training zarrs, `--all-rows` is appropriate. For long
 sampled videos, remember that the PyNv path is sequential; selecting a row from

@@ -470,6 +470,7 @@ def check_training_crop_pynvvc_pixel_parity(
     *,
     zarr_path: str | Path,
     crop_run: str | None = None,
+    video_path: str | Path | None = None,
     rows: Sequence[int] | None = None,
     all_rows: bool = False,
     sample_count: int = 32,
@@ -497,7 +498,9 @@ def check_training_crop_pynvvc_pixel_parity(
     if "roi_coordinates_full" not in crop_group:
         raise ValueError(f"crop_runs/{resolved_crop_run} is missing roi_coordinates_full.")
 
-    video_path = _resolve_video_path(root, crop_group)
+    resolved_video_path = (
+        Path(video_path).expanduser() if video_path is not None else _resolve_video_path(root, crop_group)
+    )
     video_shape = _resolve_video_shape(root, crop_group)
     roi_shape = _resolve_roi_shape(crop_group)
     roi_images = crop_group["roi_images"]
@@ -538,7 +541,7 @@ def check_training_crop_pynvvc_pixel_parity(
     reference_read_seconds = time.perf_counter() - reference_started
 
     produced, decode_timing = _decode_pynvvc_luma_rows(
-        video_path=video_path,
+        video_path=resolved_video_path,
         rows=selected_rows,
         source_frame_indices=source_frame_indices,
         roi_coordinates_full=roi_coordinates_full,
@@ -598,7 +601,8 @@ def check_training_crop_pynvvc_pixel_parity(
         "inputs": {
             "zarr_path": str(archive_path),
             "crop_run": resolved_crop_run,
-            "video_path": str(video_path),
+            "video_path": str(resolved_video_path),
+            "video_path_overridden": video_path is not None,
             "all_rows": bool(all_rows),
             "sample_count_requested": int(sample_count),
             "sample_seed": int(seed),
@@ -649,6 +653,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path, help="Per-recording training Zarr archive.")
     parser.add_argument("--crop-run", default=None, help="Crop run override; defaults to crop_runs latest.")
+    parser.add_argument(
+        "--video-path",
+        type=Path,
+        default=None,
+        help="Override source video path. Useful when a training zarr was copied to PRFS.",
+    )
     parser.add_argument("--rows", default=None, help="Comma/space separated explicit ROI rows to compare.")
     parser.add_argument("--all-rows", action="store_true", help="Compare every ROI row.")
     parser.add_argument("--sample-count", type=_non_negative_int, default=32)
@@ -679,6 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     payload = check_training_crop_pynvvc_pixel_parity(
         zarr_path=args.zarr_path,
         crop_run=args.crop_run,
+        video_path=args.video_path,
         rows=_parse_rows(args.rows),
         all_rows=args.all_rows,
         sample_count=args.sample_count,
