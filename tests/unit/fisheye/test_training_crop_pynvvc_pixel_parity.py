@@ -35,6 +35,12 @@ class _FakePynvvcReader:
         self._offset += len(result)
         return result
 
+    def iter_frames(self):
+        while self._offset < len(self._frames):
+            frame = self._frames[self._offset]
+            self._offset += 1
+            yield frame
+
     def close(self) -> None:
         pass
 
@@ -52,6 +58,12 @@ class _FakePynvvcNv12Reader:
         result = self._frames[self._offset : self._offset + int(count)]
         self._offset += len(result)
         return result
+
+    def iter_frames(self):
+        while self._offset < len(self._frames):
+            frame = self._frames[self._offset]
+            self._offset += 1
+            yield frame
 
     def close(self) -> None:
         pass

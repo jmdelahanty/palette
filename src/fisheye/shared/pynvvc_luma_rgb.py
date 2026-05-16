@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -64,6 +64,26 @@ class PynvvcLumaRgbReader:
                 else:
                     self._pending_frames.append(tensor)
         return frames
+
+    def iter_frames(self) -> Iterator[torch.Tensor]:
+        """Yield decoded CUDA tensors one at a time.
+
+        Callers that materialize pixels from PyNvVideoCodec surfaces should
+        prefer this iterator over retaining a list of decoded frames. It lets
+        them consume/copy each frame before advancing the decoder, avoiding
+        ambiguity around decoder surface reuse.
+        """
+
+        while self._pending_frames:
+            yield self._pending_frames.pop(0)
+        while not self._eof:
+            try:
+                packet = next(self.packet_iter)
+            except StopIteration:
+                self._eof = True
+                break
+            for frame in self.decoder.Decode(packet):
+                yield torch.from_dlpack(frame)
 
     def close(self) -> None:
         self._pending_frames = []

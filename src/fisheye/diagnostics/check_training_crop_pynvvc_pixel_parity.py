@@ -506,7 +506,7 @@ def _decode_pynvvc_luma_rows(
             )
 
         max_frame = int(max(frame_to_rows))
-        decode_chunk = max(1, int(decode_chunk_frames))
+        frame_iter = reader.iter_frames()
         decoded_frame_index = 0
         decoded_frames = 0
         decode_seconds = 0.0
@@ -516,56 +516,54 @@ def _decode_pynvvc_luma_rows(
         produced: dict[int, np.ndarray] = {}
 
         while decoded_frame_index <= max_frame:
-            count = min(decode_chunk, max_frame - decoded_frame_index + 1)
             started = time.perf_counter()
-            frames = reader.decode_next(count)
-            decode_seconds += time.perf_counter() - started
-            if not frames:
+            try:
+                frame_tensor = next(frame_iter)
+            except StopIteration:
                 break
-            decoded_frames += int(len(frames))
+            decode_seconds += time.perf_counter() - started
+            decoded_frames += 1
 
-            for offset, frame_tensor in enumerate(frames):
-                frame_idx = decoded_frame_index + offset
-                roi_rows = frame_to_rows.get(frame_idx)
-                if not roi_rows:
-                    continue
-                started = time.perf_counter()
-                if candidate_pixel_mode in RGB_WEIGHTED_GRAY_CANDIDATE_MODES:
-                    matrix = "bt709" if "bt709" in candidate_pixel_mode else "bt601"
-                    crops = _crop_pynvvc_nv12_rgb_weighted_gray_frame(
-                        frame_tensor,
-                        roi_ids=roi_rows,
-                        roi_coordinates_full=roi_coordinates_full,
-                        roi_shape=roi_shape,
-                        video_shape=video_shape,
-                        matrix=matrix,
-                        grayscale_fp16=bool(grayscale_fp16),
-                    )
-                else:
-                    crops = _crop_pynvvc_luma_frame(
-                        frame_tensor,
-                        roi_ids=roi_rows,
-                        roi_coordinates_full=roi_coordinates_full,
-                        roi_shape=roi_shape,
-                        video_shape=video_shape,
-                    )
-                if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
-                    torch.cuda.synchronize()
-                crop_seconds += time.perf_counter() - started
+            roi_rows = frame_to_rows.get(decoded_frame_index)
+            if not roi_rows:
+                decoded_frame_index += 1
+                continue
+            started = time.perf_counter()
+            if candidate_pixel_mode in RGB_WEIGHTED_GRAY_CANDIDATE_MODES:
+                matrix = "bt709" if "bt709" in candidate_pixel_mode else "bt601"
+                crops = _crop_pynvvc_nv12_rgb_weighted_gray_frame(
+                    frame_tensor,
+                    roi_ids=roi_rows,
+                    roi_coordinates_full=roi_coordinates_full,
+                    roi_shape=roi_shape,
+                    video_shape=video_shape,
+                    matrix=matrix,
+                    grayscale_fp16=bool(grayscale_fp16),
+                )
+            else:
+                crops = _crop_pynvvc_luma_frame(
+                    frame_tensor,
+                    roi_ids=roi_rows,
+                    roi_coordinates_full=roi_coordinates_full,
+                    roi_shape=roi_shape,
+                    video_shape=video_shape,
+                )
+            if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
+                torch.cuda.synchronize()
+            crop_seconds += time.perf_counter() - started
 
-                started = time.perf_counter()
-                crops = _apply_candidate_pixel_mode(crops, candidate_pixel_mode)
-                if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
-                    torch.cuda.synchronize()
-                transform_seconds += time.perf_counter() - started
+            started = time.perf_counter()
+            crops = _apply_candidate_pixel_mode(crops, candidate_pixel_mode)
+            if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
+                torch.cuda.synchronize()
+            transform_seconds += time.perf_counter() - started
 
-                started = time.perf_counter()
-                crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
-                contiguous_seconds += time.perf_counter() - started
-                for local_idx, row in enumerate(roi_rows):
-                    produced[int(row)] = np.ascontiguousarray(crops_cpu[local_idx], dtype=np.uint8)
-
-            decoded_frame_index += int(len(frames))
+            started = time.perf_counter()
+            crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
+            contiguous_seconds += time.perf_counter() - started
+            for local_idx, row in enumerate(roi_rows):
+                produced[int(row)] = np.ascontiguousarray(crops_cpu[local_idx], dtype=np.uint8)
+            decoded_frame_index += 1
 
         return produced, {
             "video_open_seconds": float(video_open_seconds),

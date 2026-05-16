@@ -413,52 +413,50 @@ def regenerate_training_crops_pynvvc(
                 f"decoder={source_width}x{source_height}, metadata={expected_width}x{expected_height}."
             )
 
+        frame_iter = reader.iter_frames()
         decoded_frame_index = 0
-        decode_chunk = max(1, int(decode_chunk_frames))
         while decoded_frame_index <= max_frame:
-            count = min(decode_chunk, max_frame - decoded_frame_index + 1)
             decode_started = time.perf_counter()
-            frames = reader.decode_next(count)
-            timing["decode_seconds"] += float(time.perf_counter() - decode_started)
-            if not frames:
+            try:
+                frame_tensor = next(frame_iter)
+            except StopIteration:
                 break
-            timing["decoded_frames"] += int(len(frames))
+            timing["decode_seconds"] += float(time.perf_counter() - decode_started)
+            timing["decoded_frames"] += 1
 
-            for frame_offset, frame_tensor in enumerate(frames):
-                frame_idx = decoded_frame_index + frame_offset
-                rows = frame_to_rows.get(frame_idx)
-                if not rows:
-                    timing["skipped_frames"] += 1
-                    continue
-                crop_started = time.perf_counter()
-                crops = _crop_pynvvc_luma_frame(
-                    frame_tensor,
-                    roi_ids=rows,
-                    roi_coordinates_full=roi_coordinates_full,
-                    roi_shape=roi_shape,
-                    video_shape=video_shape,
-                )
-                try:
-                    import torch
+            rows = frame_to_rows.get(decoded_frame_index)
+            if not rows:
+                timing["skipped_frames"] += 1
+                decoded_frame_index += 1
+                continue
+            crop_started = time.perf_counter()
+            crops = _crop_pynvvc_luma_frame(
+                frame_tensor,
+                roi_ids=rows,
+                roi_coordinates_full=roi_coordinates_full,
+                roi_shape=roi_shape,
+                video_shape=video_shape,
+            )
+            try:
+                import torch
 
-                    if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
-                        torch.cuda.synchronize()
-                except Exception:
-                    pass
-                timing["crop_seconds"] += float(time.perf_counter() - crop_started)
+                if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
+            timing["crop_seconds"] += float(time.perf_counter() - crop_started)
 
-                contiguous_started = time.perf_counter()
-                crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
-                timing["contiguous_seconds"] += float(time.perf_counter() - contiguous_started)
+            contiguous_started = time.perf_counter()
+            crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
+            timing["contiguous_seconds"] += float(time.perf_counter() - contiguous_started)
 
-                write_started = time.perf_counter()
-                for local_idx, row in enumerate(rows):
-                    roi_images[int(row)] = crops_cpu[int(local_idx)]
-                    rows_written_mask[int(row)] = True
-                timing["write_seconds"] += float(time.perf_counter() - write_started)
-                timing["rows_written"] = int(rows_written_mask.sum())
-
-            decoded_frame_index += int(len(frames))
+            write_started = time.perf_counter()
+            for local_idx, row in enumerate(rows):
+                roi_images[int(row)] = crops_cpu[int(local_idx)]
+                rows_written_mask[int(row)] = True
+            timing["write_seconds"] += float(time.perf_counter() - write_started)
+            timing["rows_written"] = int(rows_written_mask.sum())
+            decoded_frame_index += 1
 
         rows_written = int(rows_written_mask.sum())
         if rows_written != total_rois:
