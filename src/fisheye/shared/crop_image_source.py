@@ -21,6 +21,7 @@ from fisheye.shared.crop_roi_layout import (
     build_scratch_roi_cache_layout,
     crop_roi_layout_attrs,
 )
+from fisheye.shared.flat_roi_cache import crop_run_name_from_manifest, open_flat_roi_cache
 from fisheye.shared.type_conversions import normalize_attr
 
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
@@ -505,6 +506,7 @@ class CropImageSource:
     roi_cache_created: bool = False
     roi_cache_key: str | None = None
     roi_cache_path: str | None = None
+    roi_cache_backend: str | None = None
     roi_live_acceleration_requested: str | None = None
     roi_live_acceleration_effective: str | None = None
     roi_live_acceleration_fallback_reason: str | None = None
@@ -524,11 +526,15 @@ class CropImageSource:
         roi_live_acceleration: str = "auto",
         roi_live_gpu_chunk_frames: int = _ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT,
         roi_cache_dir: str | Path | None = None,
+        roi_cache_manifest: str | Path | None = None,
         console: Any | None = None,
     ) -> "CropImageSource":
         normalized_cache_policy = _normalize_roi_cache_policy(roi_cache_policy)
         normalized_live_acceleration = _normalize_roi_live_acceleration(roi_live_acceleration)
         live_gpu_chunk_frames = max(1, int(roi_live_gpu_chunk_frames))
+        manifest_path = Path(roi_cache_manifest).expanduser() if roi_cache_manifest is not None else None
+        if crop_run is None and manifest_path is not None:
+            crop_run = crop_run_name_from_manifest(manifest_path)
         _crop_parent, crop_group, crop_run_name = resolve_crop_run(
             root,
             crop_run=crop_run,
@@ -650,7 +656,12 @@ class CropImageSource:
             _images_full=images_full if storage_mode == "geometry_only" else None,
             _external_reader=external_reader if storage_mode == "geometry_only" else None,
         )
-        if source.storage_mode == "geometry_only" and source._should_use_roi_cache():
+        if manifest_path is not None:
+            source._activate_flat_bin_cache(
+                manifest_path=manifest_path,
+                zarr_path=zarr_path,
+            )
+        elif source.storage_mode == "geometry_only" and source._should_use_roi_cache():
             source._activate_temporary_cache(
                 zarr_path=zarr_path,
                 roi_cache_dir=roi_cache_dir,
@@ -756,6 +767,28 @@ class CropImageSource:
                 frame_cache[frame_idx_int] = frame
             batch[batch_idx] = _crop_from_top_left(frame, top_left, self.roi_shape)
         return batch
+
+    def _activate_flat_bin_cache(
+        self,
+        *,
+        manifest_path: Path,
+        zarr_path: str | Path | None,
+    ) -> None:
+        archive_path = Path(zarr_path).expanduser().resolve() if zarr_path is not None else None
+        expected_shape = (self.total_rois, int(self.roi_shape[0]), int(self.roi_shape[1]))
+        cache_arr = open_flat_roi_cache(
+            manifest_path,
+            expected_archive_path=archive_path,
+            expected_crop_run=self.crop_run_name,
+            expected_shape=expected_shape,
+        )
+        self._roi_images = cache_arr
+        self.roi_cache_used = True
+        self.roi_cache_created = False
+        self.roi_cache_key = str(cache_arr.manifest.get("cache_key") or "") or None
+        self.roi_cache_path = str(cache_arr.manifest_path)
+        self.roi_cache_backend = "flat_bin_v1"
+        self.roi_read_mode = "flat_bin_roi_cache"
 
     def _should_use_roi_cache(self) -> bool:
         if self.storage_mode != "geometry_only":
@@ -931,6 +964,7 @@ class CropImageSource:
         self.roi_cache_created = not reuse_existing
         self.roi_cache_key = cache_key
         self.roi_cache_path = str(cache_path)
+        self.roi_cache_backend = "zarr"
         self.roi_read_mode = "temporary_cache"
 
     def _build_roi_cache_key(self, archive_path: Path) -> str:
@@ -990,5 +1024,7 @@ class CropImageSource:
         raise RuntimeError("No frame source available for geometry-only crop read.")
 
     def close(self) -> None:
+        if self._roi_images is not None and hasattr(self._roi_images, "close"):
+            self._roi_images.close()
         if self._external_reader is not None:
             self._external_reader.close()

@@ -56,6 +56,7 @@ class SubjectSegmentationConfig:
     background_run: Optional[str] = None
     roi_cache_policy: str = "auto"
     roi_cache_dir: Optional[str] = None
+    roi_cache_manifest: Optional[str] = None
     roi_live_acceleration: str = "auto"
     roi_live_gpu_chunk_frames: int = 32
 
@@ -386,6 +387,7 @@ def segment_subject_masks_from_root(
         roi_live_acceleration=cfg.roi_live_acceleration,
         roi_live_gpu_chunk_frames=int(cfg.roi_live_gpu_chunk_frames),
         roi_cache_dir=cfg.roi_cache_dir,
+        roi_cache_manifest=cfg.roi_cache_manifest,
         console=console,
     )
     crop_group = crop_source.crop_group
@@ -497,6 +499,7 @@ def segment_subject_masks_from_root(
                 "source_roi_read_mode": crop_source.roi_read_mode,
                 "roi_cache_policy": crop_source.roi_cache_policy,
                 "source_roi_cache_used": bool(crop_source.roi_cache_used),
+                "source_roi_cache_backend": crop_source.roi_cache_backend,
                 "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
                 "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
                 "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -724,6 +727,7 @@ def _build_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "background_run",
         "roi_cache_policy",
         "roi_cache_dir",
+        "roi_cache_manifest",
         "roi_live_acceleration",
         "roi_live_gpu_chunk_frames",
         "diff_threshold",
@@ -754,6 +758,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
     )
     parser.add_argument("--roi-cache-dir", type=str, help="Optional scratch directory for temporary ROI caches.")
+    parser.add_argument(
+        "--roi-cache-manifest",
+        type=str,
+        help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
+    )
     parser.add_argument(
         "--roi-live-acceleration",
         choices=("auto", "cpu", "gpu"),

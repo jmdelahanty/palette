@@ -548,6 +548,7 @@ def resolve_sam_subject_inputs(
     zarr_path: str | Path | None = None,
     roi_cache_policy: str = "auto",
     roi_cache_dir: str | Path | None = None,
+    roi_cache_manifest: str | Path | None = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
 ) -> ResolvedSamInputs:
@@ -557,6 +558,7 @@ def resolve_sam_subject_inputs(
         zarr_path=zarr_path,
         roi_cache_policy=roi_cache_policy,
         roi_cache_dir=roi_cache_dir,
+        roi_cache_manifest=roi_cache_manifest,
         roi_live_acceleration=roi_live_acceleration,
         roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
     )
@@ -1616,6 +1618,7 @@ def write_sam_subject_mask_run(
     )
     source_roi_cache_policy = source_crop_source.roi_cache_policy if source_crop_source is not None else "never"
     source_roi_cache_used = bool(source_crop_source.roi_cache_used) if source_crop_source is not None else False
+    source_roi_cache_backend = source_crop_source.roi_cache_backend if source_crop_source is not None else None
     source_roi_cache_key = source_crop_source.roi_cache_key if source_crop_source is not None else None
     source_roi_cache_path = source_crop_source.roi_cache_path if source_crop_source is not None else None
     source_roi_live_acceleration_requested = (
@@ -1647,6 +1650,7 @@ def write_sam_subject_mask_run(
             "source_roi_read_mode": source_roi_read_mode,
             "roi_cache_policy": source_roi_cache_policy,
             "source_roi_cache_used": source_roi_cache_used,
+            "source_roi_cache_backend": source_roi_cache_backend,
             "source_roi_live_acceleration_requested": source_roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": source_roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": source_roi_live_acceleration_fallback_reason,
@@ -1836,6 +1840,7 @@ def write_sam_subject_mask_run(
             "source_roi_read_mode": source_roi_read_mode,
             "roi_cache_policy": source_roi_cache_policy,
             "roi_cache_used": source_roi_cache_used,
+            "roi_cache_backend": source_roi_cache_backend,
             "roi_cache_key": source_roi_cache_key,
             "roi_live_acceleration_requested": source_roi_live_acceleration_requested,
             "roi_live_acceleration_effective": source_roi_live_acceleration_effective,
@@ -1877,6 +1882,7 @@ def run_sam_subject_mask_inference(
     positive_keypoint_labels: Sequence[str] | None = None,
     roi_cache_policy: str = "auto",
     roi_cache_dir: str | Path | None = None,
+    roi_cache_manifest: str | Path | None = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
     profile_timings: bool = False,
@@ -1921,6 +1927,7 @@ def run_sam_subject_mask_inference(
         zarr_path=zarr_path,
         roi_cache_policy=roi_cache_policy,
         roi_cache_dir=roi_cache_dir,
+        roi_cache_manifest=roi_cache_manifest,
         roi_live_acceleration=roi_live_acceleration,
         roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
     )
@@ -2144,6 +2151,7 @@ def inspect_sam_subject_archive(
     positive_keypoint_labels: Sequence[str] | None = None,
     roi_cache_policy: str = "auto",
     roi_cache_dir: str | Path | None = None,
+    roi_cache_manifest: str | Path | None = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
 ) -> dict[str, Any]:
@@ -2155,6 +2163,7 @@ def inspect_sam_subject_archive(
         zarr_path=zarr_path,
         roi_cache_policy=roi_cache_policy,
         roi_cache_dir=roi_cache_dir,
+        roi_cache_manifest=roi_cache_manifest,
         roi_live_acceleration=roi_live_acceleration,
         roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
     )
@@ -2187,6 +2196,7 @@ def inspect_sam_subject_archive(
             "source_roi_read_mode": inputs.crop_source.roi_read_mode,
             "roi_cache_policy": inputs.crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(inputs.crop_source.roi_cache_used),
+            "source_roi_cache_backend": inputs.crop_source.roi_cache_backend,
             "source_roi_live_acceleration_requested": inputs.crop_source.roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": inputs.crop_source.roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": inputs.crop_source.roi_live_acceleration_fallback_reason,
@@ -2276,6 +2286,7 @@ def inspect_sam_subject_archive_path(
     positive_keypoint_labels: Sequence[str] | None = None,
     roi_cache_policy: str = "auto",
     roi_cache_dir: str | Path | None = None,
+    roi_cache_manifest: str | Path | None = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
 ) -> dict[str, Any]:
@@ -2299,6 +2310,7 @@ def inspect_sam_subject_archive_path(
         positive_keypoint_labels=positive_keypoint_labels,
         roi_cache_policy=roi_cache_policy,
         roi_cache_dir=roi_cache_dir,
+        roi_cache_manifest=roi_cache_manifest,
         roi_live_acceleration=roi_live_acceleration,
         roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
         zarr_path=zarr_path,
@@ -2422,6 +2434,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--roi-cache-dir",
         type=str,
         help="Optional scratch directory for temporary ROI caches.",
+    )
+    parser.add_argument(
+        "--roi-cache-manifest",
+        type=str,
+        help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
     )
     parser.add_argument(
         "--roi-live-acceleration",
@@ -2569,6 +2586,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             crop_run=args.crop_run,
             roi_cache_policy=args.roi_cache_policy,
             roi_cache_dir=args.roi_cache_dir,
+            roi_cache_manifest=args.roi_cache_manifest,
             roi_live_acceleration=args.roi_live_acceleration,
             roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
             keypoint_run=args.keypoint_run,
@@ -2597,6 +2615,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             crop_run=args.crop_run,
             roi_cache_policy=args.roi_cache_policy,
             roi_cache_dir=args.roi_cache_dir,
+            roi_cache_manifest=args.roi_cache_manifest,
             roi_live_acceleration=args.roi_live_acceleration,
             roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
             keypoint_run=args.keypoint_run,

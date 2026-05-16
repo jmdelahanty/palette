@@ -373,6 +373,7 @@ def detect_keypoints_yolo(
     mask_threshold: float = 0.5,
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
+    roi_cache_manifest: Optional[Path] = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
     profile_timings: bool = False,
@@ -413,6 +414,7 @@ def detect_keypoints_yolo(
         roi_live_acceleration=roi_live_acceleration,
         roi_live_gpu_chunk_frames=roi_live_gpu_chunk_frames,
         roi_cache_dir=roi_cache_dir,
+        roi_cache_manifest=roi_cache_manifest,
         console=console,
     )
     crop_group = crop_source.crop_group
@@ -716,6 +718,7 @@ def detect_keypoints_yolo(
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "source_roi_cache_used": bool(crop_source.roi_cache_used),
+        "source_roi_cache_backend": crop_source.roi_cache_backend,
         "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -733,6 +736,7 @@ def detect_keypoints_yolo(
             "profile_timings": bool(profile_timings),
             "roi_live_acceleration": str(roi_live_acceleration),
             "roi_live_gpu_chunk_frames": int(roi_live_gpu_chunk_frames),
+            "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
             # Maintained for API compatibility with pipeline/batch configs.
             "mask_threshold": float(mask_threshold),
         },
@@ -794,7 +798,9 @@ def detect_keypoints_yolo(
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "roi_cache_used": bool(crop_source.roi_cache_used),
+            "roi_cache_backend": crop_source.roi_cache_backend,
             "roi_cache_key": crop_source.roi_cache_key,
+            "roi_cache_path": crop_source.roi_cache_path,
             "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -828,6 +834,7 @@ def detect_keypoints_yolo(
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),
+        "roi_cache_backend": crop_source.roi_cache_backend,
         "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -919,6 +926,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional scratch directory for temporary ROI caches.",
     )
     parser.add_argument(
+        "--roi-cache-manifest",
+        type=Path,
+        default=None,
+        help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
+    )
+    parser.add_argument(
         "--profile-timings",
         action="store_true",
         help="Collect per-stage timing diagnostics and store them in the output run attrs.",
@@ -946,6 +959,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         mask_threshold=args.mask_threshold,
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
+        roi_cache_manifest=args.roi_cache_manifest,
         profile_timings=args.profile_timings,
         registry=args.registry,
     )

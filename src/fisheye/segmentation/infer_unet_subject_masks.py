@@ -781,6 +781,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--roi-cache-dir", type=Path, default=None, help="Optional scratch directory for temporary ROI caches.")
     parser.add_argument(
+        "--roi-cache-manifest",
+        type=Path,
+        default=None,
+        help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
+    )
+    parser.add_argument(
         "--roi-live-acceleration",
         choices=("auto", "cpu", "gpu"),
         default="auto",
@@ -921,6 +927,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_live_acceleration=args.roi_live_acceleration,
         roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
         roi_cache_dir=args.roi_cache_dir,
+        roi_cache_manifest=args.roi_cache_manifest,
         console=console,
     )
     crop_group = crop_source.crop_group
@@ -994,6 +1001,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
+            "source_roi_cache_backend": crop_source.roi_cache_backend,
             "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -1108,7 +1116,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "source_roi_read_mode": crop_source.roi_read_mode,
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),
+        "roi_cache_backend": crop_source.roi_cache_backend,
         "roi_cache_key": crop_source.roi_cache_key,
+        "roi_cache_path": crop_source.roi_cache_path,
         "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -1153,6 +1163,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "output_queue_size": int(args.output_queue_size),
             "progress": bool(args.progress),
             "roi_cache_policy": crop_source.roi_cache_policy,
+            "roi_cache_manifest": str(args.roi_cache_manifest) if args.roi_cache_manifest else None,
             "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
         },

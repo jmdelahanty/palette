@@ -768,6 +768,7 @@ def segment_eye_masks_yolo(
     verbose: bool = False,
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
+    roi_cache_manifest: Optional[Path] = None,
     console: Optional[Console] = None,
     registry: Optional[Registry] = None,
     status_details: Optional[Dict[str, object]] = None,
@@ -807,6 +808,7 @@ def segment_eye_masks_yolo(
         zarr_path=zarr_path,
         roi_cache_policy=roi_cache_policy,
         roi_cache_dir=roi_cache_dir,
+        roi_cache_manifest=roi_cache_manifest,
         console=console,
     )
     crop_run_name = crop_source.crop_run_name
@@ -1201,6 +1203,7 @@ def segment_eye_masks_yolo(
                 "prototype_fallback_used": prototype_fallback_used,
                 "native_mask_hook_used": native_cache_used,
                 "proto_upsample_factor": proto_factor,
+                "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
             },
             "source_crop_run": crop_run_name,
             **build_source_crop_snapshot_attrs(
@@ -1210,6 +1213,7 @@ def segment_eye_masks_yolo(
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
+            "source_roi_cache_backend": crop_source.roi_cache_backend,
             **build_source_keypoints_attrs(resolved_keypoints_run, include_legacy_alias=True),
             "total_rois": total_rois,
             "successful_eyes": total_successful_eyes,
@@ -1272,7 +1276,9 @@ def segment_eye_masks_yolo(
                 "source_roi_read_mode": crop_source.roi_read_mode,
                 "roi_cache_policy": crop_source.roi_cache_policy,
                 "roi_cache_used": bool(crop_source.roi_cache_used),
+                "roi_cache_backend": crop_source.roi_cache_backend,
                 "roi_cache_key": crop_source.roi_cache_key,
+                "roi_cache_path": crop_source.roi_cache_path,
                 "source_keypoints_run": resolved_keypoints_run,
                 "source_keypoint_group": resolved_keypoint_group,
                 "frame_source": crop_source.frame_source_kind,
@@ -1348,6 +1354,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional scratch directory for temporary ROI caches.",
     )
+    parser.add_argument(
+        "--roi-cache-manifest",
+        type=Path,
+        default=None,
+        help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
     return parser
 
@@ -1377,6 +1389,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         legacy_masks=args.legacy_masks,
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
+        roi_cache_manifest=args.roi_cache_manifest,
         verbose=args.verbose,
         console=console,
     )
