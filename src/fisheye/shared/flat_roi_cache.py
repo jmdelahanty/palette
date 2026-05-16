@@ -21,6 +21,7 @@ import zarr
 FLAT_ROI_CACHE_SCHEMA = "palette_roi_cache_flat_bin_v1"
 FLAT_ROI_CACHE_LAYOUT = "flat_bin_v1"
 FLAT_ROI_CACHE_PROGRESS_SCHEMA = "palette_roi_cache_flat_bin_progress_v1"
+FLAT_ROI_CACHE_DECODE_BACKENDS = ("auto", "read_slice", "pynvvc_luma")
 
 
 class FlatRoiCacheArray:
@@ -118,6 +119,7 @@ def build_flat_roi_cache(
     compute_sha256: bool = False,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
+    roi_decode_backend: str = "auto",
     console: Any | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     progress_interval_seconds: float = 30.0,
@@ -130,6 +132,7 @@ def build_flat_roi_cache(
         raise FileNotFoundError(f"Zarr path not found: {archive_path}")
     if manifest_path is None and output_dir is None:
         raise ValueError("Provide either output_dir or manifest_path.")
+    decode_backend_requested = _normalize_decode_backend(roi_decode_backend)
 
     root = zarr.open(str(archive_path), mode="r", use_consolidated=False)
 
@@ -180,18 +183,6 @@ def build_flat_roi_cache(
         total_rois = int(source.total_rois)
         effective_batch_size = max(1, int(batch_size))
         started = time.perf_counter()
-        last_progress = started
-        timing = {
-            "read_seconds_total": 0.0,
-            "contiguous_seconds_total": 0.0,
-            "serialize_seconds_total": 0.0,
-            "write_seconds_total": 0.0,
-            "sha256_seconds_total": 0.0,
-            "batches": 0,
-            "rows": 0,
-            "bytes": 0,
-        }
-        sha = hashlib.sha256() if compute_sha256 else None
         _emit_progress(
             progress_callback,
             "start",
@@ -201,89 +192,29 @@ def build_flat_roi_cache(
             batch_size=effective_batch_size,
             total_rois=total_rois,
             total_bytes=total_bytes,
+            decode_backend_requested=decode_backend_requested,
             source=_progress_source_payload(source),
         )
 
-        with bin_tmp.open("wb") as handle:
-            for batch_index, start in enumerate(range(0, total_rois, effective_batch_size), start=1):
-                end = min(start + effective_batch_size, total_rois)
-                read_started = time.perf_counter()
-                raw_batch = source.read_slice(start, end)
-                read_seconds = time.perf_counter() - read_started
-
-                contiguous_started = time.perf_counter()
-                batch = np.ascontiguousarray(raw_batch, dtype=np.uint8)
-                contiguous_seconds = time.perf_counter() - contiguous_started
-                if tuple(batch.shape[1:]) != tuple(source.roi_shape):
-                    raise ValueError(
-                        f"ROI batch shape mismatch: expected (*, {source.roi_shape[0]}, {source.roi_shape[1]}), "
-                        f"got {tuple(batch.shape)}."
-                    )
-
-                serialize_started = time.perf_counter()
-                payload = batch.tobytes(order="C")
-                serialize_seconds = time.perf_counter() - serialize_started
-
-                write_started = time.perf_counter()
-                handle.write(payload)
-                write_seconds = time.perf_counter() - write_started
-
-                sha_seconds = 0.0
-                if sha is not None:
-                    sha_started = time.perf_counter()
-                    sha.update(payload)
-                    sha_seconds = time.perf_counter() - sha_started
-
-                batch_rows = int(end - start)
-                batch_bytes = int(len(payload))
-                timing["read_seconds_total"] += float(read_seconds)
-                timing["contiguous_seconds_total"] += float(contiguous_seconds)
-                timing["serialize_seconds_total"] += float(serialize_seconds)
-                timing["write_seconds_total"] += float(write_seconds)
-                timing["sha256_seconds_total"] += float(sha_seconds)
-                timing["batches"] = int(batch_index)
-                timing["rows"] += batch_rows
-                timing["bytes"] += batch_bytes
-
-                now = time.perf_counter()
-                should_emit = _should_emit_batch_progress(
-                    batch_index=batch_index,
-                    rows_written=int(timing["rows"]),
-                    total_rois=total_rois,
-                    now=now,
-                    last_progress=last_progress,
-                    progress_interval_seconds=float(progress_interval_seconds),
-                    progress_every_batches=int(progress_every_batches),
-                )
-                if should_emit:
-                    last_progress = now
-                    elapsed = now - started
-                    _emit_progress(
-                        progress_callback,
-                        "batch",
-                        batch={
-                            "index": int(batch_index),
-                            "start": int(start),
-                            "end": int(end),
-                            "rows": batch_rows,
-                            "bytes": batch_bytes,
-                            "read_seconds": float(read_seconds),
-                            "contiguous_seconds": float(contiguous_seconds),
-                            "serialize_seconds": float(serialize_seconds),
-                            "write_seconds": float(write_seconds),
-                            "sha256_seconds": float(sha_seconds),
-                            "read_rows_per_second": _rate(batch_rows, read_seconds),
-                            "write_mib_per_second": _rate(batch_bytes / (1024 * 1024), write_seconds),
-                        },
-                        progress=_progress_totals(
-                            rows_written=int(timing["rows"]),
-                            bytes_written=int(timing["bytes"]),
-                            total_rois=total_rois,
-                            total_bytes=total_bytes,
-                            elapsed_seconds=elapsed,
-                            timing=timing,
-                        ),
-                    )
+        try:
+            timing, payload_sha256, decode_backend_effective = _write_flat_cache_payload(
+                source=source,
+                bin_tmp=bin_tmp,
+                total_bytes=total_bytes,
+                batch_size=effective_batch_size,
+                compute_sha256=bool(compute_sha256),
+                decode_backend_requested=decode_backend_requested,
+                progress_callback=progress_callback,
+                progress_interval_seconds=float(progress_interval_seconds),
+                progress_every_batches=int(progress_every_batches),
+                started=started,
+            )
+        except Exception:
+            try:
+                bin_tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise
 
         os.replace(bin_tmp, bin_path)
         duration_seconds = float(time.perf_counter() - started)
@@ -301,9 +232,11 @@ def build_flat_roi_cache(
             cache_key=cache_key,
             batch_size=effective_batch_size,
             duration_seconds=duration_seconds,
-            payload_sha256=sha.hexdigest() if sha is not None else None,
+            payload_sha256=payload_sha256,
             total_bytes=total_bytes,
             timing_summary=timing_summary,
+            decode_backend_requested=decode_backend_requested,
+            decode_backend_effective=decode_backend_effective,
         )
         manifest_tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(manifest_tmp, resolved_manifest_path)
@@ -312,6 +245,7 @@ def build_flat_roi_cache(
             "complete",
             manifest_path=str(resolved_manifest_path),
             bin_path=str(bin_path),
+            decode_backend_effective=decode_backend_effective,
             source=_progress_source_payload(source),
             progress=_progress_totals(
                 rows_written=int(timing["rows"]),
@@ -340,6 +274,8 @@ def _build_manifest(
     payload_sha256: str | None,
     total_bytes: int,
     timing_summary: Mapping[str, Any],
+    decode_backend_requested: str,
+    decode_backend_effective: str,
 ) -> dict[str, Any]:
     roi_h, roi_w = source.roi_shape
     return {
@@ -371,6 +307,8 @@ def _build_manifest(
         "builder": {
             "batch_size": int(batch_size),
             "duration_seconds": float(duration_seconds),
+            "decode_backend_requested": str(decode_backend_requested),
+            "decode_backend_effective": str(decode_backend_effective),
             "timing": dict(timing_summary),
             "format_note": (
                 "flat_bin_v1 stores all ROI rows contiguously as raw uint8 bytes. "
@@ -379,6 +317,476 @@ def _build_manifest(
             ),
         },
     }
+
+
+def _write_flat_cache_payload(
+    *,
+    source: Any,
+    bin_tmp: Path,
+    total_bytes: int,
+    batch_size: int,
+    compute_sha256: bool,
+    decode_backend_requested: str,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    progress_interval_seconds: float,
+    progress_every_batches: int,
+    started: float,
+) -> tuple[dict[str, Any], str | None, str]:
+    if decode_backend_requested in {"auto", "pynvvc_luma"} and _source_supports_pynvvc_luma(source):
+        try:
+            return _write_flat_cache_payload_pynvvc_luma(
+                source=source,
+                bin_tmp=bin_tmp,
+                total_bytes=total_bytes,
+                batch_size=batch_size,
+                compute_sha256=compute_sha256,
+                progress_callback=progress_callback,
+                progress_interval_seconds=progress_interval_seconds,
+                progress_every_batches=progress_every_batches,
+                started=started,
+            )
+        except Exception as exc:
+            if decode_backend_requested == "pynvvc_luma":
+                raise
+            _emit_progress(
+                progress_callback,
+                "backend_fallback",
+                requested_backend=decode_backend_requested,
+                failed_backend="pynvvc_luma",
+                fallback_backend="read_slice",
+                error={"type": exc.__class__.__name__, "message": str(exc)},
+            )
+            try:
+                bin_tmp.unlink()
+            except FileNotFoundError:
+                pass
+    elif decode_backend_requested == "pynvvc_luma":
+        raise RuntimeError(
+            "pynvvc_luma flat ROI cache backend requires a geometry-only crop run "
+            "with source_video_path and known frame dimensions."
+        )
+
+    return _write_flat_cache_payload_read_slice(
+        source=source,
+        bin_tmp=bin_tmp,
+        total_bytes=total_bytes,
+        batch_size=batch_size,
+        compute_sha256=compute_sha256,
+        progress_callback=progress_callback,
+        progress_interval_seconds=progress_interval_seconds,
+        progress_every_batches=progress_every_batches,
+        started=started,
+    )
+
+
+def _write_flat_cache_payload_read_slice(
+    *,
+    source: Any,
+    bin_tmp: Path,
+    total_bytes: int,
+    batch_size: int,
+    compute_sha256: bool,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    progress_interval_seconds: float,
+    progress_every_batches: int,
+    started: float,
+) -> tuple[dict[str, Any], str | None, str]:
+    total_rois = int(source.total_rois)
+    timing = _new_timing()
+    last_progress = started
+    sha = hashlib.sha256() if compute_sha256 else None
+    with bin_tmp.open("wb") as handle:
+        for batch_index, start in enumerate(range(0, total_rois, batch_size), start=1):
+            end = min(start + batch_size, total_rois)
+            read_started = time.perf_counter()
+            raw_batch = source.read_slice(start, end)
+            read_seconds = time.perf_counter() - read_started
+
+            contiguous_started = time.perf_counter()
+            batch = np.ascontiguousarray(raw_batch, dtype=np.uint8)
+            contiguous_seconds = time.perf_counter() - contiguous_started
+            if tuple(batch.shape[1:]) != tuple(source.roi_shape):
+                raise ValueError(
+                    f"ROI batch shape mismatch: expected (*, {source.roi_shape[0]}, {source.roi_shape[1]}), "
+                    f"got {tuple(batch.shape)}."
+                )
+
+            serialize_started = time.perf_counter()
+            payload = batch.tobytes(order="C")
+            serialize_seconds = time.perf_counter() - serialize_started
+
+            write_started = time.perf_counter()
+            handle.write(payload)
+            write_seconds = time.perf_counter() - write_started
+
+            sha_seconds = 0.0
+            if sha is not None:
+                sha_started = time.perf_counter()
+                sha.update(payload)
+                sha_seconds = time.perf_counter() - sha_started
+
+            batch_rows = int(end - start)
+            batch_bytes = int(len(payload))
+            _record_timing_batch(
+                timing,
+                batch_rows=batch_rows,
+                batch_bytes=batch_bytes,
+                read_seconds=read_seconds,
+                contiguous_seconds=contiguous_seconds,
+                serialize_seconds=serialize_seconds,
+                write_seconds=write_seconds,
+                sha_seconds=sha_seconds,
+                batch_index=batch_index,
+            )
+            last_progress = _maybe_emit_batch_progress(
+                progress_callback=progress_callback,
+                batch_index=batch_index,
+                batch_payload={
+                    "index": int(batch_index),
+                    "start": int(start),
+                    "end": int(end),
+                    "rows": batch_rows,
+                    "bytes": batch_bytes,
+                    "read_seconds": float(read_seconds),
+                    "contiguous_seconds": float(contiguous_seconds),
+                    "serialize_seconds": float(serialize_seconds),
+                    "write_seconds": float(write_seconds),
+                    "sha256_seconds": float(sha_seconds),
+                    "read_rows_per_second": _rate(batch_rows, read_seconds),
+                    "write_mib_per_second": _rate(batch_bytes / (1024 * 1024), write_seconds),
+                    "decode_backend": "read_slice",
+                },
+                timing=timing,
+                total_rois=total_rois,
+                total_bytes=total_bytes,
+                started=started,
+                last_progress=last_progress,
+                progress_interval_seconds=progress_interval_seconds,
+                progress_every_batches=progress_every_batches,
+            )
+    return timing, sha.hexdigest() if sha is not None else None, "read_slice"
+
+
+def _write_flat_cache_payload_pynvvc_luma(
+    *,
+    source: Any,
+    bin_tmp: Path,
+    total_bytes: int,
+    batch_size: int,
+    compute_sha256: bool,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    progress_interval_seconds: float,
+    progress_every_batches: int,
+    started: float,
+) -> tuple[dict[str, Any], str | None, str]:
+    import torch
+
+    reader = _open_pynvvc_luma_reader(Path(str(source.frame_source_path)))
+    try:
+        source_height = int(reader.source_height)
+        source_width = int(reader.source_width)
+        if source.frame_shape is not None:
+            expected_h, expected_w = int(source.frame_shape[0]), int(source.frame_shape[1])
+            if expected_h != source_height or expected_w != source_width:
+                raise ValueError(
+                    "PyNvVideoCodec source dimensions do not match crop metadata: "
+                    f"decoder={source_width}x{source_height}, metadata={expected_w}x{expected_h}."
+                )
+
+        frame_to_roi = _frame_to_roi_indices(source.frame_indices)
+        max_frame = int(max(frame_to_roi)) if frame_to_roi else -1
+        row_stride = int(source.roi_shape[0]) * int(source.roi_shape[1])
+        timing = _new_timing()
+        last_progress = started
+        rows_written_mask = np.zeros(int(source.total_rois), dtype=bool)
+        batch_index = 0
+        decoded_frame_index = 0
+        read_batch_frames = max(1, int(getattr(source, "roi_live_gpu_chunk_frames", 32) or 32))
+
+        with bin_tmp.open("w+b") as handle:
+            handle.truncate(int(total_bytes))
+            while decoded_frame_index <= max_frame:
+                decode_count = min(read_batch_frames, max_frame - decoded_frame_index + 1)
+                read_started = time.perf_counter()
+                frames = reader.decode_next(decode_count)
+                read_seconds = time.perf_counter() - read_started
+                if not frames:
+                    break
+
+                decoded_frame_ids = [decoded_frame_index + offset for offset in range(len(frames))]
+                skipped_batch_frames = sum(1 for frame_idx in decoded_frame_ids if frame_idx not in frame_to_roi)
+                decode_accounted = False
+                for frame_offset, frame_tensor in enumerate(frames):
+                    frame_idx = decoded_frame_index + frame_offset
+                    roi_ids = frame_to_roi.get(frame_idx)
+                    if not roi_ids:
+                        continue
+
+                    batch_index += 1
+                    crop_started = time.perf_counter()
+                    crops = _crop_pynvvc_luma_frame(
+                        frame_tensor,
+                        roi_ids=roi_ids,
+                        roi_coordinates_full=source.roi_coordinates_full,
+                        roi_shape=source.roi_shape,
+                        video_shape=(source_height, source_width),
+                    )
+                    if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
+                        torch.cuda.synchronize()
+                    contiguous_started = time.perf_counter()
+                    crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
+                    contiguous_seconds = time.perf_counter() - contiguous_started
+                    crop_seconds = time.perf_counter() - crop_started - contiguous_seconds
+
+                    serialize_started = time.perf_counter()
+                    payloads = [
+                        np.ascontiguousarray(crops_cpu[local_idx], dtype=np.uint8).tobytes(order="C")
+                        for local_idx in range(crops_cpu.shape[0])
+                    ]
+                    serialize_seconds = time.perf_counter() - serialize_started
+
+                    write_started = time.perf_counter()
+                    for roi_id, payload in zip(roi_ids, payloads):
+                        handle.seek(int(roi_id) * row_stride)
+                        handle.write(payload)
+                        rows_written_mask[int(roi_id)] = True
+                    write_seconds = time.perf_counter() - write_started
+
+                    batch_rows = int(len(roi_ids))
+                    batch_bytes = int(batch_rows * row_stride)
+                    account_decode = not decode_accounted
+                    decode_accounted = True
+                    _record_timing_batch(
+                        timing,
+                        batch_rows=batch_rows,
+                        batch_bytes=batch_bytes,
+                        read_seconds=read_seconds if account_decode else 0.0,
+                        contiguous_seconds=contiguous_seconds,
+                        serialize_seconds=serialize_seconds,
+                        write_seconds=write_seconds,
+                        sha_seconds=0.0,
+                        batch_index=batch_index,
+                        decode_seconds=read_seconds if account_decode else 0.0,
+                        crop_seconds=crop_seconds,
+                        decoded_frames=len(frames) if account_decode else 0,
+                        skipped_frames=skipped_batch_frames if account_decode else 0,
+                    )
+                    last_progress = _maybe_emit_batch_progress(
+                        progress_callback=progress_callback,
+                        batch_index=batch_index,
+                        batch_payload={
+                            "index": int(batch_index),
+                            "frame_index": int(frame_idx),
+                            "rows": batch_rows,
+                            "bytes": batch_bytes,
+                            "read_seconds": float(read_seconds if account_decode else 0.0),
+                            "decode_seconds": float(read_seconds if account_decode else 0.0),
+                            "crop_seconds": float(crop_seconds),
+                            "contiguous_seconds": float(contiguous_seconds),
+                            "serialize_seconds": float(serialize_seconds),
+                            "write_seconds": float(write_seconds),
+                            "sha256_seconds": 0.0,
+                            "read_rows_per_second": _rate(batch_rows, crop_seconds + contiguous_seconds),
+                            "write_mib_per_second": _rate(batch_bytes / (1024 * 1024), write_seconds),
+                            "decode_backend": "pynvvc_luma",
+                        },
+                        timing=timing,
+                        total_rois=int(source.total_rois),
+                        total_bytes=total_bytes,
+                        started=started,
+                        last_progress=last_progress,
+                        progress_interval_seconds=progress_interval_seconds,
+                        progress_every_batches=progress_every_batches,
+                    )
+                    del crops, crops_cpu, payloads
+
+                if not decode_accounted:
+                    timing["read_seconds_total"] += float(read_seconds)
+                    timing["decode_seconds_total"] += float(read_seconds)
+                    timing["decoded_frames"] += int(len(frames))
+                    timing["skipped_frames"] += int(len(frames))
+
+                decoded_frame_index += len(frames)
+                del frames
+
+        rows_written = int(rows_written_mask.sum())
+        if rows_written != int(source.total_rois):
+            missing = int(source.total_rois) - rows_written
+            raise RuntimeError(
+                f"PyNvVideoCodec flat ROI cache wrote {rows_written}/{source.total_rois} rows; "
+                f"{missing} rows were not produced before decoder EOF."
+            )
+
+        payload_sha256 = _sha256_file(bin_tmp) if compute_sha256 else None
+        return timing, payload_sha256, "pynvvc_luma"
+    finally:
+        reader.close()
+
+
+def _source_supports_pynvvc_luma(source: Any) -> bool:
+    return (
+        str(getattr(source, "storage_mode", "")) == "geometry_only"
+        and str(getattr(source, "frame_source_kind", "")) == "source_video_path"
+        and bool(getattr(source, "frame_source_path", None))
+        and getattr(source, "frame_shape", None) is not None
+    )
+
+
+def _open_pynvvc_luma_reader(video_path: Path) -> Any:
+    from fisheye.shared.pynvvc_luma_rgb import PynvvcLumaRgbReader
+
+    return PynvvcLumaRgbReader(video_path, start_frame=0, gpu_id=0)
+
+
+def _frame_to_roi_indices(frame_indices: np.ndarray) -> dict[int, list[int]]:
+    mapping: dict[int, list[int]] = {}
+    for roi_idx, frame_idx in enumerate(np.asarray(frame_indices, dtype=np.int64).reshape(-1)):
+        mapping.setdefault(int(frame_idx), []).append(int(roi_idx))
+    return mapping
+
+
+def _crop_pynvvc_luma_frame(
+    frame_tensor: Any,
+    *,
+    roi_ids: Sequence[int],
+    roi_coordinates_full: np.ndarray,
+    roi_shape: tuple[int, int],
+    video_shape: tuple[int, int],
+) -> Any:
+    import torch
+
+    roi_h, roi_w = int(roi_shape[0]), int(roi_shape[1])
+    height, width = int(video_shape[0]), int(video_shape[1])
+    y_plane = frame_tensor[:height, :width].contiguous()
+    crops: list[Any] = []
+    for roi_id in roi_ids:
+        x1 = int(roi_coordinates_full[int(roi_id), 0])
+        y1 = int(roi_coordinates_full[int(roi_id), 1])
+        x2 = x1 + roi_w
+        y2 = y1 + roi_h
+        if 0 <= x1 and x2 <= width and 0 <= y1 and y2 <= height:
+            crops.append(y_plane[y1:y2, x1:x2].clone())
+            continue
+
+        roi = torch.zeros((roi_h, roi_w), dtype=torch.uint8, device=y_plane.device)
+        vy1 = max(0, y1)
+        vy2 = min(height, y2)
+        vx1 = max(0, x1)
+        vx2 = min(width, x2)
+        if vy2 > vy1 and vx2 > vx1:
+            py1 = max(0, -y1)
+            px1 = max(0, -x1)
+            py2 = py1 + (vy2 - vy1)
+            px2 = px1 + (vx2 - vx1)
+            roi[py1:py2, px1:px2] = y_plane[vy1:vy2, vx1:vx2]
+        crops.append(roi)
+    if not crops:
+        return torch.empty((0, roi_h, roi_w), dtype=torch.uint8, device=y_plane.device)
+    return torch.stack(crops, dim=0)
+
+
+def _new_timing() -> dict[str, Any]:
+    return {
+        "read_seconds_total": 0.0,
+        "decode_seconds_total": 0.0,
+        "crop_seconds_total": 0.0,
+        "contiguous_seconds_total": 0.0,
+        "serialize_seconds_total": 0.0,
+        "write_seconds_total": 0.0,
+        "sha256_seconds_total": 0.0,
+        "decoded_frames": 0,
+        "skipped_frames": 0,
+        "batches": 0,
+        "rows": 0,
+        "bytes": 0,
+    }
+
+
+def _record_timing_batch(
+    timing: dict[str, Any],
+    *,
+    batch_rows: int,
+    batch_bytes: int,
+    read_seconds: float,
+    contiguous_seconds: float,
+    serialize_seconds: float,
+    write_seconds: float,
+    sha_seconds: float,
+    batch_index: int,
+    decode_seconds: float = 0.0,
+    crop_seconds: float = 0.0,
+    decoded_frames: int = 0,
+    skipped_frames: int = 0,
+) -> None:
+    timing["read_seconds_total"] += float(read_seconds)
+    timing["decode_seconds_total"] += float(decode_seconds)
+    timing["crop_seconds_total"] += float(crop_seconds)
+    timing["contiguous_seconds_total"] += float(contiguous_seconds)
+    timing["serialize_seconds_total"] += float(serialize_seconds)
+    timing["write_seconds_total"] += float(write_seconds)
+    timing["sha256_seconds_total"] += float(sha_seconds)
+    timing["decoded_frames"] += int(decoded_frames)
+    timing["skipped_frames"] += int(skipped_frames)
+    timing["batches"] = int(batch_index)
+    timing["rows"] += int(batch_rows)
+    timing["bytes"] += int(batch_bytes)
+
+
+def _maybe_emit_batch_progress(
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    batch_index: int,
+    batch_payload: dict[str, Any],
+    timing: Mapping[str, Any],
+    total_rois: int,
+    total_bytes: int,
+    started: float,
+    last_progress: float,
+    progress_interval_seconds: float,
+    progress_every_batches: int,
+) -> float:
+    now = time.perf_counter()
+    if not _should_emit_batch_progress(
+        batch_index=batch_index,
+        rows_written=int(timing["rows"]),
+        total_rois=total_rois,
+        now=now,
+        last_progress=last_progress,
+        progress_interval_seconds=progress_interval_seconds,
+        progress_every_batches=progress_every_batches,
+    ):
+        return last_progress
+    elapsed = now - started
+    _emit_progress(
+        progress_callback,
+        "batch",
+        batch=batch_payload,
+        progress=_progress_totals(
+            rows_written=int(timing["rows"]),
+            bytes_written=int(timing["bytes"]),
+            total_rois=total_rois,
+            total_bytes=total_bytes,
+            elapsed_seconds=elapsed,
+            timing=timing,
+        ),
+    )
+    return now
+
+
+def _normalize_decode_backend(value: str) -> str:
+    backend = str(value or "auto").strip().lower()
+    if backend not in FLAT_ROI_CACHE_DECODE_BACKENDS:
+        choices = ", ".join(FLAT_ROI_CACHE_DECODE_BACKENDS)
+        raise ValueError(f"Invalid flat ROI cache decode backend '{value}'. Expected one of: {choices}")
+    return backend
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _emit_progress(
@@ -486,6 +894,10 @@ def _timing_summary(
         "serialize_seconds_total": float(timing.get("serialize_seconds_total", 0.0)),
         "write_seconds_total": float(timing.get("write_seconds_total", 0.0)),
         "sha256_seconds_total": float(timing.get("sha256_seconds_total", 0.0)),
+        "decode_seconds_total": float(timing.get("decode_seconds_total", 0.0)),
+        "crop_seconds_total": float(timing.get("crop_seconds_total", 0.0)),
+        "decoded_frames": int(timing.get("decoded_frames", 0)),
+        "skipped_frames": int(timing.get("skipped_frames", 0)),
         "rows_per_second": float(_rate(total_rois, duration_seconds)),
         "mib_per_second": float(_rate(total_bytes / (1024 * 1024), duration_seconds)),
         "read_rows_per_second": float(

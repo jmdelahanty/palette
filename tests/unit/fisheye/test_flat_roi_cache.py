@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared import flat_roi_cache as flat_cache_mod
 from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.flat_roi_cache import (
     FLAT_ROI_CACHE_LAYOUT,
@@ -37,6 +38,68 @@ def _make_materialized_crop_archive(tmp_path: Path) -> tuple[Path, np.ndarray]:
     )
     crop.create_array("frame_indices", data=np.arange(5, dtype=np.int64), overwrite=True)
     return zarr_path, roi_images
+
+
+def _make_geometry_only_crop_archive(tmp_path: Path) -> tuple[Path, np.ndarray]:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_geom"
+
+    crop = crop_parent.create_group("crop_geom")
+    crop.attrs["crop_storage_mode"] = "geometry_only"
+    crop.attrs["roi_size"] = [2, 2]
+    crop.attrs["width"] = 5
+    crop.attrs["height"] = 4
+    crop.attrs["source_video_path"] = str(tmp_path / "fake.mp4")
+    crop.attrs["crop_signature"] = "sig-flat-cache-geom-test"
+    crop.attrs["crop_revision"] = "rev-geom-001"
+    frame_indices = np.array([2, 0, 2], dtype=np.int64)
+    roi_coordinates = np.array([[1, 1], [0, 0], [3, 2]], dtype=np.int32)
+    crop.create_array("frame_indices", data=frame_indices, overwrite=True)
+    crop.create_array("roi_coordinates_full", data=roi_coordinates, overwrite=True)
+
+    frames = []
+    for frame_idx in range(3):
+        luma = np.arange(4 * 5, dtype=np.uint8).reshape(4, 5) + np.uint8(frame_idx * 20)
+        frames.append(luma)
+    expected = np.stack(
+        [
+            frames[2][1:3, 1:3],
+            frames[0][0:2, 0:2],
+            frames[2][2:4, 3:5],
+        ],
+        axis=0,
+    )
+    return zarr_path, expected
+
+
+class _FakePynvvcReader:
+    def __init__(self, frames: list[np.ndarray]) -> None:
+        import torch
+
+        self.source_height = int(frames[0].shape[0])
+        self.source_width = int(frames[0].shape[1])
+        self._frames = [
+            torch.from_numpy(
+                np.vstack(
+                    [
+                        frame,
+                        np.zeros((max(1, frame.shape[0] // 2), frame.shape[1]), dtype=np.uint8),
+                    ]
+                )
+            )
+            for frame in frames
+        ]
+        self._offset = 0
+
+    def decode_next(self, count: int):
+        result = self._frames[self._offset : self._offset + int(count)]
+        self._offset += len(result)
+        return result
+
+    def close(self) -> None:
+        pass
 
 
 def test_build_flat_roi_cache_roundtrips_through_manifest(tmp_path: Path) -> None:
@@ -123,3 +186,44 @@ def test_flat_roi_cache_rejects_wrong_shape(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="shape mismatch"):
         open_flat_roi_cache(manifest["manifest_path"], expected_shape=(5, 4, 4))
+
+
+def test_build_flat_roi_cache_pynvvc_luma_streams_rows_in_source_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path, expected = _make_geometry_only_crop_archive(tmp_path)
+    frames = [
+        np.arange(4 * 5, dtype=np.uint8).reshape(4, 5) + np.uint8(frame_idx * 20)
+        for frame_idx in range(3)
+    ]
+
+    monkeypatch.setattr(
+        flat_cache_mod,
+        "_open_pynvvc_luma_reader",
+        lambda _video_path: _FakePynvvcReader(frames),
+    )
+    progress_events: list[dict] = []
+
+    manifest = build_flat_roi_cache(
+        zarr_path=zarr_path,
+        output_dir=tmp_path / "cache",
+        batch_size=2,
+        roi_decode_backend="pynvvc_luma",
+        progress_callback=progress_events.append,
+        progress_every_batches=1,
+    )
+
+    assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
+    assert manifest["builder"]["timing"]["decoded_frames"] == 3
+    assert manifest["builder"]["timing"]["rows"] == 3
+    assert any(
+        event.get("event") == "batch"
+        and event.get("batch", {}).get("decode_backend") == "pynvvc_luma"
+        for event in progress_events
+    )
+    cache = open_flat_roi_cache(manifest["manifest_path"], expected_shape=expected.shape)
+    try:
+        np.testing.assert_array_equal(cache[:], expected)
+    finally:
+        cache.close()

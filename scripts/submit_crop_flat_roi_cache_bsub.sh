@@ -29,6 +29,7 @@ CACHE_BATCH_SIZE=1024
 CACHE_CROP_RUN=""
 ROI_LIVE_ACCELERATION="cpu"
 ROI_LIVE_GPU_CHUNK_FRAMES=32
+CACHE_DECODE_BACKEND="auto"
 SHA256=0
 OVERWRITE=0
 DRY_RUN=0
@@ -70,6 +71,7 @@ Cache options:
   --cache-gpus N                    GPU count for cache job; 0 omits -gpu (default: 0)
   --cache-walltime H:MM             Wall time for cache job (default: 2:00)
   --cache-batch-size N              ROI rows per cache-builder batch (default: 1024)
+  --cache-decode-backend NAME       auto|pynvvc_luma|read_slice (default: auto)
   --roi-live-acceleration NAME      cpu|gpu|auto for geometry-only live ROI reads (default: cpu)
   --roi-live-gpu-chunk-frames N     GPU live-read frame chunk size (default: 32)
   --sha256                          Record payload sha256 in manifest
@@ -106,6 +108,7 @@ while [[ $# -gt 0 ]]; do
     --cache-gpus) CACHE_GPUS="$2"; shift 2;;
     --cache-walltime) CACHE_WALLTIME="$2"; shift 2;;
     --cache-batch-size) CACHE_BATCH_SIZE="$2"; shift 2;;
+    --cache-decode-backend) CACHE_DECODE_BACKEND="$2"; shift 2;;
     --roi-live-acceleration) ROI_LIVE_ACCELERATION="$2"; shift 2;;
     --roi-live-gpu-chunk-frames) ROI_LIVE_GPU_CHUNK_FRAMES="$2"; shift 2;;
     --sha256) SHA256=1; shift;;
@@ -176,6 +179,7 @@ printf -v CROP_ARGS_SHELL '%q ' "${CROP_ARGS[@]}"
 BUILDER_ARGS=(
   "$ZARR_PATH"
   --batch-size "$CACHE_BATCH_SIZE"
+  --decode-backend "$CACHE_DECODE_BACKEND"
   --roi-live-acceleration "$ROI_LIVE_ACCELERATION"
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
 )

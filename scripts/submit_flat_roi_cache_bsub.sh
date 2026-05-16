@@ -12,6 +12,7 @@ MEM_GB=64
 GPUS=0
 WALLTIME="2:00"
 BATCH_SIZE=1024
+DECODE_BACKEND="auto"
 ROI_LIVE_ACCELERATION="cpu"
 ROI_LIVE_GPU_CHUNK_FRAMES=32
 SHA256=0
@@ -45,6 +46,7 @@ Options:
   --gpus N                       GPU count; 0 omits -gpu (default: 0)
   --walltime H:MM                LSF wall time (default: 2:00)
   --batch-size N                 ROI rows written per cache-builder batch (default: 1024)
+  --decode-backend NAME          auto|pynvvc_luma|read_slice (default: auto)
   --roi-live-acceleration NAME   CropImageSource live-read acceleration: cpu|gpu|auto (default: cpu)
   --roi-live-gpu-chunk-frames N  GPU live-read frame chunk size (default: 32)
   --sha256                       Record payload sha256 in the manifest
@@ -70,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --gpus) GPUS="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
     --batch-size) BATCH_SIZE="$2"; shift 2;;
+    --decode-backend) DECODE_BACKEND="$2"; shift 2;;
     --roi-live-acceleration) ROI_LIVE_ACCELERATION="$2"; shift 2;;
     --roi-live-gpu-chunk-frames) ROI_LIVE_GPU_CHUNK_FRAMES="$2"; shift 2;;
     --sha256) SHA256=1; shift;;
@@ -126,6 +129,7 @@ fi
 BUILDER_ARGS=(
   "$ZARR_PATH"
   --batch-size "$BATCH_SIZE"
+  --decode-backend "$DECODE_BACKEND"
   --roi-live-acceleration "$ROI_LIVE_ACCELERATION"
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
 )

@@ -50,6 +50,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=32,
         help="Frame batch size for GPU-accelerated live ROI reads.",
     )
+    parser.add_argument(
+        "--decode-backend",
+        choices=("auto", "pynvvc_luma", "read_slice"),
+        default="auto",
+        help=(
+            "Flat-cache materialization backend. 'auto' prefers sequential "
+            "PyNvVideoCodec luma for geometry-only external-video crops and "
+            "falls back to the generic read_slice path."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print the full manifest JSON.")
     parser.add_argument(
         "--progress-jsonl",
@@ -106,6 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             compute_sha256=args.sha256,
             roi_live_acceleration=args.roi_live_acceleration,
             roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
+            roi_decode_backend=args.decode_backend,
             progress_callback=emit_progress if progress_handle is not None or args.progress_stderr else None,
             progress_interval_seconds=float(args.progress_interval_s),
             progress_every_batches=int(args.progress_every_batches),
@@ -135,7 +146,8 @@ def _format_progress_event(event: dict) -> str:
             f"batch_size={event.get('batch_size')} "
             f"storage={source.get('storage_mode')} "
             f"read_mode={source.get('roi_read_mode')} "
-            f"accel={source.get('roi_live_acceleration_effective')}"
+            f"accel={source.get('roi_live_acceleration_effective')} "
+            f"decode_backend={event.get('decode_backend_requested')}"
         )
     if name == "batch":
         progress = event.get("progress") if isinstance(event.get("progress"), dict) else {}
@@ -153,11 +165,20 @@ def _format_progress_event(event: dict) -> str:
             f"batch_read_s={batch.get('read_seconds'):.3f} "
             f"batch_write_s={batch.get('write_seconds'):.3f}"
         )
+    if name == "backend_fallback":
+        error = event.get("error") if isinstance(event.get("error"), dict) else {}
+        return (
+            "flat_roi_cache_progress=backend_fallback "
+            f"failed={event.get('failed_backend')} "
+            f"fallback={event.get('fallback_backend')} "
+            f"error={error.get('type')}: {error.get('message')}"
+        )
     if name == "complete":
         progress = event.get("progress") if isinstance(event.get("progress"), dict) else {}
         timing = event.get("timing") if isinstance(event.get("timing"), dict) else {}
         return (
             "flat_roi_cache_progress=complete "
+            f"decode_backend={event.get('decode_backend_effective')} "
             f"rows={progress.get('rows_written')}/{progress.get('rows_total')} "
             f"elapsed_s={progress.get('elapsed_seconds'):.1f} "
             f"overall_roi_s={timing.get('rows_per_second'):.1f} "

@@ -371,13 +371,31 @@ directory:
 runs/diagnostics/.../<label>.cache.<jobid>.progress.jsonl
 ```
 
+The flat-cache builder has a dedicated decode backend selection:
+
+```bash
+scripts/py -m fisheye.utils.build_flat_roi_cache \
+  /path/to/recording_analysis.zarr \
+  --decode-backend auto \
+  --roi-live-acceleration cpu \
+  --output-dir /misc/public/palette_cache/<workflow_id>/roi_cache
+```
+
+For geometry-only crop runs backed by an external video, `auto` prefers
+`pynvvc_luma`: a sequential PyNvVideoCodec/NVDEC path that streams frames from
+the beginning of the file, crops only frames with ROI rows, and writes those rows
+directly into the flat binary payload. This avoids Decord `VideoReader` startup
+and random-access indexing costs. If PyNvVideoCodec cannot be used and the
+backend was not explicitly forced, `auto` falls back to the generic `read_slice`
+path. Use `--decode-backend pynvvc_luma` when the job should fail instead of
+falling back.
+
 Each JSONL record reports rows and bytes written, elapsed time, ETA, aggregate
-ROI throughput, and per-batch timing for the source read/decode/crop step,
-contiguous conversion, serialization, and file write. The submit wrapper also
-passes `--progress-stderr`, so compact progress summaries appear in the LSF
-stderr file while the builder is running. A non-empty cache stderr file is
-therefore not necessarily a failure; check the final status JSON and LSF exit
-state.
+ROI throughput, and per-batch timing for decode/read, crop, contiguous
+conversion, serialization, and file write. The submit wrapper also passes
+`--progress-stderr`, so compact progress summaries appear in the LSF stderr file
+while the builder is running. A non-empty cache stderr file is therefore not
+necessarily a failure; check the final status JSON and LSF exit state.
 
 then publishes payload first and manifest last:
 
