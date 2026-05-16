@@ -39,6 +39,24 @@ class _FakePynvvcReader:
         pass
 
 
+class _FakePynvvcNv12Reader:
+    def __init__(self, frames: list[np.ndarray], *, source_height: int, source_width: int) -> None:
+        import torch
+
+        self.source_height = int(source_height)
+        self.source_width = int(source_width)
+        self._frames = [torch.from_numpy(frame) for frame in frames]
+        self._offset = 0
+
+    def decode_next(self, count: int):
+        result = self._frames[self._offset : self._offset + int(count)]
+        self._offset += len(result)
+        return result
+
+    def close(self) -> None:
+        pass
+
+
 def _make_training_archive(tmp_path: Path, *, mismatch: bool = False) -> tuple[Path, list[np.ndarray]]:
     zarr_path = tmp_path / "recording_training.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -163,4 +181,74 @@ def test_training_crop_pynvvc_pixel_parity_can_test_limited_to_full_range_candid
     assert report["inputs"]["candidate_pixel_mode"] == "luma_limited_to_full_range"
     assert report["source"]["candidate_pixel_contract"]["name"] == (
         "nv12_luma_limited_to_full_range_uint8"
+    )
+
+
+def test_training_crop_pynvvc_pixel_parity_can_test_nv12_rgb_weighted_gray_candidate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    zarr_path, _frames = _make_training_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root.attrs["width"] = 6
+    root.attrs["height"] = 4
+    crop = root["crop_runs/crop_001"]
+    crop.attrs["width"] = 6
+    crop.attrs["height"] = 4
+    crop.attrs["roi_size"] = [2, 2]
+    root["raw_video"].attrs["gpu_fp16"] = False
+    crop["roi_coordinates_full"][:] = np.array([[0, 0], [2, 1], [4, 2]], dtype=np.int32)
+
+    source_height = 4
+    source_width = 6
+    y = np.arange(source_height * source_width, dtype=np.uint8).reshape(source_height, source_width) + 40
+    uv = np.array(
+        [
+            [90, 140, 100, 150, 110, 160],
+            [120, 130, 125, 135, 130, 140],
+        ],
+        dtype=np.uint8,
+    )
+    base_nv12 = np.vstack([y, uv])
+    nv12_frames = [np.clip(base_nv12.astype(np.int16) + frame_idx * 3, 0, 255).astype(np.uint8) for frame_idx in range(5)]
+    frame_indices = np.asarray(crop["frame_indices"][:], dtype=np.int64)
+    source_frames = np.asarray(root["raw_video/original_frame_indices"][:], dtype=np.int64)[frame_indices]
+    roi_coordinates = np.asarray(crop["roi_coordinates_full"][:], dtype=np.int32)
+    expected = []
+    for row, source_frame in enumerate(source_frames):
+        crops = parity_mod._crop_pynvvc_nv12_rgb_weighted_gray_frame(
+            torch.from_numpy(nv12_frames[int(source_frame)]),
+            roi_ids=[row],
+            roi_coordinates_full=roi_coordinates,
+            roi_shape=(2, 2),
+            video_shape=(source_height, source_width),
+            matrix="bt601",
+            grayscale_fp16=False,
+        )
+        expected.append(crops.numpy()[0])
+    crop["roi_images"][:] = np.stack(expected, axis=0)
+
+    monkeypatch.setattr(
+        parity_mod,
+        "_open_pynvvc_luma_reader",
+        lambda _video_path: _FakePynvvcNv12Reader(
+            nv12_frames,
+            source_height=source_height,
+            source_width=source_width,
+        ),
+    )
+
+    report = check_training_crop_pynvvc_pixel_parity(
+        zarr_path=zarr_path,
+        rows=[0, 1, 2],
+        candidate_pixel_mode="nv12_bt601_limited_rgb_weighted_gray",
+    )
+
+    assert report["status"] == "ok"
+    assert report["inputs"]["candidate_pixel_mode"] == "nv12_bt601_limited_rgb_weighted_gray"
+    assert report["inputs"]["candidate_weighted_gray_fp16"] is False
+    assert report["source"]["candidate_pixel_contract"]["name"] == (
+        "nv12_bt601_limited_rgb_weighted_gray_uint8"
     )

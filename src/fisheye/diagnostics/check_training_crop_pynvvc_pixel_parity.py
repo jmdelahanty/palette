@@ -32,7 +32,16 @@ from fisheye.shared.roi_pixel_contract import (
 
 
 SOURCE_FRAME_INDEX_MODES = ("auto", "direct", "original_frame_indices")
-CANDIDATE_PIXEL_MODES = ("raw_luma", "luma_limited_to_full_range")
+CANDIDATE_PIXEL_MODES = (
+    "raw_luma",
+    "luma_limited_to_full_range",
+    "nv12_bt601_limited_rgb_weighted_gray",
+    "nv12_bt709_limited_rgb_weighted_gray",
+)
+RGB_WEIGHTED_GRAY_CANDIDATE_MODES = {
+    "nv12_bt601_limited_rgb_weighted_gray",
+    "nv12_bt709_limited_rgb_weighted_gray",
+}
 
 
 def _open_pynvvc_luma_reader(video_path: Path) -> Any:
@@ -295,6 +304,16 @@ def _safe_percentile(values: np.ndarray, q: float) -> float:
     return float(np.percentile(values, q))
 
 
+def _stored_import_gpu_fp16(root: Any) -> bool | None:
+    raw_video = root.get("raw_video")
+    if raw_video is None:
+        return None
+    value = raw_video.attrs.get("gpu_fp16")
+    if value is None:
+        return None
+    return bool(value)
+
+
 def _diff_summary(
     *,
     rows: Sequence[int],
@@ -360,6 +379,92 @@ def _frame_to_selected_rows(
     return mapping
 
 
+def _crop_pynvvc_nv12_rgb_weighted_gray_frame(
+    frame_tensor: Any,
+    *,
+    roi_ids: Sequence[int],
+    roi_coordinates_full: np.ndarray,
+    roi_shape: tuple[int, int],
+    video_shape: tuple[int, int],
+    matrix: str,
+    grayscale_fp16: bool,
+) -> Any:
+    """Crop NV12 ROIs and convert them to the training-import grayscale contract."""
+
+    import torch
+
+    roi_h, roi_w = int(roi_shape[0]), int(roi_shape[1])
+    height, width = int(video_shape[0]), int(video_shape[1])
+    y_plane = frame_tensor[:height, :width].contiguous()
+    uv_plane = frame_tensor[height : height + ((height + 1) // 2), :width].contiguous()
+    u_plane = uv_plane[:, 0::2]
+    v_plane = uv_plane[:, 1::2]
+    crops: list[Any] = []
+    for roi_id in roi_ids:
+        x1 = int(roi_coordinates_full[int(roi_id), 0])
+        y1 = int(roi_coordinates_full[int(roi_id), 1])
+        x2 = x1 + roi_w
+        y2 = y1 + roi_h
+        roi = torch.zeros((roi_h, roi_w), dtype=torch.uint8, device=y_plane.device)
+        vy1 = max(0, y1)
+        vy2 = min(height, y2)
+        vx1 = max(0, x1)
+        vx2 = min(width, x2)
+        if vy2 > vy1 and vx2 > vx1:
+            py1 = max(0, -y1)
+            px1 = max(0, -x1)
+            py2 = py1 + (vy2 - vy1)
+            px2 = px1 + (vx2 - vx1)
+            ys = torch.arange(vy1, vy2, device=y_plane.device, dtype=torch.long)
+            xs = torch.arange(vx1, vx2, device=y_plane.device, dtype=torch.long)
+            y = y_plane[vy1:vy2, vx1:vx2].to(torch.float32)
+            # NV12 chroma is half resolution; each full-res pixel samples floor(y/2), floor(x/2).
+            uv_ys = torch.div(ys, 2, rounding_mode="floor")
+            uv_xs = torch.div(xs, 2, rounding_mode="floor")
+            u = u_plane[uv_ys[:, None], uv_xs[None, :]].to(torch.float32)
+            v = v_plane[uv_ys[:, None], uv_xs[None, :]].to(torch.float32)
+            rgb_uint8 = _nv12_limited_to_rgb_uint8(y, u, v, matrix=matrix)
+            work_dtype = torch.float16 if bool(grayscale_fp16) else torch.float32
+            weights = torch.tensor(
+                [0.2989, 0.5870, 0.1140],
+                device=y_plane.device,
+                dtype=work_dtype,
+            ).view(1, 1, 3)
+            gray = (rgb_uint8.to(work_dtype) * weights).sum(dim=-1)
+            roi[py1:py2, px1:px2] = gray.clamp(0.0, 255.0).to(torch.uint8)
+        crops.append(roi)
+    if not crops:
+        return torch.empty((0, roi_h, roi_w), dtype=torch.uint8, device=y_plane.device)
+    return torch.stack(crops, dim=0)
+
+
+def _nv12_limited_to_rgb_uint8(y: Any, u: Any, v: Any, *, matrix: str) -> Any:
+    import torch
+
+    c = (y - 16.0).clamp_min(0.0)
+    d = u - 128.0
+    e = v - 128.0
+    if matrix == "bt601":
+        r = 1.16438356 * c + 1.59602678 * e
+        g = 1.16438356 * c - 0.39176229 * d - 0.81296765 * e
+        b = 1.16438356 * c + 2.01723214 * d
+    elif matrix == "bt709":
+        r = 1.16438356 * c + 1.79274107 * e
+        g = 1.16438356 * c - 0.21324861 * d - 0.53290933 * e
+        b = 1.16438356 * c + 2.11240179 * d
+    else:
+        raise ValueError(f"Unsupported YUV matrix: {matrix}")
+    rgb = torch.stack(
+        (
+            r.clamp(0.0, 255.0),
+            g.clamp(0.0, 255.0),
+            b.clamp(0.0, 255.0),
+        ),
+        dim=-1,
+    )
+    return rgb.round().to(torch.uint8)
+
+
 def _decode_pynvvc_luma_rows(
     *,
     video_path: Path,
@@ -370,6 +475,7 @@ def _decode_pynvvc_luma_rows(
     video_shape: tuple[int, int],
     decode_chunk_frames: int,
     candidate_pixel_mode: str,
+    grayscale_fp16: bool | None,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     import torch
 
@@ -424,13 +530,25 @@ def _decode_pynvvc_luma_rows(
                 if not roi_rows:
                     continue
                 started = time.perf_counter()
-                crops = _crop_pynvvc_luma_frame(
-                    frame_tensor,
-                    roi_ids=roi_rows,
-                    roi_coordinates_full=roi_coordinates_full,
-                    roi_shape=roi_shape,
-                    video_shape=video_shape,
-                )
+                if candidate_pixel_mode in RGB_WEIGHTED_GRAY_CANDIDATE_MODES:
+                    matrix = "bt709" if "bt709" in candidate_pixel_mode else "bt601"
+                    crops = _crop_pynvvc_nv12_rgb_weighted_gray_frame(
+                        frame_tensor,
+                        roi_ids=roi_rows,
+                        roi_coordinates_full=roi_coordinates_full,
+                        roi_shape=roi_shape,
+                        video_shape=video_shape,
+                        matrix=matrix,
+                        grayscale_fp16=bool(grayscale_fp16),
+                    )
+                else:
+                    crops = _crop_pynvvc_luma_frame(
+                        frame_tensor,
+                        roi_ids=roi_rows,
+                        roi_coordinates_full=roi_coordinates_full,
+                        roi_shape=roi_shape,
+                        video_shape=video_shape,
+                    )
                 if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
                     torch.cuda.synchronize()
                 crop_seconds += time.perf_counter() - started
@@ -466,7 +584,7 @@ def _decode_pynvvc_luma_rows(
 def _apply_candidate_pixel_mode(crops: Any, mode: str) -> Any:
     import torch
 
-    if mode == "raw_luma":
+    if mode == "raw_luma" or mode in RGB_WEIGHTED_GRAY_CANDIDATE_MODES:
         return crops
     if mode == "luma_limited_to_full_range":
         # Common video-range YUV expansion: limited-range luma [16, 235] -> full-range [0, 255].
@@ -485,6 +603,18 @@ def _candidate_pixel_contract(mode: str) -> dict[str, Any]:
             color_conversion=(
                 "PyNvVideoCodec raw NV12 Y/luma plane cropped, then expanded from "
                 "limited video range [16,235] to full uint8 range [0,255]"
+            ),
+            production_status="diagnostic_candidate",
+            source_frame_representation="PyNvVideoCodec decoded NV12 surface",
+        )
+    if mode in RGB_WEIGHTED_GRAY_CANDIDATE_MODES:
+        matrix = "BT.709" if "bt709" in mode else "BT.601"
+        return roi_pixel_contract(
+            name=f"{mode}_uint8",
+            color_conversion=(
+                f"PyNvVideoCodec decoded NV12 surface cropped as YUV; {matrix} limited-range "
+                "YUV-to-RGB reconstruction rounded to uint8; then training-import grayscale "
+                "weights [0.2989, 0.5870, 0.1140] are applied before uint8 truncation"
             ),
             production_status="diagnostic_candidate",
             source_frame_representation="PyNvVideoCodec decoded NV12 surface",
@@ -583,6 +713,7 @@ def check_training_crop_pynvvc_pixel_parity(
     reference_started = time.perf_counter()
     reference = _read_roi_rows(roi_images, selected_rows)
     reference_read_seconds = time.perf_counter() - reference_started
+    grayscale_fp16 = _stored_import_gpu_fp16(root)
 
     produced, decode_timing = _decode_pynvvc_luma_rows(
         video_path=resolved_video_path,
@@ -593,6 +724,7 @@ def check_training_crop_pynvvc_pixel_parity(
         video_shape=video_shape,
         decode_chunk_frames=decode_chunk_frames,
         candidate_pixel_mode=candidate_pixel_mode,
+        grayscale_fp16=grayscale_fp16,
     )
     present_rows = [row for row in selected_rows if row in produced]
     missing_rows = [row for row in selected_rows if row not in produced]
@@ -656,6 +788,9 @@ def check_training_crop_pynvvc_pixel_parity(
             "source_frame_index_mode_requested": str(source_frame_index_mode),
             "decode_chunk_frames": int(decode_chunk_frames),
             "candidate_pixel_mode": str(candidate_pixel_mode),
+            "candidate_weighted_gray_fp16": bool(grayscale_fp16)
+            if candidate_pixel_mode in RGB_WEIGHTED_GRAY_CANDIDATE_MODES
+            else None,
         },
         "source": {
             "total_rois": int(total_rois),
@@ -727,7 +862,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "PyNv candidate pixel transform to compare against stored roi_images. "
             "raw_luma is the current fast flat-cache candidate; "
-            "luma_limited_to_full_range tests a video-range expansion hypothesis."
+            "luma_limited_to_full_range tests a video-range expansion hypothesis; "
+            "nv12_*_rgb_weighted_gray reconstructs RGB from NV12 before applying the "
+            "training import grayscale weights."
         ),
     )
     parser.add_argument("--max-abs-diff", type=int, default=0)
