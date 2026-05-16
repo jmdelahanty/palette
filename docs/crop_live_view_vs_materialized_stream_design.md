@@ -3,6 +3,12 @@
 Date: 2026-03-06
 Type: Decision note / phased migration plan (not a contract)
 
+Update note, 2026-05-16: the target policy is shifting toward geometry-only as
+the default for analysis crop runs while keeping training artifacts
+materialized. The clean workflow/cache design for that target lives in
+`docs/geometry_only_crop_workflow_cache_design.md`. This document remains useful
+as historical context for the mixed-mode migration and performance tradeoffs.
+
 ## Context
 
 `Palette` currently materializes crop pixels under `crop_runs/<run>/roi_images`
@@ -12,7 +18,7 @@ move into a different datastream shape.
 
 ## Decision
 
-Current recommendation:
+Historical recommendation, partially superseded:
 
 - Keep materialized crops (`crop_runs/<run>/roi_images`) as the default and
   production-safe mode for now, even though warm-cache geometry-only inference
@@ -27,6 +33,18 @@ Current recommendation:
 - Treat live cropping as a compatibility project first, then revisit whether it
   should become the default.
 
+Current target direction, as of 2026-05-16:
+
+- Analysis batch planning may default to `geometry_only` crop runs when neither
+  CLI nor config asks for materialized crops.
+- Training archives and training/export artifacts remain materialized and
+  self-contained.
+- High-throughput pose/segmentation on geometry-only analysis archives should
+  use a workflow ROI cache, not repeated live decode in each downstream job.
+- `crop_runs.latest` remains materialized-compatible until the major readers
+  are migrated; mixed-mode workflows should resolve `latest_any` or pass an
+  explicit crop run.
+
 ## Current vs Target Policy
 
 It is important to separate the current implementation from the future target
@@ -34,11 +52,12 @@ state.
 
 ### Current implementation
 
-- Crop writers still default to `crop_storage_mode=materialized` for both
-  training and analysis archives.
-- There is not yet a built-in "`training` gets materialized, `analysis` gets
-  geometry-only" writer split based on `zarr_use`.
-- `geometry_only` is an explicit opt-in writer/storage mode, not the default.
+- Direct crop writer defaults remain `crop_storage_mode=materialized` unless a
+  caller passes an explicit storage mode.
+- `crop_batch` now plans analysis archives as `geometry_only` by default when
+  neither CLI nor config specifies `crop_storage_mode`.
+- Training archives remain materialized by default and reject geometry-only
+  crop writes.
 - `crop_runs.latest` remains materialized-compatible during the migration; mixed
   mode adds explicit pointers such as `latest_materialized` and `latest_any`.
 - Materialized crop runs should use one canonical ROI layout regardless of
@@ -665,10 +684,11 @@ Related policy:
 ### Phase 1: Metadata and resolver groundwork
 
 Mostly complete. Existing archive backfill and the shared ROI resolver now
-exist. Crop writers still remain materialized by default.
+exist. Direct crop writer defaults remain materialized; `crop_batch` now selects
+geometry-only for analysis archives unless overridden.
 
 1. Add `crop_storage_mode` attr support to crop writers and readers, but keep
-   all writers materialized by default.
+   direct writer defaults materialized.
 2. Add one shared ROI resolver abstraction that can:
    - return `roi_images` when present,
    - otherwise reconstruct ROI pixels from full-frame sources using

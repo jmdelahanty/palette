@@ -200,11 +200,12 @@ Parent-group pointer semantics during mixed-mode migration:
 
 Current policy note:
 
-- Crop writers still default to materialized mode for both training and
-  analysis archives.
+- Direct crop writer defaults remain materialized unless a caller passes an
+  explicit storage mode.
+- `crop_batch` defaults analysis archives to `geometry_only` when neither CLI
+  nor config specifies `crop_storage_mode`.
 - Training archives should reject geometry-only crop writes; canonical training
   crop runs are expected to persist `roi_images`.
-- `geometry_only` runs are currently opt-in rather than the default.
 - Many traditional/training/export consumers still require materialized
   `roi_images` even though mixed-mode readers now exist for some ROI-model
   workflows.
@@ -218,6 +219,11 @@ compatibility-only for historical archives. The chosen path is recorded in
 `detection_source_path`.
 `auto` resolves to the canonical curated refined surface when it exists, then
 falls back to the legacy sparse chain only for historical archives.
+
+For `geometry_only` crop runs, `source_video_path` or embedded
+`raw_video/images_full` must remain readable from the environment where ROI
+pixels will be reconstructed. Copied analysis archives should update copied
+metadata paths to the cluster-visible source video before crop/cache jobs run.
 
 `detection_indices` is intentionally an ordinal mapping into the resolved source
 rowset, not stable logical identity. When crops are sourced from canonical

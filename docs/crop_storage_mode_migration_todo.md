@@ -1,8 +1,8 @@
 # Crop Storage Mode Migration TODO
 
 Purpose: migrate `Palette` from materialized-only crop handling to mixed-mode
-crop storage support, while keeping materialized crops as the production default
-and keeping keypoint/eye-mask training artifacts materialized.
+crop storage support, while keeping training artifacts materialized and allowing
+analysis crop planning to default to geometry-only where readers are ready.
 
 Design reference:
 - `docs/crop_live_view_vs_materialized_stream_design.md`
@@ -12,10 +12,12 @@ Date anchored: 2026-03-06.
 
 ## Decision Snapshot (Current)
 
-- [x] Materialized crops remain the default for production/analysis archives.
-- [x] Crop writer defaults are not yet split by `zarr_use`; analysis archives
-  only become `geometry_only` when an explicit writer/storage-mode choice opts
-  into that behavior.
+- [x] Direct crop writer defaults remain materialized unless the caller passes
+  an explicit writer/storage-mode choice.
+- [x] `crop_batch` defaults analysis archives to `geometry_only` when neither
+  CLI nor config specifies `crop_storage_mode`.
+- [x] Training archives default to materialized crop runs and reject
+  `geometry_only`.
 - [x] Geometry-only runs must not become `crop_runs.latest` during the initial
   migration.
 - [x] `crop_runs.latest` remains backward-compatible and materialized-compatible;
@@ -141,6 +143,14 @@ Date anchored: 2026-03-06.
   Conclusion: temporary local ROI cache remains the preferred analysis path for
   large full-frame sources; `geometry_live_gpu` is useful as a fallback/debugging
   path, not the default high-throughput workflow.
+- [x] Add a flat binary workflow-cache backend and submit wrappers for cluster
+  smoke testing:
+  - `scripts/py -m fisheye.utils.build_flat_roi_cache`
+  - `scripts/submit_flat_roi_cache_bsub.sh`
+  - `scripts/submit_crop_flat_roi_cache_bsub.sh`
+  These caches are workflow artifacts, not canonical crop runs. The 2026-05-16
+  smoke path builds them on node-local scratch and publishes payload-first,
+  manifest-last to `/misc/public/palette_cache/<workflow_id>/roi_cache`.
 
 ## Phase 3: Secondary ROI Consumers
 
@@ -180,6 +190,8 @@ Date anchored: 2026-03-06.
   training artifacts remain self-contained materialized datasets.
 - [ ] Document and enforce that temporary ROI caches are runtime accelerators,
   not durable training artifacts.
+- [x] Document the cluster shared-cache policy in
+  `docs/geometry_only_crop_workflow_cache_design.md`.
 - [ ] Keep merged keypoint/eye-mask training zarrs materialized by default.
 - [ ] Update training loaders so analysis archives may be mixed-mode, while
   training artifacts continue to assume materialized ROI tensors.

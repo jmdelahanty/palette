@@ -62,6 +62,18 @@ def test_build_plans_allows_existing_quality_with_no_skip(tmp_path: Path) -> Non
     assert plan.detect_run == "detect_2026_01"
 
 
+def test_build_plans_accepts_direct_zarr_directory(tmp_path: Path) -> None:
+    recordings = tmp_path / "recordings"
+    zarr_path = _make_zarr(recordings, "rec_direct", detect_run="detect_2026_01", with_quality=False)
+
+    plans = _build_plans([zarr_path], recursive=False, detect_run="detect_2026_01", skip_existing=True)
+
+    assert len(plans) == 1
+    assert plans[0].zarr_path == zarr_path
+    assert plans[0].status == "ok"
+    assert plans[0].detect_run == "detect_2026_01"
+
+
 def test_build_plans_detect_run_not_found(tmp_path: Path) -> None:
     recordings = tmp_path / "recordings"
     _make_zarr(recordings, "rec_a", detect_run="detect_2026_01", with_quality=False)

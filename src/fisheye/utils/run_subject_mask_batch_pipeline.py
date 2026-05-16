@@ -90,6 +90,16 @@ def _latest_group_name(parent_path: Path) -> Optional[str]:
     return children[-1] if children else None
 
 
+def _latest_crop_group_name(parent_path: Path) -> Optional[str]:
+    attrs = _attrs(parent_path)
+    for key in ("latest_any", "latest", "latest_materialized"):
+        value = attrs.get(key)
+        if isinstance(value, str) and value and (parent_path / value).is_dir():
+            return value
+    children = _child_groups(parent_path)
+    return children[-1] if children else None
+
+
 def _discover_analysis_zarrs(roots: Sequence[Path], *, include_smoke: bool) -> list[Path]:
     seen: set[str] = set()
     zarrs: list[Path] = []
@@ -141,7 +151,7 @@ def _zarr_paths_from_report(report_path: Path) -> list[Path]:
 
 
 def _resolve_crop_run(zarr_path: Path) -> Optional[str]:
-    return _latest_group_name(zarr_path / "crop_runs")
+    return _latest_crop_group_name(zarr_path / "crop_runs")
 
 
 def _resolve_assignment_keypoints(zarr_path: Path) -> tuple[Optional[str], Optional[str]]:

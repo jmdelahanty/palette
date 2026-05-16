@@ -7,6 +7,7 @@ pre-filtering.
 
 Related contract:
 - `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
+- `docs/cluster_workflow_orchestration.md`
 - `docs/cluster_run_group_artifact_workflow.md`
 - `docs/cluster_pipeline_migration_checklist.md`
 - `docs/environment_setup.md`
@@ -34,6 +35,44 @@ writes** instead of many short tasks.
 - **Keep per‑job CPU modest** unless the workflow is CPU‑bound.
 - Prefer **threads** for IO‑heavy steps (background/detect on sampled imports).
 - Avoid parallelizing more than the filesystem can sustain.
+
+For future long experiments split into shorter clips, treat the clip as the
+first parallelism unit when the storage layout gives each clip an independent
+namespace. Multiple jobs may process and import disjoint clip-local run groups
+in parallel; only experiment-level metadata updates such as clip indexes,
+`latest` pointers, consolidated metadata, and registry projections need to be
+serialized. See `docs/cluster_run_group_artifact_workflow.md`.
+
+## Local Batch Versus Cluster Workflow Scope
+
+This guide documents the current batch runners. They remain appropriate for
+local workstation processing, small pilots, conservative archive-level runs,
+and smoke testing.
+
+For production cluster workflows, treat batching as a planning and submission
+concern rather than as one long-lived Python process that owns many stages. The
+preferred structure is:
+
+- Use a planner to create explicit per-recording or per-clip work items.
+- Use local batch runners to execute those work items directly when running on
+  a workstation.
+- Use a cluster submitter to turn those work items into LSF jobs with stage
+  dependencies, resource-specific queues, logs, and JSON reports.
+
+For video-heavy GPU stages, the default cluster unit should be one recording or
+one clip per stage job. For short CPU-only stages, grouping several work items
+into one CPU job can be reasonable when filesystem pressure is controlled.
+
+At Janelia, checked 2026-05-16, `short` is the default queue for CPU jobs under
+one hour, and `gpu_l4` is the normal single-node L4 GPU queue. `gpu_l4_parallel`
+is for multinode/MPI jobs and should not be used for ordinary Palette
+single-recording stages. See `docs/cluster_workflow_orchestration.md` for the
+queue table.
+
+Do not treat `--jobs`, `--batch-size`, or a loop over many archives as the
+final cluster abstraction. Those controls are useful locally, but the cluster
+workflow layer should schedule explicit stage jobs and pass explicit run names
+instead of relying on `latest`.
 
 ## Video Decode Storage Policy
 
@@ -94,9 +133,11 @@ For the benchmark protocol and current measurements, see
 
 For downstream analysis stages such as track kinematics, swim-bout detection,
 bout kinematics, eye angles, and stimulus response metrics, prefer
-**recording-level parallelism** as the first scaling layer. On the cluster this
-means submitting one recording or a small batch of recordings per job, rather
-than assuming every analysis stage is internally Dask-aware.
+**recording-level parallelism** as the first scaling layer. For clipped
+long-running experiments, the equivalent unit is a clip-local namespace. On the
+cluster this means submitting one recording, one clip, or a small independent
+batch per job, rather than assuming every analysis stage is internally
+Dask-aware.
 
 This is intentional:
 
@@ -125,6 +166,10 @@ Current status:
 - `stimulus_response` metrics should usually remain recording-level or
   step/window-level first. Add internal Dask only after the metric writer has a
   clear disjoint-slice contract.
+- `detect_quality` and `refine_detect` are single-process single-writer stages
+  today. On the cluster, run them by recording or clip namespace first. Do not
+  wrap their internal writes in Dask unless the writer is redesigned around
+  disjoint physical Zarr chunks or scratch artifacts plus serialized import.
 
 When running movement/bout analysis locally, `scripts/run_movement_bout_batch_pipeline`
 supports conservative archive-level scheduling. The default remains serial
@@ -187,6 +232,15 @@ For copied recording layouts, the detection planner prefers the local
 `<recording>/cams/*.mp4` beside the analysis Zarr before falling back to any
 `source_video_path` attrs stored inside the Zarr. This allows PRFS smoke copies
 to run even when their embedded source attrs still point at workstation paths.
+
+Crop geometry and ROI-cache materialization are stricter today: `crop_batch`
+resolves the archive's video source metadata and requires that path to exist
+from the compute node, even for `crop_storage_mode=geometry_only`. Geometry-only
+crop creation skips ROI pixel extraction but still records valid source-video
+provenance for later live reads and cache building. For ad-hoc PRFS smoke
+copies, repair copied archive attrs such as `source_video_path`, `source_path`,
+and `raw_video/source_path` to the cluster-visible `cams/*.mp4` path before
+submitting crop/cache jobs.
 
 ### Registry mode
 

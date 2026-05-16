@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import h5py
+import numpy as np
 import pytest
 import zarr
 
@@ -85,6 +86,81 @@ def test_plan_from_zarr_refine_missing_only_skips_when_refined_exists(tmp_path: 
 
     assert plan.status == "skipped"
     assert plan.reason == "refined eye masks already present"
+
+
+def test_plan_from_zarr_model_eye_masks_accept_geometry_only_latest_any(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    crop_parent = root.require_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_geometry"
+    crop_geometry = crop_parent.create_group("crop_geometry")
+    crop_geometry.attrs["crop_storage_mode"] = "geometry_only"
+    _create_latest_run(root, "keypoints_runs", "keypoints_001")
+
+    plan = mod._plan_from_zarr(
+        zarr_path=zarr_path,
+        recording_dir=tmp_path,
+        h5_path=tmp_path / "raw" / "recording.h5",
+        camera_id="3",
+        skip_existing=True,
+        require_crop=True,
+        require_keypoints=True,
+        refine_only=False,
+        crop_storage_requirement="any",
+    )
+
+    assert plan.status == "ok"
+    assert plan.crop_present is True
+
+
+def test_plan_from_zarr_traditional_eye_masks_require_materialized_crop(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    crop_parent = root.require_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_geometry"
+    crop_geometry = crop_parent.create_group("crop_geometry")
+    crop_geometry.attrs["crop_storage_mode"] = "geometry_only"
+    _create_latest_run(root, "keypoints_runs", "keypoints_001")
+
+    plan = mod._plan_from_zarr(
+        zarr_path=zarr_path,
+        recording_dir=tmp_path,
+        h5_path=tmp_path / "raw" / "recording.h5",
+        camera_id="3",
+        skip_existing=True,
+        require_crop=True,
+        require_keypoints=True,
+        refine_only=False,
+        crop_storage_requirement="materialized",
+    )
+
+    assert plan.status == "missing"
+    assert plan.reason == "crop missing"
+    assert plan.crop_present is False
+
+    crop_parent.attrs["latest_materialized"] = "crop_materialized"
+    crop_materialized = crop_parent.create_group("crop_materialized")
+    crop_materialized.attrs["crop_storage_mode"] = "materialized"
+    crop_materialized.create_array(
+        "roi_images",
+        data=np.zeros((1, 4, 4), dtype=np.uint8),
+        overwrite=True,
+    )
+
+    plan = mod._plan_from_zarr(
+        zarr_path=zarr_path,
+        recording_dir=tmp_path,
+        h5_path=tmp_path / "raw" / "recording.h5",
+        camera_id="3",
+        skip_existing=True,
+        require_crop=True,
+        require_keypoints=True,
+        refine_only=False,
+        crop_storage_requirement="materialized",
+    )
+
+    assert plan.status == "ok"
+    assert plan.crop_present is True
 
 
 @pytest.mark.parametrize(

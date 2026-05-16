@@ -168,14 +168,15 @@ At Janelia, a practical PRFS scratch root may live under `misc/public` or an
 equivalent site-managed shared scratch location. Treat that path as a shared
 workflow cache and transfer area, not as canonical analysis storage.
 
-Current proposed default:
+Current Janelia smoke default:
 
 ```text
-misc/public/palette_cache/
+/misc/public/palette_cache/
 ```
 
-Use the site-qualified absolute path for actual jobs once confirmed from the
-cluster login/compute environment.
+This path was used as the shared workflow cache root for the 2026-05-16
+sickyfish smoke. If a different site or project allocation is used, pass
+`--public-cache-root` explicitly.
 
 Use this for:
 
@@ -329,6 +330,34 @@ scripts/submit_flat_roi_cache_bsub.sh \
   --public-cache-root /misc/public/palette_cache
 ```
 
+For the common "create crop geometry, then materialize a flat ROI cache" case,
+use the two-job wrapper:
+
+```bash
+scripts/submit_crop_flat_roi_cache_bsub.sh \
+  --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
+  --source-type refined \
+  --workflow-id smoke_crop_flat_roi_cache_20260516 \
+  --public-cache-root /misc/public/palette_cache \
+  --run-label sickyfish_cam2010093_crop_cache \
+  --crop-queue short \
+  --cache-queue gpu_l4 \
+  --cache-gpus 1 \
+  --roi-live-acceleration gpu \
+  --crop-walltime 1:00 \
+  --cache-walltime 2:00
+```
+
+The wrapper submits two jobs. The crop job writes or reuses the geometry-only
+crop run on a CPU queue. The cache job is submitted immediately with an LSF
+dependency equivalent to `-w done(<crop_jobid>)`, so it remains pending until
+the crop job exits successfully. If the crop job fails, the cache job does not
+start.
+
+Observed Janelia queue note: `normal` is not a valid queue on the checked
+cluster. The wrapper defaults now use `short`; GPU cache builds should pass an
+explicit GPU queue such as `--cache-queue gpu_l4 --cache-gpus 1`.
+
 The wrapper writes:
 
 ```text
@@ -363,6 +392,40 @@ metadata overhead and make sequential copy/staging cheap. Zarr may still win for
 tooling compatibility, chunk-local random access, or compressed/sharded storage.
 Benchmarks should compare both backends on PRFS direct reads and node-local
 staged reads before changing workflow defaults.
+
+## Source Video Path Portability
+
+Geometry-only crop runs still need a readable video source during creation.
+They skip ROI pixel extraction, but the crop writer resolves and validates the
+frame source so the crop run can record durable video provenance for later
+live reads or cache materialization.
+
+Copied archives can therefore fail on the cluster if their root metadata still
+points at a workstation-only path such as `/nvme1/recordings/...`, even when
+the MP4 has been copied beside the archive under `/groups/...`. The 2026-05-16
+sickyfish smoke hit this exact failure:
+
+```text
+Video path in metadata not found:
+/nvme1/recordings/.../cams/Cam2010093_....mp4
+```
+
+The archive copy was repaired by updating the copied Zarr's root attrs and
+`raw_video` attrs to the cluster-visible MP4:
+
+```text
+root.attrs["recording_path"] = "/groups/.../<recording>"
+root.attrs["source_video_path"] = "/groups/.../<recording>/cams/<camera>.mp4"
+root.attrs["source_path"] = "/groups/.../<recording>/cams/<camera>.mp4"
+root.attrs["source_video_metadata"]["source_path"] = "/groups/.../<recording>/cams/<camera>.mp4"
+raw_video.attrs["source_path"] = "/groups/.../<recording>/cams/<camera>.mp4"
+```
+
+For future migrated archives, this should be handled during migration/import:
+`source_video_path` must be a path readable from the compute nodes. For ad-hoc
+smoke copies, repair the copied archive metadata or add an explicit
+source-video override before submitting crop/cache jobs. Do not edit the
+original workstation archive merely to satisfy a cluster smoke copy.
 
 ## NFS/PRFS Read Policy
 
@@ -447,6 +510,19 @@ Workflow logs should also record where each cache was written:
 
 The registry does not need to track temporary ROI caches in the near-term.
 Cache lifecycle can be managed from workflow manifests/logs.
+
+Current implementation status:
+
+- Flat cache manifests record schema/layout, source archive, crop run,
+  source frame path, ROI shape, payload byte count, optional checksum, builder
+  batch size, and one coarse `builder.duration_seconds`.
+- Submit wrappers write stdout/stderr plus crop/cache status JSON files with
+  job id, host, status, published paths, byte size, and source/array metadata.
+- Downstream readers that accept `--roi-cache-manifest` record cache policy,
+  backend, key, and manifest path in run attrs/provenance.
+- Per-phase timings for video open, decode, ROI extraction, local `.bin`
+  write, PRFS copy, manifest publish, and validation are not yet detailed.
+  Add those before scaling beyond smoke runs.
 
 ## Cache Lifecycle
 
@@ -538,8 +614,6 @@ archives once geometry-only becomes the default.
 
 ## Open Questions
 
-- What is the site-qualified absolute path for `misc/public/palette_cache` from
-  Janelia login and compute nodes?
 - What TTL should successful workflow caches use?
 - Are PRFS workflow-cache reads fast enough for ROI inference, or should
   downstream jobs always stage caches to node-local scratch?
@@ -547,6 +621,9 @@ archives once geometry-only becomes the default.
   benchmarked?
 - Which Palette and Crimson review surfaces must support geometry-only before
   `crop_runs.latest` becomes latest-any?
+- Should the crop/cache submitter grow a first-class `--source-video-path`
+  override or repair/preflight helper for copied archives whose metadata still
+  points at workstation-only paths?
 
 ## Required Reader Inventory
 

@@ -262,8 +262,42 @@ def _has_latest_run(root: zarr.Group, group_name: str) -> bool:
     return bool(parent.attrs.get("latest"))
 
 
+def _crop_pointer_exists(crop_parent: zarr.Group, pointer_names: Sequence[str]) -> bool:
+    for attr_name in pointer_names:
+        candidate = _normalize_attr(crop_parent.attrs.get(attr_name))
+        if candidate and candidate in crop_parent:
+            return True
+    return False
+
+
 def _has_crop(root: zarr.Group) -> bool:
-    return _has_latest_run(root, "crop_runs")
+    crop = root.get("crop_runs")
+    if crop is None:
+        return False
+    return _crop_pointer_exists(crop, ("latest_any", "latest", "latest_materialized"))
+
+
+def _has_materialized_crop(root: zarr.Group) -> bool:
+    crop = root.get("crop_runs")
+    if crop is None:
+        return False
+    for attr_name in ("latest_materialized", "latest"):
+        candidate = _normalize_attr(crop.attrs.get(attr_name))
+        if not candidate or candidate not in crop:
+            continue
+        crop_group = crop[candidate]
+        storage_mode = _normalize_attr(crop_group.attrs.get("crop_storage_mode"))
+        if storage_mode == "materialized" and "roi_images" in crop_group:
+            return True
+        if storage_mode is None and "roi_images" in crop_group:
+            return True
+    return False
+
+
+def _has_crop_for_requirement(root: zarr.Group, crop_storage_requirement: str) -> bool:
+    if crop_storage_requirement == "materialized":
+        return _has_materialized_crop(root)
+    return _has_crop(root)
 
 
 def _has_any_keypoints(root: zarr.Group) -> bool:
@@ -281,6 +315,7 @@ def _plan_from_zarr(
     require_keypoints: bool,
     refine_only: bool,
     refine_missing_only: bool = False,
+    crop_storage_requirement: str = "any",
 ) -> EyeMaskPlan:
     if not zarr_path.exists():
         return EyeMaskPlan(
@@ -303,7 +338,7 @@ def _plan_from_zarr(
             reason=f"zarr open failed: {exc}",
         )
 
-    crop_present = _has_crop(root)
+    crop_present = _has_crop_for_requirement(root, crop_storage_requirement)
     keypoints_present = _has_any_keypoints(root)
     eye_masks_present = _has_latest_run(root, "eye_masks_runs")
     refined_eye_masks_present = _has_latest_run(root, "refined_eye_masks_runs")
@@ -398,6 +433,7 @@ def _build_plans(
     refine_only: bool,
     zarr_use: str,
     refine_missing_only: bool = False,
+    crop_storage_requirement: str = "any",
 ) -> List[EyeMaskPlan]:
     plans: List[EyeMaskPlan] = []
     for h5_path in _iter_h5(roots, recursive):
@@ -435,6 +471,7 @@ def _build_plans(
                     require_keypoints=require_keypoints,
                     refine_only=refine_only,
                     refine_missing_only=refine_missing_only,
+                    crop_storage_requirement=crop_storage_requirement,
                 )
             )
     return plans
@@ -448,6 +485,7 @@ def _build_plans_from_zarr(
     refine_only: bool,
     zarr_use: str,
     refine_missing_only: bool = False,
+    crop_storage_requirement: str = "any",
 ) -> List[EyeMaskPlan]:
     plans: List[EyeMaskPlan] = []
     for zarr_path in zarr_paths:
@@ -467,6 +505,7 @@ def _build_plans_from_zarr(
                 require_keypoints=require_keypoints,
                 refine_only=refine_only,
                 refine_missing_only=refine_missing_only,
+                crop_storage_requirement=crop_storage_requirement,
             )
         )
     return plans
@@ -549,6 +588,10 @@ def _canonical_method(method: str) -> str:
             f"Unsupported eye mask method '{method}'. Expected one of: traditional, yolo, unet."
         )
     return canonical
+
+
+def _crop_requirement_for_eye_mask_method(method: str) -> str:
+    return "materialized" if _canonical_method(method) == "traditional" else "any"
 
 
 def _validate_method_requirements(config: Dict[str, Any], method: str, *, refine_only: bool) -> None:
@@ -1667,6 +1710,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise SystemExit(str(exc)) from exc
     require_crop = bool(args.require_crop) and not bool(args.no_require_crop)
     require_keypoints = bool(args.require_keypoints) and not bool(args.no_require_keypoints)
+    crop_storage_requirement = _crop_requirement_for_eye_mask_method(method)
 
     plans: List[EyeMaskPlan] = []
     if args.source == "registry":
@@ -1698,6 +1742,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 refine_only=bool(args.refine_only),
                 zarr_use=str(args.zarr_use),
                 refine_missing_only=bool(args.refine_missing_only),
+                crop_storage_requirement=crop_storage_requirement,
             )
         )
     else:
@@ -1712,6 +1757,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     refine_only=bool(args.refine_only),
                     zarr_use=str(args.zarr_use),
                     refine_missing_only=bool(args.refine_missing_only),
+                    crop_storage_requirement=crop_storage_requirement,
                 )
             )
         if explicit_zarrs:
@@ -1724,6 +1770,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     refine_only=bool(args.refine_only),
                     zarr_use=str(args.zarr_use),
                     refine_missing_only=bool(args.refine_missing_only),
+                    crop_storage_requirement=crop_storage_requirement,
                 )
             )
 

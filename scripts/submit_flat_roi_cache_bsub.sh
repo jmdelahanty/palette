@@ -6,7 +6,7 @@ CROP_RUN=""
 PUBLIC_CACHE_ROOT="/misc/public/palette_cache"
 PUBLIC_CACHE_DIR=""
 LOG_DIR=""
-QUEUE="normal"
+QUEUE="short"
 NCORES=4
 MEM_GB=64
 GPUS=0
@@ -39,7 +39,7 @@ Options:
   --public-cache-dir PATH        Explicit publish directory; overrides root/workflow_id/roi_cache
   --workflow-id ID               Workflow namespace under public-cache-root
   --log-dir PATH                 Log/output directory (default: runs/diagnostics/flat_roi_cache_bsub)
-  --queue NAME                   LSF queue (default: normal)
+  --queue NAME                   LSF queue (default: short)
   --ncores N                     CPU slots (default: 4)
   --mem-gb N                     Memory request in GB (default: 64)
   --gpus N                       GPU count; 0 omits -gpu (default: 0)

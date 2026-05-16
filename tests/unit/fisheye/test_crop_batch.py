@@ -60,6 +60,7 @@ def test_build_plans_analysis_filter_skips_training(tmp_path: Path) -> None:
 
     assert by_name[analysis.name].status == "ok"
     assert by_name[analysis.name].source_type == "detect"
+    assert by_name[analysis.name].crop_storage_mode == "geometry_only"
     assert by_name[training.name].status == "skipped"
     assert "wanted=analysis" in (by_name[training.name].reason or "")
 
@@ -90,7 +91,31 @@ def test_build_plans_any_filter_includes_all_uses(tmp_path: Path) -> None:
     )
     by_name = {plan.zarr_path.name: plan for plan in plans}
     assert by_name[analysis.name].status == "ok"
+    assert by_name[analysis.name].crop_storage_mode == "geometry_only"
     assert by_name[training.name].status == "ok"
+    assert by_name[training.name].crop_storage_mode == "materialized"
+
+
+def test_build_plan_honors_configured_materialized_mode_for_analysis(tmp_path: Path) -> None:
+    zarr_path = _make_archive(
+        tmp_path,
+        "rec_a",
+        "rec_a_analysis.zarr",
+        zarr_purpose="analysis",
+    )
+
+    plan = mod._build_plan(
+        zarr_path=zarr_path,
+        config={"crop": {"crop_storage_mode": "materialized"}},
+        source_type="detect",
+        source_path=None,
+        selection_policy=None,
+        force_new=False,
+        crop_storage_mode=None,
+    )
+
+    assert plan.status == "ok"
+    assert plan.crop_storage_mode == "materialized"
 
 
 def test_main_strict_stops_after_first_failure(monkeypatch, tmp_path: Path) -> None:

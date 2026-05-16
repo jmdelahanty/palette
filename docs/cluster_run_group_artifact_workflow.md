@@ -1,7 +1,7 @@
 # Cluster Run-Group Artifact Workflow
 <!-- contract-meta
 status: design
-last_verified: 2026-05-14
+last_verified: 2026-05-16
 purpose: Define how Palette cluster jobs should produce Zarr-compatible run-group artifacts on node-local scratch and safely import them into canonical analysis archives.
 -->
 
@@ -26,6 +26,13 @@ not a new analysis schema.
 For the broader detect, pose, segmentation, and refinement migration checklist,
 see `docs/cluster_pipeline_migration_checklist.md`.
 
+For scheduler-level orchestration across GPU, CPU, import, validation, and
+registry-projection jobs, see `docs/cluster_workflow_orchestration.md`.
+
+For geometry-only crop runs and temporary ROI cache placement across cluster
+pose/segmentation workflows, see
+`docs/geometry_only_crop_workflow_cache_design.md`.
+
 ## Design Decision
 
 Cluster workers should not write directly into canonical analysis Zarrs on
@@ -44,6 +51,60 @@ analysis/eye_angle_runs/eye_angle_...
 
 The package is immutable after creation. If the run needs to be regenerated,
 create a new run name and a new package.
+
+## Clip-Partitioned Experiment Stores
+
+Future long-running experiments may be recorded as multiple shorter clips
+instead of one very large video. This is a first-class scaling target, not an
+exception to the cluster artifact workflow.
+
+The design decision is: clip compute should parallelize by independent clip
+namespace, while shared experiment-level metadata is finalized separately.
+Importer locking protects shared mutable metadata; it should not serialize
+independent clip-local compute or clip-local package promotion when the target
+paths are disjoint.
+
+Preferred layout shape:
+
+```text
+experiment.zarr/
+  clips/
+    clip_0000/
+      video_metadata/
+      detect_runs/detect_...
+      crop_runs/crop_...
+    clip_0001/
+      video_metadata/
+      detect_runs/detect_...
+      crop_runs/crop_...
+  experiment_index/
+    clip_table
+    run_manifest
+```
+
+Each cluster job should own one clip, or a small set of clips, and write a
+complete clip-local run group on node-local scratch before packaging it. The
+importer can then promote into a clip-local target such as
+`clips/clip_0017/detect_runs/detect_...` without touching arrays owned by other
+clips.
+
+Avoid a design where many jobs append into one giant run group such as
+`detect_runs/detect_full_experiment/frame_indices`. That shape requires global
+row allocation, chunk-aligned writes, frame-offset coordination, and careful
+metadata synchronization. It may be useful for a generated query/export layer,
+but it should not be the primary concurrent write target.
+
+Readers should treat an experiment as a logical concatenation of clip-local
+outputs using explicit identifiers:
+
+- `clip_id`
+- `local_frame_index`
+- `global_frame_index`
+- source video path or clip source id
+
+A short serialized finalize step may build or refresh `experiment_index`,
+`latest` pointers, consolidated metadata, and registry projections after all
+clip-local imports complete.
 
 ## Janelia Cluster Assumptions
 
@@ -168,7 +229,11 @@ is intended to eliminate.
 ### Importer
 
 The importer owns canonical archive mutation. It should run serially, or under a
-lock that guarantees one importer per target archive. It should:
+lock that guarantees one importer per mutable namespace. For today's
+single-recording archives, that usually means one importer per target archive.
+For future clip-partitioned experiment stores, that can be one importer per
+clip namespace for clip-local run groups, plus a separate experiment-level lock
+for shared indexes and parent metadata. The importer should:
 
 - unpack the package into an incoming/staging path on the storage node;
 - validate the package again against the current canonical archive;
@@ -327,6 +392,50 @@ tree hash. If apply-time validation fails after `.incoming` is created, the
 incoming directory is moved to `<family_parent>/.failed/<run_name>_<timestamp>/`.
 `latest` is updated only when the package `latest_policy` requests it.
 
+Post-import validation:
+
+```bash
+scripts/py -m fisheye.utils.validate_imported_run_group \
+  <recording_analysis.zarr> \
+  --target-group-path detect_runs/<run_name>
+```
+
+The validator checks the import receipt, strict JSON, required arrays, source
+inputs, source tarball checksum, run provenance, and the imported run-group
+fingerprint. For `detect_yolo_sparse_v1`, the fingerprint is interpreted as
+the immutable imported model-output core. Existing Palette detect-quality
+reports are appended under `detect_runs/<run>/quality_reports/`; after those
+reports exist, the validator allows that known mutable child while still
+requiring the imported core tree hash to match the original artifact manifest.
+
+Registry-free downstream smoke:
+
+```bash
+scripts/py -m fisheye.refinement.detect_quality \
+  <recording_analysis.zarr> \
+  --run <imported_detect_run> \
+  --save
+
+scripts/py -m fisheye.refinement.refine_detect \
+  <recording_analysis.zarr> \
+  --detect-run <imported_detect_run> \
+  --quality-run <detect_quality_run> \
+  --config configs/fisheye/default.yaml \
+  --per-frame-top-k 1
+```
+
+The batch wrappers can also plan against a direct Zarr directory path without
+registry discovery:
+
+```bash
+scripts/py -m fisheye.utils.detect_quality_batch <recording_analysis.zarr> \
+  --detect-run <imported_detect_run> --no-skip-existing --json
+
+scripts/py -m fisheye.utils.refine_detect_batch <recording_analysis.zarr> \
+  --detect-run <imported_detect_run> --quality-run <detect_quality_run> \
+  --no-skip-existing --config configs/fisheye/default.yaml
+```
+
 1. Unpack to an incoming path under the target run-family parent:
 
    ```text
@@ -401,9 +510,14 @@ canonical Zarr state plus artifact manifests.
 ## Concurrency Rules
 
 - Parallelize by recording first.
+- For long experiments represented as clips, parallelize by clip namespace when
+  each job writes disjoint clip-local run groups.
 - Use one writer per target run group.
-- Use one importer per target archive.
-- Do not run two imports that write the same parent attrs concurrently.
+- Use one importer per mutable namespace. Use archive-level locking for current
+  single-recording archives; clip-level locking is acceptable for future
+  stores when the import does not update shared experiment-level metadata.
+- Do not run two imports that write the same parent attrs, `latest` pointer,
+  consolidated metadata, experiment index, or registry projection concurrently.
 - Do not unpack directly into the final target path.
 - Do not share one scratch output directory across jobs unless each job owns a
   unique subdirectory.

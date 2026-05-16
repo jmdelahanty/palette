@@ -222,7 +222,42 @@ def _has_crop(root: zarr.Group) -> bool:
     crop = root.get("crop_runs")
     if crop is None:
         return False
-    return bool(crop.attrs.get("latest"))
+    return _crop_pointer_exists(crop, ("latest_any", "latest", "latest_materialized"))
+
+
+def _crop_pointer_exists(crop_parent: zarr.Group, pointer_names: Sequence[str]) -> bool:
+    for attr_name in pointer_names:
+        candidate = _normalize_attr(crop_parent.attrs.get(attr_name))
+        if candidate and candidate in crop_parent:
+            return True
+    return False
+
+
+def _has_materialized_crop(root: zarr.Group) -> bool:
+    crop = root.get("crop_runs")
+    if crop is None:
+        return False
+    for attr_name in ("latest_materialized", "latest"):
+        candidate = _normalize_attr(crop.attrs.get(attr_name))
+        if not candidate or candidate not in crop:
+            continue
+        crop_group = crop[candidate]
+        storage_mode = _normalize_attr(crop_group.attrs.get("crop_storage_mode"))
+        if storage_mode == "materialized" and "roi_images" in crop_group:
+            return True
+        if storage_mode is None and "roi_images" in crop_group:
+            return True
+    return False
+
+
+def _has_crop_for_requirement(root: zarr.Group, crop_storage_requirement: str) -> bool:
+    if crop_storage_requirement == "materialized":
+        return _has_materialized_crop(root)
+    return _has_crop(root)
+
+
+def _crop_requirement_for_keypoint_method(method: str) -> str:
+    return "any" if method in {"yolo", "yolo_pose"} else "materialized"
 
 
 def _has_background(root: zarr.Group) -> bool:
@@ -754,6 +789,7 @@ def _plan_from_zarr(
     require_background: bool,
     require_tuning: bool,
     refine_only: bool,
+    crop_storage_requirement: str = "any",
 ) -> KeypointPlan:
     if not zarr_path.exists():
         return KeypointPlan(
@@ -777,7 +813,7 @@ def _plan_from_zarr(
             reason=f"zarr open failed: {exc}",
         )
 
-    crop_present = _has_crop(root)
+    crop_present = _has_crop_for_requirement(root, crop_storage_requirement)
     background_present = _has_background(root)
     keypoints_present = _has_keypoints(root)
     tuning_present = _has_keypoint_tuning(root)
@@ -871,6 +907,7 @@ def _build_plans(
     require_background: bool,
     require_tuning: bool,
     refine_only: bool,
+    crop_storage_requirement: str = "any",
 ) -> List[KeypointPlan]:
     plans: List[KeypointPlan] = []
     for h5_path in _iter_h5(roots, recursive):
@@ -888,6 +925,7 @@ def _build_plans(
                 require_background=require_background,
                 require_tuning=require_tuning,
                 refine_only=refine_only,
+                crop_storage_requirement=crop_storage_requirement,
             )
         )
     return plans
@@ -900,6 +938,7 @@ def _build_plans_from_zarr(
     require_background: bool,
     require_tuning: bool,
     refine_only: bool,
+    crop_storage_requirement: str = "any",
 ) -> List[KeypointPlan]:
     plans: List[KeypointPlan] = []
     for zarr_path in zarr_paths:
@@ -917,6 +956,7 @@ def _build_plans_from_zarr(
                 require_background=require_background,
                 require_tuning=require_tuning,
                 refine_only=refine_only,
+                crop_storage_requirement=crop_storage_requirement,
             )
         )
     return plans
@@ -1935,6 +1975,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         require_background = method not in {"yolo", "yolo_pose"}
     require_crop = bool(args.require_crop) and not bool(args.no_require_crop)
+    crop_storage_requirement = _crop_requirement_for_keypoint_method(method)
 
     logger: Optional[JsonLogger] = None
     log_path: Optional[Path] = None
@@ -1956,6 +1997,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             overwrite=bool(args.overwrite),
             require_background=require_background,
             require_crop=require_crop,
+            crop_storage_requirement=crop_storage_requirement,
             require_tuning=bool(args.require_tuning),
             config=args.config,
             method=args.method,
@@ -2016,6 +2058,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             require_background=require_background,
             require_tuning=bool(args.require_tuning),
             refine_only=bool(args.refine_only),
+            crop_storage_requirement=crop_storage_requirement,
         )
         for plan in registry_plans:
             camera_id = camera_ids_by_zarr.get(str(plan.zarr_path.resolve()))
@@ -2033,6 +2076,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     require_background=require_background,
                     require_tuning=bool(args.require_tuning),
                     refine_only=bool(args.refine_only),
+                    crop_storage_requirement=crop_storage_requirement,
                 )
             )
         if explicit_zarrs:
@@ -2044,6 +2088,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     require_background=require_background,
                     require_tuning=bool(args.require_tuning),
                     refine_only=bool(args.refine_only),
+                    crop_storage_requirement=crop_storage_requirement,
                 )
             )
 

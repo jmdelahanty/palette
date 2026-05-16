@@ -82,7 +82,7 @@ def _progress(console: Optional[Console], total: int):
 def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
     for root in roots:
         root = root.expanduser()
-        if root.is_file() and root.suffix == ".zarr":
+        if root.name.endswith(".zarr") and (root.is_file() or root.is_dir()):
             yield root
             continue
         if not root.exists():

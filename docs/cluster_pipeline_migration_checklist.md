@@ -1,7 +1,7 @@
 # Cluster Pipeline Migration Checklist
 <!-- contract-meta
 status: working_checklist
-last_verified: 2026-05-14
+last_verified: 2026-05-16
 purpose: Track what remains to migrate Palette detect, pose, segmentation, and refinement workflows to Janelia cluster execution.
 -->
 
@@ -14,6 +14,7 @@ It is based on a read-through of:
 
 - `docs/operator_guide/pipeline_workflow.md`
 - `docs/cluster_batching_guide.md`
+- `docs/cluster_workflow_orchestration.md`
 - `docs/cluster_run_group_artifact_workflow.md`
 - `scripts/submit_detect_batches_bsub.sh`
 - `scripts/submit_crop_batches_bsub.sh`
@@ -27,6 +28,10 @@ The near-term goal is not to redesign every writer. The near-term goal is to
 run small, observable, registry-scoped cluster jobs safely, then close the
 gaps needed for larger production runs.
 
+For scheduler-level decisions about splitting GPU inference, CPU refinement,
+artifact import, validation, and registry projection into separate LSF jobs,
+see `docs/cluster_workflow_orchestration.md`.
+
 ## Current State
 
 Palette already has the first layer of cluster support:
@@ -36,6 +41,7 @@ Palette already has the first layer of cluster support:
 | Environment validation | present | `scripts/validate_cluster_palette_env.sh` checks Python, CUDA, PyTorch, Decord, FFmpeg linkage, reports PyNvVideoCodec/NVIDIA video-library availability, and can require PyNv with `--require-pynvvc`. |
 | Detect submitter | present | `scripts/submit_detect_batches_bsub.sh` wraps `fisheye.utils.run_detections_batch`. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
+| Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs. |
 | Keypoint submitter | present | `scripts/submit_keypoints_batches_bsub.sh` wraps `fisheye.utils.run_keypoints_batch`. |
 | Eye-mask submitter | present | `scripts/submit_eye_masks_batches_bsub.sh` wraps `fisheye.utils.run_eye_masks_batch`. |
 | Registry discovery | present for first four stages | Registry mode can prefilter by `recording_step_status` and path/camera/rig filters. |
@@ -114,21 +120,27 @@ Ready for pilot:
   have registry model metadata available on the cluster.
 - [x] Compute-only detection smoke CLI exists:
   `scripts/py -m fisheye.diagnostics.detect_compute_smoke`.
+- [x] Detection run-group artifact runner exists:
+  `scripts/py -m fisheye.utils.run_detection_artifact`.
+- [x] Detection artifact importer apply mode exists:
+  `scripts/py -m fisheye.utils.import_run_group_artifact --apply`.
+- [x] Post-import validator exists:
+  `scripts/py -m fisheye.utils.validate_imported_run_group`.
 
 Remaining:
 
-- [ ] Run a compute-only cluster detection smoke on the sickyfish PRFS
+- [x] Run a compute-only cluster detection smoke on the sickyfish PRFS
   recording: PRFS video open, model load, small-batch decode, inference, and no
   canonical `detect_runs` writes.
-- [ ] Add minimal scratch run-group artifact/import path for detection before a
+- [x] Add minimal scratch run-group artifact/import path for detection before a
   full output-writing cluster smoke.
-- [ ] Run one real cluster detection artifact/import smoke on the sickyfish PRFS
+- [x] Run one real cluster detection artifact/import smoke on the sickyfish PRFS
   recording.
-- [ ] Verify detect output strict JSON and schema.
-- [ ] Verify run provenance includes model, decode backend, timings, git
+- [x] Verify detect output strict JSON and schema.
+- [x] Verify run provenance includes model, decode backend, timings, git
   commit, host, and CUDA device.
 - [ ] Verify registry `detect` status refresh after cluster run.
-- [ ] Decide whether detect should be the first stage converted to scratch
+- [x] Decide whether detect should be the first stage converted to scratch
   run-group artifacts.
 
 ### 2. Detect Quality And Refined Detect
@@ -146,6 +158,21 @@ Ready for pilot:
 - [x] Refined detect writes sparse canonical `instances` and
   `source_detections`.
 - [x] Raw `detect_runs` are treated as immutable model outputs.
+- [x] Registry-free smoke from an imported cluster detect run succeeded:
+  detect quality wrote `quality_reports/<run>` under the imported detect run,
+  and `refine_detect` consumed that explicit quality run to produce a curated
+  `refined_detect_runs/<run>`.
+- [x] The imported-detect validator preserves the imported model-output core
+  fingerprint while allowing the known mutable derived child
+  `quality_reports/`.
+
+Execution model note:
+
+- `detect_quality` and `refine_detect` are single-process, single-writer stages
+  today. Do not add Dask inside these writers just to run them on the cluster;
+  scale them first by recording or clip namespace. If they later become
+  artifact-produced stages, package/import the completed run group and keep
+  shared metadata updates serialized.
 
 Remaining:
 
@@ -171,17 +198,29 @@ Ready for pilot:
 
 - [x] Registry-scoped discovery exists.
 - [x] LSF submitter exists.
+- [x] Geometry-only analysis crop policy is implemented in batch planning.
+- [x] Two-job crop + flat ROI cache submitter exists; the cache job depends on
+  successful crop completion.
+- [x] Flat ROI cache builder writes to node-local scratch and publishes
+  payload-first/manifest-last to `/misc/public/palette_cache/<workflow_id>/`.
 - [x] GPU decode path exists for external video crop generation.
 - [x] `decode_seconds`, `compute_seconds`, and `write_seconds` style profiling
   exists in crop code paths.
 
 Remaining:
 
-- [ ] Run a crop cluster smoke after detect/refine detect outputs are present.
+- [ ] Rerun the crop + flat ROI cache cluster smoke after repairing copied
+  smoke archive `source_video_path` attrs to point at the PRFS MP4.
 - [ ] Verify crop source resolution prefers the refined canonical surface.
-- [ ] Verify ROI storage mode and chunking are appropriate on PRFS.
-- [ ] Decide whether crop outputs should use scratch package/import earlier
-  than smaller tabular stages because crop data is dense and file-heavy.
+- [ ] Verify the crop status JSON, flat cache manifest, published payload size,
+  and `open_flat_roi_cache` validation.
+- [ ] Add detailed phase telemetry for cache build and publish: video open,
+  decode, crop extraction, local write, PRFS copy, manifest publish, and
+  validation.
+- [ ] Benchmark direct PRFS flat-cache reads versus staging the flat cache to
+  node-local scratch before downstream GPU inference.
+- [ ] Decide whether materialized crop outputs still need scratch package/import
+  when operators explicitly request `crop_storage_mode=materialized`.
 
 ### 4. Keypoints And Refined Keypoints
 
@@ -301,6 +340,8 @@ Implementation tasks:
 - [ ] Use that helper from detect, crop, keypoints, eye masks, subject masks,
   and refinement/finalization writers.
 - [ ] Add tests that the helper handles unset variables for workstation runs.
+- [ ] Extend flat ROI cache submitters beyond coarse status JSONs with
+  per-phase timings and LSF resource context.
 
 ### B. Registry And Stage Status
 
@@ -343,6 +384,13 @@ Production target:
 - serialized importer validates and promotes into canonical Zarr;
 - importer updates `latest`, consolidated metadata, and registry projection.
 
+For future long-running experiments split into clips, the importer should lock
+the smallest mutable namespace that protects correctness. Current
+single-recording archives usually need archive-level import serialization.
+Clip-partitioned experiment stores can import disjoint clip-local run groups in
+parallel, then run a short serialized experiment-level finalize step for shared
+indexes, `latest`, consolidated metadata, and registry projection.
+
 Implementation tasks:
 
 - [ ] Add run-group packer. Existing `pack_zarr_transfer_artifact` packs whole
@@ -350,7 +398,9 @@ Implementation tasks:
 - [ ] Add run-group artifact validator.
 - [ ] Add serialized run-group importer with `.incoming` and `.failed`
   handling.
-- [ ] Add file or SQLite locks so one importer owns a target archive.
+- [ ] Add file or SQLite locks so one importer owns a mutable namespace
+  (archive-level for current stores; clip-level plus experiment-level finalize
+  for future clip-partitioned stores).
 - [ ] Add tests for failed validation leaving normal namespaces untouched.
 
 ### D. Validation Gates

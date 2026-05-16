@@ -159,6 +159,29 @@ def _infer_crop_run_storage_mode(crop_group: zarr.Group) -> str:
     return "geometry_only"
 
 
+def _desired_crop_storage_mode(
+    *,
+    root: zarr.Group,
+    zarr_path: Path,
+    config: Dict[str, Any],
+    crop_params: Dict[str, Any],
+    explicit_crop_storage_mode: Optional[str],
+) -> str:
+    if explicit_crop_storage_mode is not None:
+        return _normalize_crop_storage_mode(explicit_crop_storage_mode)
+
+    crop_cfg = config.get("crop", {}) or {}
+    configured = crop_cfg.get("crop_storage_mode")
+    if configured is not None:
+        return _normalize_crop_storage_mode(configured)
+
+    archive_use = _infer_archive_use(root, zarr_path)
+    if archive_use == "analysis":
+        return "geometry_only"
+
+    return _normalize_crop_storage_mode(crop_params.get("crop_storage_mode", "materialized"))
+
+
 def _latest_crop_signature(
     root: zarr.Group,
     *,
@@ -252,8 +275,12 @@ def _build_plan(
 
     crop_params, _ = get_crop_parameters(root, config, console=None)
     roi_size = tuple(crop_params.get("roi_sz", [512, 512]))
-    desired_crop_storage_mode = _normalize_crop_storage_mode(
-        crop_storage_mode if crop_storage_mode is not None else crop_params.get("crop_storage_mode", "materialized")
+    desired_crop_storage_mode = _desired_crop_storage_mode(
+        root=root,
+        zarr_path=zarr_path,
+        config=config,
+        crop_params=crop_params,
+        explicit_crop_storage_mode=crop_storage_mode,
     )
     archive_use = _infer_archive_use(root, zarr_path)
     if archive_use == "training" and desired_crop_storage_mode != "materialized":

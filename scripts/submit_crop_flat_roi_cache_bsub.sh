@@ -15,12 +15,12 @@ RUN_ID=""
 RUN_LABEL=""
 WORKFLOW_ID=""
 
-CROP_QUEUE="normal"
+CROP_QUEUE="short"
 CROP_NCORES=4
 CROP_MEM_GB=32
 CROP_WALLTIME="1:00"
 
-CACHE_QUEUE="normal"
+CACHE_QUEUE="short"
 CACHE_NCORES=4
 CACHE_MEM_GB=64
 CACHE_GPUS=0
@@ -54,7 +54,7 @@ Crop options:
   --source-path PATH                Explicit detection source path
   --selection-policy POLICY         Selection policy passed to crop_batch
   --force-new                       Force a new crop run even if a matching one exists
-  --crop-queue NAME                 LSF queue for crop job (default: normal)
+  --crop-queue NAME                 LSF queue for crop job (default: short)
   --crop-ncores N                   CPU slots for crop job (default: 4)
   --crop-mem-gb N                   Memory for crop job in GB (default: 32)
   --crop-walltime H:MM              Wall time for crop job (default: 1:00)
@@ -64,7 +64,7 @@ Cache options:
   --public-cache-root PATH          Shared cache root (default: /misc/public/palette_cache)
   --public-cache-dir PATH           Explicit publish dir; overrides root/workflow_id/roi_cache
   --workflow-id ID                  Workflow namespace under public-cache-root
-  --cache-queue NAME                LSF queue for cache job (default: normal)
+  --cache-queue NAME                LSF queue for cache job (default: short; use e.g. gpu_l4 with --cache-gpus)
   --cache-ncores N                  CPU slots for cache job (default: 4)
   --cache-mem-gb N                  Memory for cache job in GB (default: 64)
   --cache-gpus N                    GPU count for cache job; 0 omits -gpu (default: 0)
