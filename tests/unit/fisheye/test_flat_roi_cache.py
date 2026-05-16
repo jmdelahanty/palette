@@ -42,12 +42,16 @@ def _make_materialized_crop_archive(tmp_path: Path) -> tuple[Path, np.ndarray]:
 def test_build_flat_roi_cache_roundtrips_through_manifest(tmp_path: Path) -> None:
     zarr_path, roi_images = _make_materialized_crop_archive(tmp_path)
     cache_dir = tmp_path / "cache"
+    progress_events: list[dict] = []
 
     manifest = build_flat_roi_cache(
         zarr_path=zarr_path,
         output_dir=cache_dir,
         batch_size=2,
         compute_sha256=True,
+        progress_callback=progress_events.append,
+        progress_every_batches=1,
+        progress_interval_seconds=999,
     )
 
     assert manifest["schema"] == FLAT_ROI_CACHE_SCHEMA
@@ -57,6 +61,20 @@ def test_build_flat_roi_cache_roundtrips_through_manifest(tmp_path: Path) -> Non
     assert manifest["array"]["shape"] == [5, 4, 3]
     assert manifest["array"]["dtype"] == "uint8"
     assert manifest["array"]["sha256"]
+    assert manifest["builder"]["timing"]["batches"] == 3
+    assert manifest["builder"]["timing"]["rows"] == 5
+    assert manifest["builder"]["timing"]["bytes"] == int(roi_images.size)
+    assert manifest["builder"]["timing"]["read_seconds_total"] >= 0
+    assert manifest["builder"]["timing"]["write_seconds_total"] >= 0
+
+    assert progress_events[0]["event"] == "start"
+    assert progress_events[-1]["event"] == "complete"
+    batch_events = [event for event in progress_events if event["event"] == "batch"]
+    assert [event["batch"]["index"] for event in batch_events] == [1, 2, 3]
+    assert batch_events[-1]["progress"]["rows_written"] == 5
+    assert batch_events[-1]["progress"]["bytes_written"] == int(roi_images.size)
+    assert batch_events[-1]["batch"]["read_seconds"] >= 0
+    assert batch_events[-1]["batch"]["write_seconds"] >= 0
 
     manifest_path = Path(str(manifest["manifest_path"]))
     cache = open_flat_roi_cache(

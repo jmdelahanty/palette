@@ -364,6 +364,21 @@ The wrapper writes:
 /scratch/$USER/$LSB_JOBID/palette_cache/flat_roi_cache/<label>.flat_roi_cache.{json,bin}
 ```
 
+During cache construction the wrapper also writes progress telemetry in the run
+directory:
+
+```text
+runs/diagnostics/.../<label>.cache.<jobid>.progress.jsonl
+```
+
+Each JSONL record reports rows and bytes written, elapsed time, ETA, aggregate
+ROI throughput, and per-batch timing for the source read/decode/crop step,
+contiguous conversion, serialization, and file write. The submit wrapper also
+passes `--progress-stderr`, so compact progress summaries appear in the LSF
+stderr file while the builder is running. A non-empty cache stderr file is
+therefore not necessarily a failure; check the final status JSON and LSF exit
+state.
+
 then publishes payload first and manifest last:
 
 ```text

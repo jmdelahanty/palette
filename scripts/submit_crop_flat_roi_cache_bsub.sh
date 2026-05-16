@@ -271,6 +271,7 @@ OVERWRITE=${OVERWRITE_Q}
 JOB_ID="\${LSB_JOBID:-manual_cache}"
 HOST="\$(hostname)"
 STATUS_JSON="\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.json"
+PROGRESS_JSONL="\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.progress.jsonl"
 
 scratch_user="\${USER:-\$(id -un)}"
 if [[ -n "\${LSB_JOBID:-}" && -d "/scratch/\${scratch_user}" ]]; then
@@ -303,6 +304,7 @@ echo "palette_job_cache=\${PALETTE_JOB_CACHE}"
 echo "local_manifest=\${LOCAL_MANIFEST}"
 echo "public_manifest=\${FINAL_MANIFEST}"
 echo "status_json=\${STATUS_JSON}"
+echo "progress_jsonl=\${PROGRESS_JSONL}"
 
 if [[ "\${OVERWRITE}" != "1" && ( -e "\${FINAL_MANIFEST}" || -e "\${FINAL_BIN}" ) ]]; then
   echo "Published cache already exists; pass --overwrite to replace:" >&2
@@ -311,7 +313,7 @@ if [[ "\${OVERWRITE}" != "1" && ( -e "\${FINAL_MANIFEST}" || -e "\${FINAL_BIN}" 
   exit 2
 fi
 
-scripts/py -m fisheye.utils.build_flat_roi_cache ${BUILDER_ARGS_SHELL}--manifest-path "\${LOCAL_MANIFEST}" --json > "\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.manifest.build.json"
+scripts/py -m fisheye.utils.build_flat_roi_cache ${BUILDER_ARGS_SHELL}--manifest-path "\${LOCAL_MANIFEST}" --progress-jsonl "\${PROGRESS_JSONL}" --progress-stderr --progress-interval-s 30 --json > "\${RUN_DIR}/\${RUN_LABEL}.cache.\${JOB_ID}.manifest.build.json"
 
 if [[ ! -s "\${LOCAL_MANIFEST}" ]]; then
   echo "Local manifest was not created: \${LOCAL_MANIFEST}" >&2

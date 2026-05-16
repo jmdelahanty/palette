@@ -13,13 +13,14 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import zarr
 
 FLAT_ROI_CACHE_SCHEMA = "palette_roi_cache_flat_bin_v1"
 FLAT_ROI_CACHE_LAYOUT = "flat_bin_v1"
+FLAT_ROI_CACHE_PROGRESS_SCHEMA = "palette_roi_cache_flat_bin_progress_v1"
 
 
 class FlatRoiCacheArray:
@@ -118,6 +119,9 @@ def build_flat_roi_cache(
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
     console: Any | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    progress_interval_seconds: float = 30.0,
+    progress_every_batches: int = 0,
 ) -> dict[str, Any]:
     """Materialize the selected crop run into a flat binary ROI cache."""
 
@@ -160,43 +164,165 @@ def build_flat_roi_cache(
                 expected_shape=source.shape,
             )
             manifest.setdefault("manifest_path", str(resolved_manifest_path))
+            _emit_progress(
+                progress_callback,
+                "reuse_existing",
+                manifest_path=str(resolved_manifest_path),
+                bin_path=str(resolved_manifest_path.with_suffix(".bin")),
+                source=_progress_source_payload(source),
+            )
             return manifest
 
         manifest_tmp = _temporary_path(resolved_manifest_path, suffix=".tmp.json")
         bin_path = resolved_manifest_path.with_suffix(".bin")
         bin_tmp = _temporary_path(bin_path, suffix=".tmp.bin")
         total_bytes = int(np.prod(source.shape, dtype=np.int64))
+        total_rois = int(source.total_rois)
+        effective_batch_size = max(1, int(batch_size))
         started = time.perf_counter()
+        last_progress = started
+        timing = {
+            "read_seconds_total": 0.0,
+            "contiguous_seconds_total": 0.0,
+            "serialize_seconds_total": 0.0,
+            "write_seconds_total": 0.0,
+            "sha256_seconds_total": 0.0,
+            "batches": 0,
+            "rows": 0,
+            "bytes": 0,
+        }
         sha = hashlib.sha256() if compute_sha256 else None
+        _emit_progress(
+            progress_callback,
+            "start",
+            manifest_path=str(resolved_manifest_path),
+            bin_path=str(bin_path),
+            tmp_bin_path=str(bin_tmp),
+            batch_size=effective_batch_size,
+            total_rois=total_rois,
+            total_bytes=total_bytes,
+            source=_progress_source_payload(source),
+        )
 
         with bin_tmp.open("wb") as handle:
-            for start in range(0, source.total_rois, max(1, int(batch_size))):
-                end = min(start + max(1, int(batch_size)), source.total_rois)
-                batch = np.ascontiguousarray(source.read_slice(start, end), dtype=np.uint8)
+            for batch_index, start in enumerate(range(0, total_rois, effective_batch_size), start=1):
+                end = min(start + effective_batch_size, total_rois)
+                read_started = time.perf_counter()
+                raw_batch = source.read_slice(start, end)
+                read_seconds = time.perf_counter() - read_started
+
+                contiguous_started = time.perf_counter()
+                batch = np.ascontiguousarray(raw_batch, dtype=np.uint8)
+                contiguous_seconds = time.perf_counter() - contiguous_started
                 if tuple(batch.shape[1:]) != tuple(source.roi_shape):
                     raise ValueError(
                         f"ROI batch shape mismatch: expected (*, {source.roi_shape[0]}, {source.roi_shape[1]}), "
                         f"got {tuple(batch.shape)}."
                     )
+
+                serialize_started = time.perf_counter()
                 payload = batch.tobytes(order="C")
+                serialize_seconds = time.perf_counter() - serialize_started
+
+                write_started = time.perf_counter()
                 handle.write(payload)
+                write_seconds = time.perf_counter() - write_started
+
+                sha_seconds = 0.0
                 if sha is not None:
+                    sha_started = time.perf_counter()
                     sha.update(payload)
+                    sha_seconds = time.perf_counter() - sha_started
+
+                batch_rows = int(end - start)
+                batch_bytes = int(len(payload))
+                timing["read_seconds_total"] += float(read_seconds)
+                timing["contiguous_seconds_total"] += float(contiguous_seconds)
+                timing["serialize_seconds_total"] += float(serialize_seconds)
+                timing["write_seconds_total"] += float(write_seconds)
+                timing["sha256_seconds_total"] += float(sha_seconds)
+                timing["batches"] = int(batch_index)
+                timing["rows"] += batch_rows
+                timing["bytes"] += batch_bytes
+
+                now = time.perf_counter()
+                should_emit = _should_emit_batch_progress(
+                    batch_index=batch_index,
+                    rows_written=int(timing["rows"]),
+                    total_rois=total_rois,
+                    now=now,
+                    last_progress=last_progress,
+                    progress_interval_seconds=float(progress_interval_seconds),
+                    progress_every_batches=int(progress_every_batches),
+                )
+                if should_emit:
+                    last_progress = now
+                    elapsed = now - started
+                    _emit_progress(
+                        progress_callback,
+                        "batch",
+                        batch={
+                            "index": int(batch_index),
+                            "start": int(start),
+                            "end": int(end),
+                            "rows": batch_rows,
+                            "bytes": batch_bytes,
+                            "read_seconds": float(read_seconds),
+                            "contiguous_seconds": float(contiguous_seconds),
+                            "serialize_seconds": float(serialize_seconds),
+                            "write_seconds": float(write_seconds),
+                            "sha256_seconds": float(sha_seconds),
+                            "read_rows_per_second": _rate(batch_rows, read_seconds),
+                            "write_mib_per_second": _rate(batch_bytes / (1024 * 1024), write_seconds),
+                        },
+                        progress=_progress_totals(
+                            rows_written=int(timing["rows"]),
+                            bytes_written=int(timing["bytes"]),
+                            total_rois=total_rois,
+                            total_bytes=total_bytes,
+                            elapsed_seconds=elapsed,
+                            timing=timing,
+                        ),
+                    )
 
         os.replace(bin_tmp, bin_path)
+        duration_seconds = float(time.perf_counter() - started)
+        timing_summary = _timing_summary(
+            timing=timing,
+            total_rois=total_rois,
+            total_bytes=total_bytes,
+            duration_seconds=duration_seconds,
+        )
         manifest = _build_manifest(
             source=source,
             archive_path=archive_path,
             manifest_path=resolved_manifest_path,
             bin_path=bin_path,
             cache_key=cache_key,
-            batch_size=int(batch_size),
-            duration_seconds=float(time.perf_counter() - started),
+            batch_size=effective_batch_size,
+            duration_seconds=duration_seconds,
             payload_sha256=sha.hexdigest() if sha is not None else None,
             total_bytes=total_bytes,
+            timing_summary=timing_summary,
         )
         manifest_tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(manifest_tmp, resolved_manifest_path)
+        _emit_progress(
+            progress_callback,
+            "complete",
+            manifest_path=str(resolved_manifest_path),
+            bin_path=str(bin_path),
+            source=_progress_source_payload(source),
+            progress=_progress_totals(
+                rows_written=int(timing["rows"]),
+                bytes_written=int(timing["bytes"]),
+                total_rois=total_rois,
+                total_bytes=total_bytes,
+                elapsed_seconds=duration_seconds,
+                timing=timing,
+            ),
+            timing=timing_summary,
+        )
         return manifest
     finally:
         source.close()
@@ -213,6 +339,7 @@ def _build_manifest(
     duration_seconds: float,
     payload_sha256: str | None,
     total_bytes: int,
+    timing_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
     roi_h, roi_w = source.roi_shape
     return {
@@ -244,6 +371,7 @@ def _build_manifest(
         "builder": {
             "batch_size": int(batch_size),
             "duration_seconds": float(duration_seconds),
+            "timing": dict(timing_summary),
             "format_note": (
                 "flat_bin_v1 stores all ROI rows contiguously as raw uint8 bytes. "
                 "It is optimized for simple sequential reads and cheap transfer, "
@@ -251,6 +379,134 @@ def _build_manifest(
             ),
         },
     }
+
+
+def _emit_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    event: str,
+    **payload: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        {
+            "schema": FLAT_ROI_CACHE_PROGRESS_SCHEMA,
+            "event": event,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            **payload,
+        }
+    )
+
+
+def _progress_source_payload(source: Any) -> dict[str, Any]:
+    return {
+        "crop_run_name": str(source.crop_run_name),
+        "storage_mode": str(source.storage_mode),
+        "roi_shape": [int(source.roi_shape[0]), int(source.roi_shape[1])],
+        "total_rois": int(source.total_rois),
+        "frame_source_kind": source.frame_source_kind,
+        "frame_source_path": None if source.frame_source_path is None else str(source.frame_source_path),
+        "roi_read_mode": getattr(source, "roi_read_mode", None),
+        "roi_live_acceleration_requested": getattr(source, "roi_live_acceleration_requested", None),
+        "roi_live_acceleration_effective": getattr(source, "roi_live_acceleration_effective", None),
+        "roi_live_acceleration_fallback_reason": getattr(
+            source, "roi_live_acceleration_fallback_reason", None
+        ),
+    }
+
+
+def _should_emit_batch_progress(
+    *,
+    batch_index: int,
+    rows_written: int,
+    total_rois: int,
+    now: float,
+    last_progress: float,
+    progress_interval_seconds: float,
+    progress_every_batches: int,
+) -> bool:
+    if batch_index == 1 or rows_written >= total_rois:
+        return True
+    if progress_every_batches > 0 and batch_index % progress_every_batches == 0:
+        return True
+    if progress_interval_seconds > 0 and now - last_progress >= progress_interval_seconds:
+        return True
+    return False
+
+
+def _progress_totals(
+    *,
+    rows_written: int,
+    bytes_written: int,
+    total_rois: int,
+    total_bytes: int,
+    elapsed_seconds: float,
+    timing: Mapping[str, Any],
+) -> dict[str, Any]:
+    remaining_rows = max(0, int(total_rois) - int(rows_written))
+    rows_per_second = _rate(rows_written, elapsed_seconds)
+    eta_seconds = None if rows_per_second <= 0 else remaining_rows / rows_per_second
+    return {
+        "rows_written": int(rows_written),
+        "rows_total": int(total_rois),
+        "rows_fraction": _fraction(rows_written, total_rois),
+        "bytes_written": int(bytes_written),
+        "bytes_total": int(total_bytes),
+        "bytes_fraction": _fraction(bytes_written, total_bytes),
+        "mib_written": float(bytes_written / (1024 * 1024)),
+        "mib_total": float(total_bytes / (1024 * 1024)),
+        "elapsed_seconds": float(elapsed_seconds),
+        "eta_seconds": None if eta_seconds is None else float(eta_seconds),
+        "rows_per_second": float(rows_per_second),
+        "mib_per_second": float(_rate(bytes_written / (1024 * 1024), elapsed_seconds)),
+        "read_rows_per_second": float(
+            _rate(rows_written, float(timing.get("read_seconds_total", 0.0)))
+        ),
+        "write_mib_per_second": float(
+            _rate(bytes_written / (1024 * 1024), float(timing.get("write_seconds_total", 0.0)))
+        ),
+        "batches": int(timing.get("batches", 0)),
+    }
+
+
+def _timing_summary(
+    *,
+    timing: Mapping[str, Any],
+    total_rois: int,
+    total_bytes: int,
+    duration_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "duration_seconds": float(duration_seconds),
+        "batches": int(timing.get("batches", 0)),
+        "rows": int(timing.get("rows", 0)),
+        "bytes": int(timing.get("bytes", 0)),
+        "read_seconds_total": float(timing.get("read_seconds_total", 0.0)),
+        "contiguous_seconds_total": float(timing.get("contiguous_seconds_total", 0.0)),
+        "serialize_seconds_total": float(timing.get("serialize_seconds_total", 0.0)),
+        "write_seconds_total": float(timing.get("write_seconds_total", 0.0)),
+        "sha256_seconds_total": float(timing.get("sha256_seconds_total", 0.0)),
+        "rows_per_second": float(_rate(total_rois, duration_seconds)),
+        "mib_per_second": float(_rate(total_bytes / (1024 * 1024), duration_seconds)),
+        "read_rows_per_second": float(
+            _rate(total_rois, float(timing.get("read_seconds_total", 0.0)))
+        ),
+        "write_mib_per_second": float(
+            _rate(total_bytes / (1024 * 1024), float(timing.get("write_seconds_total", 0.0)))
+        ),
+    }
+
+
+def _rate(numerator: float, seconds: float) -> float:
+    if seconds <= 0:
+        return 0.0
+    return float(numerator) / float(seconds)
+
+
+def _fraction(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 1.0
+    return float(numerator) / float(denominator)
 
 
 def _default_manifest_path(
