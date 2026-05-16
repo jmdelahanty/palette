@@ -296,11 +296,27 @@ is discarded.
 
 The importer should use a two-phase import:
 
-1. Unpack to an incoming path:
+Current dry-run implementation:
+
+```bash
+scripts/py -m fisheye.utils.import_run_group_artifact \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz
+```
+
+This command extracts only to a temporary validation directory and prints a
+strict JSON plan. It validates the manifest shape, strict JSON, required arrays,
+run-group tree hash, source input paths, target archive path, final target path,
+and planned `.incoming`/`.failed` paths. It does not create `.incoming`, does
+not modify `latest`, and does not mutate the canonical Zarr.
+
+1. Unpack to an incoming path under the target run-family parent:
 
    ```text
-   analysis/<family>/.incoming/<run_name>/
+   <family_parent>/.incoming/<run_name>/
    ```
+
+   For detection this is `detect_runs/.incoming/<run_name>/`. For analysis
+   run families it is typically `analysis/<family>/.incoming/<run_name>/`.
 
 2. Validate:
 
@@ -315,8 +331,8 @@ The importer should use a two-phase import:
 3. Promote:
 
    ```text
-   analysis/<family>/.incoming/<run_name>/
-   analysis/<family>/<run_name>/
+   <family_parent>/.incoming/<run_name>/
+   <family_parent>/<run_name>/
    ```
 
 4. Finalize parent metadata:
@@ -330,7 +346,7 @@ If validation fails, leave the incoming directory untouched for diagnosis or
 move it to:
 
 ```text
-analysis/<family>/.failed/<run_name>_<timestamp>/
+<family_parent>/.failed/<run_name>_<timestamp>/
 ```
 
 Do not leave failed packages under the normal run-family namespace.

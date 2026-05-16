@@ -453,10 +453,22 @@ scripts/submit_detect_artifact_bsub.sh \
   --batch-size 16
 ```
 
-Importer support remains a separate serialized step. Until that importer is in
-place, these packages are durable transfer artifacts, not canonical completed
-analysis runs. The LSF wrapper also writes `<label>.<JOBID>.transfer.json` next
-to the tarball with the scratch-to-PRFS copy timing.
+Apply-mode importer support remains a separate serialized step. Until that
+apply mode is in place, these packages are durable transfer artifacts, not
+canonical completed analysis runs. The LSF wrapper also writes
+`<label>.<JOBID>.transfer.json` next to the tarball with the scratch-to-PRFS
+copy timing.
+
+Dry-run importer validation:
+
+```bash
+scripts/py -m fisheye.utils.import_run_group_artifact \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz
+```
+
+The dry-run importer extracts to a temporary validation directory, recomputes
+the run-group tree hash, checks the target archive/final path, and prints the
+planned `.incoming` promotion without mutating the canonical Zarr.
 
 **Logs:** `<root>/logs/run_detections_batch/bsub_submissions/detect_<run_id>/`
 
