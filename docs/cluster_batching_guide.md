@@ -470,6 +470,20 @@ The dry-run importer extracts to a temporary validation directory, recomputes
 the run-group tree hash, checks the target archive/final path, and prints the
 planned `.incoming` promotion without mutating the canonical Zarr.
 
+Apply mode:
+
+```bash
+scripts/py -m fisheye.utils.import_run_group_artifact \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz \
+  --apply
+```
+
+Apply mode copies the packaged run group to `detect_runs/.incoming/<run_name>/`,
+revalidates it there, promotes it to `detect_runs/<run_name>/`, and writes an
+import receipt at `detect_runs/.imports/<run_name>_import_receipt.json`. For
+first use on a new cluster path, test with `--target-zarr` pointing at a
+disposable Zarr before applying to the canonical archive.
+
 **Logs:** `<root>/logs/run_detections_batch/bsub_submissions/detect_<run_id>/`
 
 ---

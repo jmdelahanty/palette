@@ -36,7 +36,13 @@ def _write_array(path: Path) -> None:
     )
 
 
-def _write_artifact(tmp_path: Path, *, target_zarr: Path, corrupt_hash: bool = False) -> Path:
+def _write_artifact(
+    tmp_path: Path,
+    *,
+    target_zarr: Path,
+    corrupt_hash: bool = False,
+    latest_policy: str = "do_not_set_latest",
+) -> Path:
     source_video = tmp_path / "camera.mp4"
     source_video.write_bytes(b"fake")
     artifact_root = tmp_path / "palette_run_group_artifact"
@@ -55,7 +61,7 @@ def _write_artifact(tmp_path: Path, *, target_zarr: Path, corrupt_hash: bool = F
         "run_name": "detect_fake",
         "layout": "detect_yolo_sparse_v1",
         "schema_version": 1,
-        "latest_policy": "do_not_set_latest",
+        "latest_policy": latest_policy,
         "source_inputs": [
             {"path": str(source_video), "role": "source_video"},
             {"path": str(target_zarr), "role": "target_analysis_archive"},
@@ -134,3 +140,80 @@ def test_build_import_plan_rejects_unsafe_tar_member(tmp_path: Path) -> None:
 
     assert plan["status"] == "failed"
     assert "unsafe tar member path" in "\n".join(plan["errors"])
+
+
+def test_apply_import_promotes_run_group_and_writes_receipt_sidecar(tmp_path: Path) -> None:
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+    tarball = _write_artifact(tmp_path, target_zarr=target_zarr)
+
+    result = mod.apply_import(tarball_path=tarball)
+
+    final_path = target_zarr / "detect_runs" / "detect_fake"
+    incoming_path = target_zarr / "detect_runs" / ".incoming" / "detect_fake"
+    receipt_path = target_zarr / "detect_runs" / ".imports" / "detect_fake_import_receipt.json"
+    assert result["status"] == "ok"
+    assert result["apply"] is True
+    assert result["applied"] is True
+    assert final_path.exists()
+    assert not incoming_path.exists()
+    assert (final_path / "frame_indices" / "zarr.json").exists()
+    assert receipt_path.exists()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["run_name"] == "detect_fake"
+    assert receipt["latest_updated"] is False
+    parent_attrs = json.loads((target_zarr / "detect_runs" / "zarr.json").read_text(encoding="utf-8"))[
+        "attributes"
+    ]
+    assert "latest" not in parent_attrs
+
+
+def test_apply_import_updates_latest_when_requested(tmp_path: Path) -> None:
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+    tarball = _write_artifact(
+        tmp_path,
+        target_zarr=target_zarr,
+        latest_policy="set_latest_explicit",
+    )
+
+    result = mod.apply_import(tarball_path=tarball)
+
+    parent_attrs = json.loads((target_zarr / "detect_runs" / "zarr.json").read_text(encoding="utf-8"))[
+        "attributes"
+    ]
+    assert result["status"] == "ok"
+    assert result["latest_updated"] is True
+    assert parent_attrs["latest"] == "detect_fake"
+
+
+def test_apply_import_moves_incoming_to_failed_on_apply_validation_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+    tarball = _write_artifact(tmp_path, target_zarr=target_zarr)
+    original_required_arrays_report = mod.required_arrays_report
+    call_count = {"n": 0}
+
+    def fail_second_required_arrays_report(path: Path):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            return {
+                "status": "fail",
+                "run_group_zarr_json_present": True,
+                "arrays": [],
+                "missing_arrays": ["frame_indices"],
+            }
+        return original_required_arrays_report(path)
+
+    monkeypatch.setattr(mod, "required_arrays_report", fail_second_required_arrays_report)
+
+    result = mod.apply_import(tarball_path=tarball)
+
+    assert result["status"] == "failed"
+    assert result["applied"] is False
+    assert result["failed_path"] is not None
+    assert Path(result["failed_path"]).exists()
+    assert not (target_zarr / "detect_runs" / ".incoming" / "detect_fake").exists()
+    assert not (target_zarr / "detect_runs" / "detect_fake").exists()

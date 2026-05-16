@@ -309,6 +309,24 @@ run-group tree hash, source input paths, target archive path, final target path,
 and planned `.incoming`/`.failed` paths. It does not create `.incoming`, does
 not modify `latest`, and does not mutate the canonical Zarr.
 
+Apply-mode implementation:
+
+```bash
+scripts/py -m fisheye.utils.import_run_group_artifact \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz \
+  --apply
+```
+
+Apply mode first runs the same dry-run validations. If they pass, it copies the
+packaged run group to `<family_parent>/.incoming/<run_name>/`, revalidates the
+incoming copy, promotes it to `<family_parent>/<run_name>/`, and writes an
+import receipt sidecar at
+`<family_parent>/.imports/<run_name>_import_receipt.json`. The receipt is kept
+outside the run group so the imported run-group bytes still match the package
+tree hash. If apply-time validation fails after `.incoming` is created, the
+incoming directory is moved to `<family_parent>/.failed/<run_name>_<timestamp>/`.
+`latest` is updated only when the package `latest_policy` requests it.
+
 1. Unpack to an incoming path under the target run-family parent:
 
    ```text

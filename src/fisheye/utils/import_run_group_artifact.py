@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from fisheye.utils.system import get_git_info
 from fisheye.utils.run_detection_artifact import (
     ARTIFACT_SCHEMA,
     LATEST_POLICY_CHOICES,
@@ -46,6 +48,25 @@ def _read_json_strict(path: Path) -> Any:
         raise ValueError(f"non-finite JSON constant {value!r}")
 
     return json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
+
+
+def _write_zarr_group_metadata(path: Path) -> None:
+    zarr_json = path / "zarr.json"
+    if zarr_json.exists():
+        return
+    _write_json(
+        zarr_json,
+        {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {},
+        },
+    )
 
 
 def _status_from_errors(errors: list[str]) -> str:
@@ -147,6 +168,27 @@ def _validate_manifest_shape(manifest: Any) -> tuple[Optional[dict[str, Any]], l
     if _manifest_target_path(manifest) is None:
         errors.append("target_archive_path must be a non-empty string")
     return manifest, errors
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _update_latest_attr(family_path: Path, run_name: str) -> None:
+    _write_zarr_group_metadata(family_path)
+    zarr_json = family_path / "zarr.json"
+    payload = _read_json_strict(zarr_json)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{zarr_json} is not a JSON object")
+    attrs = payload.setdefault("attributes", {})
+    if not isinstance(attrs, dict):
+        raise ValueError(f"{zarr_json} attributes must be an object")
+    attrs["latest"] = run_name
+    _write_json(zarr_json, payload)
 
 
 def build_import_plan(
@@ -339,6 +381,11 @@ def build_import_plan(
         errors.extend(f"source_inputs: {error}" for error in source_errors)
 
         if manifest and validations["manifest"]["status"] == "pass":
+            receipt_path = (
+                family_path / ".imports" / f"{run_name}_import_receipt.json"
+                if family_path is not None and run_name
+                else None
+            )
             planned_actions.extend(
                 [
                     {
@@ -367,7 +414,7 @@ def build_import_plan(
                     },
                     {
                         "action": "write_import_receipt",
-                        "path": str(final_path / "import_receipt.json") if final_path is not None else None,
+                        "path": str(receipt_path) if receipt_path is not None else None,
                     },
                 ]
             )
@@ -384,6 +431,11 @@ def build_import_plan(
             "incoming_path": str(incoming_path) if incoming_path is not None else None,
             "failed_path_pattern": failed_path_pattern,
             "final_path": str(final_path) if final_path is not None else None,
+            "receipt_path": (
+                str(family_path / ".imports" / f"{run_name}_import_receipt.json")
+                if family_path is not None and run_name
+                else None
+            ),
             "latest_policy": latest_policy or None,
             "validations": validations,
             "planned_actions": planned_actions,
@@ -403,6 +455,161 @@ def build_import_plan(
             temp_owner.cleanup()
 
 
+def apply_import(
+    *,
+    tarball_path: Path,
+    target_zarr: Optional[Path] = None,
+    overwrite: bool = False,
+    validate_source_inputs: bool = True,
+) -> dict[str, Any]:
+    """Apply an artifact import using .incoming promotion and receipt sidecar."""
+    plan = build_import_plan(
+        tarball_path=tarball_path,
+        target_zarr=target_zarr,
+        overwrite=overwrite,
+        validate_source_inputs=validate_source_inputs,
+    )
+    if plan["status"] != "ok":
+        plan["apply"] = True
+        plan["applied"] = False
+        return plan
+
+    tarball_path = Path(plan["source_tarball"]).expanduser().resolve()
+    target_archive = Path(str(plan["target_archive_path"]))
+    run_family = str(plan["run_family"])
+    run_name = str(plan["run_name"])
+    latest_policy = str(plan["latest_policy"])
+    incoming_path = Path(str(plan["incoming_path"]))
+    final_path = Path(str(plan["final_path"]))
+    receipt_path = Path(str(plan["receipt_path"]))
+    family_path = target_archive / run_family
+    failed_base = family_path / ".failed"
+    failed_path = failed_base / f"{run_name}_{_utc_now_label()}"
+    apply_validations: dict[str, dict[str, Any]] = {}
+    apply_errors: list[str] = []
+    latest_updated = False
+    imported = False
+
+    temp_owner = tempfile.TemporaryDirectory(prefix="palette_run_group_apply_")
+    try:
+        extract_root = Path(temp_owner.name)
+        artifact_root = _safe_extract_artifact(tarball_path, extract_root)
+        manifest_path = artifact_root / "artifact_manifest.json"
+        manifest = _read_json_strict(manifest_path)
+        run_group_dir = artifact_root / "run_group"
+        expected_hash = manifest.get("checksums", {}).get("run_group_tree_hash")
+
+        family_path.mkdir(parents=True, exist_ok=True)
+        _write_zarr_group_metadata(family_path)
+        (family_path / ".incoming").mkdir(exist_ok=True)
+        failed_base.mkdir(exist_ok=True)
+
+        if incoming_path.exists():
+            raise FileExistsError(f"incoming path already exists: {incoming_path}")
+        if final_path.exists():
+            if not overwrite:
+                raise FileExistsError(f"final target already exists: {final_path}")
+            shutil.rmtree(final_path)
+
+        shutil.copytree(run_group_dir, incoming_path)
+
+        strict_report = strict_json_report(incoming_path)
+        strict_errors = [] if strict_report["status"] == "pass" else ["strict JSON validation failed"]
+        _add_validation(apply_validations, "incoming_strict_json", strict_errors, report=strict_report)
+        apply_errors.extend(f"incoming_strict_json: {error}" for error in strict_errors)
+
+        arrays_report = required_arrays_report(incoming_path)
+        array_errors = [] if arrays_report["status"] == "pass" else ["required array validation failed"]
+        _add_validation(apply_validations, "incoming_required_arrays", array_errors, report=arrays_report)
+        apply_errors.extend(f"incoming_required_arrays: {error}" for error in array_errors)
+
+        actual_hash = tree_hash(incoming_path)
+        hash_errors = []
+        if actual_hash != expected_hash:
+            hash_errors.append("incoming run_group_tree_hash mismatch")
+        _add_validation(
+            apply_validations,
+            "incoming_run_group_tree_hash",
+            hash_errors,
+            expected=expected_hash,
+            actual=actual_hash,
+        )
+        apply_errors.extend(f"incoming_run_group_tree_hash: {error}" for error in hash_errors)
+        if apply_errors:
+            raise ValueError("; ".join(apply_errors))
+
+        shutil.move(str(incoming_path), str(final_path))
+        imported = True
+
+        if latest_policy != "do_not_set_latest":
+            _update_latest_attr(family_path, run_name)
+            latest_updated = True
+
+        receipt = {
+            "schema_version": 1,
+            "imported_at": datetime.now(timezone.utc).isoformat(),
+            "source_tarball": str(tarball_path),
+            "source_tarball_sha256": _sha256_file(tarball_path),
+            "target_archive_path": str(target_archive),
+            "target_group_path": plan["target_group_path"],
+            "run_family": run_family,
+            "run_name": run_name,
+            "layout": plan["layout"],
+            "final_path": str(final_path),
+            "incoming_path": str(incoming_path),
+            "latest_policy": latest_policy,
+            "latest_updated": latest_updated,
+            "manifest": manifest,
+            "manifest_sha256": hashlib.sha256(
+                manifest_path.read_bytes()
+            ).hexdigest(),
+            "importer": {
+                "command": " ".join(sys.argv),
+                "git": get_git_info(),
+            },
+            "validations": {
+                **plan["validations"],
+                **apply_validations,
+            },
+        }
+        _write_json(receipt_path, receipt)
+
+        return {
+            **plan,
+            "status": "ok",
+            "apply": True,
+            "applied": True,
+            "latest_updated": latest_updated,
+            "receipt_path": str(receipt_path),
+            "validations": {
+                **plan["validations"],
+                **apply_validations,
+            },
+            "errors": [],
+        }
+    except Exception as exc:
+        if incoming_path.exists():
+            failed_base.mkdir(parents=True, exist_ok=True)
+            if failed_path.exists():
+                failed_path = failed_base / f"{run_name}_{_utc_now_label()}_1"
+            shutil.move(str(incoming_path), str(failed_path))
+        return {
+            **plan,
+            "status": "failed",
+            "apply": True,
+            "applied": False,
+            "imported": imported,
+            "failed_path": str(failed_path) if failed_path.exists() else None,
+            "validations": {
+                **plan.get("validations", {}),
+                **apply_validations,
+            },
+            "errors": [*plan.get("errors", []), str(exc)],
+        }
+    finally:
+        temp_owner.cleanup()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Dry-run validation and import planning for Palette run-group artifacts."
@@ -417,7 +624,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Allow planning over an existing final target path",
+        help="Allow planning/apply over an existing final target path",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the import after validation; default is dry-run only",
     )
     parser.add_argument(
         "--skip-source-input-checks",
@@ -436,15 +648,25 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    plan = build_import_plan(
-        tarball_path=args.tarball,
-        target_zarr=args.target_zarr,
-        overwrite=args.overwrite,
-        validate_source_inputs=not args.skip_source_input_checks,
-        keep_extracted=args.keep_extracted,
-    )
-    print(json.dumps(plan, indent=2, sort_keys=True, default=_json_default))
-    return 0 if plan["status"] == "ok" else 1
+    if args.apply:
+        if args.keep_extracted is not None:
+            parser.error("--keep-extracted is only supported for dry-run validation")
+        result = apply_import(
+            tarball_path=args.tarball,
+            target_zarr=args.target_zarr,
+            overwrite=args.overwrite,
+            validate_source_inputs=not args.skip_source_input_checks,
+        )
+    else:
+        result = build_import_plan(
+            tarball_path=args.tarball,
+            target_zarr=args.target_zarr,
+            overwrite=args.overwrite,
+            validate_source_inputs=not args.skip_source_input_checks,
+            keep_extracted=args.keep_extracted,
+        )
+    print(json.dumps(result, indent=2, sort_keys=True, default=_json_default))
+    return 0 if result["status"] == "ok" else 1
 
 
 if __name__ == "__main__":
