@@ -153,6 +153,10 @@ Use `to_zarr()` only when all of these are true:
 
 Good current or near-term fits:
 
+- `subject_shape_runs`: current worker-chunk backend is row-local and writes
+  directly from workers. For Dask execution, requested chunks are rounded up to
+  the refined-subject metric row chunk grid before tasks are created, and both
+  requested/effective chunk sizes are recorded.
 - `tail_posture_view_runs`: dense, row-local arrays such as `head_xy`,
   `head_yaw_rad`, `tail_keypoints_xy`, `tail_angle_rad`, `tail_angle_deg`,
   `valid`, and status columns. This is the cleanest future `to_zarr()` target.
@@ -238,6 +242,9 @@ Recommended order for downstream movement analysis:
 
 - `eye_angle_analysis`: already has a Dask worker-chunk backend. Keep worker
   chunks aligned to output chunks and record scheduler/worker provenance.
+- `subject_shape_runs`: already has a Dask worker-chunk backend. Worker chunks
+  are aligned to `refined_subject_mask_metric_row_chunk`; preserve that guard if
+  adding new worker-written arrays.
 - `bout_kinematics`: best future candidate for internal Dask because per-bout
   rows are mostly independent. Prefer partitioned per-bout computation followed
   by chunk-aligned writes or a deterministic single-writer merge.

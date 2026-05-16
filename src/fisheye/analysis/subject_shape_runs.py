@@ -40,7 +40,11 @@ from ..shared.refined_subject_masks_io import (
     load_refined_subject_masks_run_tables,
     resolve_refined_subject_masks_run,
 )
-from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
+from ..shared.subject_mask_chunks import (
+    REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT,
+    refined_subject_mask_dask_worker_row_chunk,
+    refined_subject_mask_metric_row_chunk,
+)
 from ..tune.refined_subject_mask_review import _compute_geometry_metrics, _compute_mask_metrics
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
@@ -208,6 +212,13 @@ def _row_chunks(total_rows: int, chunk_size: int) -> list[tuple[int, int]]:
     total = max(0, int(total_rows))
     chunk = max(1, int(chunk_size))
     return [(start, min(total, start + chunk)) for start in range(0, total, chunk)]
+
+
+def _worker_chunk_size_for_backend(total_rows: int, requested_chunk_size: int, execution_backend: str) -> int:
+    requested = max(1, int(requested_chunk_size))
+    if execution_backend == DASK_WORKER_EXECUTION_BACKEND:
+        return refined_subject_mask_dask_worker_row_chunk(total_rows, requested)
+    return requested
 
 
 _json_safe = json_attr_safe
@@ -936,7 +947,8 @@ def _prepare_subject_shape_run(
     refined_run_name: str,
     refined_group: zarr.Group,
     component_indices: Sequence[tuple[str, int]],
-    chunk_size: int,
+    requested_chunk_size: int,
+    worker_chunk_size: int,
     execution_backend: str,
     scheduler: str,
     num_workers: Optional[int],
@@ -988,7 +1000,13 @@ def _prepare_subject_shape_run(
         "dask_execution_enabled": execution_backend == DASK_WORKER_EXECUTION_BACKEND,
         "dask_scheduler": scheduler,
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
-        "dask_chunk_size": max(1, int(chunk_size)),
+        "dask_requested_chunk_size": max(1, int(requested_chunk_size)),
+        "dask_chunk_size": max(1, int(worker_chunk_size)),
+        "dask_chunk_alignment": (
+            REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
+            if execution_backend == DASK_WORKER_EXECUTION_BACKEND
+            else "requested_chunk_size"
+        ),
         "dask_version": getattr(dask, "__version__", "unknown"),
     }
     source_labels = list(refined_group.attrs.get("mask_labels") or [])
@@ -1073,8 +1091,9 @@ def _prepare_subject_shape_run(
             "bspline_arclength_sample_count": DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
             "tail_sample_count": TAIL_SAMPLE_COUNT,
             "tail_sample_domain": "tail_segment_normalized_arclength",
-            "chunk_size": max(1, int(chunk_size)),
-            "chunk_count": len(_row_chunks(total_rows, max(1, int(chunk_size)))),
+            "chunk_size": max(1, int(requested_chunk_size)),
+            "worker_chunk_size": max(1, int(worker_chunk_size)),
+            "chunk_count": len(_row_chunks(total_rows, max(1, int(worker_chunk_size)))),
             **dask_metadata,
         }
     )
@@ -1124,7 +1143,8 @@ def _prepare_subject_shape_run(
             "bspline_arclength_sample_count": DEFAULT_BSPLINE_ARCLENGTH_SAMPLE_COUNT,
             "tail_sample_count": TAIL_SAMPLE_COUNT,
             "tail_sample_domain": "tail_segment_normalized_arclength",
-            "chunk_size": max(1, int(chunk_size)),
+            "chunk_size": max(1, int(requested_chunk_size)),
+            "worker_chunk_size": max(1, int(worker_chunk_size)),
         },
         inputs={
             "source_refined_subject_masks_run": refined_run_name,
@@ -2383,18 +2403,28 @@ def write_subject_shape_run_group(
     masks = refined_tables.require_masks_roi()
     total_rows = int(masks.shape[0])
     target_run = str(run_name or _default_run_name())
-    chunks = _row_chunks(total_rows, max(1, int(chunk_size)))
+    requested_chunk_size = max(1, int(chunk_size))
+    worker_chunk_size = _worker_chunk_size_for_backend(total_rows, requested_chunk_size, backend)
+    chunks = _row_chunks(total_rows, worker_chunk_size)
     summary: dict[str, object] = {
         "status": "planned" if dry_run else "updated",
         "source_refined_subject_masks_run": refined_run_name,
         "subject_shape_run": target_run,
         "component_names": [name for name, _idx in component_indices],
         "roi_count": total_rows,
-        "chunk_size": max(1, int(chunk_size)),
+        "chunk_size": requested_chunk_size,
+        "worker_chunk_size": worker_chunk_size,
         "chunk_count": len(chunks),
         "execution_backend": backend,
         "dask_scheduler": scheduler_key,
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
+        "dask_requested_chunk_size": requested_chunk_size,
+        "dask_chunk_size": worker_chunk_size,
+        "dask_chunk_alignment": (
+            REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
+            if backend == DASK_WORKER_EXECUTION_BACKEND
+            else "requested_chunk_size"
+        ),
         "mutates_archive": not bool(dry_run),
     }
     if dry_run:
@@ -2408,7 +2438,8 @@ def write_subject_shape_run_group(
         refined_run_name=refined_run_name,
         refined_group=refined_group,
         component_indices=component_indices,
-        chunk_size=max(1, int(chunk_size)),
+        requested_chunk_size=requested_chunk_size,
+        worker_chunk_size=worker_chunk_size,
         execution_backend=backend,
         scheduler=scheduler_key,
         num_workers=num_workers,

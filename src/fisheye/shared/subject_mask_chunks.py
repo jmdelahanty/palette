@@ -9,6 +9,7 @@ from __future__ import annotations
 
 SUBJECT_MASK_STORAGE_ROW_CHUNK = 16
 SUBJECT_MASK_METRIC_ROW_CHUNK = 256
+REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT = "refined_subject_mask_metric_row_chunk"
 
 
 def _clamp_positive_chunk(preferred: int, total: int) -> int:
@@ -47,3 +48,19 @@ def refined_subject_mask_storage_chunks(total_rows: int, height: int, width: int
 def refined_subject_mask_metric_row_chunk(total_rows: int) -> int:
     """Return canonical row chunk depth for refined-subject-mask metric arrays."""
     return subject_mask_metric_row_chunk(total_rows)
+
+
+def refined_subject_mask_dask_worker_row_chunk(total_rows: int, requested_chunk_size: int) -> int:
+    """Return a worker chunk size that cannot split refined-subject metric chunks.
+
+    Refined-subject analysis workers commonly update multiple row-aligned metric
+    arrays. Those arrays use ``refined_subject_mask_metric_row_chunk`` on the
+    first axis, so Dask worker ranges must be at least one metric chunk and, for
+    larger requests, an integer multiple of that physical chunk size.
+    """
+
+    requested = max(1, int(requested_chunk_size))
+    metric_chunk = refined_subject_mask_metric_row_chunk(total_rows)
+    if requested <= metric_chunk:
+        return int(metric_chunk)
+    return int(((requested + metric_chunk - 1) // metric_chunk) * metric_chunk)

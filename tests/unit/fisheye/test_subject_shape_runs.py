@@ -250,16 +250,37 @@ def test_write_subject_shape_run_uses_dask_worker_chunks(tmp_path: Path, monkeyp
 
     assert summary["status"] == "updated"
     assert summary["execution_backend"] == "dask_worker_chunks"
-    assert summary["chunk_count"] == 3
+    assert summary["chunk_size"] == 1
+    assert summary["worker_chunk_size"] == 3
+    assert summary["dask_requested_chunk_size"] == 1
+    assert summary["dask_chunk_size"] == 3
+    assert summary["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
+    assert summary["chunk_count"] == 1
     root = zarr.open_group(str(zarr_path), mode="r")
     run = root["analysis"]["subject_shape_runs"]["shape_dask"]
     assert run.attrs["dask_execution_enabled"] is True
     assert run.attrs["dask_scheduler"] == "single-threaded"
-    assert len(run.attrs["subject_shape_chunk_timings"]) == 3
+    assert run.attrs["chunk_size"] == 1
+    assert run.attrs["worker_chunk_size"] == 3
+    assert run.attrs["dask_requested_chunk_size"] == 1
+    assert run.attrs["dask_chunk_size"] == 3
+    assert run.attrs["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
+    assert run.attrs["provenance"]["parameters"]["worker_chunk_size"] == 3
+    assert run.attrs["provenance"]["scheduler"]["dask_requested_chunk_size"] == 1
+    assert run.attrs["provenance"]["scheduler"]["dask_chunk_size"] == 3
+    assert len(run.attrs["subject_shape_chunk_timings"]) == 1
     assert run["components"]["eye_left"]["ellipse_success"][:].tolist() == [True, True, True]
     assert run["relations"]["eye_pair"]["separation_valid"][:].tolist() == [True, True, True]
     assert run["body_frame"]["valid"][:].tolist() == [True, True, True]
     assert run["components"]["subject_body"]["centerline_valid"][:].tolist() == [True, True, True]
+
+
+def test_subject_shape_dask_worker_chunk_size_rounds_to_metric_grid() -> None:
+    assert mod._worker_chunk_size_for_backend(1000, 1, "dask_worker_chunks") == 256
+    assert mod._worker_chunk_size_for_backend(1000, 256, "dask_worker_chunks") == 256
+    assert mod._worker_chunk_size_for_backend(1000, 257, "dask_worker_chunks") == 512
+    assert mod._worker_chunk_size_for_backend(1000, 500, "dask_worker_chunks") == 512
+    assert mod._worker_chunk_size_for_backend(1000, 500, "serial_driver") == 500
 
 
 def test_write_subject_shape_run_dry_run_does_not_create_analysis_group() -> None:

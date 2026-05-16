@@ -39,6 +39,8 @@ from ..shared.provenance_attrs import (
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import (
+    REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT,
+    refined_subject_mask_dask_worker_row_chunk,
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
 )
@@ -840,11 +842,7 @@ def _row_chunks(total_rows: int, chunk_size: int) -> list[tuple[int, int]]:
 def _dask_worker_row_chunk_size(total_rows: int, requested_chunk_size: int) -> int:
     """Return a worker chunk size that avoids concurrent partial Zarr chunk writes."""
 
-    requested = max(1, int(requested_chunk_size))
-    metric_chunk = refined_subject_mask_metric_row_chunk(total_rows)
-    if requested <= metric_chunk:
-        return int(metric_chunk)
-    return int(((requested + metric_chunk - 1) // metric_chunk) * metric_chunk)
+    return refined_subject_mask_dask_worker_row_chunk(total_rows, requested_chunk_size)
 
 
 def _worker_chunk_size_for_backend(total_rows: int, requested_chunk_size: int, execution_backend: str) -> int:
@@ -1649,7 +1647,7 @@ def refresh_refined_subject_mask_metrics_run(
         "dask_requested_chunk_size": requested_chunk_size,
         "dask_chunk_size": worker_chunk_size,
         "dask_chunk_alignment": (
-            "refined_subject_mask_metric_row_chunk"
+            REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
             if execution_backend == _DASK_WORKER_EXECUTION_BACKEND
             else "requested_chunk_size"
         ),
@@ -2094,7 +2092,7 @@ def finalize_subject_mask_run(
         "dask_requested_chunk_size": requested_chunk_size,
         "dask_chunk_size": worker_chunk_size,
         "dask_chunk_alignment": (
-            "refined_subject_mask_metric_row_chunk"
+            REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
             if execution_backend == _DASK_WORKER_EXECUTION_BACKEND
             else "requested_chunk_size"
         ),
