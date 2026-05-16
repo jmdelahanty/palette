@@ -53,6 +53,11 @@ def _write_source_pose_zarr(
     crop_parent.attrs["latest"] = "crop_pose_001"
     crop = crop_parent.create_group("crop_pose_001")
     crop.attrs["detection_source_type"] = detection_source_type
+    crop.attrs["roi_pixel_contract"] = {
+        "name": "legacy_training_gray_uint8_v1",
+        "channels": "gray",
+        "dtype": "uint8",
+    }
     crop.create_array(
         "roi_images",
         data=np.zeros((4, 16, 16), dtype=np.uint8),
@@ -238,6 +243,40 @@ def test_discover_merge_sources_rejects_non_refined_crop_lineage(tmp_path: Path)
     manifest = _manifest_for_single_source(zarr_path)
 
     with pytest.raises(ValueError, match="keypoint merged export requires crop lineage detection_source_type='refined'"):
+        _discover_merge_sources(
+            manifest,
+            expected_input_format="gray",
+            row_gate_policy="raw_success",
+        )
+
+
+def test_discover_merge_sources_accepts_required_roi_pixel_contract(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared")
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["required_roi_pixel_contract_name"] = "legacy_training_gray_uint8_v1"
+
+    specs, _ = _discover_merge_sources(
+        manifest,
+        expected_input_format="gray",
+        row_gate_policy="raw_success",
+    )
+
+    assert specs[0].roi_pixel_contract_name == "legacy_training_gray_uint8_v1"
+    assert specs[0].roi_pixel_contract == {
+        "name": "legacy_training_gray_uint8_v1",
+        "channels": "gray",
+        "dtype": "uint8",
+    }
+
+
+def test_discover_merge_sources_rejects_required_roi_pixel_contract_mismatch(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_pose.zarr"
+    _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared")
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["required_roi_pixel_contract_name"] = "orange_mono_pynvvc_luma_uint8_v1"
+
+    with pytest.raises(ValueError, match="ROI pixel contract mismatch"):
         _discover_merge_sources(
             manifest,
             expected_input_format="gray",

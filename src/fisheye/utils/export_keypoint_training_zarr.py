@@ -84,6 +84,8 @@ class PoseMergeSourceSpec:
     roi_shape: Tuple[int, ...]
     roi_dtype: np.dtype
     roi_chunks: Optional[Tuple[int, ...]]
+    roi_pixel_contract: Optional[Dict[str, Any]]
+    roi_pixel_contract_name: Optional[str]
     keypoint_shape: Tuple[int, ...]
     keypoint_dtype: np.dtype
     keypoint_labels: List[str]
@@ -188,6 +190,28 @@ def _read_reason_labels_safe(group: zarr.Group) -> Optional[np.ndarray]:
     if labels is None:
         return None
     return np.asarray(labels, dtype=object)
+
+
+def _resolve_roi_pixel_contract(crop_group: zarr.Group) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    raw_contract = crop_group.attrs.get("roi_pixel_contract")
+    contract = dict(raw_contract) if isinstance(raw_contract, Mapping) else None
+    contract_name = (
+        _as_text(crop_group.attrs.get("roi_pixel_contract_name"))
+        or (_as_text(contract.get("name")) if contract is not None else None)
+    )
+    return contract, contract_name
+
+
+def _resolve_required_roi_pixel_contract_name(
+    *,
+    manifest_payload: Mapping[str, Any],
+    dataset_payload: Mapping[str, Any],
+) -> Optional[str]:
+    return (
+        _as_text(dataset_payload.get("required_roi_pixel_contract_name"))
+        or _as_text(dataset_payload.get("roi_pixel_contract_name"))
+        or _as_text(manifest_payload.get("required_roi_pixel_contract_name"))
+    )
 
 
 def _clean_slug(value: Optional[str], fallback: str) -> str:
@@ -690,7 +714,7 @@ def _discover_merge_sources(
         if not zarr_path_raw:
             raise ValueError(f"datasets[{ordinal}] is missing zarr_path.")
         source_zarr = Path(str(zarr_path_raw))
-        root = zarr.open_group(str(source_zarr), mode="r")
+        root = zarr.open_group(str(source_zarr), mode="r", use_consolidated=False)
 
         kp_parent = root.get("keypoints_runs")
         if kp_parent is None:
@@ -730,6 +754,16 @@ def _discover_merge_sources(
         if crop_parent is None or source_crop_run not in crop_parent:
             raise ValueError(f"{source_zarr}: crop run '{source_crop_run}' not found in crop_runs.")
         crop_group = crop_parent[source_crop_run]
+        roi_pixel_contract, roi_pixel_contract_name = _resolve_roi_pixel_contract(crop_group)
+        required_roi_pixel_contract_name = _resolve_required_roi_pixel_contract_name(
+            manifest_payload=manifest_payload,
+            dataset_payload=dataset,
+        )
+        if required_roi_pixel_contract_name and roi_pixel_contract_name != required_roi_pixel_contract_name:
+            raise ValueError(
+                f"{source_zarr}: crop run '{source_crop_run}' ROI pixel contract mismatch "
+                f"({roi_pixel_contract_name!r} != {required_roi_pixel_contract_name!r})."
+            )
 
         if "roi_images" not in crop_group:
             raise ValueError(f"{source_zarr}: crop run '{source_crop_run}' missing roi_images.")
@@ -956,6 +990,8 @@ def _discover_merge_sources(
                 roi_shape=dataset_roi_shape,
                 roi_dtype=dataset_roi_dtype,
                 roi_chunks=dataset_roi_chunks,
+                roi_pixel_contract=roi_pixel_contract,
+                roi_pixel_contract_name=roi_pixel_contract_name,
                 keypoint_shape=dataset_keypoint_shape,
                 keypoint_dtype=dataset_keypoint_dtype,
                 keypoint_labels=list(dataset_labels),
@@ -1219,7 +1255,7 @@ def _export_merged(
             if copy_progress is not None and copy_task_id is not None:
                 copy_progress.update(copy_task_id, description=f"Copying {spec.dataset_name}")
 
-            root = zarr.open_group(str(spec.source_zarr), mode="r")
+            root = zarr.open_group(str(spec.source_zarr), mode="r", use_consolidated=False)
             roi_src = root[spec.roi_path]
             crop_source_group = root[f"crop_runs/{spec.source_crop_run}"]
             selected = np.asarray(spec.selected_indices, dtype=np.int64)
@@ -1501,7 +1537,7 @@ def validate_merged_keypoint_training_zarr(
     expected_total_samples: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Validate merged keypoint-training Zarr layout and trainer-facing invariants."""
-    root = zarr.open_group(str(zarr_path), mode="r")
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     errors: List[str] = []
 
     if str(root.attrs.get("zarr_purpose", "")).strip().lower() != "training":
@@ -1941,6 +1977,7 @@ def _build_merged_manifest_payload(
     dish_values: set[str] = set()
     canvas_values: set[str] = set()
     rig_values: set[str] = set()
+    roi_contract_names: set[str] = set()
     for spec in merge_result.source_specs:
         if spec.dish_design:
             dish_values.add(spec.dish_design)
@@ -1948,6 +1985,8 @@ def _build_merged_manifest_payload(
             canvas_values.add(spec.canvas_name)
         if spec.rig_id:
             rig_values.add(spec.rig_id)
+        if spec.roi_pixel_contract_name:
+            roi_contract_names.add(spec.roi_pixel_contract_name)
         source_datasets_payload.append(
             {
                 "name": spec.dataset_name,
@@ -1965,6 +2004,8 @@ def _build_merged_manifest_payload(
                 "row_gate_box_only_selected": int(spec.row_gate_box_only_selected),
                 "source_crop_run": spec.source_crop_run,
                 "keypoint_run": spec.keypoint_run,
+                "roi_pixel_contract": spec.roi_pixel_contract,
+                "roi_pixel_contract_name": spec.roi_pixel_contract_name,
                 "skeleton_id": spec.skeleton_id,
                 "kpt_shape": list(spec.kpt_shape) if spec.kpt_shape is not None else None,
                 "skeleton_signature": spec.skeleton_signature,
@@ -1977,6 +2018,7 @@ def _build_merged_manifest_payload(
     merged_dish = _collapse(dish_values, mixed_label="mixed_dishes")
     merged_canvas = _collapse(canvas_values, mixed_label="mixed_canvas")
     merged_rig = _collapse(rig_values, mixed_label="mixed_rigs")
+    merged_roi_contract_name = _collapse(roi_contract_names, mixed_label="mixed_roi_pixel_contracts")
 
     requested_source_type = (
         _as_text(manifest_payload.get("source_type_requested"))
@@ -1996,6 +2038,7 @@ def _build_merged_manifest_payload(
         "source_type_resolved": merge_result.source_type,
         "source_crop_run": run_name,
         "input_format": merge_result.input_format,
+        "roi_pixel_contract_name": merged_roi_contract_name,
         "keypoint_run_requested": "merged_export",
         "keypoint_run_resolved": run_name,
         "skeleton_id": merge_result.skeleton_id,
@@ -2021,6 +2064,8 @@ def _build_merged_manifest_payload(
     payload["output_config_path"] = str(out_config)
     payload["source_type_requested"] = requested_source_type
     payload["source_type"] = merge_result.source_type
+    payload["roi_pixel_contract_name"] = merged_roi_contract_name
+    payload["roi_pixel_contract_names"] = sorted(roi_contract_names)
     payload["dish_design"] = merged_dish
     payload["canvas_name"] = merged_canvas
     payload["rig_name"] = merged_rig
@@ -2040,6 +2085,8 @@ def _build_merged_manifest_payload(
         "run_name": run_name,
         "input_format": merge_result.input_format,
         "source_type": merge_result.source_type,
+        "roi_pixel_contract_name": merged_roi_contract_name,
+        "roi_pixel_contract_names": sorted(roi_contract_names),
         "skeleton_id": merge_result.skeleton_id,
         "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
         "skeleton_signature": merge_result.skeleton_signature,
