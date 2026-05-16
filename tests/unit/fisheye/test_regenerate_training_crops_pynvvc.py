@@ -44,6 +44,40 @@ class _FakePynvvcReader:
         pass
 
 
+class _FakeStreamMetadata:
+    def __init__(self, *, height: int, width: int, num_frames: int) -> None:
+        self.height = height
+        self.width = width
+        self.num_frames = num_frames
+
+
+class _FakeIndexedPynvvcDecoder:
+    def __init__(self, frames: list[np.ndarray]) -> None:
+        import torch
+
+        self._height = int(frames[0].shape[0])
+        self._width = int(frames[0].shape[1])
+        self.requested: list[int] = []
+        self._frames = [
+            torch.from_numpy(
+                np.vstack(
+                    [
+                        frame,
+                        np.zeros((max(1, frame.shape[0] // 2), frame.shape[1]), dtype=np.uint8),
+                    ]
+                )
+            )
+            for frame in frames
+        ]
+
+    def get_stream_metadata(self) -> _FakeStreamMetadata:
+        return _FakeStreamMetadata(height=self._height, width=self._width, num_frames=len(self._frames))
+
+    def get_batch_frames_by_index(self, indices: list[int]):
+        self.requested.extend(int(index) for index in indices)
+        return [self._frames[int(index)] for index in indices]
+
+
 def _make_training_archive(tmp_path: Path) -> tuple[Path, list[np.ndarray]]:
     zarr_path = tmp_path / "recording_training.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -133,3 +167,51 @@ def test_regenerate_training_crops_pynvvc_dry_run_does_not_write(
     assert report["status"] == "dry_run"
     root = zarr.open_group(str(zarr_path), mode="r")
     assert "crop_preview" not in root["crop_runs"]
+
+
+def test_regenerate_training_crops_pynvvc_auto_uses_indexed_for_sparse_frames(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path, _frames = _make_training_archive(tmp_path)
+    frames = [
+        np.arange(4 * 5, dtype=np.uint8).reshape(4, 5) + np.uint8(frame_idx % 200)
+        for frame_idx in range(201)
+    ]
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root.attrs["source_video_total_frames"] = 201
+    root["raw_video/original_frame_indices"][:] = np.array([0, 100, 200], dtype=np.int32)
+    indexed_decoder = _FakeIndexedPynvvcDecoder(frames)
+    monkeypatch.setattr(
+        mod,
+        "_open_pynvvc_luma_indexed_decoder",
+        lambda _video_path: indexed_decoder,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_open_pynvvc_luma_reader",
+        lambda _video_path: (_ for _ in ()).throw(AssertionError("sequential reader should not be used")),
+    )
+
+    report = regenerate_training_crops_pynvvc(
+        zarr_path=zarr_path,
+        source_crop_run="crop_001",
+        target_crop_run="crop_001_pynvvc_luma_indexed",
+        decode_mode="auto",
+        decode_chunk_frames=2,
+    )
+
+    assert report["status"] == "ok"
+    assert report["decode_mode_effective"] == "indexed"
+    assert indexed_decoder.requested == [0, 100, 200]
+    target = zarr.open_group(str(zarr_path), mode="r")["crop_runs/crop_001_pynvvc_luma_indexed"]
+    assert target.attrs["decode_mode_effective"] == "indexed"
+    expected = np.stack(
+        [
+            frames[0][0:2, 0:2],
+            frames[100][1:3, 1:3],
+            frames[200][2:4, 3:5],
+        ],
+        axis=0,
+    )
+    assert np.array_equal(target["roi_images"][:], expected)

@@ -660,7 +660,7 @@ def check_training_crop_pynvvc_pixel_parity(
 
     archive_path = Path(zarr_path).expanduser().resolve()
     started_total = time.perf_counter()
-    root = zarr.open_group(str(archive_path), mode="r", use_consolidated=False)
+    root = zarr.open_group(str(archive_path), mode="r")
     resolved_crop_run = _resolve_crop_run(root, crop_run)
     crop_group = root["crop_runs"][resolved_crop_run]
     if "roi_images" not in crop_group:

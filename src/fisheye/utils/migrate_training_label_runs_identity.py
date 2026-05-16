@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import socket
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -209,11 +210,12 @@ def migrate_training_label_runs_identity(
     run_suffix: str = "_pynvvc_luma_v1",
     overwrite: bool = False,
     set_latest: bool = False,
+    consolidate_metadata: bool = True,
     dry_run: bool = False,
     allow_source_crop_mismatch: bool = False,
 ) -> dict[str, Any]:
     archive_path = Path(zarr_path).expanduser().resolve()
-    root = zarr.open_group(str(archive_path), mode="a", use_consolidated=False)
+    root = zarr.open_group(str(archive_path), mode="a")
     target_crop_group = _resolve_target_crop(root, target_crop_run)
     resolved_source_crop = _resolve_source_crop_run(
         target_crop_group=target_crop_group,
@@ -229,6 +231,7 @@ def migrate_training_label_runs_identity(
         "all_runs": bool(all_runs),
         "run_suffix": str(run_suffix),
         "set_latest": bool(set_latest),
+        "consolidate_metadata": bool(consolidate_metadata),
         "migrations": [],
         "skipped": [],
         "host": socket.gethostname(),
@@ -326,6 +329,11 @@ def migrate_training_label_runs_identity(
             entry["array_identity"] = identity
             report["migrations"].append(entry)
 
+    if not dry_run and consolidate_metadata:
+        started = time.perf_counter()
+        zarr.consolidate_metadata(str(archive_path))
+        report["consolidate_metadata_seconds"] = float(time.perf_counter() - started)
+
     return _json_safe(report)
 
 
@@ -339,6 +347,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-suffix", default="_pynvvc_luma_v1")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--set-latest", action="store_true", help="Update each migrated parent latest pointer.")
+    parser.add_argument(
+        "--no-consolidate-metadata",
+        action="store_true",
+        help="Do not refresh consolidated metadata after writing migrated label runs.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-source-crop-mismatch", action="store_true")
     parser.add_argument("--output-json", type=Path)
@@ -357,6 +370,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_suffix=args.run_suffix,
         overwrite=args.overwrite,
         set_latest=args.set_latest,
+        consolidate_metadata=not args.no_consolidate_metadata,
         dry_run=args.dry_run,
         allow_source_crop_mismatch=args.allow_source_crop_mismatch,
     )

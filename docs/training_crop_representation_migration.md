@@ -233,6 +233,73 @@ Before marking migrated training data usable:
    - run predictions on held-out reviewed examples,
    - compare performance against historical model and inspect overlays.
 
+## Batch Migration Workflow
+
+Use the batch wrapper for reviewed per-recording training Zarrs. It is
+intentionally dry-run by default and writes JSONL so failures can be inspected
+per archive before any bulk write.
+
+Dry-run against approved registry training Zarrs:
+
+```bash
+scripts/py -m fisheye.utils.batch_migrate_training_crop_pixel_contract \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training \
+  --required-review-state approved \
+  --required-review-intended-use training \
+  --jsonl-report /tmp/pynvvc_training_crop_migration_dryrun.jsonl \
+  --summary-json /tmp/pynvvc_training_crop_migration_dryrun.summary.json
+```
+
+Apply only after the dry-run report is clean:
+
+```bash
+scripts/py -m fisheye.utils.batch_migrate_training_crop_pixel_contract \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training \
+  --required-review-state approved \
+  --required-review-intended-use training \
+  --apply \
+  --jsonl-report /tmp/pynvvc_training_crop_migration_apply.jsonl \
+  --summary-json /tmp/pynvvc_training_crop_migration_apply.summary.json
+```
+
+Default behavior:
+
+- Candidate discovery uses `zarr_use=training` and skips merged/exported
+  training artifacts under training dataset roots.
+- Registry-discovered candidates are gated by keypoint review state
+  `approved` and intended use `training` unless `--approval-family none` is
+  passed.
+- The target crop run name is `<source_crop_run>_pynvvc_luma_v1`.
+- Migrated label run names use the same `_pynvvc_luma_v1` suffix and point at
+  the new crop run with `label_coordinate_transform=identity`.
+- By default, the batch wrapper migrates each label family's latest source run
+  only. Pass `--all-label-runs` only when doing a full archival migration of
+  historical label runs; it is much slower and creates many more arrays.
+- `crop_runs/latest` and label `latest` pointers are not changed unless
+  `--set-latest` is passed.
+- Existing completed target crop runs with the expected
+  `orange_mono_pynvvc_luma_uint8_v1` contract are reused, so the batch is
+  idempotent. Existing incomplete or mismatched target crop runs require
+  inspection or `--overwrite`.
+- After `--apply`, the wrapper runs a small PyNvVC parity sample by default;
+  use `--parity-sample-count 0` to skip it.
+
+Decode access policy:
+
+- `fisheye.utils.regenerate_training_crops_pynvvc` supports
+  `--decode-mode auto|sequential|indexed`.
+- `auto` keeps the sequential demux/decode path for dense frame windows and
+  uses PyNvVideoCodec `SimpleDecoder.get_batch_frames_by_index(...)` for sparse
+  sampled training Zarrs.
+- The indexed path is the correct default for existing training imports whose
+  crop rows are sampled every ~100 source frames. Sequentially decoding
+  `0..max(source_frame_indices)` is correct but too slow for that sparse
+  layout.
+- The effective access mode is recorded in `crop_runs/<run>.attrs` as
+  `decode_mode_requested` and `decode_mode_effective`.
+
 ## Implementation Checklist
 
 1. Add a crop regeneration utility.
@@ -240,6 +307,7 @@ Before marking migrated training data usable:
      name, pixel contract.
    - Output: new materialized crop run using PyNvVideoCodec luma.
    - Must support sampled training Zarr frame mapping.
+   - Must use indexed PyNvVC reads for sparse sampled training rows.
    - Initial implementation: `scripts/py -m
      fisheye.utils.regenerate_training_crops_pynvvc`.
 2. Add label migration utilities.
@@ -263,6 +331,8 @@ Before marking migrated training data usable:
    - Dry-run inventory first.
    - Apply to all approved training Zarrs.
    - Refresh registry quality/profile rows.
+   - Initial implementation: `scripts/py -m
+     fisheye.utils.batch_migrate_training_crop_pixel_contract`.
 7. Export and retrain.
    - Export detection/keypoint/mask datasets from the migrated crop contract.
    - Train new models.
