@@ -545,6 +545,9 @@ Implementation tasks:
   summarizes detect artifact, CPU stage, and finalizer status from
   `submission_manifest.json` and can be used with `--require-complete` as the
   one-clip smoke gate.
+- [ ] Run the one-clip PRFS smoke and require this gate to pass before enabling
+  all-clip fan-out:
+  `scripts/py -m fisheye.utils.check_clipped_detect_refine_submission <run_dir>/submission_manifest.json --require-complete`.
 - [x] Add a collection resolver for downstream readers so they can map
   `recording_frame_id` to `(clip_id, clip_local_frame_index, run_path)`.
   `scripts/py -m fisheye.utils.resolve_clipped_refined_detect_collection`
@@ -612,7 +615,9 @@ Implementation tasks:
 - [ ] Make every submitter produce a manifest summary, per-batch path list,
   stdout/stderr, and JSONL stage log.
 - [ ] Standardize log directory selection for PRFS versus fallback scratch.
-- [ ] Add a small status summarizer for LSF run directories.
+- [x] Add a small status summarizer for clipped detect/refine LSF submission
+  manifests:
+  `scripts/py -m fisheye.utils.check_clipped_detect_refine_submission`.
 - [ ] Add a failure classifier that distinguishes environment failure,
   registry/model-resolution failure, data-validation failure, and writer
   failure.
