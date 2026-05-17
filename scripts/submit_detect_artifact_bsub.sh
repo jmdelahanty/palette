@@ -15,6 +15,11 @@ DECODE_BACKEND="auto"
 BATCH_SIZE=16
 RUN_ID=""
 RUN_LABEL=""
+WORKFLOW_ID=""
+RECORDING_ID=""
+CLIP_ID=""
+CLIP_INDEX=""
+CAMERA_SERIAL=""
 CONF=""
 IOU=""
 MAX_DET=""
@@ -51,6 +56,11 @@ Options:
   --resize-dims H W        Optional canonical inference size [h w]
   --run-id ID              Stable run id instead of UTC timestamp
   --run-label LABEL        Artifact basename; default is analysis zarr stem
+  --workflow-id ID         Optional workflow id recorded in logs/manifests
+  --recording-id ID        Optional recording id recorded in logs/manifests
+  --clip-id ID             Optional clip id, e.g. clip_000000
+  --clip-index N           Optional zero-based clip index
+  --camera-serial SERIAL   Optional camera serial for clip-camera provenance
   --overwrite-artifact     Allow replacement of same scratch artifact path
   --dry-run                Print files and submit command; do not submit
   -h, --help               Show this message
@@ -77,6 +87,11 @@ while [[ $# -gt 0 ]]; do
     --resize-dims) RESIZE_DIMS=("$2" "$3"); shift 3;;
     --run-id) RUN_ID="$2"; shift 2;;
     --run-label) RUN_LABEL="$2"; shift 2;;
+    --workflow-id) WORKFLOW_ID="$2"; shift 2;;
+    --recording-id) RECORDING_ID="$2"; shift 2;;
+    --clip-id) CLIP_ID="$2"; shift 2;;
+    --clip-index) CLIP_INDEX="$2"; shift 2;;
+    --camera-serial) CAMERA_SERIAL="$2"; shift 2;;
     --overwrite-artifact) OVERWRITE_ARTIFACT=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
@@ -103,6 +118,12 @@ fi
 if [[ -z "$RUN_LABEL" ]]; then
   stem="$(basename "$ZARR")"
   RUN_LABEL="${stem%.zarr}"
+  if [[ -n "$CLIP_ID" ]]; then
+    RUN_LABEL="${RUN_LABEL}_${CLIP_ID}"
+  fi
+  if [[ -n "$CAMERA_SERIAL" ]]; then
+    RUN_LABEL="${RUN_LABEL}_cam${CAMERA_SERIAL}"
+  fi
 fi
 SAFE_LABEL="$(printf '%s' "$RUN_LABEL" | tr -c 'A-Za-z0-9_.-' '_')"
 RUN_DIR="${OUTPUT_DIR}/detect_artifact_${RUN_ID}_${SAFE_LABEL}"
@@ -113,6 +134,53 @@ if [[ -e "$RUN_DIR" ]]; then
   exit 2
 fi
 mkdir -p "$RUN_DIR"
+
+scripts/py - "$RUN_DIR/submission_context.json" \
+  "$ZARR" "$VIDEO" "$MODEL" "$CONFIG" "$OUTPUT_DIR" "$RUN_ID" "$RUN_LABEL" "$SAFE_LABEL" \
+  "$WORKFLOW_ID" "$RECORDING_ID" "$CLIP_ID" "$CLIP_INDEX" "$CAMERA_SERIAL" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    output_path,
+    zarr,
+    video,
+    model,
+    config,
+    output_dir,
+    run_id,
+    run_label,
+    safe_label,
+    workflow_id,
+    recording_id,
+    clip_id,
+    clip_index,
+    camera_serial,
+) = sys.argv[1:]
+
+def optional(value: str):
+    return value if value else None
+
+payload = {
+    "schema_version": 1,
+    "submission_kind": "detect_artifact_bsub",
+    "target_zarr": zarr,
+    "video": video,
+    "model": model,
+    "config": config,
+    "output_dir": output_dir,
+    "run_id": run_id,
+    "run_label": run_label,
+    "safe_label": safe_label,
+    "workflow_id": optional(workflow_id),
+    "recording_id": optional(recording_id),
+    "clip_id": optional(clip_id),
+    "clip_index": int(clip_index) if clip_index else None,
+    "camera_serial": optional(camera_serial),
+}
+Path(output_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 
 ARTIFACT_ARGS=(
   "$VIDEO"
@@ -126,6 +194,11 @@ if [[ -n "$CONF" ]]; then ARTIFACT_ARGS+=(--conf "$CONF"); fi
 if [[ -n "$IOU" ]]; then ARTIFACT_ARGS+=(--iou "$IOU"); fi
 if [[ -n "$MAX_DET" ]]; then ARTIFACT_ARGS+=(--max-det "$MAX_DET"); fi
 if [[ "${#RESIZE_DIMS[@]}" -gt 0 ]]; then ARTIFACT_ARGS+=(--resize-dims "${RESIZE_DIMS[@]}"); fi
+if [[ -n "$WORKFLOW_ID" ]]; then ARTIFACT_ARGS+=(--workflow-id "$WORKFLOW_ID"); fi
+if [[ -n "$RECORDING_ID" ]]; then ARTIFACT_ARGS+=(--recording-id "$RECORDING_ID"); fi
+if [[ -n "$CLIP_ID" ]]; then ARTIFACT_ARGS+=(--clip-id "$CLIP_ID"); fi
+if [[ -n "$CLIP_INDEX" ]]; then ARTIFACT_ARGS+=(--clip-index "$CLIP_INDEX"); fi
+if [[ -n "$CAMERA_SERIAL" ]]; then ARTIFACT_ARGS+=(--camera-serial "$CAMERA_SERIAL"); fi
 if [[ "$OVERWRITE_ARTIFACT" == "1" ]]; then ARTIFACT_ARGS+=(--overwrite-artifact); fi
 
 printf -v ARTIFACT_ARGS_SHELL '%q ' "${ARTIFACT_ARGS[@]}"
@@ -133,6 +206,11 @@ printf -v ARTIFACT_ARGS_SHELL '%q ' "${ARTIFACT_ARGS[@]}"
 JOB_SCRIPT="${RUN_DIR}/run_detect_artifact.sh"
 RUN_DIR_Q="$(printf '%q' "$RUN_DIR")"
 SAFE_LABEL_Q="$(printf '%q' "$SAFE_LABEL")"
+WORKFLOW_ID_Q="$(printf '%q' "$WORKFLOW_ID")"
+RECORDING_ID_Q="$(printf '%q' "$RECORDING_ID")"
+CLIP_ID_Q="$(printf '%q' "$CLIP_ID")"
+CLIP_INDEX_Q="$(printf '%q' "$CLIP_INDEX")"
+CAMERA_SERIAL_Q="$(printf '%q' "$CAMERA_SERIAL")"
 
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -142,6 +220,11 @@ cd "$(pwd)"
 
 RUN_DIR=${RUN_DIR_Q}
 RUN_LABEL=${SAFE_LABEL_Q}
+WORKFLOW_ID=${WORKFLOW_ID_Q}
+RECORDING_ID=${RECORDING_ID_Q}
+CLIP_ID=${CLIP_ID_Q}
+CLIP_INDEX=${CLIP_INDEX_Q}
+CAMERA_SERIAL=${CAMERA_SERIAL_Q}
 JOB_ID="\${LSB_JOBID:-manual}"
 
 scratch_user="\${USER:-\$(id -un)}"
@@ -167,6 +250,11 @@ echo "palette_job_cache=\$PALETTE_JOB_CACHE"
 echo "artifact_dir=\$ARTIFACT_DIR"
 echo "scratch_tarball=\$SCRATCH_TARBALL"
 echo "summary_json=\$SUMMARY_JSON"
+echo "workflow_id=\$WORKFLOW_ID"
+echo "recording_id=\$RECORDING_ID"
+echo "clip_id=\$CLIP_ID"
+echo "clip_index=\$CLIP_INDEX"
+echo "camera_serial=\$CAMERA_SERIAL"
 
 scripts/py -m fisheye.utils.run_detection_artifact ${ARTIFACT_ARGS_SHELL}--artifact-dir "\$ARTIFACT_DIR" --work-dir "\$WORK_DIR" --tarball-output "\$SCRATCH_TARBALL" > "\$SUMMARY_JSON"
 
@@ -183,6 +271,11 @@ cat > "\$TRANSFER_JSON" <<TRANSFERJSON
   "scratch_tarball": "\$SCRATCH_TARBALL",
   "final_tarball": "\$FINAL_TARBALL",
   "summary_json": "\$SUMMARY_JSON",
+  "workflow_id": "\$WORKFLOW_ID",
+  "recording_id": "\$RECORDING_ID",
+  "clip_id": "\$CLIP_ID",
+  "clip_index": "\$CLIP_INDEX",
+  "camera_serial": "\$CAMERA_SERIAL",
   "copy_tarball_seconds": \$copy_seconds
 }
 TRANSFERJSON
@@ -210,8 +303,13 @@ BSUB_CMD="bsub ${BSUB_ARGS_SHELL}bash $(printf '%q' "$JOB_SCRIPT")"
 
 echo "Run dir: $RUN_DIR"
 echo "Job script: $JOB_SCRIPT"
+echo "Submission context: ${RUN_DIR}/submission_context.json"
+if [[ -n "$CLIP_ID" || -n "$CAMERA_SERIAL" ]]; then
+  echo "Clip context: workflow_id=${WORKFLOW_ID:-<none>} recording_id=${RECORDING_ID:-<none>} clip_id=${CLIP_ID:-<none>} clip_index=${CLIP_INDEX:-<none>} camera_serial=${CAMERA_SERIAL:-<none>}"
+fi
 echo "Expected tarball: ${RUN_DIR}/${SAFE_LABEL}.<JOBID>.tar.gz"
 echo "Expected summary: ${RUN_DIR}/${SAFE_LABEL}.<JOBID>.summary.json"
+echo "Expected transfer log: ${RUN_DIR}/${SAFE_LABEL}.<JOBID>.transfer.json"
 echo "Artifact command: scripts/py -m fisheye.utils.run_detection_artifact ${ARTIFACT_ARGS_SHELL}--artifact-dir <scratch>/palette_run_group_artifact --work-dir <scratch>/work --tarball-output <scratch>/<label>.<JOBID>.tar.gz"
 echo "Submit command: $BSUB_CMD"
 

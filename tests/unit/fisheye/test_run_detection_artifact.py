@@ -117,6 +117,11 @@ def test_build_detection_artifact_packages_detect_run_group(
         decode_backend="pynvvc_nv12_rgb",
         tarball_output=tarball,
         command=["scripts/py", "-m", "fisheye.utils.run_detection_artifact"],
+        workflow_id="sleepyfish_detect_smoke",
+        recording_id="sleepyfish_recording",
+        clip_id="clip_000003",
+        clip_index=3,
+        camera_serial="2010093",
     )
 
     assert summary["status"] == "ok"
@@ -125,6 +130,20 @@ def test_build_detection_artifact_packages_detect_run_group(
     manifest = json.loads((artifact_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
     assert manifest["artifact_schema"] == mod.ARTIFACT_SCHEMA
     assert manifest["target_group_path"] == "detect_runs/detect_fake"
+    assert (
+        manifest["intended_target_group_path"]
+        == "clips/clip_000003/cameras/2010093/detect_runs/detect_fake"
+    )
+    assert manifest["artifact_scope"] == "clip_camera"
+    assert manifest["clip_context"] == {
+        "camera_serial": "2010093",
+        "clip_camera_key": "clip_000003/camera_2010093",
+        "clip_id": "clip_000003",
+        "clip_index": 3,
+        "recording_id": "sleepyfish_recording",
+        "scope": "clip_camera",
+        "workflow_id": "sleepyfish_detect_smoke",
+    }
     assert manifest["latest_policy"] == "do_not_set_latest"
     assert manifest["validation"] == {
         "canonical_write": "not_performed",
@@ -133,11 +152,17 @@ def test_build_detection_artifact_packages_detect_run_group(
     }
     assert manifest["artifact_timing"]["copy_run_group_seconds_total"] >= 0.0
     assert manifest["provenance"]["decoder_backend"] == "pynvvc_nv12_rgb"
+    assert manifest["provenance"]["clip_context"]["clip_id"] == "clip_000003"
     assert manifest["provenance"]["runtime"]["gpu"]["devices"][0]["name"] == "NVIDIA L4"
     assert manifest["provenance"]["runtime"]["platform"]["lsf"]["queue"] == "gpu_l4"
     assert (
         manifest["provenance"]["runtime"]["environment"]["python_executable"]
         == "/fake/env/bin/python"
+    )
+    assert summary["artifact_scope"] == "clip_camera"
+    assert (
+        summary["intended_target_group_path"]
+        == "clips/clip_000003/cameras/2010093/detect_runs/detect_fake"
     )
     assert summary["artifact_timing"]["tarball_seconds_total"] >= 0.0
     captured = capsys.readouterr()

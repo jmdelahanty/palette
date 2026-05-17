@@ -195,6 +195,10 @@ Ready for pilot:
   `scripts/py -m fisheye.diagnostics.detect_compute_smoke`.
 - [x] Detection run-group artifact runner exists:
   `scripts/py -m fisheye.utils.run_detection_artifact`.
+- [x] Detection artifact runner and LSF submitter can record clip-camera
+  context (`workflow_id`, `recording_id`, `clip_id`, `clip_index`, and
+  `camera_serial`) in submission logs, job stdout, artifact summaries, and
+  manifests.
 - [x] Detection artifact importer apply mode exists:
   `scripts/py -m fisheye.utils.import_run_group_artifact --apply`.
 - [x] Post-import validator exists:

@@ -633,8 +633,14 @@ The builder supports two layouts:
 
 - rolling clips: reads `recording_clip_index.json` plus per-clip
   `Cam*_meta.csv`;
-- single video: falls back to `cams/Cam*_meta.csv` and `cams/Cam*.mp4` when no
-  clip index is present.
+- single-video camera layout: reads `cams/Cam*_meta.csv` and
+  `cams/Cam*.mp4` when no clip index is present.
+
+The single-video `cams/` layout is not legacy. It is still a first-class
+recording representation for short or moderate recordings where one MP4 per
+camera remains operationally simple. The rolling `clips/` layout is for long
+recordings or workflows that benefit from clip-parallel processing and smaller
+video units.
 
 Default outputs:
 

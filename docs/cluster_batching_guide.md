@@ -515,6 +515,32 @@ scripts/submit_detect_artifact_bsub.sh \
   --batch-size 16
 ```
 
+For rolling-clip smoke runs, pass the clip context explicitly and point
+`--video` at the per-clip MP4. The submitter writes
+`submission_context.json`, includes the context in stdout, and passes it to the
+artifact manifest and summary:
+
+```bash
+scripts/submit_detect_artifact_bsub.sh \
+  --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
+  --video /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/clips/clip_000000/Cam<serial>_<recording>.mp4 \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/<model>/weights/best.pt \
+  --output-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<recording> \
+  --workflow-id <workflow_id> \
+  --recording-id <recording> \
+  --clip-id clip_000000 \
+  --clip-index 0 \
+  --camera-serial <serial> \
+  --decode-backend auto \
+  --batch-size 16
+```
+
+The current importer still promotes detection artifacts into top-level
+`detect_runs/<run>`. Clip smoke packages therefore record
+`intended_target_group_path=clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run>`
+for the next clip-importer slice, but they should be treated as package-only
+artifacts until that importer support is enabled.
+
 Apply-mode importer support remains a separate serialized step. Until that
 apply mode is in place, these packages are durable transfer artifacts, not
 canonical completed analysis runs. The LSF wrapper also writes

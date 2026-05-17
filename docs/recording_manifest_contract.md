@@ -234,6 +234,12 @@ Notes:
 
 ### Video-only manual intake
 
+`cams/` is the first-class single-file camera layout: one MP4 plus frame
+metadata/keyframe sidecars per camera. This remains the preferred representation
+for short or moderate recordings where a single video per camera is easy to
+manage. Rolling `clips/` are a separate first-class layout for long recordings
+or cluster-parallel workflows, not a replacement that deprecates `cams/`.
+
 ```json
 {
   "session_uuid": "2026-03-09_colleague_set_001",

@@ -71,10 +71,16 @@ statistics.
 
 ### Future Clipped Analysis Archives
 
-Current readers and writers mostly assume a single-video analysis archive with
-top-level run families such as `detect_runs/`, `crop_runs/`, and
+Current readers and writers mostly support the first-class single-video camera
+layout with top-level run families such as `detect_runs/`, `crop_runs/`, and
 `keypoints_runs/`. Long rolling-clip recordings should not extend that model by
 having many cluster jobs append into one giant global run group.
+
+`cams/` is not a legacy layout. It is the canonical single-file-per-camera
+recording representation and remains appropriate for short or moderate
+recordings, such as 20-30 minute videos. `clips/` is a second first-class
+representation for recordings that are intentionally split into rolling video
+segments.
 
 The intended future layout is one parent analysis Zarr with clip-local physical
 run groups:

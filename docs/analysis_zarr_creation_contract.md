@@ -67,7 +67,8 @@ Defaults:
 
 - `--recording-dir` is required unless both `--video` and `--output` are explicit.
 - `--video` resolution:
-  - if omitted, resolve from `recording_dir/cams/*.mp4`
+  - if omitted, resolve from `recording_dir/cams/*.mp4` for the first-class
+    single-video camera layout
   - if multiple candidates exist, fail with explicit message
 - `--h5` resolution:
   - if omitted, resolve from `recording_dir/raw/*.h5`

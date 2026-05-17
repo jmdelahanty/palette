@@ -664,3 +664,12 @@ includes `artifact_timing` for the detection call, run-group copy, validation,
 hashing, and tarball creation. The LSF wrapper captures it as
 `<label>.<JOBID>.summary.json` and writes a sibling
 `<label>.<JOBID>.transfer.json` with the scratch-to-PRFS tarball copy timing.
+
+For rolling-clip smoke runs, `scripts/submit_detect_artifact_bsub.sh` accepts
+`--workflow-id`, `--recording-id`, `--clip-id`, `--clip-index`, and
+`--camera-serial`. These values are written to `submission_context.json`, echoed
+in the job stdout, carried into the artifact runner, and stored in
+`artifact_manifest.json`, `artifact_summary.json`, and the transfer log. Until
+the clip importer slice lands, clip packages keep the importer-compatible
+top-level `target_group_path` and separately record
+`intended_target_group_path=clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run>`.

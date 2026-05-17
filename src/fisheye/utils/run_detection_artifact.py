@@ -178,6 +178,41 @@ def _cluster_provenance() -> dict[str, Optional[str]]:
     return {key: os.environ.get(key) for key in keys}
 
 
+def _clip_context(
+    *,
+    workflow_id: Optional[str],
+    recording_id: Optional[str],
+    clip_id: Optional[str],
+    clip_index: Optional[int],
+    camera_serial: Optional[str],
+) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    if workflow_id:
+        context["workflow_id"] = workflow_id
+    if recording_id:
+        context["recording_id"] = recording_id
+    if clip_id:
+        context["clip_id"] = clip_id
+    if clip_index is not None:
+        context["clip_index"] = int(clip_index)
+    if camera_serial:
+        context["camera_serial"] = camera_serial
+    if clip_id and camera_serial:
+        context["scope"] = "clip_camera"
+        context["clip_camera_key"] = f"{clip_id}/camera_{camera_serial}"
+    elif context:
+        context["scope"] = "partial_clip_context"
+    return context
+
+
+def _intended_target_group_path(*, run_name: str, clip_context: dict[str, Any]) -> str:
+    clip_id = clip_context.get("clip_id")
+    camera_serial = clip_context.get("camera_serial")
+    if isinstance(clip_id, str) and clip_id and isinstance(camera_serial, str) and camera_serial:
+        return f"clips/{clip_id}/cameras/{_safe_label(camera_serial)}/{RUN_FAMILY}/{run_name}"
+    return f"{RUN_FAMILY}/{run_name}"
+
+
 def _stderr_console() -> Any:
     if Console is None:
         return None
@@ -227,6 +262,11 @@ def build_detection_artifact(
     tarball_output: Optional[Path] = None,
     overwrite_artifact: bool = False,
     command: Optional[Sequence[str]] = None,
+    workflow_id: Optional[str] = None,
+    recording_id: Optional[str] = None,
+    clip_id: Optional[str] = None,
+    clip_index: Optional[int] = None,
+    camera_serial: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run YOLO into scratch and package only the completed detect run group."""
     video_path = video_path.expanduser().resolve()
@@ -271,6 +311,13 @@ def build_detection_artifact(
     )
     command_list = list(command) if command is not None else sys.argv
     command_text = " ".join(command_list)
+    clip_context = _clip_context(
+        workflow_id=workflow_id,
+        recording_id=recording_id,
+        clip_id=clip_id,
+        clip_index=clip_index,
+        camera_serial=camera_serial,
+    )
     _write_json(
         artifact_dir / "logs" / "job_context.json",
         {
@@ -280,6 +327,7 @@ def build_detection_artifact(
             "cluster": _cluster_provenance(),
             "runtime": runtime_environment,
             "scratch_zarr": str(scratch_zarr),
+            "clip_context": clip_context,
         },
     )
     (artifact_dir / "logs" / "command.log").write_text(command_text + "\n", encoding="utf-8")
@@ -330,16 +378,24 @@ def build_detection_artifact(
     artifact_timing["run_group_tree_hash_seconds_total"] = time.perf_counter() - hash_start
     git_info = get_git_info()
     timing = _extract_timing(source_run_group)
+    target_group_path = f"{RUN_FAMILY}/{run_name}"
+    intended_target_group_path = _intended_target_group_path(
+        run_name=run_name,
+        clip_context=clip_context,
+    )
     manifest = {
         "artifact_schema": ARTIFACT_SCHEMA,
         "created_at": _utc_now(),
         "target_archive_path": str(target_zarr),
-        "target_group_path": f"{RUN_FAMILY}/{run_name}",
+        "target_group_path": target_group_path,
+        "intended_target_group_path": intended_target_group_path,
         "run_family": RUN_FAMILY,
         "run_name": run_name,
         "layout": "detect_yolo_sparse_v1",
         "schema_version": 1,
         "latest_policy": latest_policy,
+        "artifact_scope": clip_context.get("scope", "archive_top_level"),
+        "clip_context": clip_context,
         "source_inputs": [
             {"path": str(video_path), "role": "source_video"},
             {"path": str(target_zarr), "role": "target_analysis_archive"},
@@ -355,6 +411,7 @@ def build_detection_artifact(
             "runtime": runtime_environment,
             "decoder_backend": decode_backend or "auto",
             "scratch_zarr": str(scratch_zarr),
+            "clip_context": clip_context,
         },
         "timing": timing,
         "artifact_timing": artifact_timing,
@@ -383,7 +440,10 @@ def build_detection_artifact(
         "tarball_path": str(tarball_path),
         "scratch_zarr": str(scratch_zarr),
         "run_name": run_name,
-        "target_group_path": f"{RUN_FAMILY}/{run_name}",
+        "target_group_path": target_group_path,
+        "intended_target_group_path": intended_target_group_path,
+        "artifact_scope": clip_context.get("scope", "archive_top_level"),
+        "clip_context": clip_context,
         "manifest_path": str(artifact_dir / "artifact_manifest.json"),
         "artifact_timing": artifact_timing,
         "strict_json": strict_report,
@@ -428,6 +488,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Importer latest policy recorded in the package manifest",
     )
     parser.add_argument("--overwrite-artifact", action="store_true", help="Replace existing artifact/work dirs and tarball")
+    parser.add_argument("--workflow-id", default=None, help="Optional workflow id for clipped/batch provenance")
+    parser.add_argument("--recording-id", default=None, help="Optional recording id for clipped/batch provenance")
+    parser.add_argument("--clip-id", default=None, help="Optional source clip id, e.g. clip_000000")
+    parser.add_argument("--clip-index", type=int, default=None, help="Optional zero-based source clip index")
+    parser.add_argument("--camera-serial", default=None, help="Optional camera serial for clip-camera provenance")
     return parser
 
 
@@ -454,6 +519,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tarball_output=args.tarball_output,
             overwrite_artifact=args.overwrite_artifact,
             command=[sys.executable, "-m", "fisheye.utils.run_detection_artifact", *(argv or sys.argv[1:])],
+            workflow_id=args.workflow_id,
+            recording_id=args.recording_id,
+            clip_id=args.clip_id,
+            clip_index=args.clip_index,
+            camera_serial=args.camera_serial,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

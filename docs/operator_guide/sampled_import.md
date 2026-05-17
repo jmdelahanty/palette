@@ -20,6 +20,11 @@ step.
 
 ## Single video import
 
+The organized `cams/` layout is a first-class source for sampled training
+imports. Use it when a recording has one manageable MP4 per camera. Rolling
+`clips/` are only needed when the acquisition was intentionally split into
+segments or when clip-local parallel processing is the workflow target.
+
 ```bash
 scripts/py -m fisheye.capture.import_video /path/to/Cam2010093.mp4 \
   --training-data \
