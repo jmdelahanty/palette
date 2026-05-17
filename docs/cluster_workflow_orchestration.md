@@ -229,6 +229,21 @@ exists, submission fails unless `--allow-existing-outputs` is explicitly set.
 Use a new workflow id for ordinary retries; only bypass this guard during
 intentional manual recovery.
 
+After submitting, check the generated `submission_manifest.json` rather than
+manually hunting through per-stage log folders:
+
+```bash
+scripts/py -m fisheye.utils.check_clipped_detect_refine_submission \
+  <run_dir>/submission_manifest.json
+```
+
+The checker reports the detect artifact, import, validation, detect-quality,
+refined-detect, refined validation, and finalizer stages. It treats explicit
+`status=failed` or invalid JSON as failed, missing status JSONs as incomplete,
+and returns success only when the chain has no failed stages. Add
+`--require-complete` when using it as a gate before broad fan-out; that exits
+nonzero until every planned stage and finalizer is complete and `ok`.
+
 ### Finalizer Responsibilities
 
 The current finalizer is intentionally a small CPU job:

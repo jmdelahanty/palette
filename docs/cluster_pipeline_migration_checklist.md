@@ -540,6 +540,11 @@ Implementation tasks:
 - [x] Add retry/idempotence guardrails: submit-mode preflight refuses existing
   planned detect, detect-quality, refined, or finalized collection targets
   unless `--allow-existing-outputs` is explicitly passed.
+- [x] Add an operator-facing submission checker:
+  `scripts/py -m fisheye.utils.check_clipped_detect_refine_submission`
+  summarizes detect artifact, CPU stage, and finalizer status from
+  `submission_manifest.json` and can be used with `--require-complete` as the
+  one-clip smoke gate.
 - [x] Add a collection resolver for downstream readers so they can map
   `recording_frame_id` to `(clip_id, clip_local_frame_index, run_path)`.
   `scripts/py -m fisheye.utils.resolve_clipped_refined_detect_collection`

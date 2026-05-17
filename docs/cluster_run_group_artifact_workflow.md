@@ -558,6 +558,20 @@ or finalized collection paths already exist. Prefer a new `--workflow-id` for
 retries. `--allow-existing-outputs` exists for deliberate expert recovery, not
 normal operation.
 
+After submission, summarize the chain from the generated manifest:
+
+```bash
+scripts/py -m fisheye.utils.check_clipped_detect_refine_submission \
+  <submission_bundle>/submission_manifest.json
+```
+
+This is the operator-facing progress gate. It checks the detect artifact summary
+and tarball, every CPU stage status JSON, and the finalizer status JSON. A
+running or blocked chain reports `incomplete`; explicit failed stages report
+`failed`; a fully completed chain reports `ok`. Use `--require-complete` in
+scripts or handoff notes when the next step must not proceed until every stage
+and the finalizer are complete.
+
 The finalizer can also be run manually against a completed plan:
 
 ```bash
