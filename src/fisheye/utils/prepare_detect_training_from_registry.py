@@ -151,9 +151,11 @@ def _build_query_signature(args: argparse.Namespace, *, model_input: str) -> dic
         "arena_id": args.arena_id,
         "path_contains": args.path_contains,
         "limit": args.limit,
+        "source_layout": args.source_layout,
         "source_type": args.source_type,
         "input_format": args.input_format,
         "model_input": model_input,
+        "training_sample_duplicate_policy": args.training_sample_duplicate_policy,
     }
 
 
@@ -335,6 +337,14 @@ def _row_zarr_path_key(row: Mapping[str, Any]) -> str:
     return str(Path(str(row["zarr_path"])).expanduser().resolve())
 
 
+def _row_get(row: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    try:
+        value = row[key]
+    except Exception:
+        return default
+    return default if value is None else value
+
+
 def _profile_dataset_ids_for_rows(registry: Registry, rows: Sequence[Mapping[str, Any]]) -> set[str]:
     dataset_ids = sorted({str(row["dataset_id"]) for row in rows if row["dataset_id"]})
     if not dataset_ids:
@@ -406,6 +416,139 @@ def _dedupe_rows_by_zarr_path(
             )
 
     return list(best_by_path.values()), skipped
+
+
+def _training_sample_identity_for_row(row: Mapping[str, Any]) -> tuple[Optional[tuple[str, str, int, str]], dict[str, str]]:
+    """Return a parent-frame fingerprint for sampled training Zarrs.
+
+    This is intentionally based on `raw_video/original_frame_indices` rather than
+    local stage row IDs. Full-video sampled Zarrs and clipped replacements should
+    have identical parent-frame arrays when they represent the same labeled
+    examples.
+    """
+
+    zarr_path = Path(str(row["zarr_path"]))
+    try:
+        root = open_zarr_group_direct(zarr_path, mode="r")
+    except Exception:
+        return None, {
+            "source_layout": _decode_attr(_row_get(row, "source_layout")) or "",
+            "source_frame_index_path": _decode_attr(_row_get(row, "source_frame_index_path")) or "",
+        }
+
+    source_layout = _decode_attr(_row_get(row, "source_layout")) or _decode_attr(root.attrs.get("source_layout")) or ""
+    source_frame_index_path = (
+        _decode_attr(_row_get(row, "source_frame_index_path"))
+        or _decode_attr(root.attrs.get("source_frame_index_path"))
+        or ""
+    )
+    raw_video = root.get("raw_video")
+    if raw_video is None or "original_frame_indices" not in raw_video:
+        return None, {"source_layout": source_layout, "source_frame_index_path": source_frame_index_path}
+
+    original_indices = np.asarray(raw_video["original_frame_indices"][:])
+    if original_indices.ndim != 1 or original_indices.size == 0:
+        return None, {"source_layout": source_layout, "source_frame_index_path": source_frame_index_path}
+
+    contiguous = np.ascontiguousarray(original_indices)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.dtype).encode("utf-8"))
+    digest.update(str(tuple(contiguous.shape)).encode("utf-8"))
+    digest.update(contiguous.view(np.uint8).tobytes())
+    recording_id = (
+        _decode_attr(_row_get(row, "recording_id"))
+        or _decode_attr(root.attrs.get("recording_id"))
+        or _decode_attr(root.attrs.get("session_uuid"))
+    )
+    camera_serial = (
+        _decode_attr(_row_get(row, "camera_serial"))
+        or _decode_attr(root.attrs.get("camera_serial"))
+        or _decode_attr(root.attrs.get("camera_id"))
+    )
+    if not recording_id or not camera_serial:
+        return None, {"source_layout": source_layout, "source_frame_index_path": source_frame_index_path}
+    identity = (str(recording_id), str(camera_serial), int(contiguous.size), digest.hexdigest())
+    return identity, {"source_layout": source_layout, "source_frame_index_path": source_frame_index_path}
+
+
+def _dedupe_rows_by_training_sample_identity(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    policy: str,
+) -> tuple[list[Mapping[str, Any]], list[dict[str, str]]]:
+    """Avoid exporting both original and clipped copies of the same labeled samples."""
+
+    if policy == "keep-all":
+        return list(rows), []
+
+    best_by_identity: dict[tuple[str, str, int, str], tuple[Mapping[str, Any], dict[str, str]]] = {}
+    skipped: list[dict[str, str]] = []
+
+    def _score(row: Mapping[str, Any], metadata: Mapping[str, str]) -> tuple[int, int, int, str]:
+        zarr_path = Path(str(row["zarr_path"]))
+        source_layout = str(metadata.get("source_layout") or "").strip().lower()
+        source_frame_index_path = str(metadata.get("source_frame_index_path") or "").strip()
+        return (
+            1 if source_layout == "rolling_clips" else 0,
+            1 if source_frame_index_path else 0,
+            1 if "clipped_training" in zarr_path.name.lower() else 0,
+            str(row["dataset_id"]),
+        )
+
+    for row in rows:
+        zarr_use = _decode_attr(_row_get(row, "zarr_use"))
+        if str(zarr_use or "").strip().lower() != "training":
+            identity = None
+            metadata = {"source_layout": "", "source_frame_index_path": ""}
+        else:
+            identity, metadata = _training_sample_identity_for_row(row)
+        if identity is None:
+            synthetic_key = (
+                f"no_identity:{str(row['dataset_id'])}",
+                str(row["zarr_path"]),
+                0,
+                str(row["dataset_id"]),
+            )
+            best_by_identity[synthetic_key] = (row, metadata)
+            continue
+
+        current = best_by_identity.get(identity)
+        if current is None:
+            best_by_identity[identity] = (row, metadata)
+            continue
+
+        current_row, current_metadata = current
+        if policy == "error":
+            raise ValueError(
+                "Duplicate training sample identity detected for parent-frame-matched Zarrs: "
+                f"{current_row['zarr_path']} and {row['zarr_path']}. "
+                "Use --training-sample-duplicate-policy prefer-clipped to keep the clipped replacement, "
+                "or keep-all only when double-counting is intentional."
+            )
+
+        if _score(row, metadata) > _score(current_row, current_metadata):
+            skipped.append(
+                {
+                    "dataset_id": str(current_row["dataset_id"]),
+                    "zarr_path": str(current_row["zarr_path"]),
+                    "kept_dataset_id": str(row["dataset_id"]),
+                    "kept_zarr_path": str(row["zarr_path"]),
+                    "reason": "duplicate_parent_frame_training_samples",
+                }
+            )
+            best_by_identity[identity] = (row, metadata)
+        else:
+            skipped.append(
+                {
+                    "dataset_id": str(row["dataset_id"]),
+                    "zarr_path": str(row["zarr_path"]),
+                    "kept_dataset_id": str(current_row["dataset_id"]),
+                    "kept_zarr_path": str(current_row["zarr_path"]),
+                    "reason": "duplicate_parent_frame_training_samples",
+                }
+            )
+
+    return [entry[0] for entry in best_by_identity.values()], skipped
 
 
 def _resolve_detect_quality_from_zarr(
@@ -561,6 +704,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--rig-id", type=str)
     parser.add_argument("--arena-id", type=str)
     parser.add_argument("--path-contains", type=str)
+    parser.add_argument("--source-layout", type=str, help="Exact source layout match, e.g. rolling_clips.")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 
@@ -608,6 +752,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--max-interpolated-detections-rate",
         type=float,
         help="Legacy compatibility gate: require interpolated_detections_rate <= threshold (0-1) via refined_detect_review_current.",
+    )
+    parser.add_argument(
+        "--training-sample-duplicate-policy",
+        choices=["prefer-clipped", "error", "keep-all"],
+        default="prefer-clipped",
+        help=(
+            "Policy for training Zarrs with identical recording/camera raw_video/original_frame_indices. "
+            "Default keeps rolling-clip replacements and skips the original full-video sampled copy."
+        ),
     )
     # Legacy orchestration flags are intentionally hidden and rejected.
     parser.add_argument("--export-onnx", action="store_true", help=argparse.SUPPRESS)
@@ -678,6 +831,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         camera_id=args.camera_id,
         rig_id=args.rig_id,
         arena_id=args.arena_id,
+        source_layout=args.source_layout,
         model_input=model_input,
         path_contains=args.path_contains,
         limit=args.limit,
@@ -835,6 +989,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         if len(duplicate_rows) > 20:
             print(f"  ... {len(duplicate_rows) - 20} more duplicate row(s) omitted.")
+
+    rows, sample_duplicate_rows = _dedupe_rows_by_training_sample_identity(
+        rows,
+        policy=args.training_sample_duplicate_policy,
+    )
+    if sample_duplicate_rows:
+        print(
+            f"Skipped {len(sample_duplicate_rows)} duplicate parent-frame training sample set(s) "
+            f"using policy={args.training_sample_duplicate_policy}:"
+        )
+        for duplicate in sample_duplicate_rows[:20]:
+            print(
+                f"  - {duplicate['dataset_id']} -> kept {duplicate['kept_dataset_id']} "
+                f"for {duplicate['reason']} [{duplicate['zarr_path']}]"
+            )
+        if len(sample_duplicate_rows) > 20:
+            print(f"  ... {len(sample_duplicate_rows) - 20} more duplicate sample set(s) omitted.")
 
     registry.close()
 

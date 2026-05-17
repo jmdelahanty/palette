@@ -222,6 +222,31 @@ selector deduplicates multiple registry rows that point at the same physical
 Zarr path and prefers rows that have both an approved refined-detect quality
 projection and a detection data profile.
 
+For clipped replacements of full-video sampled training Zarrs, keep the
+registry wrapper default:
+
+```bash
+--training-sample-duplicate-policy prefer-clipped
+```
+
+This computes a fingerprint from each training Zarr's
+`raw_video/original_frame_indices` plus recording/camera identity. If the
+original sampled Zarr and the clipped training Zarr contain the same parent
+frames, the clipped `source_layout="rolling_clips"` copy is selected and the
+original is skipped. Use `--training-sample-duplicate-policy error` for audit
+runs when you want duplicate parent-frame samples to fail closed. Use
+`keep-all` only when deliberate double-counting is intended.
+
+To inspect or select only clipped training Zarrs, use the registry source-layout
+filter:
+
+```bash
+scripts/py -m fisheye.utils.registry_query \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training \
+  --source-layout rolling_clips
+```
+
 Sampled recording-only training Zarrs usually do not have `crop_runs`. For
 `--source-type refined`, the preparer reads the approved
 `refined_detect_runs/<run>/instances` surface directly; crop approval is not
@@ -263,6 +288,11 @@ scripts/py -m fisheye.diagnostics.prepare_detect_training \
   --out-config /path/to/train_detect.yaml \
   --out-manifest /path/to/train_detect.manifest.json
 ```
+
+Do not use the direct path-based preparer for the final all-available export
+when both original and clipped replacements exist unless you have manually
+removed duplicates from the path list. It does not query registry
+`source_layout` metadata before building the manifest.
 
 Key options:
 - `--source-type`: which detection source family to use. `refined` is the

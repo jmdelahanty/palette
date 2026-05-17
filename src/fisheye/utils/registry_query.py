@@ -1290,6 +1290,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--subject-count-min", type=int)
     parser.add_argument("--subject-count-max", type=int)
     parser.add_argument("--zarr-use", type=str, help="Exact zarr use match (training/analysis/inference/export/archive).")
+    parser.add_argument("--source-layout", type=str, help="Exact source layout match, e.g. rolling_clips.")
     parser.add_argument(
         "--experiment-context-status",
         choices=["present", "absent", "unknown"],
@@ -2003,6 +2004,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             subject_count_min=args.subject_count_min,
             subject_count_max=args.subject_count_max,
             zarr_use=args.zarr_use,
+            source_layout=args.source_layout,
             experiment_context_status=args.experiment_context_status,
             experiment_context_source=args.experiment_context_source,
             stimulus_runs_available=(
@@ -2847,6 +2849,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"exposure_us={row['exposure'] or '-'}\t"
                 f"codec={row['video_codec'] or '-'}\t"
                 f"pixfmt={row['video_pix_fmt'] or '-'}\t"
+                f"source_layout={row.get('source_layout') or '-'}\t"
                 f"encoder={encoder_name or format_encoder or '-'}"
             )
 

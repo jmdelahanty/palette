@@ -13,6 +13,7 @@ def _write_context_zarr(
     zarr_purpose: str,
     recording_id: str,
     artifact_schema_id: str,
+    source_layout: str | None = None,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs.update(
@@ -32,6 +33,11 @@ def _write_context_zarr(
             "experiment_context_status_detail": "Synthetic recording-only fixture has no H5/protocol source.",
         }
     )
+    if source_layout is not None:
+        root.attrs["source_layout"] = source_layout
+        root.attrs["source_frame_index_path"] = "source_frame_index.parquet"
+        root.attrs["source_recording_frame_index_path"] = str(path.parent.parent / "recording_frame_index.parquet")
+        root.attrs["source_frame_index_schema"] = "palette.training_source_frame_index.v1"
 
 
 def test_registry_scan_indexes_recording_only_training_and_analysis_context(tmp_path: Path) -> None:
@@ -90,3 +96,33 @@ def test_registry_scan_indexes_recording_only_training_and_analysis_context(tmp_
     assert {row["experiment_context_source"] for row in rows} == {"none"}
     assert {row["stimulus_runs_available"] for row in rows} == {0}
     assert {row["zarr_use"] for row in query_rows} == {"analysis", "training"}
+
+
+def test_registry_scan_exposes_clipped_training_source_metadata(tmp_path: Path) -> None:
+    recording_dir = tmp_path / "recordings" / "synthetic_rolling"
+    zarr_dir = recording_dir / "zarr"
+    zarr_dir.mkdir(parents=True)
+    training_zarr = zarr_dir / "synthetic_rolling_clipped_training.zarr"
+
+    _write_context_zarr(
+        training_zarr,
+        zarr_purpose="training",
+        recording_id="synthetic_rolling",
+        artifact_schema_id="video_only_v1",
+        source_layout="rolling_clips",
+    )
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        registry.scan_zarr(training_zarr)
+        rows = registry.query_datasets(source_layout="rolling_clips")
+    finally:
+        registry.close()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["zarr_use"] == "training"
+    assert row["source_layout"] == "rolling_clips"
+    assert row["source_frame_index_path"] == "source_frame_index.parquet"
+    assert row["source_frame_index_schema"] == "palette.training_source_frame_index.v1"
+    assert str(row["source_recording_frame_index_path"]).endswith("recording_frame_index.parquet")

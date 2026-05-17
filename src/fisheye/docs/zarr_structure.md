@@ -192,6 +192,18 @@ throughput, and source video metadata.
 imports. It is useful because it is compact and aligned to imported frames, but
 it is not a complete recording provenance table.
 
+Clipped training imports should also carry root attrs:
+`source_layout="rolling_clips"`,
+`source_frame_index_path="source_frame_index.parquet"`,
+`source_frame_index_schema="palette.training_source_frame_index.v1"`, and
+`source_recording_frame_index_path=<recording-root frame index>`. The registry
+stores these attrs on `datasets` and exposes them through
+`dataset_context_current` / `query_datasets()`. Registry-driven detection
+training preparation uses them, together with a fingerprint of
+`raw_video/original_frame_indices`, to prefer clipped replacements over
+original full-video sampled training Zarrs when both represent the same parent
+frames.
+
 For clipped training Zarrs, `raw_video/original_frame_indices` should contain
 `parent_frame_index` values. Stage-level `frame_indices` in that training Zarr
 remain sample-local indices into `raw_video/images_*`; consumers that need the

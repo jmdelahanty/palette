@@ -358,11 +358,21 @@ after verifying exact equality between source
 
 ### D. Registry And Operator Workflow
 
-- [ ] Decide whether creation immediately registers the training Zarr or leaves
-  registry scanning as an explicit follow-up.
+- [x] Creation leaves registry scanning as an explicit follow-up. This keeps
+  import/materialization deterministic and lets operators inspect a clipped
+  training Zarr before it becomes discoverable for export.
 - [ ] Add operator docs with dry-run and apply commands.
-- [ ] Confirm registry reports `zarr_use="training"` and preserves source
-  context for clipped sources.
+- [x] Confirm registry reports `zarr_use="training"` and preserves source
+  context for clipped sources. The datasets table and
+  `dataset_context_current` expose `source_layout`,
+  `source_frame_index_path`, `source_recording_frame_index_path`, and
+  `source_frame_index_schema`.
+- [x] Registry-driven detection training preparation defaults to
+  `--training-sample-duplicate-policy prefer-clipped`, which skips original
+  full-video sampled training Zarrs when a clipped training Zarr has the same
+  recording, camera, and `raw_video/original_frame_indices` fingerprint.
+- [x] The duplicate policy can be set to `error` for audit runs or `keep-all`
+  only when deliberate double-counting is required.
 - [ ] Add a training-image profile smoke so source-frame metadata is visible in
   registry summaries.
 

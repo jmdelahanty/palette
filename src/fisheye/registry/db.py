@@ -2074,6 +2074,10 @@ class DatasetMetadata:
     recording_id: Optional[str]
     zarr_use: Optional[str]
     zarr_purpose: Optional[str]
+    source_layout: Optional[str]
+    source_frame_index_path: Optional[str]
+    source_recording_frame_index_path: Optional[str]
+    source_frame_index_schema: Optional[str]
 
 
 def extract_dataset_metadata(
@@ -2090,6 +2094,10 @@ def extract_dataset_metadata(
         recording_id=_decode_attr(root.attrs.get("recording_id")) or _decode_attr(session_uuid),
         zarr_use=_decode_attr(root.attrs.get("zarr_use")),
         zarr_purpose=_decode_attr(root.attrs.get("zarr_purpose")),
+        source_layout=_decode_attr(root.attrs.get("source_layout")),
+        source_frame_index_path=_decode_attr(root.attrs.get("source_frame_index_path")),
+        source_recording_frame_index_path=_decode_attr(root.attrs.get("source_recording_frame_index_path")),
+        source_frame_index_schema=_decode_attr(root.attrs.get("source_frame_index_schema")),
     )
 
 
@@ -2876,6 +2884,11 @@ class Registry:
                 "training_image_profile_registry",
                 self._migration_051_training_image_profile_registry,
             ),
+            (
+                52,
+                "dataset_source_layout_metadata",
+                self._migration_052_dataset_source_layout_metadata,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -2994,6 +3007,10 @@ class Registry:
                 artifact_kind TEXT,
                 zarr_origin TEXT,
                 zarr_use TEXT,
+                source_layout TEXT,
+                source_frame_index_path TEXT,
+                source_recording_frame_index_path TEXT,
+                source_frame_index_schema TEXT,
                 path_hash TEXT,
                 created_utc TEXT,
                 last_seen_utc TEXT,
@@ -3010,6 +3027,10 @@ class Registry:
                 "artifact_kind": "TEXT",
                 "zarr_origin": "TEXT",
                 "zarr_use": "TEXT",
+                "source_layout": "TEXT",
+                "source_frame_index_path": "TEXT",
+                "source_recording_frame_index_path": "TEXT",
+                "source_frame_index_schema": "TEXT",
             },
         )
         cur.execute(
@@ -8833,6 +8854,15 @@ class Registry:
 
     def _migration_034_dataset_context_current_view(self) -> None:
         cur = self.conn.cursor()
+        self._ensure_columns(
+            "datasets",
+            {
+                "source_layout": "TEXT",
+                "source_frame_index_path": "TEXT",
+                "source_recording_frame_index_path": "TEXT",
+                "source_frame_index_schema": "TEXT",
+            },
+        )
         if self._table_exists("recordings"):
             self._ensure_columns(
                 "recordings",
@@ -8982,6 +9012,10 @@ class Registry:
                 d.artifact_kind AS artifact_kind,
                 d.zarr_origin AS zarr_origin,
                 d.zarr_use AS zarr_use,
+                d.source_layout AS source_layout,
+                d.source_frame_index_path AS source_frame_index_path,
+                d.source_recording_frame_index_path AS source_recording_frame_index_path,
+                d.source_frame_index_schema AS source_frame_index_schema,
                 d.status AS dataset_status,
                 d.last_seen_utc AS last_seen_utc,
                 r.recording_name AS recording_name,
@@ -9860,6 +9894,20 @@ class Registry:
             """
         )
 
+    def _migration_052_dataset_source_layout_metadata(self) -> None:
+        """Expose training source-frame sidecars and rolling-clip layout metadata."""
+
+        self._ensure_columns(
+            "datasets",
+            {
+                "source_layout": "TEXT",
+                "source_frame_index_path": "TEXT",
+                "source_recording_frame_index_path": "TEXT",
+                "source_frame_index_schema": "TEXT",
+            },
+        )
+        self._migration_034_dataset_context_current_view()
+
     def _ensure_training_model_input_shape_columns(self) -> None:
         self._ensure_columns(
             "training_models",
@@ -10663,6 +10711,10 @@ class Registry:
         zarr_purpose: Optional[str] = None,
         zarr_origin: Optional[str] = None,
         zarr_use: Optional[str] = None,
+        source_layout: Optional[str] = None,
+        source_frame_index_path: Optional[str] = None,
+        source_recording_frame_index_path: Optional[str] = None,
+        source_frame_index_schema: Optional[str] = None,
     ) -> None:
         now = _utc_now()
         resolved_recording_id = recording_id
@@ -10687,6 +10739,10 @@ class Registry:
             "artifact_kind": resolved_artifact_kind,
             "zarr_origin": _normalize_zarr_origin(zarr_origin) or inferred_origin,
             "zarr_use": _normalize_zarr_use(zarr_use) or inferred_use,
+            "source_layout": _decode_attr(source_layout),
+            "source_frame_index_path": _decode_attr(source_frame_index_path),
+            "source_recording_frame_index_path": _decode_attr(source_recording_frame_index_path),
+            "source_frame_index_schema": _decode_attr(source_frame_index_schema),
             "path_hash": _compute_path_hash(zarr_path),
             "created_utc": now,
             "last_seen_utc": now,
@@ -10696,10 +10752,12 @@ class Registry:
             """
             INSERT INTO datasets (
                 dataset_id, session_uuid, zarr_path, recording_id, artifact_kind, zarr_origin, zarr_use,
+                source_layout, source_frame_index_path, source_recording_frame_index_path, source_frame_index_schema,
                 path_hash, created_utc, last_seen_utc, status
             )
             VALUES (
                 :dataset_id, :session_uuid, :zarr_path, :recording_id, :artifact_kind, :zarr_origin, :zarr_use,
+                :source_layout, :source_frame_index_path, :source_recording_frame_index_path, :source_frame_index_schema,
                 :path_hash, :created_utc, :last_seen_utc, :status
             )
             ON CONFLICT(dataset_id) DO UPDATE SET
@@ -10709,6 +10767,10 @@ class Registry:
                 artifact_kind=COALESCE(excluded.artifact_kind, datasets.artifact_kind),
                 zarr_origin=COALESCE(excluded.zarr_origin, datasets.zarr_origin),
                 zarr_use=COALESCE(excluded.zarr_use, datasets.zarr_use),
+                source_layout=COALESCE(excluded.source_layout, datasets.source_layout),
+                source_frame_index_path=COALESCE(excluded.source_frame_index_path, datasets.source_frame_index_path),
+                source_recording_frame_index_path=COALESCE(excluded.source_recording_frame_index_path, datasets.source_recording_frame_index_path),
+                source_frame_index_schema=COALESCE(excluded.source_frame_index_schema, datasets.source_frame_index_schema),
                 path_hash=excluded.path_hash,
                 last_seen_utc=excluded.last_seen_utc,
                 status=excluded.status;
@@ -14250,6 +14312,10 @@ class Registry:
             recording_id=metadata.recording_id,
             zarr_purpose=zarr_purpose,
             zarr_use=metadata.zarr_use,
+            source_layout=metadata.source_layout,
+            source_frame_index_path=metadata.source_frame_index_path,
+            source_recording_frame_index_path=metadata.source_recording_frame_index_path,
+            source_frame_index_schema=metadata.source_frame_index_schema,
         )
         dataset_row = self.conn.execute(
             "SELECT recording_id, zarr_use FROM datasets WHERE dataset_id = ?;",
@@ -15522,6 +15588,7 @@ class Registry:
         subject_count_max: Optional[int] = None,
         zarr_origin: Optional[str] = None,
         zarr_use: Optional[str] = None,
+        source_layout: Optional[str] = None,
         experiment_context_status: Optional[str] = None,
         experiment_context_source: Optional[str] = None,
         stimulus_runs_available: Optional[bool] = None,
@@ -15561,6 +15628,8 @@ class Registry:
         sql = [
             "SELECT dcc.dataset_id, dcc.session_uuid, dcc.zarr_path,",
             "dcc.recording_id, dcc.zarr_origin, dcc.zarr_use, dcc.dataset_status AS status,",
+            "dcc.source_layout, dcc.source_frame_index_path, dcc.source_recording_frame_index_path,",
+            "dcc.source_frame_index_schema,",
             "dcc.experiment_context_status, dcc.experiment_context_source,",
             "dcc.experiment_context_status_detail, dcc.stimulus_runs_available,",
             "dcc.dish_design, COALESCE(dcc.subject_id, dcc.legacy_fish_id) AS fish_id, dcc.subject_id AS subject_id,",
@@ -15627,6 +15696,7 @@ class Registry:
         add_clause("AND dcc.subject_count_effective <= ?", subject_count_max)
         add_clause("AND dcc.zarr_origin = ?", _normalize_zarr_origin(zarr_origin))
         add_clause("AND dcc.zarr_use = ?", _normalize_zarr_use(zarr_use))
+        add_clause("AND dcc.source_layout = ?", source_layout)
         add_clause("AND dcc.experiment_context_status = ?", experiment_context_status)
         add_clause("AND dcc.experiment_context_source = ?", experiment_context_source)
         if stimulus_runs_available is not None:

@@ -170,8 +170,10 @@ def _naming_args(**overrides):
         "arena_id": None,
         "path_contains": None,
         "limit": None,
+        "source_layout": None,
         "source_type": "refined",
         "input_format": "gray",
+        "training_sample_duplicate_policy": "prefer-clipped",
     }
     defaults.update(overrides)
     return type("Args", (), defaults)()
@@ -221,6 +223,113 @@ def test_dedupe_rows_by_zarr_path_prefers_quality_and_profile_row(tmp_path: Path
             "kept_dataset_id": "dataset_base:zpathhash",
         }
     ]
+
+
+def _write_sampled_training_zarr(
+    path: Path,
+    *,
+    original_frame_indices: np.ndarray,
+    recording_id: str = "recording_a",
+    camera_serial: str = "2010093",
+    source_layout: str | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs.update(
+        {
+            "zarr_purpose": "training",
+            "session_uuid": recording_id,
+            "recording_id": recording_id,
+            "recording_name": recording_id,
+            "camera_serial": camera_serial,
+        }
+    )
+    if source_layout is not None:
+        root.attrs["source_layout"] = source_layout
+        root.attrs["source_frame_index_path"] = "source_frame_index.parquet"
+        root.attrs["source_recording_frame_index_path"] = "/recording_frame_index.parquet"
+        root.attrs["source_frame_index_schema"] = "palette.training_source_frame_index.v1"
+    raw = root.create_group("raw_video")
+    raw.create_array(
+        "images_ds",
+        data=np.zeros((len(original_frame_indices), 2, 2), dtype=np.uint8),
+    )
+    raw.create_array("original_frame_indices", data=original_frame_indices.astype(np.int64))
+    analysis = root.create_group("analysis_metadata")
+    analysis.attrs["camera_metadata"] = {"serial_number": camera_serial}
+
+
+def test_registry_prepare_prefers_clipped_duplicate_training_samples(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    frame_indices = np.array([0, 5000, 10000], dtype=np.int64)
+    recording_zarr_dir = tmp_path / "recordings" / "recording_a" / "zarr"
+    original_zarr = recording_zarr_dir / "recording_a_training.zarr"
+    clipped_zarr = recording_zarr_dir / "recording_a_clipped_training.zarr"
+    _write_sampled_training_zarr(original_zarr, original_frame_indices=frame_indices)
+    _write_sampled_training_zarr(
+        clipped_zarr,
+        original_frame_indices=frame_indices,
+        source_layout="rolling_clips",
+    )
+
+    registry = Registry(registry_path)
+    try:
+        registry.scan_zarr(original_zarr)
+        registry.scan_zarr(clipped_zarr)
+    finally:
+        registry.close()
+
+    calls: list[list[str]] = []
+
+    def fake_prepare(cli: list[str]) -> None:
+        calls.append(list(cli))
+
+    monkeypatch.setattr(wrapper.pdt, "main", fake_prepare)
+
+    rc = wrapper.main(["--registry", str(registry_path), "--dry-run"])
+    assert rc == 0
+    assert calls
+    zarr_args = [Path(arg).resolve() for arg in calls[0] if str(arg).endswith(".zarr")]
+    assert zarr_args == [clipped_zarr.resolve()]
+    output = capsys.readouterr().out
+    assert "duplicate parent-frame training sample" in output
+    assert "policy=prefer-clipped" in output
+
+
+def test_registry_prepare_can_fail_on_duplicate_training_samples(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    frame_indices = np.array([0, 5000, 10000], dtype=np.int64)
+    recording_zarr_dir = tmp_path / "recordings" / "recording_a" / "zarr"
+    original_zarr = recording_zarr_dir / "recording_a_training.zarr"
+    clipped_zarr = recording_zarr_dir / "recording_a_clipped_training.zarr"
+    _write_sampled_training_zarr(original_zarr, original_frame_indices=frame_indices)
+    _write_sampled_training_zarr(
+        clipped_zarr,
+        original_frame_indices=frame_indices,
+        source_layout="rolling_clips",
+    )
+
+    registry = Registry(registry_path)
+    try:
+        registry.scan_zarr(original_zarr)
+        registry.scan_zarr(clipped_zarr)
+    finally:
+        registry.close()
+
+    with pytest.raises(ValueError, match="Duplicate training sample identity"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--dry-run",
+                "--training-sample-duplicate-policy",
+                "error",
+            ]
+        )
 
 
 def test_auto_out_manifest_is_set_when_out_config_is_given(tmp_path: Path, monkeypatch) -> None:
