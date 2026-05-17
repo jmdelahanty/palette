@@ -570,7 +570,9 @@ and tarball, every CPU stage status JSON, and the finalizer status JSON. A
 running or blocked chain reports `incomplete`; explicit failed stages report
 `failed`; a fully completed chain reports `ok`. Use `--require-complete` in
 scripts or handoff notes when the next step must not proceed until every stage
-and the finalizer are complete.
+and the finalizer are complete. For missing or failed stages, the human output
+also reports stdout/stderr file presence and sizes so operators can jump
+directly to the useful LSF logs.
 
 The finalizer can also be run manually against a completed plan:
 

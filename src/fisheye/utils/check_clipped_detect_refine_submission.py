@@ -259,6 +259,21 @@ def _format_seconds(value: Any) -> str:
     return "-"
 
 
+def _format_file_record(label: str, value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return f"{label}=missing"
+    path = str(value.get("path") or "")
+    if not path:
+        return f"{label}=missing"
+    exists = bool(value.get("exists"))
+    size = value.get("size_bytes")
+    if exists and isinstance(size, int):
+        return f"{label}={size}B"
+    if exists:
+        return f"{label}=exists"
+    return f"{label}=missing"
+
+
 def _print_human(payload: Mapping[str, Any]) -> None:
     print(f"submission_manifest: {payload.get('submission_manifest')}")
     print(f"workflow_id: {payload.get('workflow_id')}")
@@ -277,6 +292,19 @@ def _print_human(payload: Mapping[str, Any]) -> None:
         line = f"{status:>10}  {stage:<28} job={job_id:<12} t={seconds:<8} {work_unit_id}"
         if reason:
             line += f"  reason={reason}"
+        if status in {"missing", "failed", "invalid"}:
+            log_bits = [
+                _format_file_record("stdout", report.get("stdout")),
+                _format_file_record("stderr", report.get("stderr")),
+            ]
+            if report.get("kind") == "detect_artifact":
+                log_bits.extend(
+                    [
+                        _format_file_record("summary", report.get("summary_json")),
+                        _format_file_record("tarball", report.get("tarball")),
+                    ]
+                )
+            line += "  " + " ".join(log_bits)
         print(line)
     if payload.get("status") == "ok":
         print("\nsubmission_check=ok")
