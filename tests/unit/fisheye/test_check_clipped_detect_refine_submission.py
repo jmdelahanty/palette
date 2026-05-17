@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fisheye.utils.check_clipped_detect_refine_submission import (
     check_clipped_detect_refine_submission,
+    main,
 )
 from fisheye.utils.submit_clipped_detect_refine_plan_bsub import SUBMISSION_SCHEMA
 
@@ -94,6 +95,29 @@ def test_check_clipped_detect_refine_submission_reports_ok(tmp_path: Path) -> No
     assert result["status_counts"] == {"ok": 4}
 
 
+def test_check_clipped_detect_refine_submission_cli_require_complete_ok(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    manifest_path = _manifest(tmp_path)
+    tarball = tmp_path / "artifacts" / "unit.123.tar.gz"
+    tarball.parent.mkdir(parents=True)
+    tarball.write_bytes(b"tarball")
+    _write_json(tmp_path / "artifacts" / "unit.123.summary.json", {"status": "ok"})
+    for path in [
+        tmp_path / "run" / "unit" / "status" / "import_detect.124.json",
+        tmp_path / "run" / "unit" / "status" / "validate_refined_detect.125.json",
+        tmp_path / "run" / "finalizer" / "status" / "finalizer.126.json",
+    ]:
+        _write_json(path, {"status": "ok", "exit_code": 0, "stage_seconds": 1.25})
+
+    exit_code = main([str(manifest_path), "--require-complete"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "submission_check=ok" in captured.out
+
+
 def test_check_clipped_detect_refine_submission_reports_incomplete(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path)
 
@@ -101,6 +125,19 @@ def test_check_clipped_detect_refine_submission_reports_incomplete(tmp_path: Pat
 
     assert result["status"] == "incomplete"
     assert result["status_counts"]["missing"] == 4
+
+
+def test_check_clipped_detect_refine_submission_cli_require_complete_blocks_incomplete(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    manifest_path = _manifest(tmp_path)
+
+    exit_code = main([str(manifest_path), "--require-complete"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "submission_check=incomplete" in captured.out
 
 
 def test_check_clipped_detect_refine_submission_reports_failed_stage(tmp_path: Path) -> None:
