@@ -226,7 +226,30 @@ def _delete_legacy_dense_curated_root(refined_run: zarr.Group) -> None:
             del refined_run.attrs[name]
 
 
-def _resolve_refined_parent(root: zarr.Group) -> Tuple[zarr.Group, str]:
+def _normalize_group_path(path: str) -> str:
+    value = str(path or "").strip().strip("/")
+    if not value:
+        raise ValueError("group path must be non-empty")
+    if ".." in Path(value).parts:
+        raise ValueError(f"group path must not contain '..': {path!r}")
+    return value
+
+
+def _resolve_group_path(root: zarr.Group, path: str, *, mode: str) -> zarr.Group:
+    normalized = _normalize_group_path(path)
+    if mode == "a":
+        return root.require_group(normalized)
+    return root[normalized]
+
+
+def _resolve_refined_parent(
+    root: zarr.Group,
+    *,
+    refined_family_path: Optional[str] = None,
+) -> Tuple[zarr.Group, str]:
+    if refined_family_path is not None:
+        normalized = _normalize_group_path(refined_family_path)
+        return _resolve_group_path(root, normalized, mode="a"), normalized
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is not None:
         return refined_parent, "refined_detect_runs"
@@ -668,6 +691,12 @@ def _resolve_bound_source_detect_group(
     refined_run: zarr.Group,
 ) -> tuple[Optional[zarr.Group], Optional[str]]:
     source_detect_run = normalize_attr(refined_run.attrs.get("source_detect_run"))
+    source_detect_path = normalize_attr(refined_run.attrs.get("source_detect_path"))
+    if source_detect_path:
+        try:
+            return root[source_detect_path], source_detect_run
+        except Exception:
+            pass
     detect_parent = root.get("detect_runs")
     if detect_parent is None or not source_detect_run or source_detect_run not in detect_parent:
         return None, source_detect_run
@@ -1918,6 +1947,7 @@ def write_curated_refined_detect_surfaces(
     root: zarr.Group,
     *,
     zarr_path: Optional[Path] = None,
+    refined_family_path: Optional[str] = None,
     refined_run_name: Optional[str] = None,
     instance_frame_indices: np.ndarray,
     instance_bbox_norm_coords: np.ndarray,
@@ -1941,7 +1971,7 @@ def write_curated_refined_detect_surfaces(
     env_info: Optional[Mapping[str, Any]] = None,
     source_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    refined_parent, _ = _resolve_refined_parent(root)
+    refined_parent, _ = _resolve_refined_parent(root, refined_family_path=refined_family_path)
     resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(refined_parent.attrs.get("latest"))
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")

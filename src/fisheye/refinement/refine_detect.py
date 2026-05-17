@@ -30,12 +30,26 @@ from ..shared.zarr_helpers import open_zarr_group_direct
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+DEFAULT_DETECT_FAMILY_PATH = "detect_runs"
 _REFINED_DETECT_STATUS_SOURCE = "runtime_refine_detect"
 _DISH_MASK_QUALITY_LABEL = 5
 _DEPRECATED_INTERPOLATION_OVERRIDE_MESSAGE = (
     "Interpolation overrides are deprecated and unsupported for refine_detect. "
     "The current sparse-first refine_detect workflow always runs with interpolation disabled."
 )
+
+
+def _normalize_group_path(path: str) -> str:
+    value = str(path or "").strip().strip("/")
+    if not value:
+        raise ValueError("group path must be non-empty")
+    if ".." in Path(value).parts:
+        raise ValueError(f"group path must not contain '..': {path!r}")
+    return value
+
+
+def _join_group_path(*parts: str) -> str:
+    return "/".join(str(part).strip("/") for part in parts if str(part).strip("/"))
 
 
 def _reject_deprecated_interpolation_overrides(
@@ -953,6 +967,9 @@ def create_refined_run(
     require_detect_quality: bool = True,
     per_frame_top_k: Optional[int] = None,
     top_k_score_field: str = "scores",
+    detect_family_path: str = DEFAULT_DETECT_FAMILY_PATH,
+    refined_family_path: str = REFINED_DETECT_GROUP,
+    refined_run_name: Optional[str] = None,
 ) -> str:
     """
     Create a refined detection run with sparse-first curated detect surfaces.
@@ -970,6 +987,10 @@ def create_refined_run(
         require_detect_quality: Require usable detect_quality labels for refinement
         per_frame_top_k: Optional max accepted detections per frame after quality filtering
         top_k_score_field: Score field used for top-k ranking; currently only "scores"
+        detect_family_path: Group path containing source detect runs
+        refined_family_path: Group path where refined detect runs are written
+        refined_run_name: Optional explicit refined run name. Used by cluster
+            planners when downstream jobs need deterministic paths.
         
     Returns:
         Name of created refined run
@@ -1036,13 +1057,18 @@ def create_refined_run(
     
     # Open mutable stores directly so a newly written run is not hidden by stale consolidated metadata.
     root = open_zarr_group_direct(zarr_path, mode='a')
+    detect_family_path = _normalize_group_path(detect_family_path)
+    refined_family_path = _normalize_group_path(refined_family_path)
     
     # Get detect run
     if detect_run is None:
-        detect_run = root['detect_runs'].attrs['latest']
+        detect_run = root[detect_family_path].attrs['latest']
     
-    detect_group = root[f'detect_runs/{detect_run}']
+    source_detect_path = _join_group_path(detect_family_path, detect_run)
+    detect_group = root[source_detect_path]
     console.print(f"Source detect run: [cyan]{detect_run}[/cyan]")
+    if detect_family_path != DEFAULT_DETECT_FAMILY_PATH:
+        console.print(f"Source detect family: [cyan]{detect_family_path}[/cyan]")
     
     # Load detection data
     console.print("\nLoading detection data...")
@@ -1244,13 +1270,18 @@ def create_refined_run(
     duration = time.perf_counter() - start_time
     
     # Create refined detect group
-    if REFINED_DETECT_GROUP not in root:
-        root.create_group(REFINED_DETECT_GROUP)
-    refined_runs = root[REFINED_DETECT_GROUP]
+    refined_runs = root.require_group(refined_family_path)
     
-    # Create timestamped run
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    run_name = f"refined_detect_{timestamp}"
+    # Create timestamped or explicitly named run.
+    if refined_run_name is not None:
+        run_name = str(refined_run_name).strip()
+        if not run_name or "/" in run_name or run_name in {".", ".."}:
+            raise ValueError(f"Invalid refined run name: {refined_run_name!r}")
+    else:
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        run_name = f"refined_detect_{timestamp}"
+    if run_name in refined_runs:
+        raise ValueError(f"{refined_runs.path}/{run_name} already exists")
     refined_group = refined_runs.create_group(run_name)
     refined_runs.attrs['latest'] = run_name
     
@@ -1273,7 +1304,10 @@ def create_refined_run(
     }
 
     refined_group.attrs['source_detect_run'] = detect_run
+    refined_group.attrs['source_detect_family_path'] = detect_family_path
+    refined_group.attrs['source_detect_path'] = source_detect_path
     refined_group.attrs['source_quality_run'] = resolved_quality_run or 'N/A'
+    refined_group.attrs['refined_family_path'] = refined_family_path
     refined_group.attrs['refinement_timestamp'] = created_timestamp
     refined_group.attrs['processing_time_seconds'] = float(duration)
     refined_group.attrs['operations'] = ['filter'] if refine_mode == "standard" else ['passthrough']
@@ -1285,7 +1319,10 @@ def create_refined_run(
         refined_group.attrs['coverage_frames_full'] = int(full_frame_count)
     refined_group.attrs['inputs'] = {
         'detect_run': detect_run,
-        'quality_run': resolved_quality_run or 'N/A'
+        'detect_family_path': detect_family_path,
+        'detect_path': source_detect_path,
+        'quality_run': resolved_quality_run or 'N/A',
+        'refined_family_path': refined_family_path,
     }
 
     git_info = get_git_info()
@@ -1330,9 +1367,12 @@ def create_refined_run(
         parameters=parameters_payload,
         inputs={
             'detect_run': detect_run,
+            'detect_family_path': detect_family_path,
+            'detect_path': source_detect_path,
             'quality_run': resolved_quality_run or 'N/A',
             'frame_source': 'zarr' if root.attrs.get('has_raw_video', True) else 'external',
             'source_video_path': root.attrs.get('source_video_path'),
+            'refined_family_path': refined_family_path,
         },
         artifacts=artifact_info,
     )
@@ -1365,6 +1405,8 @@ def create_refined_run(
         env_info=env_info,
         source_context={
             "source_detect_run": detect_run,
+            "source_detect_family_path": detect_family_path,
+            "source_detect_path": source_detect_path,
             "quality_run": resolved_quality_run or "N/A",
             "selection_policy": (
                 "quality_filtered_per_frame_top_k_sparse_instances_no_interpolation"
@@ -1374,6 +1416,7 @@ def create_refined_run(
             "dish_mask_gate": dish_mask_gate,
             "top_k_selection": top_k_selection,
         },
+        refined_family_path=refined_family_path,
     )
 
     console.print(f"[green]✓[/green] Refined run saved: {refined_group.path}")
@@ -1391,6 +1434,11 @@ def create_refined_run(
     if save_visuals or show_visuals:
         if quality_group is None:
             console.print("[yellow]Visualizations requested, but no quality report is available; skipping.[/yellow]")
+        elif detect_family_path != DEFAULT_DETECT_FAMILY_PATH:
+            console.print(
+                "[yellow]Visualizations requested, but clip-local detect quality "
+                "rendering is not path-aware yet; skipping.[/yellow]"
+            )
         else:
             try:
                 from ..visualization.visualize_detect_quality import render_quality_png
@@ -1447,7 +1495,10 @@ def create_refined_run(
         details={
             "reason": "present",
             "source_detect_run": detect_run,
+            "source_detect_family_path": detect_family_path,
+            "source_detect_path": source_detect_path,
             "source_quality_run": resolved_quality_run,
+            "refined_family_path": refined_family_path,
             "refine_mode": refine_mode,
             "parameter_source": param_source,
             "filters_applied": filters,
@@ -1485,6 +1536,11 @@ Examples:
   # Specify source runs
   scripts/py -m fisheye.refinement.refine_detect data.zarr --detect-run detect_2025-10-03_20-28-11
 
+  # Refine a clip-local detect run
+  scripts/py -m fisheye.refinement.refine_detect data.zarr \\
+    --detect-family-path clips/clip_000000/cameras/2010093/detect_runs \\
+    --refined-family-path clips/clip_000000/cameras/2010093/refined_detect_runs
+
   # Keep only the top confidence candidate per frame while preserving all raw candidates
   # in source_detections.
   scripts/py -m fisheye.refinement.refine_detect data.zarr --per-frame-top-k 1
@@ -1493,6 +1549,22 @@ Examples:
     
     parser.add_argument('zarr_path', help='Path to zarr file')
     parser.add_argument('--detect-run', help='Source detect run (default: latest)')
+    parser.add_argument(
+        '--detect-family-path',
+        default=DEFAULT_DETECT_FAMILY_PATH,
+        help=(
+            'Group path containing detect runs (default: detect_runs). '
+            'Use clips/<clip>/cameras/<serial>/detect_runs for clip-local runs.'
+        ),
+    )
+    parser.add_argument(
+        '--refined-family-path',
+        default=REFINED_DETECT_GROUP,
+        help=(
+            'Group path where refined detect runs are written (default: refined_detect_runs). '
+            'Use clips/<clip>/cameras/<serial>/refined_detect_runs for clip-local runs.'
+        ),
+    )
     parser.add_argument('--quality-run', help='Source quality run (default: latest)')
     parser.add_argument('--max-gap', type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--method', default=None, choices=['linear'], help=argparse.SUPPRESS)
@@ -1529,6 +1601,11 @@ Examples:
         choices=['scores'],
         help='Score field used for --per-frame-top-k ranking (default: scores).',
     )
+    parser.add_argument(
+        '--run-name',
+        default=None,
+        help='Optional explicit refined run name (default: timestamped refined_detect_<local_time>).',
+    )
     
     args = parser.parse_args()
     
@@ -1560,6 +1637,9 @@ Examples:
             require_detect_quality=not args.allow_missing_quality,
             per_frame_top_k=args.per_frame_top_k,
             top_k_score_field=args.top_k_score_field,
+            detect_family_path=args.detect_family_path,
+            refined_family_path=args.refined_family_path,
+            refined_run_name=args.run_name,
         )
         
         print(f"\n✓ Created refined run: {run_name}")

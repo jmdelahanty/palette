@@ -455,6 +455,7 @@ def detect_yolo(
     use_gpu: Optional[bool] = None,
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
+    run_name: Optional[str] = None,
 ) -> str:
     """
     Run YOLO inference directly on video file, creating minimal zarr output.
@@ -479,6 +480,8 @@ def detect_yolo(
         use_gpu: Use GPU for inference (overrides config)
         write_raw_video_metadata: Create/update raw_video attrs (no frames) for registry/provenance
         overwrite_raw_video_metadata: Overwrite existing raw_video attrs when writing metadata
+        run_name: Optional explicit detect run group name. Used by cluster planners
+            when downstream jobs need deterministic paths.
         
     Returns:
         Name of detect_runs group
@@ -1034,7 +1037,18 @@ def detect_yolo(
                 f"(root={len(root_updates)}, raw_video={len(raw_updates)})"
             )
     
-    detect_group, run_name = get_run_group(root, 'detect', console, create_new=True)
+    if run_name is not None:
+        run_name = str(run_name).strip()
+        if not run_name or "/" in run_name or run_name in {".", ".."}:
+            raise ValueError(f"Invalid detect run name: {run_name!r}")
+        parent_group = root.require_group("detect_runs")
+        if run_name in parent_group:
+            raise ValueError(f"detect_runs/{run_name} already exists")
+        detect_group = parent_group.create_group(run_name)
+        parent_group.attrs["latest"] = run_name
+        console.print(f"Created run group: [cyan]detect_runs/{run_name}[/cyan]")
+    else:
+        detect_group, run_name = get_run_group(root, 'detect', console, create_new=True)
     console.print(f"[green]✓[/green] Writing detections to detect_runs/{run_name}")
     
     # Storage for detections
@@ -1724,6 +1738,11 @@ Examples:
         action='store_true',
         help='Overwrite existing raw_video attrs when writing metadata-only import',
     )
+    parser.add_argument(
+        '--run-name',
+        default=None,
+        help='Optional explicit detect run group name (default: timestamped detect_<utc>).',
+    )
     
     args = parser.parse_args()
     
@@ -1743,6 +1762,7 @@ Examples:
             use_gpu=not args.cpu if args.cpu else None,
             write_raw_video_metadata=args.write_raw_video_metadata,
             overwrite_raw_video_metadata=args.overwrite_raw_video_metadata,
+            run_name=args.run_name,
         )
     except Exception as e:
         console = Console()

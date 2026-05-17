@@ -42,6 +42,7 @@ def _write_artifact(
     target_zarr: Path,
     corrupt_hash: bool = False,
     latest_policy: str = "do_not_set_latest",
+    intended_target_group_path: str | None = None,
 ) -> Path:
     source_video = tmp_path / "camera.mp4"
     source_video.write_bytes(b"fake")
@@ -75,6 +76,8 @@ def _write_artifact(
             "canonical_write": "not_performed",
         },
     }
+    if intended_target_group_path is not None:
+        manifest["intended_target_group_path"] = intended_target_group_path
     (artifact_root / "artifact_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (artifact_root / "validation").mkdir()
     (artifact_root / "validation" / "strict_json_report.json").write_text("{}", encoding="utf-8")
@@ -102,6 +105,36 @@ def test_build_import_plan_validates_artifact_without_mutating_target(tmp_path: 
     assert plan["validations"]["required_arrays"]["status"] == "pass"
     assert plan["validations"]["run_group_tree_hash"]["status"] == "pass"
     assert not (target_zarr / "detect_runs").exists()
+
+
+def test_build_import_plan_can_target_clip_local_intended_path(tmp_path: Path) -> None:
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+    tarball = _write_artifact(
+        tmp_path,
+        target_zarr=target_zarr,
+        intended_target_group_path="clips/clip_000000/cameras/2010093/detect_runs/detect_fake",
+    )
+
+    plan = mod.build_import_plan(tarball_path=tarball, use_intended_target=True)
+
+    assert plan["status"] == "ok"
+    assert plan["target_group_path"] == "clips/clip_000000/cameras/2010093/detect_runs/detect_fake"
+    assert plan["target_group_path_source"] == "intended_target_group_path"
+    assert plan["run_family_path"] == "clips/clip_000000/cameras/2010093/detect_runs"
+    assert plan["final_path"] == str(
+        target_zarr / "clips" / "clip_000000" / "cameras" / "2010093" / "detect_runs" / "detect_fake"
+    )
+    assert plan["incoming_path"] == str(
+        target_zarr
+        / "clips"
+        / "clip_000000"
+        / "cameras"
+        / "2010093"
+        / "detect_runs"
+        / ".incoming"
+        / "detect_fake"
+    )
 
 
 def test_build_import_plan_fails_when_final_target_exists(tmp_path: Path) -> None:
@@ -166,6 +199,34 @@ def test_apply_import_promotes_run_group_and_writes_receipt_sidecar(tmp_path: Pa
         "attributes"
     ]
     assert "latest" not in parent_attrs
+
+
+def test_apply_import_can_promote_to_clip_local_intended_path(tmp_path: Path) -> None:
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+    intended = "clips/clip_000000/cameras/2010093/detect_runs/detect_fake"
+    tarball = _write_artifact(
+        tmp_path,
+        target_zarr=target_zarr,
+        intended_target_group_path=intended,
+    )
+
+    result = mod.apply_import(tarball_path=tarball, use_intended_target=True)
+
+    family = target_zarr / "clips" / "clip_000000" / "cameras" / "2010093" / "detect_runs"
+    final_path = family / "detect_fake"
+    receipt_path = family / ".imports" / "detect_fake_import_receipt.json"
+    assert result["status"] == "ok"
+    assert result["applied"] is True
+    assert result["target_group_path"] == intended
+    assert result["run_family_path"] == "clips/clip_000000/cameras/2010093/detect_runs"
+    assert final_path.exists()
+    assert receipt_path.exists()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["target_group_path"] == intended
+    assert receipt["target_group_path_source"] == "intended_target_group_path"
+    assert receipt["run_family"] == "detect_runs"
+    assert receipt["run_family_path"] == "clips/clip_000000/cameras/2010093/detect_runs"
 
 
 def test_apply_import_updates_latest_when_requested(tmp_path: Path) -> None:

@@ -94,22 +94,29 @@ def _resolve_target_group(
     target_group_path: Optional[str],
     run_family: Optional[str],
     run_name: Optional[str],
-) -> tuple[str, str, str, Path]:
+) -> tuple[str, str, str, str, Path]:
     if target_group_path:
         parts = Path(target_group_path).parts
-        if len(parts) != 2 or parts[0] in {"", ".", ".."} or parts[1] in {"", ".", ".."}:
-            raise ValueError("--target-group-path must look like '<run_family>/<run_name>'")
-        family = parts[0]
-        name = parts[1]
-        return target_group_path, family, name, zarr_path / family / name
+        if (
+            len(parts) < 2
+            or any(part in {"", ".", ".."} for part in parts)
+            or Path(target_group_path).is_absolute()
+        ):
+            raise ValueError(
+                "--target-group-path must be a relative path ending in '<run_family>/<run_name>'"
+            )
+        family = parts[-2]
+        family_path = str(Path(*parts[:-1]))
+        name = parts[-1]
+        return target_group_path, family, family_path, name, zarr_path / target_group_path
     if not run_family or not run_name:
         raise ValueError("provide --target-group-path or both --run-family and --run-name")
     target = f"{run_family}/{run_name}"
-    return target, run_family, run_name, zarr_path / run_family / run_name
+    return target, run_family, run_family, run_name, zarr_path / run_family / run_name
 
 
-def _default_receipt_path(zarr_path: Path, run_family: str, run_name: str) -> Path:
-    return zarr_path / run_family / ".imports" / f"{run_name}_import_receipt.json"
+def _default_receipt_path(zarr_path: Path, run_family_path: str, run_name: str) -> Path:
+    return zarr_path / run_family_path / ".imports" / f"{run_name}_import_receipt.json"
 
 
 def _detect_provenance_report(attrs: dict[str, Any], manifest: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -197,7 +204,7 @@ def validate_imported_run_group(
     errors: list[str] = []
     validations: dict[str, dict[str, Any]] = {}
     try:
-        target_group, family, name, final_path = _resolve_target_group(
+        target_group, family, family_path, name, final_path = _resolve_target_group(
             zarr_path=zarr_path,
             target_group_path=target_group_path,
             run_family=run_family,
@@ -213,9 +220,9 @@ def validate_imported_run_group(
     receipt_path = (
         receipt_path.expanduser().resolve()
         if receipt_path is not None
-        else _default_receipt_path(zarr_path, family, name)
+        else _default_receipt_path(zarr_path, family_path, name)
     )
-    incoming_path = zarr_path / family / ".incoming" / name
+    incoming_path = zarr_path / family_path / ".incoming" / name
     manifest: Optional[dict[str, Any]] = None
 
     if final_path.exists() and final_path.is_dir():
@@ -258,6 +265,8 @@ def validate_imported_run_group(
                 "run_name": name,
                 "final_path": str(final_path),
             }
+            if receipt.get("run_family_path") is not None or family_path != family:
+                expected_pairs["run_family_path"] = family_path
             for key, expected in expected_pairs.items():
                 observed = receipt.get(key)
                 if observed != expected:
@@ -403,6 +412,7 @@ def validate_imported_run_group(
         "target_archive_path": str(zarr_path),
         "target_group_path": target_group,
         "run_family": family,
+        "run_family_path": family_path,
         "run_name": name,
         "final_path": str(final_path),
         "receipt_path": str(receipt_path),

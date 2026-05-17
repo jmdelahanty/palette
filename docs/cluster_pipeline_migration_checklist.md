@@ -150,9 +150,9 @@ Remaining:
   `recording_frame_index_manifest.json` from `recording_clip_index` plus
   per-clip metadata CSVs.
 - [x] Create parent analysis-Zarr shell for clipped recordings.
-- [ ] Extend run-group artifact manifests/importer to target
+- [x] Extend run-group artifact manifests/importer to target
   `clips/<clip_id>/cameras/<camera_serial>/<family>/<run_name>`.
-- [ ] Add a clip workflow finalizer that validates expected clip coverage and
+- [x] Add a clip workflow finalizer that validates expected clip coverage and
   writes `experiment_index/finalized_runs/<workflow_id>`.
 - [ ] Teach core readers to resolve finalized clip collections in addition to
   traditional top-level run groups.
@@ -239,6 +239,11 @@ Ready for pilot:
   detect quality wrote `quality_reports/<run>` under the imported detect run,
   and `refine_detect` consumed that explicit quality run to produce a curated
   `refined_detect_runs/<run>`.
+- [x] Clip-local smoke from an imported cluster detect artifact succeeded:
+  `import_run_group_artifact --use-intended-target` promoted the run under
+  `clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run>`, detect quality
+  wrote clip-local `quality_reports/<run>`, and `refine_detect` wrote
+  `clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs/<run>`.
 - [x] The imported-detect validator preserves the imported model-output core
   fingerprint while allowing the known mutable derived child
   `quality_reports/`.
@@ -256,6 +261,11 @@ Remaining:
 - [ ] Add `scripts/submit_detect_quality_batches_bsub.sh`, or document that
   detect quality remains workstation/local for now.
 - [ ] Add `scripts/submit_refine_detect_batches_bsub.sh`.
+- [x] Add clip-aware validation/reporting utilities for imported detect and
+  refined-detect paths so operators do not need to inspect nested `zarr.json`
+  metadata manually.
+- [ ] Add an explicit detect-quality report validator if the quality report
+  becomes a hard contract separate from `refine_detect` consumption.
 - [ ] Ensure registry discovery can select recordings with `detect='ok'` and
   missing or stale `refined_detect`.
 - [ ] Ensure `refine_detect_batch` emits cluster-friendly JSONL logs and
@@ -487,6 +497,56 @@ Implementation tasks:
 - [ ] Keep registry as a fast query projection, not the authoritative source
   of the data. Zarr run groups remain authoritative.
 
+### B2. Clipped Recording Orchestration
+
+Policy:
+
+- Treat `(recording_id, camera_serial, clip_id)` as the cluster work unit.
+- Run per-clip detect, import, validation, detect quality, and refined detect
+  independently in clip-local namespaces.
+- Use CPU-only jobs for import, validation, detect quality, and refined detect;
+  do not hold a GPU after model inference completes.
+- Fan in with one recording-level finalizer that writes the collection
+  manifest, logical latest alias, consolidated metadata refresh, and registry
+  projection when enabled.
+
+Implementation tasks:
+
+- [x] Add a dry-run clip inventory/planner that emits one work item per
+  clip-camera:
+  `scripts/py -m fisheye.utils.plan_clipped_detect_refine_workflow`.
+- [x] Add optional deterministic run-name controls for detect artifact,
+  detect-quality, and refined-detect stages so dependent jobs do not need to
+  discover timestamped names from previous outputs.
+- [x] Add a dry-run-safe submitter that consumes the plan and creates per-clip
+  dependent job scripts/manifests:
+  `scripts/py -m fisheye.utils.submit_clipped_detect_refine_plan_bsub`.
+- [ ] Promote the submitter from one-clip smoke mode to broad fan-out after the
+  one-clip chain is validated on PRFS.
+- [x] Add a refined-detect validator after the per-clip chain:
+  `scripts/py -m fisheye.utils.validate_refined_detect_run`.
+- [x] Add a real recording-level finalizer after the per-clip chain:
+  detect artifact -> import -> validate -> detect quality -> refine detect ->
+  validate refined detect -> finalize collection.
+  `scripts/py -m fisheye.utils.finalize_clipped_detect_refine_workflow`
+  validates every planned clip-camera refined run and writes
+  `experiment_index/finalized_runs/<workflow_id>` only when all checks pass.
+- [x] Add per-stage JSON reports that include clip id, camera serial, run
+  names, target group paths, job id, queue, host, timing, and validation state.
+- [x] Add a recording-level finalizer that verifies expected clip-camera
+  refined outputs, per-clip `frame_counts` length, and
+  `recording_frame_index.parquet` clip/frame continuity before writing a
+  finalized collection manifest.
+- [x] Add retry/idempotence guardrails: submit-mode preflight refuses existing
+  planned detect, detect-quality, refined, or finalized collection targets
+  unless `--allow-existing-outputs` is explicitly passed.
+- [x] Add a collection resolver for downstream readers so they can map
+  `recording_frame_id` to `(clip_id, clip_local_frame_index, run_path)`.
+  `scripts/py -m fisheye.utils.resolve_clipped_refined_detect_collection`
+  resolves a finalized collection and can export a frame/run mapping parquet.
+- [ ] Add optional resume/skip-valid-output mode after one-clip finalizer smoke
+  proves the fail-closed path on PRFS.
+
 ### C. Direct Write Versus Artifact Import
 
 Short-term:
@@ -571,6 +631,19 @@ Implementation tasks:
 10. Generalize run-group artifact packer and validator beyond detection.
 11. Generalize serialized run-group importer beyond detection.
 12. Switch broad production cluster jobs from direct write to artifact/import.
+
+For clipped sleepyfish-style recordings, use this narrower order before broad
+parallel runs:
+
+1. Build a clip-camera work-item inventory from the clipped analysis Zarr and
+   frame-index sidecars.
+2. Run one more clip end-to-end through detect artifact -> import -> validate
+   -> detect quality -> refined detect -> validate refined detect.
+3. Add the workflow submitter that can submit the same chain for all clips with
+   bounded active GPU jobs.
+4. Add the recording-level finalizer and collection manifest.
+5. Run the full clipped recording only after the finalizer can fail closed on
+   missing, failed, duplicated, or stale clip outputs.
 
 ## Open Questions
 

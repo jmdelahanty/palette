@@ -82,6 +82,13 @@ work item should depend on the relevant clip-local imports and should be the
 only job that updates shared experiment-level indexes, logical latest aliases,
 consolidated metadata, or registry projections.
 
+Use `scripts/py -m fisheye.utils.plan_clipped_detect_refine_workflow` as the
+first conservative step for a clipped recording. It is dry-run only: it reads
+`recording_clip_index.json`, creates deterministic run names, and prints the
+exact per-clip commands for detection artifact submission, import, validation,
+detect quality, and refined detect. Actual LSF submission should consume this
+plan rather than rediscovering clip rows or relying on mutable `latest` attrs.
+
 ## Video Decode Storage Policy
 
 For single-pass detection, do not copy full source videos to node-local scratch
@@ -175,9 +182,11 @@ Current status:
   step/window-level first. Add internal Dask only after the metric writer has a
   clear disjoint-slice contract.
 - `detect_quality` and `refine_detect` are single-process single-writer stages
-  today. On the cluster, run them by recording or clip namespace first. Do not
-  wrap their internal writes in Dask unless the writer is redesigned around
-  disjoint physical Zarr chunks or scratch artifacts plus serialized import.
+  today. On the cluster, run them by recording or clip namespace first, then run
+  `validate_refined_detect_run` before any fan-in finalizer consumes the output.
+  Do not wrap their internal writes in Dask unless the writer is redesigned
+  around disjoint physical Zarr chunks or scratch artifacts plus serialized
+  import.
 
 When running movement/bout analysis locally, `scripts/run_movement_bout_batch_pipeline`
 supports conservative archive-level scheduling. The default remains serial
@@ -535,23 +544,23 @@ scripts/submit_detect_artifact_bsub.sh \
   --batch-size 16
 ```
 
-The current importer still promotes detection artifacts into top-level
-`detect_runs/<run>`. Clip smoke packages therefore record
-`intended_target_group_path=clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run>`
-for the next clip-importer slice, but they should be treated as package-only
-artifacts until that importer support is enabled.
+The importer can promote detection artifacts into either top-level
+`detect_runs/<run>` or a clip-local intended target. Clip smoke packages record
+`intended_target_group_path=clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run>`;
+use `--use-intended-target` when importing those packages into clipped analysis
+archives.
 
-Apply-mode importer support remains a separate serialized step. Until that
-apply mode is in place, these packages are durable transfer artifacts, not
-canonical completed analysis runs. The LSF wrapper also writes
-`<label>.<JOBID>.transfer.json` next to the tarball with the scratch-to-PRFS
-copy timing.
+Apply-mode importer support is a separate serialized step. Until apply has
+completed successfully, packages are durable transfer artifacts, not canonical
+completed analysis runs. The LSF wrapper also writes `<label>.<JOBID>.transfer.json`
+next to the tarball with the scratch-to-PRFS copy timing.
 
 Dry-run importer validation:
 
 ```bash
 scripts/py -m fisheye.utils.import_run_group_artifact \
-  /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz \
+  --use-intended-target
 ```
 
 The dry-run importer extracts to a temporary validation directory, recomputes
@@ -563,13 +572,17 @@ Apply mode:
 ```bash
 scripts/py -m fisheye.utils.import_run_group_artifact \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz \
+  --use-intended-target \
   --apply
 ```
 
-Apply mode copies the packaged run group to `detect_runs/.incoming/<run_name>/`,
-revalidates it there, promotes it to `detect_runs/<run_name>/`, and writes an
-import receipt at `detect_runs/.imports/<run_name>_import_receipt.json`. For
-first use on a new cluster path, test with `--target-zarr` pointing at a
+Apply mode copies the packaged run group to
+`clips/<clip_id>/cameras/<camera_serial>/detect_runs/.incoming/<run_name>/`,
+revalidates it there, promotes it to
+`clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run_name>/`, and writes an
+import receipt at
+`clips/<clip_id>/cameras/<camera_serial>/detect_runs/.imports/<run_name>_import_receipt.json`.
+For first use on a new cluster path, test with `--target-zarr` pointing at a
 disposable Zarr before applying to the canonical archive.
 
 **Logs:** `<root>/logs/run_detections_batch/bsub_submissions/detect_<run_id>/`

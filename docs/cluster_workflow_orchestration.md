@@ -145,6 +145,162 @@ The detect job owns expensive model inference. Everything after import is
 either structural validation, quality scoring, deterministic filtering, or
 metadata projection.
 
+## Clipped Recording DAG
+
+For rolling-clip recordings, the primary parallelism unit is one
+`(recording_id, camera_serial, clip_id)` namespace. Each clip-camera should run
+the detect-to-refine chain independently, then one recording-level finalizer
+should fan in those results.
+
+Per clip-camera:
+
+```text
+detect artifact job (GPU)
+  -> import detect artifact job (CPU/storage)
+  -> validate imported detect job (CPU)
+  -> detect quality job (CPU)
+  -> refined detect job (CPU)
+  -> validate refined detect job (CPU)
+```
+
+Per recording-camera after all clip-camera chains succeed:
+
+```text
+recording-level finalizer job (CPU)
+  -> verify clip coverage and frame-index continuity
+  -> write collection manifest / logical latest aliases
+  -> refresh consolidated metadata if policy requires it
+  -> project registry/status rows when the registry is cluster-visible
+```
+
+The per-clip jobs may run in parallel because they write disjoint namespaces:
+
+```text
+clips/<clip_id>/cameras/<serial>/detect_runs/<run>
+clips/<clip_id>/cameras/<serial>/refined_detect_runs/<run>
+```
+
+They should not write recording-level collection metadata, parent logical
+latest aliases, registry rows, or consolidated metadata. Those shared updates
+belong to the finalizer.
+
+Clip-local `latest` attrs are acceptable inside an isolated clip-camera run
+family because only that clip chain owns that namespace. Recording-level
+consumers should not infer a complete recording surface from per-clip `latest`
+attrs. They should consume an explicit finalized collection manifest that maps
+each clip to the selected detect/refined runs.
+
+The first implementation slice is a dry-run planner:
+
+```bash
+scripts/py -m fisheye.utils.plan_clipped_detect_refine_workflow \
+  <recording_dir> \
+  --model <detect_model.pt> \
+  --workflow-id <stable_workflow_id> \
+  --output-json <recording_dir>/derived/cluster_artifacts/detect_refine_plan.json
+```
+
+It emits deterministic names for the clip-local detect, detect-quality, and
+refined-detect runs. Deterministic names are preferred for scheduled DAGs
+because dependency jobs can use explicit paths instead of reading `latest` or
+parsing a previous job's timestamped output.
+
+The second implementation slice consumes that plan and prepares the LSF
+dependency chain:
+
+```bash
+scripts/py -m fisheye.utils.submit_clipped_detect_refine_plan_bsub \
+  <recording_dir>/derived/cluster_artifacts/detect_refine_plan.json \
+  --limit 1
+```
+
+This command is dry-run by default. It writes a submission bundle with per-stage
+job scripts, expected status JSON paths, exact `bsub` commands, and a finalizer
+job that depends on every `validate_refined_detect` stage. The CPU dependency
+chain is import, imported-detect validation, detect quality, refined detect,
+refined-detect validation, and final collection validation. To submit a single
+clip smoke, add `--submit --limit 1`. Submit mode refuses more than one work
+unit unless `--allow-multiple` is explicitly passed; broad fan-out should wait
+until the one-clip chain and finalizer checks are green.
+
+Submit mode also performs a Zarr target preflight. If any planned clip-local
+detect run, detect-quality report, refined run, or finalized collection already
+exists, submission fails unless `--allow-existing-outputs` is explicitly set.
+Use a new workflow id for ordinary retries; only bypass this guard during
+intentional manual recovery.
+
+### Finalizer Responsibilities
+
+The current finalizer is intentionally a small CPU job:
+`scripts/py -m fisheye.utils.finalize_clipped_detect_refine_workflow`. It:
+
+- read all per-clip stage reports and require `status=ok`;
+- validate that every expected clip-camera from `recording_clip_index` or
+  `recording_frame_index.parquet` has a selected refined-detect run;
+- check unexpected frame-count changes by comparing each refined
+  `instances/frame_counts` vector length to the planned clip `frame_count`;
+- audit `recording_frame_index.parquet` for planned clip-camera row counts,
+  contiguous `clip_local_frame_index` values, duplicate `recording_frame_id`
+  values, and camera-level `recording_frame_id` continuity;
+- write a recording-level collection manifest with selected run paths;
+- write `experiment_index/finalized_runs/<workflow_id>`;
+- update parent-level `refined_detect_runs.latest_collection` only for the
+  finalized collection, not while individual clips are still running;
+- optionally refresh consolidated metadata and registry projections after the
+  Zarr state is complete.
+
+The finalizer should not concatenate large per-clip arrays unless a downstream
+consumer explicitly requires a materialized parent-level array. The preferred
+first representation is a manifest-backed collection plus the frame-index
+mapping that already resolves `(recording_frame_id, clip_id,
+clip_local_frame_index)`.
+
+Downstream readers should use
+`scripts/py -m fisheye.utils.resolve_clipped_refined_detect_collection` or the
+underlying `build_collection_frame_map()` helper to resolve a finalized
+collection into `(recording_frame_id, clip_id, clip_local_frame_index,
+refined_group_path)`. This keeps collection semantics centralized and avoids
+each consumer independently scanning `clips/`.
+
+### Scheduler Pattern For Clips
+
+For a small number of clips, a submitter can create explicit LSF dependency
+chains per clip and a finalizer that depends on every refined validation job.
+For many clips, prefer a generated workflow manifest plus job arrays or grouped
+CPU jobs, with the finalizer depending on the array/group completion and then
+validating report files.
+
+Rules:
+
+- Use GPU queues only for model inference or GPU decode/cache stages.
+- Use CPU queues such as `short` for import, validation, detect quality, and
+  refined detect.
+- Cap active clip GPU jobs to avoid flooding shared storage with simultaneous
+  large-video reads.
+- Do not hold a GPU while detect quality or refined detect runs.
+- Do not let multiple jobs write the same clip-local run family/run name.
+- Keep downstream inputs explicit: archive path, clip id, camera serial,
+  detect run, quality run, refined run, and target group path should all come
+  from reports or the workflow manifest, not from broad `latest` discovery.
+
+### Failure And Retry For Clips
+
+Clip workflows should be idempotent by default:
+
+- A failed detect job leaves only scratch artifacts and logs.
+- A failed import leaves `.incoming` or moves it to `.failed` in that clip-local
+  run family.
+- A failed quality/refine job writes a failed report and does not update
+  recording-level collection metadata.
+- Retrying a clip should either use a new run name or require explicit
+  overwrite/cleanup.
+- The finalizer should fail closed if any expected clip is missing, failed, or
+  points to a stale source run.
+
+This pattern allows partial reruns: only the failed clips need to be retried,
+and successful clip-local outputs remain usable as long as the finalizer has
+not selected a different collection.
+
 ## LSF Dependency Pattern
 
 LSF dependencies should express the stage graph explicitly. A concrete
@@ -165,8 +321,14 @@ import_job=$(bsub -q short -n 2 -W 1:00 \
   -oo logs/import.%J.out -eo logs/import.%J.err \
   scripts/run_import_detect_artifact_job.sh)
 
-quality_job=$(bsub -q short -n 2 -W 1:00 \
+validate_import_job=$(bsub -q short -n 2 -W 1:00 \
   -w "done(${import_job})" \
+  -J palette_validate_detect \
+  -oo logs/validate_detect.%J.out -eo logs/validate_detect.%J.err \
+  scripts/run_validate_imported_detect_job.sh)
+
+quality_job=$(bsub -q short -n 2 -W 1:00 \
+  -w "done(${validate_import_job})" \
   -J palette_detect_quality \
   -oo logs/quality.%J.out -eo logs/quality.%J.err \
   scripts/run_detect_quality_job.sh)
@@ -176,6 +338,12 @@ refine_job=$(bsub -q short -n 4 -W 1:00 \
   -J palette_refine_detect \
   -oo logs/refine.%J.out -eo logs/refine.%J.err \
   scripts/run_refine_detect_job.sh)
+
+validate_refined_job=$(bsub -q short -n 2 -W 1:00 \
+  -w "done(${refine_job})" \
+  -J palette_validate_refined_detect \
+  -oo logs/validate_refined.%J.out -eo logs/validate_refined.%J.err \
+  scripts/run_validate_refined_detect_job.sh)
 ```
 
 The exact queue names and wall times are deployment choices. On the Janelia LSF
@@ -377,11 +545,14 @@ jobs/
   validate_detect.<jobid>.json
   detect_quality.<jobid>.json
   refine_detect.<jobid>.json
+  validate_refined_detect.<jobid>.json
 logs/
   detect_artifact.<jobid>.out
   detect_artifact.<jobid>.err
   import_detect.<jobid>.out
   import_detect.<jobid>.err
+  validate_refined_detect.<jobid>.out
+  validate_refined_detect.<jobid>.err
 ```
 
 The workflow manifest should include:
@@ -404,7 +575,7 @@ manifests complement stage provenance; they do not replace it.
 
 The next implementation slice should avoid solving the whole pipeline at once.
 
-Recommended scope:
+Recommended single-recording scope:
 
 1. Add CPU-only LSF submitter for detect quality.
 2. Add CPU-only LSF submitter for refined detect.
@@ -415,6 +586,23 @@ Recommended scope:
 5. Add a small workflow submitter or documented operator pattern that chains:
    imported detect validation -> detect quality -> refined detect -> refined
    validation.
+
+Recommended clipped-recording scope:
+
+1. Add a clip inventory/planner that emits one work item per
+   `(recording_id, camera_serial, clip_id)`.
+2. Submit clip-local detect artifact jobs with explicit `--workflow-id`,
+   `--recording-id`, `--clip-id`, `--clip-index`, and `--camera-serial`.
+3. Submit dependent CPU jobs per clip for import, validation, detect quality,
+   refined detect, and refined validation.
+4. Write one JSON report per stage containing clip identity, run names, target
+   group paths, queue, job id, timing, and validation status.
+5. Add a recording-level finalizer that reads those reports and writes the
+   finalized collection manifest.
+6. Run the one-clip chain through the finalizer before enabling
+   `--allow-multiple`.
+7. Keep registry refresh out of the clip fan-out path; project registry rows
+   only from the finalizer once the collection is complete.
 
 Keep registry refresh out of this slice unless the cluster-visible registry
 path is already decided. The workflow can remain explicit-path and explicit-run

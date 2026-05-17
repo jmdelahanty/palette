@@ -267,6 +267,7 @@ def build_detection_artifact(
     clip_id: Optional[str] = None,
     clip_index: Optional[int] = None,
     camera_serial: Optional[str] = None,
+    run_name: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run YOLO into scratch and package only the completed detect run group."""
     video_path = video_path.expanduser().resolve()
@@ -350,6 +351,7 @@ def build_detection_artifact(
             use_gpu=use_gpu,
             write_raw_video_metadata=False,
             overwrite_raw_video_metadata=False,
+            run_name=run_name,
         )
     artifact_timing["detect_yolo_seconds_total"] = time.perf_counter() - detect_start
 
@@ -493,6 +495,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip-id", default=None, help="Optional source clip id, e.g. clip_000000")
     parser.add_argument("--clip-index", type=int, default=None, help="Optional zero-based source clip index")
     parser.add_argument("--camera-serial", default=None, help="Optional camera serial for clip-camera provenance")
+    parser.add_argument("--run-name", default=None, help="Optional explicit detect run group name")
     return parser
 
 
@@ -524,6 +527,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             clip_id=args.clip_id,
             clip_index=args.clip_index,
             camera_serial=args.camera_serial,
+            run_name=args.run_name,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

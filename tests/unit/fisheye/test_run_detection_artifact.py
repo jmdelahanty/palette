@@ -173,3 +173,35 @@ def test_build_detection_artifact_packages_detect_run_group(
         names = set(tar.getnames())
     assert "palette_run_group_artifact/artifact_manifest.json" in names
     assert "palette_run_group_artifact/run_group/frame_indices/zarr.json" in names
+
+
+def test_build_detection_artifact_can_request_deterministic_run_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake")
+    target_zarr = tmp_path / "recording_analysis.zarr"
+    _write_group(target_zarr)
+    artifact_dir = tmp_path / "artifact"
+
+    def fake_detect_yolo(**kwargs):
+        run_name = kwargs["run_name"]
+        scratch_zarr = Path(kwargs["output_zarr"])
+        run_group = scratch_zarr / "detect_runs" / run_name
+        _write_group(run_group)
+        for name in mod.REQUIRED_DETECT_ARRAYS:
+            _write_array(run_group / name)
+        return run_name
+
+    monkeypatch.setattr(mod, "_detect_yolo", fake_detect_yolo)
+
+    summary = mod.build_detection_artifact(
+        video_path=video,
+        target_zarr=target_zarr,
+        artifact_dir=artifact_dir,
+        tarball_output=tmp_path / "artifact.tar.gz",
+        run_name="detect_planned_clip_000000_cam2010093",
+    )
+
+    assert summary["run_name"] == "detect_planned_clip_000000_cam2010093"
+    assert summary["target_group_path"] == "detect_runs/detect_planned_clip_000000_cam2010093"

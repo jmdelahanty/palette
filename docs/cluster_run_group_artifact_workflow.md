@@ -421,6 +421,14 @@ scripts/py -m fisheye.utils.import_run_group_artifact \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz
 ```
 
+For rolling-clip artifacts, use the manifest's clip-local intended target:
+
+```bash
+scripts/py -m fisheye.utils.import_run_group_artifact \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz \
+  --use-intended-target
+```
+
 This command extracts only to a temporary validation directory and prints a
 strict JSON plan. It validates the manifest shape, strict JSON, required arrays,
 run-group tree hash, source input paths, target archive path, final target path,
@@ -434,6 +442,16 @@ scripts/py -m fisheye.utils.import_run_group_artifact \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts/<run>/<label>.<JOBID>.tar.gz \
   --apply
 ```
+
+For rolling-clip artifacts, add `--use-intended-target --apply` so the run lands
+under `clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run_name>` instead
+of the compatibility top-level `detect_runs/<run_name>` path.
+
+For clustered clip DAGs, prefer deterministic run names instead of timestamped
+names. The detection artifact submitter accepts `--detect-run-name`, which is
+passed through to `fisheye.utils.run_detection_artifact --run-name` and then to
+the scratch `detect_yolo` run. This makes the downstream import, validation,
+quality, and refine commands fully known before submission.
 
 Apply mode first runs the same dry-run validations. If they pass, it copies the
 packaged run group to `<family_parent>/.incoming/<run_name>/`, revalidates the
@@ -476,6 +494,101 @@ scripts/py -m fisheye.refinement.refine_detect \
   --config configs/fisheye/default.yaml \
   --per-frame-top-k 1
 ```
+
+For a clip-local imported detect run, use explicit family paths:
+
+```bash
+scripts/py -m fisheye.refinement.detect_quality \
+  <recording_analysis.zarr> \
+  --detect-family-path clips/<clip_id>/cameras/<camera_serial>/detect_runs \
+  --run <imported_detect_run> \
+  --quality-run-name <quality_run_name>
+
+scripts/py -m fisheye.refinement.refine_detect \
+  <recording_analysis.zarr> \
+  --detect-family-path clips/<clip_id>/cameras/<camera_serial>/detect_runs \
+  --refined-family-path clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs \
+  --detect-run <imported_detect_run> \
+  --quality-run <quality_run_name> \
+  --run-name <refined_run_name> \
+  --per-frame-top-k 1
+
+scripts/py -m fisheye.utils.validate_refined_detect_run \
+  <recording_analysis.zarr> \
+  --target-group-path clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs/<refined_run_name>
+```
+
+Dry-run planning for all clip-camera chains:
+
+```bash
+scripts/py -m fisheye.utils.plan_clipped_detect_refine_workflow \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording> \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/<run>/weights/best.pt \
+  --workflow-id sleepyfish_detect_refine_smoke_YYYYMMDD \
+  --output-json /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/derived/cluster_artifacts/detect_refine_plan.json
+```
+
+The planner does not submit jobs or mutate Zarrs. It reads
+`recording_clip_index.json`, emits one work item per `(recording_id,
+camera_serial, clip_id)`, generates deterministic detect/quality/refined run
+names, and records the exact commands for detect artifact submission, import,
+post-import validation, detect quality, refined detect, and refined-detect
+validation.
+
+To prepare the dependent LSF scripts from that plan without submitting:
+
+```bash
+scripts/py -m fisheye.utils.submit_clipped_detect_refine_plan_bsub \
+  /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/derived/cluster_artifacts/detect_refine_plan.json \
+  --limit 1
+```
+
+The submitter writes a local submission bundle containing one script per CPU
+stage, one finalizer script, and a `submission_manifest.json` with the planned
+dependency chain. The CPU chain is import, imported-detect validation, detect
+quality, refined detect, refined-detect validation, and final collection
+validation. It is dry-run by default. Use `--submit --limit 1` for the first
+cluster smoke; use `--allow-multiple` only after the one-clip chain has passed
+import validation, detect-quality, refined-detect, and finalizer checks.
+
+Before submission, the submitter preflights planned target paths in the
+analysis Zarr. Dry-runs report collisions in `target_preflight`; submit mode
+refuses to proceed when planned detect run, detect-quality report, refined run,
+or finalized collection paths already exist. Prefer a new `--workflow-id` for
+retries. `--allow-existing-outputs` exists for deliberate expert recovery, not
+normal operation.
+
+The finalizer can also be run manually against a completed plan:
+
+```bash
+scripts/py -m fisheye.utils.finalize_clipped_detect_refine_workflow \
+  <recording_dir>/derived/cluster_artifacts/detect_refine_plan.json \
+  --submission-manifest <submission_manifest.json> \
+  --apply
+```
+
+It fails closed if any planned clip-camera refined run is missing, if the
+refined validator fails, if the refined `instances/frame_counts` length does
+not match the planned clip `frame_count`, if `recording_frame_index.parquet`
+has missing/non-contiguous planned clip-camera rows, or if required stage status
+JSONs are missing/non-ok. Successful apply writes
+`experiment_index/finalized_runs/<workflow_id>` and updates the parent
+`refined_detect_runs.latest_collection` pointer.
+
+Resolve a finalized collection to a parent-frame mapping:
+
+```bash
+scripts/py -m fisheye.utils.resolve_clipped_refined_detect_collection \
+  <recording_analysis.zarr> \
+  --collection-id <workflow_id> \
+  --output-parquet <recording_dir>/derived/cluster_artifacts/<workflow_id>_frame_run_map.parquet
+```
+
+The resolver joins `recording_frame_index.parquet` to the finalized
+`selected_runs` manifest and emits rows with `recording_frame_id`,
+`clip_local_frame_index`, `clip_id`, `camera_serial`, and the selected
+detect/refined run paths. Readers should use this resolver instead of scanning
+clip directories independently.
 
 The batch wrappers can also plan against a direct Zarr directory path without
 registry discovery:
@@ -669,7 +782,9 @@ For rolling-clip smoke runs, `scripts/submit_detect_artifact_bsub.sh` accepts
 `--workflow-id`, `--recording-id`, `--clip-id`, `--clip-index`, and
 `--camera-serial`. These values are written to `submission_context.json`, echoed
 in the job stdout, carried into the artifact runner, and stored in
-`artifact_manifest.json`, `artifact_summary.json`, and the transfer log. Until
-the clip importer slice lands, clip packages keep the importer-compatible
-top-level `target_group_path` and separately record
+`artifact_manifest.json`, `artifact_summary.json`, and the transfer log. Clip
+packages keep an importer-compatible top-level `target_group_path` and also
+record
 `intended_target_group_path=clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run>`.
+Use `import_run_group_artifact --use-intended-target` for the clip-local
+canonical import path.

@@ -130,6 +130,11 @@ def _manifest_target_path(manifest: dict[str, Any]) -> Optional[Path]:
     return Path(value).expanduser()
 
 
+def _is_safe_relative_group_path(value: str) -> bool:
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
 def _validate_manifest_shape(manifest: Any) -> tuple[Optional[dict[str, Any]], list[str]]:
     errors: list[str] = []
     if not isinstance(manifest, dict):
@@ -150,9 +155,13 @@ def _validate_manifest_shape(manifest: Any) -> tuple[Optional[dict[str, Any]], l
     if not isinstance(target_group_path, str) or not target_group_path:
         errors.append("target_group_path must be a non-empty string")
     if isinstance(target_group_path, str) and (
-        target_group_path.startswith("/") or ".." in Path(target_group_path).parts
+        not _is_safe_relative_group_path(target_group_path)
     ):
         errors.append("target_group_path must be a relative path without '..'")
+    intended_target_group_path = manifest.get("intended_target_group_path")
+    if isinstance(intended_target_group_path, str) and intended_target_group_path:
+        if not _is_safe_relative_group_path(intended_target_group_path):
+            errors.append("intended_target_group_path must be a relative path without '..'")
     if layout not in SUPPORTED_LAYOUTS:
         errors.append(f"unsupported layout: {layout!r}")
     if latest_policy not in LATEST_POLICY_CHOICES:
@@ -168,6 +177,39 @@ def _validate_manifest_shape(manifest: Any) -> tuple[Optional[dict[str, Any]], l
     if _manifest_target_path(manifest) is None:
         errors.append("target_archive_path must be a non-empty string")
     return manifest, errors
+
+
+def _effective_target_group_path(
+    manifest: dict[str, Any],
+    *,
+    use_intended_target: bool,
+) -> tuple[str, str, list[str]]:
+    """Resolve the run-group destination path from artifact manifest metadata."""
+    errors: list[str] = []
+    target_group_path = manifest.get("target_group_path")
+    intended_target_group_path = manifest.get("intended_target_group_path")
+    run_family = str(manifest.get("run_family") or "")
+    run_name = str(manifest.get("run_name") or "")
+    selected_source = "target_group_path"
+    selected = target_group_path
+
+    if use_intended_target:
+        if not isinstance(intended_target_group_path, str) or not intended_target_group_path:
+            errors.append("--use-intended-target was requested, but intended_target_group_path is missing")
+        else:
+            selected = intended_target_group_path
+            selected_source = "intended_target_group_path"
+
+    if not isinstance(selected, str) or not selected:
+        return "", selected_source, errors
+    if not _is_safe_relative_group_path(selected):
+        errors.append(f"{selected_source} must be a relative path without '..'")
+        return selected, selected_source, errors
+    if run_family and run_name:
+        parts = Path(selected).parts
+        if len(parts) < 2 or parts[-2:] != (run_family, run_name):
+            errors.append(f"{selected_source} must end with {run_family}/{run_name}")
+    return selected, selected_source, errors
 
 
 def _sha256_file(path: Path) -> str:
@@ -198,6 +240,7 @@ def build_import_plan(
     overwrite: bool = False,
     validate_source_inputs: bool = True,
     keep_extracted: Optional[Path] = None,
+    use_intended_target: bool = False,
 ) -> dict[str, Any]:
     """Return a dry-run import plan for a run-group artifact tarball."""
     tarball_path = tarball_path.expanduser().resolve()
@@ -252,7 +295,12 @@ def build_import_plan(
         manifest = manifest or {}
         run_family = str(manifest.get("run_family") or "")
         run_name = str(manifest.get("run_name") or "")
-        target_group_path = str(manifest.get("target_group_path") or "")
+        manifest_target_group_path = str(manifest.get("target_group_path") or "")
+        effective_target_group_path, target_path_source, target_selection_errors = _effective_target_group_path(
+            manifest,
+            use_intended_target=use_intended_target,
+        )
+        target_group_path = effective_target_group_path
         latest_policy = str(manifest.get("latest_policy") or "")
         layout = str(manifest.get("layout") or "")
         manifest_target = _manifest_target_path(manifest)
@@ -324,7 +372,8 @@ def build_import_plan(
         errors.extend(f"target_archive: {error}" for error in target_errors)
 
         final_path = resolved_target / target_group_path if resolved_target is not None and target_group_path else None
-        family_path = resolved_target / run_family if resolved_target is not None and run_family else None
+        run_family_relative_path = str(Path(target_group_path).parent) if target_group_path else run_family
+        family_path = resolved_target / run_family_relative_path if resolved_target is not None and run_family_relative_path else None
         incoming_path = family_path / ".incoming" / run_name if family_path is not None and run_name else None
         failed_path_pattern = (
             str(family_path / ".failed" / f"{run_name}_{_utc_now_label()}")
@@ -333,6 +382,7 @@ def build_import_plan(
         )
 
         target_path_errors: list[str] = []
+        target_path_errors.extend(target_selection_errors)
         if final_path is None:
             target_path_errors.append("final target path could not be resolved")
         elif final_path.exists() and not overwrite:
@@ -425,7 +475,11 @@ def build_import_plan(
             "source_tarball": str(tarball_path),
             "target_archive_path": str(resolved_target) if resolved_target is not None else None,
             "target_group_path": target_group_path or None,
+            "manifest_target_group_path": manifest_target_group_path or None,
+            "target_group_path_source": target_path_source,
+            "use_intended_target": bool(use_intended_target),
             "run_family": run_family or None,
+            "run_family_path": run_family_relative_path or None,
             "run_name": run_name or None,
             "layout": layout or None,
             "incoming_path": str(incoming_path) if incoming_path is not None else None,
@@ -461,6 +515,7 @@ def apply_import(
     target_zarr: Optional[Path] = None,
     overwrite: bool = False,
     validate_source_inputs: bool = True,
+    use_intended_target: bool = False,
 ) -> dict[str, Any]:
     """Apply an artifact import using .incoming promotion and receipt sidecar."""
     plan = build_import_plan(
@@ -468,6 +523,7 @@ def apply_import(
         target_zarr=target_zarr,
         overwrite=overwrite,
         validate_source_inputs=validate_source_inputs,
+        use_intended_target=use_intended_target,
     )
     if plan["status"] != "ok":
         plan["apply"] = True
@@ -476,13 +532,13 @@ def apply_import(
 
     tarball_path = Path(plan["source_tarball"]).expanduser().resolve()
     target_archive = Path(str(plan["target_archive_path"]))
-    run_family = str(plan["run_family"])
+    run_family_path = str(plan.get("run_family_path") or plan["run_family"])
     run_name = str(plan["run_name"])
     latest_policy = str(plan["latest_policy"])
     incoming_path = Path(str(plan["incoming_path"]))
     final_path = Path(str(plan["final_path"]))
     receipt_path = Path(str(plan["receipt_path"]))
-    family_path = target_archive / run_family
+    family_path = target_archive / run_family_path
     failed_base = family_path / ".failed"
     failed_path = failed_base / f"{run_name}_{_utc_now_label()}"
     apply_validations: dict[str, dict[str, Any]] = {}
@@ -552,7 +608,11 @@ def apply_import(
             "source_tarball_sha256": _sha256_file(tarball_path),
             "target_archive_path": str(target_archive),
             "target_group_path": plan["target_group_path"],
-            "run_family": run_family,
+            "manifest_target_group_path": plan.get("manifest_target_group_path"),
+            "target_group_path_source": plan.get("target_group_path_source"),
+            "use_intended_target": bool(plan.get("use_intended_target")),
+            "run_family": plan["run_family"],
+            "run_family_path": run_family_path,
             "run_name": run_name,
             "layout": plan["layout"],
             "final_path": str(final_path),
@@ -637,6 +697,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Do not require source_inputs paths to exist during dry-run validation",
     )
     parser.add_argument(
+        "--use-intended-target",
+        action="store_true",
+        help=(
+            "Import to artifact_manifest.json intended_target_group_path instead of "
+            "target_group_path. Use for clip-camera artifacts that should land under "
+            "clips/<clip>/cameras/<serial>/<run_family>/<run>."
+        ),
+    )
+    parser.add_argument(
         "--keep-extracted",
         type=Path,
         default=None,
@@ -656,6 +725,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             target_zarr=args.target_zarr,
             overwrite=args.overwrite,
             validate_source_inputs=not args.skip_source_input_checks,
+            use_intended_target=args.use_intended_target,
         )
     else:
         result = build_import_plan(
@@ -664,6 +734,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             overwrite=args.overwrite,
             validate_source_inputs=not args.skip_source_input_checks,
             keep_extracted=args.keep_extracted,
+            use_intended_target=args.use_intended_target,
         )
     print(json.dumps(result, indent=2, sort_keys=True, default=_json_default))
     return 0 if result["status"] == "ok" else 1

@@ -24,6 +24,21 @@ from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr
 
 _DETECT_QUALITY_STATUS_SOURCE = "runtime_detect_quality"
+DEFAULT_DETECT_FAMILY_PATH = "detect_runs"
+
+
+def _normalize_group_path(path: str) -> str:
+    value = str(path or "").strip().strip("/")
+    if not value:
+        raise ValueError("group path must be non-empty")
+    parts = Path(value).parts
+    if any(part == ".." for part in parts):
+        raise ValueError(f"group path must not contain '..': {path!r}")
+    return value
+
+
+def _join_group_path(*parts: str) -> str:
+    return "/".join(str(part).strip("/") for part in parts if str(part).strip("/"))
 
 
 def _emit_detect_quality_status(
@@ -32,6 +47,7 @@ def _emit_detect_quality_status(
     quality_run_name: str,
     source_detect_run: str,
     quality_score: Dict[str, object],
+    source_detect_family_path: str = DEFAULT_DETECT_FAMILY_PATH,
     console: Optional[object] = None,
 ) -> None:
     """Write a detect_quality step status row to the registry (non-fatal)."""
@@ -53,6 +69,7 @@ def _emit_detect_quality_status(
                 "quality_score": quality_score.get("overall_score"),
                 "clean_percentage": quality_score.get("coverage_score"),
                 "source_detect_run": source_detect_run,
+                "source_detect_family_path": source_detect_family_path,
             },
             console=None,
             auto_registry_from_env=True,
@@ -454,7 +471,9 @@ def calculate_sampled_quality_score(
 def save_quality_report(
     zarr_path: str,
     quality_report: Dict,
-    console: Optional[Any] = None
+    console: Optional[Any] = None,
+    detect_family_path: str = DEFAULT_DETECT_FAMILY_PATH,
+    quality_run_name: Optional[str] = None,
 ) -> str:
     """
     Save quality report to zarr file within the source detect run.
@@ -468,6 +487,8 @@ def save_quality_report(
         zarr_path: Path to zarr file
         quality_report: Report from analyze_detect_quality()
         console: Optional Rich console for output
+        quality_run_name: Optional explicit quality report run name. Used by
+            cluster planners when downstream refinement needs deterministic paths.
 
     Returns:
         Path to created quality report group
@@ -478,7 +499,10 @@ def save_quality_report(
 
     # Navigate to source detect run
     source_run = quality_report["source_run"]
-    detect_group = root[f"detect_runs/{source_run}"]
+    detect_family_path = _normalize_group_path(
+        str(quality_report.get("source_detect_family_path") or detect_family_path)
+    )
+    detect_group = root[_join_group_path(detect_family_path, source_run)]
 
     # Create quality_reports subgroup if needed
     if "quality_reports" not in detect_group:
@@ -486,9 +510,16 @@ def save_quality_report(
 
     quality_reports_group = detect_group["quality_reports"]
 
-    # Create timestamped run
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name = f"detect_quality_{timestamp}"
+    # Create timestamped or explicitly named run.
+    if quality_run_name is not None:
+        run_name = str(quality_run_name).strip()
+        if not run_name or "/" in run_name or run_name in {".", ".."}:
+            raise ValueError(f"Invalid quality run name: {quality_run_name!r}")
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_name = f"detect_quality_{timestamp}"
+    if run_name in quality_reports_group:
+        raise ValueError(f"{quality_reports_group.path}/{run_name} already exists")
     quality_group = quality_reports_group.create_group(run_name)
     quality_reports_group.attrs["latest"] = run_name
 
@@ -586,6 +617,8 @@ def save_quality_report(
         'command': ' '.join(sys.argv),
         'created_at_utc': datetime.now().isoformat(),
         'source_detect_run': source_run,
+        'source_detect_family_path': detect_family_path,
+        'source_detect_path': _join_group_path(detect_family_path, source_run),
         'jump_threshold': quality_report['artifacts']['jump_threshold'],
         'blip_gap_threshold': quality_report['artifacts'].get('blip_gap_threshold'),
         'jump_threshold_mode': quality_report['artifacts'].get('jump_threshold_mode', 'pixels'),
@@ -644,6 +677,7 @@ def save_quality_report(
         zarr_path=zarr_path,
         quality_run_name=run_name,
         source_detect_run=source_run,
+        source_detect_family_path=detect_family_path,
         quality_score=quality_report["quality_score"],
         console=console,
     )
@@ -654,6 +688,7 @@ def save_quality_report(
 def analyze_detect_quality(
     zarr_path: str,
     run_name: Optional[str] = None,
+    detect_family_path: str = DEFAULT_DETECT_FAMILY_PATH,
     jump_threshold: float = 100.0,
     blip_gap_threshold: int = 10,
     threshold_mode: str = "pixels",
@@ -673,14 +708,15 @@ def analyze_detect_quality(
         Complete quality analysis report
     """
     root = zarr.open(zarr_path, mode="r")
+    detect_family_path = _normalize_group_path(detect_family_path)
     sampled, sampled_meta = _read_sampled_import_meta(root)
     expected_count = _get_expected_subject_count(root)
 
     # Get detect run
     if run_name is None:
-        run_name = root["detect_runs"].attrs["latest"]
+        run_name = root[detect_family_path].attrs["latest"]
 
-    detect_group = root[f"detect_runs/{run_name}"]
+    detect_group = root[_join_group_path(detect_family_path, run_name)]
     frame_indices = detect_group["frame_indices"][:]
     bbox_coords = detect_group["bbox_norm_coords"][:]
 
@@ -780,6 +816,8 @@ def analyze_detect_quality(
 
     return {
         "source_run": run_name,
+        "source_detect_family_path": detect_family_path,
+        "source_detect_path": _join_group_path(detect_family_path, run_name),
         "coverage": {
             **coverage_stats,
             "multi_detection_frames": multi_detection_frames,
@@ -829,6 +867,14 @@ Examples:
     parser.add_argument("zarr_path", help="Path to zarr file")
     parser.add_argument("--run", help="Specific detect run to analyze (default: latest)")
     parser.add_argument(
+        "--detect-family-path",
+        default=DEFAULT_DETECT_FAMILY_PATH,
+        help=(
+            "Group path containing detect runs (default: detect_runs). "
+            "Use clips/<clip>/cameras/<serial>/detect_runs for clip-local runs."
+        ),
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=100.0,
@@ -855,6 +901,11 @@ Examples:
     parser.add_argument(
         "--no-save", action="store_true", help="Skip saving report to zarr"
     )
+    parser.add_argument(
+        "--quality-run-name",
+        default=None,
+        help="Optional explicit quality report run name (default: timestamped detect_quality_<local_time>).",
+    )
 
     args = parser.parse_args()
 
@@ -864,6 +915,8 @@ Examples:
     console.print(f"Zarr: {args.zarr_path}")
     if args.run:
         console.print(f"Run: {args.run}")
+    if args.detect_family_path != DEFAULT_DETECT_FAMILY_PATH:
+        console.print(f"Detect family path: {args.detect_family_path}")
     if args.threshold_mode == "scaled":
         console.print(
             f"Jump threshold: {args.threshold} px @ {args.threshold_reference_width:.0f}px reference "
@@ -877,6 +930,7 @@ Examples:
         report = analyze_detect_quality(
             args.zarr_path,
             run_name=args.run,
+            detect_family_path=args.detect_family_path,
             jump_threshold=args.threshold,
             threshold_mode=args.threshold_mode,
             threshold_reference_width=args.threshold_reference_width,
@@ -928,7 +982,13 @@ Examples:
         # Save if requested
         if args.save and not args.no_save:
             console.print()
-            save_quality_report(args.zarr_path, report, console=console)
+            save_quality_report(
+                args.zarr_path,
+                report,
+                console=console,
+                detect_family_path=args.detect_family_path,
+                quality_run_name=args.quality_run_name,
+            )
 
         sys.exit(0)
 

@@ -581,8 +581,8 @@ Palette implements only the setup pieces of this contract. Remaining slices:
 - Manifest/backfill schema for `recording_clip_index.{json,csv}`.
 - Registry tables or projections for clip children of a recording.
 - Analysis/training Zarr writers that can write clip-local run groups.
-- Run-group artifact/import support for
-  `clips/<clip_id>/cameras/<camera_serial>/<family>/<run>`.
+- Run-group artifact/import support beyond the current detection artifact
+  slice for `clips/<clip_id>/cameras/<camera_serial>/<family>/<run>`.
 - Finalize-stage utility for clip coverage checks, collection manifests,
   logical latest aliases, consolidated metadata, and registry projection.
 - Readers that can resolve finalized clip collections by `recording_frame_id`.
@@ -600,13 +600,14 @@ Read-only audit on 2026-05-16 found these expected stale assumptions:
   in `fisheye.utils.create_clipped_analysis_zarr`.
 - Current LSF batch submitters discover whole `*_analysis.zarr` archives, not
   `(recording_id, camera_serial, clip_id, stage)` work items.
-- Current detection, crop, keypoint, and mask writers write top-level groups
-  such as `detect_runs/<run>` and `crop_runs/<run>` and update parent `latest`
-  attrs directly.
-- `fisheye.utils.import_run_group_artifact` currently supports only the
-  detection artifact slice and requires `target_group_path ==
-  "<run_family>/<run_name>"`, so it cannot yet import to
-  `clips/<clip_id>/cameras/<camera_serial>/<run_family>/<run_name>`.
+- Most crop, keypoint, and mask writers still write top-level groups such as
+  `crop_runs/<run>` and update parent `latest` attrs directly.
+- `fisheye.utils.import_run_group_artifact` currently supports the detection
+  artifact slice. For rolling clips, pass `--use-intended-target` to import to
+  `clips/<clip_id>/cameras/<camera_serial>/detect_runs/<run_name>`.
+- `fisheye.refinement.detect_quality` and
+  `fisheye.refinement.refine_detect` accept explicit detect/refined family
+  paths for clip-local quality/refinement smoke runs.
 - Existing reader/status tools generally resolve `latest` from top-level run
   families and need a shared resolver for finalized clip collections.
 - Temporal analysis tools consume parent-level latest keypoint/detection

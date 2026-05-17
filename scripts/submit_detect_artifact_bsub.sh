@@ -23,6 +23,7 @@ CAMERA_SERIAL=""
 CONF=""
 IOU=""
 MAX_DET=""
+DETECT_RUN_NAME=""
 RESIZE_DIMS=()
 DRY_RUN=0
 OVERWRITE_ARTIFACT=0
@@ -61,6 +62,7 @@ Options:
   --clip-id ID             Optional clip id, e.g. clip_000000
   --clip-index N           Optional zero-based clip index
   --camera-serial SERIAL   Optional camera serial for clip-camera provenance
+  --detect-run-name NAME   Optional explicit detect run name inside the artifact
   --overwrite-artifact     Allow replacement of same scratch artifact path
   --dry-run                Print files and submit command; do not submit
   -h, --help               Show this message
@@ -92,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --clip-id) CLIP_ID="$2"; shift 2;;
     --clip-index) CLIP_INDEX="$2"; shift 2;;
     --camera-serial) CAMERA_SERIAL="$2"; shift 2;;
+    --detect-run-name) DETECT_RUN_NAME="$2"; shift 2;;
     --overwrite-artifact) OVERWRITE_ARTIFACT=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
@@ -137,7 +140,7 @@ mkdir -p "$RUN_DIR"
 
 scripts/py - "$RUN_DIR/submission_context.json" \
   "$ZARR" "$VIDEO" "$MODEL" "$CONFIG" "$OUTPUT_DIR" "$RUN_ID" "$RUN_LABEL" "$SAFE_LABEL" \
-  "$WORKFLOW_ID" "$RECORDING_ID" "$CLIP_ID" "$CLIP_INDEX" "$CAMERA_SERIAL" <<'PY'
+  "$WORKFLOW_ID" "$RECORDING_ID" "$CLIP_ID" "$CLIP_INDEX" "$CAMERA_SERIAL" "$DETECT_RUN_NAME" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -157,6 +160,7 @@ from pathlib import Path
     clip_id,
     clip_index,
     camera_serial,
+    detect_run_name,
 ) = sys.argv[1:]
 
 def optional(value: str):
@@ -178,6 +182,7 @@ payload = {
     "clip_id": optional(clip_id),
     "clip_index": int(clip_index) if clip_index else None,
     "camera_serial": optional(camera_serial),
+    "detect_run_name": optional(detect_run_name),
 }
 Path(output_path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -199,6 +204,7 @@ if [[ -n "$RECORDING_ID" ]]; then ARTIFACT_ARGS+=(--recording-id "$RECORDING_ID"
 if [[ -n "$CLIP_ID" ]]; then ARTIFACT_ARGS+=(--clip-id "$CLIP_ID"); fi
 if [[ -n "$CLIP_INDEX" ]]; then ARTIFACT_ARGS+=(--clip-index "$CLIP_INDEX"); fi
 if [[ -n "$CAMERA_SERIAL" ]]; then ARTIFACT_ARGS+=(--camera-serial "$CAMERA_SERIAL"); fi
+if [[ -n "$DETECT_RUN_NAME" ]]; then ARTIFACT_ARGS+=(--run-name "$DETECT_RUN_NAME"); fi
 if [[ "$OVERWRITE_ARTIFACT" == "1" ]]; then ARTIFACT_ARGS+=(--overwrite-artifact); fi
 
 printf -v ARTIFACT_ARGS_SHELL '%q ' "${ARTIFACT_ARGS[@]}"
@@ -306,6 +312,9 @@ echo "Job script: $JOB_SCRIPT"
 echo "Submission context: ${RUN_DIR}/submission_context.json"
 if [[ -n "$CLIP_ID" || -n "$CAMERA_SERIAL" ]]; then
   echo "Clip context: workflow_id=${WORKFLOW_ID:-<none>} recording_id=${RECORDING_ID:-<none>} clip_id=${CLIP_ID:-<none>} clip_index=${CLIP_INDEX:-<none>} camera_serial=${CAMERA_SERIAL:-<none>}"
+fi
+if [[ -n "$DETECT_RUN_NAME" ]]; then
+  echo "Detect run name: $DETECT_RUN_NAME"
 fi
 echo "Expected tarball: ${RUN_DIR}/${SAFE_LABEL}.<JOBID>.tar.gz"
 echo "Expected summary: ${RUN_DIR}/${SAFE_LABEL}.<JOBID>.summary.json"
