@@ -127,6 +127,40 @@ def test_check_clipped_detect_refine_submission_reports_incomplete(tmp_path: Pat
     assert result["status_counts"]["missing"] == 4
 
 
+def test_check_clipped_detect_refine_submission_treats_empty_summary_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _manifest(tmp_path)
+    summary = tmp_path / "artifacts" / "unit.123.summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text("", encoding="utf-8")
+
+    result = check_clipped_detect_refine_submission(manifest_path)
+
+    assert result["status"] == "incomplete"
+    assert result["work_items"][0]["detect_artifact"]["status"] == "missing"
+    assert result["work_items"][0]["detect_artifact"]["reason"] == "empty detect artifact summary JSON"
+
+
+def test_check_clipped_detect_refine_submission_treats_empty_status_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _manifest(tmp_path)
+    tarball = tmp_path / "artifacts" / "unit.123.tar.gz"
+    tarball.parent.mkdir(parents=True)
+    tarball.write_bytes(b"tarball")
+    _write_json(tmp_path / "artifacts" / "unit.123.summary.json", {"status": "ok"})
+    empty_status = tmp_path / "run" / "unit" / "status" / "import_detect.124.json"
+    empty_status.parent.mkdir(parents=True)
+    empty_status.write_text("", encoding="utf-8")
+
+    result = check_clipped_detect_refine_submission(manifest_path)
+
+    assert result["status"] == "incomplete"
+    assert result["work_items"][0]["stages"][0]["status"] == "missing"
+    assert result["work_items"][0]["stages"][0]["reason"] == "empty status JSON"
+
+
 def test_check_clipped_detect_refine_submission_cli_require_complete_blocks_incomplete(
     tmp_path: Path,
     capsys,

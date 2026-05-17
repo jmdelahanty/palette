@@ -66,6 +66,11 @@ def _load_status_payload(path_value: Any) -> tuple[dict[str, Any] | None, str | 
     if not path.exists():
         return None, "missing status JSON"
     try:
+        if path.stat().st_size == 0:
+            return None, "empty status JSON"
+    except OSError:
+        pass
+    try:
         payload = _read_json(path)
     except Exception as exc:
         return None, f"unreadable status JSON: {exc}"
@@ -95,7 +100,11 @@ def _stage_report(stage: Mapping[str, Any], *, work_unit_id: str | None = None) 
 
     payload, error = _load_status_payload(status_path)
     if error is not None:
-        status = "missing" if error in {"missing status path", "missing status JSON"} else "invalid"
+        status = (
+            "missing"
+            if error in {"missing status path", "missing status JSON", "empty status JSON"}
+            else "invalid"
+        )
         report.update({"status": status, "reason": error})
         return report
     assert payload is not None
@@ -142,6 +151,12 @@ def _detect_artifact_report(item: Mapping[str, Any]) -> dict[str, Any]:
     if not summary_path or not Path(summary_path).exists():
         report.update({"status": "missing", "reason": "missing detect artifact summary JSON"})
         return report
+    try:
+        if Path(summary_path).stat().st_size == 0:
+            report.update({"status": "missing", "reason": "empty detect artifact summary JSON"})
+            return report
+    except OSError:
+        pass
     try:
         summary = _read_json(Path(summary_path))
     except Exception as exc:
