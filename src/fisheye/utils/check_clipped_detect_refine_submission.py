@@ -95,7 +95,8 @@ def _stage_report(stage: Mapping[str, Any], *, work_unit_id: str | None = None) 
 
     payload, error = _load_status_payload(status_path)
     if error is not None:
-        report.update({"status": "missing", "reason": error})
+        status = "missing" if error in {"missing status path", "missing status JSON"} else "invalid"
+        report.update({"status": status, "reason": error})
         return report
     assert payload is not None
     status = str(payload.get("status") or "")

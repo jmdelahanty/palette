@@ -155,6 +155,24 @@ def test_check_clipped_detect_refine_submission_reports_failed_stage(tmp_path: P
     assert result["status_counts"]["missing"] == 2
 
 
+def test_check_clipped_detect_refine_submission_treats_unreadable_status_as_failed(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _manifest(tmp_path)
+    tarball = tmp_path / "artifacts" / "unit.123.tar.gz"
+    tarball.parent.mkdir(parents=True)
+    tarball.write_bytes(b"tarball")
+    _write_json(tmp_path / "artifacts" / "unit.123.summary.json", {"status": "ok"})
+    bad_status = tmp_path / "run" / "unit" / "status" / "import_detect.124.json"
+    bad_status.parent.mkdir(parents=True)
+    bad_status.write_text("{not json", encoding="utf-8")
+
+    result = check_clipped_detect_refine_submission(manifest_path)
+
+    assert result["status"] == "failed"
+    assert result["status_counts"]["invalid"] == 1
+
+
 def test_check_clipped_detect_refine_submission_keeps_dry_run_planned(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path, job_id="<detect_jobid:unit>")
 
