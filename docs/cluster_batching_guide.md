@@ -10,6 +10,7 @@ Related contract:
 - `docs/cluster_workflow_orchestration.md`
 - `docs/cluster_run_group_artifact_workflow.md`
 - `docs/cluster_pipeline_migration_checklist.md`
+- `docs/clipped_training_zarr_implementation_checklist.md`
 - `docs/environment_setup.md`
 
 Janelia-specific cluster policy source:
@@ -41,7 +42,8 @@ first parallelism unit when the storage layout gives each clip an independent
 namespace. Multiple jobs may process and import disjoint clip-local run groups
 in parallel; only experiment-level metadata updates such as clip indexes,
 `latest` pointers, consolidated metadata, and registry projections need to be
-serialized. See `docs/cluster_run_group_artifact_workflow.md`.
+serialized. See `docs/cluster_run_group_artifact_workflow.md` and
+`docs/orange_rolling_clip_recording_contract.md`.
 
 ## Local Batch Versus Cluster Workflow Scope
 
@@ -73,6 +75,12 @@ Do not treat `--jobs`, `--batch-size`, or a loop over many archives as the
 final cluster abstraction. Those controls are useful locally, but the cluster
 workflow layer should schedule explicit stage jobs and pass explicit run names
 instead of relying on `latest`.
+
+For clipped recordings, the batch abstraction should produce explicit
+`(recording_id, camera_serial, clip_id, stage)` work items. A separate finalize
+work item should depend on the relevant clip-local imports and should be the
+only job that updates shared experiment-level indexes, logical latest aliases,
+consolidated metadata, or registry projections.
 
 ## Video Decode Storage Policy
 

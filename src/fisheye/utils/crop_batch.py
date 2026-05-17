@@ -257,7 +257,7 @@ def _build_plan(
     if not zarr_path.exists():
         return CropPlan(zarr_path=zarr_path, status="missing", reason="zarr not found")
 
-    root = zarr.open_group(str(zarr_path), mode="r")
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     try:
         resolved_path, _source_group, _detection_source, resolved_type = get_detection_source_info(
             root=root,
@@ -357,7 +357,7 @@ def _build_plans(
     for zarr_path in zarr_paths:
         if zarr_use_filter != "any":
             try:
-                root = zarr.open_group(str(zarr_path), mode="r")
+                root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
             except Exception as exc:
                 plans.append(
                     CropPlan(

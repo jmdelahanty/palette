@@ -69,6 +69,82 @@ Lightweight stages such as `tracking_runs/` may omit some of the broader
 timing-oriented attrs while still recording canonical lineage and summary
 statistics.
 
+### Future Clipped Analysis Archives
+
+Current readers and writers mostly assume a single-video analysis archive with
+top-level run families such as `detect_runs/`, `crop_runs/`, and
+`keypoints_runs/`. Long rolling-clip recordings should not extend that model by
+having many cluster jobs append into one giant global run group.
+
+The intended future layout is one parent analysis Zarr with clip-local physical
+run groups:
+
+```text
+<recording>_analysis.zarr/
+  # root attrs point to recording-level sidecars:
+  # recording_frame_index.parquet
+  # recording_frame_index_manifest.json
+  detect_runs/                 # parent finalized/aggregated placeholder
+  refined_detect_runs/
+  crop_runs/
+  keypoints_runs/
+  subject_mask_runs/
+  clips/
+    clip_000000/
+      cameras/
+        2010093/
+          source/
+            frame_map/
+          detect_runs/
+          refined_detect_runs/
+          crop_runs/
+          keypoints_runs/
+          subject_mask_runs/
+    clip_000001/
+      ...
+  experiment_index/
+    workflow_manifests/
+    finalized_runs/
+```
+
+In that layout, clip-local run groups are the cluster compute/import target.
+`experiment_index/finalized_runs/<workflow_id>` maps each stage to a
+collection of concrete clip-local run paths. Compatibility readers should learn
+to resolve either a traditional top-level run group or a finalized clip
+collection. Materialized global concatenated arrays are optional exports, not
+the default durable write path.
+
+The prototype shell creator is
+`scripts/py -m fisheye.utils.create_clipped_analysis_zarr`. It creates
+metadata-only clip-camera namespaces and parent placeholders; it does not run
+analysis stages, import run-group artifacts, or update registry projections.
+
+Temporal stages require an explicit boundary policy before they can be treated
+as clip-local. Detection, crop geometry, keypoint inference, and mask inference
+are image-local and fit this layout directly. Track kinematics, bout detection,
+smoothing, and temporal state-machine stages need parent-wide finalization or
+documented overlap/state handoff.
+
+Dish masks in clipped archives are camera/static spatial metadata. Orange
+acquisition guarantees fixed dish location and fixed camera geometry within a
+recording, so one dish mask per `(recording_id, camera_serial)` applies to all
+clips from that camera. The mask should be inherited from the source
+recording/camera. The mask payload may retain the source `tuned_on_array`
+coordinate system such as `images_ds`; consumers should use normalized mask
+metrics when applying it to normalized detections. It is not per-clip mutable
+review state.
+
+Run-row identity is scoped to a concrete run path. In clipped archives,
+`refined_row_ids` and downstream `source_refined_row_ids` must be interpreted
+with the owning clip-camera run path, for example
+`(source_refined_run_path, source_refined_row_id)`. Do not treat row-id
+integers from different clip-local runs as globally unique.
+
+See `docs/orange_rolling_clip_recording_contract.md` and
+`docs/cluster_run_group_artifact_workflow.md` for the storage design. See
+`docs/clipped_recording_consumer_mapping_contract.md` for the reader-facing
+frame-index semantics and Crimson impact.
+
 ---
 
 ## String/Text Encoding Conventions
@@ -111,6 +187,37 @@ Arrays written during import (kvikIO or standard path):
 
 Attributes include import method, device, chunk/shard sizes, duration,
 throughput, and source video metadata.
+
+`raw_video/original_frame_indices` is an array-level mapping for sampled
+imports. It is useful because it is compact and aligned to imported frames, but
+it is not a complete recording provenance table.
+
+For clipped training Zarrs, `raw_video/original_frame_indices` should contain
+`parent_frame_index` values. Stage-level `frame_indices` in that training Zarr
+remain sample-local indices into `raw_video/images_*`; consumers that need the
+exact source MP4 and local frame should read the row-aligned
+`source_frame_index.parquet` sidecar.
+
+Put differently, `original_frame_indices` is the clipped training Zarr's
+compatibility bridge to the parent recording timeline. It is not the full
+clip-level map. The clip-level map is either the recording-root
+`recording_frame_index.parquet` or the training-local sampled
+`source_frame_index.parquet`.
+
+For full recording-level frame provenance, Palette should use a sidecar table
+such as `recording_frame_index.parquet` plus a small manifest or root attrs
+that point to it. This applies to both future clipped recordings and current
+single-video recordings. In single-video archives, the local source-frame index
+is normally equal to `parent_frame_index`; in clipped archives, the table maps
+`parent_frame_index` to `(clip_id, clip_local_frame_index, video_path)`.
+
+Keep large row-oriented metadata out of Zarr attrs. Use Zarr for arrays and
+Parquet for frame-index/query tables.
+
+The frame-index sidecar is not a review ledger. Mutable edits, review status,
+stale-state detection, source fingerprints, and downstream lineage remain in
+Zarr run groups and derived registry/finalize views. The frame index should be
+safe to regenerate from recording metadata without losing scientific curation.
 
 ---
 
@@ -497,6 +604,9 @@ Reader rule:
   rows with finite bbox geometry
 - `refined_row_ids` are stable logical row identity and must not be treated as
   physical row positions or biological identity
+- in clipped analysis archives, `refined_row_ids` are local to the concrete
+  clip-camera refined run; parent-wide consumers must pair them with the run
+  path or finalized collection identity
 - current sparse rows should be sorted by `frame_indices` then
   `refined_row_ids`; `frame_offsets` and `frame_counts` must match that order
 
@@ -801,6 +911,11 @@ SAM/SAM2/SAM3 write-back, and swim-bladder refresh flows.
 | `mask_probs_roi` | `(n_rois, C, H, W)` | `float16/float32/uint8` | Decoded or quantized semantic probabilities in `[0,1]`; probability-first raw runs treat this as the canonical model output. |
 | `available_channels` | `(C,)` | `bool` | Run-level declaration of which channels are semantically valid |
 
+Compact binary mask storage alternatives such as RLE are deferred. Current
+readers should continue to support dense `masks_roi`; proposed RLE storage,
+reader abstraction, and benchmark gates are documented in
+`docs/mask_rle_storage_design_and_benchmark_plan.md`.
+
 `metrics/` subgroup:
 
 - required: `prob_max`, `mask_present`
@@ -864,6 +979,11 @@ temporal context, or cross-component relationship belongs in
 | `edit_applied` | `(n_rois, C)` | `bool` | True when the refined channel differs from the source subject-mask run |
 | `reason_bytes` *(optional)* | `(n_rois, width)` | `uint8` | Null-terminated UTF-8 reason labels |
 | `reason` *(optional)* | `(n_rois,)` | `string` | Human-readable reason tags |
+
+Compact binary mask storage alternatives such as RLE are deferred. Refined
+editing surfaces may materialize dense masks from compact storage in the future,
+but the current compatibility contract remains dense `masks_roi`. See
+`docs/mask_rle_storage_design_and_benchmark_plan.md`.
 
 `metrics/` subgroup:
 

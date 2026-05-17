@@ -177,10 +177,16 @@ until their producing streams have finished.
 
 Example LSF smoke using the sequential PyNvVideoCodec NV12/RGB backend:
 
+These cluster examples assume the current preferred v003 detector has been
+mirrored from `/nvme1/models/detect/...` to
+`/groups/johnson/johnsonlab/jeremy/palette_models/detect/...`. If it has not
+been copied yet, either copy the v003 run directory first or substitute the
+available detector path explicitly.
+
 ```bash
 scripts/submit_detect_compute_smoke_bsub.sh \
   --video /groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --log-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/logs \
   --decode-backend pynvvc_nv12_rgb \
@@ -227,7 +233,7 @@ scripts/validate_cluster_palette_env.sh --require-pynvvc
 
 scripts/submit_detect_decode_backend_parity_bsub.sh \
   --video /groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --backend-a decord_gpu \
   --backend-b pynvvc_nv12_rgb \
@@ -248,7 +254,7 @@ The underlying Python command is:
 ```bash
 scripts/py -m fisheye.diagnostics.compare_detect_decode_backend_predictions \
   /groups/johnson/johnsonlab/jeremy/palette_smoke/sickyfish_2026_02_23_16_23_35_cam2010093/cams/Cam2010093_sickyfish_2026_02_23_16_23_35_cam2010093.mp4 \
-  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_20260513_tmux/weights/best.pt \
+  --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt \
   --config configs/fisheye/yolo_detect_config.yaml \
   --backend-a decord_gpu \
   --backend-b pynvvc_nv12_rgb \

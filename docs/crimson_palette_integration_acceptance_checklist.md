@@ -27,6 +27,10 @@ Out of scope:
 - unconstrained multi-subject tracking inside one arena
 - detect retune parity in arena-aware mode
 - keypoint or detect registry redesign
+- first-class clipped analysis-Zarr review. Clipped analysis shells require a
+  finalized collection resolver before Crimson should flatten clip-local runs
+  onto a parent recording timeline. See
+  `docs/clipped_recording_consumer_mapping_contract.md`.
 
 ## Contract References
 
@@ -41,6 +45,7 @@ Read these first if the expected behavior is unclear:
 - `docs/refined_detect_sparse_instances_schema.md`
 - `docs/detection_refinement_workflow.md`
 - `docs/crimson_track_motion_read_contract.md`
+- `docs/clipped_recording_consumer_mapping_contract.md`
 
 ## Test Archives
 

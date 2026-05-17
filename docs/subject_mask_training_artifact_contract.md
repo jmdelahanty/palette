@@ -78,6 +78,27 @@ The distinction is intentional:
 - `target_valid_channels` means a specific training row-channel pair is
   supervised and should contribute to loss
 
+## Crop Pixel Contract
+
+For Orange monochrome camera recordings, the accepted crop pixel contract for
+new subject-mask/keypoint training exports is `pynvvc_luma_v1`:
+
+```text
+shape: [roi, roi_height, roi_width]
+dtype: uint8
+source: decoded NV12 Y/luma plane from the source MP4
+semantics: mono camera intensity before model-specific tensorization
+```
+
+This matches the current Orange TensorRT deployment boundary: Orange detection
+and pose paths start from single-channel mono/luma, then perform
+engine-specific preprocessing outside TensorRT by resizing/letterboxing,
+replicating luma into three planar channels, dividing by 255, and feeding FP32
+NCHW tensors to the engine. Training artifacts should therefore preserve the
+luma ROI crop as the canonical image surface and leave RGB replication,
+normalization, and input-size details to the trainer/runtime for the selected
+model.
+
 ## Source Parity Audit
 
 The preflight manifest is the canonical source-selection contract for a merged
@@ -321,6 +342,11 @@ Required attrs:
 - `source_mask_stage`
 - `source_crop_run`
 - `source_zarr_path`
+
+Dense `masks_roi` remains the training artifact compatibility contract. Compact
+binary storage options such as RLE should be introduced behind a mask
+materialization API first; see
+[`mask_rle_storage_design_and_benchmark_plan.md`](mask_rle_storage_design_and_benchmark_plan.md).
 
 Recommended attrs:
 

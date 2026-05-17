@@ -123,6 +123,7 @@ Example known schema:
 
 - `artifact_schema_id="behavior_v1"`
 - `artifact_schema_id="video_only_v1"`
+- future: `artifact_schema_id="orange_rolling_clips_v1"`
 
 For `behavior_v1`, integrity currently checks required artifact types:
 
@@ -148,6 +149,15 @@ Recommended manifest content:
 
 `video_only_v1` does not currently trigger the `behavior_v1` required-artifact
 integrity check, so missing H5/CSV sidecars are tolerated.
+
+For future Orange rolling-clip recordings, keep clips as children of one
+recording/session rather than separate recording rows. The authoritative clip
+inputs are `recording_session.json`, `recording_clip_index.{json,csv}`, each
+`clips/clip_%06d/clip_manifest.json`, and each per-clip camera bundle
+(`Cam*.mp4`, `Cam*_meta.csv`, `Cam*_keyframe.json`). Per-clip metadata row
+order is the clip-local frame index; native Orange `Cam*_meta.csv` `frame_id`
+is the session-continuous `recording_frame_id`. See
+[`docs/orange_rolling_clip_recording_contract.md`](orange_rolling_clip_recording_contract.md).
 
 ### Video-only Organizer CSV
 

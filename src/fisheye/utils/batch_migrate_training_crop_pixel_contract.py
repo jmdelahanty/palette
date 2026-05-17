@@ -95,7 +95,13 @@ def _resolve_source_crop_run(root: Any, requested: str | None) -> str:
     for attr_name in ("latest_materialized", "latest", "latest_any"):
         candidate = crop_parent.attrs.get(attr_name)
         if candidate and str(candidate) in crop_parent:
-            return str(candidate)
+            candidate_name = str(candidate)
+            candidate_group = crop_parent[candidate_name]
+            if _contract_name(candidate_group) == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME:
+                source = candidate_group.attrs.get("source_crop_run")
+                if source and str(source) in crop_parent:
+                    return str(source)
+            return candidate_name
     names = sorted(str(name) for name in crop_parent.group_keys())
     if len(names) == 1:
         return names[0]
@@ -289,7 +295,7 @@ def migrate_one_candidate(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     archive_path = candidate.zarr_path.expanduser()
-    root = zarr.open_group(str(archive_path), mode="r")
+    root = zarr.open_group(str(archive_path), mode="r", use_consolidated=False)
     resolved_source_crop = _resolve_source_crop_run(root, source_crop_run)
     target_crop_run = f"{resolved_source_crop}{target_crop_suffix}"
     existing_target = _target_crop_status(root, target_crop_run)
@@ -397,9 +403,9 @@ def batch_migrate_training_crop_pixel_contract(
     set_latest: bool = False,
     source_frame_index_mode: str = "auto",
     crop_decode_mode: str = "auto",
-    decode_chunk_frames: int = 32,
+    decode_chunk_frames: int = 1,
     roi_chunk_len: int = DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
-    parity_sample_count: int = 8,
+    parity_sample_count: int = 0,
     parity_boundary_sample_count: int = 4,
     fail_fast: bool = False,
     jsonl_report: Path | None = None,
@@ -529,13 +535,25 @@ def _build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="PyNvVideoCodec access pattern for crop regeneration.",
     )
-    parser.add_argument("--decode-chunk-frames", type=int, default=32)
+    parser.add_argument(
+        "--decode-chunk-frames",
+        type=int,
+        default=1,
+        help=(
+            "Frame indices per indexed PyNvVideoCodec request. Default 1 avoids slow wide-span "
+            "indexed batches for sparse long training videos."
+        ),
+    )
     parser.add_argument("--roi-chunk-len", type=int, default=DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN)
     parser.add_argument(
         "--parity-sample-count",
         type=int,
-        default=8,
-        help="After --apply, sample this many rows for PyNvVC parity; set 0 to skip.",
+        default=0,
+        help=(
+            "After --apply, sample this many rows for PyNvVC parity. Default 0 skips parity; "
+            "the parity checker currently uses sequential decode and can be very slow for sparse "
+            "training zarrs."
+        ),
     )
     parser.add_argument("--parity-boundary-sample-count", type=int, default=4)
     mode = parser.add_mutually_exclusive_group()

@@ -108,7 +108,25 @@ def _default_target_run(source_crop_run: str) -> str:
     return f"{source_crop_run}_pynvvc_luma_{stamp}"
 
 
-def _resolve_video_path(root: Any, crop_group: Any, explicit: str | Path | None) -> Path:
+def _infer_recording_video_path(archive_path: Path | None) -> Path | None:
+    if archive_path is None:
+        return None
+    recording_dir = archive_path.parent.parent
+    cams_dir = recording_dir / "cams"
+    if not cams_dir.is_dir():
+        return None
+    candidates = sorted(cams_dir.glob("*.mp4"))
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _resolve_video_path(
+    root: Any,
+    crop_group: Any,
+    explicit: str | Path | None,
+    archive_path: Path | None = None,
+) -> Path:
     if explicit is not None:
         return Path(explicit).expanduser()
     metadata = root.attrs.get("source_video_metadata")
@@ -121,17 +139,75 @@ def _resolve_video_path(root: Any, crop_group: Any, explicit: str | Path | None)
         root.attrs.get("source_path"),
         metadata_path,
     )
-    if not text:
-        raise ValueError("Unable to resolve source video path; pass --video-path.")
-    return Path(text).expanduser()
+    if text:
+        return Path(text).expanduser()
+    inferred = _infer_recording_video_path(archive_path)
+    if inferred is not None:
+        return inferred
+    raise ValueError("Unable to resolve source video path; pass --video-path.")
 
 
-def _resolve_video_shape(root: Any, crop_group: Any) -> tuple[int, int]:
+def _shape_from_raw_video(root: Any) -> tuple[int, int] | None:
+    raw_video = root.get("raw_video")
+    if raw_video is None:
+        return None
+    for name in ("images_full", "images", "frames"):
+        if name not in raw_video:
+            continue
+        shape = getattr(raw_video[name], "shape", None)
+        if shape is None or len(shape) < 3:
+            continue
+        return int(shape[1]), int(shape[2])
+    return None
+
+
+def _shape_from_video_probe(video_path: Path) -> tuple[int, int] | None:
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return None
+    capture = cv2.VideoCapture(str(video_path))
+    try:
+        if not capture.isOpened():
+            return None
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if height > 0 and width > 0:
+            return height, width
+        return None
+    finally:
+        capture.release()
+
+
+def _resolve_video_shape(root: Any, crop_group: Any, video_path: Path | None = None) -> tuple[int, int]:
     metadata = root.attrs.get("source_video_metadata")
     metadata_height = metadata.get("height") if isinstance(metadata, Mapping) else None
     metadata_width = metadata.get("width") if isinstance(metadata, Mapping) else None
-    height = _first_positive_int(crop_group.attrs.get("height"), root.attrs.get("height"), metadata_height)
-    width = _first_positive_int(crop_group.attrs.get("width"), root.attrs.get("width"), metadata_width)
+    height = _first_positive_int(
+        crop_group.attrs.get("height"),
+        crop_group.attrs.get("source_video_height"),
+        root.attrs.get("height"),
+        root.attrs.get("source_video_height"),
+        root.attrs.get("full_height"),
+        metadata_height,
+    )
+    width = _first_positive_int(
+        crop_group.attrs.get("width"),
+        crop_group.attrs.get("source_video_width"),
+        root.attrs.get("width"),
+        root.attrs.get("source_video_width"),
+        root.attrs.get("full_width"),
+        metadata_width,
+    )
+    if height is not None and width is not None:
+        return int(height), int(width)
+    raw_shape = _shape_from_raw_video(root)
+    if raw_shape is not None:
+        return raw_shape
+    if video_path is not None:
+        probed_shape = _shape_from_video_probe(video_path)
+        if probed_shape is not None:
+            return probed_shape
     if height is None or width is None:
         raise ValueError("Unable to resolve source video dimensions from crop/root attrs.")
     return int(height), int(width)
@@ -313,7 +389,7 @@ def regenerate_training_crops_pynvvc(
     video_path: str | Path | None = None,
     source_frame_index_mode: str = "auto",
     decode_mode: str = "auto",
-    decode_chunk_frames: int = 32,
+    decode_chunk_frames: int = 1,
     roi_chunk_len: int = DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
     overwrite: bool = False,
     set_latest: bool = False,
@@ -322,7 +398,7 @@ def regenerate_training_crops_pynvvc(
 ) -> dict[str, Any]:
     archive_path = Path(zarr_path).expanduser().resolve()
     started = time.perf_counter()
-    root = zarr.open_group(str(archive_path), mode="a")
+    root = zarr.open_group(str(archive_path), mode="a", use_consolidated=False)
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
         raise KeyError("Zarr archive is missing crop_runs.")
@@ -355,8 +431,8 @@ def regenerate_training_crops_pynvvc(
             f"do not match frame_indices rows {total_rois}."
         )
 
-    resolved_video_path = _resolve_video_path(root, source_group, video_path)
-    video_shape = _resolve_video_shape(root, source_group)
+    resolved_video_path = _resolve_video_path(root, source_group, video_path, archive_path)
+    video_shape = _resolve_video_shape(root, source_group, resolved_video_path)
     source_frame_indices, frame_mapping = _map_source_frame_indices(
         root=root,
         crop_frame_indices=frame_indices,
@@ -651,7 +727,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="PyNvVideoCodec access pattern. auto uses indexed reads for sparse training samples.",
     )
-    parser.add_argument("--decode-chunk-frames", type=int, default=32)
+    parser.add_argument(
+        "--decode-chunk-frames",
+        type=int,
+        default=1,
+        help=(
+            "Frame indices per indexed PyNvVideoCodec request. Default 1 avoids slow wide-span "
+            "indexed batches for sparse long training videos."
+        ),
+    )
     parser.add_argument("--roi-chunk-len", type=int, default=DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN)
     parser.add_argument("--overwrite", action="store_true", help="Replace target crop run if it already exists.")
     parser.add_argument(

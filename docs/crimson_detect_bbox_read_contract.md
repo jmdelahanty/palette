@@ -1,12 +1,23 @@
 # Crimson Detect BBox Read Contract
 <!-- contract-meta
-version: 4
+version: 5
 status: active
-last_verified: 2026-04-15
+last_verified: 2026-05-16
 -->
 
 Purpose: define the read contract Crimson should use to load detect bounding
 boxes from Palette Zarr archives.
+
+Scope note for clipped recordings:
+
+- This contract applies to traditional top-level analysis Zarrs and
+  materialized training Zarrs.
+- It does not yet define first-class reading for clipped analysis shells where
+  physical runs live under
+  `clips/<clip_id>/cameras/<camera_serial>/<family>/<run>`.
+- For clipped analysis archives, Crimson needs a finalized collection resolver
+  before it can safely flatten clip-local detections onto a parent timeline.
+  See `docs/clipped_recording_consumer_mapping_contract.md`.
 
 ## Primary Read Surface
 
@@ -157,3 +168,4 @@ runs with `instances/`.
 - `docs/detection_refinement_workflow.md`
 - `src/fisheye/docs/zarr_structure.md`
 - `docs/crimson_refined_detect_manual_contract.md`
+- `docs/clipped_recording_consumer_mapping_contract.md`

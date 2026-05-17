@@ -52,6 +52,12 @@ context-dependent layers and should be absent rather than faked when no
 experiment context exists. The operational details live in
 [`recording_analysis_pipeline_contract.md`](recording_analysis_pipeline_contract.md#recording-only-mode).
 
+This current-state contract describes traditional top-level analysis/training
+Zarr consumers. Clipped analysis shells are a new layout and require explicit
+collection resolution before they should be treated as normal Crimson/operator
+review targets. See
+[`clipped_recording_consumer_mapping_contract.md`](clipped_recording_consumer_mapping_contract.md).
+
 ## Current Stage Contract
 
 | Family | Raw provenance | Current refined authority | Compatibility/cache surfaces | Operator/query truth |

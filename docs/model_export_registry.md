@@ -49,6 +49,45 @@ written beside ONNX and TensorRT artifacts retain full build provenance,
 including paths, hashes, input shape, output contract, export command, and build
 environment.
 
+## Current preferred detector baseline
+
+As of 2026-05-16, the preferred detector baseline is:
+
+```text
+set_id: detect_all_available_detect_training_v003
+run_id: detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1
+task_type: detect
+status: success
+input_shape: [1, 3, 640, 640]
+input_color_space: rgb
+```
+
+Artifact paths:
+
+```text
+best.pt:
+/nvme1/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt
+
+ONNX:
+/nvme1/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/exports/onnx/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1.onnx
+
+TensorRT FP16:
+/nvme1/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/exports/tensorrt/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1_fp16.engine
+```
+
+Best validation checkpoint was epoch 41:
+
+```text
+precision: 0.9794
+recall: 0.9787
+mAP50: 0.9838
+mAP50-95: 0.7539
+```
+
+This run reproduced the prior v002 baseline metrics exactly, but v003 is the
+preferred operational baseline because it has a clean source-set identity and
+successful registry rows in `training_runs`, `training_models`, `onnx_models`,
+and `tensorrt_models`.
 
 ## Design principles
 - Keep normalized artifact tables (`training_models`, `onnx_models`, `tensorrt_models`).

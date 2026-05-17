@@ -2858,7 +2858,7 @@ def crop_detections(
     console.rule("[bold]Stage: Cropping ROIs from Detections[/bold]")
     start_time = time.perf_counter()
 
-    root = zarr.open_group(zarr_path, mode='a')
+    root = zarr.open_group(zarr_path, mode='a', use_consolidated=False)
 
     crop_params_cfg = config.get('crop', {}) or {}
     if selection_policy is None:

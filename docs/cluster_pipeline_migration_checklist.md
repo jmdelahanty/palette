@@ -49,6 +49,7 @@ Palette already has the first layer of cluster support:
 | Video decode benchmark | present | `fisheye.diagnostics.benchmark_video_decode` showed PRFS streaming is acceptable for single-pass Decord-GPU detection. |
 | Run-group artifact design | documented | `docs/cluster_run_group_artifact_workflow.md` defines the target architecture. |
 | Whole-Zarr transfer packing | prototype present | `fisheye.utils.pack_zarr_transfer_artifact` packs whole archives, not individual run groups. |
+| Rolling-clip planning/materialization | prototype present | Planner/materializer/verifier, frame-index builder, and metadata-only analysis-Zarr shell creator exist for Orange-style keyframe-aligned clips; clip-local model writers/import/finalize support remains design-only. |
 
 Palette also has batch utilities for additional stages:
 
@@ -86,6 +87,18 @@ promote it into the canonical analysis Zarr through a serialized importer. Do
 not treat `/tmp` as the cluster scratch target, and do not make the tarball the
 canonical data format.
 
+For future clipped recordings, the intended production shape is similar but the
+target namespace is clip-local:
+
+```text
+clips/<clip_id>/cameras/<camera_serial>/<run_family>/<run_name>
+```
+
+The cluster should parallelize model compute by clip, then run a serialized
+finalize stage that owns shared experiment metadata, logical latest aliases,
+collection manifests, consolidated metadata, and registry projections. Do not
+make many clip jobs append into one top-level global run group.
+
 ## Stage Checklist
 
 ### 0. Environment And Inputs
@@ -100,6 +113,66 @@ canonical data format.
 - [ ] Add a short operator runbook for rebuilding Decord on cluster nodes.
 - [ ] Decide whether this environment should remain conda-based or move to
   Apptainer after the first production smoke.
+
+### 0b. Rolling-Clip Archive Shape
+
+Current implementation:
+
+- `fisheye.utils.plan_orange_style_clips`
+- `fisheye.utils.materialize_orange_style_clips`
+- `fisheye.utils.verify_orange_style_clips`
+
+Ready:
+
+- [x] Orange rolling-clip layout audited.
+- [x] Keyframe-aligned planning utility exists.
+- [x] Retroactive materializer exists for one camera stream at a time.
+- [x] Verifier exists for structural checks and optional ffprobe packet counts.
+- [x] Sleepyfish long recordings were materialized and verified as
+  Orange-style clips.
+- [x] `fisheye.utils.build_recording_frame_index` exists and supports clipped
+  and single-video layouts.
+- [x] `fisheye.utils.create_clipped_analysis_zarr` exists and creates a
+  metadata-only clipped analysis shell with clip-camera namespaces.
+- [x] Real smoke on
+  `/nvme1/recordings/sleepyfish_2026_05_05_17_45_30_cam2010093` wrote
+  `recording_frame_index.parquet` and manifest with 1,188,000 rows and
+  zero validation failures.
+- [x] Real shell smoke on the same sleepyfish recording wrote
+  `/tmp/palette_clipped_analysis_shell_smoke/sleepyfish_2026_05_05_17_45_30_cam2010093_analysis.zarr`
+  with 22 clips, 22 clip-camera rows, and 1,188,000 indexed frames.
+- [x] Consumer mapping contract exists:
+  `docs/clipped_recording_consumer_mapping_contract.md`.
+
+Remaining:
+
+- [x] Build `recording_frame_index.parquet` and
+  `recording_frame_index_manifest.json` from `recording_clip_index` plus
+  per-clip metadata CSVs.
+- [x] Create parent analysis-Zarr shell for clipped recordings.
+- [ ] Extend run-group artifact manifests/importer to target
+  `clips/<clip_id>/cameras/<camera_serial>/<family>/<run_name>`.
+- [ ] Add a clip workflow finalizer that validates expected clip coverage and
+  writes `experiment_index/finalized_runs/<workflow_id>`.
+- [ ] Teach core readers to resolve finalized clip collections in addition to
+  traditional top-level run groups.
+- [ ] Teach Crimson-facing readers to use Palette's finalized collection
+  resolver instead of independently flattening `clips/` directories.
+- [ ] Define temporal boundary policies for track kinematics, bout detection,
+  and other stateful stages before enabling clip-local execution for them.
+
+Read-only stale-assumption audit from 2026-05-16:
+
+- Batch submitters still discover whole `*_analysis.zarr` stores.
+- Existing writers generally update top-level run-family `latest` attrs
+  directly.
+- The current run-group importer only accepts top-level
+  `<run_family>/<run_name>` targets.
+- Reader/status tools mostly resolve top-level latest runs and do not yet know
+  about finalized clip collections.
+- Current Zarr schema helpers are still single-video-first for normal import
+  paths; clipped analysis shell creation is implemented separately but core
+  readers/writers do not yet target clip-camera namespaces.
 
 ### 1. Detect
 
@@ -224,10 +297,14 @@ Remaining:
   downstream pose/segmentation runs (`roi_image_representation`,
   `roi_pixel_contract`, `source_roi_image_representation`,
   `source_roi_pixel_contract_name`, `source_roi_pixel_contract`).
-- [ ] Decide the accepted production crop pixel contract for pose/segmentation
+- [x] Decide the accepted production crop pixel contract for pose/segmentation
   input caches. Current materialized readers expose grayscale `uint8` ROI crops,
   but historical paths differ in conversion details: OpenCV weighted grayscale,
   Decord GPU channel mean, and current PyNv luma-plane cropping.
+  2026-05-16 Orange runtime audit selected `pynvvc_luma_v1` for mono Orange
+  camera recordings: `[N,H,W] uint8` decoded NV12 Y/luma crops, with
+  engine-specific resize/letterbox/channel replication/normalization performed
+  by the model runtime.
 - [x] Add a crop-pixel parity utility for the canonical `CropImageSource` path
   versus flat ROI caches. It reports byte equality, max/mean/p95 absolute
   difference, and top mismatched rows for fixed ROI rows.
@@ -235,14 +312,23 @@ Remaining:
   `crop_runs/<run>/roi_images` against PyNvVideoCodec luma crops reconstructed
   from the original video, including `raw_video/original_frame_indices` mapping
   for sampled training zarrs.
+- [x] Audit current training-zarr crop migration coverage. As of 2026-05-16,
+  52/60 approved detector-training source zarrs are crop-bearing and all 52 have
+  a `pynvvc_luma_v1` crop run. The remaining 8 `sickyfish`/`sleepyfish` sampled
+  zarrs are detection-only and have no `crop_runs`, so they are not migration
+  failures.
 - [ ] Run `fisheye.diagnostics.check_flat_roi_cache_pixel_parity` on each new
   flat ROI cache before using it for pose/segmentation quality validation.
-- [ ] Run `fisheye.diagnostics.check_training_crop_pynvvc_pixel_parity` on at
+- [x] Run `fisheye.diagnostics.check_training_crop_pynvvc_pixel_parity` on at
   least one existing per-recording training zarr before accepting `pynvvc_luma`
-  as a model-facing crop cache contract.
-- [ ] Decide whether `pynvvc_luma` is acceptable for production
+  as a model-facing crop cache contract. The first quick check was not
+  byte-identical to historical crop pixels, which is expected because
+  `pynvvc_luma_v1` is an explicit raw-luma contract rather than the old
+  OpenCV/Decord grayscale conversion.
+- [x] Decide whether `pynvvc_luma` is acceptable for production
   pose/segmentation caches or implement a canonical backend such as
-  `pynvvc_legacy_gray` / `pynvvc_nv12_gray`.
+  `pynvvc_legacy_gray` / `pynvvc_nv12_gray`. For mono Orange recordings,
+  `pynvvc_luma_v1` is the accepted contract.
 - [ ] If `pynvvc_luma` fails strict crop-pixel parity, implement a parity-safe
   sequential PyNv backend and make `--decode-backend auto` prefer that backend
   rather than falling back to slow `read_slice` for long-video workflows.

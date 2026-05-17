@@ -215,7 +215,7 @@ def migrate_training_label_runs_identity(
     allow_source_crop_mismatch: bool = False,
 ) -> dict[str, Any]:
     archive_path = Path(zarr_path).expanduser().resolve()
-    root = zarr.open_group(str(archive_path), mode="a")
+    root = zarr.open_group(str(archive_path), mode="a", use_consolidated=False)
     target_crop_group = _resolve_target_crop(root, target_crop_run)
     resolved_source_crop = _resolve_source_crop_run(
         target_crop_group=target_crop_group,
@@ -329,7 +329,7 @@ def migrate_training_label_runs_identity(
             entry["array_identity"] = identity
             report["migrations"].append(entry)
 
-    if not dry_run and consolidate_metadata:
+    if not dry_run and consolidate_metadata and report["migrations"]:
         started = time.perf_counter()
         zarr.consolidate_metadata(str(archive_path))
         report["consolidate_metadata_seconds"] = float(time.perf_counter() - started)

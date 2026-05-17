@@ -66,13 +66,16 @@ Cluster production workflows need a different shape:
 The natural cluster scheduling unit is:
 
 ```text
-(recording_id, clip_id, stage)
+(recording_id, camera_serial, clip_id, stage)
 ```
 
 For unclipped recordings, `clip_id` can be omitted or set to a sentinel such as
-`full_recording`. For future clipped experiments, each clip should own an
-independent namespace so detect, crop, pose, and segmentation jobs can run in
-parallel without appending into the same physical Zarr arrays.
+`full_recording`. For current one-camera recordings, `camera_serial` is still
+part of the identity so the same plan shape can support future multi-camera
+clip-camera artifacts. For future clipped experiments, each clip-camera
+namespace should own independent outputs so detect, crop, pose, and
+segmentation jobs can run in parallel without appending into the same physical
+Zarr arrays.
 
 Batching still matters, but it moves to the planning and submission layer. A
 cluster submitter may group small CPU-only tasks into one job, cap active job

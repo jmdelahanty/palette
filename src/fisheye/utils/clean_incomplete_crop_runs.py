@@ -64,7 +64,7 @@ def _build_plan(
     remove_non_completed: bool,
     remove_statuses: set[str],
 ) -> CropCleanupPlan:
-    root = zarr.open_group(str(zarr_path), mode="r")
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
         return CropCleanupPlan(
@@ -103,7 +103,7 @@ def _build_plan(
 def _apply_plan(plan: CropCleanupPlan) -> CropCleanupPlan:
     if not plan.delete_runs:
         return plan
-    root = zarr.open_group(str(plan.zarr_path), mode="a")
+    root = zarr.open_group(str(plan.zarr_path), mode="a", use_consolidated=False)
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
         return plan

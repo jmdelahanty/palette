@@ -228,6 +228,15 @@ Sampled recording-only training Zarrs usually do not have `crop_runs`. For
 required for this sampled-training path because there is no crop stage to
 approve.
 
+Current inventory note (2026-05-16): the approved detector-training corpus has
+60 source training zarrs. 52 are legacy/crop-bearing training zarrs and all 52
+have a `pynvvc_luma_v1` materialized crop run for future crop-based exports.
+The 8 `sickyfish`/`sleepyfish` sampled training zarrs are detection-only; they
+intentionally contain `detect_runs`/`refined_detect_runs` but no `crop_runs`.
+Do not run crop-pixel migration tools on those 8 unless they are first promoted
+into crop-bearing keypoint/segmentation training sources by creating explicit
+crop geometry from their approved refined detections.
+
 The direct path-based preparer is still useful for explicit lists or debugging:
 
 ```bash
@@ -472,6 +481,34 @@ scripts/py -m fisheye.training.train_detection \
   --no-log-registry
 ```
 
+#### Current preferred detection baseline
+
+As of 2026-05-16, the preferred detector baseline is:
+
+```text
+set_id: detect_all_available_detect_training_v003
+run_id: detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1
+status: success
+input: RGB, NCHW, [1, 3, 640, 640]
+best epoch: 41
+best validation metrics: P=0.9794, R=0.9787, mAP50=0.9838, mAP50-95=0.7539
+```
+
+Primary artifacts:
+
+```text
+/nvme1/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt
+/nvme1/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/exports/onnx/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1.onnx
+/nvme1/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/exports/tensorrt/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1_fp16.engine
+```
+
+The v003 retry reproduced the previous v002 baseline exactly at the metric
+level, but v003 is the cleaner preferred baseline because it was built from the
+current 60 approved source training zarrs and has clean `success` rows in
+`training_runs`, `training_models`, `onnx_models`, and `tensorrt_models`.
+The interrupted `detect_all_available_detect_training_v003_yolo11n_trt_20260516_tmux`
+attempt should be treated as superseded by the retry run above.
+
 For production detection runs, prefer leaving registry logging enabled and pass
 the manifest and set ID explicitly. Long-running GPU jobs should be launched in
 `tmux` or an equivalent scheduler job, not as a foreground Codex/tool process,
@@ -481,30 +518,30 @@ Example: train from a merged registry-built dataset and export through FP16
 TensorRT in one run:
 
 ```bash
-tmux new-session -d -s palette_detect_train_v002 '
+tmux new-session -d -s palette_detect_train_v003 '
 cd /home/delahantyj@hhmi.org/gitrepos/palette &&
 env MPLCONFIGDIR=/tmp/matplotlib-training \
     ULTRALYTICS_CONFIG_DIR=/tmp/ultralytics-training \
   scripts/py -m fisheye.training.train_detection \
-    /nvme1/training/datasets/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002.yaml \
-    --manifest /nvme1/training/datasets/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002.manifest.json \
-    --set-id detect_all_available_detect_training_v002 \
+    /nvme1/training/datasets/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003.yaml \
+    --manifest /nvme1/training/datasets/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003.manifest.json \
+    --set-id detect_all_available_detect_training_v003 \
     --registry /nvme1/palette_registry.sqlite \
-    --project /nvme1/models/detect/detect_all_available_detect_training_v002 \
-    --run-name detect_all_available_detect_training_v002_yolo11n_trt_YYYYMMDD \
+    --project /nvme1/models/detect/detect_all_available_detect_training_v003 \
+    --run-name detect_all_available_detect_training_v003_yolo11n_trt_YYYYMMDD \
     --export-trt \
     --trt-precision fp16 \
     --trtexec /usr/local/TensorRT-10.0.1.6/bin/trtexec \
     --trt-profiling \
-    > /tmp/detect_all_available_detect_training_v002_train_trt_YYYYMMDD.log 2>&1
+    > /tmp/detect_all_available_detect_training_v003_train_trt_YYYYMMDD.log 2>&1
 '
 ```
 
 Monitor:
 
 ```bash
-tmux attach -t palette_detect_train_v002
-tail -f /tmp/detect_all_available_detect_training_v002_train_trt_YYYYMMDD.log
+tmux attach -t palette_detect_train_v003
+tail -f /tmp/detect_all_available_detect_training_v003_train_trt_YYYYMMDD.log
 ```
 
 Expected detection-training outputs:
@@ -532,7 +569,7 @@ scripts/py -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_dev
 Post-run artifact check:
 
 ```bash
-RUN=/nvme1/models/detect/detect_all_available_detect_training_v002/detect_all_available_detect_training_v002_yolo11n_trt_YYYYMMDD
+RUN=/nvme1/models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_YYYYMMDD
 find "$RUN" -maxdepth 4 -type f \( -name best.pt -o -name results.csv -o -name "*.onnx" -o -name "*.engine" -o -name "*.manifest.json" \) | sort
 ```
 

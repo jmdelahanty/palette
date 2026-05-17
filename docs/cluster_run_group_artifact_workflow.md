@@ -33,6 +33,14 @@ For geometry-only crop runs and temporary ROI cache placement across cluster
 pose/segmentation workflows, see
 `docs/geometry_only_crop_workflow_cache_design.md`.
 
+For Orange's native rolling-clip recording layout and Palette's future
+clip-table import shape, see
+`docs/orange_rolling_clip_recording_contract.md`.
+
+For clipped training-Zarr creation from that layout, including the Parquet
+frame-map decision, see
+`docs/clipped_training_zarr_implementation_checklist.md`.
+
 ## Design Decision
 
 Cluster workers should not write directly into canonical analysis Zarrs on
@@ -58,6 +66,13 @@ Future long-running experiments may be recorded as multiple shorter clips
 instead of one very large video. This is a first-class scaling target, not an
 exception to the cluster artifact workflow.
 
+Orange already supports headless rolling clips. The native Orange artifact
+shape is one parent recording folder with `recording_clip_index.{json,csv}` and
+per-clip directories under `clips/clip_%06d/`. Each clip has clip-local MP4,
+metadata CSV, keyframe JSON, and clip manifest files. Palette should preserve
+Orange's `clip_id` and session-continuous `recording_frame_id` mapping rather
+than treating clips as unrelated recordings.
+
 The design decision is: clip compute should parallelize by independent clip
 namespace, while shared experiment-level metadata is finalized separately.
 Importer locking protects shared mutable metadata; it should not serialize
@@ -70,13 +85,17 @@ Preferred layout shape:
 experiment.zarr/
   clips/
     clip_0000/
-      video_metadata/
-      detect_runs/detect_...
-      crop_runs/crop_...
+      cameras/
+        2010093/
+          source/
+          detect_runs/detect_...
+          crop_runs/crop_...
     clip_0001/
-      video_metadata/
-      detect_runs/detect_...
-      crop_runs/crop_...
+      cameras/
+        2010093/
+          source/
+          detect_runs/detect_...
+          crop_runs/crop_...
   experiment_index/
     clip_table
     run_manifest
@@ -85,8 +104,8 @@ experiment.zarr/
 Each cluster job should own one clip, or a small set of clips, and write a
 complete clip-local run group on node-local scratch before packaging it. The
 importer can then promote into a clip-local target such as
-`clips/clip_0017/detect_runs/detect_...` without touching arrays owned by other
-clips.
+`clips/clip_0017/cameras/2010093/detect_runs/detect_...` without touching
+arrays owned by other clips or cameras.
 
 Avoid a design where many jobs append into one giant run group such as
 `detect_runs/detect_full_experiment/frame_indices`. That shape requires global
@@ -98,13 +117,47 @@ Readers should treat an experiment as a logical concatenation of clip-local
 outputs using explicit identifiers:
 
 - `clip_id`
-- `local_frame_index`
-- `global_frame_index`
+- `clip_local_frame_index`
+- `recording_frame_id`
+- optional generated `global_frame_index` alias when it is equal to
+  `recording_frame_id`
 - source video path or clip source id
 
 A short serialized finalize step may build or refresh `experiment_index`,
 `latest` pointers, consolidated metadata, and registry projections after all
 clip-local imports complete.
+
+### Clip Finalize Stage
+
+For clipped recordings, finalization is a separate job family from model
+compute and run-group import. It should not hold a GPU unless the specific
+finalizer needs one.
+
+The finalize stage should run after the required clip-local imports for a
+workflow succeed. Its responsibilities are shared metadata and logical views:
+
+- verify expected clip coverage from `recording_clip_index` or
+  `recording_frame_index.parquet`;
+- verify each clip-local run references the expected upstream run names and
+  source fingerprints;
+- write or refresh `experiment_index/workflow_manifests/<workflow_id>`;
+- write run-collection manifests that map `(clip_id, camera_serial)` to
+  concrete clip-local run paths;
+- update logical latest aliases only after coverage and validation pass;
+- refresh consolidated metadata when policy requires it;
+- update registry projections from the finalized canonical Zarr state.
+
+The finalize stage is also where temporal boundary policy belongs. Image-local
+outputs can be collected directly, but temporal analyses such as track
+kinematics, bout detection, smoothing, hysteresis, and state-machine outputs
+must either be computed parent-wide in the finalize phase or record explicit
+clip-overlap/state-handoff semantics. Silent per-clip concatenation is not a
+valid temporal policy.
+
+One giant global array may be generated as an explicit compatibility/export
+product after finalization, but it should not be the active cluster write
+target. The durable source of truth remains the parent recording clock plus
+validated clip-local run groups.
 
 ## Janelia Cluster Assumptions
 

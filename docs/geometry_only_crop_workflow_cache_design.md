@@ -468,8 +468,36 @@ through `--roi-cache-manifest` records `nv12_luma_plane_uint8` from the cache
 manifest.
 
 The current flat-cache PyNvVideoCodec backend is `pynvvc_luma`. It crops the
-decoded NV12 Y plane directly. That is fast and likely close for grayscale
-camera videos, but it is not automatically byte-identical to every historical
+decoded NV12 Y plane directly. For Orange monochrome camera recordings, this is
+the accepted production crop/cache/training pixel contract:
+
+```text
+contract: pynvvc_luma_v1
+shape: [roi, roi_height, roi_width]
+dtype: uint8
+source: decoded NV12 Y/luma plane from Orange mono camera MP4
+semantics: mono camera intensity before model-specific resize/letterbox
+```
+
+The Orange runtime audit on 2026-05-16 found that current Orange TensorRT
+detection and pose deployments both start from single-channel mono/luma. Orange
+then performs preprocessing outside TensorRT:
+
+- detection: luma -> resize/letterbox -> replicate to 3 planar channels -> /255
+  -> FP32 NCHW `1x3x640x640`
+- pose: luma ROI crop -> resize/letterbox -> replicate to 3 planar channels ->
+  /255 -> FP32 NCHW, currently documented as `1x3x256x256` for the first real
+  pose engine
+- no mean/std normalization was reported
+- no deployed TensorRT segmentation path was found in Orange at that time
+
+Therefore Palette should cache/train from `[N,H,W] uint8` luma crops for mono
+Orange recordings and perform model-specific tensorization later. Normalized CHW
+tensors or replicated RGB tensors should be considered runtime/model-input
+products, not canonical cache artifacts, because their size, channel layout, and
+padding depend on the selected engine.
+
+This contract is intentionally not byte-identical to every historical Palette
 materialization path:
 
 - OpenCV CPU crop paths have used `cv2.COLOR_BGR2GRAY`.
@@ -479,9 +507,9 @@ materialization path:
   backend, because YOLO expects RGB-like input and fixed-frame parity favored
   NV12-to-RGB over luma replication.
 
-This means `pynvvc_luma` is acceptable as a throughput/materialization smoke,
-but it should remain provisional for production pose/segmentation caches until
-crop-pixel parity is measured and accepted.
+Historical crop parity checks remain useful for quantifying the migration, but
+the production question is now consistency with the explicit `pynvvc_luma_v1`
+contract, not strict equality with old OpenCV/Decord-derived crop pixels.
 
 ## Crop Pixel Parity Checklist
 
@@ -490,7 +518,7 @@ segmentation:
 
 - [x] Define and record explicit crop/cache pixel-contract metadata for future
   crop runs and downstream pose/segmentation runs.
-- [ ] Decide the accepted production grayscale contract for runtime analysis
+- [x] Decide the accepted production grayscale contract for runtime analysis
   crops: OpenCV weighted grayscale, Decord historical mean grayscale, raw NV12
   luma, or a new explicit conversion.
 - [x] Add a fixed-row parity utility that compares the canonical
@@ -505,9 +533,9 @@ segmentation:
   p95 absolute difference, and a small image-diff artifact for mismatches.
 - [x] Record `pixel_contract`, `decode_backend_effective`, source video
   identity, crop run, and conversion details in the flat-cache manifest.
-- [ ] If `pynvvc_luma` is not acceptable, implement a production backend such as
-  `pynvvc_legacy_gray` or `pynvvc_nv12_gray` that exactly matches the selected
-  contract.
+- [x] Decide whether an alternative production backend such as
+  `pynvvc_legacy_gray` or `pynvvc_nv12_gray` is required. It is not required for
+  mono Orange recordings while `pynvvc_luma_v1` is the selected contract.
 - [ ] If strict parity requires a different conversion, update
   `--decode-backend auto` to prefer the parity-accepted sequential PyNv backend,
   not the slow `read_slice` path.
@@ -518,9 +546,10 @@ segmentation:
 - [ ] Keep `read_slice`/materialized Zarr as fallback until parity and downstream
   consumer smokes pass on more than one recording.
 
-Working interpretation as of 2026-05-16: flat-cache mechanics and throughput are
-promising, but the production decision is not complete until the crop-pixel
-contract and parity checks are in place.
+Working interpretation as of 2026-05-16: for Orange monochrome camera
+recordings, `pynvvc_luma_v1` is the accepted crop/cache/training pixel contract.
+Flat-cache mechanics and downstream model smokes still need validation, but the
+pixel representation decision is no longer blocked on historical crop parity.
 
 Strict parity check:
 
@@ -534,9 +563,9 @@ scripts/py -m fisheye.diagnostics.check_flat_roi_cache_pixel_parity \
 ```
 
 The default thresholds are strict byte equality. A nonzero result means the flat
-cache does not match the currently configured `CropImageSource` path and should
-not be used for pose/segmentation quality validation until the conversion policy
-is chosen and implemented.
+cache does not match the currently configured `CropImageSource` path. Use this
+to catch implementation drift, but do not require new `pynvvc_luma_v1` crops to
+match historical OpenCV/Decord materializations byte-for-byte.
 
 ## Training Zarr Comparison
 
@@ -574,6 +603,22 @@ still point at the original workstation path.
 For small per-recording training zarrs, `--all-rows` is appropriate. For long
 sampled videos, remember that the PyNv path is sequential; selecting a row from
 a late source frame requires decoding up to that frame.
+
+Detection-only sampled training zarrs are different. They may have
+`detect_runs` and `refined_detect_runs` but no `crop_runs`; this is expected for
+detector-only training because bounding boxes are read from the refined-detect
+surface directly. `fisheye.utils.regenerate_training_crops_pynvvc` requires an
+existing crop run with `frame_indices` and `roi_coordinates_full`, so it should
+not be run on detection-only zarrs. If one of those recordings later becomes a
+pose/keypoint or segmentation source, first create crop geometry from the
+approved refined detections, then materialize a new `pynvvc_luma_v1` crop run.
+
+Observed inventory on 2026-05-16:
+
+- 60 approved detector-training source zarrs exist under `/nvme1/recordings`.
+- 52 have `crop_runs`; all 52 already have a `pynvvc_luma_v1` crop run.
+- 8 `sickyfish`/`sleepyfish` sampled training zarrs have no `crop_runs` and are
+  detection-only.
 
 Merged/exported training zarrs need more care:
 
