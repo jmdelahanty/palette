@@ -42,6 +42,7 @@ Palette already has the first layer of cluster support:
 | Detect submitter | present | `scripts/submit_detect_batches_bsub.sh` wraps `fisheye.utils.run_detections_batch`. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
 | Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs. |
+| Clipped collection flat ROI cache submitter | present | `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh` submits finalized clipped collection cache materialization and manifest-last publish. |
 | Keypoint submitter | present | `scripts/submit_keypoints_batches_bsub.sh` wraps `fisheye.utils.run_keypoints_batch`. |
 | Eye-mask submitter | present | `scripts/submit_eye_masks_batches_bsub.sh` wraps `fisheye.utils.run_eye_masks_batch`. |
 | Registry discovery | present for first four stages | Registry mode can prefilter by `recording_step_status` and path/camera/rig filters. |
@@ -154,6 +155,11 @@ Remaining:
   `clips/<clip_id>/cameras/<camera_serial>/<family>/<run_name>`.
 - [x] Add a clip workflow finalizer that validates expected clip coverage and
   writes `experiment_index/finalized_runs/<workflow_id>`.
+- [x] Run a full clipped detect -> import -> detect-quality -> refined-detect
+  -> validate -> finalize cluster smoke on the PRFS sleepyfish clipped
+  recording. Workflow `sleepyfish_cam2010093_allclips_20260517_01` completed
+  `133/133` stages, finalized 22 clip-camera refined-detect runs, and resolved
+  1,188,000 frame mappings with no unselected frame pairs.
 - [ ] Teach core readers to resolve finalized clip collections in addition to
   traditional top-level run groups.
 - [ ] Teach Crimson-facing readers to use Palette's finalized collection
@@ -264,6 +270,10 @@ Remaining:
 - [x] Add clip-aware validation/reporting utilities for imported detect and
   refined-detect paths so operators do not need to inspect nested `zarr.json`
   metadata manually.
+- [x] Verify all-clips cluster fan-out performance on a long clipped recording:
+  22 concurrent GPU detect jobs finished in `7m37s` wall time versus
+  `~2h39m` summed one-GPU detect/artifact time, with full workflow completion
+  in `~9m03s` from submission to finalizer.
 - [ ] Add an explicit detect-quality report validator if the quality report
   becomes a hard contract separate from `refine_detect` consumption.
 - [ ] Ensure registry discovery can select recordings with `detect='ok'` and
@@ -296,14 +306,27 @@ Ready for pilot:
 - [x] Sequential PyNvVideoCodec flat-cache materialization path exists
   (`pynvvc_luma`) and avoids the Decord open/random-access behavior that made
   the first long-video cache smoke impractical.
+- [x] Finalized clipped refined-detect collections can be materialized directly
+  into a flat ROI cache with a sidecar row-index parquet via
+  `fisheye.utils.build_clipped_collection_flat_roi_cache`. This avoids creating
+  a synthetic parent-level crop run before pose/segmentation cache generation.
 
 Remaining:
 
-- [ ] Rerun the crop + flat ROI cache cluster smoke after repairing copied
-  smoke archive `source_video_path` attrs to point at the PRFS MP4.
+- [x] Run the clipped-collection flat-cache builder on the all-clips sleepyfish
+  finalized collection with a small local `--limit-rows` smoke.
+- [ ] Run the clipped-collection flat-cache LSF wrapper on the all-clips
+  sleepyfish finalized collection with `--limit-rows 1024`, then without the
+  limit if the row-index and payload validation pass.
+- [x] Add an LSF submit wrapper for clipped-collection flat-cache generation
+  that builds on node-local scratch, publishes `.bin`, `.rows.parquet`, then
+  `.json` manifest to PRFS workflow cache storage.
+- [ ] Rerun the legacy crop-run + flat ROI cache cluster smoke after repairing
+  copied smoke archive `source_video_path` attrs to point at the PRFS MP4.
 - [ ] Verify crop source resolution prefers the refined canonical surface.
-- [ ] Verify the crop status JSON, flat cache manifest, published payload size,
-  and `open_flat_roi_cache` validation.
+- [ ] Verify the crop status JSON or collection cache progress JSONL, flat
+  cache manifest, row-index parquet, published payload size, and
+  `open_flat_roi_cache` validation.
 - [x] Add detailed phase telemetry for cache build and publish: video open,
   decode, crop extraction, local write, PRFS copy, manifest publish, and
   validation.
@@ -350,6 +373,48 @@ Remaining:
   node-local scratch before downstream GPU inference.
 - [ ] Decide whether materialized crop outputs still need scratch package/import
   when operators explicitly request `crop_storage_mode=materialized`.
+
+#### Clipped Collection ROI Cache To Pose/Segmentation Slice
+
+Goal: consume the finalized clipped refined-detect collection directly, build a
+shared runtime ROI cache, and prove pose/segmentation can use that cache without
+creating a synthetic parent-level crop run.
+
+Implementation checklist:
+
+- [x] Build collection-aware flat ROI cache writer:
+  `fisheye.utils.build_clipped_collection_flat_roi_cache`.
+- [x] Write `.flat_roi_cache.bin`, `.flat_roi_cache.json`, and required
+  `.flat_roi_cache.rows.parquet` sidecar.
+- [x] Record `pynvvc_luma_v1` pixel contract and source collection provenance
+  in the cache manifest.
+- [x] Make refined `instances/bbox_img_xyxy` the preferred row-level geometry
+  source; root `width`/`height` remain valid metadata and fallback dimensions
+  when normalized-only rows are encountered.
+- [x] Add focused unit coverage for clipped cache pixels and row-index lineage.
+- [x] Run a limited real-data smoke against
+  `sleepyfish_cam2010093_allclips_20260517_01`.
+- [x] Add `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh`.
+- [x] Make the LSF wrapper write a job script, stdout/stderr, status JSON,
+  progress JSONL, submission context, and final manifest path.
+- [x] Make the wrapper build under `$PALETTE_JOB_CACHE`/node scratch and publish
+  payload, row-index parquet, and manifest to
+  `/misc/public/palette_cache/<workflow_id>/roi_cache` in manifest-last order.
+- [ ] Run an LSF limited smoke with `--limit-rows 1024` and validate manifest,
+  payload size, row-index parquet, `open_flat_roi_cache`, and progress
+  telemetry.
+- [ ] Run the full all-clips sleepyfish cache build if the limited smoke passes.
+- [ ] Add a row-index-aware ROI cache source/adapter for downstream
+  pose/segmentation jobs so those jobs do not parse `.bin` or assume row number
+  equals parent frame identity.
+- [ ] Add pose smoke over the clipped collection cache using a small row limit.
+- [ ] Add segmentation smoke over the clipped collection cache using a small row
+  limit.
+- [ ] Decide whether downstream jobs should read PRFS cache directly or stage
+  `.bin`/`.rows.parquet` to node scratch before GPU inference.
+- [ ] Record downstream output provenance with cache manifest path, row-index
+  schema, pixel contract, source finalized collection id, LSF job id, host, GPU,
+  and git commit.
 
 ### 4. Keypoints And Refined Keypoints
 

@@ -354,6 +354,25 @@ dependency equivalent to `-w done(<crop_jobid>)`, so it remains pending until
 the crop job exits successfully. If the crop job fails, the cache job does not
 start.
 
+For finalized clipped refined-detect collections, skip synthetic crop-run
+creation and submit the collection-aware cache builder directly:
+
+```bash
+scripts/submit_clipped_collection_flat_roi_cache_bsub.sh \
+  --zarr /groups/johnson/johnsonlab/jeremy/palette_smoke/<recording>/zarr/<recording>_analysis.zarr \
+  --collection-id <workflow_id> \
+  --public-cache-root /misc/public/palette_cache \
+  --run-label <recording>_<workflow_id>_roi_cache \
+  --queue gpu_l4 \
+  --gpus 1 \
+  --walltime 2:00
+```
+
+Use `--limit-rows 1024` for the first LSF smoke. The wrapper writes a job
+script, submission context, stdout/stderr, status JSON, progress JSONL, and a
+builder manifest snapshot. It builds under `$PALETTE_JOB_CACHE`, publishes
+`.bin` and `.rows.parquet` first, then publishes the `.json` manifest last.
+
 Observed Janelia queue note: `normal` is not a valid queue on the checked
 cluster. The wrapper defaults now use `short`; GPU cache builds should pass an
 explicit GPU queue such as `--cache-queue gpu_l4 --cache-gpus 1`.
@@ -510,6 +529,66 @@ materialization path:
 Historical crop parity checks remain useful for quantifying the migration, but
 the production question is now consistency with the explicit `pynvvc_luma_v1`
 contract, not strict equality with old OpenCV/Decord-derived crop pixels.
+
+### Finalized Clipped Collection Cache
+
+For clipped recordings, downstream pose and segmentation should not first merge
+all clip-local detections into a parent dense crop run just to build a runtime
+cache. The collection-aware builder consumes the finalized clipped
+refined-detect collection directly:
+
+```bash
+scripts/py -m fisheye.utils.build_clipped_collection_flat_roi_cache \
+  /path/to/recording_analysis.zarr \
+  --collection-id <workflow_id> \
+  --output-dir /misc/public/palette_cache/<workflow_id>/roi_cache \
+  --progress-jsonl /path/to/cache.progress.jsonl \
+  --progress-stderr
+```
+
+The builder resolves `experiment_index/finalized_runs/<workflow_id>`, joins it
+to `recording_frame_index.parquet`, reads each selected
+`clips/<clip>/cameras/<camera>/refined_detect_runs/<run>/instances` group, and
+derives the same centered fixed-size ROI coordinates as `crop_batch`.
+
+Root attrs policy:
+
+- Root path/provenance attrs such as `recording_path` and `source_video_path`
+  remain current for single-video archives and migrated smoke copies.
+- Root image-dimension attrs such as `width` and `height` remain valid for
+  single-video archives. They may also be valid parent-level invariants for
+  clipped recordings when all clips/cameras share the same resolution.
+- Clipped collection cache builders should prefer refined pixel-space
+  `instances/bbox_img_xyxy` for ROI geometry because those boxes are already the
+  refined row-level pixel coordinates. If only normalized boxes are present,
+  root `width`/`height` may be used as a compatibility fallback when the
+  dimensions are unambiguous; otherwise the builder should fail rather than
+  silently invent geometry.
+
+It writes three sibling artifacts:
+
+```text
+<label>.flat_roi_cache.json
+<label>.flat_roi_cache.bin
+<label>.flat_roi_cache.rows.parquet
+```
+
+The `.bin` payload remains `[N,H,W] uint8` flat luma crops. The sidecar
+`.rows.parquet` is required for clipped collection caches because there is no
+single `crop_runs/<run>` row table. It records at least:
+
+- `roi_row_index`
+- `clip_id`, `clip_index`, `camera_serial`
+- `clip_local_frame_index`, `recording_frame_id`, `parent_frame_index`
+- `refined_group_path`, `refined_detect_run`, `refined_row_id`
+- `source_detect_row_index`
+- `bbox_norm_*`, `roi_x`, `roi_y`, `roi_w`, `roi_h`
+- `video_path`, `metadata_path`, `keyframe_path`
+
+Downstream pose/segmentation code should still read ROI pixels through a cache
+adapter and should use the row-index parquet for lineage/output placement. It
+should not parse `.bin` directly and should not infer parent frame identity from
+row number.
 
 ## Crop Pixel Parity Checklist
 
@@ -761,14 +840,17 @@ Current implementation status:
 
 - Flat cache manifests record schema/layout, source archive, crop run,
   source frame path, ROI shape, payload byte count, optional checksum, builder
-  batch size, and one coarse `builder.duration_seconds`.
+  batch size, pixel contract, and phase timing summaries.
+- Finalized clipped refined-detect collections can also be cached without a
+  `crop_runs/<run>` source. These manifests record collection identity and a
+  sidecar `.rows.parquet` path for row lineage.
 - Submit wrappers write stdout/stderr plus crop/cache status JSON files with
   job id, host, status, published paths, byte size, and source/array metadata.
 - Downstream readers that accept `--roi-cache-manifest` record cache policy,
   backend, key, and manifest path in run attrs/provenance.
-- Per-phase timings for video open, decode, ROI extraction, local `.bin`
-  write, PRFS copy, manifest publish, and validation are not yet detailed.
-  Add those before scaling beyond smoke runs.
+- Per-phase timings for decode/read, ROI extraction, contiguous conversion,
+  serialization, local `.bin` write, PRFS copy, manifest publish, and
+  validation are captured in flat-cache builder and wrapper telemetry.
 
 ## Cache Lifecycle
 

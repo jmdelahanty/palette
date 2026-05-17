@@ -606,6 +606,91 @@ The resolver joins `recording_frame_index.parquet` to the finalized
 detect/refined run paths. Readers should use this resolver instead of scanning
 clip directories independently.
 
+Build a runtime ROI cache from a finalized clipped collection:
+
+```bash
+scripts/py -m fisheye.utils.build_clipped_collection_flat_roi_cache \
+  <recording_analysis.zarr> \
+  --collection-id <workflow_id> \
+  --output-dir /misc/public/palette_cache/<workflow_id>/roi_cache \
+  --progress-jsonl <recording_dir>/derived/cluster_artifacts/<workflow_id>_roi_cache.progress.jsonl \
+  --progress-stderr
+```
+
+For LSF execution, use the submit wrapper so the cache is built on node-local
+scratch and published to PRFS in manifest-last order:
+
+```bash
+scripts/submit_clipped_collection_flat_roi_cache_bsub.sh \
+  --zarr <recording_analysis.zarr> \
+  --collection-id <workflow_id> \
+  --public-cache-root /misc/public/palette_cache \
+  --run-label <recording>_<workflow_id>_roi_cache \
+  --queue gpu_l4 \
+  --gpus 1 \
+  --walltime 2:00
+```
+
+For the first cluster smoke, add `--limit-rows 1024`. The wrapper writes a
+submission context, generated job script, LSF stdout/stderr, progress JSONL,
+status JSON, and final published manifest/payload/row-index paths.
+
+This builder consumes clip-local refined `instances` rows directly and writes a
+flat ROI cache plus a required `.rows.parquet` sidecar. The payload rows are
+`pynvvc_luma_v1` `[N,H,W] uint8` crops. The row-index parquet maps each cache row
+back to `clip_id`, `camera_serial`, `clip_local_frame_index`,
+`recording_frame_id`, `refined_group_path`, and `refined_row_id`, so downstream
+pose and segmentation jobs can remain clip/parent-frame aware without merging
+all clip runs into one parent crop run first.
+
+Root `width`/`height` attrs remain valid for single-video archives and can be
+valid parent-level invariants for clipped recordings when every clip/camera has
+the same resolution. The collection cache path should still prefer refined
+`instances/bbox_img_xyxy` as the row-level geometry source, using root
+dimensions only as an unambiguous compatibility fallback for normalized-only
+rows. Root source-path attrs are still valid provenance and migration metadata,
+especially for single-video archives and smoke-copy repair.
+
+Measured all-clips smoke, 2026-05-17:
+
+- Recording:
+  `/groups/johnson/johnsonlab/jeremy/palette_smoke/sleepyfish_2026_05_05_17_45_30_cam2010093`.
+- Workflow id: `sleepyfish_cam2010093_allclips_20260517_01`.
+- Scope: 22 clip-camera work units, `clip_000000..clip_000021`,
+  camera `2010093`, 1,188,000 frames.
+- Decode backend: explicit `pynvvc_luma_rgb`.
+- Model:
+  `/groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt`.
+- Submission checker result: `133/133` stages `ok`, including the finalizer.
+- Finalized collection:
+  `experiment_index/finalized_runs/sleepyfish_cam2010093_allclips_20260517_01`.
+- Resolver result: `mapped_frame_count=1188000`,
+  `selected_run_count=22`, `unselected_frame_pair_count=0`.
+
+Performance from the actual cluster artifacts:
+
+| Measurement | Value |
+|-------------|-------|
+| First detect job start to last detect job finish | `7m37s` |
+| First detect job start to finalizer complete | `~8m54s` |
+| Submission to finalizer complete | `~9m03s` |
+| Sum of per-clip YOLO/detection time | `9308s` (`~2h35m`) |
+| Sum of per-clip artifact time | `9563s` (`~2h39m`) |
+| Sum of LSF detect job runtimes | `9680s` (`~2h41m`) |
+| Mean per-clip artifact time | `435s` |
+| Parallel aggregate detect throughput | `~2600 fps` |
+| Serial-equivalent one-GPU throughput | `~128 fps` |
+| Parallel speedup over summed one-GPU detect time | `~20x` |
+
+Interpretation: the `~2600 fps` number is aggregate wall-clock throughput
+from running 22 independent clip jobs concurrently; it is not per-GPU model
+speed. The serial-equivalent numbers are the better estimate for how long this
+recording would take if processed as one long video or as clips on a single
+GPU. The fan-out result supports clip-camera GPU jobs as the default scaling
+unit for long recordings, while the small CPU follow-up stages remain good
+candidates for a future fused per-clip postprocess job to reduce scheduler
+overhead.
+
 The batch wrappers can also plan against a direct Zarr directory path without
 registry discovery:
 

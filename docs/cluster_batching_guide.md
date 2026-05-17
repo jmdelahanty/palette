@@ -89,6 +89,23 @@ exact per-clip commands for detection artifact submission, import, validation,
 detect quality, and refined detect. Actual LSF submission should consume this
 plan rather than rediscovering clip rows or relying on mutable `latest` attrs.
 
+2026-05-17 all-clips smoke result: the
+`sleepyfish_2026_05_05_17_45_30_cam2010093` PRFS recording was submitted as 22
+clip-camera GPU detect jobs plus dependent CPU postprocess/finalizer jobs.
+The workflow completed with `133/133` stages `ok`, finalized 22 selected
+refined-detect runs, and resolved all 1,188,000 frame mappings. The detect
+fan-out finished in `7m37s` wall time from first GPU job start to last GPU job
+finish. Summed one-GPU detect/artifact time was `~2h39m`, implying roughly
+`20x` wall-clock speedup when enough L4 slots were available.
+
+This supports clip-camera fan-out for GPU detection on long recordings. It
+does not prove that every small CPU stage should stay as a separate LSF job:
+in this run the CPU stages were generally seconds long. The conservative
+separate-stage chain is useful while validating contracts and logs; a future
+`--fuse-cpu-postprocess` mode could combine per-clip import, validation,
+detect-quality, refine, and refined validation into one CPU job while keeping
+the GPU detect jobs and recording-level finalizer separate.
+
 ## Video Decode Storage Policy
 
 For single-pass detection, do not copy full source videos to node-local scratch
