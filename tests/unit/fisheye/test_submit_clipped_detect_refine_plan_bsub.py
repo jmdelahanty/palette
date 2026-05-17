@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,9 @@ def test_build_submission_bundle_dry_run_writes_dependency_scripts(tmp_path: Pat
     )
 
     stages = {stage["stage"]: stage for stage in item["stages"]}
+    for stage in stages.values():
+        subprocess.run(["bash", "-n", stage["script"]], check=True)
+
     assert stages["import_detect"]["dependency"] == "done(<detect_jobid:recording_clip_000000_cam2010093>)"
     assert stages["validate_detect"]["dependency"] == "done(<import_detect_jobid:recording_clip_000000_cam2010093>)"
     assert stages["detect_quality"]["dependency"] == "done(<validate_detect_jobid:recording_clip_000000_cam2010093>)"
@@ -96,11 +100,21 @@ def test_build_submission_bundle_dry_run_writes_dependency_scripts(tmp_path: Pat
     assert "STATUS_JSON_TEMPLATE=" in script_text
     assert "fisheye.utils.import_run_group_artifact" in script_text
     assert "--use-intended-target --apply" in script_text
+    assert (
+        "trap 'rc=$?; if [[ $rc -ne 0 ]]; then write_stage_status failed \"$rc\" || true; fi' EXIT"
+        in script_text
+    )
+    assert "write_stage_status ok 0" in script_text
+    assert '"exit_code": int(os.environ.get("STAGE_EXIT_CODE", "0"))' in script_text
 
     finalizer_script = Path(finalizer["script"])
+    subprocess.run(["bash", "-n", str(finalizer_script)], check=True)
     finalizer_text = finalizer_script.read_text(encoding="utf-8")
     assert "finalize_recording_collection" in finalizer_text
     assert "STAGE_SECONDS" in finalizer_text
+    assert "write_stage_status failed" in finalizer_text
+    assert "write_stage_status ok 0" in finalizer_text
+    assert '"exit_code": int(os.environ.get("STAGE_EXIT_CODE", "0"))' in finalizer_text
 
     manifest_path = Path(manifest["submission_manifest"])
     assert manifest_path.exists()

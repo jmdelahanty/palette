@@ -254,15 +254,20 @@ echo "camera_serial=$CAMERA_SERIAL"
 echo "palette_job_cache=$PALETTE_JOB_CACHE"
 echo "status_json=$STATUS_JSON"
 
-started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-stage_start_ns="$(date +%s%N)"
-{command}
-stage_end_ns="$(date +%s%N)"
-stage_seconds="$(awk -v s="$stage_start_ns" -v e="$stage_end_ns" 'BEGIN {{ printf "%.6f", (e - s) / 1000000000 }}')"
-export STAGE_STARTED_AT_UTC="$started_at"
-export STAGE_SECONDS="$stage_seconds"
-
-scripts/py - "$STATUS_JSON" <<'PY'
+stage_start_ns=""
+write_stage_status() {{
+  local status_value="$1"
+  local exit_code="$2"
+  local stage_end_ns
+  local stage_seconds=""
+  stage_end_ns="$(date +%s%N)"
+  if [[ -n "${{stage_start_ns:-}}" ]]; then
+    stage_seconds="$(awk -v s="$stage_start_ns" -v e="$stage_end_ns" 'BEGIN {{ printf "%.6f", (e - s) / 1000000000 }}')"
+  fi
+  export STAGE_STATUS="$status_value"
+  export STAGE_EXIT_CODE="$exit_code"
+  export STAGE_SECONDS="$stage_seconds"
+  scripts/py - "$STATUS_JSON" <<'PY'
 import json
 import os
 import socket
@@ -271,8 +276,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 status_path = Path(sys.argv[1])
+seconds = os.environ.get("STAGE_SECONDS") or None
 payload = {{
-    "status": "ok",
+    "status": os.environ.get("STAGE_STATUS"),
     "schema_version": 1,
     "stage": "{stage}",
     "work_unit_id": os.environ.get("WORK_UNIT_ID"),
@@ -281,18 +287,28 @@ payload = {{
     "detect_run": os.environ.get("DETECT_RUN"),
     "quality_run": os.environ.get("QUALITY_RUN"),
     "refined_run": os.environ.get("REFINED_RUN"),
+    "exit_code": int(os.environ.get("STAGE_EXIT_CODE", "0")),
     "job_id": os.environ.get("LSB_JOBID"),
     "queue": os.environ.get("LSB_QUEUE"),
     "slots": os.environ.get("LSB_DJOB_NUMPROC"),
     "host": socket.gethostname(),
     "started_at_utc": os.environ.get("STAGE_STARTED_AT_UTC"),
     "finished_at_utc": datetime.now(timezone.utc).isoformat(),
-    "stage_seconds": float(os.environ.get("STAGE_SECONDS", "nan")),
+    "stage_seconds": float(seconds) if seconds is not None else None,
     "palette_job_cache": os.environ.get("PALETTE_JOB_CACHE"),
 }}
 status_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
 print(f"status_json={{status_path}}")
 PY
+}}
+
+trap 'rc=$?; if [[ $rc -ne 0 ]]; then write_stage_status failed "$rc" || true; fi' EXIT
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+stage_start_ns="$(date +%s%N)"
+export STAGE_STARTED_AT_UTC="$started_at"
+{command}
+write_stage_status ok 0
+trap - EXIT
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -332,15 +348,20 @@ echo "stage=finalize_recording_collection"
 echo "palette_job_cache=$PALETTE_JOB_CACHE"
 echo "status_json=$STATUS_JSON"
 
-started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-stage_start_ns="$(date +%s%N)"
-{command}
-stage_end_ns="$(date +%s%N)"
-stage_seconds="$(awk -v s="$stage_start_ns" -v e="$stage_end_ns" 'BEGIN {{ printf "%.6f", (e - s) / 1000000000 }}')"
-export STAGE_STARTED_AT_UTC="$started_at"
-export STAGE_SECONDS="$stage_seconds"
-
-scripts/py - "$STATUS_JSON" <<'PY'
+stage_start_ns=""
+write_stage_status() {{
+  local status_value="$1"
+  local exit_code="$2"
+  local stage_end_ns
+  local stage_seconds=""
+  stage_end_ns="$(date +%s%N)"
+  if [[ -n "${{stage_start_ns:-}}" ]]; then
+    stage_seconds="$(awk -v s="$stage_start_ns" -v e="$stage_end_ns" 'BEGIN {{ printf "%.6f", (e - s) / 1000000000 }}')"
+  fi
+  export STAGE_STATUS="$status_value"
+  export STAGE_EXIT_CODE="$exit_code"
+  export STAGE_SECONDS="$stage_seconds"
+  scripts/py - "$STATUS_JSON" <<'PY'
 import json
 import os
 import socket
@@ -349,22 +370,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 status_path = Path(sys.argv[1])
+seconds = os.environ.get("STAGE_SECONDS") or None
 payload = {{
-    "status": "ok",
+    "status": os.environ.get("STAGE_STATUS"),
     "schema_version": 1,
     "stage": "finalize_recording_collection",
+    "exit_code": int(os.environ.get("STAGE_EXIT_CODE", "0")),
     "job_id": os.environ.get("LSB_JOBID"),
     "queue": os.environ.get("LSB_QUEUE"),
     "slots": os.environ.get("LSB_DJOB_NUMPROC"),
     "host": socket.gethostname(),
     "started_at_utc": os.environ.get("STAGE_STARTED_AT_UTC"),
     "finished_at_utc": datetime.now(timezone.utc).isoformat(),
-    "stage_seconds": float(os.environ.get("STAGE_SECONDS", "nan")),
+    "stage_seconds": float(seconds) if seconds is not None else None,
     "palette_job_cache": os.environ.get("PALETTE_JOB_CACHE"),
 }}
 status_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
 print(f"status_json={{status_path}}")
 PY
+}}
+
+trap 'rc=$?; if [[ $rc -ne 0 ]]; then write_stage_status failed "$rc" || true; fi' EXIT
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+stage_start_ns="$(date +%s%N)"
+export STAGE_STARTED_AT_UTC="$started_at"
+{command}
+write_stage_status ok 0
+trap - EXIT
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
