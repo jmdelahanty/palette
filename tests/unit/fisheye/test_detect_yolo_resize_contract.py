@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from fisheye.detection import detect_yolo as mod
 
@@ -33,6 +34,33 @@ def test_record_timing_accumulates_perf_counter_elapsed(monkeypatch) -> None:
 
     assert elapsed == pytest.approx(2.5)
     assert timings["read_decode_seconds_total"] == pytest.approx(3.5)
+
+
+def test_pynvvc_streamed_batch_materializes_frames_before_surface_reuse() -> None:
+    reusable_surface = torch.full((1, 1), 1, dtype=torch.uint8)
+    second_surface = torch.full((1, 1), 2, dtype=torch.uint8)
+
+    def frame_iter():
+        yield reusable_surface
+        reusable_surface.fill_(99)
+        yield second_surface
+
+    processed, count, read_seconds, preprocess_seconds = mod._read_and_preprocess_pynvvc_batch(  # noqa: SLF001
+        frame_iter=frame_iter(),
+        max_batch_frames=2,
+        decode_backend_effective=mod.BACKEND_PYNVVC_LUMA_RGB,
+        source_height=1,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        resize_hw=(1, 1),
+    )
+
+    assert count == 2
+    assert read_seconds >= 0.0
+    assert preprocess_seconds >= 0.0
+    assert processed is not None
+    values = torch.round(processed[:, 0, 0, 0] * 255.0).to(torch.int64).tolist()
+    assert values == [1, 2]
 
 
 def test_detect_yolo_rejects_conflicting_resize_dims_and_imgsz() -> None:

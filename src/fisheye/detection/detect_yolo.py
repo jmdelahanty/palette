@@ -439,6 +439,74 @@ def _record_timing(timings: Dict[str, float], key: str, start: float) -> float:
     return elapsed
 
 
+def _read_and_preprocess_pynvvc_batch(
+    *,
+    frame_iter: Any,
+    max_batch_frames: int,
+    decode_backend_effective: str,
+    source_height: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    resize_hw: list[int] | tuple[int, int],
+) -> tuple[Optional[torch.Tensor], int, float, float]:
+    """Read PyNvVC frames and immediately materialize owned model inputs.
+
+    PyNvVideoCodec frames can be backed by decoder-owned reusable surfaces. Do
+    not retain raw decoded tensors across further decode calls; preprocess each
+    yielded frame into owned resized RGB tensor memory before advancing.
+    """
+
+    processed_frames: list[torch.Tensor] = []
+    read_seconds = 0.0
+    preprocess_seconds = 0.0
+    for _ in range(max(0, int(max_batch_frames))):
+        read_start = time.perf_counter()
+        try:
+            frame_tensor = next(frame_iter)
+        except StopIteration:
+            break
+        read_seconds += time.perf_counter() - read_start
+
+        preprocess_start = time.perf_counter()
+        if decode_backend_effective == BACKEND_PYNVVC_NV12_RGB:
+            processed_frame = preprocess_nv12_rgb(
+                [frame_tensor],
+                source_height=source_height,
+                device=device,
+                dtype=dtype,
+                resize_hw=resize_hw,
+            )
+        else:
+            processed_frame = preprocess_luma_rgb(
+                [frame_tensor],
+                source_height=source_height,
+                device=device,
+                dtype=dtype,
+                resize_hw=resize_hw,
+            )
+        if getattr(processed_frame, "is_cuda", False):
+            # PyNvVideoCodec may recycle the decoded surface on the next decode.
+            # Ensure PyTorch has finished copying/resizing into owned tensor
+            # memory before allowing the decoder to advance.
+            torch.cuda.current_stream(device=device).synchronize()
+        preprocess_seconds += time.perf_counter() - preprocess_start
+        processed_frames.append(processed_frame)
+        del frame_tensor
+
+    if not processed_frames:
+        return None, 0, read_seconds, preprocess_seconds
+    if len(processed_frames) == 1:
+        processed = processed_frames[0]
+    else:
+        processed = torch.cat(processed_frames, dim=0)
+    return (
+        processed.contiguous(memory_format=torch.channels_last),
+        len(processed_frames),
+        read_seconds,
+        preprocess_seconds,
+    )
+
+
 def detect_yolo(
     video_path: str,
     model_path: Optional[str] = None,
@@ -1126,43 +1194,28 @@ def detect_yolo(
                 raise RuntimeError(f"{decode_backend_effective} requires a resolved tensor resize.")
             device = torch.device('cuda' if use_gpu and torch.cuda.is_available() else 'cpu')
             dtype = torch.float16 if model_fp16 else torch.float32
+            frame_iter = pynvvc_reader.iter_frames()
 
-            for batch_start in range(0, n_frames, batch_size):
-                batch_end = min(batch_start + batch_size, n_frames)
-                indices = list(range(batch_start, batch_end))
-
-                read_start = time.perf_counter()
-                decoded_frames = pynvvc_reader.decode_next(len(indices))
-                read_elapsed = _record_timing(
-                    stage_timings, 'read_decode_seconds_total', read_start
+            while frame_idx < n_frames:
+                max_batch_frames = min(int(batch_size), int(n_frames - frame_idx))
+                processed, actual_count, read_elapsed, preprocess_elapsed = (
+                    _read_and_preprocess_pynvvc_batch(
+                        frame_iter=frame_iter,
+                        max_batch_frames=max_batch_frames,
+                        decode_backend_effective=decode_backend_effective,
+                        source_height=pynvvc_reader.source_height,
+                        device=device,
+                        dtype=dtype,
+                        resize_hw=effective_input_resize_dims,
+                    )
                 )
+                stage_timings['read_decode_seconds_total'] += float(read_elapsed)
+                stage_timings['preprocess_resize_seconds_total'] += float(preprocess_elapsed)
                 read_times.append(read_elapsed)
 
-                actual_count = len(decoded_frames)
-                if actual_count <= 0:
+                if actual_count <= 0 or processed is None:
                     break
-                actual_indices = indices[:actual_count]
-
-                preprocess_start = time.perf_counter()
-                if decode_backend_effective == BACKEND_PYNVVC_NV12_RGB:
-                    processed = preprocess_nv12_rgb(
-                        decoded_frames,
-                        source_height=pynvvc_reader.source_height,
-                        device=device,
-                        dtype=dtype,
-                        resize_hw=effective_input_resize_dims,
-                    )
-                else:
-                    processed = preprocess_luma_rgb(
-                        decoded_frames,
-                        source_height=pynvvc_reader.source_height,
-                        device=device,
-                        dtype=dtype,
-                        resize_hw=effective_input_resize_dims,
-                    )
-                _record_timing(
-                    stage_timings, 'preprocess_resize_seconds_total', preprocess_start
-                )
+                actual_indices = list(range(frame_idx, frame_idx + actual_count))
 
                 inference_start = time.perf_counter()
                 with torch.inference_mode():
@@ -1181,7 +1234,6 @@ def detect_yolo(
 
                 del results
                 del processed
-                del decoded_frames
 
                 frame_idx += actual_count
                 batch_count += 1
@@ -1196,7 +1248,7 @@ def detect_yolo(
                     console.print(f"[dim]Batch {batch_count}: read={avg_read*1000:.1f}ms, "
                                 f"inference={avg_inference*1000:.1f}ms, fps={current_fps:.1f}[/dim]")
 
-                if actual_count < len(indices):
+                if actual_count < max_batch_frames:
                     break
 
         elif use_decord:
@@ -1480,6 +1532,9 @@ def detect_yolo(
         'timing_policy': 'wall_clock_no_per_batch_cuda_sync',
         'decode_backend_requested': decode_backend_requested,
         'decode_backend_effective': decode_backend_effective,
+        'pynvvc_surface_materialization': (
+            'stream_preprocess_owned_batch_v1' if use_pynvvc else 'not_applicable'
+        ),
         'video_reader_type': video_reader_type,
         'frames_processed': int(frame_idx),
         'batches_processed': int(len(inference_times)),
@@ -1529,6 +1584,9 @@ def detect_yolo(
             'legacy_video_resize_dims': legacy_video_resize_dims,
             'decode_backend_requested': decode_backend_requested,
             'decode_backend_effective': decode_backend_effective,
+            'pynvvc_surface_materialization': (
+                'stream_preprocess_owned_batch_v1' if use_pynvvc else 'not_applicable'
+            ),
         },
         'summary_statistics': stats,
         'timing_summary': timing_summary,
