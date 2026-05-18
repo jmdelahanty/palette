@@ -163,6 +163,31 @@ Modes:
 - `--manual`: draw corrections
 - `--audit`: update summary statistics
 
+For the current 5-point `traditional_v2` migration, the preferred labeling path
+is not direct use of the existing 5-point model on new PyNvVC-luma crops. Seed
+a `traditional_v2` refined run from the reliable 3-point refined run with
+`extend_keypoint_skeleton`, then manually complete `snout_tip` and `tail_tip`.
+The seed run is expected to have `refined_success=false` and
+`usable_keypoints=false` until those new points are completed.
+
+Example manual completion from an SSH/tmux session with X forwarding available:
+
+```bash
+scripts/py -m fisheye.tune.keypoint_review \
+  /path/to/training.zarr \
+  --manual \
+  --refined-run refined_keypoints_traditional_v2_seed_pynvvc_luma_v1_20260517_cam2010093 \
+  --review-intended-use training
+```
+
+Manual review supports arbitrary labels from the selected run metadata. For
+`traditional_v2`, use number keys `1` through `5` to select
+`swim_bladder`, `eye_left`, `eye_right`, `snout_tip`, and `tail_tip`, then save
+with `s`. Use `n`/`p` for navigation, `a` to approve when complete, `x` for
+`fish_present_no_keypoints`, and `d` for detection issues. Do not approve
+experimental low-confidence 5-point model outputs unless they have been
+visually corrected.
+
 ### Eye mask review
 
 ```bash
@@ -253,14 +278,28 @@ Sampled recording-only training Zarrs usually do not have `crop_runs`. For
 required for this sampled-training path because there is no crop stage to
 approve.
 
-Current inventory note (2026-05-16): the approved detector-training corpus has
-60 source training zarrs. 52 are legacy/crop-bearing training zarrs and all 52
-have a `pynvvc_luma_v1` materialized crop run for future crop-based exports.
-The 8 `sickyfish`/`sleepyfish` sampled training zarrs are detection-only; they
-intentionally contain `detect_runs`/`refined_detect_runs` but no `crop_runs`.
-Do not run crop-pixel migration tools on those 8 unless they are first promoted
-into crop-bearing keypoint/segmentation training sources by creating explicit
-crop geometry from their approved refined detections.
+Inventory note: the approved detector-training corpus reached 60 source
+training zarrs on 2026-05-16. At that point, 52 were legacy/crop-bearing
+training zarrs with a `pynvvc_luma_v1` materialized crop run, and the 8
+`sickyfish`/`sleepyfish` sampled training zarrs were detection-only. That
+snapshot is now stale for active development: those 8 sampled zarrs are being
+promoted into crop/keypoint training sources as explicit crop geometry and
+PyNvVC-luma crops are added. Check each archive's current `crop_runs.latest`,
+`keypoints_runs.latest`, and `refined_keypoints_runs.latest` before assuming it
+is detection-only.
+
+Metadata-only inspection command:
+
+```bash
+for z in /nvme1/recordings/{sickyfish_*,sleepyfish_*}/zarr/*_training.zarr \
+         /nvme1/recordings/{sickyfish_*,sleepyfish_*}/zarr/*_clipped_training.zarr; do
+  [ -d "$z" ] || continue
+  echo "$z"
+  jq -r '.attributes.latest // "no crop_runs latest"' "$z/crop_runs/zarr.json" 2>/dev/null || true
+  jq -r '.attributes.latest // "no keypoints_runs latest"' "$z/keypoints_runs/zarr.json" 2>/dev/null || true
+  jq -r '.attributes.latest // "no refined_keypoints_runs latest"' "$z/refined_keypoints_runs/zarr.json" 2>/dev/null || true
+done
+```
 
 The direct path-based preparer is still useful for explicit lists or debugging:
 

@@ -646,6 +646,10 @@ def _sync_refined_keypoint_step_status_after_auto_review(
             recording_id=_normalize_attr(context.get("recording_id")),
             zarr_use=None,
             zarr_purpose=None,
+            source_layout=None,
+            source_frame_index_path=None,
+            source_recording_frame_index_path=None,
+            source_frame_index_schema=None,
         )
         wrote = emit_stage_completion(
             None,

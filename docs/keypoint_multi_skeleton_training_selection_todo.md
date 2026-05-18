@@ -17,19 +17,37 @@ This is the broad policy needed to handle:
 - future richer skeletons
 - archives where multiple skeletons coexist intentionally
 
-## Current Problem
+## Historical Problem
 
-The current training preflight/export flow still treats the selected raw
+Earlier training preflight/export flow treated the selected raw
 `keypoints_runs/<run>` as the skeleton authority, even when review-gated row
-selection and exported coordinates come from a refined run.
+selection and exported coordinates came from a refined run.
 
-That breaks the intended `traditional_v2` migration workflow:
+That broke the intended `traditional_v2` migration workflow:
 
 - raw source run may still be `traditional_v1`
 - refined reviewed run may already be `traditional_v2`
-- current preflight can still report `traditional_v1`
-- current export can switch coordinate arrays to refined keypoints but still
+- old preflight could still report `traditional_v1`
+- old export could switch coordinate arrays to refined keypoints but still
   carry raw/manifest skeleton metadata
+
+## Current Status
+
+The main preflight/export path now resolves the effective annotation source and
+persists manifest fields such as `annotation_source_kind`,
+`annotation_source_parent`, `annotation_source_run`, `skeleton_id`, and
+`kpt_shape`. When a refined run supplies the exported coordinates and row gate,
+that refined run is the skeleton authority.
+
+This TODO remains useful for open policy and validation work, but the core
+"raw run overrides refined run" bug is no longer the expected behavior. The
+remaining risks are operational:
+
+- stale registry quality rows can still point preflight at the wrong refined
+  sibling until the tie-break fix is completed
+- mixed-skeleton selections must continue to fail closed
+- operators still need explicit `--skeleton-id` selection once several reviewed
+  skeletons coexist in the same candidate pool
 
 ## Proposed Model
 
@@ -82,7 +100,7 @@ That means:
 
 ## Effective Annotation Source
 
-Introduce explicit terminology and eventually explicit manifest fields:
+Use explicit terminology and manifest fields:
 
 - `annotation_source_kind = raw | refined`
 - `annotation_source_parent = keypoints_runs | refined_keypoints_runs`
@@ -124,7 +142,9 @@ selection.
 Target:
 - [prepare_keypoint_training_from_registry.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/utils/prepare_keypoint_training_from_registry.py)
 
-Needed behavior:
+Status: implemented for the primary registry-driven path.
+
+Required behavior:
 
 - when quality/review gating resolves a refined run as the effective annotation
   source, derive:
@@ -138,7 +158,9 @@ Needed behavior:
 Target:
 - [export_keypoint_training_zarr.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/utils/export_keypoint_training_zarr.py)
 
-Needed behavior:
+Status: implemented for the primary merged export path.
+
+Required behavior:
 
 - if export switches `keypoints_path` to `refined_keypoints_runs/.../keypoints_roi`,
   then skeleton identity resolution must use that refined run’s metadata
@@ -146,6 +168,8 @@ Needed behavior:
   coordinate source
 
 ### 3. Manifest Should Record Effective Annotation Source Explicitly
+
+Status: implemented for generated keypoint-training manifests.
 
 Manifest/dataset payload additions:
 

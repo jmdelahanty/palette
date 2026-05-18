@@ -609,6 +609,10 @@ def test_write_curated_refined_detect_surfaces_uses_detect_frame_source_dimensio
         refined["source_detections"]["bbox_img_xyxy"][:],
         np.asarray([[240.0, 240.0, 400.0, 400.0]], dtype=np.float64),
     )
+    assert refined["instances"]["bbox_img_xyxy"].chunks == (1, 4)
+    assert refined["instances"]["bbox_norm_coords"].chunks == (1, 4)
+    assert refined["source_detections"]["bbox_img_xyxy"].chunks == (1, 4)
+    assert refined["source_detections"]["bbox_norm_coords"].chunks == (1, 4)
 
 
 def test_write_curated_refined_detect_surfaces_reuses_existing_sparse_groups_on_rerun() -> None:

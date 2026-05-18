@@ -34,13 +34,10 @@ from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..pose.heading import compute_heading_from_spec
 from ..utils.system import get_environment_info, get_git_info
-from ..pose.schema import schema_payload_from_package
+from ..pose.schema import PoseSchema, normalize_kpt_shape, schema_payload_from_package
 from ultralytics import YOLO, __version__ as ultralytics_version
 
-# Load the traditional 3-point pose schema (swim_bladder + left/right eyes)
-TRADITIONAL_POSE_SCHEMA, TRADITIONAL_POSE_ATTR_PAYLOAD = schema_payload_from_package(
-    "traditional_v1"
-)
+DEFAULT_POSE_SCHEMA_NAME = "traditional_v1"
 _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 
@@ -101,15 +98,21 @@ def _emit_keypoint_step_status(
     )
 
 
-def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -> Dict[str, zarr.Array]:
+def _create_output_arrays(
+    group: zarr.Group,
+    total_rois: int,
+    chunk_hint: int,
+    *,
+    n_keypoints: int,
+) -> Dict[str, zarr.Array]:
     chunk_len = min(max(chunk_hint, 1), total_rois) if total_rois > 0 else 1
-    data_chunk = (chunk_len, 3, 2)
+    data_chunk = (chunk_len, int(n_keypoints), 2)
     scalar_chunk = (chunk_len,)
 
     arrays = {
         "keypoints_roi": group.create_array(
             "keypoints_roi",
-            shape=(total_rois, 3, 2),
+            shape=(total_rois, int(n_keypoints), 2),
             chunks=data_chunk,
             dtype="f8",
             fill_value=np.nan,
@@ -117,7 +120,7 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
         ),
         "keypoints_img": group.create_array(
             "keypoints_img",
-            shape=(total_rois, 3, 2),
+            shape=(total_rois, int(n_keypoints), 2),
             chunks=data_chunk,
             dtype="f8",
             fill_value=np.nan,
@@ -125,7 +128,7 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
         ),
         "keypoints_norm": group.create_array(
             "keypoints_norm",
-            shape=(total_rois, 3, 2),
+            shape=(total_rois, int(n_keypoints), 2),
             chunks=data_chunk,
             dtype="f8",
             fill_value=np.nan,
@@ -149,8 +152,8 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
         ),
         "keypoint_confidences": group.create_array(
             "keypoint_confidences",
-            shape=(total_rois, 3),
-            chunks=(chunk_len, 3),
+            shape=(total_rois, int(n_keypoints)),
+            chunks=(chunk_len, int(n_keypoints)),
             dtype="f8",
             fill_value=np.nan,
             overwrite=True,
@@ -275,11 +278,11 @@ def _prepare_refined_roi_overrides(
     }
 
 
-def _compute_heading(bladder: np.ndarray, eye_left: np.ndarray, eye_right: np.ndarray) -> float:
+def _compute_heading(points: np.ndarray, pose_schema: PoseSchema) -> float:
     return compute_heading_from_spec(
-        TRADITIONAL_POSE_SCHEMA.metadata.get("heading_computation"),
-        labels=TRADITIONAL_POSE_SCHEMA.node_names,
-        points=np.asarray([bladder, eye_left, eye_right], dtype=np.float64),
+        pose_schema.metadata.get("heading_computation"),
+        labels=pose_schema.node_names,
+        points=np.asarray(points, dtype=np.float64),
     )
 
 
@@ -319,6 +322,36 @@ def _extract_keypoint_confidences(keypoints, det_idx: int, *, n_keypoints: int =
     take = min(n_keypoints, conf_flat.size)
     out[:take] = conf_flat[:take]
     return out
+
+
+def _resolve_model_kpt_shape(model: YOLO) -> Optional[tuple[int, int]]:
+    """Best-effort extraction of the Ultralytics model keypoint shape."""
+    model_obj = getattr(model, "model", None)
+    for raw in (
+        getattr(model_obj, "kpt_shape", None),
+        getattr(model_obj, "args", {}).get("kpt_shape")
+        if isinstance(getattr(model_obj, "args", None), dict)
+        else None,
+        getattr(model_obj, "yaml", {}).get("kpt_shape")
+        if isinstance(getattr(model_obj, "yaml", None), dict)
+        else None,
+    ):
+        shape = normalize_kpt_shape(raw)
+        if shape is not None:
+            return shape
+    return None
+
+
+def _normalize_torch_device(device: Optional[str]) -> Optional[str]:
+    """Accept Ultralytics-style GPU ids while passing a valid torch device string."""
+    if device is None:
+        return None
+    text = str(device).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return f"cuda:{text}"
+    return text
 
 
 def _extract_pose_bbox_xyxy_roi(
@@ -363,6 +396,7 @@ def detect_keypoints_yolo(
     *,
     run_name: Optional[str] = None,
     crop_run: Optional[str] = None,
+    pose_schema: str = DEFAULT_POSE_SCHEMA_NAME,
     batch_size: int = 256,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
@@ -397,15 +431,24 @@ def detect_keypoints_yolo(
         raise FileNotFoundError(f"Model path not found: {model_path}")
 
     model = YOLO(str(model_path))
-    if device:
-        model.to(device)
+    torch_device = _normalize_torch_device(device)
+    if torch_device:
+        model.to(torch_device)
     try:
         model_device = str(next(model.model.parameters()).device)
     except (AttributeError, StopIteration):
-        model_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        model_device = torch_device or ("cuda" if torch.cuda.is_available() else "cpu")
     model_path_resolved = model_path.resolve()
+    pose_schema_obj, pose_schema_attrs = schema_payload_from_package(pose_schema)
+    n_keypoints = int(pose_schema_obj.num_keypoints)
+    model_kpt_shape = _resolve_model_kpt_shape(model)
+    if model_kpt_shape is not None and int(model_kpt_shape[0]) != n_keypoints:
+        raise ValueError(
+            f"Model keypoint count {int(model_kpt_shape[0])} does not match "
+            f"pose schema '{pose_schema_obj.name}' keypoint count {n_keypoints}."
+        )
 
-    root = zarr.open(str(zarr_path), mode="a")
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     crop_source = CropImageSource.open(
         root,
         crop_run=crop_run,
@@ -451,14 +494,21 @@ def detect_keypoints_yolo(
     imgsz = imgsz or max(roi_h, roi_w)
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
-    run_group.attrs["keypoint_labels"] = ["swim_bladder", "eye_left", "eye_right"]
-    run_group.attrs["keypoint_confidence_labels"] = ["swim_bladder", "eye_left", "eye_right"]
-    run_group.attrs["skeleton_id"] = str(TRADITIONAL_POSE_ATTR_PAYLOAD["skeleton_id"])
-    run_group.attrs["kpt_shape"] = list(TRADITIONAL_POSE_ATTR_PAYLOAD["kpt_shape"])
-    run_group.attrs["pose_schema"] = dict(TRADITIONAL_POSE_ATTR_PAYLOAD)
+    run_group.attrs["keypoint_labels"] = list(pose_schema_obj.node_names)
+    run_group.attrs["keypoint_confidence_labels"] = list(pose_schema_obj.node_names)
+    run_group.attrs["skeleton_id"] = str(pose_schema_attrs["skeleton_id"])
+    run_group.attrs["kpt_shape"] = list(pose_schema_attrs["kpt_shape"])
+    run_group.attrs["pose_schema"] = dict(pose_schema_attrs)
+    if model_kpt_shape is not None:
+        run_group.attrs["model_kpt_shape"] = list(model_kpt_shape)
     root.attrs["current_keypoint_group_path"] = run_group.path
 
-    arrays = _create_output_arrays(run_group, total_rois, chunk_hint=batch_size * 4)
+    arrays = _create_output_arrays(
+        run_group,
+        total_rois,
+        chunk_hint=batch_size * 4,
+        n_keypoints=n_keypoints,
+    )
 
     lineage_result = copy_row_lineage_arrays(
         run_group,
@@ -582,17 +632,17 @@ def detect_keypoints_yolo(
                     conf=conf,
                     iou=iou,
                     max_det=max_det,
-                    device=device,
+                    device=torch_device,
                     verbose=verbose,
                     stream=False,
                 )
 
-            batch_keypoints_roi = np.full((len(rgb_inputs), 3, 2), np.nan, dtype=np.float64)
+            batch_keypoints_roi = np.full((len(rgb_inputs), n_keypoints, 2), np.nan, dtype=np.float64)
             batch_keypoints_img = np.full_like(batch_keypoints_roi, np.nan)
             batch_keypoints_norm = np.full_like(batch_keypoints_roi, np.nan)
             batch_heading = np.full(len(rgb_inputs), np.nan, dtype=np.float64)
             batch_conf = np.full(len(rgb_inputs), np.nan, dtype=np.float64)
-            batch_keypoint_conf = np.full((len(rgb_inputs), 3), np.nan, dtype=np.float64)
+            batch_keypoint_conf = np.full((len(rgb_inputs), n_keypoints), np.nan, dtype=np.float64)
             batch_success = np.zeros(len(rgb_inputs), dtype=bool)
             batch_pose_bbox_roi = np.full((len(rgb_inputs), 4), np.nan, dtype=np.float32)
 
@@ -609,8 +659,10 @@ def detect_keypoints_yolo(
                         continue
 
                     kp = kp_xy[det_idx].detach().cpu().numpy()
-                    if kp.shape[0] < 3:
+                    if kp.shape[0] < n_keypoints:
                         continue
+                    if kp.shape[0] > n_keypoints:
+                        kp = kp[:n_keypoints]
 
                     kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
                     kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
@@ -620,8 +672,12 @@ def detect_keypoints_yolo(
                     kp_img = kp + np.array([top_left[0], top_left[1]])
                     batch_keypoints_img[i] = kp_img
                     batch_keypoints_norm[i] = kp_img / norm_factor
-                    batch_heading[i] = _compute_heading(kp[0], kp[1], kp[2])
-                    batch_keypoint_conf[i] = _extract_keypoint_confidences(keypoints, det_idx, n_keypoints=3)
+                    batch_heading[i] = _compute_heading(kp, pose_schema_obj)
+                    batch_keypoint_conf[i] = _extract_keypoint_confidences(
+                        keypoints,
+                        det_idx,
+                        n_keypoints=n_keypoints,
+                    )
 
                     boxes = getattr(res, "boxes", None)
                     if boxes is not None and boxes.conf is not None and boxes.conf.numel() > 0:
@@ -736,6 +792,9 @@ def detect_keypoints_yolo(
             "batch_size": batch_size,
             "device": model_device,
             "profile_timings": bool(profile_timings),
+            "pose_schema": pose_schema_obj.name,
+            "n_keypoints": int(n_keypoints),
+            "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
             "roi_live_acceleration": str(roi_live_acceleration),
             "roi_live_gpu_chunk_frames": int(roi_live_gpu_chunk_frames),
             "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
@@ -818,6 +877,10 @@ def detect_keypoints_yolo(
             "model_name": model_path.name,
             "ultralytics_version": ultralytics_version,
             "device": model_device,
+            "pose_schema": pose_schema_obj.name,
+            "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
+            "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
+            "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
         },
     )
     write_stage_provenance(run_group, provenance_record)
@@ -848,6 +911,10 @@ def detect_keypoints_yolo(
         "successful_detections": int(success_total),
         "failed_detections": int(failure_total),
         "success_rate_percent": round(float(success_rate), 2),
+        "pose_schema": pose_schema_obj.name,
+        "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
+        "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
+        "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
     }
     if source_refined_run:
         status_details["source_refined_run"] = source_refined_run
@@ -904,6 +971,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True, help="Path to the trained YOLO pose weights (.pt)")
     parser.add_argument("--run-name", help="Optional custom run name for keypoints_runs")
     parser.add_argument("--crop-run", help="Optional crop run override (defaults to latest)")
+    parser.add_argument(
+        "--pose-schema",
+        default=DEFAULT_POSE_SCHEMA_NAME,
+        help=(
+            "Pose schema from configs/fisheye/pose_schemas to stamp on the output run "
+            f"(default: {DEFAULT_POSE_SCHEMA_NAME})."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for inference")
     parser.add_argument("--imgsz", type=int, default=None, help="Image size for YOLO inference")
     parser.add_argument("--device", default=None, help="Torch device string (e.g. '0' or 'cuda:0')")
@@ -953,6 +1028,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         model_path=args.model,
         run_name=args.run_name,
         crop_run=args.crop_run,
+        pose_schema=args.pose_schema,
         batch_size=args.batch_size,
         device=args.device,
         imgsz=args.imgsz,

@@ -50,10 +50,11 @@ def test_create_output_arrays_includes_keypoint_confidences(tmp_path) -> None:
     root = zarr.open_group(store=str(tmp_path / "test.zarr"), mode="w")
     run = root.create_group("keypoints_runs").create_group("keypoints_001")
 
-    arrays = _create_output_arrays(run, total_rois=10, chunk_hint=4)
+    arrays = _create_output_arrays(run, total_rois=10, chunk_hint=4, n_keypoints=5)
 
     assert "keypoint_confidences" in arrays
-    assert arrays["keypoint_confidences"].shape == (10, 3)
+    assert arrays["keypoints_roi"].shape == (10, 5, 2)
+    assert arrays["keypoint_confidences"].shape == (10, 5)
     assert arrays["keypoint_confidences"].dtype.name == "float64"
     assert "pose_bbox_xyxy_roi" in arrays
     assert arrays["pose_bbox_xyxy_roi"].shape == (10, 4)

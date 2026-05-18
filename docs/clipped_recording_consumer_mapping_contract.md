@@ -245,6 +245,55 @@ It should not assume `clips/clip_*/...` can be flattened by directory order.
 The parent timeline order comes from `recording_frame_index.parquet` or a
 finalized collection manifest.
 
+### Current Crimson Migration Status
+
+As of 2026-05-18, the local Crimson clipped-analysis prototype has moved past
+metadata-only open for the sleepyfish PRFS smoke. It can resolve the finalized
+collection, map 1,188,000 parent frames, load 22 selected clip-camera refined
+runs, switch to the first clip video, and render detections from the selected
+clip-local `instances/` groups.
+
+That proves the resolver path is viable, but it does not yet make clipped
+analysis editing production-ready. The remaining Crimson-facing risks are:
+
+- verify displayed video frame, parent timeline frame, clip-local frame, and
+  bbox row remain synchronized after seeks and clip transitions;
+- keep bbox reads logical-index based so older split-column chunks such as
+  `(26664, 2)` do not corrupt `[N, 4]` bbox interpretation;
+- keep detection editing disabled in clipped-analysis mode until write routing
+  and downstream stale marking are implemented;
+- preserve the resolver-driven design rather than flattening `clips/`
+  directories by sorted path order.
+
+The first Crimson migration slice should remain read-only and resolver-driven:
+
+1. Resolve the finalized collection id, defaulting to
+   `refined_detect_runs.attrs["latest_collection"]`.
+2. Read the selected clip-camera run metadata from
+   `experiment_index/finalized_runs/<collection_id>`.
+3. Read `recording_frame_index.parquet` with Arrow/Parquet support.
+4. Build a parent-frame map to
+   `(clip_id, camera_serial, video_path, clip_local_frame_index,
+   refined_group_path)`.
+5. Render detections from `<refined_group_path>/instances`, preferring
+   `bbox_img_xyxy` and using `bbox_norm_coords` only as a fallback.
+6. Read Zarr bbox arrays by logical indices, not raw chunk-contiguous memory
+   assumptions; Palette prefers `(row_chunk, 4)` for new bbox arrays but older
+   archives may have legal Zarr chunks that split the four bbox columns.
+7. Keep detection editing disabled in clipped-analysis mode until write routing
+   and downstream stale marking are implemented.
+
+The current design preference is for Crimson to add a Parquet dependency rather
+than rely on a Palette-specific JSON dump of millions of frame rows. Parquet is
+the durable on-disk frame-map format; Arrow is the in-memory table API Crimson
+would normally read it into. This keeps Palette as the authority for producing
+the mapping and lets Crimson consume the same validated artifact that Python
+tools use.
+
+If Arrow/Parquet becomes too costly for the Crimson build, Palette can add a
+temporary compact sidecar exporter. That should be treated as an adapter, not a
+replacement for `recording_frame_index.parquet`.
+
 ## Editing And Stale-State Rules
 
 Manual edits should target the same coordinate namespace as the reviewed run.
@@ -274,8 +323,11 @@ edited.
   `experiment_index/finalized_runs/<workflow_id>`.
 - [ ] Update status/check tools to report clipped shell state as
   `metadata_only` until finalized runs exist.
-- [ ] Update Crimson contracts after the resolver exists, rather than making
-  Crimson independently discover clip directories.
+- [ ] Update Crimson contracts to use `recording_frame_index.parquet` plus
+  finalized collection metadata, rather than making Crimson independently
+  discover clip directories.
+- [ ] Keep Crimson clipped-analysis detection editing disabled until clip-local
+  write routing and stale propagation are specified.
 - [ ] Add tests for mapping clip-local detect rows to parent timeline frames.
 - [ ] Add tests that top-level clipped shell placeholders are not mistaken for
   real latest runs.

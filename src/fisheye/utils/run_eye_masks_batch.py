@@ -821,6 +821,10 @@ def _sync_eye_mask_registry_rows_after_run(
             recording_id=recording_id,
             zarr_use=zarr_use,
             zarr_purpose=None,
+            source_layout=None,
+            source_frame_index_path=None,
+            source_recording_frame_index_path=None,
+            source_frame_index_schema=None,
         )
 
         step_status_written: List[str] = []

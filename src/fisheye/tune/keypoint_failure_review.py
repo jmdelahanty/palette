@@ -855,6 +855,10 @@ def _sync_registry_after_review_status(
             recording_id=_normalize_attr(context.get("recording_id")),
             zarr_use=_normalize_attr(context.get("zarr_use")),
             zarr_purpose=None,
+            source_layout=None,
+            source_frame_index_path=None,
+            source_recording_frame_index_path=None,
+            source_frame_index_schema=None,
         )
         wrote = emit_stage_completion(
             None,

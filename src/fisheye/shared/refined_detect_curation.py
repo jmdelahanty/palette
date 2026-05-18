@@ -47,6 +47,8 @@ REFINED_ARTIFACT_STATE_CODE_MAP: Dict[str, int] = {
     "present": 3,
     "not_applicable": 4,
 }
+FIXED_WIDTH_BBOX_ARRAY_NAMES = frozenset({"bbox_img_xyxy", "bbox_norm_coords"})
+DEFAULT_REFINED_DETECT_ROW_CHUNK = 65_536
 
 CURATED_REFINED_REQUIRED_ARRAYS: Tuple[str, ...] = (
     "refined_row_ids",
@@ -193,9 +195,20 @@ def _get_or_create_child_group(group: zarr.Group, name: str) -> zarr.Group:
         raise
 
 
+def _common_array_chunks(name: str, data: np.ndarray) -> tuple[int, ...] | None:
+    arr = np.asarray(data)
+    if name in FIXED_WIDTH_BBOX_ARRAY_NAMES and arr.ndim == 2 and arr.shape[1] == 4:
+        return (max(1, min(int(arr.shape[0]), DEFAULT_REFINED_DETECT_ROW_CHUNK)), 4)
+    return None
+
+
 def _write_common_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
     _delete_if_present(group, name)
-    group.create_array(name, data=data, overwrite=True)
+    chunks = _common_array_chunks(name, data)
+    if chunks is None:
+        group.create_array(name, data=data, overwrite=True)
+    else:
+        group.create_array(name, data=data, chunks=chunks, overwrite=True)
 
 
 def _write_string_array(

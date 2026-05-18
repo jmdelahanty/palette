@@ -362,6 +362,10 @@ def _emit_refined_keypoint_status(
             recording_id=context.recording_id,
             zarr_use=None,
             zarr_purpose=None,
+            source_layout=None,
+            source_frame_index_path=None,
+            source_recording_frame_index_path=None,
+            source_frame_index_schema=None,
         )
         return emit_stage_completion(
             None,
@@ -760,7 +764,7 @@ def _process_refinement_chunk(
     params_dict: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Process a slice of keypoints and return refinement outputs."""
-    root = zarr.open(zarr_path, mode="r")
+    root = zarr.open_group(zarr_path, mode="r", use_consolidated=False)
     kp_source = root[f"keypoints_runs/{keypoint_run}"]
     min_triangle_angle_default, min_triangle_area_default, max_triangle_area_default = (
         _resolve_refinement_geometry_defaults(kp_source.attrs)
@@ -1009,7 +1013,7 @@ def create_refined_keypoint_run(
     console.rule("[bold]Keypoint Refinement[/bold]")
     start_time = time.perf_counter()
 
-    root = zarr.open(zarr_path, mode="a")
+    root = zarr.open_group(zarr_path, mode="a", use_consolidated=False)
     status_context = _resolve_status_context_from_root(root, zarr_path)
     if status_context is None:
         status_context = _resolve_status_context(zarr_path)

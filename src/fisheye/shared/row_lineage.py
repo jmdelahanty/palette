@@ -15,12 +15,18 @@ ROW_ALIGNMENT_ARRAYS: Tuple[str, ...] = (
     "detection_indices",
 )
 ROW_IDENTITY_ARRAYS: Tuple[str, ...] = (
+    "source_frame_indices",
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
     "source_refined_row_ids",
     "source_detect_row_index",
 )
 ROW_LINEAGE_ARRAYS: Tuple[str, ...] = ROW_ALIGNMENT_ARRAYS + ROW_IDENTITY_ARRAYS
 PER_ROI_ROW_LINEAGE_ARRAYS = {
     "frame_indices",
+    "source_frame_indices",
+    "source_clip_indices",
+    "source_clip_local_frame_indices",
     "detection_indices",
     "source_refined_row_ids",
     "source_detect_row_index",

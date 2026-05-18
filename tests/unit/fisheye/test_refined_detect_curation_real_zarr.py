@@ -89,3 +89,7 @@ def test_write_curated_refined_detect_surfaces_persists_summary_metadata_on_real
     assert summary["source_detection_filtered"] == 1
     assert summary["source_detection_candidates"] == 3
     assert "curation_updated_at_utc" in run.attrs
+    assert run["instances"]["bbox_img_xyxy"].chunks == (2, 4)
+    assert run["instances"]["bbox_norm_coords"].chunks == (2, 4)
+    assert run["source_detections"]["bbox_img_xyxy"].chunks == (3, 4)
+    assert run["source_detections"]["bbox_norm_coords"].chunks == (3, 4)

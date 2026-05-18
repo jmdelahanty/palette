@@ -67,8 +67,9 @@ scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
 
 If your approved training pool spans more than one skeleton lineage, add an
 explicit selector so preflight keeps only the intended annotation source instead
-of failing on mixed skeleton signatures. For the current 5-point traditional
-reviewed runs:
+of failing on mixed skeleton signatures. Use the 5-point selector only for
+completed and approved `traditional_v2` refined runs, not for seed runs that
+still have missing `snout_tip` / `tail_tip` values:
 
 ```bash
 scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \

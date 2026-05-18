@@ -12,8 +12,9 @@ from fisheye.shared.refined_detect_curation import (
 from fisheye.utils.validate_refined_detect_run import validate_refined_detect_run
 
 
-def _array(group: zarr.Group, name: str, data: np.ndarray) -> None:
-    group.create_array(name, data=np.asarray(data), overwrite=True)
+def _array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tuple[int, ...] | None = None) -> None:
+    kwargs = {"chunks": chunks} if chunks is not None else {}
+    group.create_array(name, data=np.asarray(data), overwrite=True, **kwargs)
 
 
 def _write_valid_refined_run(tmp_path: Path, *, source_detect_path: str) -> Path:
@@ -92,3 +93,26 @@ def test_validate_refined_detect_run_fails_when_source_detect_path_is_missing(tm
     assert result["validations"][-1]["name"] == "source_detect_path_exists"
     assert result["validations"][-1]["status"] == "fail"
     assert "source_detect_path does not resolve" in "\n".join(result["errors"])
+
+
+def test_validate_refined_detect_run_warns_on_split_bbox_column_chunks(tmp_path: Path) -> None:
+    source_detect_path = "clips/clip_000000/cameras/2010093/detect_runs/detect_001"
+    zarr_path = _write_valid_refined_run(tmp_path, source_detect_path=source_detect_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    instances = root["clips/clip_000000/cameras/2010093/refined_detect_runs/refined_001/instances"]
+    del instances["bbox_img_xyxy"]
+    _array(
+        instances,
+        "bbox_img_xyxy",
+        np.asarray([[1.0, 2.0, 3.0, 4.0]], dtype=np.float64),
+        chunks=(1, 2),
+    )
+
+    result = validate_refined_detect_run(
+        zarr_path,
+        target_group_path="clips/clip_000000/cameras/2010093/refined_detect_runs/refined_001",
+    )
+
+    assert result["status"] == "ok"
+    assert any(item["chunks"] == [1, 2] for item in result["bbox_chunk_validation"])
+    assert "splits the fixed-width bbox columns" in "\n".join(result["warnings"])

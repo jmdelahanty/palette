@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.shared.roi_pixel_contract import ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
@@ -78,6 +79,14 @@ class _FakeIndexedPynvvcDecoder:
         return [self._frames[int(index)] for index in indices]
 
 
+class _FakeRootForFrameIndex:
+    def __init__(self, attrs: dict[str, object]) -> None:
+        self.attrs = attrs
+
+    def get(self, _name: str):
+        return None
+
+
 def _make_training_archive(tmp_path: Path) -> tuple[Path, list[np.ndarray]]:
     zarr_path = tmp_path / "recording_training.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -150,6 +159,42 @@ def test_regenerate_training_crops_pynvvc_writes_new_luma_crop_run(
     assert np.array_equal(target["roi_images"][:], expected)
     assert np.array_equal(target["frame_indices"][:], np.array([0, 1, 2], dtype=np.int64))
     assert "bbox_norm_coords" in target
+
+
+def test_load_clipped_source_frame_mapping_reads_required_parquet_columns(
+    tmp_path: Path,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    archive_path = tmp_path / "recording_clipped_training.zarr"
+    archive_path.mkdir()
+    video_a = tmp_path / "clips" / "clip_000000" / "Cam2010093.mp4"
+    video_b = tmp_path / "clips" / "clip_000001" / "Cam2010093.mp4"
+    index_path = archive_path / "source_frame_index.parquet"
+    table = pa.table(
+        {
+            "sample_index": pa.array([0, 1, 2], type=pa.int64()),
+            "video_path": pa.array([str(video_a), str(video_a), str(video_b)]),
+            "clip_local_frame_index": pa.array([11, 12, 3], type=pa.int64()),
+        }
+    )
+    pq.write_table(table, index_path)
+
+    mapping = mod._load_clipped_source_frame_mapping(
+        root=_FakeRootForFrameIndex({"source_frame_index_path": "source_frame_index.parquet"}),
+        archive_path=archive_path,
+        crop_frame_indices=np.array([2, 0], dtype=np.int64),
+        mode="source_frame_index_parquet",
+    )
+
+    assert mapping is not None
+    assert mapping["mode"] == "source_frame_index_parquet"
+    assert mapping["source_frame_index_path"] == str(index_path)
+    assert np.array_equal(mapping["source_frame_indices"], np.array([2, 0], dtype=np.int64))
+    assert np.array_equal(mapping["source_clip_local_frame_indices"], np.array([3, 11], dtype=np.int64))
+    assert np.array_equal(mapping["source_clip_indices"], np.array([-1, -1], dtype=np.int64))
+    assert mapping["video_frame_to_rows"][video_b][3] == [0]
+    assert mapping["video_frame_to_rows"][video_a][11] == [1]
 
 
 def test_regenerate_training_crops_pynvvc_dry_run_does_not_write(

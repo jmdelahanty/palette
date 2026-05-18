@@ -12,11 +12,13 @@ Scope note for clipped recordings:
 
 - This contract applies to traditional top-level analysis Zarrs and
   materialized training Zarrs.
-- It does not yet define first-class reading for clipped analysis shells where
-  physical runs live under
-  `clips/<clip_id>/cameras/<camera_serial>/<family>/<run>`.
-- For clipped analysis archives, Crimson needs a finalized collection resolver
-  before it can safely flatten clip-local detections onto a parent timeline.
+- For clipped analysis archives, this contract defines the bbox leaf-group
+  read rules after a resolver has selected a concrete clip-local refined run,
+  such as
+  `clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs/<run>/instances`.
+- It does not by itself define how to select a finalized collection, map parent
+  frames to clip-local frames, or switch videos at clip boundaries.
+  Crimson needs a finalized collection resolver for that.
   See `docs/clipped_recording_consumer_mapping_contract.md`.
 
 ## Primary Read Surface
@@ -139,6 +141,31 @@ Legacy sparse/raw geometry:
 
 - `bbox_norm_coords` is `[cx, cy, w, h]`
 - normalize against the detector input frame dimensions
+
+## Zarr Chunking Rules
+
+The logical bbox interface is `[N, 4]` for both traditional and clipped
+archives. Crimson should read Zarr arrays by logical indices and must not assume
+that a row is contiguous inside one physical chunk.
+
+Palette now writes refined-detect bbox arrays with preferred chunk shape:
+
+```text
+(row_chunk, 4)
+```
+
+for:
+
+- `instances/bbox_img_xyxy`
+- `instances/bbox_norm_coords`
+- `source_detections/bbox_img_xyxy`
+- `source_detections/bbox_norm_coords`
+
+Older archives may still have auto-chosen chunks such as `(26664, 2)`, which
+split the fixed-width bbox columns. That is valid Zarr storage but can expose
+reader bugs. Use `fisheye.utils.validate_refined_detect_run` to warn on this
+layout and `fisheye.utils.rechunk_refined_detect_bbox_arrays` to opt-in repair
+existing refined-detect runs.
 
 ## Metadata Hints
 

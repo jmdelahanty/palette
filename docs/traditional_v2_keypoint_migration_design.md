@@ -23,18 +23,52 @@ The following pieces are now implemented:
 - `configs/fisheye/pose_schemas/traditional_v2.json`
 - `scripts/py -m fisheye.utils.extend_keypoint_skeleton`
 - dynamic manual keypoint review selection for runs with more than 3 keypoints
+- `scripts/py -m fisheye.detection.detect_keypoints_yolo --pose-schema ...`,
+  including dynamic output array shape and model/schema keypoint-count checks
 - schema-driven derived metric storage on `refined_keypoints_runs`
 - `scripts/py -m fisheye.utils.backfill_keypoint_derived_metrics`
 - keypoint profile aggregation of derived metrics in
   `analysis/keypoint_profile_runs/<run>.attrs["profile_summary"]`
 
-Current canary flow:
+Current recommended canary flow:
 
-1. extend a `traditional_v1` refined run into a `traditional_v2` seed run
-2. manually label `snout_tip` and `tail_tip`
-3. run `backfill_keypoint_derived_metrics` to populate named derived metrics and
+1. run a reliable `traditional_v1` keypoint model over the target crop
+   representation
+2. refine that 3-point run
+3. extend the `traditional_v1` refined run into a `traditional_v2` seed run
+4. manually label `snout_tip` and `tail_tip`
+5. approve the completed refined run for `intended_use=training`
+6. only then export/train a `traditional_v2` pose model
+
+Do not treat an auto-generated `traditional_v2` seed as a reviewed label
+source. The seed intentionally has missing new landmarks and should keep
+`refined_success=false` / `usable_keypoints=false` until manual completion.
+
+Direct `traditional_v2` YOLO inference is supported by the runtime, but the
+current available 5-point model is not approved as an automatic label source
+for the new PyNvVC-luma crop representation. A 2026-05-17 smoke with
+`pose_cedar_shadow_pose_traditional_v2_v002/.../weights/best.pt` showed very
+low normal-confidence coverage on the new sampled `sickyfish`/`sleepyfish`
+training crops. Forcing near-zero confidence can produce arrays, but those
+outputs should remain experimental and should not become `latest` or be used
+for training without manual review.
+
+After manual completion:
+
+1. run `backfill_keypoint_derived_metrics` to populate named derived metrics and
    finalize migration status
-4. backfill/write keypoint profiles from the completed refined run
+2. backfill/write keypoint profiles from the completed refined run
+
+For the current `sickyfish` PyNvVC-luma training zarrs, the local working
+pattern is:
+
+- keep `keypoints_runs/latest` on the reliable 3-point
+  `keypoints_pynvvc_luma_v1_20260517_cam...` source run
+- set `refined_keypoints_runs/latest` to the corresponding
+  `refined_keypoints_traditional_v2_seed_pynvvc_luma_v1_20260517_cam...` seed
+  while it awaits manual completion of `snout_tip` and `tail_tip`
+- keep any low-confidence direct 5-point runs clearly experimental unless they
+  are manually corrected and promoted
 
 Still intentionally deferred:
 
@@ -184,13 +218,25 @@ Batch behavior:
 
 The new schema file alone is not enough for full first-class support.
 
-Current blockers:
+Resolved blockers:
 
-- `src/fisheye/shared/zarr/stage_arrays.py` still fixes raw and refined keypoints to `(n_rois, 3, 2)`
-- `src/fisheye/docs/zarr_structure.md` still documents `refined_keypoints_runs` as `(n_rois, 3, 2)`
-- several geometry and refinement fields are still explicitly triangle-based for the 3-point starter skeleton
+- `src/fisheye/shared/zarr/stage_arrays.py` now models raw and refined
+  keypoint coordinate/confidence arrays with dynamic `n_keypoints`
+- `src/fisheye/docs/zarr_structure.md` now documents dynamic
+  `(n_rois, n_keypoints, 2)` / `(N, K, 2)` keypoint arrays
+- `src/fisheye/detection/detect_keypoints_yolo.py` can now write schema-stamped
+  dynamic-`K` YOLO keypoint runs
 
-So the first migrated `traditional_v2` runs should be treated as seed/canary labeling runs, not as a drop-in replacement for every existing keypoint consumer.
+Remaining constraint:
+
+- several geometry and refinement fields are still explicitly triangle-based
+  compatibility metrics for the 3-point starter skeleton
+- downstream consumers that need semantic landmarks must continue migrating to
+  label-based resolution and clear missing-label failures
+
+So the first migrated `traditional_v2` runs should still be treated as
+seed/canary labeling runs until the new landmarks are manually completed and
+the target downstream consumer has been validated.
 
 ## What Must Generalize Next
 
@@ -203,9 +249,15 @@ Every keypoint and refined-keypoint writer should explicitly set:
 - `pose_schema`
 - `keypoint_labels`
 
+Status: mostly implemented for active raw/refined writers; keep this as a
+maintenance requirement for any new writer.
+
 ### Phase 2: Dynamic Keypoint Array Specs
 
 Replace fixed `(n_rois, 3, 2)` assumptions with `(n_rois, K, 2)` where possible.
+
+Status: implemented for the shared stage-array contracts and the YOLO writer.
+Remaining work is producer/consumer-specific, not the core storage contract.
 
 Priority surfaces:
 

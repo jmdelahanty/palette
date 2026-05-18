@@ -69,7 +69,35 @@ scripts/py -m fisheye.registry.maintenance \
 Expected result:
 - `Integrity check passed: no issues found.`
 
-## 7) Phase 2 Subject/Dish/Cross Backfill (Optional)
+## 7) Duplicate Dataset Row Dry Run
+
+After path or dataset-ID policy migrations, the registry may contain multiple
+active `datasets` rows for the same physical Zarr path. Do not delete those
+rows directly. First generate a dry-run dedupe plan:
+
+```bash
+scripts/py -m fisheye.registry.dedupe \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+For the clipped training slice:
+
+```bash
+scripts/py -m fisheye.registry.dedupe \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training \
+  --path-contains clipped_training.zarr \
+  --json
+```
+
+The report is read-only. It groups duplicate rows by exact `zarr_path` and
+`path_hash`, proposes a canonical `dataset_id`, and lists every dependent row
+that would need to be moved. `conflicting_rows > 0` means a direct update would
+collide with an existing primary-key or unique-index row, most commonly
+`recording_step_status(dataset_id, step_name)`. Those conflicts need an
+explicit merge policy before any apply-mode cleanup is safe.
+
+## 8) Phase 2 Subject/Dish/Cross Backfill (Optional)
 
 Preview without writes:
 
@@ -88,7 +116,7 @@ scripts/py -m fisheye.registry.maintenance \
   --backfill-subject-dish-cross
 ```
 
-## 8) Phase 6 Subjects Backfill + Query View (Optional)
+## 9) Phase 6 Subjects Backfill + Query View (Optional)
 
 Preview without writes:
 

@@ -15545,6 +15545,8 @@ class Registry:
     def scan_zarr(self, zarr_path: Path) -> Optional[str]:
         if not zarr_path.exists():
             return None
+        if _is_empty_zarr_stub(zarr_path):
+            return None
         root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         return self.register_from_root(root, zarr_path)
 
@@ -15568,7 +15570,7 @@ class Registry:
                 if scope_roots and not _path_matches_scope(dataset_path, scope_roots):
                     continue
                 checked += 1
-                if _is_zarr_root(dataset_path):
+                if _is_zarr_root(dataset_path) and not _is_empty_zarr_stub(dataset_path):
                     continue
                 self.conn.execute(
                     "UPDATE datasets SET status = 'missing' WHERE dataset_id = ?;",
@@ -15787,6 +15789,43 @@ def _is_zarr_root(path: Path) -> bool:
     return (path / "zarr.json").exists() or (path / ".zgroup").exists()
 
 
+def _is_empty_zarr_stub(path: Path) -> bool:
+    """Return true for aborted Zarr roots with only root metadata and no attrs."""
+
+    if not path.is_dir() or not _is_zarr_root(path):
+        return False
+
+    metadata_names = {"zarr.json", ".zgroup", ".zattrs", ".zmetadata"}
+    try:
+        non_metadata_children = [child for child in path.iterdir() if child.name not in metadata_names]
+    except OSError:
+        return False
+    if non_metadata_children:
+        return False
+
+    if (path / ".zattrs").exists():
+        try:
+            attrs = json.loads((path / ".zattrs").read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if attrs:
+            return False
+
+    zarr_json = path / "zarr.json"
+    if zarr_json.exists():
+        try:
+            data = json.loads(zarr_json.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        attrs = data.get("attributes")
+        if isinstance(attrs, Mapping) and attrs:
+            return False
+        if attrs is not None and not isinstance(attrs, Mapping):
+            return False
+
+    return True
+
+
 def _normalize_fs_path(path: Path | str) -> Path:
     candidate = Path(path).expanduser()
     try:
@@ -15814,6 +15853,8 @@ def _find_zarr_roots(root: Path) -> List[Path]:
         if not candidate.is_dir():
             continue
         if not _is_zarr_root(candidate):
+            continue
+        if _is_empty_zarr_stub(candidate):
             continue
         resolved = _normalize_fs_path(candidate)
         if resolved in seen:

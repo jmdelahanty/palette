@@ -126,3 +126,18 @@ def test_registry_scan_exposes_clipped_training_source_metadata(tmp_path: Path) 
     assert row["source_frame_index_path"] == "source_frame_index.parquet"
     assert row["source_frame_index_schema"] == "palette.training_source_frame_index.v1"
     assert str(row["source_recording_frame_index_path"]).endswith("recording_frame_index.parquet")
+
+
+def test_registry_scan_ignores_empty_zarr_group_stubs(tmp_path: Path) -> None:
+    stub_zarr = tmp_path / "recordings" / "synthetic" / "zarr" / "aborted_training.zarr"
+    zarr.open_group(str(stub_zarr), mode="w", zarr_format=3)
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        dataset_id = registry.scan_zarr(stub_zarr)
+        rows = registry.conn.execute("SELECT dataset_id FROM datasets;").fetchall()
+    finally:
+        registry.close()
+
+    assert dataset_id is None
+    assert rows == []

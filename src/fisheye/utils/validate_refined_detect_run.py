@@ -70,6 +70,55 @@ def _optional_dict(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, Mapping) else None
 
 
+def _array_chunks(array: Any) -> tuple[int, ...] | None:
+    chunks = getattr(array, "chunks", None)
+    if chunks is None:
+        return None
+    try:
+        return tuple(int(value) for value in chunks)
+    except TypeError:
+        return None
+
+
+def _bbox_chunk_validation(refined: zarr.Group) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for group_name in ("instances", "source_detections"):
+        group = refined.get(group_name)
+        if group is None:
+            continue
+        for array_name in ("bbox_img_xyxy", "bbox_norm_coords"):
+            if array_name not in group:
+                continue
+            array = group[array_name]
+            shape = tuple(int(value) for value in getattr(array, "shape", ()))
+            chunks = _array_chunks(array)
+            status = "pass"
+            message = None
+            if len(shape) != 2 or shape[1] != 4:
+                status = "warning"
+                message = f"{group_name}/{array_name} has unexpected shape {shape}; expected [N, 4]"
+            elif chunks is None:
+                status = "warning"
+                message = f"{group_name}/{array_name} chunk shape is unavailable"
+            elif len(chunks) != 2 or chunks[1] != 4:
+                status = "warning"
+                message = (
+                    f"{group_name}/{array_name} chunk shape {chunks} splits the fixed-width bbox columns; "
+                    "preferred chunk shape is [row_chunk, 4]"
+                )
+            reports.append(
+                {
+                    "group": group_name,
+                    "array": array_name,
+                    "shape": list(shape),
+                    "chunks": list(chunks) if chunks is not None else None,
+                    "status": status,
+                    "message": message,
+                }
+            )
+    return reports
+
+
 def validate_refined_detect_run(
     zarr_path: str | Path,
     *,
@@ -171,6 +220,10 @@ def validate_refined_detect_run(
         if source_detections is not None and "source_detect_row_index" in source_detections
         else None,
     }
+    bbox_chunk_validation = _bbox_chunk_validation(refined)
+    for item in bbox_chunk_validation:
+        if item["status"] != "pass" and item.get("message"):
+            warnings.append(str(item["message"]))
 
     return {
         "status": "ok" if not errors else "failed",
@@ -183,6 +236,7 @@ def validate_refined_detect_run(
         "source_quality_run": source_quality_run,
         "refined_family_path": refined_family,
         "row_counts": row_counts,
+        "bbox_chunk_validation": bbox_chunk_validation,
         "summary_statistics": summary_statistics,
         "coverage_comparison": coverage_comparison,
         "identity_validation": identity_validation,

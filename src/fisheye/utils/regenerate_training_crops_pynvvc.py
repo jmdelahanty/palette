@@ -34,7 +34,7 @@ from fisheye.shared.roi_pixel_contract import (
 )
 
 
-SOURCE_FRAME_INDEX_MODES = ("auto", "direct", "original_frame_indices")
+SOURCE_FRAME_INDEX_MODES = ("auto", "direct", "original_frame_indices", "source_frame_index_parquet")
 DECODE_MODES = ("auto", "sequential", "indexed")
 MODULE_NAME = "fisheye.utils.regenerate_training_crops_pynvvc"
 
@@ -145,6 +145,95 @@ def _resolve_video_path(
     if inferred is not None:
         return inferred
     raise ValueError("Unable to resolve source video path; pass --video-path.")
+
+
+def _resolve_source_frame_index_path(root: Any, archive_path: Path) -> Path | None:
+    raw_video = root.get("raw_video")
+    raw_attrs = getattr(raw_video, "attrs", {}) if raw_video is not None else {}
+    text = _first_attr_text(
+        root.attrs.get("source_frame_index_path"),
+        raw_attrs.get("source_frame_index_path"),
+    )
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = archive_path / path
+    return path
+
+
+def _load_clipped_source_frame_mapping(
+    *,
+    root: Any,
+    archive_path: Path,
+    crop_frame_indices: np.ndarray,
+    mode: str,
+) -> dict[str, Any] | None:
+    if mode not in SOURCE_FRAME_INDEX_MODES:
+        raise ValueError(f"Unsupported source frame index mode: {mode}")
+    if mode in {"direct", "original_frame_indices"}:
+        return None
+
+    index_path = _resolve_source_frame_index_path(root, archive_path)
+    if index_path is None:
+        if mode == "source_frame_index_parquet":
+            raise ValueError("source_frame_index_parquet requested, but no source frame index path is recorded.")
+        return None
+    if not index_path.exists():
+        raise FileNotFoundError(f"source_frame_index.parquet not found: {index_path}")
+
+    try:
+        import pyarrow.parquet as pq
+    except Exception as exc:  # pragma: no cover - dependency is present in Palette env
+        raise RuntimeError(f"pyarrow import failed; cannot read clipped source frame index: {exc}") from exc
+
+    required = {"sample_index", "video_path", "clip_local_frame_index"}
+    optional = {"parent_frame_index", "clip_index"}
+    schema = pq.read_schema(index_path)
+    available = set(schema.names)
+    missing = sorted(required - available)
+    if missing:
+        raise ValueError(f"source_frame_index.parquet missing required columns: {missing}")
+    table = pq.read_table(index_path, columns=sorted((required | optional) & available)).combine_chunks()
+
+    by_sample: dict[int, Mapping[str, Any]] = {}
+    for row in table.to_pylist():
+        by_sample[int(row["sample_index"])] = row
+
+    local = np.asarray(crop_frame_indices, dtype=np.int64).reshape(-1)
+    source_frame_indices = np.empty(local.shape[0], dtype=np.int64)
+    source_clip_local_frame_indices = np.empty(local.shape[0], dtype=np.int64)
+    source_clip_indices = np.full(local.shape[0], -1, dtype=np.int64)
+    video_frame_to_rows: dict[Path, dict[int, list[int]]] = {}
+    video_paths: set[str] = set()
+
+    for roi_idx, sample_index in enumerate(local):
+        row = by_sample.get(int(sample_index))
+        if row is None:
+            raise IndexError(
+                "Crop frame index is outside source_frame_index.parquet sample_index values: "
+                f"roi_row={roi_idx}, frame_index={int(sample_index)}."
+            )
+        video_path = Path(str(row["video_path"])).expanduser()
+        clip_frame_index = int(row["clip_local_frame_index"])
+        parent_frame_index = row.get("parent_frame_index")
+        source_frame_indices[roi_idx] = int(parent_frame_index) if parent_frame_index is not None else int(sample_index)
+        source_clip_local_frame_indices[roi_idx] = clip_frame_index
+        clip_index = row.get("clip_index")
+        if clip_index is not None:
+            source_clip_indices[roi_idx] = int(clip_index)
+        video_paths.add(str(video_path))
+        video_frame_to_rows.setdefault(video_path, {}).setdefault(clip_frame_index, []).append(int(roi_idx))
+
+    return {
+        "mode": "source_frame_index_parquet",
+        "source_frame_index_path": str(index_path),
+        "source_frame_indices": source_frame_indices,
+        "source_clip_local_frame_indices": source_clip_local_frame_indices,
+        "source_clip_indices": source_clip_indices,
+        "video_frame_to_rows": video_frame_to_rows,
+        "video_paths": sorted(video_paths),
+    }
 
 
 def _shape_from_raw_video(root: Any) -> tuple[int, int] | None:
@@ -336,6 +425,23 @@ def _decoder_dimensions(decoder: Any) -> tuple[int, int]:
     raise ValueError("Unable to resolve PyNvVideoCodec source dimensions.")
 
 
+def _close_reader(reader: Any | None) -> None:
+    if reader is None:
+        return
+    try:
+        if hasattr(reader, "close"):
+            reader.close()
+        elif hasattr(reader, "stop"):
+            reader.stop()
+        elif hasattr(reader, "end"):
+            reader.end()
+    except Exception:
+        # PyNvVideoCodec's Python SimpleDecoder exposes stop(), but some builds
+        # do not implement the underlying bound method. Decoder object
+        # destruction is enough for this one-shot tool.
+        pass
+
+
 def _choose_decode_mode(
     *,
     requested: str,
@@ -431,21 +537,50 @@ def regenerate_training_crops_pynvvc(
             f"do not match frame_indices rows {total_rois}."
         )
 
-    resolved_video_path = _resolve_video_path(root, source_group, video_path, archive_path)
-    video_shape = _resolve_video_shape(root, source_group, resolved_video_path)
-    source_frame_indices, frame_mapping = _map_source_frame_indices(
-        root=root,
-        crop_frame_indices=frame_indices,
-        mode=source_frame_index_mode,
-    )
-    frame_to_rows = _frame_to_roi_indices(source_frame_indices)
-    max_frame = int(max(frame_to_rows)) if frame_to_rows else -1
+    clipped_mapping = None
+    if video_path is None:
+        clipped_mapping = _load_clipped_source_frame_mapping(
+            root=root,
+            archive_path=archive_path,
+            crop_frame_indices=frame_indices,
+            mode=source_frame_index_mode,
+        )
+
+    if clipped_mapping is not None:
+        resolved_video_path = None
+        first_video = Path(str(clipped_mapping["video_paths"][0]))
+        video_shape = _resolve_video_shape(root, source_group, first_video)
+        source_frame_indices = np.asarray(clipped_mapping["source_frame_indices"], dtype=np.int64)
+        frame_mapping = {
+            "mode": "source_frame_index_parquet",
+            "source_frame_index_path": clipped_mapping["source_frame_index_path"],
+            "video_path_count": len(clipped_mapping["video_paths"]),
+            "video_paths_preview": clipped_mapping["video_paths"][:5],
+        }
+        frame_to_rows: dict[int, list[int]] = {}
+        max_frame = max(
+            (max(frame_rows) for frame_rows in clipped_mapping["video_frame_to_rows"].values() if frame_rows),
+            default=-1,
+        )
+        decode_mode_effective = "indexed" if decode_mode == "auto" else str(decode_mode)
+        if decode_mode_effective == "sequential":
+            raise ValueError("Clipped source_frame_index_parquet decoding currently requires indexed decode mode.")
+    else:
+        resolved_video_path = _resolve_video_path(root, source_group, video_path, archive_path)
+        video_shape = _resolve_video_shape(root, source_group, resolved_video_path)
+        source_frame_indices, frame_mapping = _map_source_frame_indices(
+            root=root,
+            crop_frame_indices=frame_indices,
+            mode=source_frame_index_mode,
+        )
+        frame_to_rows = _frame_to_roi_indices(source_frame_indices)
+        max_frame = int(max(frame_to_rows)) if frame_to_rows else -1
+        decode_mode_effective = _choose_decode_mode(
+            requested=str(decode_mode),
+            frame_to_rows=frame_to_rows,
+            max_frame=max_frame,
+        )
     contract = orange_mono_pynvvc_luma_pixel_contract()
-    decode_mode_effective = _choose_decode_mode(
-        requested=str(decode_mode),
-        frame_to_rows=frame_to_rows,
-        max_frame=max_frame,
-    )
     layout = build_canonical_crop_roi_layout(
         total_rois=total_rois,
         preferred_chunk_len=int(roi_chunk_len),
@@ -457,7 +592,8 @@ def regenerate_training_crops_pynvvc(
         "zarr_path": str(archive_path),
         "source_crop_run": str(resolved_source_crop),
         "target_crop_run": str(resolved_target_crop),
-        "video_path": str(resolved_video_path),
+        "video_path": str(resolved_video_path) if resolved_video_path is not None else None,
+        "source_video_paths": clipped_mapping["video_paths"] if clipped_mapping is not None else None,
         "video_shape": [int(video_shape[0]), int(video_shape[1])],
         "roi_shape": [int(roi_shape[0]), int(roi_shape[1])],
         "total_rois": int(total_rois),
@@ -486,7 +622,7 @@ def regenerate_training_crops_pynvvc(
             "source_crop_path": f"crop_runs/{resolved_source_crop}",
             "crop_storage_mode": "materialized",
             "roi_size": [int(roi_shape[0]), int(roi_shape[1])],
-            "source_video_path": str(resolved_video_path),
+            "source_video_path": str(resolved_video_path) if resolved_video_path is not None else "multiple_clips",
             "height": int(video_shape[0]),
             "width": int(video_shape[1]),
             "decode_backend": "pynvvc_luma",
@@ -501,6 +637,10 @@ def regenerate_training_crops_pynvvc(
             "source_frame_indices_max": int(source_frame_indices.max()) if source_frame_indices.size else None,
         }
     )
+    if clipped_mapping is not None:
+        target_group.attrs["source_video_paths"] = clipped_mapping["video_paths"]
+        target_group.attrs["source_frame_index_path"] = clipped_mapping["source_frame_index_path"]
+        target_group.attrs["source_layout"] = "rolling_clips"
     target_group.attrs.update(crop_roi_layout_attrs(layout))
 
     copied_arrays = _copy_crop_arrays(source_group, target_group)
@@ -510,6 +650,19 @@ def regenerate_training_crops_pynvvc(
         chunks=(max(1, min(4096, total_rois)),),
         overwrite=True,
     )
+    if clipped_mapping is not None:
+        target_group.create_array(
+            "source_clip_local_frame_indices",
+            data=np.asarray(clipped_mapping["source_clip_local_frame_indices"], dtype=np.int64),
+            chunks=(max(1, min(4096, total_rois)),),
+            overwrite=True,
+        )
+        target_group.create_array(
+            "source_clip_indices",
+            data=np.asarray(clipped_mapping["source_clip_indices"], dtype=np.int64),
+            chunks=(max(1, min(4096, total_rois)),),
+            overwrite=True,
+        )
     roi_images = target_group.create_array(
         "roi_images",
         **build_crop_roi_create_kwargs(
@@ -528,121 +681,130 @@ def regenerate_training_crops_pynvvc(
         "write_seconds": 0.0,
         "decoded_frames": 0,
         "skipped_frames": 0,
-        "frames_with_rois": int(len(frame_to_rows)),
-        "frames_requested": int(len(frame_to_rows)),
+        "frames_with_rois": (
+            sum(len(frame_rows) for frame_rows in clipped_mapping["video_frame_to_rows"].values())
+            if clipped_mapping is not None
+            else int(len(frame_to_rows))
+        ),
+        "frames_requested": (
+            sum(len(frame_rows) for frame_rows in clipped_mapping["video_frame_to_rows"].values())
+            if clipped_mapping is not None
+            else int(len(frame_to_rows))
+        ),
         "decode_mode": str(decode_mode_effective),
         "indexed_batches": 0,
         "rows_written": 0,
+        "video_count": len(clipped_mapping["video_paths"]) if clipped_mapping is not None else 1,
     }
     rows_written_mask = np.zeros(total_rois, dtype=bool)
     open_started = time.perf_counter()
     reader: Any | None = None
-    try:
-        reader = (
-            _open_pynvvc_luma_reader(resolved_video_path)
-            if decode_mode_effective == "sequential"
-            else _open_pynvvc_luma_indexed_decoder(resolved_video_path)
+
+    def _write_frame_crops(frame_tensor: Any, rows: list[int]) -> None:
+        crop_started = time.perf_counter()
+        crops = _crop_pynvvc_luma_frame(
+            frame_tensor,
+            roi_ids=rows,
+            roi_coordinates_full=roi_coordinates_full,
+            roi_shape=roi_shape,
+            video_shape=video_shape,
         )
-        timing["video_open_seconds"] = float(time.perf_counter() - open_started)
-        source_height, source_width = _decoder_dimensions(reader)
-        expected_height, expected_width = int(video_shape[0]), int(video_shape[1])
-        if (source_height, source_width) != (expected_height, expected_width):
-            raise ValueError(
-                "PyNvVideoCodec dimensions do not match Zarr metadata: "
-                f"decoder={source_width}x{source_height}, metadata={expected_width}x{expected_height}."
-            )
-
-        if decode_mode_effective == "sequential":
-            frame_iter = reader.iter_frames()
-            decoded_frame_index = 0
-            while decoded_frame_index <= max_frame:
-                decode_started = time.perf_counter()
-                try:
-                    frame_tensor = next(frame_iter)
-                except StopIteration:
-                    break
-                timing["decode_seconds"] += float(time.perf_counter() - decode_started)
-                timing["decoded_frames"] += 1
-
-                rows = frame_to_rows.get(decoded_frame_index)
-                if not rows:
-                    timing["skipped_frames"] += 1
-                    decoded_frame_index += 1
-                    continue
-                crop_started = time.perf_counter()
-                crops = _crop_pynvvc_luma_frame(
-                    frame_tensor,
-                    roi_ids=rows,
-                    roi_coordinates_full=roi_coordinates_full,
-                    roi_shape=roi_shape,
-                    video_shape=video_shape,
-                )
-                try:
-                    import torch
-
-                    if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
-                        torch.cuda.synchronize()
-                except Exception:
-                    pass
-                timing["crop_seconds"] += float(time.perf_counter() - crop_started)
-
-                contiguous_started = time.perf_counter()
-                crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
-                timing["contiguous_seconds"] += float(time.perf_counter() - contiguous_started)
-
-                write_started = time.perf_counter()
-                for local_idx, row in enumerate(rows):
-                    roi_images[int(row)] = crops_cpu[int(local_idx)]
-                    rows_written_mask[int(row)] = True
-                timing["write_seconds"] += float(time.perf_counter() - write_started)
-                timing["rows_written"] = int(rows_written_mask.sum())
-                decoded_frame_index += 1
-        else:
+        try:
             import torch
 
-            requested_frames = sorted(int(frame_idx) for frame_idx in frame_to_rows)
-            for batch_start in range(0, len(requested_frames), int(decode_chunk_frames)):
-                batch_frame_indices = requested_frames[batch_start : batch_start + int(decode_chunk_frames)]
-                decode_started = time.perf_counter()
-                decoded_frames = reader.get_batch_frames_by_index(batch_frame_indices)
-                timing["decode_seconds"] += float(time.perf_counter() - decode_started)
-                timing["decoded_frames"] += int(len(decoded_frames))
-                timing["indexed_batches"] += 1
+            if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
+                torch.cuda.synchronize()
+        except Exception:
+            pass
+        timing["crop_seconds"] += float(time.perf_counter() - crop_started)
 
-                if len(decoded_frames) != len(batch_frame_indices):
-                    raise RuntimeError(
-                        "PyNvVideoCodec indexed decode returned "
-                        f"{len(decoded_frames)} frame(s) for {len(batch_frame_indices)} requested index/indices."
-                    )
+        contiguous_started = time.perf_counter()
+        crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
+        timing["contiguous_seconds"] += float(time.perf_counter() - contiguous_started)
 
-                for decoded_frame_index, frame in zip(batch_frame_indices, decoded_frames):
-                    frame_tensor = torch.from_dlpack(frame)
-                    rows = frame_to_rows[int(decoded_frame_index)]
-                    crop_started = time.perf_counter()
-                    crops = _crop_pynvvc_luma_frame(
-                        frame_tensor,
-                        roi_ids=rows,
-                        roi_coordinates_full=roi_coordinates_full,
-                        roi_shape=roi_shape,
-                        video_shape=video_shape,
+        write_started = time.perf_counter()
+        for local_idx, row in enumerate(rows):
+            roi_images[int(row)] = crops_cpu[int(local_idx)]
+            rows_written_mask[int(row)] = True
+        timing["write_seconds"] += float(time.perf_counter() - write_started)
+        timing["rows_written"] = int(rows_written_mask.sum())
+
+    def _decode_indexed_frames(video_reader: Any, requested_by_frame: Mapping[int, list[int]]) -> None:
+        import torch
+
+        requested_frames = sorted(int(frame_idx) for frame_idx in requested_by_frame)
+        for batch_start in range(0, len(requested_frames), int(decode_chunk_frames)):
+            batch_frame_indices = requested_frames[batch_start : batch_start + int(decode_chunk_frames)]
+            decode_started = time.perf_counter()
+            decoded_frames = video_reader.get_batch_frames_by_index(batch_frame_indices)
+            timing["decode_seconds"] += float(time.perf_counter() - decode_started)
+            timing["decoded_frames"] += int(len(decoded_frames))
+            timing["indexed_batches"] += 1
+
+            if len(decoded_frames) != len(batch_frame_indices):
+                raise RuntimeError(
+                    "PyNvVideoCodec indexed decode returned "
+                    f"{len(decoded_frames)} frame(s) for {len(batch_frame_indices)} requested index/indices."
+                )
+
+            for decoded_frame_index, frame in zip(batch_frame_indices, decoded_frames):
+                frame_tensor = torch.from_dlpack(frame)
+                _write_frame_crops(frame_tensor, requested_by_frame[int(decoded_frame_index)])
+
+    try:
+        if clipped_mapping is not None:
+            expected_height, expected_width = int(video_shape[0]), int(video_shape[1])
+            for clip_video_path, clip_frame_to_rows in clipped_mapping["video_frame_to_rows"].items():
+                video_open_started = time.perf_counter()
+                reader = _open_pynvvc_luma_indexed_decoder(Path(clip_video_path))
+                timing["video_open_seconds"] += float(time.perf_counter() - video_open_started)
+                source_height, source_width = _decoder_dimensions(reader)
+                if (source_height, source_width) != (expected_height, expected_width):
+                    raise ValueError(
+                        "PyNvVideoCodec dimensions do not match Zarr metadata: "
+                        f"video={clip_video_path}, decoder={source_width}x{source_height}, "
+                        f"metadata={expected_width}x{expected_height}."
                     )
+                _decode_indexed_frames(reader, clip_frame_to_rows)
+                _close_reader(reader)
+                reader = None
+        else:
+            assert resolved_video_path is not None
+            reader = (
+                _open_pynvvc_luma_reader(resolved_video_path)
+                if decode_mode_effective == "sequential"
+                else _open_pynvvc_luma_indexed_decoder(resolved_video_path)
+            )
+            timing["video_open_seconds"] = float(time.perf_counter() - open_started)
+            source_height, source_width = _decoder_dimensions(reader)
+            expected_height, expected_width = int(video_shape[0]), int(video_shape[1])
+            if (source_height, source_width) != (expected_height, expected_width):
+                raise ValueError(
+                    "PyNvVideoCodec dimensions do not match Zarr metadata: "
+                    f"decoder={source_width}x{source_height}, metadata={expected_width}x{expected_height}."
+                )
+
+            if decode_mode_effective == "sequential":
+                frame_iter = reader.iter_frames()
+                decoded_frame_index = 0
+                while decoded_frame_index <= max_frame:
+                    decode_started = time.perf_counter()
                     try:
-                        if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
-                            torch.cuda.synchronize()
-                    except Exception:
-                        pass
-                    timing["crop_seconds"] += float(time.perf_counter() - crop_started)
+                        frame_tensor = next(frame_iter)
+                    except StopIteration:
+                        break
+                    timing["decode_seconds"] += float(time.perf_counter() - decode_started)
+                    timing["decoded_frames"] += 1
 
-                    contiguous_started = time.perf_counter()
-                    crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
-                    timing["contiguous_seconds"] += float(time.perf_counter() - contiguous_started)
-
-                    write_started = time.perf_counter()
-                    for local_idx, row in enumerate(rows):
-                        roi_images[int(row)] = crops_cpu[int(local_idx)]
-                        rows_written_mask[int(row)] = True
-                    timing["write_seconds"] += float(time.perf_counter() - write_started)
-                    timing["rows_written"] = int(rows_written_mask.sum())
+                    rows = frame_to_rows.get(decoded_frame_index)
+                    if not rows:
+                        timing["skipped_frames"] += 1
+                        decoded_frame_index += 1
+                        continue
+                    _write_frame_crops(frame_tensor, rows)
+                    decoded_frame_index += 1
+            else:
+                _decode_indexed_frames(reader, frame_to_rows)
 
         rows_written = int(rows_written_mask.sum())
         if rows_written != total_rois:
@@ -692,19 +854,7 @@ def regenerate_training_crops_pynvvc(
         target_group.attrs["error_message"] = str(exc)
         raise
     finally:
-        if reader is not None:
-            try:
-                if hasattr(reader, "close"):
-                    reader.close()
-                elif hasattr(reader, "stop"):
-                    reader.stop()
-                elif hasattr(reader, "end"):
-                    reader.end()
-            except Exception:
-                # PyNvVideoCodec's Python SimpleDecoder exposes stop(), but
-                # some builds do not implement the underlying bound method.
-                # Decoder object destruction is enough for this one-shot tool.
-                pass
+        _close_reader(reader)
 
 
 def _build_parser() -> argparse.ArgumentParser:

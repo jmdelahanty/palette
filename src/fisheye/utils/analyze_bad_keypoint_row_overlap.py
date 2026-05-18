@@ -270,7 +270,7 @@ def analyze(
     bad_ratio_threshold: float,
     pad_px: float,
 ) -> Dict[str, Any]:
-    root = zarr.open(zarr_path, mode="r")
+    root = zarr.open_group(zarr_path, mode="r", use_consolidated=False)
     run_sel = _pick_keypoint_run(root, run_name)
     run = run_sel.run
     run_attrs = dict(getattr(run, "attrs", {}))

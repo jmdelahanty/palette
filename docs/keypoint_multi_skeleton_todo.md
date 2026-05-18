@@ -112,6 +112,9 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
       non-traditional labels.
 - [ ] Update keypoint detect/refine code paths that allocate fixed 3-point
       tensors.
+- [x] Update YOLO keypoint detection to accept an explicit packaged
+      `--pose-schema`, allocate dynamic keypoint/confidence arrays, and fail
+      when the model keypoint count does not match the selected schema.
 - [x] Switch the traditional raw detector and interactive tuner from hardcoded
       geometry/blob-assignment defaults to packaged `pose_heuristics`
       profiles.
@@ -139,8 +142,9 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
 
 - raw `traditional_pose` detector: intentionally emits traditional-v1
   3-point runs until the producer contract changes
-- current YOLO keypoint writer wrapper: still traditional-v1-shaped and should
-  be generalized together with model/skeleton selection
+- YOLO keypoint writer wrapper: now schema-aware and dynamic-`K`, but richer
+  YOLO models still require representation-specific validation before they are
+  treated as production label sources
 - triangle QC arrays: `triangle_angles`, `triangle_angles_raw`, and
   `triangle_area` remain compatibility diagnostics for the traditional
   triangle, not the general skeleton geometry surface

@@ -205,6 +205,32 @@ Model registry entries should record:
 Runtime inference should warn or fail when a model trained on one
 `roi_pixel_contract` is asked to consume another.
 
+## Pose/Keypoint Implications
+
+For pose/keypoint training, the crop-pixel contract is now a model-input
+contract, not just storage metadata. Orange-compatible inference consumes
+monochrome/luma crop pixels and expands them into three equal channels during
+model preprocessing. The canonical persisted crop cache should therefore remain
+`uint8` luma (`pynvvc_luma_v1` /
+`orange_mono_pynvvc_luma_uint8_v1`) rather than normalized CHW tensors.
+
+Existing models trained on historical Decord-derived crop pixels may still run,
+but their performance on new PyNvVC-luma crops is an empirical question. A
+2026-05-17 smoke showed that the available `traditional_v2` 5-point YOLO pose
+model performed poorly at normal confidence on the new PyNvVC-luma sampled
+training crops. The recommended migration path is:
+
+1. regenerate or create crop runs with the PyNvVC-luma contract
+2. run the reliable 3-point pose model on that same representation
+3. refine the 3-point output
+4. seed `traditional_v2` with `extend_keypoint_skeleton`
+5. manually complete and approve `snout_tip` / `tail_tip`
+6. retrain the 5-point pose model from the completed PyNvVC-luma labels
+
+Low-confidence direct 5-point predictions can be useful as visual hints, but
+they must not be promoted to training labels without manual correction and
+review.
+
 ## Validation Gates
 
 Before marking migrated training data usable:
@@ -297,6 +323,14 @@ Decode access policy:
   crop rows are sampled every ~100 source frames. Sequentially decoding
   `0..max(source_frame_indices)` is correct but too slow for that sparse
   layout.
+- Clipped training Zarrs can regenerate crops directly from rolling clips when
+  the archive records `source_frame_index.parquet`. In that case crop
+  `frame_indices` are sample-local rows; the parquet maps each sample to
+  `video_path + clip_local_frame_index`, and the utility opens only the clip
+  files that contain requested crop rows.
+- For clipped mappings, the effective decode mode is indexed. Sequential decode
+  is intentionally rejected because the requested rows are distributed across
+  many independent clip-local timelines.
 - The effective access mode is recorded in `crop_runs/<run>.attrs` as
   `decode_mode_requested` and `decode_mode_effective`.
 

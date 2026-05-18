@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Keypoint Review</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="layout">
+      <section id="viewer-pane">
+        <canvas id="viewer" width="960" height="540"></canvas>
+      </section>
+      <aside id="panel">
+        <h1>Keypoint Review</h1>
+        <div id="dataset-panel" class="panel-block hidden">
+          <label>
+            Training dataset
+            <select id="dataset-select"></select>
+          </label>
+          <button id="dataset-refresh-btn">Refresh registry</button>
+          <div id="dataset-status-line" class="mono muted"></div>
+        </div>
+        <div id="status-line" class="mono"></div>
+        <div id="reason-line" class="mono muted"></div>
+        <div id="points-list" class="mono"></div>
+        <div id="point-help" class="muted mono">
+          Tip: 1-9 selects a keypoint, [/ ] cycles keypoints, click places/drag-selects it, t toggles labels, Shift+drag pans, wheel zooms, s saves, x no-keypoints, d detection issue, c clear flag, b follow-up, a/N/R/P review status.
+        </div>
+        <div id="state-line" class="muted"></div>
+        <div id="readback-line" class="mono muted"></div>
+        <div id="messages" class="mono"></div>
+        <div id="controls">
+          <label>
+            Filter
+            <select id="filter-mode">
+              <option value="failed">failed</option>
+              <option value="all">all</option>
+              <option value="edited">edited</option>
+              <option value="manual">manual</option>
+              <option value="usable">usable</option>
+              <option value="raw_failed">raw failed</option>
+            </select>
+          </label>
+          <label>
+            Search
+            <input id="search-box" type="search" placeholder="reason/status text" />
+          </label>
+          <button id="apply-filter-btn">Apply filter</button>
+          <label class="check-row">
+            <input id="auto-advance-box" type="checkbox" />
+            Auto-advance after save/action
+          </label>
+          <div class="jump-row">
+            <input id="jump-roi" type="number" placeholder="ROI" />
+            <input id="jump-frame" type="number" placeholder="Frame" />
+            <button id="jump-btn">Jump</button>
+          </div>
+        </div>
+        <div id="toolbar">
+          <button id="fit-btn">Fit to window (f)</button>
+          <button id="save-btn">Save (s)</button>
+          <button id="no-keypoints-btn">No keypoints (x)</button>
+          <button id="detection-issue-btn">Detection issue (d)</button>
+          <button id="clear-label-btn">Clear flag (c)</button>
+          <button id="followup-btn">Flag follow-up (b)</button>
+          <button id="prev-btn">Prev (p)</button>
+          <button id="next-btn">Next (n)</button>
+          <button id="approve-btn">Approve (a)</button>
+          <button id="needs-review-btn">Needs review (N)</button>
+          <button id="reject-btn">Reject (R)</button>
+          <button id="pending-btn">Pending (P)</button>
+        </div>
+      </aside>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

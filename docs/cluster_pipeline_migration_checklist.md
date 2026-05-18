@@ -1,7 +1,7 @@
 # Cluster Pipeline Migration Checklist
 <!-- contract-meta
 status: working_checklist
-last_verified: 2026-05-16
+last_verified: 2026-05-18
 purpose: Track what remains to migrate Palette detect, pose, segmentation, and refinement workflows to Janelia cluster execution.
 -->
 
@@ -50,7 +50,7 @@ Palette already has the first layer of cluster support:
 | Video decode benchmark | present | `fisheye.diagnostics.benchmark_video_decode` showed PRFS streaming is acceptable for single-pass Decord-GPU detection. |
 | Run-group artifact design | documented | `docs/cluster_run_group_artifact_workflow.md` defines the target architecture. |
 | Whole-Zarr transfer packing | prototype present | `fisheye.utils.pack_zarr_transfer_artifact` packs whole archives, not individual run groups. |
-| Rolling-clip planning/materialization | prototype present | Planner/materializer/verifier, frame-index builder, and metadata-only analysis-Zarr shell creator exist for Orange-style keyframe-aligned clips; clip-local model writers/import/finalize support remains design-only. |
+| Rolling-clip planning/materialization | active pilot present | Planner/materializer/verifier, frame-index builder, metadata-only analysis-Zarr shell creator, clip-local detect artifact import, detect-quality/refined-detect chaining, and finalized collection writing have all passed the sleepyfish all-clips smoke. Core reader/editor support remains in migration. |
 
 Palette also has batch utilities for additional stages:
 
@@ -350,10 +350,13 @@ Remaining:
   from the original video, including `raw_video/original_frame_indices` mapping
   for sampled training zarrs.
 - [x] Audit current training-zarr crop migration coverage. As of 2026-05-16,
-  52/60 approved detector-training source zarrs are crop-bearing and all 52 have
-  a `pynvvc_luma_v1` crop run. The remaining 8 `sickyfish`/`sleepyfish` sampled
-  zarrs are detection-only and have no `crop_runs`, so they are not migration
-  failures.
+  52/60 approved detector-training source zarrs were crop-bearing and all 52
+  had a `pynvvc_luma_v1` crop run. The remaining 8 `sickyfish`/`sleepyfish`
+  sampled zarrs were initially detection-only, but that snapshot is now
+  historical: those archives are being promoted into crop/keypoint training
+  sources as explicit crop geometry and PyNvVC-luma crops are added. Inspect
+  each archive's current `crop_runs.latest`, `keypoints_runs.latest`, and
+  `refined_keypoints_runs.latest` before treating it as detection-only.
 - [ ] Run `fisheye.diagnostics.check_flat_roi_cache_pixel_parity` on each new
   flat ROI cache before using it for pose/segmentation quality validation.
 - [x] Run `fisheye.diagnostics.check_training_crop_pynvvc_pixel_parity` on at

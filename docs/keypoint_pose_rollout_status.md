@@ -2,6 +2,8 @@
 
 Date anchored: 2026-04-17
 
+Status addendum: 2026-05-17
+
 Purpose: document the current implementation status of Palette's modern
 keypoint pose stack after the heading-semantics cutover and the first packaged
 pose-heuristic rollout, and define the next concrete implementation sequence.
@@ -34,6 +36,10 @@ What is now materially true:
 - the first major consumer/training surfaces now resolve labels from run
   metadata and reject missing or mixed signatures rather than silently assuming
   the starter skeleton
+- YOLO keypoint inference can now be explicitly stamped with a packaged pose
+  schema via `detect_keypoints_yolo --pose-schema`, and the writer validates
+  the model keypoint count against that schema before writing dynamic `K`
+  arrays
 
 The main remaining work is not "decide the architecture." The architecture is
 clear enough now. The remaining work is:
@@ -189,6 +195,10 @@ Important current limitation:
   they currently resolve the `traditional_v1` packaged profile
 - the presence of `traditional_v2` packaged defaults does not mean the raw
   detector is already multi-skeleton
+- the presence of a direct `traditional_v2` YOLO model does not mean that model
+  is the recommended automatic label source for new PyNvVC-luma crops; the
+  current recommended path is 3-point inference plus `traditional_v2` seed
+  promotion and manual completion
 
 ## What Is Not Yet Finished
 
@@ -244,8 +254,9 @@ fall into these categories:
 
 - raw `traditional_pose` detector output is intentionally a 3-point
   `traditional_v1` producer for now
-- the current YOLO writer wrapper still materializes traditional-v1-shaped
-  output and should only be generalized when the model/skeleton contract grows
+- the YOLO writer has a schema-aware dynamic-`K` path, but richer skeletons
+  still require model-specific validation and operator policy before being used
+  as production automatic label sources
 - `triangle_angles`, `triangle_angles_raw`, and `triangle_area` remain
   triangle-QC compatibility arrays, not the general skeleton geometry contract
 - visualization snippets that index `kp[0]` / `kp[1]` are reading x/y
@@ -388,9 +399,10 @@ Checklist:
       runtime consumer surface
 - [ ] Fail clearly when a required label is absent, rather than silently
       assuming the starter skeleton
-- [ ] Decide when raw `traditional_pose` / current YOLO writer outputs should
-      grow beyond traditional-v1. Their remaining fixed `3` allocations are
-      currently producer-contract constraints, not reader/storage constraints.
+- [ ] Decide when raw `traditional_pose` outputs should grow beyond
+      traditional-v1. The YOLO writer can now write dynamic schema-stamped
+      outputs, but each richer YOLO model still needs representation-specific
+      validation before promotion.
 - [ ] Re-check manual/review UIs for dynamic keypoint count behavior
 - [ ] Re-check remaining patch/manual/review helper paths for dynamic `K`
 

@@ -680,8 +680,10 @@ the current machine. Use it for copied PRFS smoke inputs whose stored attrs
 still point at the original workstation path.
 
 For small per-recording training zarrs, `--all-rows` is appropriate. For long
-sampled videos, remember that the PyNv path is sequential; selecting a row from
-a late source frame requires decoding up to that frame.
+sampled videos, use indexed PyNvVC access rather than sequentially decoding up
+to late source frames. For rolling-clip training zarrs, prefer
+`source_frame_index.parquet` so crop rows decode from `video_path +
+clip_local_frame_index` instead of reopening/seeking through the parent MP4.
 
 Detection-only sampled training zarrs are different. They may have
 `detect_runs` and `refined_detect_runs` but no `crop_runs`; this is expected for
@@ -692,12 +694,18 @@ not be run on detection-only zarrs. If one of those recordings later becomes a
 pose/keypoint or segmentation source, first create crop geometry from the
 approved refined detections, then materialize a new `pynvvc_luma_v1` crop run.
 
-Observed inventory on 2026-05-16:
+Observed inventory on 2026-05-16, updated after the first clipped-source crop
+migration on 2026-05-17:
 
 - 60 approved detector-training source zarrs exist under `/nvme1/recordings`.
 - 52 have `crop_runs`; all 52 already have a `pynvvc_luma_v1` crop run.
-- 8 `sickyfish`/`sleepyfish` sampled training zarrs have no `crop_runs` and are
-  detection-only.
+- 4 `sickyfish` sampled training zarrs now have `pynvvc_luma_v1` crop runs
+  sourced from their single-camera MP4s.
+- 4 `sleepyfish` clipped training zarrs now have `pynvvc_luma_v1` crop runs
+  sourced from rolling clips through `source_frame_index.parquet`.
+- The 4 non-clipped `sleepyfish` sampled training zarrs still carry their
+  original grayscale crop runs. Avoid regenerating those from the parent MP4;
+  use the clipped training zarrs or add an explicit clip-frame mapping first.
 
 Merged/exported training zarrs need more care:
 

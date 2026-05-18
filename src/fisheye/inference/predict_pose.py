@@ -231,6 +231,10 @@ def _emit_keypoint_status(
             recording_id=context.recording_id,
             zarr_use=None,
             zarr_purpose=None,
+            source_layout=None,
+            source_frame_index_path=None,
+            source_recording_frame_index_path=None,
+            source_frame_index_schema=None,
         )
         emit_stage_completion(
             None,
