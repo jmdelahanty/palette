@@ -182,6 +182,150 @@ That is a separate implementation slice. For now, Crimson is the preferred
 place to build analysis-video review for clipped recordings, while the web
 reviewer remains focused on materialized training examples.
 
+## Review Proxy Videos For Clipped Analysis
+
+The first video-backed analysis viewer (`video_detect_review_web`) can resolve
+clipped parent frames and refined boxes, but direct browser playback of the
+original clip MP4s is a poor review substrate. The sleepyfish smoke clips are
+`4512x4512` HEVC, roughly `14 GB` per 30-minute clip, and the MP4 `moov` atom is
+at the end of the file. A browser `<video>` element may need multiple range
+requests plus large HEVC decode work before it can display one exact review
+frame. This is much less predictable than PyNvVideoCodec/Crimson decoding.
+
+Preferred design: create derived browser-review proxy videos outside the
+analysis Zarr and point the web viewer at a manifest. The proxy is cache data,
+not canonical analysis truth.
+
+Suggested layout:
+
+```text
+<recording>/
+  clips/
+  zarr/
+  derived/
+    review_proxy/
+      video_detect/
+        <proxy_run_id>/
+          manifest.json
+          clips/
+            clip_000000/
+              Cam2010093_1024_h264.mp4
+            clip_000001/
+              Cam2010093_1024_h264.mp4
+```
+
+Proxy contract:
+
+- Same `clip_id`, `camera_serial`, frame count, FPS, and frame-index timeline as
+  the source clip.
+- Lower display resolution, initially `1024x1024` or `1280x1280`.
+- Browser-friendly codec/container, initially H.264 MP4 with faststart metadata.
+- One manifest entry per `(clip_id, camera_serial)`.
+- Boxes remain stored/read in source-image coordinates; the frontend scales
+  overlays to the displayed proxy dimensions. Proxy pixels are display-only.
+- Proxies may be regenerated, cleaned by TTL, or copied to shared cache such as
+  `/misc/public/palette_cache`; they should not be written into the canonical
+  analysis Zarr.
+
+Example manifest shape:
+
+```json
+{
+  "schema_version": "palette.review_proxy.video.v1",
+  "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010093",
+  "source_recording_dir": "/groups/johnson/johnsonlab/jeremy/palette_smoke/sleepyfish_2026_05_05_17_45_30_cam2010093",
+  "proxy_width": 1024,
+  "proxy_height": 1024,
+  "frame_count_policy": "same_as_source_clip",
+  "timebase_policy": "same_fps_same_frame_index",
+  "coordinate_policy": "scale_source_image_to_proxy_for_display_only",
+  "clips": [
+    {
+      "clip_id": "clip_000000",
+      "camera_serial": "2010093",
+      "source_video_path": ".../clips/clip_000000/Cam2010093_....mp4",
+      "proxy_video_path": ".../derived/review_proxy/video_detect/<proxy_run_id>/clips/clip_000000/Cam2010093_1024_h264.mp4",
+      "source_width": 4512,
+      "source_height": 4512,
+      "proxy_width": 1024,
+      "proxy_height": 1024,
+      "fps": 30,
+      "frame_count": 54000
+    }
+  ]
+}
+```
+
+Planned viewer interface:
+
+```bash
+scripts/py -m fisheye.tune.video_detect_review_web \
+  <analysis.zarr> \
+  --review-proxy-manifest <recording>/derived/review_proxy/video_detect/<proxy_run_id>/manifest.json
+```
+
+Implementation status:
+
+1. [x] Keep the existing source-video path for diagnostics.
+2. [x] Add a builder that creates faststart H.264 proxy MP4s from clipped source
+   videos and writes the manifest.
+3. [x] Add proxy manifest resolution in `video_detect_review_backend.py`.
+4. [ ] Add validation that proxy frame count/FPS matches the source clip.
+5. [x] Prefer proxy media in the browser when a manifest is provided; fall back to
+   source video only when no manifest is provided.
+
+Builder status: `fisheye.utils.build_review_proxy_videos` creates the proxy
+manifest and, with `--apply`, transcodes the selected clip-camera videos.
+It is dry-run by default. The default `--encoder auto` prefers `libx264` when
+available and falls back to NVENC H.264 encoders such as `h264_nvenc` on
+FFmpeg builds that do not include GPL x264 support.
+
+```bash
+scripts/py -m fisheye.utils.build_review_proxy_videos \
+  <recording_dir> \
+  --proxy-run-id <proxy_run_id> \
+  --proxy-width 1024 \
+  --proxy-height 1024 \
+  --limit 1
+```
+
+Full apply for all clips:
+
+```bash
+scripts/py -m fisheye.utils.build_review_proxy_videos \
+  <recording_dir> \
+  --proxy-run-id <proxy_run_id> \
+  --proxy-width 1024 \
+  --proxy-height 1024 \
+  --apply
+```
+
+The default output directory is:
+
+```text
+<recording>/derived/review_proxy/video_detect/<proxy_run_id>/
+```
+
+After proxies are built, run the video-backed reviewer against the analysis
+Zarr and pass the manifest explicitly:
+
+```bash
+scripts/py -m fisheye.tune.video_detect_review_web \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --review-proxy-manifest <recording>/derived/review_proxy/video_detect/<proxy_run_id>/manifest.json \
+  --host 0.0.0.0 \
+  --port 8790
+```
+
+When a proxy manifest is present, the backend still resolves detections in
+source-image coordinates and exposes both source and proxy dimensions to the
+frontend. The proxy MP4 is used only as the media source for display.
+
+Serving individual PyNvVideoCodec-decoded JPEG/WebP frames remains a useful
+alternative for exact-frame labeling and can share the same clipped frame
+resolver. For smooth browser playback and scrubbing, precomputed proxy MP4s are
+the more debuggable first target than an on-the-fly PyNvVC downsampled stream.
+
 ## Why this is feasible now
 
 - Manual save logic is already concentrated in `detect_review.py` and mostly reusable through `_apply` and `shared` curation helpers.

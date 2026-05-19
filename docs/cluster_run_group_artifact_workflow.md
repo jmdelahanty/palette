@@ -689,12 +689,64 @@ surfaces until after a full batch was decoded, producing batch-window bbox
 plateaus even though `frame_indices` were continuous. The historical
 `sleepyfish_cam2010093_allclips_20260517_01` refined detections are useful for
 workflow and scheduler timing, but should not be treated as a trusted visual
-prediction product. Regenerate clipped detect/refine outputs with a run that
-records
-`pynvvc_surface_materialization=stream_preprocess_owned_batch_v1`; with the
-current conservative implementation, prefer `--batch-size 1` for
-`pynvvc_luma_rgb` until a CUDA event / preallocated owned-batch-buffer
-optimization is implemented and benchmarked.
+prediction product.
+
+Regenerate clipped detect/refine outputs with a run that records
+`pynvvc_surface_materialization=stream_event_owned_batch_v2` or a later
+materialization marker. The event/preallocated-batch implementation is
+correctness-safe, but the measured full-clip smoke was not faster than the
+previous conservative paths: `clip_000000` processed at `125.6 fps` with
+`--batch-size 16`, versus historical fixed-path measurements of `127.8 fps` for
+batch `16` and `131.0 fps` for batch `1`. For correctness-sensitive production
+clipped `pynvvc_luma_rgb` jobs, keep using fixed/current PyNvVC outputs and
+prefer `--batch-size 1` until a true overlap or buffer-pool design proves faster
+end-to-end.
+
+Cluster rerun readiness, added 2026-05-18:
+
+- We are ready to rerun clipped detection/refinement on the cluster after pulling
+  a commit that contains the `stream_event_owned_batch_v2` materialization path.
+- Use a new `--workflow-id`; do not overwrite
+  `sleepyfish_cam2010093_allclips_20260517_01`, because that collection remains
+  scheduler-valid but visually suspect.
+- Use `--decode-backend pynvvc_luma_rgb --batch-size 1` for the first production
+  rerun. Current batch 16 is correctness-safe, but the measured full-clip smoke
+  did not show an end-to-end speed advantage.
+- After submission, require the checker to report every stage `ok`, then inspect
+  one imported detect run's `timing_summary.pynvvc_surface_materialization` and
+  `parameters.pynvvc_surface_materialization`; both should be
+  `stream_event_owned_batch_v2`.
+- Treat any PyNvVC batch-size-greater-than-1 run without a fixed materialization
+  marker as suspect and regenerate rather than trying to repair boxes in place.
+
+Template for the next all-clips rerun:
+
+```bash
+REC=/groups/johnson/johnsonlab/jeremy/palette_smoke/sleepyfish_2026_05_05_17_45_30_cam2010093
+MODEL=/groups/johnson/johnsonlab/jeremy/palette_models/detect/detect_all_available_detect_training_v003/detect_all_available_detect_training_v003_yolo11n_trt_20260516_retry1/weights/best.pt
+WORKFLOW_ID=sleepyfish_cam2010093_allclips_pynvvc_fixed_YYYYMMDD_01
+PLAN="$REC/derived/cluster_artifacts/detect_refine_plan_${WORKFLOW_ID}.json"
+RUN_DIR="$REC/derived/cluster_artifacts/detect_refine_submission_${WORKFLOW_ID}"
+
+scripts/py -m fisheye.utils.plan_clipped_detect_refine_workflow \
+  "$REC" \
+  --model "$MODEL" \
+  --workflow-id "$WORKFLOW_ID" \
+  --decode-backend pynvvc_luma_rgb \
+  --batch-size 1 \
+  --output-json "$PLAN"
+
+scripts/py -m fisheye.utils.submit_clipped_detect_refine_plan_bsub \
+  "$PLAN" \
+  --run-dir "$RUN_DIR" \
+  --submit \
+  --allow-multiple \
+  --output-json "$RUN_DIR/submission_manifest.json"
+
+scripts/py -m fisheye.utils.check_clipped_detect_refine_submission \
+  "$RUN_DIR/submission_manifest.json" \
+  --require-complete
+```
 
 Interpretation: the `~2600 fps` number is aggregate wall-clock throughput
 from running 22 independent clip jobs concurrently; it is not per-GPU model
@@ -704,6 +756,15 @@ GPU. The fan-out result supports clip-camera GPU jobs as the default scaling
 unit for long recordings, while the small CPU follow-up stages remain good
 candidates for a future fused per-clip postprocess job to reduce scheduler
 overhead.
+
+For browser review of these clipped outputs, do not treat the original
+`4512x4512` HEVC clip MP4s as the long-term web-serving substrate. They are
+large analysis sources, not browser review proxies. The planned web review cache
+is documented in `docs/detection_review_web_todo.md`: derived faststart H.264
+proxy videos under `derived/review_proxy/video_detect/<proxy_run_id>/`, plus a
+manifest that maps proxy clips back to the source clip timeline. The analysis
+Zarr remains the canonical detection/curation store; proxy videos are
+regenerable display artifacts.
 
 The batch wrappers can also plan against a direct Zarr directory path without
 registry discovery:

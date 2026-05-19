@@ -63,6 +63,7 @@ DECODE_BACKEND_CHOICES = (
     DECODE_BACKEND_DECORD_CPU,
     DECODE_BACKEND_OPENCV,
 )
+PYNVVC_SURFACE_MATERIALIZATION = "stream_event_owned_batch_v2"
 
 
 def _decord_available() -> bool:
@@ -449,17 +450,29 @@ def _read_and_preprocess_pynvvc_batch(
     dtype: torch.dtype,
     resize_hw: list[int] | tuple[int, int],
 ) -> tuple[Optional[torch.Tensor], int, float, float]:
-    """Read PyNvVC frames and immediately materialize owned model inputs.
+    """Read PyNvVC frames into an owned preallocated model-input batch.
 
     PyNvVideoCodec frames can be backed by decoder-owned reusable surfaces. Do
     not retain raw decoded tensors across further decode calls; preprocess each
-    yielded frame into owned resized RGB tensor memory before advancing.
+    yielded frame into owned resized RGB tensor memory before advancing. CUDA
+    events scope the wait to the materialization work that reads the decoder
+    surface, rather than synchronizing the whole current stream unconditionally.
     """
 
-    processed_frames: list[torch.Tensor] = []
+    height, width = int(resize_hw[0]), int(resize_hw[1])
+    max_batch_frames = max(0, int(max_batch_frames))
+    if max_batch_frames <= 0:
+        return None, 0, 0.0, 0.0
+
+    processed_batch = torch.empty(
+        (max_batch_frames, 3, height, width),
+        device=device,
+        dtype=dtype,
+    ).contiguous(memory_format=torch.channels_last)
     read_seconds = 0.0
     preprocess_seconds = 0.0
-    for _ in range(max(0, int(max_batch_frames))):
+    actual_count = 0
+    for batch_index in range(max_batch_frames):
         read_start = time.perf_counter()
         try:
             frame_tensor = next(frame_iter)
@@ -484,24 +497,31 @@ def _read_and_preprocess_pynvvc_batch(
                 dtype=dtype,
                 resize_hw=resize_hw,
             )
-        if getattr(processed_frame, "is_cuda", False):
+        processed_batch[batch_index : batch_index + 1].copy_(
+            processed_frame,
+            non_blocking=bool(getattr(processed_frame, "is_cuda", False)),
+        )
+        if getattr(processed_batch, "is_cuda", False):
             # PyNvVideoCodec may recycle the decoded surface on the next decode.
-            # Ensure PyTorch has finished copying/resizing into owned tensor
-            # memory before allowing the decoder to advance.
-            torch.cuda.current_stream(device=device).synchronize()
+            # Wait only for the event marking completion of this frame's
+            # materialization into owned tensor memory before advancing.
+            stream = torch.cuda.current_stream(device=device)
+            materialized = torch.cuda.Event(blocking=False)
+            materialized.record(stream)
+            materialized.synchronize()
         preprocess_seconds += time.perf_counter() - preprocess_start
-        processed_frames.append(processed_frame)
+        actual_count += 1
         del frame_tensor
+        del processed_frame
 
-    if not processed_frames:
+    if actual_count <= 0:
         return None, 0, read_seconds, preprocess_seconds
-    if len(processed_frames) == 1:
-        processed = processed_frames[0]
-    else:
-        processed = torch.cat(processed_frames, dim=0)
+    processed = processed_batch[:actual_count]
+    if actual_count != max_batch_frames:
+        processed = processed.contiguous(memory_format=torch.channels_last)
     return (
-        processed.contiguous(memory_format=torch.channels_last),
-        len(processed_frames),
+        processed,
+        actual_count,
         read_seconds,
         preprocess_seconds,
     )
@@ -1533,7 +1553,7 @@ def detect_yolo(
         'decode_backend_requested': decode_backend_requested,
         'decode_backend_effective': decode_backend_effective,
         'pynvvc_surface_materialization': (
-            'stream_preprocess_owned_batch_v1' if use_pynvvc else 'not_applicable'
+            PYNVVC_SURFACE_MATERIALIZATION if use_pynvvc else 'not_applicable'
         ),
         'video_reader_type': video_reader_type,
         'frames_processed': int(frame_idx),
@@ -1585,7 +1605,7 @@ def detect_yolo(
             'decode_backend_requested': decode_backend_requested,
             'decode_backend_effective': decode_backend_effective,
             'pynvvc_surface_materialization': (
-                'stream_preprocess_owned_batch_v1' if use_pynvvc else 'not_applicable'
+                PYNVVC_SURFACE_MATERIALIZATION if use_pynvvc else 'not_applicable'
             ),
         },
         'summary_statistics': stats,

@@ -63,6 +63,26 @@ def test_pynvvc_streamed_batch_materializes_frames_before_surface_reuse() -> Non
     assert values == [1, 2]
 
 
+def test_pynvvc_streamed_batch_returns_partial_owned_batch() -> None:
+    def frame_iter():
+        yield torch.full((1, 1), 7, dtype=torch.uint8)
+
+    processed, count, _read_seconds, _preprocess_seconds = mod._read_and_preprocess_pynvvc_batch(  # noqa: SLF001
+        frame_iter=frame_iter(),
+        max_batch_frames=4,
+        decode_backend_effective=mod.BACKEND_PYNVVC_LUMA_RGB,
+        source_height=1,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        resize_hw=(1, 1),
+    )
+
+    assert count == 1
+    assert processed is not None
+    assert tuple(processed.shape) == (1, 3, 1, 1)
+    assert torch.round(processed[0, :, 0, 0] * 255.0).to(torch.int64).tolist() == [7, 7, 7]
+
+
 def test_detect_yolo_rejects_conflicting_resize_dims_and_imgsz() -> None:
     with pytest.raises(ValueError, match="Conflicting CLI overrides"):
         mod.detect_yolo(

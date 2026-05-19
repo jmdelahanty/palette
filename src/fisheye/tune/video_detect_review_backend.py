@@ -32,6 +32,10 @@ class VideoSource:
     frame_count: int | None = None
     clip_id: str | None = None
     camera_serial: str | None = None
+    media_kind: str = "source_video"
+    source_path: Path | None = None
+    media_width: int | None = None
+    media_height: int | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,7 @@ class VideoDetectReviewSession:
     frame_records: Any
     refined_cache: dict[str, RefinedPayloadCacheEntry] = field(default_factory=dict)
     collection_id: str | None = None
+    review_proxy_manifest: str | None = None
     manual_score: float = 1.0
     manual_class_id: int = 0
     current_frame: int = 0
@@ -295,6 +300,44 @@ def _group_at_path(root: zarr.Group, path: str) -> zarr.Group:
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _resolve_path_from_base(base: Path, value: Any) -> Path:
+    path = Path(str(value)).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
+def _load_review_proxy_manifest(path: str | Path | None) -> dict[tuple[str, str], dict[str, Any]]:
+    if path is None:
+        return {}
+    manifest_path = Path(path).expanduser().resolve()
+    payload = _read_json(manifest_path)
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"Review proxy manifest is not a JSON object: {manifest_path}")
+    schema = str(payload.get("schema_version") or "")
+    if schema != "palette.review_proxy.video.v1":
+        raise RuntimeError(f"Unsupported review proxy manifest schema {schema!r}: {manifest_path}")
+    clips = payload.get("clips")
+    if not isinstance(clips, list) or not clips:
+        raise RuntimeError(f"Review proxy manifest has no clips: {manifest_path}")
+    by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in clips:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError(f"Review proxy manifest clip entry is not an object: {manifest_path}")
+        camera_serial = str(raw.get("camera_serial") or "")
+        clip_id = str(raw.get("clip_id") or "")
+        if not camera_serial or not clip_id:
+            raise RuntimeError(f"Review proxy manifest clip missing camera_serial/clip_id: {raw}")
+        proxy_video_path = raw.get("proxy_video_path")
+        if not proxy_video_path:
+            raise RuntimeError(f"Review proxy manifest clip missing proxy_video_path: {raw}")
+        proxy_path = _resolve_path_from_base(manifest_path.parent, proxy_video_path)
+        if not proxy_path.is_file():
+            raise RuntimeError(f"Review proxy video does not exist: {proxy_path}")
+        by_pair[(camera_serial, clip_id)] = {**dict(raw), "proxy_video_path": str(proxy_path)}
+    return by_pair
 
 
 def _resolve_clipped_collection(root: zarr.Group, collection_id: str | None) -> tuple[str, zarr.Group]:
@@ -529,6 +572,7 @@ def _clipped_session(
     *,
     collection_id: str | None,
     recording_frame_index: str | Path | None,
+    review_proxy_manifest: str | Path | None,
     editable: bool,
     manual_score: float,
     manual_class_id: int,
@@ -575,24 +619,39 @@ def _clipped_session(
     fps = _resolve_fps(root, default=30.0)
     videos: dict[str, VideoSource] = {}
     video_id_by_path: dict[str, str] = {}
+    proxy_by_pair = _load_review_proxy_manifest(review_proxy_manifest)
     for row in selected_runs:
         source = row.get("source") if isinstance(row.get("source"), Mapping) else {}
         video_path_value = source.get("video_path") if isinstance(source, Mapping) else None
         if not video_path_value:
             continue
         video_path = Path(str(video_path_value)).expanduser().resolve()
-        video_id = _video_id(video_path, prefix=str(row.get("clip_id") or "clip"))
+        clip_id = str(row.get("clip_id") or "")
+        camera_serial = str(row.get("camera_serial") or "")
+        proxy = proxy_by_pair.get((camera_serial, clip_id))
+        if review_proxy_manifest is not None and proxy is None:
+            raise RuntimeError(f"Review proxy manifest has no entry for camera={camera_serial!r} clip={clip_id!r}")
+        media_path = Path(str(proxy["proxy_video_path"])).expanduser().resolve() if proxy else video_path
+        media_kind = "review_proxy_video" if proxy else "source_video"
+        video_id = _video_id(media_path, prefix=clip_id or "clip")
         video_id_by_path[str(video_path)] = video_id
         videos[video_id] = VideoSource(
             video_id=video_id,
-            path=video_path,
+            path=media_path,
             fps=fps,
             width=width,
             height=height,
-            clip_id=str(row.get("clip_id") or ""),
-            camera_serial=str(row.get("camera_serial") or ""),
+            frame_count=_as_positive_int(proxy.get("frame_count")) if proxy else None,
+            clip_id=clip_id,
+            camera_serial=camera_serial,
+            media_kind=media_kind,
+            source_path=video_path,
+            media_width=_as_positive_int(proxy.get("proxy_width")) if proxy else width,
+            media_height=_as_positive_int(proxy.get("proxy_height")) if proxy else height,
         )
     if not videos:
+        if proxy_by_pair:
+            raise RuntimeError("Review proxy manifest was provided, but selected runs had no source video paths to map.")
         # Fall back to unique paths in the frame-index table if selected_runs came from
         # an older finalizer without nested source metadata.
         for value in table["video_path"].unique().to_pylist():
@@ -614,6 +673,7 @@ def _clipped_session(
         videos=videos,
         frame_records=records,
         collection_id=resolved_collection_id,
+        review_proxy_manifest=str(Path(review_proxy_manifest).expanduser().resolve()) if review_proxy_manifest else None,
         manual_score=float(manual_score),
         manual_class_id=int(manual_class_id),
     )
@@ -625,6 +685,7 @@ def resolve_video_detect_review_session(
     collection_id: str | None = None,
     refined_run: str | None = None,
     recording_frame_index: str | Path | None = None,
+    review_proxy_manifest: str | Path | None = None,
     editable: bool = False,
     manual_score: float = 1.0,
     manual_class_id: int = 0,
@@ -643,6 +704,7 @@ def resolve_video_detect_review_session(
             root,
             collection_id=collection_id,
             recording_frame_index=recording_frame_index,
+            review_proxy_manifest=review_proxy_manifest,
             editable=editable,
             manual_score=manual_score,
             manual_class_id=manual_class_id,
@@ -673,6 +735,7 @@ def review_session_summary(session: VideoDetectReviewSession) -> dict[str, objec
         "zarr_path": session.zarr_path,
         "mode": session.mode,
         "collection_id": session.collection_id,
+        "review_proxy_manifest": session.review_proxy_manifest,
         "editable": bool(session.editable),
         "total_frames": int(len(session.frame_records)),
         "video_count": int(len(session.videos)),
@@ -692,10 +755,14 @@ def video_sources_payload(session: VideoDetectReviewSession) -> list[dict[str, o
             "video_id": source.video_id,
             "path": str(source.path),
             "media_url": f"/media/{source.video_id}",
+            "media_kind": source.media_kind,
             "fps": float(source.fps),
             "width": int(source.width),
             "height": int(source.height),
+            "media_width": int(source.media_width) if source.media_width is not None else int(source.width),
+            "media_height": int(source.media_height) if source.media_height is not None else int(source.height),
             "frame_count": int(source.frame_count) if source.frame_count is not None else None,
+            "source_path": str(source.source_path) if source.source_path is not None else str(source.path),
             "clip_id": source.clip_id,
             "camera_serial": source.camera_serial,
         }
@@ -729,6 +796,8 @@ def load_frame_payload(session: VideoDetectReviewSession, parent_frame_index: in
         raise RuntimeError(f"Refined run is missing source frame {record.source_frame_index}.")
     row_idx = int(row_idx)
     bbox_norm = _finite_bbox_or_none(np.asarray(cache.payload["bbox_norm_coords"], dtype=np.float64).reshape(-1, 4)[row_idx])
+    media_width = int(source.media_width) if source.media_width is not None else int(source.width)
+    media_height = int(source.media_height) if source.media_height is not None else int(source.height)
     return {
         "parent_frame_index": int(record.parent_frame_index),
         "source_frame_index": int(record.source_frame_index),
@@ -736,12 +805,18 @@ def load_frame_payload(session: VideoDetectReviewSession, parent_frame_index: in
         "recording_frame_id": int(record.recording_frame_id) if record.recording_frame_id is not None else None,
         "video_id": record.video_id,
         "media_url": f"/media/{record.video_id}",
+        "media_kind": source.media_kind,
         "video_time_s": float(record.source_frame_index) / float(source.fps),
         "fps": float(source.fps),
         "width": int(source.width),
         "height": int(source.height),
+        "source_width": int(source.width),
+        "source_height": int(source.height),
+        "media_width": media_width,
+        "media_height": media_height,
         "bbox_norm": bbox_norm,
         "bbox_img_xyxy": _norm_to_xyxy(bbox_norm, width=source.width, height=source.height) if bbox_norm else None,
+        "bbox_media_xyxy": _norm_to_xyxy(bbox_norm, width=media_width, height=media_height) if bbox_norm else None,
         "row_idx": row_idx,
         "status": _status_payload(cache.payload, row_idx),
         "refined_group_path": record.refined_group_path,

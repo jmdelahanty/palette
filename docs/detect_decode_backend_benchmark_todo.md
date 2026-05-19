@@ -171,12 +171,13 @@ until their producing streams have finished.
   batch. Those tensors can reference decoder-owned reusable CUDA surfaces, so
   earlier list entries can point at overwritten pixels by the time preprocessing
   runs.
-- Fix: the PyNvVC production path now consumes `PynvvcLumaRgbReader.iter_frames`,
-  immediately preprocesses each decoded surface into owned resized RGB tensor
-  memory, synchronizes that materialization before advancing decode, and then
-  batches the owned tensors for YOLO. New runs record
-  `pynvvc_surface_materialization=stream_preprocess_owned_batch_v1` in
-  `parameters` and `timing_summary`.
+- Fix: the PyNvVC production path now consumes `PynvvcLumaRgbReader.iter_frames`
+  and immediately preprocesses each decoded surface into owned resized RGB tensor
+  memory before advancing decode. The current implementation uses a preallocated
+  owned batch tensor plus per-frame CUDA events for the surface-read/copy
+  handoff. New runs record
+  `pynvvc_surface_materialization=stream_event_owned_batch_v2` in `parameters`
+  and `timing_summary`.
 - Regression coverage:
   `tests/unit/fisheye/test_detect_yolo_resize_contract.py::test_pynvvc_streamed_batch_materializes_frames_before_surface_reuse`
   mutates a fake reusable decoder surface after first yield and verifies the
@@ -189,22 +190,27 @@ until their producing streams have finished.
 
 | Batch size | FPS | Total | Read/decode | Preprocess | Predict | Notes |
 |------------|-----|-------|-------------|------------|---------|-------|
-| `16` | `127.8` | `422.5s` | `288.1s` | `16.1s` | `111.1s` | Faster YOLO prediction but slower read/decode timing under conservative per-frame materialization. |
-| `1` | `131.0` | `412.3s` | `33.0s` | `14.1s` | `357.4s` | Slightly faster end-to-end with current conservative sync policy. |
+| `16`, `stream_preprocess_owned_batch_v1` | `127.8` | `422.5s` | `288.1s` | `16.1s` | `111.1s` | Historical fixed conservative sync path; correct but not the current marker. |
+| `16`, `stream_event_owned_batch_v2` | `125.6` | `429.8s` | `292.3s` | `17.5s` | `112.8s` | Current event/preallocated owned-batch path; correct but not faster in this smoke. |
+| `1`, `stream_preprocess_owned_batch_v1` | `131.0` | `412.3s` | `33.0s` | `14.1s` | `357.4s` | Fastest measured end-to-end in this smoke because per-frame materialization avoids expensive batched read timing. |
 
 - Correctness comparison over the first 5,000 frames of the full clip:
-  fixed batch 16 and fixed batch 1 matched exactly on 4,824/5,000 frames
-  (`96.5%`), with max normalized bbox difference `0.00156`; plateau statistics
-  were similar between batch sizes, so the historical 16-frame corruption pattern
-  is gone.
+  event batch 16 and fixed batch 1 matched within `0.0016` normalized bbox units
+  on 5,000/5,000 frames, with exact equality on 4,824/5,000 frames and max
+  normalized bbox difference `0.00156`. Plateau statistics were also similar
+  across event batch 16, fixed batch 16, and fixed batch 1: max plateau run
+  `22` frames, and only `2-3` runs at least `16` frames in the first 5,000
+  frames. The historical batch-window corruption pattern is gone.
 - Current recommendation: for correctness-sensitive production clipped
-  `pynvvc_luma_rgb` jobs, prefer `--batch-size 1` unless/until the conservative
-  per-frame synchronization is replaced with a CUDA event / preallocated owned
-  batch-buffer implementation. Batch 16 remains correct after the fix, but is
-  not currently faster end-to-end in this measured full-clip smoke.
+  `pynvvc_luma_rgb` jobs, require a fixed/current materialization marker
+  (`stream_event_owned_batch_v2` or later). Prefer `--batch-size 1` for
+  throughput unless/until a true overlap or decoder-surface buffer-pool design
+  proves faster end-to-end. Batch 16 remains correct after the fix, but is not
+  currently faster in this measured full-clip smoke.
 - Historical detect/refine runs created before this fix and lacking
-  `pynvvc_surface_materialization=stream_preprocess_owned_batch_v1` should be
-  considered suspect if they used PyNvVC with batch size greater than 1.
+  `pynvvc_surface_materialization=stream_preprocess_owned_batch_v1` or
+  `stream_event_owned_batch_v2` should be considered suspect if they used PyNvVC
+  with batch size greater than 1.
 
 2026-05-15 Crimson/native decode follow-up:
 

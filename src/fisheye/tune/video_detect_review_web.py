@@ -24,6 +24,7 @@ class _ServerConfig:
     collection_id: Optional[str]
     refined_run: Optional[str]
     recording_frame_index: Optional[str]
+    review_proxy_manifest: Optional[str]
     editable: bool
     manual_score: float
     manual_class_id: int
@@ -42,6 +43,7 @@ _CONTENT_TYPES = {
     ".json": "application/json; charset=utf-8",
     ".txt": "text/plain; charset=utf-8",
 }
+_MEDIA_COPY_CHUNK_BYTES = 1024 * 1024
 
 
 def _format_error(error: str, *, details: Optional[str] = None, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> dict[str, object]:
@@ -146,7 +148,42 @@ def _make_handler(state: _ServerState, static_root: Path, backend_module):
                 for key, value in extra_headers.items():
                     self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(payload)
+            if self.command != "HEAD":
+                try:
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+        def _send_media_headers(
+            self,
+            *,
+            status: HTTPStatus,
+            content_type: str,
+            content_length: int,
+            extra_headers: Optional[dict[str, str]] = None,
+        ) -> None:
+            self.send_response(int(status))
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(content_length))
+            self.send_header("Accept-Ranges", "bytes")
+            if extra_headers:
+                for key, value in extra_headers.items():
+                    self.send_header(key, value)
+            self.end_headers()
+
+        def _stream_file_range(self, path: Path, *, start: int, length: int) -> None:
+            remaining = int(length)
+            with path.open("rb") as handle:
+                handle.seek(start)
+                while remaining > 0:
+                    chunk = handle.read(min(_MEDIA_COPY_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    remaining -= len(chunk)
 
         def _write_json(self, payload: object, *, status: HTTPStatus = HTTPStatus.OK) -> None:
             data = json.dumps(payload, allow_nan=False).encode("utf-8")
@@ -164,7 +201,11 @@ def _make_handler(state: _ServerState, static_root: Path, backend_module):
                 self._write_not_found("Static asset not found.")
                 return
             content_type = _CONTENT_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
-            self._write_bytes(candidate.read_bytes(), content_type=content_type)
+            self._write_bytes(
+                candidate.read_bytes(),
+                content_type=content_type,
+                extra_headers={"Cache-Control": "no-store"},
+            )
 
         def _serve_media(self, video_id: str) -> None:
             source = state.session.videos.get(video_id)
@@ -179,25 +220,39 @@ def _make_handler(state: _ServerState, static_root: Path, backend_module):
             try:
                 byte_range = _parse_range_header(self.headers.get("Range"), file_size=file_size)
             except Exception as exc:
-                self._write_json(
-                    _format_error("Invalid Range header.", details=str(exc), status=HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE),
-                    status=HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,
-                )
+                self.send_response(int(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE))
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes */{file_size}")
+                payload = json.dumps(
+                    _format_error(
+                        "Invalid Range header.",
+                        details=str(exc),
+                        status=HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,
+                    ),
+                    allow_nan=False,
+                ).encode("utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    try:
+                        self.wfile.write(payload)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
                 return
             start, end = byte_range if byte_range is not None else (0, file_size - 1)
             length = max(0, end - start + 1)
-            with source.path.open("rb") as handle:
-                handle.seek(start)
-                payload = handle.read(length)
-            headers = {"Accept-Ranges": "bytes"}
+            headers = {}
             if byte_range is not None:
                 headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
-            self._write_bytes(
-                payload,
+            self._send_media_headers(
                 status=HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK,
                 content_type=content_type,
+                content_length=length,
                 extra_headers=headers,
             )
+            if self.command != "HEAD":
+                self._stream_file_range(source.path, start=start, length=length)
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -266,6 +321,9 @@ def _make_handler(state: _ServerState, static_root: Path, backend_module):
                 return
             self._write_not_found()
 
+        def do_HEAD(self) -> None:  # noqa: N802
+            self.do_GET()
+
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             try:
@@ -330,6 +388,7 @@ def run_server(config: _ServerConfig) -> int:
         collection_id=config.collection_id,
         refined_run=config.refined_run,
         recording_frame_index=config.recording_frame_index,
+        review_proxy_manifest=config.review_proxy_manifest,
         editable=config.editable,
         manual_score=config.manual_score,
         manual_class_id=config.manual_class_id,
@@ -361,6 +420,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--collection-id", default=None, help="Finalized clipped refined-detect collection id")
     parser.add_argument("--refined-run", default=None, help="Traditional refined detect run name")
     parser.add_argument("--recording-frame-index", type=Path, default=None, help="Override recording_frame_index.parquet")
+    parser.add_argument("--review-proxy-manifest", type=Path, default=None, help="Use derived review-proxy videos for clipped media.")
     parser.add_argument("--edit", action="store_true", help="Allow saving bbox edits back into the analysis Zarr")
     parser.add_argument("--manual-score", type=float, default=1.0, help="Confidence score for manually added boxes")
     parser.add_argument("--manual-class-id", type=int, default=0, help="Class id for manually added boxes")
@@ -377,6 +437,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             collection_id=args.collection_id,
             refined_run=args.refined_run,
             recording_frame_index=str(args.recording_frame_index) if args.recording_frame_index else None,
+            review_proxy_manifest=str(args.review_proxy_manifest) if args.review_proxy_manifest else None,
             editable=bool(args.edit),
             manual_score=float(args.manual_score),
             manual_class_id=int(args.manual_class_id),

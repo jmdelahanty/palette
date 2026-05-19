@@ -1,10 +1,13 @@
 const state = {
   bboxNorm: null,
+  bboxRect: null,
   framePayload: null,
   serverState: null,
   currentVideoUrl: null,
   messageTimeout: null,
   renderer: null,
+  rendererLabel: "Renderer: detecting...",
+  rendererPreference: new URLSearchParams(window.location.search).get("renderer") || "canvas",
   image: {
     width: 1,
     height: 1,
@@ -34,6 +37,23 @@ const messages = document.getElementById("messages");
 const rendererLine = document.getElementById("renderer-line");
 const frameInput = document.getElementById("frame-input");
 const autoAdvanceBox = document.getElementById("auto-advance-box");
+
+function setRendererLabel(text) {
+  state.rendererLabel = text;
+  updateRendererLine();
+}
+
+function updateRendererLine() {
+  const viewport = state.viewport;
+  rendererLine.textContent = [
+    state.rendererLabel,
+    `video=${video.videoWidth || 0}x${video.videoHeight || 0}`,
+    `t=${Number(video.currentTime || 0).toFixed(3)}s`,
+    `ready=${video.readyState}`,
+    `dpr=${Number(devicePixelRatio || 1).toFixed(2)}`,
+    `view=${state.image.width}x${state.image.height}@${viewport.scale.toFixed(3)}+${viewport.offsetX.toFixed(1)},${viewport.offsetY.toFixed(1)}`,
+  ].join(" | ");
+}
 
 function setMessage(text, isError = false) {
   if (state.messageTimeout) {
@@ -69,6 +89,46 @@ function waitForEvent(target, eventName, timeoutMs = 6000) {
   });
 }
 
+function waitForVideoData(timeoutMs = 10000) {
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const events = ["loadeddata", "canplay", "seeked", "timeupdate"];
+    const cleanup = () => {
+      clearTimeout(timer);
+      for (const eventName of events) {
+        video.removeEventListener(eventName, onReady);
+      }
+      video.removeEventListener("error", onError);
+    };
+    const finish = (callback) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      cleanup();
+      callback();
+    };
+    function onReady() {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        finish(resolve);
+      }
+    }
+    function onError() {
+      finish(() => reject(new Error(video.error ? video.error.message : "Video decode failed.")));
+    }
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error("Timed out waiting for decoded video data.")));
+    }, timeoutMs);
+    for (const eventName of events) {
+      video.addEventListener(eventName, onReady);
+    }
+    video.addEventListener("error", onError, { once: true });
+  });
+}
+
 function resizeCanvases() {
   const rect = pane.getBoundingClientRect();
   const width = Math.max(1, Math.floor(rect.width * devicePixelRatio));
@@ -100,6 +160,14 @@ function viewToImg(x, y) {
   return [
     (x - state.viewport.offsetX) / state.viewport.scale,
     (y - state.viewport.offsetY) / state.viewport.scale,
+  ];
+}
+
+function eventToOverlayPoint(event) {
+  const rect = overlay.getBoundingClientRect();
+  return [
+    event.clientX - rect.left,
+    event.clientY - rect.top,
   ];
 }
 
@@ -144,7 +212,7 @@ function rectPxToNorm(rect) {
 }
 
 function pointInBox(imgPoint) {
-  const rect = normToRectPx(state.bboxNorm);
+  const rect = state.bboxRect || normToRectPx(state.bboxNorm);
   if (!rect) {
     return false;
   }
@@ -247,18 +315,23 @@ async function initWebGpuRenderer() {
 
   function render() {
     if (video.readyState < 2) {
-      return;
+      return false;
     }
     resizeCanvases();
     context.configure({ device, format, alphaMode: "opaque" });
     writeVertices();
-    const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: sampler },
-        { binding: 1, resource: device.importExternalTexture({ source: video }) },
-      ],
-    });
+    let bindGroup;
+    try {
+      bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: sampler },
+          { binding: 1, resource: device.importExternalTexture({ source: video }) },
+        ],
+      });
+    } catch (_error) {
+      return false;
+    }
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -276,13 +349,14 @@ async function initWebGpuRenderer() {
     pass.draw(6);
     pass.end();
     device.queue.submit([encoder.finish()]);
+    return true;
   }
 
   return { type: "webgpu", render };
 }
 
 function drawBox(ctx) {
-  const rect = normToRectPx(state.bboxNorm);
+  const rect = state.bboxRect || normToRectPx(state.bboxNorm);
   if (!rect) {
     return;
   }
@@ -306,9 +380,8 @@ function draw() {
   overlayCtx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   overlayCtx.clearRect(0, 0, rect.width, rect.height);
 
-  if (state.renderer && state.renderer.type === "webgpu") {
-    state.renderer.render();
-  } else {
+  const renderedWithWebGpu = state.renderer && state.renderer.type === "webgpu" && state.renderer.render();
+  if (!renderedWithWebGpu) {
     overlayCtx.fillStyle = "#020617";
     overlayCtx.fillRect(0, 0, rect.width, rect.height);
     if (video.readyState >= 2) {
@@ -322,6 +395,7 @@ function draw() {
     }
   }
   drawBox(overlayCtx);
+  updateRendererLine();
 }
 
 function renderText(payload) {
@@ -344,22 +418,34 @@ function renderText(payload) {
     status.reason_label ? `reason=${status.reason_label}` : null,
     status.manual_edit !== undefined ? `manual=${Boolean(status.manual_edit)}` : null,
     status.confidence_score !== null && status.confidence_score !== undefined ? `score=${Number(status.confidence_score).toFixed(3)}` : null,
+    payload.media_width && payload.source_width ? `media=${payload.media_width}x${payload.media_height}` : null,
+    payload.source_width ? `source=${payload.source_width}x${payload.source_height}` : null,
+    payload.bbox_media_xyxy ? `box_media=[${payload.bbox_media_xyxy.map((v) => Number(v).toFixed(1)).join(",")}]` : null,
     payload.refined_group_path ? `run=${payload.refined_group_path}` : null,
   ].filter(Boolean).join(" | ");
+}
+
+function updateBoxFromPayload(payload) {
+  state.bboxNorm = payload.bbox_norm || null;
+  state.bboxRect = payload.bbox_media_xyxy ? [...payload.bbox_media_xyxy] : normToRectPx(state.bboxNorm);
 }
 
 async function ensureVideo(payload) {
   if (state.currentVideoUrl !== payload.media_url) {
     state.currentVideoUrl = payload.media_url;
+    video.preload = "auto";
     video.src = payload.media_url;
+    video.load();
     await waitForEvent(video, "loadedmetadata");
   }
   const targetTime = Number(payload.video_time_s || 0);
   if (Math.abs(video.currentTime - targetTime) > Math.max(0.002, 0.25 / Number(payload.fps || 30))) {
-    const seekPromise = waitForEvent(video, "seeked").catch(() => null);
+    const seekPromise = waitForEvent(video, "seeked", 10000).catch(() => null);
     video.currentTime = targetTime;
     await seekPromise;
   }
+  await waitForVideoData();
+  updateRendererLine();
 }
 
 async function loadFrame(frameIndex, { fit = false } = {}) {
@@ -371,9 +457,9 @@ async function loadFrame(frameIndex, { fit = false } = {}) {
   }
   state.framePayload = payload;
   state.serverState = payload.state;
-  state.bboxNorm = payload.bbox_norm || null;
-  state.image.width = Number(payload.width || 1);
-  state.image.height = Number(payload.height || 1);
+  state.image.width = Number(payload.media_width || payload.width || 1);
+  state.image.height = Number(payload.media_height || payload.height || 1);
+  updateBoxFromPayload(payload);
   await ensureVideo(payload);
   if (fit || state.viewport.scale <= 0) {
     setViewportToFit();
@@ -392,9 +478,9 @@ async function loadCurrentFrame({ fit = false } = {}) {
   }
   state.framePayload = payload;
   state.serverState = payload.state;
-  state.bboxNorm = payload.bbox_norm || null;
-  state.image.width = Number(payload.width || 1);
-  state.image.height = Number(payload.height || 1);
+  state.image.width = Number(payload.media_width || payload.width || 1);
+  state.image.height = Number(payload.media_height || payload.height || 1);
+  updateBoxFromPayload(payload);
   await ensureVideo(payload);
   if (fit || state.viewport.scale <= 0) {
     setViewportToFit();
@@ -441,6 +527,7 @@ async function saveCurrent() {
 
 function clearBox() {
   state.bboxNorm = null;
+  state.bboxRect = null;
   draw();
   setMessage("Box cleared locally; press Save to persist.");
 }
@@ -451,8 +538,7 @@ function ensureEvents() {
   });
 
   overlay.addEventListener("mousedown", (event) => {
-    const x = event.offsetX;
-    const y = event.offsetY;
+    const [x, y] = eventToOverlayPoint(event);
     const imgPoint = clampImgPoint(viewToImg(x, y));
     if (event.shiftKey || event.button === 1 || event.button === 2) {
       state.viewport.isPanning = true;
@@ -467,13 +553,14 @@ function ensureEvents() {
     }
     if (pointInBox(imgPoint)) {
       state.viewport.moveStart = imgPoint;
-      state.viewport.moveStartBox = state.bboxNorm ? [...state.bboxNorm] : null;
+      state.viewport.moveStartBox = state.bboxRect ? [...state.bboxRect] : null;
       overlay.style.cursor = "move";
       event.preventDefault();
       return;
     }
     state.viewport.drawStart = imgPoint;
-    state.bboxNorm = rectPxToNorm([imgPoint[0], imgPoint[1], imgPoint[0] + 1, imgPoint[1] + 1]);
+    state.bboxRect = [imgPoint[0], imgPoint[1], imgPoint[0] + 1, imgPoint[1] + 1];
+    state.bboxNorm = rectPxToNorm(state.bboxRect);
     draw();
     event.preventDefault();
   });
@@ -499,19 +586,23 @@ function ensureEvents() {
     }
 
     if (state.viewport.moveStart && state.viewport.moveStartBox) {
-      const dx = (imgPoint[0] - state.viewport.moveStart[0]) / state.image.width;
-      const dy = (imgPoint[1] - state.viewport.moveStart[1]) / state.image.height;
+      const dx = imgPoint[0] - state.viewport.moveStart[0];
+      const dy = imgPoint[1] - state.viewport.moveStart[1];
       const moved = [...state.viewport.moveStartBox];
-      moved[0] = Math.min(Math.max(moved[0] + dx, moved[2] * 0.5), 1 - moved[2] * 0.5);
-      moved[1] = Math.min(Math.max(moved[1] + dy, moved[3] * 0.5), 1 - moved[3] * 0.5);
-      state.bboxNorm = moved;
+      const width = Math.abs(moved[2] - moved[0]);
+      const height = Math.abs(moved[3] - moved[1]);
+      const xMin = Math.min(Math.max(Math.min(moved[0], moved[2]) + dx, 0), Math.max(0, state.image.width - width));
+      const yMin = Math.min(Math.max(Math.min(moved[1], moved[3]) + dy, 0), Math.max(0, state.image.height - height));
+      state.bboxRect = [xMin, yMin, xMin + width, yMin + height];
+      state.bboxNorm = rectPxToNorm(state.bboxRect);
       draw();
       return;
     }
 
     if (state.viewport.drawStart) {
       const start = state.viewport.drawStart;
-      state.bboxNorm = rectPxToNorm([start[0], start[1], imgPoint[0], imgPoint[1]]);
+      state.bboxRect = [start[0], start[1], imgPoint[0], imgPoint[1]];
+      state.bboxNorm = rectPxToNorm(state.bboxRect);
       draw();
     }
   });
@@ -526,8 +617,7 @@ function ensureEvents() {
 
   overlay.addEventListener("wheel", (event) => {
     event.preventDefault();
-    const cursorX = event.offsetX;
-    const cursorY = event.offsetY;
+    const [cursorX, cursorY] = eventToOverlayPoint(event);
     const scaleBefore = state.viewport.scale;
     const delta = event.deltaY < 0 ? 1.12 : 0.9;
     const scaleAfter = Math.max(0.02, Math.min(40, scaleBefore * delta));
@@ -588,20 +678,22 @@ async function bootstrap() {
   resizeCanvases();
   ensureEvents();
   try {
-    const webgpuRenderer = await initWebGpuRenderer();
+    const webgpuRenderer = state.rendererPreference === "webgpu" ? await initWebGpuRenderer() : null;
     if (webgpuRenderer) {
       state.renderer = webgpuRenderer;
       pane.classList.add("webgpu");
-      rendererLine.textContent = "Renderer: WebGPU video texture + Canvas overlay";
+      setRendererLabel("Renderer: WebGPU video texture + Canvas overlay");
     } else {
       state.renderer = { type: "canvas2d" };
+      pane.classList.remove("webgpu");
       video.style.opacity = "0";
-      rendererLine.textContent = "Renderer: Canvas2D fallback";
+      setRendererLabel(state.rendererPreference === "webgpu" ? "Renderer: Canvas2D fallback" : "Renderer: Canvas2D default");
     }
   } catch (error) {
     state.renderer = { type: "canvas2d" };
+    pane.classList.remove("webgpu");
     video.style.opacity = "0";
-    rendererLine.textContent = `Renderer: Canvas2D fallback (${error.message || error})`;
+    setRendererLabel(`Renderer: Canvas2D fallback (${error.message || error})`);
   }
   await loadCurrentFrame({ fit: true });
 }
