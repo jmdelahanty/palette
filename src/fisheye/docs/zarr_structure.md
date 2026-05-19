@@ -553,6 +553,22 @@ Common attrs on `refined_detect_runs/<run>`:
 - status/source/review/artifact code maps
 - provenance/environment metadata
 
+Coordinate attrs on current refined runs and their `instances/` /
+`source_detections/` surfaces:
+
+- `bbox_img_xyxy_coordinate_space`: `source_image_xyxy`
+- `bbox_img_xyxy_reference_width`, `bbox_img_xyxy_reference_height`
+- `bbox_norm_coords_format`: `cxcywh`
+- `bbox_norm_coords_coordinate_space`: `normalized`
+- `bbox_norm_reference_width`, `bbox_norm_reference_height`
+- `bbox_norm_reference_space`: usually `inference_image` for YOLO-generated
+  detections, or `source_image` when normalized boxes are source-frame relative
+- `bbox_coordinate_contract_version`: current writer value is
+  `refined_detect_bbox_coordinates_v2`
+
+`coordinate_space = "full_image_xyxy"` is retained as a legacy run-level alias.
+Consumers should prefer the explicit `bbox_*` attrs above.
+
 Parent attrs on `refined_detect_runs/`:
 - `latest`
 - `detect_review_status_latest` (run name containing the most recent review status)
@@ -602,8 +618,9 @@ Required arrays:
 - `refined_row_ids`
 - `frame_indices`
 - `frame_offsets`
-- `bbox_img_xyxy`
-- `bbox_norm_coords`
+- `bbox_img_xyxy`: source-image pixel-space `[x1, y1, x2, y2]`
+- `bbox_norm_coords`: normalized `[cx, cy, w, h]`; reference dimensions are
+  recorded in `bbox_norm_reference_width` / `bbox_norm_reference_height`
 - `source_kind_codes`
 - `manual_edit_flags`
 
@@ -637,13 +654,14 @@ Required arrays:
 
 - `source_detect_row_index`
 - `frame_indices`
-- `bbox_norm_coords`
+- `bbox_norm_coords`: normalized `[cx, cy, w, h]`; reference dimensions are
+  recorded in `bbox_norm_reference_width` / `bbox_norm_reference_height`
 - `decision_codes`
 - `resolved_refined_row_id`
 
 Common optional arrays:
 
-- `bbox_img_xyxy`
+- `bbox_img_xyxy`: source-image pixel-space `[x1, y1, x2, y2]`
 - `confidence_scores`
 - `class_ids`
 - `reason_bytes`

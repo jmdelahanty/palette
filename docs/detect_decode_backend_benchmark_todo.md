@@ -159,6 +159,53 @@ until their producing streams have finished.
   `array_assembly`, and `zarr_write`, so backend comparisons can be audited from
   persisted detect runs rather than compute-smoke JSON alone.
 
+2026-05-18 PyNvVideoCodec surface-reuse follow-up:
+
+- The first clipped sleepyfish all-clips detect/refine collection exposed a
+  correctness bug in the production PyNvVC detection path. Raw detections held
+  then jumped in batch-aligned windows: `clip_000000` had continuous
+  `frame_indices`, but only 8 unique bbox centers in the first 256 frames and
+  exact plateau runs `[144, 16, 16, 16, 16, 16, 16, 16]`.
+- Root cause: `detect_yolo` retained a list of `torch.from_dlpack(frame)` tensors
+  returned by PyNvVideoCodec and preprocessed them after collecting the whole
+  batch. Those tensors can reference decoder-owned reusable CUDA surfaces, so
+  earlier list entries can point at overwritten pixels by the time preprocessing
+  runs.
+- Fix: the PyNvVC production path now consumes `PynvvcLumaRgbReader.iter_frames`,
+  immediately preprocesses each decoded surface into owned resized RGB tensor
+  memory, synchronizes that materialization before advancing decode, and then
+  batches the owned tensors for YOLO. New runs record
+  `pynvvc_surface_materialization=stream_preprocess_owned_batch_v1` in
+  `parameters` and `timing_summary`.
+- Regression coverage:
+  `tests/unit/fisheye/test_detect_yolo_resize_contract.py::test_pynvvc_streamed_batch_materializes_frames_before_surface_reuse`
+  mutates a fake reusable decoder surface after first yield and verifies the
+  owned preprocessed batch still preserves distinct frame values.
+- A 256-frame production-path smoke showed the fix removed the batch-window
+  artifact: fixed `batch_size=16` matched fixed `batch_size=1` on 254/256
+  frames and had 43 unique bbox centers in the first 256 frames.
+- Full-clip timing on `sleepyfish_2026_05_05_17_45_30_cam2010093`
+  `clip_000000` (54,000 frames, local A6000, fixed `pynvvc_luma_rgb`):
+
+| Batch size | FPS | Total | Read/decode | Preprocess | Predict | Notes |
+|------------|-----|-------|-------------|------------|---------|-------|
+| `16` | `127.8` | `422.5s` | `288.1s` | `16.1s` | `111.1s` | Faster YOLO prediction but slower read/decode timing under conservative per-frame materialization. |
+| `1` | `131.0` | `412.3s` | `33.0s` | `14.1s` | `357.4s` | Slightly faster end-to-end with current conservative sync policy. |
+
+- Correctness comparison over the first 5,000 frames of the full clip:
+  fixed batch 16 and fixed batch 1 matched exactly on 4,824/5,000 frames
+  (`96.5%`), with max normalized bbox difference `0.00156`; plateau statistics
+  were similar between batch sizes, so the historical 16-frame corruption pattern
+  is gone.
+- Current recommendation: for correctness-sensitive production clipped
+  `pynvvc_luma_rgb` jobs, prefer `--batch-size 1` unless/until the conservative
+  per-frame synchronization is replaced with a CUDA event / preallocated owned
+  batch-buffer implementation. Batch 16 remains correct after the fix, but is
+  not currently faster end-to-end in this measured full-clip smoke.
+- Historical detect/refine runs created before this fix and lacking
+  `pynvvc_surface_materialization=stream_preprocess_owned_batch_v1` should be
+  considered suspect if they used PyNvVC with batch size greater than 1.
+
 2026-05-15 Crimson/native decode follow-up:
 
 - Crimson now has an external headless diagnostic target:

@@ -682,6 +682,20 @@ Performance from the actual cluster artifacts:
 | Serial-equivalent one-GPU throughput | `~128 fps` |
 | Parallel speedup over summed one-GPU detect time | `~20x` |
 
+Important caveat, added 2026-05-18: this measured collection was produced before
+the PyNvVideoCodec surface-materialization fix in `detect_yolo`. The
+pre-fix `pynvvc_luma_rgb` batch path could retain decoder-owned reusable CUDA
+surfaces until after a full batch was decoded, producing batch-window bbox
+plateaus even though `frame_indices` were continuous. The historical
+`sleepyfish_cam2010093_allclips_20260517_01` refined detections are useful for
+workflow and scheduler timing, but should not be treated as a trusted visual
+prediction product. Regenerate clipped detect/refine outputs with a run that
+records
+`pynvvc_surface_materialization=stream_preprocess_owned_batch_v1`; with the
+current conservative implementation, prefer `--batch-size 1` for
+`pynvvc_luma_rgb` until a CUDA event / preallocated owned-batch-buffer
+optimization is implemented and benchmarked.
+
 Interpretation: the `~2600 fps` number is aggregate wall-clock throughput
 from running 22 independent clip jobs concurrently; it is not per-GPU model
 speed. The serial-equivalent numbers are the better estimate for how long this

@@ -744,11 +744,11 @@ def _resolve_image_dimensions(
 ) -> Tuple[Optional[int], Optional[int]]:
     """Resolve image-space dimensions for detection bbox conversion.
 
-    Analysis Zarrs normally carry root ``width``/``height`` attrs. Sampled
-    training Zarrs may only carry dimensions under ``raw_video`` and seeded
-    detections may be normalized to ``raw_video/images_ds``. Prefer the bound
-    detect run's frame-source shape when present so refined training labels stay
-    in the same image space as the reviewed frames.
+    This resolver is for materialized pixel-space arrays such as
+    ``bbox_img_xyxy``. Prefer source-video/source-full dimensions when present so
+    these arrays are in the display/source image space. Normalized bbox arrays
+    may use a different model/inference reference size; use
+    ``_resolve_bbox_norm_reference_dimensions`` for that metadata.
     """
 
     bound_detect_group = detect_group
@@ -756,18 +756,28 @@ def _resolve_image_dimensions(
         bound_detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
 
     if bound_detect_group is not None:
+        width, height = _positive_width_height(
+            bound_detect_group.attrs.get("source_video_width"),
+            bound_detect_group.attrs.get("source_video_height"),
+        )
+        if width is not None and height is not None:
+            return width, height
+        width, height = _positive_width_height(
+            bound_detect_group.attrs.get("source_full_width"),
+            bound_detect_group.attrs.get("source_full_height"),
+        )
+        if width is not None and height is not None:
+            return width, height
         source_shape = bound_detect_group.attrs.get("frame_source_shape")
         height, width = _shape_hw(source_shape)
         if width is not None and height is not None and width > 0 and height > 0:
             return width, height
-        width, height = _positive_width_height(
-            bound_detect_group.attrs.get("inference_width"),
-            bound_detect_group.attrs.get("inference_height"),
-        )
-        if width is not None and height is not None:
-            return width, height
 
-    width, height = _positive_width_height(root.attrs.get("inference_width"), root.attrs.get("inference_height"))
+    width, height = _positive_width_height(root.attrs.get("source_video_width"), root.attrs.get("source_video_height"))
+    if width is not None and height is not None:
+        return width, height
+
+    width, height = _positive_width_height(root.attrs.get("source_full_width"), root.attrs.get("source_full_height"))
     if width is not None and height is not None:
         return width, height
 
@@ -792,7 +802,50 @@ def _resolve_image_dimensions(
                 if width is not None and height is not None and width > 0 and height > 0:
                     return width, height
 
+    if bound_detect_group is not None:
+        width, height = _positive_width_height(
+            bound_detect_group.attrs.get("inference_width"),
+            bound_detect_group.attrs.get("inference_height"),
+        )
+        if width is not None and height is not None:
+            return width, height
+
+    width, height = _positive_width_height(root.attrs.get("inference_width"), root.attrs.get("inference_height"))
+    if width is not None and height is not None:
+        return width, height
+
     return None, None
+
+
+def _resolve_bbox_norm_reference_dimensions(
+    root: zarr.Group,
+    *,
+    detect_group: Optional[zarr.Group] = None,
+    refined_run: Optional[zarr.Group] = None,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Resolve the pixel dimensions that ``bbox_norm_coords`` are normalized by."""
+
+    bound_detect_group = detect_group
+    if bound_detect_group is None and refined_run is not None:
+        bound_detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
+
+    if bound_detect_group is not None:
+        width, height = _positive_width_height(
+            bound_detect_group.attrs.get("inference_width"),
+            bound_detect_group.attrs.get("inference_height"),
+        )
+        if width is not None and height is not None:
+            return width, height
+        source_shape = bound_detect_group.attrs.get("frame_source_shape")
+        height, width = _shape_hw(source_shape)
+        if width is not None and height is not None and width > 0 and height > 0:
+            return width, height
+
+    width, height = _positive_width_height(root.attrs.get("inference_width"), root.attrs.get("inference_height"))
+    if width is not None and height is not None:
+        return width, height
+
+    return _resolve_image_dimensions(root, detect_group=bound_detect_group, refined_run=refined_run)
 
 
 def _resolved_total_frames(root: zarr.Group, refined_run: zarr.Group) -> int:
@@ -1068,6 +1121,32 @@ def _bbox_norm_to_img_xyxy_with_missing(
     return bbox_img
 
 
+def _write_bbox_coordinate_attrs(
+    group: zarr.Group,
+    *,
+    bbox_img_width: int,
+    bbox_img_height: int,
+    bbox_norm_reference_width: Optional[int],
+    bbox_norm_reference_height: Optional[int],
+) -> None:
+    group.attrs["bbox_img_xyxy_coordinate_space"] = "source_image_xyxy"
+    group.attrs["bbox_img_xyxy_reference_width"] = int(bbox_img_width)
+    group.attrs["bbox_img_xyxy_reference_height"] = int(bbox_img_height)
+    group.attrs["bbox_norm_coords_format"] = "cxcywh"
+    group.attrs["bbox_norm_coords_coordinate_space"] = "normalized"
+    if bbox_norm_reference_width is not None and bbox_norm_reference_height is not None:
+        group.attrs["bbox_norm_reference_width"] = int(bbox_norm_reference_width)
+        group.attrs["bbox_norm_reference_height"] = int(bbox_norm_reference_height)
+        group.attrs["bbox_norm_reference_space"] = (
+            "inference_image"
+            if (
+                int(bbox_norm_reference_width) != int(bbox_img_width)
+                or int(bbox_norm_reference_height) != int(bbox_img_height)
+            )
+            else "source_image"
+        )
+
+
 def _normalize_source_row_index(values: np.ndarray, length: int) -> np.ndarray:
     arr = np.asarray(values, dtype=np.int32).reshape(-1)
     if arr.shape[0] != length:
@@ -1139,6 +1218,20 @@ def _refresh_curated_refined_detect_metadata(
         "review_state_code_map": dict(REFINED_REVIEW_STATE_CODE_MAP),
         "summary_statistics": summary_statistics,
     }
+    coordinate_attr_source = instances_group if has_sparse_instances else refined_run
+    for key in (
+        "bbox_img_xyxy_coordinate_space",
+        "bbox_img_xyxy_reference_width",
+        "bbox_img_xyxy_reference_height",
+        "bbox_norm_coords_format",
+        "bbox_norm_coords_coordinate_space",
+        "bbox_norm_reference_width",
+        "bbox_norm_reference_height",
+        "bbox_norm_reference_space",
+    ):
+        if coordinate_attr_source is not None and key in coordinate_attr_source.attrs:
+            attr_updates[key] = coordinate_attr_source.attrs[key]
+    attr_updates["bbox_coordinate_contract_version"] = "refined_detect_bbox_coordinates_v2"
     for key, value in attr_updates.items():
         refined_run.attrs[str(key)] = _json_safe_attr_value(value)
     if has_sparse_instances:
@@ -1351,8 +1444,17 @@ def _write_sparse_instances_arrays(
     confidence_scores: Optional[np.ndarray] = None,
     class_ids: Optional[np.ndarray] = None,
     review_notes: Optional[np.ndarray] = None,
+    bbox_norm_reference_width: Optional[int] = None,
+    bbox_norm_reference_height: Optional[int] = None,
 ) -> None:
     subgroup = _get_or_create_child_group(refined_run, "instances")
+    _write_bbox_coordinate_attrs(
+        subgroup,
+        bbox_img_width=width,
+        bbox_img_height=height,
+        bbox_norm_reference_width=bbox_norm_reference_width,
+        bbox_norm_reference_height=bbox_norm_reference_height,
+    )
     refined_row_ids_arr = np.asarray(refined_row_ids, dtype=np.int64).reshape(-1)
     frame_indices_arr = np.asarray(frame_indices, dtype=np.int32).reshape(-1)
     bbox_norm_arr = np.asarray(bbox_norm_coords, dtype=np.float64).reshape(-1, 4)
@@ -1454,8 +1556,17 @@ def _write_source_detections_arrays(
     confidence_scores: Optional[np.ndarray] = None,
     class_ids: Optional[np.ndarray] = None,
     review_notes: Optional[np.ndarray] = None,
+    bbox_norm_reference_width: Optional[int] = None,
+    bbox_norm_reference_height: Optional[int] = None,
 ) -> None:
     subgroup = _get_or_create_child_group(refined_run, "source_detections")
+    _write_bbox_coordinate_attrs(
+        subgroup,
+        bbox_img_width=width,
+        bbox_img_height=height,
+        bbox_norm_reference_width=bbox_norm_reference_width,
+        bbox_norm_reference_height=bbox_norm_reference_height,
+    )
     source_detect_row_index_arr = np.asarray(source_detect_row_index, dtype=np.int32).reshape(-1)
     frame_indices_arr = np.asarray(frame_indices, dtype=np.int32).reshape(-1)
     bbox_norm_arr = np.asarray(bbox_norm_coords, dtype=np.float64).reshape(-1, 4)
@@ -1573,7 +1684,16 @@ def _write_dense_curated_root_arrays(
     confidence_scores: Optional[np.ndarray] = None,
     class_ids: Optional[np.ndarray] = None,
     review_notes: Optional[Sequence[str]] = None,
+    bbox_norm_reference_width: Optional[int] = None,
+    bbox_norm_reference_height: Optional[int] = None,
 ) -> None:
+    _write_bbox_coordinate_attrs(
+        refined_run,
+        bbox_img_width=width,
+        bbox_img_height=height,
+        bbox_norm_reference_width=bbox_norm_reference_width,
+        bbox_norm_reference_height=bbox_norm_reference_height,
+    )
     refined_row_ids_arr = np.asarray(refined_row_ids, dtype=np.int64).reshape(-1)
     frame_indices_arr = np.asarray(frame_indices, dtype=np.int32).reshape(-1)
     entity_ids_arr = np.asarray(entity_ids, dtype=np.int32).reshape(-1)
@@ -1699,6 +1819,7 @@ def _sync_dense_curated_refined_root_from_sparse_views(
     width, height = _resolve_image_dimensions(root, refined_run=refined_run)
     if width is None or height is None or width <= 0 or height <= 0:
         raise ValueError("Root attrs must include positive width and height.")
+    norm_width, norm_height = _resolve_bbox_norm_reference_dimensions(root, refined_run=refined_run)
 
     total_frames = _resolved_total_frames(root, refined_run)
     existing_run = refined_run if has_curated_refined_detect_arrays(refined_run) else None
@@ -1953,6 +2074,8 @@ def _sync_dense_curated_refined_root_from_sparse_views(
         confidence_scores=dense_confidence_scores,
         class_ids=dense_class_ids,
         review_notes=review_notes,
+        bbox_norm_reference_width=norm_width,
+        bbox_norm_reference_height=norm_height,
     )
 
 
@@ -1992,6 +2115,7 @@ def write_curated_refined_detect_surfaces(
     width, height = _resolve_image_dimensions(root, refined_run=refined_run)
     if width is None or height is None or width <= 0 or height <= 0:
         raise ValueError("Root attrs must include positive width and height.")
+    norm_width, norm_height = _resolve_bbox_norm_reference_dimensions(root, refined_run=refined_run)
     total_frames = _resolved_total_frames(root, refined_run)
 
     instance_frame_indices_arr = np.asarray(instance_frame_indices, dtype=np.int32).reshape(-1)
@@ -2141,6 +2265,8 @@ def write_curated_refined_detect_surfaces(
         width=int(width),
         height=int(height),
         total_frames=total_frames,
+        bbox_norm_reference_width=norm_width,
+        bbox_norm_reference_height=norm_height,
         refined_row_ids=instance_refined_row_ids_arr,
         frame_indices=instance_frame_indices_arr,
         bbox_norm_coords=instance_bbox_norm_arr,
@@ -2156,6 +2282,8 @@ def write_curated_refined_detect_surfaces(
         refined_run,
         width=int(width),
         height=int(height),
+        bbox_norm_reference_width=norm_width,
+        bbox_norm_reference_height=norm_height,
         source_detect_row_index=source_detection_source_row_arr,
         frame_indices=source_detection_frame_indices_arr,
         bbox_norm_coords=source_detection_bbox_norm_arr,

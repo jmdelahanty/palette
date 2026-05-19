@@ -99,7 +99,7 @@ def _read_frame_index(path: Path) -> pa.Table:
     missing = sorted(required - names)
     if missing:
         raise ValueError(f"recording_frame_index.parquet missing required columns: {missing}")
-    optional = ["parent_frame_index", "timestamp", "timestamp_sys"]
+    optional = ["parent_frame_index", "timestamp", "timestamp_sys", "video_path"]
     columns = ["camera_serial", "clip_id", "clip_local_frame_index", "recording_frame_id"]
     columns.extend(name for name in optional if name in names)
     return pq.read_table(path, columns=columns).combine_chunks()
@@ -156,7 +156,7 @@ def build_collection_frame_map(
             "detect_group_path": selected.get("detect_group_path"),
             "refined_group_path": selected.get("refined_group_path"),
         }
-        for optional in ("parent_frame_index", "timestamp", "timestamp_sys"):
+        for optional in ("parent_frame_index", "timestamp", "timestamp_sys", "video_path"):
             if optional in columns:
                 row[optional] = columns[optional][row_index]
         rows.append(row)

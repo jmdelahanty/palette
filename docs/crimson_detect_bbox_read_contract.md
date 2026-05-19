@@ -134,13 +134,23 @@ For legacy sparse refined groups:
 
 Canonical refined detect geometry:
 
-- `bbox_img_xyxy` is authoritative
-- `bbox_norm_coords` is a normalized mirror
+- `bbox_img_xyxy` is authoritative for rendering/editing and is source-image
+  pixel-space `[x1, y1, x2, y2]`
+- `bbox_norm_coords` is a normalized mirror in `[cx, cy, w, h]`
+- consumers should read `bbox_img_xyxy_coordinate_space`,
+  `bbox_img_xyxy_reference_width/height`, and
+  `bbox_norm_reference_width/height` attrs when present
+- Palette owns the inference-to-source transform when refined surfaces are
+  written; Crimson should not silently treat inference-space pixels as source
+  pixels
 
 Legacy sparse/raw geometry:
 
 - `bbox_norm_coords` is `[cx, cy, w, h]`
 - normalize against the detector input frame dimensions
+- if an older refined run has `bbox_img_xyxy` numerically in inference pixels,
+  repair it with `fisheye.utils.backfill_refined_detect_bbox_img_xyxy` instead
+  of baking scale heuristics into new consumers
 
 ## Zarr Chunking Rules
 

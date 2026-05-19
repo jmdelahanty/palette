@@ -394,6 +394,11 @@ Implementation checklist:
 - [x] Make refined `instances/bbox_img_xyxy` the preferred row-level geometry
   source; root `width`/`height` remain valid metadata and fallback dimensions
   when normalized-only rows are encountered.
+- [x] Define the refined bbox coordinate contract: `bbox_img_xyxy` is source-image
+  pixel-space; `bbox_norm_coords` remains normalized `cxcywh` with explicit
+  reference-dimension attrs, often the detector inference image.
+- [x] Add dry-run/apply backfill support for older refined runs whose
+  `bbox_img_xyxy` was materialized in inference-image pixels.
 - [x] Add focused unit coverage for clipped cache pixels and row-index lineage.
 - [x] Run a limited real-data smoke against
   `sleepyfish_cam2010093_allclips_20260517_01`.

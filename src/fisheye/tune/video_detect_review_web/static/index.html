@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Palette Video Detection Review</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main id="layout">
+      <section id="viewer-pane">
+        <video id="source-video" muted playsinline preload="metadata"></video>
+        <canvas id="gpu-canvas"></canvas>
+        <canvas id="overlay"></canvas>
+      </section>
+      <aside id="panel">
+        <h1>Video Detection Review</h1>
+        <div id="state-line" class="mono muted">Loading...</div>
+        <div id="status-line" class="mono"></div>
+        <div id="readback-line" class="mono muted"></div>
+        <div id="messages" class="mono"></div>
+
+        <div id="frame-controls">
+          <label class="field-row">
+            <span>Parent frame</span>
+            <input id="frame-input" type="number" value="0" min="0">
+          </label>
+          <button id="go-btn" type="button">Go</button>
+        </div>
+
+        <div id="toolbar">
+          <button id="save-btn" type="button">Save</button>
+          <button id="clear-btn" type="button">Clear Box</button>
+          <button id="prev-btn" type="button">Previous</button>
+          <button id="next-btn" type="button">Next</button>
+          <button id="fit-btn" type="button">Fit</button>
+        </div>
+
+        <label class="check-row">
+          <input id="auto-advance-box" type="checkbox">
+          Auto-advance after save
+        </label>
+
+        <div id="help" class="mono muted">
+          <p>Left drag: draw or move box.</p>
+          <p>Right drag / middle drag / shift drag: pan.</p>
+          <p>Wheel: zoom. Keys: s save, c clear, n/p navigate, f fit, g go.</p>
+          <p id="renderer-line">Renderer: detecting...</p>
+        </div>
+      </aside>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,174 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: #0b1117;
+  color: #e5edf4;
+}
+
+#layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 12px;
+  width: 100%;
+  height: 100%;
+  padding: 10px;
+}
+
+#viewer-pane {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #334155;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(59, 130, 246, 0.12), transparent 30%),
+    radial-gradient(circle at 85% 80%, rgba(20, 184, 166, 0.12), transparent 28%),
+    #020617;
+}
+
+#source-video,
+#gpu-canvas,
+#overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#source-video {
+  object-fit: contain;
+  background: #020617;
+}
+
+#gpu-canvas {
+  display: none;
+}
+
+#overlay {
+  cursor: crosshair;
+}
+
+#viewer-pane.webgpu #source-video {
+  opacity: 0;
+}
+
+#viewer-pane.webgpu #gpu-canvas {
+  display: block;
+}
+
+#panel {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #334155;
+  background: #111827;
+  padding: 12px;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  letter-spacing: 0.01em;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.muted {
+  color: #94a3b8;
+}
+
+#frame-controls {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.field-row {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #cbd5e1;
+}
+
+input[type="number"] {
+  width: 100%;
+  border: 1px solid #475569;
+  background: #020617;
+  color: #e2e8f0;
+  padding: 7px 8px;
+}
+
+#toolbar {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.check-row {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: #d1d5db;
+}
+
+button {
+  border: 1px solid #475569;
+  background: #243244;
+  color: #f8fafc;
+  padding: 8px 10px;
+}
+
+button:hover {
+  background: #334155;
+}
+
+button:disabled {
+  color: #64748b;
+  background: #111827;
+}
+
+#messages {
+  margin-top: 10px;
+  min-height: 2.4em;
+}
+
+#state-line,
+#status-line,
+#readback-line {
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+
+#help {
+  margin-top: 14px;
+  line-height: 1.35;
+}
+
+#help p {
+  margin: 4px 0;
+}
+
+@media (max-width: 900px) {
+  #layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  #panel {
+    max-height: 42vh;
+  }
+}
