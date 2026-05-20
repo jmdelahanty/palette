@@ -26,24 +26,36 @@ def _write_valid_merged_zarr(path: Path, *, suppress_legacy_string_warning: bool
         chunks=(2, 8, 8),
     )
 
-    crop_parent = root.create_group("crop_runs")
-    crop_parent.attrs["latest"] = "merged_export_smoke"
-    crop = crop_parent.create_group("merged_export_smoke")
-    crop.create_array(
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "merged_export_smoke"
+    refined = refined_parent.create_group("merged_export_smoke")
+    instances = refined.create_group("instances")
+    instances.create_array(
         "bbox_norm_coords",
         data=np.zeros((4, 4), dtype=np.float32),
         chunks=(4, 4),
     )
-    crop.create_array(
+    instances.create_array(
         "frame_indices",
         data=np.arange(4, dtype=np.int64),
         chunks=(4,),
     )
-    crop.create_array(
-        "detection_source",
-        data=np.array([0, 1, 0, 0], dtype=np.int8),
+    instances.create_array(
+        "source_kind_codes",
+        data=np.array([1, 3, 1, 1], dtype=np.int8),
         chunks=(4,),
     )
+    instances.create_array(
+        "manual_edit_flags",
+        data=np.array([False, True, False, False], dtype=bool),
+        chunks=(4,),
+    )
+    instances.create_array(
+        "source_detect_row_index",
+        data=np.array([300, -1, 400, 401], dtype=np.int32),
+        chunks=(4,),
+    )
+    instances.create_array("frame_counts", data=np.ones(4, dtype=np.int32), chunks=(4,))
 
     splits = root.create_group("splits")
     splits.create_array("train_indices", data=np.array([0, 1], dtype=np.int64), chunks=(2,))
@@ -121,10 +133,25 @@ def test_validate_merged_training_zarr_rejects_invalid_frame_indices(tmp_path: P
     zarr_path = tmp_path / "merged_bad.zarr"
     _write_valid_merged_zarr(zarr_path)
     root = zarr.open_group(str(zarr_path), mode="a")
-    latest = root["crop_runs"].attrs["latest"]
-    root[f"crop_runs/{latest}/frame_indices"][:] = np.array([1, 2, 3, 4], dtype=np.int64)
+    latest = root["refined_detect_runs"].attrs["latest"]
+    root[f"refined_detect_runs/{latest}/instances/frame_indices"][:] = np.array([1, 2, 3, 4], dtype=np.int64)
 
     with pytest.raises(ValueError, match="frame_indices"):
+        validate_merged_training_zarr(
+            zarr_path,
+            expected_input_format="gray",
+            expected_total_samples=4,
+        )
+
+
+def test_validate_merged_training_zarr_rejects_interpolated_source_kind(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "merged_interpolated.zarr"
+    _write_valid_merged_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    latest = root["refined_detect_runs"].attrs["latest"]
+    root[f"refined_detect_runs/{latest}/instances/source_kind_codes"][:] = np.array([1, 2, 1, 1], dtype=np.int8)
+
+    with pytest.raises(ValueError, match="interpolated rows"):
         validate_merged_training_zarr(
             zarr_path,
             expected_input_format="gray",

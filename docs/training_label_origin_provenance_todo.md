@@ -27,9 +27,12 @@ That is enough to trace a row back to its source frame, but not enough to answer
 
 Current gaps:
 
-- Detect merged export uses `detection_source`, but its contract currently
-  treats `0` as `real/manual-reviewed` and `1` as `interpolated/synthetic`.
-  Manual-reviewed rows are therefore conflated with unedited real detections.
+- Detect merged export now writes the canonical
+  `refined_detect_runs/<run>/instances` surface and preserves
+  `source_kind_codes` plus `manual_edit_flags`; this distinguishes raw-detect,
+  manual, and manually edited positive rows better than the old crop
+  `detection_source` field. A cross-task `label_origin` / `supervision_mode`
+  field is still not standardized across detect, pose, and masks.
 - Keypoint merged export preserves run-level provenance
   (`refined_keypoint_run`, `quality_registry_refined_run`,
   `keypoint_review_status`) and row-level supervision mode

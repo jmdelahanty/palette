@@ -64,30 +64,36 @@ def _write_detect_source_zarr(path: Path) -> None:
         chunks=(3, 8, 8),
     )
 
-    crop_parent = root.create_group("crop_runs")
-    crop_parent.attrs["latest"] = "crop_001"
-    crop = crop_parent.create_group("crop_001")
-    crop.create_array(
+    refined_parent = root.create_group("refined_detect_runs")
+    refined_parent.attrs["latest"] = "refined_detect_001"
+    refined = refined_parent.create_group("refined_detect_001")
+    instances = refined.create_group("instances")
+    instances.create_array(
         "bbox_norm_coords",
         data=np.zeros((4, 4), dtype=np.float32),
         chunks=(4, 4),
     )
-    crop.create_array(
+    instances.create_array(
         "frame_indices",
         data=np.array([1, 2, 4, 5], dtype=np.int64),
         chunks=(4,),
     )
-    crop.create_array(
-        "detection_source",
-        data=np.array([0, 0, 1, 0], dtype=np.int8),
+    instances.create_array(
+        "source_kind_codes",
+        data=np.array([1, 3, 1, 1], dtype=np.int8),
         chunks=(4,),
     )
-    crop.create_array(
-        "source_refined_row_ids",
+    instances.create_array(
+        "manual_edit_flags",
+        data=np.array([False, True, False, False], dtype=bool),
+        chunks=(4,),
+    )
+    instances.create_array(
+        "refined_row_ids",
         data=np.array([100, 101, 102, 103], dtype=np.int64),
         chunks=(4,),
     )
-    crop.create_array(
+    instances.create_array(
         "source_detect_row_index",
         data=np.array([200, -1, 202, 203], dtype=np.int32),
         chunks=(4,),
@@ -141,11 +147,11 @@ def test_export_merged_detect_training_zarr_preserves_source_row_lineage(tmp_pat
                 zarr_path=str(source_zarr),
                 dataset_id="source_dataset",
                 session_uuid="source_dataset",
-                crop_run="crop_001",
-                bbox_array_path="crop_runs/crop_001/bbox_norm_coords",
+                crop_run=None,
+                bbox_array_path="refined_detect_runs/refined_detect_001/instances/bbox_norm_coords",
                 detection_source_type="refined",
-                detection_source_path="crop_runs/crop_001/detection_source",
-                includes_interpolated=True,
+                detection_source_path="refined_detect_runs/refined_detect_001/instances",
+                includes_interpolated=False,
                 input_format="gray",
                 images_ds_shape=[8, 8],
                 total_bboxes=4,
@@ -174,8 +180,15 @@ def test_export_merged_detect_training_zarr_preserves_source_row_lineage(tmp_pat
     )
 
     assert result.total_samples == 4
+    assert result.total_interpolated == 0
     validate_merged_training_zarr(out_zarr, expected_input_format="gray", expected_total_samples=4)
     root = zarr.open_group(str(out_zarr), mode="r")
+    latest = root["refined_detect_runs"].attrs["latest"]
+    instances = root[f"refined_detect_runs/{latest}/instances"]
+    assert "crop_runs" not in root
+    assert np.asarray(instances["frame_indices"][:], dtype=np.int64).tolist() == [0, 1, 2, 3]
+    assert np.asarray(instances["source_kind_codes"][:], dtype=np.int8).tolist() == [1, 3, 1, 1]
+    assert np.asarray(instances["manual_edit_flags"][:], dtype=bool).tolist() == [False, True, False, False]
     assert np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist() == [0, 1, 2, 3]
     assert np.asarray(root["source_index/source_refined_row_ids"][:], dtype=np.int64).tolist() == [
         100,
@@ -189,6 +202,64 @@ def test_export_merged_detect_training_zarr_preserves_source_row_lineage(tmp_pat
         202,
         203,
     ]
+
+
+def test_export_merged_detect_training_zarr_rejects_interpolated_source_rows(tmp_path: Path) -> None:
+    source_zarr = tmp_path / "source_detect.zarr"
+    out_zarr = tmp_path / "merged_detect.zarr"
+    manifest_path = tmp_path / "detect.manifest.json"
+    _write_detect_source_zarr(source_zarr)
+    root = zarr.open_group(str(source_zarr), mode="a")
+    root["refined_detect_runs/refined_detect_001/instances/source_kind_codes"][:] = np.array(
+        [1, 2, 1, 1],
+        dtype=np.int8,
+    )
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    manifest = TrainingManifest(
+        created_at_utc="2026-02-06T00:00:00+00:00",
+        task="detect",
+        source_type="refined",
+        input_format="gray",
+        imgsz=[640, 640],
+        datasets=[
+            DatasetManifest(
+                name="source_dataset",
+                zarr_path=str(source_zarr),
+                dataset_id="source_dataset",
+                session_uuid="source_dataset",
+                crop_run=None,
+                bbox_array_path="refined_detect_runs/refined_detect_001/instances/bbox_norm_coords",
+                detection_source_type="refined",
+                detection_source_path="refined_detect_runs/refined_detect_001/instances",
+                includes_interpolated=True,
+                input_format="gray",
+                images_ds_shape=[8, 8],
+                total_bboxes=4,
+                invalid_bboxes=0,
+            )
+        ],
+        provenance_policy="warn",
+        set_name="cedar_shadow",
+        set_version=1,
+        set_id="detect_cedar_shadow_v001",
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "refuses 1 legacy interpolated rows"):
+        _export_merged(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            out_zarr=out_zarr,
+            merged_dataset_id=None,
+            overwrite=True,
+            train_ratio=0.5,
+            val_ratio=0.5,
+            test_ratio=0.0,
+            seed=42,
+            include_rgb=False,
+            copy_batch_size=2,
+            invocation={},
+        )
 
 
 def test_copy_indexed_frames_reports_progress_callback() -> None:
@@ -297,7 +368,7 @@ def test_build_merged_manifest_payload_carries_identity_fields(tmp_path: Path) -
         total_samples=3,
         total_real=3,
         total_interpolated=0,
-        detection_source_counts={"0": 3},
+        source_kind_counts={"1": 3},
         train_indices=np.array([0, 1], dtype=np.int64),
         val_indices=np.array([2], dtype=np.int64),
         test_indices=np.array([], dtype=np.int64),
@@ -364,6 +435,19 @@ def test_build_merged_manifest_payload_carries_identity_fields(tmp_path: Path) -
     assert payload["datasets"][0]["dish_design"] == "cedar"
     assert payload["datasets"][0]["canvas_name"] == "shadow"
     assert payload["datasets"][0]["rig_id"] == "omnifin0"
+    assert payload["datasets"][0]["crop_run"] is None
+    assert payload["datasets"][0]["detection_source_type"] == "refined"
+    assert (
+        payload["datasets"][0]["bbox_array_path"]
+        == "refined_detect_runs/merged_export_20260206T000000Z/instances/bbox_norm_coords"
+    )
+    assert payload["datasets"][0]["detection_source_present"] is False
+    assert payload["datasets"][0]["includes_interpolated"] is False
+    assert payload["datasets"][0]["source_kind_counts"] == {"1": 3}
+    assert (
+        payload["merged_export"]["canonical_label_path"]
+        == "refined_detect_runs/merged_export_20260206T000000Z/instances"
+    )
     assert payload["merged_export"]["counts"]["source_count"] == 1
     assert payload["merged_export"]["source_datasets"][0]["dish_design"] == "cedar"
     assert payload["merged_export"]["source_datasets"][0]["canvas_name"] == "shadow"

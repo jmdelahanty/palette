@@ -26,6 +26,11 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.diagnostics.prepare_detect_training import DatasetManifest, TrainingManifest
 from fisheye.registry.db import Registry
+from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.refined_detect_curation import (
+    REFINED_SOURCE_KIND_CODE_MAP,
+    write_curated_refined_detect_surfaces,
+)
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.utils.system import build_invocation_record
@@ -85,7 +90,7 @@ class MergeResult:
     total_samples: int
     total_real: int
     total_interpolated: int
-    detection_source_counts: Dict[str, int]
+    source_kind_counts: Dict[str, int]
     train_indices: np.ndarray
     val_indices: np.ndarray
     test_indices: np.ndarray
@@ -389,7 +394,7 @@ def validate_merged_training_zarr(
     expected_input_format: Optional[str] = None,
     expected_total_samples: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Validate merged training Zarr layout and trainer-facing invariants."""
+    """Validate current merged training Zarr layout and trainer-facing invariants."""
     root = zarr.open_group(str(zarr_path), mode="r")
     errors: List[str] = []
 
@@ -398,8 +403,8 @@ def validate_merged_training_zarr(
 
     if "raw_video" not in root:
         errors.append("missing group raw_video.")
-    if "crop_runs" not in root:
-        errors.append("missing group crop_runs.")
+    if "refined_detect_runs" not in root:
+        errors.append("missing group refined_detect_runs.")
     if "splits" not in root:
         errors.append("missing group splits.")
     if "source_index" not in root:
@@ -409,7 +414,7 @@ def validate_merged_training_zarr(
         raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
 
     raw = root["raw_video"]
-    crop_parent = root["crop_runs"]
+    refined_parent = root["refined_detect_runs"]
 
     train_input_format = _normalize_input_format(expected_input_format)
     if train_input_format is None:
@@ -424,14 +429,22 @@ def validate_merged_training_zarr(
     if "images_ds" not in raw and "images_ds_rgb" not in raw:
         errors.append("raw_video must include at least one of images_ds or images_ds_rgb.")
 
-    latest_run = crop_parent.attrs.get("latest")
-    if not latest_run or latest_run not in crop_parent:
-        errors.append("crop_runs/latest missing or points to a non-existent run.")
+    latest_run = refined_parent.attrs.get("latest")
+    if not latest_run or latest_run not in refined_parent:
+        errors.append("refined_detect_runs/latest missing or points to a non-existent run.")
         raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
-    bbox_path = f"crop_runs/{latest_run}/bbox_norm_coords"
-    frame_idx_path = f"crop_runs/{latest_run}/frame_indices"
-    det_source_path = f"crop_runs/{latest_run}/detection_source"
-    for path in (bbox_path, frame_idx_path, det_source_path):
+    instances_path = f"refined_detect_runs/{latest_run}/instances"
+    if instances_path not in root:
+        errors.append(f"missing required group {instances_path}.")
+        raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
+
+    bbox_path = f"{instances_path}/bbox_norm_coords"
+    frame_idx_path = f"{instances_path}/frame_indices"
+    source_kind_path = f"{instances_path}/source_kind_codes"
+    manual_flags_path = f"{instances_path}/manual_edit_flags"
+    frame_counts_path = f"{instances_path}/frame_counts"
+    source_detect_path = f"{instances_path}/source_detect_row_index"
+    for path in (bbox_path, frame_idx_path, source_kind_path, manual_flags_path, frame_counts_path, source_detect_path):
         if path not in root:
             errors.append(f"missing required array {path}.")
 
@@ -440,7 +453,10 @@ def validate_merged_training_zarr(
 
     bbox = np.asarray(root[bbox_path][:])
     frame_indices = np.asarray(root[frame_idx_path][:])
-    detection_source = np.asarray(root[det_source_path][:])
+    source_kind_codes = np.asarray(root[source_kind_path][:])
+    manual_edit_flags = np.asarray(root[manual_flags_path][:])
+    frame_counts = np.asarray(root[frame_counts_path][:])
+    source_detect_row_index = np.asarray(root[source_detect_path][:])
 
     if bbox.ndim != 2 or int(bbox.shape[1]) != 4:
         errors.append(f"{bbox_path} must have shape (N, 4), got {tuple(int(v) for v in bbox.shape)}.")
@@ -448,27 +464,55 @@ def validate_merged_training_zarr(
 
     if frame_indices.ndim != 1:
         errors.append(f"{frame_idx_path} must be 1D, got ndim={frame_indices.ndim}.")
-    if detection_source.ndim != 1:
-        errors.append(f"{det_source_path} must be 1D, got ndim={detection_source.ndim}.")
+    if source_kind_codes.ndim != 1:
+        errors.append(f"{source_kind_path} must be 1D, got ndim={source_kind_codes.ndim}.")
+    if manual_edit_flags.ndim != 1:
+        errors.append(f"{manual_flags_path} must be 1D, got ndim={manual_edit_flags.ndim}.")
+    if source_detect_row_index.ndim != 1:
+        errors.append(f"{source_detect_path} must be 1D, got ndim={source_detect_row_index.ndim}.")
+    if frame_counts.ndim != 1:
+        errors.append(f"{frame_counts_path} must be 1D, got ndim={frame_counts.ndim}.")
     if frame_indices.ndim == 1 and frame_indices.shape[0] != total_samples:
         errors.append(f"{frame_idx_path} length mismatch ({frame_indices.shape[0]} != {total_samples}).")
-    if detection_source.ndim == 1 and detection_source.shape[0] != total_samples:
-        errors.append(f"{det_source_path} length mismatch ({detection_source.shape[0]} != {total_samples}).")
+    for path, arr in (
+        (source_kind_path, source_kind_codes),
+        (manual_flags_path, manual_edit_flags),
+        (source_detect_path, source_detect_row_index),
+    ):
+        if arr.ndim == 1 and arr.shape[0] != total_samples:
+            errors.append(f"{path} length mismatch ({arr.shape[0]} != {total_samples}).")
 
     if frame_indices.ndim == 1 and not np.issubdtype(frame_indices.dtype, np.integer):
         errors.append(f"{frame_idx_path} must be integer dtype, got {frame_indices.dtype}.")
-    if detection_source.ndim == 1 and not np.issubdtype(detection_source.dtype, np.integer):
-        errors.append(f"{det_source_path} must be integer dtype, got {detection_source.dtype}.")
+    if source_kind_codes.ndim == 1 and not np.issubdtype(source_kind_codes.dtype, np.integer):
+        errors.append(f"{source_kind_path} must be integer dtype, got {source_kind_codes.dtype}.")
+    if source_detect_row_index.ndim == 1 and not np.issubdtype(source_detect_row_index.dtype, np.integer):
+        errors.append(f"{source_detect_path} must be integer dtype, got {source_detect_row_index.dtype}.")
+    if manual_edit_flags.ndim == 1 and not np.issubdtype(manual_edit_flags.dtype, np.bool_):
+        errors.append(f"{manual_flags_path} must be bool dtype, got {manual_edit_flags.dtype}.")
     if frame_indices.ndim == 1 and frame_indices.shape[0] == total_samples:
         expected_local = np.arange(total_samples, dtype=np.int64)
         frame_indices_i64 = frame_indices.astype(np.int64, copy=False)
         if not np.array_equal(frame_indices_i64, expected_local):
             errors.append(f"{frame_idx_path} must be local 0..N-1 indexing.")
-    if detection_source.ndim == 1 and detection_source.size > 0:
-        det_codes = np.unique(detection_source.astype(np.int64, copy=False))
-        invalid_codes = [int(code) for code in det_codes.tolist() if int(code) not in (0, 1)]
+    if source_kind_codes.ndim == 1 and source_kind_codes.size > 0:
+        source_codes = np.unique(source_kind_codes.astype(np.int64, copy=False))
+        valid_codes = {int(value) for value in REFINED_SOURCE_KIND_CODE_MAP.values()}
+        invalid_codes = [int(code) for code in source_codes.tolist() if int(code) not in valid_codes]
         if invalid_codes:
-            errors.append(f"{det_source_path} contains invalid codes: {sorted(set(invalid_codes))} (expected 0 or 1).")
+            errors.append(f"{source_kind_path} contains invalid codes: {sorted(set(invalid_codes))}.")
+        interpolated_code = int(REFINED_SOURCE_KIND_CODE_MAP["interpolated"])
+        interpolated_count = int(np.count_nonzero(source_kind_codes == interpolated_code))
+        if interpolated_count:
+            errors.append(
+                f"{source_kind_path} contains {interpolated_count} interpolated rows; "
+                "new merged exports must be interpolation-free."
+            )
+    if frame_counts.ndim == 1 and int(frame_counts.shape[0]) != total_samples:
+        errors.append(f"{frame_counts_path} length must equal merged frame count ({frame_counts.shape[0]} != {total_samples}).")
+    if frame_counts.ndim == 1 and frame_counts.shape[0] == total_samples:
+        if not np.all(frame_counts.astype(np.int64, copy=False) == 1):
+            errors.append(f"{frame_counts_path} must contain exactly one instance per merged training frame.")
 
     if expected_total_samples is not None and int(expected_total_samples) != total_samples:
         errors.append(f"total sample mismatch ({total_samples} != expected {int(expected_total_samples)}).")
@@ -597,6 +641,7 @@ def validate_merged_training_zarr(
     return {
         "zarr_path": str(zarr_path),
         "run_name": str(latest_run),
+        "instances_path": instances_path,
         "training_input_format": train_input_format,
         "total_samples": int(total_samples),
         "split_counts": {
@@ -646,6 +691,138 @@ def _resolve_detection_source_path(root: zarr.Group, dataset: DatasetManifest) -
         if isinstance(root[candidate], zarr.Array):
             return candidate
     return None
+
+
+def _resolve_bbox_parent_group(root: zarr.Group, bbox_path: str) -> Optional[zarr.Group]:
+    if "/" not in bbox_path:
+        return None
+    parent_path = bbox_path.rsplit("/", 1)[0]
+    if parent_path not in root:
+        return None
+    group = root[parent_path]
+    return group if isinstance(group, zarr.Group) else None
+
+
+def _read_optional_source_vector(
+    group: Optional[zarr.Group],
+    name: str,
+    *,
+    expected_len: int,
+    dtype: np.dtype | type,
+) -> Optional[np.ndarray]:
+    if group is None or name not in group:
+        return None
+    arr = np.asarray(group[name][:], dtype=dtype).reshape(-1)
+    if int(arr.shape[0]) != int(expected_len):
+        raise ValueError(f"{name} length mismatch ({arr.shape[0]} != {expected_len}).")
+    return arr
+
+
+def _source_kind_payload_for_merge(
+    *,
+    source_zarr: Path,
+    spec: MergeSourceSpec,
+    source_group: Optional[zarr.Group],
+    detection_source: np.ndarray,
+    row_count: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, int]]:
+    """Return canonical refined-instance payload vectors for one source dataset.
+
+    New merged exports are canonical sparse refined-detect datasets. Legacy
+    ``detection_source`` is still read only to reject old interpolated rows before
+    they are copied into a new export.
+    """
+
+    reverse_kind_map = {int(value): str(key) for key, value in REFINED_SOURCE_KIND_CODE_MAP.items()}
+    source_kind_codes = _read_optional_source_vector(
+        source_group,
+        "source_kind_codes",
+        expected_len=row_count,
+        dtype=np.int8,
+    )
+    if source_kind_codes is not None:
+        invalid_codes = sorted(
+            {
+                int(code)
+                for code in np.unique(source_kind_codes.astype(np.int64, copy=False)).tolist()
+                if int(code) not in reverse_kind_map
+            }
+        )
+        if invalid_codes:
+            raise ValueError(f"{source_zarr}: source_kind_codes contains unknown codes: {invalid_codes}.")
+        interpolated_code = int(REFINED_SOURCE_KIND_CODE_MAP["interpolated"])
+        interpolated_count = int(np.count_nonzero(source_kind_codes == interpolated_code))
+        if interpolated_count:
+            raise ValueError(
+                f"{source_zarr}: merged canonical detection export refuses {interpolated_count} "
+                "legacy interpolated rows. Review/migrate/exclude them before exporting."
+            )
+        source_kind_labels = np.asarray(
+            [reverse_kind_map[int(code)] for code in source_kind_codes.tolist()],
+            dtype=object,
+        )
+    else:
+        if detection_source.shape[0] != row_count:
+            raise ValueError(
+                f"{source_zarr}: detection_source length mismatch ({detection_source.shape[0]} != {row_count})."
+            )
+        interpolated_count = int(np.count_nonzero(detection_source != 0))
+        if interpolated_count:
+            raise ValueError(
+                f"{source_zarr}: merged canonical detection export refuses {interpolated_count} "
+                "legacy interpolated detection_source rows. Review/migrate/exclude them before exporting."
+            )
+        default_kind = "manual" if str(spec.detection_source_type).strip().lower() == "manual" else "raw_detect"
+        source_kind_labels = np.full(row_count, default_kind, dtype=object)
+
+    manual_edit_flags = _read_optional_source_vector(
+        source_group,
+        "manual_edit_flags",
+        expected_len=row_count,
+        dtype=bool,
+    )
+    if manual_edit_flags is None:
+        manual_edit_flags = source_kind_labels == "manual"
+
+    reason_labels = read_reason_labels(source_group) if source_group is not None else None
+    if reason_labels is None or int(np.asarray(reason_labels).reshape(-1).shape[0]) != row_count:
+        reason_labels = np.asarray(source_kind_labels, dtype=object)
+    else:
+        reason_labels = np.asarray(reason_labels, dtype=object).reshape(-1)
+
+    confidence_scores = _read_optional_source_vector(
+        source_group,
+        "confidence_scores",
+        expected_len=row_count,
+        dtype=np.float32,
+    )
+    if confidence_scores is None:
+        confidence_scores = _read_optional_source_vector(
+            source_group,
+            "scores",
+            expected_len=row_count,
+            dtype=np.float32,
+        )
+    class_ids = _read_optional_source_vector(
+        source_group,
+        "class_ids",
+        expected_len=row_count,
+        dtype=np.int32,
+    )
+
+    code_by_label = {str(key): int(value) for key, value in REFINED_SOURCE_KIND_CODE_MAP.items()}
+    source_kind_counts: Dict[str, int] = {}
+    for label in source_kind_labels.tolist():
+        key = str(code_by_label[str(label)])
+        source_kind_counts[key] = source_kind_counts.get(key, 0) + 1
+    return (
+        source_kind_labels,
+        manual_edit_flags.astype(bool, copy=False),
+        reason_labels,
+        confidence_scores,
+        class_ids,
+        source_kind_counts,
+    )
 
 
 def _sanitize_dataset_id(dataset: DatasetManifest, ordinal: int) -> str:
@@ -1084,38 +1261,24 @@ def _export_merged(
     _ensure_writable_destination(out_zarr, overwrite=overwrite)
     out_root = zarr.open_group(str(out_zarr), mode="w")
     raw_group = out_root.require_group("raw_video")
-    crop_parent = out_root.require_group("crop_runs")
+    refined_parent = out_root.require_group("refined_detect_runs")
     source_index_group = out_root.require_group("source_index")
     split_group = out_root.require_group("splits")
 
     run_name = f"merged_export_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    crop_parent.attrs["latest"] = run_name
-    crop_group = crop_parent.require_group(run_name)
+    refined_parent.attrs["latest"] = run_name
+    refined_run = refined_parent.require_group(run_name)
 
-    bbox_chunks = (max(1, min(8192, total_samples)), 4)
     vector_chunks = (max(1, min(8192, total_samples)),)
 
-    bbox_dest = crop_group.require_array(
-        "bbox_norm_coords",
-        shape=(total_samples, 4),
-        dtype=np.float32,
-        chunks=bbox_chunks,
-        overwrite=True,
-    )
-    frame_idx_dest = crop_group.require_array(
-        "frame_indices",
-        shape=(total_samples,),
-        dtype=np.int64,
-        chunks=vector_chunks,
-        overwrite=True,
-    )
-    det_src_dest = crop_group.require_array(
-        "detection_source",
-        shape=(total_samples,),
-        dtype=np.int8,
-        chunks=vector_chunks,
-        overwrite=True,
-    )
+    merged_bbox_norm = np.empty((total_samples, 4), dtype=np.float32)
+    merged_source_kind_labels = np.empty((total_samples,), dtype=object)
+    merged_reason_labels = np.empty((total_samples,), dtype=object)
+    merged_manual_edit_flags = np.zeros((total_samples,), dtype=bool)
+    merged_source_detect_row_index = np.full((total_samples,), -1, dtype=np.int32)
+    merged_confidence_scores: Optional[np.ndarray] = None
+    merged_class_ids: Optional[np.ndarray] = None
+
     src_dataset_idx_dest = source_index_group.require_array(
         "source_dataset_idx",
         shape=(total_samples,),
@@ -1177,9 +1340,38 @@ def _export_merged(
             overwrite=True,
         )
 
+    resolution: Optional[List[int]] = None
+    if train_input_format == "gray" and layout["gray_shape"] is not None:
+        gray_shape = tuple(layout["gray_shape"])
+        resolution = [int(gray_shape[0]), int(gray_shape[1])]
+    elif layout["rgb_shape"] is not None:
+        rgb_shape = tuple(layout["rgb_shape"])
+        resolution = [int(rgb_shape[0]), int(rgb_shape[1])]
+    if resolution is None:
+        raise ValueError("Could not resolve merged training image resolution.")
+    image_height, image_width = int(resolution[0]), int(resolution[1])
+    out_root.attrs.update(
+        {
+            "total_frames": int(total_samples),
+            "n_frames": int(total_samples),
+            "height": image_height,
+            "width": image_width,
+            "inference_height": image_height,
+            "inference_width": image_width,
+        }
+    )
+    refined_run.attrs.update(
+        {
+            "coverage_frames_total": int(total_samples),
+            "detection_source_type": "refined",
+            "interpolation_enabled": False,
+            "interpolation_policy": "forbidden_for_merged_training_export",
+        }
+    )
+
     total_real = 0
     total_interpolated = 0
-    detection_source_counts: Dict[str, int] = {}
+    merged_source_kind_counts: Dict[str, int] = {}
 
     copy_passes = int(bool(need_gray)) + int(bool(need_rgb))
     copy_total = total_samples * copy_passes
@@ -1229,6 +1421,22 @@ def _export_merged(
             else:
                 detection_source = np.zeros(local_total, dtype=np.int8)
 
+            source_group = _resolve_bbox_parent_group(root, spec.bbox_path)
+            (
+                source_kind_labels,
+                manual_edit_flags,
+                reason_labels,
+                confidence_scores,
+                class_ids,
+                local_source_kind_counts,
+            ) = _source_kind_payload_for_merge(
+                source_zarr=spec.source_zarr,
+                spec=spec,
+                source_group=source_group,
+                detection_source=detection_source,
+                row_count=local_total,
+            )
+
             if need_gray and gray_dest is not None:
                 src_gray = root["raw_video/images_ds"]
                 frame_limit = int(src_gray.shape[0])
@@ -1269,26 +1477,55 @@ def _export_merged(
                     on_copied=_advance_copy,
                 )
 
-            bbox_dest[offset : offset + local_total] = bbox
-            frame_idx_dest[offset : offset + local_total] = np.arange(offset, offset + local_total, dtype=np.int64)
-            det_src_dest[offset : offset + local_total] = detection_source
+            merged_bbox_norm[offset : offset + local_total] = bbox
+            merged_source_kind_labels[offset : offset + local_total] = source_kind_labels
+            merged_reason_labels[offset : offset + local_total] = reason_labels
+            merged_manual_edit_flags[offset : offset + local_total] = manual_edit_flags
+            merged_source_detect_row_index[offset : offset + local_total] = source_detect_row_index
+            if confidence_scores is not None and merged_confidence_scores is None:
+                merged_confidence_scores = np.full((total_samples,), np.nan, dtype=np.float32)
+            if merged_confidence_scores is not None and confidence_scores is not None:
+                merged_confidence_scores[offset : offset + local_total] = confidence_scores
+            if class_ids is not None and merged_class_ids is None:
+                merged_class_ids = np.full((total_samples,), -1, dtype=np.int32)
+            if merged_class_ids is not None and class_ids is not None:
+                merged_class_ids[offset : offset + local_total] = class_ids
+
             src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
             src_frame_idx_dest[offset : offset + local_total] = src_frame_indices
             src_roi_idx_dest[offset : offset + local_total] = np.arange(local_total, dtype=np.int64)
             src_refined_row_ids_dest[offset : offset + local_total] = source_refined_row_ids
             src_detect_row_index_dest[offset : offset + local_total] = source_detect_row_index
 
-            uniques, counts = np.unique(detection_source, return_counts=True)
-            for value, count in zip(uniques.tolist(), counts.tolist()):
-                key = str(int(value))
-                detection_source_counts[key] = detection_source_counts.get(key, 0) + int(count)
-            total_real += int(np.sum(detection_source == 0))
-            total_interpolated += int(np.sum(detection_source != 0))
+            for key, count in local_source_kind_counts.items():
+                merged_source_kind_counts[key] = merged_source_kind_counts.get(key, 0) + int(count)
+            total_real += int(local_total)
 
             offset += local_total
     finally:
         if copy_progress is not None:
             copy_progress.stop()
+
+    write_curated_refined_detect_surfaces(
+        out_root,
+        zarr_path=out_zarr,
+        refined_run_name=run_name,
+        instance_frame_indices=np.arange(total_samples, dtype=np.int32),
+        instance_bbox_norm_coords=merged_bbox_norm,
+        instance_source_kind_labels=merged_source_kind_labels,
+        instance_reason_labels=merged_reason_labels,
+        instance_source_detect_row_index=merged_source_detect_row_index,
+        instance_manual_edit_flags=merged_manual_edit_flags,
+        instance_confidence_scores=merged_confidence_scores,
+        instance_class_ids=merged_class_ids,
+        command="fisheye.utils.export_detect_training_zarr --merge",
+        source_context={
+            "source_type_requested": str(manifest.source_type),
+            "source_type_resolved": "refined",
+            "source_count": int(len(source_specs)),
+            "interpolation_policy": "forbidden_for_merged_training_export",
+        },
+    )
 
     train_idx, val_idx, test_idx = _compute_split_indices(
         total_samples,
@@ -1327,14 +1564,6 @@ def _export_merged(
     if need_rgb:
         downsample_formats.append("rgb")
 
-    resolution: Optional[List[int]] = None
-    if need_gray and layout["gray_shape"] is not None:
-        gray_shape = tuple(layout["gray_shape"])
-        resolution = [int(gray_shape[0]), int(gray_shape[1])]
-    elif need_rgb and layout["rgb_shape"] is not None:
-        rgb_shape = tuple(layout["rgb_shape"])
-        resolution = [int(rgb_shape[0]), int(rgb_shape[1])]
-
     raw_attrs: Dict[str, Any] = {
         "downsample_formats": downsample_formats,
     }
@@ -1345,13 +1574,16 @@ def _export_merged(
         raw_attrs["fps"] = float(fps_values[0])
     raw_group.attrs.update(raw_attrs)
 
-    crop_group.attrs.update(
+    refined_run.attrs.update(
         {
-            "detection_source_type": str(manifest.source_type),
-            "includes_interpolated": bool(total_interpolated > 0),
-            "detection_source_path": "merged://source_index",
+            "detection_source_type": "refined",
+            "source_type_requested": str(manifest.source_type),
+            "source_type_resolved": "refined",
+            "includes_interpolated": False,
+            "interpolation_enabled": False,
+            "interpolation_policy": "forbidden_for_merged_training_export",
             "n_real_detections": int(total_real),
-            "n_interpolated_detections": int(total_interpolated),
+            "n_interpolated_detections": 0,
             "source_count": int(len(source_specs)),
         }
     )
@@ -1372,6 +1604,9 @@ def _export_merged(
         "set_name": manifest.set_name,
         "set_version": manifest.set_version,
         "source_type_requested": str(manifest.source_type),
+        "source_type_resolved": "refined",
+        "canonical_label_path": f"refined_detect_runs/{run_name}/instances",
+        "interpolation_policy": "forbidden_for_merged_training_export",
         "input_format": "both" if (need_gray and need_rgb) else train_input_format,
         "include_rgb": bool(need_rgb),
         "created_at_utc": _utc_now(),
@@ -1421,7 +1656,7 @@ def _export_merged(
         total_samples=total_samples,
         total_real=total_real,
         total_interpolated=total_interpolated,
-        detection_source_counts=detection_source_counts,
+        source_kind_counts=merged_source_kind_counts,
         train_indices=train_idx,
         val_indices=val_idx,
         test_indices=test_idx,
@@ -1535,19 +1770,22 @@ def _build_merged_manifest_payload(
         "dish_design": merged_dish,
         "canvas_name": merged_canvas,
         "rig_id": merged_rig,
-        "crop_run": run_name,
-        "bbox_array_path": f"crop_runs/{run_name}/bbox_norm_coords",
-        "detection_source_type": str(manifest.source_type),
-        "detection_source_path": f"crop_runs/{run_name}/detection_source",
-        "includes_interpolated": bool(merge_result.total_interpolated > 0),
+        "crop_run": None,
+        "bbox_array_path": f"refined_detect_runs/{run_name}/instances/bbox_norm_coords",
+        "detection_source_type": "refined",
+        "detection_source_path": f"refined_detect_runs/{run_name}/instances",
+        "source_type_requested": str(manifest.source_type),
+        "source_type_resolved": "refined",
+        "includes_interpolated": False,
+        "interpolation_policy": "forbidden_for_merged_training_export",
         "input_format": merge_result.training_input_format,
         "images_ds_shape": spatial_shape,
         "total_bboxes": int(merge_result.total_samples),
         "invalid_bboxes": 0,
         "invalid_bbox_sample": [],
-        "detection_source_counts": merge_result.detection_source_counts,
+        "source_kind_counts": merge_result.source_kind_counts,
         "frame_indices_present": True,
-        "detection_source_present": True,
+        "detection_source_present": False,
         "provenance": None,
     }
 
@@ -1561,6 +1799,8 @@ def _build_merged_manifest_payload(
         "downsample_formats": merge_result.downsample_formats,
         "training_input_format": merge_result.training_input_format,
         "include_rgb": bool(include_rgb),
+        "canonical_label_path": f"refined_detect_runs/{run_name}/instances",
+        "interpolation_policy": "forbidden_for_merged_training_export",
         "split": {
             "train_ratio": float(train_ratio),
             "val_ratio": float(val_ratio),
@@ -1658,7 +1898,7 @@ def _write_merge_summary(
             "total_samples": int(merge_result.total_samples),
             "real": int(merge_result.total_real),
             "interpolated": int(merge_result.total_interpolated),
-            "detection_source_counts": merge_result.detection_source_counts,
+            "source_kind_counts": merge_result.source_kind_counts,
             "train": int(merge_result.train_indices.shape[0]),
             "val": int(merge_result.val_indices.shape[0]),
             "test": int(merge_result.test_indices.shape[0]),
@@ -1880,7 +2120,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             out_config=out_config,
             merged_zarr=merged_zarr,
             dataset_name=merged_dataset_name,
-            source_type=str(manifest.source_type),
+            source_type="refined",
             input_format=merge_result.training_input_format,
             train_ratio=config_train_ratio,
             val_ratio=config_val_ratio,

@@ -1,50 +1,48 @@
-# Detection Merged Export Contract (Proposed)
+# Detection Merged Export Contract
 <!-- contract-meta
-version: 2
-status: draft
-last_verified: 2026-04-15
+version: 3
+status: active
+last_verified: 2026-05-20
 -->
 
-Purpose: define an implementation-ready contract for exporting a single merged detection-training Zarr per training set, while preserving provenance and compatibility with current training loaders.
+Purpose: define the current contract for exporting one merged detection-training
+Zarr per training set while preserving source traceability and using the same
+canonical refined-detection label surface as normal per-recording training
+Zarrs.
 
 ## Scope
 
 - Output a single merged Zarr for detection training.
 - Preserve source traceability for each exported sample.
 - Persist deterministic split membership in the exported Zarr.
-- Keep compatibility with existing detection loader expectations.
+- Use `refined_detect_runs/<run>/instances` as the only forward detection-label
+  surface.
 
-## Non-goals
+## Non-Goals
 
 - Replacing registry/manifest workflow.
 - Supporting pose/segmentation labels in this exporter version.
 - Rewriting existing source Zarr layout.
+- Forward-writing `crop_runs` detection-label mirrors in merged exports.
 
-## Compatibility Targets
+## Compatibility Position
 
-The merged Zarr must remain compatible with current assumptions used by:
+Current readers should prefer:
 
-- `src/fisheye/training/zarr_yolo_dataset_loader.py`
-- `src/fisheye/diagnostics/prepare_detect_training.py`
+- `raw_video/images_ds` or `raw_video/images_ds_rgb`
+- `refined_detect_runs/<run>/instances/bbox_norm_coords`
+- `refined_detect_runs/<run>/instances/frame_indices`
+- `refined_detect_runs/<run>/instances/source_kind_codes`
+- `refined_detect_runs/<run>/instances/manual_edit_flags`
 
-Compatibility requirements:
+Legacy readers may still support crop-only training archives, but new merged
+exports must not depend on `crop_runs/<run>/bbox_norm_coords` as the label
+authority. `crop_runs` remains a materialized image/support concept for older
+and per-recording stores, not the merged-export contract.
 
-- `raw_video/images_ds` exists.
-- `crop_runs/<run_id>/bbox_norm_coords` exists.
-- `crop_runs.attrs["latest"]` points to `<run_id>`.
-- `crop_runs/<run_id>/detection_source` exists when synthetic/interpolated rows are present or the exporter emits the compatibility field unconditionally.
-- `crop_runs/<run_id>/frame_indices` exists.
+## Output Layout
 
-Current default expectation:
-
-- merged exports should normally be built from `source_type=refined`
-- `detection_source_type` should normally be `refined`
-- `manual|filtered|interpolated` remain compatibility source types for legacy
-  archives or explicit historical exports
-
-## Output Layout (Zarr v3)
-
-```
+```text
 <merged>.zarr/
   raw_video/
     images_ds                  (N, H, W) uint8
@@ -54,20 +52,26 @@ Current default expectation:
       downsampled_resolution   [H, W]
       fps                      float (optional if mixed sources)
 
-  crop_runs/
+  refined_detect_runs/
     attrs:
       latest                   "<run_id>"
     <run_id>/
-      bbox_norm_coords         (N, 4) float32      # normalized [cx, cy, w, h]
-      frame_indices            (N,) int64
-      detection_source         (N,) int8             # 0 accepted curated row, 1 compatibility interpolated row
       attrs:
-        detection_source_type  "refined|detect|manual|filtered|interpolated"
-        includes_interpolated  bool                  # compatibility field; normally false for current refined exports
-        detection_source_path  "merged://source_index"
-        n_real_detections      int
-        n_interpolated_detections int
-        n_manual_edited_detections int              # optional, current refined exports should populate when known
+        curated_primary_surface "instances"
+        refined_storage_semantics "sparse_instances_v1"
+        interpolation_enabled  false
+        interpolation_policy   "forbidden_for_merged_training_export"
+      instances/
+        refined_row_ids        (N,) int64
+        frame_indices          (N,) int32           # merged local 0..N-1
+        frame_offsets          (N+1,) int64
+        frame_counts           (N,) int32           # exactly 1 for detect training rows
+        bbox_img_xyxy          (N, 4) float64
+        bbox_norm_coords       (N, 4) float64       # normalized [cx, cy, w, h]
+        source_kind_codes      (N,) int8            # raw_detect/manual only for new exports
+        manual_edit_flags      (N,) bool
+        source_detect_row_index (N,) int32
+        reason_bytes           (N, width) uint8
 
   splits/
     train_indices              (Nt,) int64
@@ -88,14 +92,17 @@ Current default expectation:
     source_roi_idx             (N,) int64
     source_refined_row_ids     (N,) int64
     source_detect_row_index    (N,) int32
-    source_dataset_id          (M,) unicode string
-    source_zarr_path           (M,) unicode string
+    source_dataset_id          (M,) UTF-8 string
+    source_zarr_path           (M,) UTF-8 string
     attrs:
       mapping_version          1
       source_count             M
 
   attrs:
     zarr_purpose               "training"
+    total_frames               N
+    width                      W
+    height                     H
     training_export            {...}
 ```
 
@@ -109,31 +116,36 @@ Required keys:
 - `set_name`: string
 - `set_version`: int
 - `source_type_requested`: string
-- `source_type_resolved`: string
+- `source_type_resolved`: `"refined"`
+- `canonical_label_path`: `refined_detect_runs/<run>/instances`
+- `interpolation_policy`: `"forbidden_for_merged_training_export"`
 - `input_format`: `"gray"` or `"rgb"` or `"both"`
 - `include_rgb`: bool
 - `created_at_utc`: ISO-8601 UTC
 - `manifest_path`: path string if available
 - `manifest_sha256`: sha256 hex if available
-- `query_filter`: JSON object (same normalized payload style as `prepare_detect_training`)
-- `invocation`: JSON object (same style as `build_invocation_record`)
+- `query_filter`: JSON object
+- `invocation`: JSON object
 - `source_dataset_ids`: list[str]
 - `source_zarr_paths`: list[str]
 
 ## Invariants
 
 - All sample-aligned arrays share identical first dimension `N`:
-  - `raw_video/images_ds`
-  - `crop_runs/<run_id>/bbox_norm_coords`
-  - `crop_runs/<run_id>/frame_indices`
-  - `crop_runs/<run_id>/detection_source`
+  - `raw_video/images_ds` or `raw_video/images_ds_rgb`
+  - `refined_detect_runs/<run>/instances/bbox_norm_coords`
+  - `refined_detect_runs/<run>/instances/frame_indices`
+  - `refined_detect_runs/<run>/instances/source_kind_codes`
+  - `refined_detect_runs/<run>/instances/manual_edit_flags`
   - `source_index/source_dataset_idx`
   - `source_index/source_frame_idx`
   - `source_index/source_roi_idx`
   - `source_index/source_refined_row_ids`
   - `source_index/source_detect_row_index`
-- `train_indices`, `val_indices`, `test_indices` are disjoint.
-- Union of split indices equals `{0..N-1}` when test split is enabled.
+- `instances/frame_indices` is exactly `0..N-1`.
+- `instances/frame_counts` has length `N` and every value is `1`.
+- `train_indices`, `val_indices`, and `test_indices` are disjoint.
+- Union of split indices equals `{0..N-1}`.
 - `source_dataset_idx[i]` is within `[0, M-1]`.
 - `source_frame_idx[i]` is the original frame index in the source Zarr context.
 - `source_roi_idx[i]` is the source-local ROI row index before merge.
@@ -141,71 +153,70 @@ Required keys:
   when available, or `-1` for legacy/unmapped rows.
 - `source_detect_row_index[i]` is the raw detect row lineage when available,
   or `-1` for rows without raw-detect backing.
-- `detection_source` encoding is stable:
-  - `0` accepted curated sample (`refined` and manual-edited current rows both map here)
-  - `1` interpolated/synthetic sample
-- Current refined exports should normally have `includes_interpolated=false`
-  and all-zero `detection_source`.
+- New merged exports must not contain `source_kind_codes == interpolated`.
+
+## Interpolation Policy
+
+Current refined-detection training data is sparse and final-state based.
+Interpolation is not allowed in new merged exports.
+
+If a source dataset contains legacy interpolated rows, the exporter must fail
+closed by default with a clear error. The caller should review, migrate, or
+exclude those rows before creating a new merged artifact. Reader fallback for
+old archives may remain, but forward exports must stay interpolation-free.
 
 ## Determinism Rules
 
-Given identical ordered input dataset list, identical seed, identical split ratios, and identical filtering rules:
+Given identical ordered input dataset list, identical seed, identical split
+ratios, and identical filtering rules:
 
 - Exported sample order is deterministic.
 - Split indices are deterministic.
-- `manifest_sha256` and exported metadata hashes are stable except for explicit time fields.
+- Source-index lineage is deterministic.
+- Metadata hashes are stable except explicit time fields.
 
-## CLI Contract (Exporter)
-
-Proposed CLI surface:
+## CLI Contract
 
 - `--merge`
 - `--out-zarr <path>`
 - `--split 0.8/0.2` or `--split 0.8/0.1/0.1`
 - `--seed 42`
-- `--input-format gray|rgb|both`
-- `--include-rgb` (alias for `--input-format both`)
-- `--source-type refined|detect|manual|filtered|interpolated`
-- `--set-name <name>`
-- `--set-version <int>`
-- `--set-id <id>` (optional override)
-- `--registry <path>` (optional)
+- `--include-rgb`
+- `--registry <path>` optional
 
 Behavior:
 
 - Default mode writes gray only.
-- Default `--source-type` should be `refined`.
-- If `--input-format both` is requested and any source lacks RGB downsample arrays, fail fast.
+- The merged training config should use `source_type: refined`, regardless of
+  the historical source type used to build the input manifest.
+- If RGB export is requested and any source lacks RGB downsample arrays, fail
+  fast.
 - `--split` writes fixed index arrays in `splits/`.
 
-## Validation Checklist (Exporter)
+## Validation Checklist
 
-- Validate all input datasets have required arrays for selected source type.
+- Validate all input datasets have required arrays for their manifest-selected
+  source path.
+- Validate output has canonical `refined_detect_runs/<run>/instances`.
+- Validate no interpolated source-kind rows are present.
 - Validate merged array lengths are consistent.
-- Validate bbox coordinates are finite and in normalized range rules already used by preflight.
+- Validate bbox coordinates are finite and in normalized range rules already
+  used by preflight.
 - Validate split coverage/disjointness.
-- Validate source index lookup integrity.
+- Validate source-index lookup integrity.
 - Write a summary JSON next to output with counts:
   - total samples
   - per-source dataset counts
-  - real vs interpolated counts
-  - manual-edited counts when available from refined summary metadata
+  - source-kind counts
+  - manual-edited counts when available
   - split counts
 
-## Registry Integration (Recommended)
+## Registry Integration
 
 When `--registry` is provided:
 
 - Upsert merged dataset row into `datasets` with `zarr_purpose="training"`.
-- Upsert provenance/context if available from dominant or homogeneous source metadata.
+- Upsert provenance/context if available from dominant or homogeneous source
+  metadata.
 - Add `training_sets.dataset_ids_json` linkage to include merged dataset id.
 - Persist invocation metadata in `training_sets.invocation_json`.
-
-## Open Decision Defaults
-
-Recommended defaults for initial implementation:
-
-- Include `splits/` arrays: yes.
-- Single merged Zarr per training set: yes.
-- Default output modality: gray only.
-- Optional RGB export: yes via `--include-rgb` or `--input-format both`.

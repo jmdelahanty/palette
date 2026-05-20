@@ -292,7 +292,7 @@ cropped ROI tensors needed by downstream consumers.
 | `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes (`[cx, cy, w, h]`) |
 | `frame_indices` | `(n_rois,)` | `int32` | Frame index per ROI |
 | `frame_counts` | `(n_frames,)` | `int32` | Count of ROIs per frame |
-| `detection_source` | `(n_rois,)` | `int8` | 0 = real detection, 1 = interpolated (copied from refined runs) |
+| `detection_source` | `(n_rois,)` | `int8` | Legacy/support crop label: 0 = accepted detection, 1 = historical interpolated row |
 | `detection_indices` | `(n_rois,)` | `int32` | Physical row index into the resolved `detection_source_path` rowset |
 | `source_refined_row_ids` *(optional)* | `(n_rois,)` | `int64` | Stable logical refined-detection row IDs copied from `refined_detect_runs/<run>/instances/refined_row_ids` |
 | `source_detect_row_index` *(optional)* | `(n_rois,)` | `int32` | Raw detect row lineage copied from refined instances when available; `-1` for manual rows |
@@ -338,6 +338,10 @@ Current policy note:
 - Many traditional/training/export consumers still require materialized
   `roi_images` even though mixed-mode readers now exist for some ROI-model
   workflows.
+- New merged detection-training exports do not use `crop_runs` as the forward
+  label authority. They write positive detection labels only to
+  `refined_detect_runs/<run>/instances`; crop-run label arrays remain
+  compatibility/support surfaces for per-recording and historical stores.
 
 Cropping resolves the ROI source via `crop.source_type` (`detect`, `refined`,
 `filtered`, `interpolated`, `manual`, `auto`) or an explicit
