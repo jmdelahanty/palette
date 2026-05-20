@@ -1,7 +1,7 @@
 # Experiment Types & Protocol Reference
 
 Purpose: catalog the experiment types, protocols, stimulus modes, and hardware
-configurations present in the Palette system as of 2026-02-28.
+configurations present in the Palette system. Last reviewed 2026-05-20.
 
 ## Recording Types
 
@@ -24,9 +24,12 @@ Only 2 protocols are populated in the registry (52 of 114 recordings):
 | `Feeding` | 26 | Feeding behavior with no programmed visual stimulus. |
 | `DefaultScreen` | 26 | Baseline/default screen protocol. |
 
-62 recordings have no protocol data (60 training zarrs + 2 others).
-Protocol extraction is blocked on a key-name mismatch in the H5 import path
-(`protocol_json` vs `protocol_definition_json`). See `docs/protocol_parameter_registry_todo.md`.
+62 recordings have no protocol data (60 training zarrs + 2 others) in the
+historical registry snapshot this reference was built from. The importer now
+handles both historical H5 protocol keys (`protocol_definition_json` and
+`protocol_json`), so missing protocol coverage should be treated as a live-data
+backfill/verification issue rather than a current importer blocker. See
+`docs/protocol_parameter_registry_todo.md`.
 
 ## Stimulus Modes
 
@@ -109,9 +112,9 @@ protocol
 ```
 
 Protocol data lives in:
-1. **Source H5 files**: `protocol_snapshot/protocol_definition_json`
-2. **Zarr attrs**: `analysis/stimulus_runs/<run>/protocol_json` (currently empty due to import bug)
-3. **Registry**: `provenance.protocol_name`, `provenance.protocol_hash` (currently NULL)
+1. **Source H5 files**: `protocol_snapshot/protocol_definition_json` or historical `protocol_snapshot/protocol_json`
+2. **Zarr attrs**: `analysis/stimulus_runs/<run>/protocol_json` when the stimulus import/backfill has been run
+3. **Registry**: `provenance.protocol_name`, `provenance.protocol_hash` when registry backfill has projected the Zarr metadata
 
 ## Biological Variables
 
@@ -133,7 +136,7 @@ Datasets are typically grouped for analysis by:
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| 0 | Partial | Fix H5 key mismatch, backfill protocol_json into zarrs. Script exists (`scripts/backfill_protocol_json.py`), 55 runs patched, but zarr attrs still empty. |
+| 0 | Partial | H5 key compatibility is implemented in `import_stimulus_to_zarr.py`; remaining work is archive/registry backfill verification for `protocol_json` coverage. |
 | 1 | Not started | Create `protocols` + `protocol_steps` tables, populate from zarr attrs. |
 | 2 | Deferred | Per-stimulus-type parameter tables (chaser_step_params, grating_step_params, etc.). Waiting for real analysis workflow to drive requirements. |
 | 3 | Deferred | Analysis result tables (chase_sequences, etc.). Requires analysis pipeline. |
@@ -147,7 +150,7 @@ The `raw_json` escape hatch in the `protocols` table (Phase 1) will cover ad-hoc
 - `docs/protocol_parameter_registry_todo.md` — full protocol registry architecture
 - `src/fisheye/docs/citrus_data_structure_documentation.md` — Citrus protocol parameter reference
 - `src/fisheye/utils/read_h5_data.py` — stimulus mode enum mappings
-- `src/fisheye/analysis/import_stimulus_to_zarr.py` — stimulus import (has key mismatch)
+- `src/fisheye/analysis/import_stimulus_to_zarr.py` — stimulus import; handles both historical protocol keys
 - `scripts/backfill_protocol_json.py` — protocol data repair script
 - `src/fisheye/registry/db.py` — recording type/subtype vocab tables (lines 2096-2121)
 - `docs/session_context.md` — session metadata fields

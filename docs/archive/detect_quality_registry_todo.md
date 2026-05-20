@@ -28,8 +28,8 @@ Implemented already:
 
 All planned detect-quality TODO items are complete; execution evidence is recorded below.
 
-Parallel execution contract for the remaining work:
-`docs/detect_quality_parallel_agents_contract.md`.
+Archived parallel execution contract:
+`docs/archive/detect_quality_parallel_agents_contract.md`.
 
 ## Policy Decisions
 

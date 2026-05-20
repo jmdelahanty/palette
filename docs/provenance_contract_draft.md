@@ -1,11 +1,11 @@
-# Provenance Contract Draft (v0)
+# Provenance Contract (v1)
 <!-- contract-meta
-version: 0
-status: draft
-last_verified: 2026-02-27
+version: 1
+status: active
+last_verified: 2026-05-20
 -->
 
-Purpose: define a single, queryable stage-wide provenance contract for
+Purpose: define the active, queryable stage-wide provenance contract for
 refinement stages so detect/keypoints/eye-masks expose consistent metadata,
 especially git commit/hash and contract identity, through shared helpers.
 
@@ -19,7 +19,7 @@ In scope:
 
 Adoption note:
 
-- this draft defines a stage-wide contract family name so the same object can be
+- this contract defines a stage-wide contract family name so the same object can be
   adopted in non-refinement stages later without renaming.
 
 Out of scope:
@@ -115,7 +115,7 @@ Read compatibility order for git commit:
 3. top-level `git_commit`
 4. top-level `git_commit_hash`
 
-## Unified Helper API (Draft)
+## Unified Helper API
 
 Add shared helpers in `src/fisheye/shared/stage_provenance.py`.
 

@@ -2,7 +2,7 @@
 
 Date anchored: 2026-03-06
 
-Last reviewed: 2026-05-01
+Last reviewed: 2026-05-20
 
 Purpose: summarize the current state of Palette's analysis and post-detection
 workflows, identify which repository docs are current versus aspirational or
@@ -173,8 +173,10 @@ That document defines the implemented
 - can support moving gratings, concentric gratings, looming dots, chaser, and
   future stimulus families without changing the top-level run contract
 
-I do not see a corresponding implementation module under `src/fisheye/analysis`.
-So this is still design, not current workflow.
+Implementation now exists under `src/fisheye/analysis/stimulus_response.py`,
+with helper modules for storage and stimulus-specific OMR/grating behavior. This
+section should be read as current-status guidance plus remaining hardening work,
+not as a pre-implementation design note.
 
 ## Documentation Status
 

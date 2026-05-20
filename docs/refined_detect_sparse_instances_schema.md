@@ -1,14 +1,14 @@
 # Refined Detect Sparse Instances Schema
 
 <!-- design-meta
-status: draft
-last_updated: 2026-04-09
+status: active
+last_updated: 2026-05-20
 -->
 
-Purpose: define a concrete target schema for moving `refined_detect_runs` from
-the current dense `(frame_index, entity_id)` root toward a canonical sparse
-instance authoring surface that can support future multi-subject detect and
-tracking.
+Purpose: define the active sparse instance schema for `refined_detect_runs` and
+the compatibility path away from older dense `(frame_index, entity_id)` roots.
+This schema is the canonical authoring surface for new refined detect runs and
+supports future multi-subject detect and tracking.
 
 This document is the implementation-shaped follow-up to
 `docs/refined_detect_multisubject_goal.md`.

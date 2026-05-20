@@ -29,6 +29,17 @@ There are **no severe doc/code contradictions** in this pass. The big
 contradiction surfaced is in the *code*, not the docs: idempotence and
 distributed-execution behavior are weaker than the contracts suggest.
 
+Follow-up cleanup applied 2026-05-20:
+
+- archived `detection_training_zarr_edit_todo.md`,
+  `detect_quality_parallel_agents_contract.md`, and
+  `subject_mask_component_provenance_followthrough_checklist.md`
+- refreshed the highest-impact stale claims in
+  `analysis_post_detection_workflow_status.md` and
+  `experiment_types_reference.md`
+- bumped `refined_detect_sparse_instances_schema.md` and
+  `provenance_contract_draft.md` from draft to active
+
 ## Action List — Archive Moves (CHECKLIST-COMPLETE)
 
 Move these to `docs/archive/` per `docs/legacy_archive_migration_policy.md`:
