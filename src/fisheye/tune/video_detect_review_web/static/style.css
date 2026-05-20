@@ -100,7 +100,8 @@ h1 {
   color: #cbd5e1;
 }
 
-input[type="number"] {
+input[type="number"],
+select {
   width: 100%;
   border: 1px solid #475569;
   background: #020617;
@@ -108,11 +109,26 @@ input[type="number"] {
   padding: 7px 8px;
 }
 
+#playback-controls {
+  margin-top: 12px;
+}
+
 #toolbar {
   margin-top: 12px;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 7px;
+}
+
+#search-controls {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+#search-controls .field-row {
+  grid-column: 1 / -1;
 }
 
 .check-row {
@@ -141,16 +157,54 @@ button:disabled {
   background: #111827;
 }
 
+button.saving {
+  border-color: #2563eb;
+  background: #1e3a8a;
+  color: #dbeafe;
+  cursor: wait;
+}
+
+#save-progress-line {
+  min-height: 1.2em;
+}
+
+#save-progress-line.saving {
+  color: #93c5fd;
+}
+
 #messages {
   margin-top: 10px;
   min-height: 2.4em;
 }
 
+.mode-line {
+  margin-top: 8px;
+  padding: 7px 8px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #cbd5e1;
+}
+
+.mode-line.editable {
+  border-color: #166534;
+  color: #bbf7d0;
+}
+
+.mode-line.readonly {
+  border-color: #92400e;
+  color: #fde68a;
+}
+
 #state-line,
 #status-line,
-#readback-line {
+#readback-line,
+#dirty-line {
   margin-top: 6px;
   white-space: pre-wrap;
+}
+
+#dirty-line.dirty {
+  color: #fbbf24;
 }
 
 #help {

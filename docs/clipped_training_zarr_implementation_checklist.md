@@ -1,7 +1,7 @@
 # Clipped Training Zarr Implementation Checklist
 <!-- contract-meta
 status: working_checklist
-last_verified: 2026-05-16
+last_verified: 2026-05-20
 purpose: Define and track the next implementation slice for creating sampled training Zarrs from Orange-style clipped recordings.
 -->
 
@@ -20,6 +20,11 @@ Consumer-facing frame semantics are defined in
 place to check before changing how `frame_indices`,
 `raw_video/original_frame_indices`, `parent_frame_index`, or
 `recording_frame_id` are exposed to readers.
+
+Storage-root relocation semantics are defined in
+`docs/recording_store_relocation_components.md`. That document is the place to
+check before moving clipped recordings or clipped training Zarrs from local
+paths such as `/nvme1/recordings` to durable `/groups` storage.
 
 ## Current Prerequisites
 
@@ -52,6 +57,18 @@ place to check before changing how `frame_indices`,
   `detect_seed_v007_20260513` and
   `refined_detect_2026-05-13_16-00-31_review_migrated` after exact
   `raw_video/original_frame_indices == parent_frame_index` preflight.
+- [x] Detection-label promotion from clipped analysis finalized collections into
+  per-recording training Zarrs is implemented through
+  `fisheye.tune.detect_training_promotion_backend` and
+  `fisheye.utils.promote_analysis_detect_to_training`.
+- [x] Detection-label promotion mirrors positive labels into the canonical
+  `refined_detect_runs/<run>/instances` table. Crop-run bbox fields remain
+  materialized image/support metadata, not the authoritative detection-label
+  surface for exporters or downstream consumers.
+- [x] The video-backed detection review UI can call the same promotion backend
+  on save when launched with `--edit --promote-training-zarr`; batch saves call
+  promotion once per saved batch and clipped appends decode once per touched
+  source clip.
 
 ## Design Decisions
 
@@ -379,11 +396,13 @@ after verifying exact equality between source
 ### E. Deferred
 
 - [ ] Clip-aware analysis writers and run-group importers.
-- [ ] Finalized clip collections under
+- [x] Finalized detect/refined-detect clip collections under
   `experiment_index/finalized_runs/<workflow_id>`.
 - [ ] Temporal boundary policy for track kinematics and bout detection.
-- [ ] Label import from existing clipped analysis runs using composite
-  `(source_refined_run_path, source_refined_row_id)` identity.
+- [x] Detection bbox promotion from existing clipped analysis refined runs using
+  composite clipped source identity and parent-frame mapping.
+- [ ] Keypoint, mask, and multi-instance label import from existing clipped
+  analysis runs.
 - [ ] Multi-camera clipped recordings.
 
 ## Staleness Notes From 2026-05-16 Docs Pass

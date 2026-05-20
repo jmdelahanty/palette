@@ -2,7 +2,7 @@
 
 <!-- todo-meta
 status: active
-last_updated: 2026-05-18
+last_updated: 2026-05-20
 -->
 
 ## Goal
@@ -126,7 +126,7 @@ Add/extend tests in `tests/unit/fisheye/test_detect_review_backend.py`:
 
 - replacing `run_manual_review(...)` UI
 - `frame_arena` and multi-slot per frame support
-- retune path and batch save
+- retune path
 - full review-status transitions (`a/N/R/P`) and follow-up flags
 - any behavior changes outside the manual save path
 
@@ -155,32 +155,29 @@ Still required before calling the web detection reviewer production-ready:
 
 ## Analysis-Zarr And Video-Backed Review Status
 
-The current web detection reviewer is primarily useful for materialized training
-Zarrs and any archive that already exposes `raw_video/images_ds`. It is not yet
-a general analysis-video viewer.
+There are now two browser review surfaces with different backing data:
 
-For traditional single-video analysis Zarrs without persisted image arrays, a
-future web reviewer would need to:
+- `detect_review_web` is the materialized-image reviewer. It is primarily for
+  training Zarrs and any archive that already exposes `raw_video/images_ds`.
+- `video_detect_review_web` is the video-backed analysis reviewer. It resolves
+  source media plus refined detections and can inspect/edit detection bboxes
+  against traditional analysis Zarrs and clipped finalized collections.
 
-- resolve `source_video_path`;
-- decode requested video frames on demand;
-- overlay the selected refined-detect run;
-- write edits back through the refined-detect curation contract.
-
-For clipped analysis shells, the web reviewer would need the same resolver
-layer Crimson now needs:
+For clipped analysis shells, `video_detect_review_web` uses the same resolver
+shape Crimson needs:
 
 - finalized collection selection from
   `experiment_index/finalized_runs/<collection_id>`;
 - `recording_frame_index.parquet` mapping from parent frame to clip-local
   frame;
-- clip-video decode for the selected frame;
+- clip-video or review-proxy media for the selected frame;
 - run lookup under
   `clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs/<run>`.
 
-That is a separate implementation slice. For now, Crimson is the preferred
-place to build analysis-video review for clipped recordings, while the web
-reviewer remains focused on materialized training examples.
+The recommended browser path for long clipped videos is to build review proxy
+MP4s and pass `--review-proxy-manifest`. Directly serving original
+high-resolution clips remains a diagnostic fallback, not the preferred operator
+review path.
 
 ## Review Proxy Videos For Clipped Analysis
 
@@ -320,6 +317,121 @@ scripts/py -m fisheye.tune.video_detect_review_web \
 When a proxy manifest is present, the backend still resolves detections in
 source-image coordinates and exposes both source and proxy dimensions to the
 frontend. The proxy MP4 is used only as the media source for display.
+
+### Video-Backed Review UI Status
+
+`video_detect_review_web` now supports clipped analysis inspection against
+finalized refined-detect collections and optional proxy videos. It is read-only
+by default. Launch with `--edit` only when intentional manual writes back into
+the analysis Zarr are desired.
+
+Current review controls:
+
+- Frame stepping by parent frame (`n` / `p`) and direct parent-frame seek.
+- Native browser playback for fast screening, with overlay boxes following the
+  browser's current media time.
+- Issue navigation for frames with no present box or a non-`present` refined
+  status (`m` next, `M` previous).
+- Low-confidence navigation using the UI threshold (`l` next, `L` previous).
+- Manual-edit navigation (`e` next, `E` previous).
+- Save/clear controls are disabled in read-only mode and guarded server-side by
+  the `editable` session flag.
+- Unsaved bbox edits are buffered client-side by parent frame, remain visible
+  when navigating back to that frame, and are saved together with `Save Pending`.
+
+Save behavior:
+
+- In editable mode, each saved frame updates the selected refined-detect state in
+  the analysis Zarr.
+- If there are unsaved edits on multiple frames, `Save` submits the whole pending
+  set to `/api/frames/save_batch`; otherwise it saves the current frame.
+- Saving promotes each edited frame into the recording's training Zarr only when
+  the server is launched with `--promote-training-zarr <training.zarr>`.
+- The post-save hook writes the analysis edit first, then calls
+  `fisheye.tune.detect_training_promotion_backend`. Batch saves call the
+  promotion backend once for all successfully saved frames instead of looping
+  one frame at a time.
+- For clipped sessions, the promotion backend groups appended training examples
+  by source clip/video so one save batch can decode a clip once for all frames in
+  that clip. Existing training rows are updated in-place without re-decoding the
+  source video.
+- Save responses and the server log report batch timing telemetry:
+  `total_batch_s`, analysis write totals, promotion totals, clipped decode group
+  counts, clipped decode total time, image-array write time, and promotion
+  metadata write time.
+- If promotion fails, the analysis edit remains valid and the UI reports
+  `promotion_failed`; it does not silently roll back the analysis edit. Pending
+  edits with promotion failures remain in the client buffer so the operator can
+  retry.
+- Without `--promote-training-zarr`, use
+  `fisheye.utils.promote_analysis_detect_to_training` explicitly after a save
+  when the edited frame should become a per-recording training example. For
+  migrated/clipped stores, prefer `--use-registry-target` so the CLI writes the
+  active registry `zarr_use='training'` store. For standard
+  `<recording>_analysis.zarr` layouts without a registry target, the CLI infers
+  the sibling `<recording>_training.zarr`; use `--training-zarr` for
+  nonstandard targets.
+
+Example editable analysis review with post-save promotion:
+
+```bash
+scripts/py -m fisheye.tune.video_detect_review_web \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --edit \
+  --promote-training-zarr <recording>/zarr/<recording>_training.zarr \
+  --host 0.0.0.0 \
+  --port 8790
+```
+
+Current limits:
+
+- The hook supports traditional sessions and clipped finalized-collection
+  sessions when the review resolver provides clip/camera/parent-frame mapping.
+- The standalone promotion CLI supports clipped finalized-collection backfill
+  from `recording_frame_index.parquet`; by default it promotes only manually
+  edited frames and keeps manual clears as explicit negative examples. It can
+  resolve the target training Zarr from the registry with
+  `--use-registry-target`.
+- Clipped promotion decodes the real source clip for training images. Review
+  proxy videos are display-only and are not promoted into training Zarrs.
+
+The issue-navigation target is intentionally broad: it includes both model
+failures with no box and refined frames marked filtered/missing. This is the
+right first pass for finding frames where the user may need to add a box, move a
+box, or decide that no fish should be labeled.
+
+### Browser Playback Semantics
+
+`video_detect_review_web` uses the browser `<video>` element for continuous
+playback and overlays boxes by resolving the current media time to a parent
+frame. This is intended for fast visual screening, not proof that every source
+frame has been presented to the reviewer.
+
+At playback rates above the display refresh budget, the browser may skip
+presenting source frames. For example, a `30 FPS` proxy on a `60 Hz` monitor can
+usually present every source frame up to `2x` playback. At `4x`, the media stream
+advances at `120` source frames per second, so the monitor cannot show every
+source frame. The overlay follows the frame corresponding to the browser's
+current media time; it does not force every source frame to be displayed.
+
+Current policy:
+
+- Use `1x` for ordinary inspection.
+- Use `2x` as the practical upper bound for every-frame presentation on a
+  `60 Hz` monitor with `30 FPS` proxies.
+- Use `3x`/`4x`/`8x` only for fast screening where skipped visual frames are
+  acceptable.
+- When exact per-frame inspection matters, use manual `n`/`p` frame stepping or
+  a future every-frame playback mode rather than native browser playback.
+
+Deferred option: add an explicit "every-frame mode" that does not call
+`video.play()`. Instead, it would advance parent frame `N, N+1, ...` on each
+render tick, seek/render that exact proxy frame, and overlay the matching
+detection payload. This guarantees no skipped source-frame presentation but caps
+throughput at decode/seek/render speed and display refresh. A future optimized
+version could use a server-side decoded-frame cache or a browser-side frame
+stream, but the current browser `<video>` playback path should remain the simple
+fast-screening mode.
 
 Serving individual PyNvVideoCodec-decoded JPEG/WebP frames remains a useful
 alternative for exact-frame labeling and can share the same clipped frame

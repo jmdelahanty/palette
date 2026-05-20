@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -826,19 +827,14 @@ def load_frame_payload(session: VideoDetectReviewSession, parent_frame_index: in
     }
 
 
-def apply_manual_edit(
+def _apply_manual_edit_to_payload(
     session: VideoDetectReviewSession,
+    record: FrameRecord,
+    payload: Mapping[str, object],
     *,
-    parent_frame_index: int,
     bbox_norm: Optional[Sequence[object]],
 ) -> dict[str, object]:
-    if not session.editable:
-        raise RuntimeError("This review server was started read-only. Restart with --edit to persist changes.")
-    if parent_frame_index < 0 or parent_frame_index >= len(session.frame_records):
-        raise IndexError("parent_frame_index is out of range.")
-    record = session.frame_records[int(parent_frame_index)]
-    cache = _load_refined_payload(session, record)
-    frame_to_row = cache.payload.get("frame_to_row")
+    frame_to_row = payload.get("frame_to_row")
     if not isinstance(frame_to_row, dict):
         raise RuntimeError("Refined payload is missing frame_to_row.")
     row_idx = frame_to_row.get(int(record.source_frame_index))
@@ -846,26 +842,25 @@ def apply_manual_edit(
         raise RuntimeError(f"Refined run is missing source frame {record.source_frame_index}.")
     row_idx = int(row_idx)
     normalized_bbox = _normalize_bbox_or_none(bbox_norm)
-    updated = _copy_payload(cache.payload)
     source_surface_row_idx = _resolve_source_surface_row_for_frame(
-        updated,
+        payload,
         frame=record.source_frame_index,
         row_idx=row_idx,
     )
 
-    source_detect_row_index = np.asarray(updated["source_detect_row_index"], dtype=np.int32).reshape(-1)
-    detection_source = np.asarray(updated["detection_source"], dtype=np.int8).reshape(-1)
-    bbox_arr = np.asarray(updated["bbox_norm_coords"], dtype=np.float64).reshape(-1, 4)
-    scores = np.asarray(updated["confidence_scores"], dtype=np.float32).reshape(-1)
-    class_ids = np.asarray(updated["class_ids"], dtype=np.int32).reshape(-1)
-    status_labels = np.asarray(updated["status_labels"], dtype=object).reshape(-1)
-    source_kind_labels = np.asarray(updated["source_kind_labels"], dtype=object).reshape(-1)
-    manual_edit_flags = np.asarray(updated["manual_edit_flags"], dtype=bool).reshape(-1)
-    reason_labels = np.asarray(updated["reason_labels"], dtype=object).reshape(-1)
+    source_detect_row_index = np.asarray(payload["source_detect_row_index"], dtype=np.int32).reshape(-1)
+    detection_source = np.asarray(payload["detection_source"], dtype=np.int8).reshape(-1)
+    bbox_arr = np.asarray(payload["bbox_norm_coords"], dtype=np.float64).reshape(-1, 4)
+    scores = np.asarray(payload["confidence_scores"], dtype=np.float32).reshape(-1)
+    class_ids = np.asarray(payload["class_ids"], dtype=np.int32).reshape(-1)
+    status_labels = np.asarray(payload["status_labels"], dtype=object).reshape(-1)
+    source_kind_labels = np.asarray(payload["source_kind_labels"], dtype=object).reshape(-1)
+    manual_edit_flags = np.asarray(payload["manual_edit_flags"], dtype=bool).reshape(-1)
+    reason_labels = np.asarray(payload["reason_labels"], dtype=object).reshape(-1)
 
     chosen_source_row_index = (
-        int(np.asarray(updated["source_surface_source_detect_row_index"], dtype=np.int32).reshape(-1)[source_surface_row_idx])
-        if source_surface_row_idx is not None and "source_surface_source_detect_row_index" in updated
+        int(np.asarray(payload["source_surface_source_detect_row_index"], dtype=np.int32).reshape(-1)[source_surface_row_idx])
+        if source_surface_row_idx is not None and "source_surface_source_detect_row_index" in payload
         else -1
     )
     source_detect_row_index[row_idx] = chosen_source_row_index
@@ -883,8 +878,8 @@ def apply_manual_edit(
         added = 0
         removed = 1
         if source_surface_row_idx is not None:
-            np.asarray(updated["source_surface_decision_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "manual_clear"
-            np.asarray(updated["source_surface_reason_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "manual_clear"
+            np.asarray(payload["source_surface_decision_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "manual_clear"
+            np.asarray(payload["source_surface_reason_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "manual_clear"
     else:
         bbox_arr[row_idx] = normalized_bbox
         scores[row_idx] = np.float32(session.manual_score)
@@ -897,22 +892,184 @@ def apply_manual_edit(
         added = 1
         removed = 0
         if source_surface_row_idx is not None:
-            np.asarray(updated["source_surface_decision_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "accepted"
-            np.asarray(updated["source_surface_reason_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "manual_correction"
+            np.asarray(payload["source_surface_decision_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "accepted"
+            np.asarray(payload["source_surface_reason_labels"], dtype=object).reshape(-1)[source_surface_row_idx] = "manual_correction"
 
+    return {
+        "action": action,
+        "row_idx": row_idx,
+        "added": added,
+        "removed": removed,
+    }
+
+
+def _manual_edit_result(session: VideoDetectReviewSession, *, parent_frame_index: int, action: str) -> dict[str, object]:
+    payload = load_frame_payload(session, parent_frame_index)
+    return {
+        "action": action,
+        "parent_frame_index": int(parent_frame_index),
+        "source_frame_index": int(payload.get("source_frame_index", parent_frame_index)),
+        "bbox_norm": payload["bbox_norm"],
+        "status": payload["status"],
+    }
+
+
+def apply_manual_edit(
+    session: VideoDetectReviewSession,
+    *,
+    parent_frame_index: int,
+    bbox_norm: Optional[Sequence[object]],
+) -> dict[str, object]:
+    if not session.editable:
+        raise RuntimeError("This review server was started read-only. Restart with --edit to persist changes.")
+    if parent_frame_index < 0 or parent_frame_index >= len(session.frame_records):
+        raise IndexError("parent_frame_index is out of range.")
+    record = session.frame_records[int(parent_frame_index)]
+    cache = _load_refined_payload(session, record)
+    updated = _copy_payload(cache.payload)
+    mutation = _apply_manual_edit_to_payload(
+        session,
+        record,
+        updated,
+        bbox_norm=bbox_norm,
+    )
     _write_payload(
         session,
         record,
         updated,
-        row_indices=np.asarray([row_idx], dtype=np.int32),
-        added=added,
-        removed=removed,
+        row_indices=np.asarray([int(mutation["row_idx"])], dtype=np.int32),
+        added=int(mutation["added"]),
+        removed=int(mutation["removed"]),
     )
     _reload_refined_payload(session, record)
+    return _manual_edit_result(session, parent_frame_index=int(parent_frame_index), action=str(mutation["action"]))
+
+
+def apply_manual_edits_batch(
+    session: VideoDetectReviewSession,
+    *,
+    edits: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Apply pending manual bbox edits with one analysis write per refined group."""
+    if not session.editable:
+        raise RuntimeError("This review server was started read-only. Restart with --edit to persist changes.")
+    if not isinstance(edits, Sequence):
+        raise ValueError("edits must be a sequence of {frame, bbox_norm} objects.")
+
+    normalized: list[dict[str, object]] = []
+    seen: set[int] = set()
+    for index, raw in enumerate(edits):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"edit at index {index} is not an object.")
+        try:
+            frame = int(raw.get("frame"))  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"edit at index {index} has invalid frame.") from exc
+        if frame in seen:
+            raise ValueError(f"duplicate frame in batch edit request: {frame}")
+        if frame < 0 or frame >= len(session.frame_records):
+            raise IndexError(f"parent_frame_index is out of range: {frame}")
+        seen.add(frame)
+        normalized.append(
+            {
+                "index": int(index),
+                "frame": int(frame),
+                "bbox_norm": raw.get("bbox_norm"),
+                "record": session.frame_records[frame],
+            }
+        )
+
+    groups: dict[str, list[dict[str, object]]] = {}
+    for item in normalized:
+        record = item["record"]
+        assert isinstance(record, FrameRecord)
+        groups.setdefault(record.refined_group_path, []).append(item)
+
+    results: list[dict[str, object] | None] = [None] * len(normalized)
+    group_timings: list[dict[str, object]] = []
+    for group_key, group_items in groups.items():
+        group_started = time.perf_counter()
+        first_record = group_items[0]["record"]
+        assert isinstance(first_record, FrameRecord)
+        cache = _load_refined_payload(session, first_record)
+        updated = _copy_payload(cache.payload)
+        successes: list[dict[str, object]] = []
+        added = 0
+        removed = 0
+        for item in group_items:
+            record = item["record"]
+            assert isinstance(record, FrameRecord)
+            frame = int(item["frame"])
+            try:
+                mutation = _apply_manual_edit_to_payload(
+                    session,
+                    record,
+                    updated,
+                    bbox_norm=item["bbox_norm"],  # type: ignore[arg-type]
+                )
+            except Exception as exc:
+                results[int(item["index"])] = {
+                    "ok": False,
+                    "frame": frame,
+                    "error": "save_failed",
+                    "details": str(exc),
+                }
+                continue
+            successes.append({"item": item, "mutation": mutation})
+            added += int(mutation["added"])
+            removed += int(mutation["removed"])
+
+        write_error: Exception | None = None
+        if successes:
+            try:
+                _write_payload(
+                    session,
+                    first_record,
+                    updated,
+                    row_indices=np.asarray(
+                        [int(entry["mutation"]["row_idx"]) for entry in successes],
+                        dtype=np.int32,
+                    ),
+                    added=added,
+                    removed=removed,
+                )
+                _reload_refined_payload(session, first_record)
+            except Exception as exc:
+                write_error = exc
+
+        elapsed = time.perf_counter() - group_started
+        group_timings.append(
+            {
+                "refined_group_path": group_key,
+                "frames": [int(entry["item"]["frame"]) for entry in successes],
+                "saved": 0 if write_error is not None else len(successes),
+                "failed": len(group_items) - len(successes) + (len(successes) if write_error is not None else 0),
+                "analysis_write_s": elapsed,
+            }
+        )
+        for entry in successes:
+            item = entry["item"]
+            frame = int(item["frame"])
+            if write_error is not None:
+                results[int(item["index"])] = {
+                    "ok": False,
+                    "frame": frame,
+                    "error": "save_failed",
+                    "details": str(write_error),
+                }
+                continue
+            mutation = entry["mutation"]
+            results[int(item["index"])] = {
+                "ok": True,
+                "frame": frame,
+                "result": _manual_edit_result(
+                    session,
+                    parent_frame_index=frame,
+                    action=str(mutation["action"]),
+                ),
+            }
+
     return {
-        "action": action,
-        "parent_frame_index": int(parent_frame_index),
-        "source_frame_index": int(record.source_frame_index),
-        "bbox_norm": load_frame_payload(session, parent_frame_index)["bbox_norm"],
-        "status": load_frame_payload(session, parent_frame_index)["status"],
+        "items": [item for item in results if item is not None],
+        "groups": group_timings,
     }

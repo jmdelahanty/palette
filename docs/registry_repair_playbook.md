@@ -75,6 +75,11 @@ After path or dataset-ID policy migrations, the registry may contain multiple
 active `datasets` rows for the same physical Zarr path. Do not delete those
 rows directly. First generate a dry-run dedupe plan:
 
+For storage-root relocation, first identify which path references are active
+location pointers and which are historical provenance. See
+`docs/recording_store_relocation_components.md` before rewriting registry
+paths, Zarr attrs, Parquet sidecars, or manifest fields.
+
 ```bash
 scripts/py -m fisheye.registry.dedupe \
   --registry /nvme1/palette_registry.sqlite

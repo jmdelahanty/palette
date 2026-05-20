@@ -18,6 +18,9 @@
         <div id="state-line" class="mono muted">Loading...</div>
         <div id="status-line" class="mono"></div>
         <div id="readback-line" class="mono muted"></div>
+        <div id="dirty-line" class="mono muted"></div>
+        <div id="save-progress-line" class="mono muted"></div>
+        <div id="edit-mode-line" class="mono mode-line"></div>
         <div id="messages" class="mono"></div>
 
         <div id="frame-controls">
@@ -28,12 +31,40 @@
           <button id="go-btn" type="button">Go</button>
         </div>
 
+        <div id="playback-controls">
+          <label class="field-row">
+            <span>Playback speed</span>
+            <select id="speed-select">
+              <option value="0.25">0.25x</option>
+              <option value="0.5">0.5x</option>
+              <option value="1" selected>1x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2x</option>
+              <option value="3">3x</option>
+              <option value="4">4x</option>
+              <option value="8">8x</option>
+            </select>
+          </label>
+        </div>
+
         <div id="toolbar">
+          <button id="play-btn" type="button">Play</button>
           <button id="save-btn" type="button">Save</button>
           <button id="clear-btn" type="button">Clear Box</button>
           <button id="prev-btn" type="button">Previous</button>
           <button id="next-btn" type="button">Next</button>
           <button id="fit-btn" type="button">Fit</button>
+        </div>
+
+        <div id="search-controls">
+          <label class="field-row">
+            <span>Low confidence threshold</span>
+            <input id="low-confidence-input" type="number" value="0.50" min="0" max="1" step="0.05">
+          </label>
+          <button id="prev-issue-btn" type="button">Prev Issue</button>
+          <button id="next-issue-btn" type="button">Next Issue</button>
+          <button id="next-low-conf-btn" type="button">Next Low Conf</button>
+          <button id="next-manual-btn" type="button">Next Manual</button>
         </div>
 
         <label class="check-row">
@@ -44,9 +75,9 @@
         <div id="help" class="mono muted">
           <p>Left drag: draw or move box.</p>
           <p>Right drag / middle drag / shift drag: pan.</p>
-          <p>Wheel: zoom. Keys: s save, c clear, n/p navigate, f fit, g go.</p>
+          <p>Wheel: zoom. Keys: space/k play-pause, [/] speed, s save pending edits, c clear, n/p navigate, m issue, l low-conf, e manual, f fit, g go.</p>
           <p id="renderer-line">Renderer: detecting...</p>
-          <p>Canvas2D is the default renderer. Add <code>?renderer=webgpu</code> to test WebGPU.</p>
+          <p>WebGPU is the default renderer when available. Add <code>?renderer=canvas</code> to force Canvas2D.</p>
         </div>
       </aside>
     </main>

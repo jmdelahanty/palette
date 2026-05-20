@@ -1,8 +1,8 @@
 # Analysis-to-Training Promotion Contract
 
 <!-- contract-meta
-status: draft
-last_updated: 2026-05-18
+status: active
+last_updated: 2026-05-20
 scope: detect bbox promotion from analysis zarr to per-recording training zarr
 -->
 
@@ -17,18 +17,25 @@ those supervised examples in the per-recording training archive.
 
 ## Current Position
 
-As of 2026-05-18, the practical review/edit split is:
+As of 2026-05-20, the practical review/edit split is:
 
-- Crimson is the preferred path for analysis-video inspection, especially for
-  clipped recordings once its Parquet-backed resolver lands.
-- Palette's current web review tools are best suited to materialized training
-  Zarrs because they can read persisted `raw_video/images_*` arrays directly.
-- A video-backed web reviewer for analysis Zarrs is possible, but it requires
-  a separate decoder/resolver layer and is not the next Palette-side blocker.
+- Crimson remains the preferred full-stack desktop path for high-performance
+  analysis-video inspection.
+- Palette now has two browser review surfaces:
+  - `detect_review_web` for materialized image archives such as training Zarrs
+    with `raw_video/images_*`;
+  - `video_detect_review_web` for analysis-video detection review, including
+    clipped finalized collections when launched with the resolver inputs and,
+    preferably, a review-proxy manifest.
+- Promotion is implemented for detection bounding boxes, including clipped
+  finalized-collection sources. The remaining integration work is exporter
+  adoption, Crimson save-hook wiring, and performance/telemetry hardening for
+  online batch saves.
 
-The next Palette-side implementation slice is therefore promotion: after an
-operator edits or confirms analysis labels, Palette should be able to dry-run
-and then apply an upsert into the recording's per-recording training Zarr.
+The current Palette-side promotion contract is: after an operator edits or
+confirms analysis labels, Palette can dry-run and apply an upsert into the
+recording's per-recording training Zarr. Review tools may call the same backend
+online after save.
 
 The preferred future operator workflow is automatic promotion on save: Crimson
 or another review UI saves the analysis-Zarr edit first, then invokes the
@@ -36,6 +43,122 @@ Palette promotion backend for that edited frame and reports the result to the
 operator. The standalone promotion CLI should remain the same backend path used
 for dry-runs, backfills, audits, repairs, and batch promotion after older review
 sessions.
+
+Current implementation status:
+
+- Implemented backend: `fisheye.tune.detect_training_promotion_backend`.
+- Implemented CLI: `fisheye.utils.promote_analysis_detect_to_training`.
+- Implemented backend scope: non-clipped top-level refined detections plus
+  clipped finalized-collection refined detections when the caller supplies the
+  resolved clip context.
+- Implemented CLI scope: non-clipped top-level refined detections and clipped
+  finalized-collection backfill from the resolved recording frame map.
+- Implemented post-save hook: `fisheye.tune.video_detect_review_web` can
+  promote traditional and clipped analysis saves when launched with
+  `--edit --promote-training-zarr`.
+- Implemented online batch behavior: `video_detect_review_web` groups analysis
+  writes and calls the promotion backend once per save batch; clipped promotion
+  groups appended frames by source clip/video for a single decode pass per clip.
+- Not yet wired: automatic promotion from Crimson save.
+- Implemented exporter contract: promoted positive detection rows are mirrored
+  into `refined_detect_runs/<run>/instances`, so normal refined-source training
+  exports can consume promoted labels without a crop-run-specific manifest
+  override.
+
+Therefore, saving an edited box in the current review UI writes the analysis
+Zarr only unless the server was explicitly launched with the promotion hook.
+With `--promote-training-zarr`, the save path writes the analysis edit first,
+then promotes that same source frame into the recording's training Zarr. The
+web UI can buffer edits across multiple frames and submit them as one batch;
+the analysis write is grouped by refined-detect output group, then the
+promotion backend is called once for the saved batch. If promotion fails, the
+analysis edit remains valid and the response reports the promotion failure
+separately.
+
+For clipped analysis sessions, promotion uses the parent-frame index as the
+training-row identity and decodes image data from the real source clip at the
+resolved clip-local frame. If a review proxy video is active, it is used only
+for browser display and never as the promoted training image source.
+
+Online save telemetry is intentionally split by stage. The `/api/frames/save_batch`
+response and server log include the total batch time, analysis-Zarr write time,
+promotion time, clipped decode group count/time, image-array write time, and
+promotion metadata write time. This is the primary diagnostic for distinguishing
+slow source-video decode from slow training-Zarr writes.
+
+Example video-review server with post-save promotion:
+
+```bash
+scripts/py -m fisheye.tune.video_detect_review_web \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --edit \
+  --promote-training-zarr <recording>/zarr/<recording>_training.zarr \
+  --host 0.0.0.0 \
+  --port 8790
+```
+
+To promote saved frames outside a review session, run the promotion CLI
+explicitly.
+
+Example dry-run:
+
+```bash
+scripts/py -m fisheye.utils.promote_analysis_detect_to_training \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --frames 12345
+```
+
+Example apply:
+
+```bash
+scripts/py -m fisheye.utils.promote_analysis_detect_to_training \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --frames 12345 \
+  --apply
+```
+
+For migrated/clipped recordings, prefer resolving the target from the registry:
+
+```bash
+scripts/py -m fisheye.utils.promote_analysis_detect_to_training \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --use-registry-target \
+  --collection-id <finalized_collection_id> \
+  --apply
+```
+
+This queries the registry for the analysis dataset's `recording_id`, then
+requires exactly one active `zarr_use='training'` dataset for that recording.
+The JSON result records `training_zarr_source: registry` and the matched
+analysis/training dataset IDs. If the registry target is ambiguous or missing,
+the command fails closed.
+
+For standard recording layouts without a registry target, the CLI infers the
+sibling target `<recording>_training.zarr` from `<recording>_analysis.zarr`.
+For smoke runs, migration repairs, or nonstandard targets, pass the target
+explicitly:
+
+```bash
+scripts/py -m fisheye.utils.promote_analysis_detect_to_training \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --training-zarr <target_training.zarr> \
+  --frames 12345 \
+  --apply
+```
+
+Example clipped finalized-collection manual backfill:
+
+```bash
+scripts/py -m fisheye.utils.promote_analysis_detect_to_training \
+  <recording>/zarr/<recording>_analysis.zarr \
+  --use-registry-target \
+  --collection-id <finalized_collection_id> \
+  --apply
+```
+
+For clipped mode, omitting `--frames` means "discover manually edited frames
+from the finalized collection." This is the default backfill mode. A manually
+cleared frame is promoted as a `negative` row unless `--no-negative` is passed.
 
 ## Two-Level Dataset Model
 
@@ -129,12 +252,20 @@ Policy:
 
 ## Required Per-Recording Training Fields
 
-The exact storage group can be finalized during implementation, but the promoted
-detect examples need these logical fields:
+The canonical detection label table is:
+
+- `refined_detect_runs/<run>/instances`: sparse, frame-sorted positive
+  detection instances. Promotion must upsert positive supervised labels here so
+  normal refined-source exporters, registry quality checks, and downstream
+  consumers have one authoritative label surface.
+
+The materialized training-image/support surface is:
 
 - `raw_video/images_ds`: materialized frame image used by training.
 - `crop_runs/<run>/bbox_norm_coords`: normalized `[cx, cy, w, h]`, finite for
-  `positive`, NaN or ignored for `negative`.
+  `positive`, NaN or ignored for `negative`. This mirrors the canonical refined
+  label state for per-recording crop/image consumers but is not the primary
+  detection label authority and is not required in new merged training exports.
 - `crop_runs/<run>/frame_indices`: row index into `raw_video/images_ds`, usually
   sequential in the per-recording training Zarr.
 - `crop_runs/<run>/label_state`: enum/string for `positive | negative |
@@ -214,35 +345,76 @@ Eventually, registry sync should be able to answer:
 - whether the per-recording training Zarr has pending promoted edits not yet
   included in any unified/exported training artifact
 
-## Recommended First Implementation Slice
+## Implemented First Slice
 
-1. Write a dry-run CLI:
-   - Input: analysis zarr, training zarr, refined run, frame list.
-   - Output: append/update/no_change/conflict/skip plan.
+Implemented in `fisheye.utils.promote_analysis_detect_to_training`:
 
-2. Implement apply for detection bbox promotion:
-   - Supports non-clipped, single-subject frame-axis refined detect rows.
-   - Copies `raw_video/images_ds[source_frame]` into the per-recording training
-     Zarr when appending.
-   - Updates bbox and label-state fields when updating.
-   - Writes source-index lineage.
+- Dry-run CLI:
+  - Input: analysis zarr, training zarr, refined run, frame list.
+  - Output: `append` / `update` / `no_change` / `conflict` / `skip` plan.
 
-3. Add validation:
-   - no duplicate source identity rows
-   - positive rows have finite bbox
-   - negative rows have no finite bbox
-   - image row count matches label row count
-   - source lineage is complete
+- Apply mode:
+  - Supports non-clipped, single-subject frame-axis refined detect rows through
+    `promote_detection_frames`.
+  - Supports clipped single-subject refined detect rows through
+    `promote_clipped_detection_frames`.
+  - The CLI can resolve clipped promotion frames from
+    `experiment_index/finalized_runs/<collection_id>` plus
+    `recording_frame_index.parquet`; it defaults to manual-only backfill and
+    keeps manual clears as explicit negative examples.
+  - Copies `raw_video/images_ds[source_frame]` into the per-recording training
+    Zarr when appending.
+  - Can decode a traditional source video through OpenCV when analysis
+    `raw_video/images_ds` is absent and a source video path is available.
+  - For clipped appends, decodes the real source clip at
+    `clip_local_frame_index`, writes `raw_video/images_ds`, and writes
+    `raw_video/images_full`. If the target training Zarr does not already have
+    `images_full`, clipped promotion creates it from the decoded source-frame
+    luma shape.
+  - Clipped appends are grouped by source clip. The backend prefers one
+    sequential PyNvVideoCodec luma decode pass per clip, falls back to OpenCV
+    random access if PyNvVideoCodec is unavailable, resizes output image arrays
+    once for the append batch, and keeps `raw_video/images_full` populated.
+    This is intentional because later crop, keypoint, and segmentation
+    workflows need a high-resolution source image without re-decoding the
+    original video.
+  - Updates bbox and label-state fields when updating.
+  - Writes `source_index` lineage.
+  - Mirrors all positive promoted/materialized rows into
+    `refined_detect_runs/<run>/instances`, using the active refined run when one
+    exists or `refined_detect_promoted_manual` for new per-recording training
+    stores.
+  - Invalidates stale inline Zarr v3 consolidated child metadata on mutated
+    refined-detect groups so later readers see the repaired arrays.
 
-4. Add Crimson handoff:
-   - Crimson saves refined detect edit in analysis Zarr.
-   - Crimson invokes the same promotion backend for the edited frame.
-   - Crimson displays promotion result.
+- Validation behavior:
+  - duplicate source identity rows become `conflict`;
+  - positive rows require finite bbox;
+  - negative rows store NaN bbox;
+  - image row count must match active crop-run row count;
+  - source lineage is written for promoted rows.
 
-## Future Automatic-On-Save Workflow
+Still deferred:
+
+- Crimson handoff:
+  - Crimson saves refined detect edit in analysis Zarr.
+  - Crimson invokes the same promotion backend for the edited frame.
+  - Crimson displays promotion result.
+- Negative-row export policy for YOLO training artifacts. Positive promoted
+  rows are already available through the canonical refined instances surface;
+  explicit negative rows remain represented in the per-recording crop/support
+  surface until the exporter has an explicit negative-sampling policy. New
+  merged detection exports should still use canonical refined instances as the
+  positive label surface and should not forward-write crop-run label mirrors.
+
+## Automatic-On-Save Workflow
 
 Automatic promotion should be implemented as an explicit post-save hook, not as
 hidden mutation inside a bbox editor.
+
+This is implemented for `video_detect_review_web` traditional and clipped
+sessions when launched with `--edit --promote-training-zarr <training.zarr>`.
+The same sequence remains the target for Crimson.
 
 Expected sequence:
 
@@ -260,19 +432,14 @@ still giving operators the desired "save once, training row updated" behavior.
 The standalone CLI remains required for non-interactive backfill, repair, and
 auditing.
 
-For the first implementation pass, keep this deliberately narrower than the
-full clipped workflow:
+The implemented Palette web path is still deliberately narrower than the full
+future workflow:
 
-- non-clipped or already materialized training Zarr targets only;
 - detection bounding boxes only;
 - one subject per frame;
 - no registry writes required;
-- `--dry-run` required for initial smoke validation before `--apply`.
-
-Clipped analysis promotion should wait until the read-only Crimson clipped
-resolver is working, because clipped apply mode must route source identity
-through `(clip_id, camera_serial, clip_local_frame_index, refined_group_path)`
-rather than a single top-level frame index.
+- clipped promotion requires either an explicit caller-provided frame context or
+  a finalized collection plus recording frame map for CLI discovery.
 
 ## Non-Goals
 
@@ -280,5 +447,5 @@ rather than a single top-level frame index.
 - Do not assign train/val/test splits during promotion.
 - Do not encode full edit history as training labels.
 - Do not require registry migration for the first slice.
-- Do not attempt clipped multi-camera promotion until the non-clipped identity
-  contract is tested.
+- Do not infer clipped promotion identity from directory names; use the resolved
+  collection/frame-map context.
