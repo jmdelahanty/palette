@@ -1,8 +1,8 @@
 # Recording Step Status Parallel Agent Contract
 <!-- contract-meta
-version: 1
+version: 2
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-05-21
 -->
 
 Purpose: define a conflict-free parallel execution plan for RS3/RS4 hook-write
@@ -29,8 +29,16 @@ Out of scope:
 
 ## Shared Runtime Write Contract
 
-All producers must write through:
+Zarr stage producers should write through:
+- `fisheye.registry.stage_complete.emit_stage_completion`
+
+Low-level registry callers that do not own a Zarr run group may write through:
 - `fisheye.registry.status_ledger.upsert_recording_step_status`
+
+`emit_stage_completion` is preferred for pipeline stage writers because it
+combines dataset row upsert, run-completion verification, shadow array
+validation telemetry, latest status write, history append, and downstream
+invalidation.
 
 Required fields on every write:
 - `dataset_id`
@@ -61,6 +69,14 @@ Write behavior requirements:
   one latest row and append one history row.
 - Fail-closed on invalid status values (propagate `ValueError` from writer API).
 - Do not silently skip writes when required run context is available.
+- For `status="ok"` with `run_name`, pass a mutable/readable Zarr root to
+  `emit_stage_completion`. The helper refuses to mark the stage complete when
+  it cannot resolve the run group or when the run-completion marker is not
+  complete.
+- Non-`ok` statuses may omit the Zarr root when prebuilt dataset metadata is
+  supplied; they intentionally bypass run-group validation.
+- Do not call `upsert_recording_step_status` directly from a Zarr stage success
+  path unless there is a documented reason the completion marker cannot apply.
 
 Payload conventions:
 - `run_name`: concrete run/group identifier when present.
@@ -71,6 +87,32 @@ Payload conventions:
 - `zarr_mtime_ns`: write when cheaply available from the current artifact path.
 - `source`: stable runtime source token in the form
   `runtime_<module_or_cli_name>`.
+
+`emit_stage_completion` adds these validation telemetry fields to
+`details_json` when a run is marked `ok`:
+
+- `stage_array_validation_status`: `ok`, `invalid`, or `no_spec`
+- `stage_array_validation_stage`: canonical array-contract stage name, when known
+- `stage_array_validation_enforced`: whether array validation was hard-enforced
+- `stage_array_validation_errors`: required-array failures, when present
+- `stage_array_validation_warnings`: optional-array or unknown-spec warnings
+
+Array validation is currently shadow-mode by default: the validator records what
+would fail, but only stages listed in
+`src/fisheye/registry/stage_complete.py::_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`
+block registry completion on array-contract failures. Completion-marker
+validation is always hard for `ok` run writes.
+
+Shadow telemetry report:
+
+```bash
+scripts/py -m fisheye.utils.report_stage_array_validation_shadow \
+  --registry /nvme1/palette_registry.sqlite \
+  --include-no-spec
+```
+
+The report command exits zero by default. Use `--fail-on-match` only when the
+selected validation statuses should fail an explicit gate.
 
 ## Agent Ownership (Strict)
 
@@ -172,9 +214,14 @@ Conflict policy:
 
 Required:
 - Targeted unit tests for touched modules pass.
+- Focused completion-contract tests pass when touching stage status writers:
+  `tests/unit/fisheye/test_zarr_run_completion.py` and
+  `tests/unit/fisheye/test_stage_completion_rooted_wrappers.py`.
 - `check_recording_steps --status-source compare` passes on validation recording(s)
   without needing a fresh maintenance backfill for newly produced runs.
 - `check_training_registry --view recording-steps` reflects runtime updates.
+- Shadow report is reviewed after real pipeline runs when enabling new
+  StageSpec enforcement candidates.
 
 Recommended smoke commands:
 

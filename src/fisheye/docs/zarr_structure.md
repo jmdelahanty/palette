@@ -58,16 +58,38 @@ it indexes both video-only training Zarrs and recording-only analysis Zarrs in
 Most `*_runs` groups carry:
 
 - `attrs["latest"]` → most recent run name.
+- `attrs["latest_complete"]` → most recent run name whose run-completion
+  marker is complete, when the writer uses the modern completion protocol.
 - Child run groups named `<stage>_<YYYY-MM-DD_hh-mm-ss>` (possibly with a
   `_NNN` suffix if repeated inside the same second).
 - Run attributes capturing provenance (`provenance` dict with command,
   timestamps, git/environment snapshots), upstream run references
   (`source_detect_run`, `source_crop_run`, etc.), configuration snapshots,
   and often `duration_seconds`.
+- Per-run completion attrs written by `fisheye.shared.zarr_run_completion`
+  (`palette_run_completion_status`, `palette_run_completed_at_utc`, and
+  related audit fields) for modern writers. A run must have a complete marker before
+  `emit_stage_completion(..., status="ok", run_name=...)` will write an `ok`
+  registry status row.
 
 Lightweight stages such as `tracking_runs/` may omit some of the broader
 timing-oriented attrs while still recording canonical lineage and summary
 statistics.
+
+Machine-readable `StageSpec` array contracts are validated at status-write time
+by `fisheye.registry.stage_complete.emit_stage_completion`. Completion-marker
+validation is hard for `ok` writes. Array validation is shadow-mode by default:
+validation details are recorded in `recording_step_status.details_json`, but a
+stage only blocks on array-contract failures after it is explicitly added to
+`_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`.
+
+Shadow-mode registry telemetry can be inspected with:
+
+```bash
+scripts/py -m fisheye.utils.report_stage_array_validation_shadow \
+  --registry /nvme1/palette_registry.sqlite \
+  --include-no-spec
+```
 
 ### Future Clipped Analysis Archives
 

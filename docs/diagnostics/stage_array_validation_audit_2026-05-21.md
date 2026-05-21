@@ -1,12 +1,18 @@
 # Stage Array Validation Rollout Audit
 
 Date: 2026-05-21
-Status: current
+Status: current, updated after first hardening slice
 Scope: Palette Zarr run-group completion validation, `StageSpec` required-array contracts, and production writer compatibility.
 
 ## Summary
 
 The completion hard gate is now the right default: a run cannot be marked `ok` without a `root`, a resolved run group, and a completed Zarr run marker. Array validation should remain shadow-mode by default until each stage is confirmed writer-compatible.
+
+Update from first hardening slice:
+
+- Rootless `ok` completion sync was remediated for pose/keypoint and eye-mask batch wrappers.
+- `scripts/py -m fisheye.utils.report_stage_array_validation_shadow` now reports shadow-mode validation telemetry from `recording_step_status.details_json`.
+- Focused wrapper tests and a real temporary-Zarr completion test cover the current behavior.
 
 Recommended first hard-enforcement allowlist after one real-run smoke each:
 
@@ -22,7 +28,7 @@ Keep these in shadow mode for now:
 
 - `background`: spec requires `frame_indices`, but the current writer stores sampled source frame identity in attrs and does not emit registry stage completion.
 - `keypoints`: YOLO keypoint runs do not write the traditional triangle diagnostic arrays required by the current spec.
-- `refined_keypoints`: the primary writer appears close, but some registry sync call sites still call `emit_stage_completion(... root=None ...)` and now cannot mark `ok`.
+- `refined_keypoints`: the primary writer appears close; rootless registry sync call sites have been fixed, but the direct/batch paths still need real-run smokes before hard enforcement.
 - `eye_masks`: the stage contains multiple method-specific surfaces; traditional, YOLO, and U-Net writers do not all satisfy the same required-array set.
 - `refined_subject_masks`: canonical finalizer/assembler outputs look compatible, but mutation and legacy paths should be smoked before hard enforcement.
 - `arena_assignment`: current writer does not emit the required `confidence` array.
@@ -40,16 +46,26 @@ Keep these in shadow mode for now:
 
 This means the most dangerous failure mode, a killed writer leaving a half-written run group that is then marked complete in the registry, is blocked independently of per-stage array enforcement.
 
-## Cross-Cutting Blockers
+## Cross-Cutting Status
 
-Rootless `ok` status call sites now need remediation before they can write registry completion status:
+Previously rootless `ok` status call sites were fixed in the first hardening slice:
 
 - `src/fisheye/refinement/refine_keypoints.py:371`
 - `src/fisheye/inference/predict_pose.py:240`
 - `src/fisheye/utils/run_keypoints_batch.py:655`
 - `src/fisheye/utils/run_eye_masks_batch.py:845`
 
-These should pass or reopen the mutable Zarr root before calling `emit_stage_completion` when `status="ok"` and `run_name` is present.
+Those wrappers now reopen the mutable Zarr root before calling `emit_stage_completion` when `status="ok"` and `run_name` is present. Non-`ok` statuses still bypass run validation.
+
+Shadow telemetry can be inspected with:
+
+```bash
+scripts/py -m fisheye.utils.report_stage_array_validation_shadow \
+  --registry /nvme1/palette_registry.sqlite \
+  --include-no-spec
+```
+
+Use `--fail-on-match` only in explicit gates; by default the command is a report and exits zero.
 
 ## Stage Verdicts
 
@@ -61,8 +77,8 @@ These should pass or reopen the mutable Zarr root before calling `emit_stage_com
 | `detect_quality` | Candidate | `src/fisheye/refinement/detect_quality.py:634` and `src/fisheye/refinement/detect_quality.py:635` write `quality_flags` and `detection_quality_labels`; `src/fisheye/refinement/detect_quality.py:678` marks complete; registry emit uses root at `src/fisheye/refinement/detect_quality.py:58`. | Add to hard allowlist after a nested quality-report smoke. Document quality run names as globally unique within a root or pass parent detect run identity. |
 | `refined_detect` | Candidate | Current curated sparse writer writes `instances` arrays at `src/fisheye/shared/refined_detect_curation.py:1506` through `src/fisheye/shared/refined_detect_curation.py:1511`, `source_detections` arrays at `src/fisheye/shared/refined_detect_curation.py:1610` through `src/fisheye/shared/refined_detect_curation.py:1622`, and sets sparse semantics at `src/fisheye/shared/refined_detect_curation.py:2303`. Completion is marked at `src/fisheye/refinement/refine_detect.py:1485`. | Add to hard allowlist after a clipped and non-clipped refined-detect smoke. |
 | `crop` | Candidate | Main writer creates/copies `frame_indices`, `bbox_norm_coords`, `frame_counts`, and detection identity around `src/fisheye/tracking/crop.py:2627` through `src/fisheye/tracking/crop.py:2650`; run completion is marked at `src/fisheye/tracking/crop.py:3604`, and registry emit uses root at `src/fisheye/tracking/crop.py:382`. | Add to hard allowlist after smoke. Confirm promotion-created crop runs do not emit incomplete registry status. |
-| `keypoints` | Blocked | Traditional writer creates triangle diagnostics at `src/fisheye/detection/detect_keypoints_traditional.py:866`, `src/fisheye/detection/detect_keypoints_traditional.py:875`, and `src/fisheye/detection/detect_keypoints_traditional.py:885`; YOLO writer creates core keypoint arrays but has no `triangle_angles`, `triangle_angles_raw`, or `triangle_area` output. `src/fisheye/inference/predict_pose.py:240` also emits with `root=None`. | Split method-specific required fields or make traditional-only diagnostics optional; fix rootless pose status sync. |
-| `refined_keypoints` | Blocked by call sites | Writer creates required geometry and review arrays, including `triangle_area` around `src/fisheye/refinement/refine_keypoints.py:1281`, `triangle_angles` around `src/fisheye/refinement/refine_keypoints.py:1297`, and `failure_indices` around `src/fisheye/refinement/refine_keypoints.py:1601`; completion is marked at `src/fisheye/refinement/refine_keypoints.py:1748`. However registry emit paths still use `root=None` at `src/fisheye/refinement/refine_keypoints.py:371` and `src/fisheye/utils/run_keypoints_batch.py:655`. | Fix rootless emit call sites, then smoke both direct refine and batch auto-review paths before enforcement. |
+| `keypoints` | Blocked | Traditional writer creates triangle diagnostics at `src/fisheye/detection/detect_keypoints_traditional.py:866`, `src/fisheye/detection/detect_keypoints_traditional.py:875`, and `src/fisheye/detection/detect_keypoints_traditional.py:885`; YOLO writer creates core keypoint arrays but has no `triangle_angles`, `triangle_angles_raw`, or `triangle_area` output. | Split method-specific required fields or make traditional-only diagnostics optional. Rooted status sync is fixed, but array enforcement is still unsafe for YOLO keypoint runs. |
+| `refined_keypoints` | Needs smoke | Writer creates required geometry and review arrays, including `triangle_area` around `src/fisheye/refinement/refine_keypoints.py:1281`, `triangle_angles` around `src/fisheye/refinement/refine_keypoints.py:1297`, and `failure_indices` around `src/fisheye/refinement/refine_keypoints.py:1601`; completion is marked at `src/fisheye/refinement/refine_keypoints.py:1748`. Rooted registry sync is now fixed for direct refine and batch auto-review paths. | Smoke both direct refine and batch auto-review paths before enforcement. |
 | `eye_masks` | Blocked | Traditional writer matches the contour/reason-style spec at `src/fisheye/segmentation/eye_segmentation.py:714`, `src/fisheye/segmentation/eye_segmentation.py:755` through `src/fisheye/segmentation/eye_segmentation.py:779`; YOLO writer uses `contour_ptr`, `contours_eye0`, and `contours_eye1` at `src/fisheye/segmentation/eye_segmentation_yolo.py:1164` through `src/fisheye/segmentation/eye_segmentation_yolo.py:1182`; U-Net writer focuses on `mask_probs_roi` and `detection_source` at `src/fisheye/segmentation/infer_unet_eye_masks.py:411` and `src/fisheye/segmentation/infer_unet_eye_masks.py:814`. | Split stage specs by method family or demote contour/ellipse/reason arrays to optional with method-specific validators. |
 | `refined_eye_masks` | Candidate | Refiner writes contour arrays at `src/fisheye/refinement/refine_eye_masks.py:1742` through `src/fisheye/refinement/refine_eye_masks.py:1760`, source lineage at `src/fisheye/refinement/refine_eye_masks.py:2093`, root arrays starting around `src/fisheye/refinement/refine_eye_masks.py:2178`, reason columns at `src/fisheye/refinement/refine_eye_masks.py:2542`, and marks complete at `src/fisheye/refinement/refine_eye_masks.py:2782`. | Add to hard allowlist after one current refined-eye run smoke. |
 | `subject_masks` | Candidate | Traditional subject writer creates `detection_source`, `masks_roi`, `mask_probs_roi`, and `available_channels` at `src/fisheye/segmentation/subject_segmentation.py:542` through `src/fisheye/segmentation/subject_segmentation.py:546`, plus metrics at `src/fisheye/segmentation/subject_segmentation.py:579` through `src/fisheye/segmentation/subject_segmentation.py:594`. U-Net subject writer creates `mask_probs_roi`, `available_channels`, metrics, and `detection_source` at `src/fisheye/segmentation/infer_unet_subject_masks.py:541`, `src/fisheye/segmentation/infer_unet_subject_masks.py:550`, `src/fisheye/segmentation/infer_unet_subject_masks.py:721`, and `src/fisheye/segmentation/infer_unet_subject_masks.py:969`. | Add to hard allowlist after traditional and U-Net smokes. |
@@ -73,7 +89,7 @@ These should pass or reopen the mutable Zarr root before calling `emit_stage_com
 ## Recommended Rollout
 
 1. Keep `_ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset()` until real-run smokes are recorded for each candidate.
-2. Fix rootless `ok` completion calls before expecting keypoint or batch paths to record registry completion.
+2. Use the shadow report command to collect real registry telemetry after the rooted keypoint/eye-mask wrappers run in production.
 3. Enable hard validation for `detect_quality` first; it has the smallest required surface and the easiest failure modes.
 4. Enable `detect`, `refined_detect`, and `crop` next as a single detection-family slice.
 5. Enable `subject_masks`, `refined_eye_masks`, and `tracking` only after one current writer smoke per stage.
@@ -82,7 +98,7 @@ These should pass or reopen the mutable Zarr root before calling `emit_stage_com
 ## Follow-Up Checklist
 
 - Add a per-stage smoke fixture or fake-group test for every candidate stage before adding it to the enforcement allowlist.
-- Add direct tests for rootless `ok` status rejection on all remaining completion wrappers.
+- Keep direct tests for rootless `ok` status rejection and rooted wrapper sync in the focused completion suite.
 - Add one test that validates `detect_quality` nested run resolution and documents the uniqueness assumption for quality run names.
 - Decide whether `keypoints` should have one broad spec with optional method diagnostics or separate `traditional_keypoints` and `yolo_keypoints` method-family validators.
 - Decide whether `eye_masks` should have method-family validators instead of one required contour-heavy spec.

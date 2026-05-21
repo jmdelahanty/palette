@@ -185,3 +185,24 @@ Remaining:
 - Current pipeline/launcher stage definitions either resolve through the
   catalog or are explicitly documented as legacy implementation stages.
 - Declared artifact families are unique.
+
+The stage catalog is the registry/status vocabulary contract. It is related to,
+but separate from, the Zarr array-surface contract in
+`fisheye.shared.zarr.stage_arrays`.
+
+Runtime status writes currently use both contracts:
+
+- `emit_stage_completion` resolves legacy step aliases such as `tracks` to the
+  corresponding array-contract stage when validating a completed run.
+- Run-completion marker validation is hard for `status="ok"` writes.
+- Stage-array validation records shadow telemetry by default and is only
+  fail-closed for stages explicitly listed in
+  `_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`.
+
+Use the shadow report before adding stages to that hard-enforcement allowlist:
+
+```bash
+scripts/py -m fisheye.utils.report_stage_array_validation_shadow \
+  --registry /nvme1/palette_registry.sqlite \
+  --include-no-spec
+```

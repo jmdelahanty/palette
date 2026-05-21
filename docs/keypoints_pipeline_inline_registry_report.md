@@ -269,13 +269,22 @@ The quality table only gets populated during a full rescan.
 
 ---
 
-## Shared helper opportunity
+## Shared helper status
 
-The inline registry write pattern is repeated identically across stages. A
-shared helper would reduce boilerplate and ensure consistency:
+This section originally proposed a shared helper for repeated inline registry
+write patterns. That helper now exists as
+`src/fisheye/registry/stage_complete.py::emit_stage_completion`.
+
+Current behavior differs from the early proposal in one important way:
+`status="ok"` with a `run_name` must pass a readable Zarr root. The helper
+refuses to write `ok` when the run group cannot be resolved or when the
+run-completion marker is incomplete. It also records shadow-mode stage-array
+validation telemetry in `details_json`.
+
+Historical sketch retained for context:
 
 ```python
-# Proposed: src/fisheye/shared/registry_stage_complete.py
+# Historical proposal: now implemented as src/fisheye/registry/stage_complete.py
 
 def emit_stage_completion(
     registry: Registry,

@@ -1,7 +1,7 @@
 # Zarr Run Completion Contract
 
 Status: active  
-Last verified: 2026-05-20
+Last verified: 2026-05-21
 
 Palette run parents such as `detect_runs`, `crop_runs`,
 `refined_detect_runs`, `keypoints_runs`, and nested `quality_reports` must not
@@ -29,6 +29,36 @@ run `running`, and set `latest_pending`. They should not move `latest` to the
 new run until the run is complete. On success, writers call
 `mark_run_complete(..., parent_group=<parent>, run_name=<name>)`, which updates
 both `latest_complete` and `latest`.
+
+## Registry Completion Rule
+
+Zarr stage writers should report successful stage completion through
+`fisheye.registry.stage_complete.emit_stage_completion`.
+
+For `status="ok"` with a `run_name`, that helper is fail-closed on this
+contract:
+
+- the caller must pass a readable Zarr root;
+- the helper must resolve the named run group under the expected run parent;
+- the run group must satisfy `is_run_complete(..., legacy_default=True)`.
+
+If any of those checks fail, the helper refuses to write an `ok`
+`recording_step_status` row. Non-`ok` statuses may bypass run-group validation
+when prebuilt dataset metadata is supplied.
+
+After the completion-marker check passes, `emit_stage_completion` also runs the
+stage-array validator. That validator is shadow-mode by default: validation
+status/errors are written into `details_json`, but array-contract failures only
+block completion for stages explicitly added to
+`_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`.
+
+Inspect shadow telemetry with:
+
+```bash
+scripts/py -m fisheye.utils.report_stage_array_validation_shadow \
+  --registry /nvme1/palette_registry.sqlite \
+  --include-no-spec
+```
 
 ## Read Rule
 
