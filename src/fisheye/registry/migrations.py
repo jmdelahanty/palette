@@ -67,6 +67,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
     (50, "detect_quality_current_reviewed_preference", "_migration_050_detect_quality_current_reviewed_preference"),
     (51, "training_image_profile_registry", "_migration_051_training_image_profile_registry"),
     (52, "dataset_source_layout_metadata", "_migration_052_dataset_source_layout_metadata"),
+    (53, "model_deployment_artifacts", "_migration_053_model_deployment_artifacts"),
 )
 
 

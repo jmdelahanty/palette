@@ -6738,3 +6738,74 @@ class RegistryMigrationMixin:
             },
         )
         self._migration_034_dataset_context_current_view()
+
+    def _migration_053_model_deployment_artifacts(self) -> None:
+        """Track hardware/runtime-specific model deployment artifacts."""
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS model_deployment_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                source_onnx_run_id TEXT,
+                source_onnx_path TEXT,
+                source_onnx_sha256 TEXT,
+                artifact_kind TEXT NOT NULL,
+                deployment_runtime TEXT NOT NULL,
+                target_hardware_class TEXT,
+                target_gpu_name TEXT,
+                target_compute_capability TEXT,
+                precision TEXT,
+                engine_path TEXT,
+                engine_sha256 TEXT,
+                manifest_path TEXT,
+                manifest_sha256 TEXT,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                validation_summary_json TEXT,
+                trtexec_path TEXT,
+                trt_version TEXT,
+                cuda_version TEXT,
+                builder_optimization_level INTEGER,
+                avg_timing INTEGER,
+                profiling_verbosity TEXT,
+                cuda_graph INTEGER,
+                nms_conf REAL,
+                nms_iou REAL,
+                nms_topk INTEGER,
+                metadata_json TEXT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES training_runs(run_id) ON DELETE CASCADE,
+                FOREIGN KEY(source_onnx_run_id) REFERENCES onnx_models(run_id)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_model_deployment_artifacts_run_id
+            ON model_deployment_artifacts(run_id);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_model_deployment_artifacts_source_onnx
+            ON model_deployment_artifacts(source_onnx_run_id);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_model_deployment_artifacts_runtime_target
+            ON model_deployment_artifacts(
+                deployment_runtime,
+                target_hardware_class,
+                status
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_model_deployment_artifacts_engine_sha
+            ON model_deployment_artifacts(engine_sha256);
+            """
+        )

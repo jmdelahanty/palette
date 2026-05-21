@@ -7242,6 +7242,236 @@ class Registry(RegistryMigrationMixin):
         )
         self.conn.commit()
 
+    def record_model_deployment_artifact(
+        self,
+        *,
+        run_id: str,
+        artifact_id: Optional[str] = None,
+        source_onnx_run_id: Optional[str] = None,
+        source_onnx_path: Optional[Path] = None,
+        source_onnx_sha256: Optional[str] = None,
+        artifact_kind: str = "tensorrt_engine",
+        deployment_runtime: str,
+        target_hardware_class: Optional[str] = None,
+        target_gpu_name: Optional[str] = None,
+        target_compute_capability: Optional[str] = None,
+        precision: Optional[str] = None,
+        engine_path: Optional[Path] = None,
+        engine_sha256: Optional[str] = None,
+        manifest_path: Optional[Path] = None,
+        manifest_sha256: Optional[str] = None,
+        status: str = "candidate",
+        validation_summary: Optional[Dict[str, Any]] = None,
+        trtexec_path: Optional[Path] = None,
+        trt_version: Optional[str] = None,
+        cuda_version: Optional[str] = None,
+        builder_optimization_level: Optional[int] = None,
+        avg_timing: Optional[int] = None,
+        profiling_verbosity: Optional[str] = None,
+        cuda_graph: Optional[bool] = None,
+        nms_conf: Optional[float] = None,
+        nms_iou: Optional[float] = None,
+        nms_topk: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Record a hardware/runtime-specific deployment artifact.
+
+        This table complements ``tensorrt_models``.  ``tensorrt_models`` keeps a
+        compact export inventory keyed by ``(run_id, precision)``; deployment
+        artifacts can contain multiple FP16 engines for the same run, such as a
+        local A6000 smoke engine and an Orange A16 production candidate.
+        """
+
+        run_id_text = str(run_id).strip()
+        if not run_id_text:
+            raise ValueError("run_id is required")
+        runtime_text = str(deployment_runtime).strip().lower()
+        if not runtime_text:
+            raise ValueError("deployment_runtime is required")
+        kind_text = str(artifact_kind or "tensorrt_engine").strip().lower()
+        if not kind_text:
+            raise ValueError("artifact_kind is required")
+        status_text = str(status or "candidate").strip().lower()
+        precision_text = str(precision).strip().lower() if precision else None
+        target_class_text = (
+            str(target_hardware_class).strip() if target_hardware_class else None
+        )
+
+        def _slug(value: Optional[str], fallback: str) -> str:
+            text = str(value or fallback).strip().lower()
+            chars = [ch if ch.isalnum() else "_" for ch in text]
+            slug = "_".join(part for part in "".join(chars).split("_") if part)
+            return slug or fallback
+
+        if artifact_id is None:
+            identity_tail = (
+                str(engine_sha256).strip().lower()[:12]
+                if engine_sha256
+                else Path(engine_path).stem if engine_path else "unhashed"
+            )
+            artifact_id = "_".join(
+                [
+                    _slug(run_id_text, "run"),
+                    _slug(runtime_text, "runtime"),
+                    _slug(target_class_text, "target"),
+                    _slug(precision_text, "precision"),
+                    _slug(identity_tail, "artifact"),
+                ]
+            )
+
+        now = _utc_now()
+        payload = {
+            "artifact_id": str(artifact_id),
+            "run_id": run_id_text,
+            "source_onnx_run_id": str(source_onnx_run_id).strip()
+            if source_onnx_run_id
+            else None,
+            "source_onnx_path": str(source_onnx_path) if source_onnx_path else None,
+            "source_onnx_sha256": str(source_onnx_sha256).strip().lower()
+            if source_onnx_sha256
+            else None,
+            "artifact_kind": kind_text,
+            "deployment_runtime": runtime_text,
+            "target_hardware_class": target_class_text,
+            "target_gpu_name": str(target_gpu_name).strip() if target_gpu_name else None,
+            "target_compute_capability": str(target_compute_capability).strip()
+            if target_compute_capability
+            else None,
+            "precision": precision_text,
+            "engine_path": str(engine_path) if engine_path else None,
+            "engine_sha256": str(engine_sha256).strip().lower()
+            if engine_sha256
+            else None,
+            "manifest_path": str(manifest_path) if manifest_path else None,
+            "manifest_sha256": str(manifest_sha256).strip().lower()
+            if manifest_sha256
+            else None,
+            "status": status_text,
+            "validation_summary_json": _json_dumps(validation_summary),
+            "trtexec_path": str(trtexec_path) if trtexec_path else None,
+            "trt_version": str(trt_version).strip() if trt_version else None,
+            "cuda_version": str(cuda_version).strip() if cuda_version else None,
+            "builder_optimization_level": self._int_or_none(builder_optimization_level),
+            "avg_timing": self._int_or_none(avg_timing),
+            "profiling_verbosity": str(profiling_verbosity).strip()
+            if profiling_verbosity
+            else None,
+            "cuda_graph": _as_bool_int(cuda_graph),
+            "nms_conf": _as_float(nms_conf),
+            "nms_iou": _as_float(nms_iou),
+            "nms_topk": self._int_or_none(nms_topk),
+            "metadata_json": _json_dumps(metadata),
+            "created_utc": now,
+            "updated_utc": now,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO model_deployment_artifacts (
+                artifact_id, run_id, source_onnx_run_id, source_onnx_path,
+                source_onnx_sha256, artifact_kind, deployment_runtime,
+                target_hardware_class, target_gpu_name, target_compute_capability,
+                precision, engine_path, engine_sha256, manifest_path,
+                manifest_sha256, status, validation_summary_json, trtexec_path,
+                trt_version, cuda_version, builder_optimization_level, avg_timing,
+                profiling_verbosity, cuda_graph, nms_conf, nms_iou, nms_topk,
+                metadata_json, created_utc, updated_utc
+            )
+            VALUES (
+                :artifact_id, :run_id, :source_onnx_run_id, :source_onnx_path,
+                :source_onnx_sha256, :artifact_kind, :deployment_runtime,
+                :target_hardware_class, :target_gpu_name, :target_compute_capability,
+                :precision, :engine_path, :engine_sha256, :manifest_path,
+                :manifest_sha256, :status, :validation_summary_json, :trtexec_path,
+                :trt_version, :cuda_version, :builder_optimization_level, :avg_timing,
+                :profiling_verbosity, :cuda_graph, :nms_conf, :nms_iou, :nms_topk,
+                :metadata_json, :created_utc, :updated_utc
+            )
+            ON CONFLICT(artifact_id) DO UPDATE SET
+                run_id=excluded.run_id,
+                source_onnx_run_id=excluded.source_onnx_run_id,
+                source_onnx_path=excluded.source_onnx_path,
+                source_onnx_sha256=excluded.source_onnx_sha256,
+                artifact_kind=excluded.artifact_kind,
+                deployment_runtime=excluded.deployment_runtime,
+                target_hardware_class=excluded.target_hardware_class,
+                target_gpu_name=excluded.target_gpu_name,
+                target_compute_capability=excluded.target_compute_capability,
+                precision=excluded.precision,
+                engine_path=excluded.engine_path,
+                engine_sha256=excluded.engine_sha256,
+                manifest_path=excluded.manifest_path,
+                manifest_sha256=excluded.manifest_sha256,
+                status=excluded.status,
+                validation_summary_json=excluded.validation_summary_json,
+                trtexec_path=excluded.trtexec_path,
+                trt_version=excluded.trt_version,
+                cuda_version=excluded.cuda_version,
+                builder_optimization_level=excluded.builder_optimization_level,
+                avg_timing=excluded.avg_timing,
+                profiling_verbosity=excluded.profiling_verbosity,
+                cuda_graph=excluded.cuda_graph,
+                nms_conf=excluded.nms_conf,
+                nms_iou=excluded.nms_iou,
+                nms_topk=excluded.nms_topk,
+                metadata_json=excluded.metadata_json,
+                created_utc=COALESCE(model_deployment_artifacts.created_utc, excluded.created_utc),
+                updated_utc=excluded.updated_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+        return str(artifact_id)
+
+    def query_model_deployment_artifacts(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        deployment_runtime: Optional[str] = None,
+        target_hardware_class: Optional[str] = None,
+        status: Optional[str] = None,
+        artifact_kind: Optional[str] = None,
+        precision: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM model_deployment_artifacts WHERE 1=1"]
+        params: List[Any] = []
+        if run_id is not None:
+            sql.append("AND run_id = ?")
+            params.append(str(run_id))
+        if deployment_runtime is not None:
+            sql.append("AND deployment_runtime = ?")
+            params.append(str(deployment_runtime).strip().lower())
+        if target_hardware_class is not None:
+            sql.append("AND target_hardware_class = ?")
+            params.append(str(target_hardware_class).strip())
+        if status is not None:
+            sql.append("AND status = ?")
+            params.append(str(status).strip().lower())
+        if artifact_kind is not None:
+            sql.append("AND artifact_kind = ?")
+            params.append(str(artifact_kind).strip().lower())
+        if precision is not None:
+            sql.append("AND precision = ?")
+            params.append(str(precision).strip().lower())
+        sql.append(
+            """
+            ORDER BY
+                CASE status
+                    WHEN 'preferred' THEN 0
+                    WHEN 'validated' THEN 1
+                    WHEN 'candidate' THEN 2
+                    WHEN 'deprecated' THEN 4
+                    ELSE 3
+                END,
+                updated_utc DESC,
+                artifact_id ASC
+            """
+        )
+        if limit is not None:
+            sql.append("LIMIT ?")
+            params.append(self._int_or_none(limit) or 0)
+        return self.conn.execute("\n".join(sql), params).fetchall()
+
     def scan_zarr(self, zarr_path: Path) -> Optional[str]:
         if not zarr_path.exists():
             return None

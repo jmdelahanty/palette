@@ -1296,6 +1296,97 @@ CREATE TABLE keypoint_quality (
 | `idx_keypoint_quality_dataset_id` | no | `c` | no | `dataset_id` |
 | `sqlite_autoindex_keypoint_quality_1` | yes | `pk` | no | `dataset_id`, `refined_run` |
 
+### `model_deployment_artifacts`
+
+| Column | Type | Nullable | PK | Default |
+|---|---|---|---|---|
+| `artifact_id` | `TEXT` | no | yes | `` |
+| `run_id` | `TEXT` | no | no | `` |
+| `source_onnx_run_id` | `TEXT` | yes | no | `` |
+| `source_onnx_path` | `TEXT` | yes | no | `` |
+| `source_onnx_sha256` | `TEXT` | yes | no | `` |
+| `artifact_kind` | `TEXT` | no | no | `` |
+| `deployment_runtime` | `TEXT` | no | no | `` |
+| `target_hardware_class` | `TEXT` | yes | no | `` |
+| `target_gpu_name` | `TEXT` | yes | no | `` |
+| `target_compute_capability` | `TEXT` | yes | no | `` |
+| `precision` | `TEXT` | yes | no | `` |
+| `engine_path` | `TEXT` | yes | no | `` |
+| `engine_sha256` | `TEXT` | yes | no | `` |
+| `manifest_path` | `TEXT` | yes | no | `` |
+| `manifest_sha256` | `TEXT` | yes | no | `` |
+| `status` | `TEXT` | no | no | `'candidate'` |
+| `validation_summary_json` | `TEXT` | yes | no | `` |
+| `trtexec_path` | `TEXT` | yes | no | `` |
+| `trt_version` | `TEXT` | yes | no | `` |
+| `cuda_version` | `TEXT` | yes | no | `` |
+| `builder_optimization_level` | `INTEGER` | yes | no | `` |
+| `avg_timing` | `INTEGER` | yes | no | `` |
+| `profiling_verbosity` | `TEXT` | yes | no | `` |
+| `cuda_graph` | `INTEGER` | yes | no | `` |
+| `nms_conf` | `REAL` | yes | no | `` |
+| `nms_iou` | `REAL` | yes | no | `` |
+| `nms_topk` | `INTEGER` | yes | no | `` |
+| `metadata_json` | `TEXT` | yes | no | `` |
+| `created_utc` | `TEXT` | no | no | `` |
+| `updated_utc` | `TEXT` | no | no | `` |
+
+#### Definition
+
+```sql
+CREATE TABLE model_deployment_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                source_onnx_run_id TEXT,
+                source_onnx_path TEXT,
+                source_onnx_sha256 TEXT,
+                artifact_kind TEXT NOT NULL,
+                deployment_runtime TEXT NOT NULL,
+                target_hardware_class TEXT,
+                target_gpu_name TEXT,
+                target_compute_capability TEXT,
+                precision TEXT,
+                engine_path TEXT,
+                engine_sha256 TEXT,
+                manifest_path TEXT,
+                manifest_sha256 TEXT,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                validation_summary_json TEXT,
+                trtexec_path TEXT,
+                trt_version TEXT,
+                cuda_version TEXT,
+                builder_optimization_level INTEGER,
+                avg_timing INTEGER,
+                profiling_verbosity TEXT,
+                cuda_graph INTEGER,
+                nms_conf REAL,
+                nms_iou REAL,
+                nms_topk INTEGER,
+                metadata_json TEXT,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES training_runs(run_id) ON DELETE CASCADE,
+                FOREIGN KEY(source_onnx_run_id) REFERENCES onnx_models(run_id)
+            )
+```
+
+#### Foreign Keys
+
+| FK ID | From | To | On Update | On Delete | Match |
+|---|---|---|---|---|
+| `0` | `source_onnx_run_id` | `onnx_models.run_id` | `NO ACTION` | `NO ACTION` | `NONE` |
+| `1` | `run_id` | `training_runs.run_id` | `NO ACTION` | `CASCADE` | `NONE` |
+
+#### Indexes
+
+| Index | Unique | Origin | Partial | Columns |
+|---|---|---|---|---|
+| `idx_model_deployment_artifacts_engine_sha` | no | `c` | no | `engine_sha256` |
+| `idx_model_deployment_artifacts_run_id` | no | `c` | no | `run_id` |
+| `idx_model_deployment_artifacts_runtime_target` | no | `c` | no | `deployment_runtime`, `target_hardware_class`, `status` |
+| `idx_model_deployment_artifacts_source_onnx` | no | `c` | no | `source_onnx_run_id` |
+| `sqlite_autoindex_model_deployment_artifacts_1` | yes | `pk` | no | `artifact_id` |
+
 ### `model_exports`
 
 | Column | Type | Nullable | PK | Default |

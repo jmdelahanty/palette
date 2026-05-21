@@ -6,6 +6,8 @@ We already record:
 - trained detector artifacts in `training_models`
 - ONNX exports in `onnx_models`
 - TensorRT exports in `tensorrt_models`
+- hardware/runtime-specific deployment artifacts in
+  `model_deployment_artifacts`
 
 This is a strong foundation, but most deployment compatibility fields still live in JSON
 manifests or `metadata_json`. That makes frequent questions harder than they should be:
@@ -30,6 +32,9 @@ contracts.
 - `training_models`: one row per detector training run (`run_id` primary key).
 - `onnx_models`: one row per run's ONNX artifact (`run_id` primary key).
 - `tensorrt_models`: one row per `(run_id, precision)`.
+- `model_deployment_artifacts`: one row per target-specific deployable
+  artifact, such as an Orange/A16 FP16 TensorRT engine built from a Palette
+  ONNX export.
 
 Legacy:
 - `model_exports` exists for compatibility/backfill history and should not be treated as the
@@ -48,6 +53,65 @@ fast query/index surface, not the only source of truth. The JSON manifests
 written beside ONNX and TensorRT artifacts retain full build provenance,
 including paths, hashes, input shape, output contract, export command, and build
 environment.
+
+## Deployment Artifacts
+
+TensorRT engines are compiled deployment artifacts, not portable model
+descriptions. A trained Palette checkpoint may produce one ONNX model, but that
+ONNX can legitimately have multiple TensorRT engines:
+
+- an A6000 engine for local workstation smoke tests,
+- an A16 engine for Orange acquisition/runtime deployment,
+- an L4 engine for cluster batch inference,
+- an INT8 candidate for a future calibration experiment.
+
+`tensorrt_models` is intentionally still a compact export inventory keyed by
+`(run_id, precision)`. It is not sufficient as the deployment selector because
+two FP16 engines can share the same trained model but target different GPUs.
+The companion table `model_deployment_artifacts` owns this target-specific
+identity.
+
+Important fields:
+
+- `artifact_id`: stable deployment artifact identifier.
+- `run_id`: trained model/training run that owns the deployment artifact.
+- `source_onnx_run_id`, `source_onnx_path`, `source_onnx_sha256`: portable
+  model artifact used as the build input.
+- `artifact_kind`: usually `tensorrt_engine`.
+- `deployment_runtime`: e.g. `orange`.
+- `target_hardware_class`: e.g. `A16`, `L4`, or `A6000`.
+- `target_gpu_name`, `target_compute_capability`: concrete build/runtime GPU
+  identity when available.
+- `precision`, `engine_path`, `engine_sha256`, `manifest_path`,
+  `manifest_sha256`: deployable engine identity.
+- `status`: `candidate`, `validated`, `preferred`, or `deprecated`.
+- `trtexec_path`, `trt_version`, `cuda_version`,
+  `builder_optimization_level`, `avg_timing`, `profiling_verbosity`,
+  `cuda_graph`: TensorRT build strategy and environment.
+- `nms_conf`, `nms_iou`, `nms_topk`: baked detection NMS settings.
+- `validation_summary_json`: app-level validation summary, such as Orange
+  steady p95 latency, drop/gap/error counts, and validation recording IDs.
+- `metadata_json`: full provenance payload; typed columns are only the fast
+  query surface.
+
+Registering an externally built Orange/A16 engine should use the deployment
+artifact table rather than overwriting the local TensorRT export row:
+
+```bash
+scripts/py -m fisheye.utils.register_model_deployment_artifact \
+  --registry /nvme1/palette_registry.sqlite \
+  --run-id detect_all_available_detect_training_v004_yolo11n_trt_20260520 \
+  --manifest-path /path/to/a16_engine.tensorrt.manifest.json \
+  --deployment-runtime orange \
+  --target-hardware-class A16 \
+  --status candidate \
+  --apply
+```
+
+For Orange production use, the preferred artifact should be the engine built on
+the target hardware class, not a local workstation engine. A6000-built engines
+remain useful for local smoke/review, but they should not be marked as the
+preferred Orange/A16 deployment artifact.
 
 ## Current preferred detector baseline
 
@@ -173,6 +237,13 @@ SELECT run_id, path, trt_version, compute_capability
 FROM tensorrt_models
 WHERE trt_version LIKE '10.%'
   AND compute_capability = '8.6';
+
+-- Preferred Orange A16 deployment engines
+SELECT run_id, artifact_id, engine_path, engine_sha256
+FROM model_deployment_artifacts
+WHERE deployment_runtime = 'orange'
+  AND target_hardware_class = 'A16'
+  AND status = 'preferred';
 ```
 
 
