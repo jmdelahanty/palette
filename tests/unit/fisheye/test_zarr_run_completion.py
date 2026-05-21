@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import zarr
 
 from fisheye.registry import stage_complete as stage_complete_mod
+from fisheye.registry.db import DatasetMetadata, Registry
 from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -494,3 +496,70 @@ def test_emit_stage_completion_resolves_nested_detect_quality_run(tmp_path: Path
     details = captured["details_json"]
     assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
     assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]
+
+
+def test_emit_stage_completion_real_zarr_writes_shadow_validation_details(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "archive.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    detect_parent = root.create_group("detect_runs")
+    detect_run = detect_parent.create_group("detect_001")
+    mark_run_started(detect_run, run_name="detect_001", stage="detect")
+    detect_run.create_array("frame_indices", data=np.asarray([0, 1], dtype=np.int32))
+    detect_run.create_array(
+        "bbox_norm_coords",
+        data=np.asarray([[0.5, 0.5, 0.1, 0.1], [0.4, 0.4, 0.2, 0.2]], dtype=np.float32),
+    )
+    detect_run.create_array("scores", data=np.asarray([0.9, 0.8], dtype=np.float32))
+    detect_run.create_array("class_ids", data=np.asarray([0, 0], dtype=np.int32))
+    detect_run.create_array("frame_counts", data=np.asarray([1, 1], dtype=np.int32))
+    mark_run_complete(detect_run, parent_group=detect_parent, run_name="detect_001")
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        registry.upsert_dataset(
+            "dataset_real",
+            session_uuid="dataset_real",
+            zarr_path=zarr_path,
+            recording_id="recording_real",
+        )
+        metadata = DatasetMetadata(
+            dataset_id="dataset_real",
+            session_uuid=None,
+            recording_id="recording_real",
+            zarr_use=None,
+            zarr_purpose=None,
+            source_layout=None,
+            source_frame_index_path=None,
+            source_recording_frame_index_path=None,
+            source_frame_index_schema=None,
+        )
+
+        wrote = emit_stage_completion(
+            root,
+            zarr_path,
+            step_name="detect",
+            status="ok",
+            source="unit_test_real_zarr",
+            run_name="detect_001",
+            registry=registry,
+            auto_registry_from_env=False,
+            upsert_dataset_row=False,
+            metadata=metadata,
+            invalidate_steps_fn=lambda *args, **kwargs: None,
+        )
+
+        assert wrote is True
+        row = registry.conn.execute(
+            """
+            SELECT status, details_json
+            FROM recording_step_status
+            WHERE dataset_id = ? AND step_name = ?;
+            """,
+            ("dataset_real", "detect"),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "ok"
+        assert '"stage_array_validation_status":"ok"' in row["details_json"]
+        assert '"stage_array_validation_enforced":false' in row["details_json"]
+    finally:
+        registry.close()

@@ -32,6 +32,7 @@ from fisheye.shared.environment import resolve_recording_roots as resolve_shared
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.registry.stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.utils.backfill_subject_mask_runs import project_eye_mask_run_to_subject_mask_run
@@ -798,6 +799,11 @@ def _sync_eye_mask_registry_rows_after_run(
     if context is None:
         return {"synced": False, "reason": "status_context_unavailable"}
 
+    try:
+        status_root = open_zarr_group_direct(zarr_path, mode="r")
+    except Exception as exc:
+        return {"synced": False, "reason": "zarr_open_failed", "error": str(exc)}
+
     registry = Registry(Path(str(context["registry_path"])))
     try:
         dataset_id = str(context["dataset_id"])
@@ -843,7 +849,7 @@ def _sync_eye_mask_registry_rows_after_run(
                     upsert_recording_step_status(*args, **kwargs)
 
                 wrote = emit_stage_completion(
-                    None,
+                    status_root,
                     zarr_path,
                     step_name=step_name,
                     status="ok",

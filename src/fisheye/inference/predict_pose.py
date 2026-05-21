@@ -16,6 +16,7 @@ from ..detection.detect_keypoints_yolo import detect_keypoints_yolo
 from ..registry.db import Registry, RegistryPaths
 from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import as_float, normalize_attr
+from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 
 _KEYPOINT_STEP_NAME = "keypoints"
@@ -224,6 +225,17 @@ def _emit_keypoint_status(
     if context is None:
         return
 
+    status_root: Optional[zarr.Group] = None
+    if status == "ok" and run_name:
+        try:
+            status_root = open_zarr_group_direct(context.zarr_path, mode="r")
+        except Exception as exc:
+            console.print(
+                "[yellow]Warning:[/yellow] failed to open Zarr root for "
+                f"{_KEYPOINT_STEP_NAME} completion validation: {exc}"
+            )
+            return
+
     registry = Registry(context.registry_path)
     try:
         metadata = DatasetMetadata(
@@ -238,7 +250,7 @@ def _emit_keypoint_status(
             source_frame_index_schema=None,
         )
         emit_stage_completion(
-            None,
+            status_root,
             context.zarr_path,
             step_name=_KEYPOINT_STEP_NAME,
             status=status,

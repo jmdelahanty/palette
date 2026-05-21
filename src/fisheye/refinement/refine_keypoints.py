@@ -74,6 +74,7 @@ from ..registry.stage_complete import (
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, normalize_attr
+from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..utils.system import get_environment_info, get_git_info
 
@@ -355,6 +356,18 @@ def _emit_refined_keypoint_status(
     if context is None:
         return False
 
+    status_root: Optional[zarr.Group] = None
+    if status == "ok" and run_name:
+        try:
+            status_root = open_zarr_group_direct(context.zarr_path, mode="r")
+        except Exception as exc:
+            if console is not None:
+                console.print(
+                    "[yellow]Warning:[/yellow] failed to open Zarr root for "
+                    f"{_STEP_NAME_REFINED_KEYPOINTS} completion validation: {exc}"
+                )
+            return False
+
     registry = Registry(context.registry_path)
     try:
         metadata = DatasetMetadata(
@@ -369,7 +382,7 @@ def _emit_refined_keypoint_status(
             source_frame_index_schema=None,
         )
         return emit_stage_completion(
-            None,
+            status_root,
             context.zarr_path,
             step_name=_STEP_NAME_REFINED_KEYPOINTS,
             status=status,

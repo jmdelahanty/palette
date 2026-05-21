@@ -27,6 +27,7 @@ from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
 from fisheye.registry.stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+from fisheye.shared.zarr_helpers import open_zarr_group_direct
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries as discover_shared_registry_zarr_entries
 from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review
@@ -608,6 +609,11 @@ def _sync_refined_keypoint_step_status_after_auto_review(
     if context is None:
         return {"synced": False, "reason": "status_context_unavailable"}
 
+    try:
+        status_root = open_zarr_group_direct(zarr_path, mode="r")
+    except Exception as exc:
+        return {"synced": False, "reason": "zarr_open_failed", "error": str(exc)}
+
     details_update: Dict[str, Any] = {
         "reason": "present",
         "latest_selector": "run_keypoints_batch_auto_review",
@@ -653,7 +659,7 @@ def _sync_refined_keypoint_step_status_after_auto_review(
             source_frame_index_schema=None,
         )
         wrote = emit_stage_completion(
-            None,
+            status_root,
             zarr_path,
             step_name="refined_keypoints",
             status="ok",
