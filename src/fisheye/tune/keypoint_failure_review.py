@@ -39,7 +39,7 @@ from ..shared.frame_flags import (
 )
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
-from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
 from ..utils.zarr_io import open_zarr_root
 from ..refinement.keypoint_quality import (

@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
 from ..registry.db import Registry, RegistryPaths
-from ..shared.registry_stage_complete import extract_dataset_metadata
+from ..registry.stage_complete import extract_dataset_metadata
 from ..shared.refined_detect_curation import (
     build_source_detection_decision_summary,
     extract_present_curated_rows,

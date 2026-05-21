@@ -17,10 +17,11 @@ from rich.console import Console
 from rich.panel import Panel
 
 from ..shared.experiment_setup import infer_experiment_setup
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..utils.zarr_io import open_zarr_root
 from .single_subject_per_arena import (
     TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
@@ -542,6 +543,10 @@ def assign_arenas_spatial(
     
     # Create run group
     assign_group, run_group_name = get_run_group(root, 'arena_assignment', console)
+    arena_parent = root.get("arena_assignment_runs")
+    if arena_parent is not None:
+        mark_run_started(assign_group, run_name=run_group_name, stage="arena_assignment")
+        note_pending_latest(arena_parent, run_group_name)
     
     # Select detection data, preferring the canonical sparse refined surface when available.
     refined_parent = root.get('refined_detect_runs')
@@ -805,9 +810,8 @@ def assign_arenas_spatial(
         'hostname': env_info['platform']['hostname']
     })
     
-    # Mark latest
-    parent_group = root['arena_assignment_runs']
-    parent_group.attrs['latest'] = run_group_name
+    if arena_parent is not None:
+        mark_run_complete(assign_group, parent_group=arena_parent, run_name=run_group_name)
 
     try:
         track_run_name, _track_group, tracking_summary = (

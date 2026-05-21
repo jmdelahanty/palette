@@ -27,12 +27,13 @@ from ..shared.provenance_attrs import (
 )
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, clean_mapping, normalize_attr
 from ..shared.zarr.schema import add_processing_run
+from ..shared.zarr_run_completion import mark_run_complete, resolve_latest_complete_run_name
 from ..utils.system import get_environment_info, get_git_info
 from .unet import UNetSmall
 
@@ -675,7 +676,7 @@ def main(
             raise ValueError(f"Source eye mask run '{source_run_name}' not found.")
         src_run = eye_parent[source_run_name]
     else:
-        latest = eye_parent.attrs.get("latest")
+        latest = resolve_latest_complete_run_name(eye_parent, legacy_default=True)
         if latest and latest in eye_parent and not args.crop_run:
             source_run_name = latest
             src_run = eye_parent[latest]
@@ -870,7 +871,7 @@ def main(
     keypoints_parent = root.get("keypoints_runs")
     latest_keypoints = None
     if keypoints_parent is not None:
-        latest_keypoints = keypoints_parent.attrs.get("latest")
+        latest_keypoints = resolve_latest_complete_run_name(keypoints_parent, legacy_default=True)
     requested_keypoints_run = _resolve_source_keypoints_run_for_unet(
         explicit_keypoints_run=args.keypoints_run,
         source_attrs=src_attrs,
@@ -1037,6 +1038,7 @@ def main(
         console.print("[bold]Timing Profile:[/bold]")
         for line in timing_profiler.render_lines(total_items=total_rois, wall_seconds=duration, limit=6):
             console.print(f"[dim]{line}[/dim]")
+    mark_run_complete(run_group, parent_group=root["eye_masks_runs"], run_name=resolved_run_name)
     _emit_eye_masks_status(
         registry=registry,
         root=root,

@@ -14,7 +14,7 @@ import zarr
 from fisheye.detection.detect_yolo import DECODE_BACKEND_CHOICES
 from fisheye.detection.detect_yolo import detect_yolo
 from fisheye.registry.db import Registry, RegistryPaths
-from fisheye.shared.registry_stage_complete import emit_stage_completion
+from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile

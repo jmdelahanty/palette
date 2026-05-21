@@ -17,7 +17,7 @@ import zarr
 from rich.console import Console
 
 from ..detection.detect_yolo import detect_yolo as run_detect_yolo
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 
 
 def _normalize_text(value: object) -> Optional[str]:

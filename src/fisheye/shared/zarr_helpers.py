@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 
 
 ParentPath: TypeAlias = str | Sequence[str]
@@ -301,7 +302,16 @@ def resolve_zarr_run(
             )
         return parent[requested], requested
 
-    latest = _normalize_run_name(parent.attrs.get("latest")) if fallback_to_latest else None
+    latest = None
+    if fallback_to_latest:
+        latest = _normalize_run_name(resolve_latest_complete_run_name(parent, legacy_default=True))
+        # Preserve the stale-consolidated-metadata fallback below: when the
+        # parent cannot see the latest child but the filesystem can, the
+        # completion resolver cannot inspect the run group.
+        if latest is None:
+            raw_latest = _normalize_run_name(parent.attrs.get("latest"))
+            if raw_latest is not None and raw_latest not in parent:
+                latest = raw_latest
     if latest is not None:
         if latest in parent:
             return parent[latest], latest

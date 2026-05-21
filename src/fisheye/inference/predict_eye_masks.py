@@ -12,7 +12,7 @@ import zarr
 from rich.console import Console
 
 from ..segmentation.eye_segmentation_yolo import segment_eye_masks_yolo
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 
 _STATUS_SOURCE = "runtime_predict_eye_masks"
 

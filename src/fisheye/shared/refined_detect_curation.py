@@ -13,6 +13,7 @@ from .detect_reason_codec import read_reason_labels, update_reason_rows, write_r
 from .json_safety import json_attr_safe
 from .stage_provenance import build_stage_provenance
 from .type_conversions import as_int, clean_mapping, normalize_attr
+from .zarr_run_completion import resolve_latest_complete_run_name
 
 
 REFINED_DETECT_STATUS_CODE_MAP: Dict[str, int] = {
@@ -302,7 +303,9 @@ def resolve_curated_refined_detect_run(
     run_name: Optional[str] = None,
 ) -> Tuple[zarr.Group, str]:
     refined_parent, _ = _resolve_refined_parent(root)
-    resolved_name = normalize_attr(run_name) or normalize_attr(refined_parent.attrs.get("latest"))
+    resolved_name = normalize_attr(run_name) or normalize_attr(
+        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    )
     if not resolved_name or resolved_name not in refined_parent:
         raise ValueError("No refined detect run available.")
     refined_run = _open_named_child_group(refined_parent, resolved_name, mode="r")
@@ -2108,7 +2111,9 @@ def write_curated_refined_detect_surfaces(
     source_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     refined_parent, _ = _resolve_refined_parent(root, refined_family_path=refined_family_path)
-    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(refined_parent.attrs.get("latest"))
+    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
+        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
     refined_run = _open_named_child_group(refined_parent, resolved_refined_run_name, mode="a")
@@ -2545,7 +2550,9 @@ def update_curated_refined_detect_rows(
     source_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     refined_parent, _ = _resolve_refined_parent(root)
-    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(refined_parent.attrs.get("latest"))
+    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
+        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
     refined_run = _open_named_child_group(refined_parent, resolved_refined_run_name, mode="a")
@@ -2656,7 +2663,9 @@ def write_curated_refined_detect_root(
     source_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     refined_parent, _ = _resolve_refined_parent(root)
-    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(refined_parent.attrs.get("latest"))
+    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
+        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
     refined_run = _open_named_child_group(refined_parent, resolved_refined_run_name, mode="a")
@@ -2815,7 +2824,9 @@ def materialize_refined_detect_curation(
         raise ValueError("Root attrs must include positive total_frames.")
 
     refined_parent, parent_name = _resolve_refined_parent(root)
-    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(refined_parent.attrs.get("latest"))
+    resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
+        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
     refined_run = _open_named_child_group(refined_parent, resolved_refined_run_name, mode="a")

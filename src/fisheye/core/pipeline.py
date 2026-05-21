@@ -31,6 +31,7 @@ from ..refinement.detect_quality import analyze_detect_quality, save_quality_rep
 from ..refinement.refine_keypoints import create_refined_keypoint_run
 from ..registry.stage_catalog import canonical_stage_id
 from ..shared.experiment_setup import infer_experiment_setup
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..shared.zarr.schema import validate_zarr_structure
 from ..utils import run_eye_masks_batch as eye_mask_batch
 
@@ -68,6 +69,12 @@ def _get_group_with_fallback(root: zarr.Group, primary: str, legacy: str) -> Opt
     if legacy in root:
         return root[legacy]
     return None
+
+
+def _latest_complete(parent: Optional[zarr.Group]) -> Optional[str]:
+    if parent is None:
+        return None
+    return resolve_latest_complete_run_name(parent, legacy_default=True)
 
 
 @dataclass
@@ -403,11 +410,11 @@ class Pipeline:
                     existing_stages.add('import')
                     if 'images_ds' in root['raw_video']:
                         existing_stages.add('downsample')
-                if 'background_runs' in root and root['background_runs'].attrs.get('latest'):
+                if 'background_runs' in root and _latest_complete(root['background_runs']):
                     existing_stages.add('background')
-                if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
+                if 'detect_runs' in root and _latest_complete(root['detect_runs']):
                     existing_stages.add('detect')
-                if 'arena_assignment_runs' in root and root['arena_assignment_runs'].attrs.get('latest'):
+                if 'arena_assignment_runs' in root and _latest_complete(root['arena_assignment_runs']):
                     existing_stages.add('assign_ids')
             except:
                 pass
@@ -1175,8 +1182,8 @@ class Pipeline:
                     results_lines.append(f"[bold]Expected fish:[/bold] {total_expected}")
                 
                 # Detection results
-                if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
-                    latest_detect = root['detect_runs'].attrs['latest']
+                latest_detect = _latest_complete(root['detect_runs']) if 'detect_runs' in root else None
+                if latest_detect:
                     detect_group = root[f'detect_runs/{latest_detect}']
                     if 'summary_statistics' in detect_group.attrs:
                         stats = detect_group.attrs['summary_statistics']
@@ -1189,8 +1196,8 @@ class Pipeline:
                         results_lines.append(f"[bold]Detection rate:[/bold] {detection_rate:.1f}% of frames")
                 
                 # Crop results - show source type
-                if 'crop_runs' in root and root['crop_runs'].attrs.get('latest'):
-                    latest_crop = root['crop_runs'].attrs['latest']
+                latest_crop = _latest_complete(root['crop_runs']) if 'crop_runs' in root else None
+                if latest_crop:
                     crop_group = root[f'crop_runs/{latest_crop}']
                     
                     # Get crop source info
@@ -1223,8 +1230,8 @@ class Pipeline:
                             )
                 
                 # Arena assignment results
-                if 'arena_assignment_runs' in root and root['arena_assignment_runs'].attrs.get('latest'):
-                    latest_assign = root['arena_assignment_runs'].attrs['latest']
+                latest_assign = _latest_complete(root['arena_assignment_runs']) if 'arena_assignment_runs' in root else None
+                if latest_assign:
                     assign_group = root[f'arena_assignment_runs/{latest_assign}']
                     if 'summary_statistics' in assign_group.attrs:
                         stats = assign_group.attrs['summary_statistics']
@@ -1260,8 +1267,8 @@ class Pipeline:
                                 )
                 
                 # Keypoint results
-                if 'keypoint_runs' in root and root['keypoint_runs'].attrs.get('latest'):
-                    latest_kp = root['keypoint_runs'].attrs['latest']
+                latest_kp = _latest_complete(root['keypoint_runs']) if 'keypoint_runs' in root else None
+                if latest_kp:
                     kp_group = root[f'keypoint_runs/{latest_kp}']
                     if 'summary_statistics' in kp_group.attrs:
                         stats = kp_group.attrs['summary_statistics']
@@ -1272,8 +1279,8 @@ class Pipeline:
                         results_lines.append(f"[bold]Keypoints:[/bold] {successful:,}/{total_rois:,} ({success_rate:.1f}%)")
                 
                 # Eye mask results
-                if 'eye_masks_runs' in root and root['eye_masks_runs'].attrs.get('latest'):
-                    latest_eye = root['eye_masks_runs'].attrs['latest']
+                latest_eye = _latest_complete(root['eye_masks_runs']) if 'eye_masks_runs' in root else None
+                if latest_eye:
                     eye_group = root[f'eye_masks_runs/{latest_eye}']
                     total_rois_attr = eye_group.attrs.get('total_rois')
                     total_rois_eye = int(total_rois_attr) if total_rois_attr is not None else 0
@@ -1307,8 +1314,8 @@ class Pipeline:
                             f"{overlap_rejects:,}, too-close: {proximity_rejects:,}, too-far: {distance_rejects:,}[/dim]"
                         )
 
-                if 'refined_eye_masks_runs' in root and root['refined_eye_masks_runs'].attrs.get('latest'):
-                    latest_refined_eye = root['refined_eye_masks_runs'].attrs['latest']
+                latest_refined_eye = _latest_complete(root['refined_eye_masks_runs']) if 'refined_eye_masks_runs' in root else None
+                if latest_refined_eye:
                     refined_eye_group = root[f'refined_eye_masks_runs/{latest_refined_eye}']
                     total_rois_attr = refined_eye_group.attrs.get('total_rois')
                     total_rois_refined = int(total_rois_attr) if total_rois_attr is not None else 0
@@ -1384,19 +1391,17 @@ class Pipeline:
             elif stage == 'background':
                 if 'background_runs' not in root:
                     return False
-                latest = root['background_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['background_runs']) is not None
             
             elif stage == 'detect':
                 if 'detect_runs' not in root:
                     return False
-                latest = root['detect_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['detect_runs']) is not None
 
             elif stage == 'detect_quality':
                 if 'detect_runs' not in root:
                     return False
-                detect_latest = root['detect_runs'].attrs.get('latest')
+                detect_latest = _latest_complete(root['detect_runs'])
                 if detect_latest is None:
                     return False
                 detect_run = root['detect_runs'].get(detect_latest)
@@ -1405,36 +1410,31 @@ class Pipeline:
                 qr = detect_run.get('quality_reports')
                 if qr is None:
                     return False
-                return qr.attrs.get('latest') is not None
+                return _latest_complete(qr) is not None
 
             elif stage == 'crop':
                 if 'crop_runs' not in root:
                     return False
-                latest = root['crop_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['crop_runs']) is not None
             
             elif stage == 'keypoints':
                 if 'keypoints_runs' not in root:
                     return False
-                latest = root['keypoints_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['keypoints_runs']) is not None
             elif stage == 'eye_masks':
                 if 'eye_masks_runs' not in root:
                     return False
-                latest = root['eye_masks_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['eye_masks_runs']) is not None
 
             elif stage == 'refined_eye_masks':
                 if 'refined_eye_masks_runs' not in root:
                     return False
-                latest = root['refined_eye_masks_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['refined_eye_masks_runs']) is not None
 
             elif stage == 'refined_subject_masks':
                 if 'refined_subject_masks_runs' not in root:
                     return False
-                latest = root['refined_subject_masks_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['refined_subject_masks_runs']) is not None
 
             elif stage == 'keypoints_refine':
                 group = _get_group_with_fallback(
@@ -1442,13 +1442,12 @@ class Pipeline:
                     REFINED_KEYPOINT_GROUP,
                     LEGACY_REFINED_KEYPOINT_GROUP,
                 )
-                return group is not None and group.attrs.get('latest') is not None
+                return group is not None and _latest_complete(group) is not None
             
             elif stage == 'assign_ids':
                 if 'arena_assignment_runs' not in root:
                     return False
-                latest = root['arena_assignment_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['arena_assignment_runs']) is not None
             
             elif stage == 'refine':
                 group = _get_group_with_fallback(
@@ -1456,13 +1455,12 @@ class Pipeline:
                     REFINED_DETECT_GROUP,
                     LEGACY_REFINED_DETECT_GROUP,
                 )
-                return group is not None and group.attrs.get('latest') is not None
+                return group is not None and _latest_complete(group) is not None
             
             elif stage == 'track':
                 if 'tracking_runs' not in root:
                     return False
-                latest = root['tracking_runs'].attrs.get('latest')
-                return latest is not None
+                return _latest_complete(root['tracking_runs']) is not None
             
             return False
             

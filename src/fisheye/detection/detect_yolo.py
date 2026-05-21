@@ -48,6 +48,7 @@ from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
 from fisheye.shared.pynvvc_luma_rgb import preprocess_nv12_rgb
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.schema import get_run_group
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from fisheye.utils.import_video_metadata import write_video_metadata
 from fisheye.utils.system import get_environment_info, get_git_info
 
@@ -1133,10 +1134,14 @@ def detect_yolo(
         if run_name in parent_group:
             raise ValueError(f"detect_runs/{run_name} already exists")
         detect_group = parent_group.create_group(run_name)
-        parent_group.attrs["latest"] = run_name
+        mark_run_started(detect_group, run_name=run_name, stage="detect")
+        note_pending_latest(parent_group, run_name)
         console.print(f"Created run group: [cyan]detect_runs/{run_name}[/cyan]")
     else:
         detect_group, run_name = get_run_group(root, 'detect', console, create_new=True)
+        parent_group = root["detect_runs"]
+        mark_run_started(detect_group, run_name=run_name, stage="detect")
+        note_pending_latest(parent_group, run_name)
     console.print(f"[green]✓[/green] Writing detections to detect_runs/{run_name}")
     
     # Storage for detections
@@ -1688,8 +1693,7 @@ def detect_yolo(
     provenance_record["timing"] = dict(timing_summary)
     write_stage_provenance(detect_group, provenance_record)
     
-    # Mark as latest
-    root['detect_runs'].attrs['latest'] = run_name
+    mark_run_complete(detect_group, parent_group=root["detect_runs"], run_name=run_name)
     
     console.print(f"[green]✓[/green] Detections saved")
     

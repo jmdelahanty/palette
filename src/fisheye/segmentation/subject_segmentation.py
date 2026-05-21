@@ -28,6 +28,7 @@ from ..shared.subject_mask_registry_status import emit_subject_mask_stage_comple
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..tune import subject_mask_tuner as tuning
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
@@ -361,7 +362,8 @@ def _prepare_run_group(
             )
         del parent[run_name]
     run_group = parent.create_group(run_name)
-    parent.attrs["latest"] = run_name
+    mark_run_started(run_group, run_name=str(run_name), stage="subject_masks")
+    note_pending_latest(parent, str(run_name))
     return run_group, str(run_name)
 
 
@@ -683,6 +685,7 @@ def segment_subject_masks_from_root(
             inputs=provenance_inputs,
         )
         write_stage_provenance(run_group, provenance)
+        mark_run_complete(run_group, parent_group=root["subject_mask_runs"], run_name=run_name)
         if zarr_path is not None:
             emit_subject_mask_stage_completion(
                 root,

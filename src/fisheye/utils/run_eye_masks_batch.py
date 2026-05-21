@@ -30,7 +30,7 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
-from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from fisheye.registry.stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
 from fisheye.utils.backfill_subject_mask_runs import project_eye_mask_run_to_subject_mask_run

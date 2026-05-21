@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 
 _DETECT_QUALITY_STATUS_SOURCE = "runtime_detect_quality"
 DEFAULT_DETECT_FAMILY_PATH = "detect_runs"
@@ -521,7 +522,8 @@ def save_quality_report(
     if run_name in quality_reports_group:
         raise ValueError(f"{quality_reports_group.path}/{run_name} already exists")
     quality_group = quality_reports_group.create_group(run_name)
-    quality_reports_group.attrs["latest"] = run_name
+    mark_run_started(quality_group, run_name=run_name, stage="detect_quality")
+    note_pending_latest(quality_reports_group, run_name)
 
     # Store metadata
     quality_group.attrs["analysis_timestamp"] = datetime.now().isoformat()
@@ -672,6 +674,8 @@ def save_quality_report(
         print(f"  Jumps: {n_jump_detections}")
         if n_multi_detections > 0:
             print(f"  Multi-detection: {n_multi_detections}")
+
+    mark_run_complete(quality_group, parent_group=quality_reports_group, run_name=run_name)
 
     _emit_detect_quality_status(
         zarr_path=zarr_path,

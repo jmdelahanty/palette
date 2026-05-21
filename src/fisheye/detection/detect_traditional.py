@@ -21,6 +21,12 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    resolve_latest_complete_run_name,
+)
 from ..utils.system import get_git_info, get_platform_info
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 
@@ -284,7 +290,9 @@ def detect_fish(
     git_info = get_git_info()
     platform_info = get_platform_info(collect_ip=False, disk_path=zarr_path)
     
-    latest_bg_run = root['background_runs'].attrs['latest']
+    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"], legacy_default=True)
+    if latest_bg_run is None:
+        raise ValueError("Traditional detection requires a complete background run.")
     _require_imported_detection_inputs(root, latest_bg_run)
     console.print(f"Using background: [cyan]{latest_bg_run}[/cyan]")
     
@@ -293,7 +301,8 @@ def detect_fish(
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
     run_name = f"detect_{timestamp}"
     detect_group = parent_group.create_group(run_name)
-    parent_group.attrs['latest'] = run_name
+    mark_run_started(detect_group, run_name=run_name, stage="detect")
+    note_pending_latest(parent_group, run_name)
     
     console.print(f"Created new run: [cyan]detect_runs/{run_name}[/cyan]")
     
@@ -525,6 +534,7 @@ def detect_fish(
         },
     )
     write_stage_provenance(detect_group, provenance_record)
+    mark_run_complete(detect_group, parent_group=parent_group, run_name=run_name)
     
     # Run quality analysis
     console.print("\n[bold]Running detection quality analysis...[/bold]")

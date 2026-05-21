@@ -66,7 +66,7 @@ from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.derived_metrics_schema import build_refined_keypoint_derived_metrics_schema
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
-from ..shared.registry_stage_complete import (
+from ..registry.stage_complete import (
     DatasetMetadata,
     emit_stage_completion,
     extract_dataset_metadata,
@@ -74,6 +74,7 @@ from ..shared.registry_stage_complete import (
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, normalize_attr
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..utils.system import get_environment_info, get_git_info
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
@@ -1093,7 +1094,8 @@ def create_refined_keypoint_run(
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_name = f"refined_keypoints_{timestamp}"
     kp_refined = kp_refined_root.create_group(run_name)
-    kp_refined_root.attrs["latest"] = run_name
+    mark_run_started(kp_refined, run_name=run_name, stage="refined_keypoints")
+    note_pending_latest(kp_refined_root, run_name)
 
     created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
 
@@ -1742,6 +1744,8 @@ def create_refined_keypoint_run(
 
     console.print("\n".join(report_lines))
     console.print(f"[green]✓[/green] Saved refined keypoints run: [cyan]{run_name}[/cyan]")
+
+    mark_run_complete(kp_refined, parent_group=kp_refined_root, run_name=run_name)
 
     _emit_refined_keypoint_status(
         context=status_context,

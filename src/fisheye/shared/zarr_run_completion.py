@@ -1,0 +1,189 @@
+"""Completion markers for Palette Zarr run groups.
+
+The contract is intentionally attr-based so it works for both Zarr v2/v3 and
+existing fake-group unit tests. Legacy runs without these attrs are treated as
+complete by default for read compatibility; runs that opt in with
+``palette_run_completion_contract`` must reach ``complete`` before status
+helpers and latest resolvers should trust them.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+RUN_COMPLETION_CONTRACT = "palette.zarr_run_completion.v1"
+RUN_COMPLETION_CONTRACT_ATTR = "palette_run_completion_contract"
+RUN_COMPLETION_STATUS_ATTR = "palette_run_completion_status"
+RUN_COMPLETED_AT_ATTR = "palette_run_completed_at_utc"
+RUN_STARTED_AT_ATTR = "palette_run_started_at_utc"
+RUN_NAME_ATTR = "palette_run_name"
+RUN_STAGE_ATTR = "palette_run_stage"
+RUN_LATEST_COMPLETE_ATTR = "latest_complete"
+RUN_LATEST_PENDING_ATTR = "latest_pending"
+
+RUN_STATUS_RUNNING = "running"
+RUN_STATUS_COMPLETE = "complete"
+RUN_STATUS_FAILED = "failed"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def mark_run_started(
+    run_group: Any,
+    *,
+    run_name: Optional[str] = None,
+    stage: Optional[str] = None,
+    started_at_utc: Optional[str] = None,
+) -> None:
+    """Mark a run group as intentionally incomplete.
+
+    Writers should call this immediately after creating a run group. Readers
+    that understand this contract will ignore the run until
+    :func:`mark_run_complete` is called.
+    """
+
+    attrs = run_group.attrs
+    attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
+    attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_RUNNING
+    attrs[RUN_STARTED_AT_ATTR] = started_at_utc or utc_now_iso()
+    if run_name is not None:
+        attrs[RUN_NAME_ATTR] = str(run_name)
+    if stage is not None:
+        attrs[RUN_STAGE_ATTR] = str(stage)
+
+
+def mark_run_complete(
+    run_group: Any,
+    *,
+    parent_group: Optional[Any] = None,
+    run_name: Optional[str] = None,
+    completed_at_utc: Optional[str] = None,
+) -> None:
+    """Mark a run as complete and then publish it as latest when requested."""
+
+    attrs = run_group.attrs
+    attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
+    attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_COMPLETE
+    attrs[RUN_COMPLETED_AT_ATTR] = completed_at_utc or utc_now_iso()
+    if run_name is not None:
+        attrs[RUN_NAME_ATTR] = str(run_name)
+    if parent_group is not None and run_name is not None:
+        name = str(run_name)
+        parent_group.attrs[RUN_LATEST_COMPLETE_ATTR] = name
+        parent_group.attrs["latest"] = name
+        if parent_group.attrs.get(RUN_LATEST_PENDING_ATTR) == name:
+            try:
+                del parent_group.attrs[RUN_LATEST_PENDING_ATTR]
+            except Exception:
+                parent_group.attrs[RUN_LATEST_PENDING_ATTR] = None
+
+
+def mark_run_failed(
+    run_group: Any,
+    *,
+    failed_at_utc: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    attrs = run_group.attrs
+    attrs[RUN_COMPLETION_CONTRACT_ATTR] = RUN_COMPLETION_CONTRACT
+    attrs[RUN_COMPLETION_STATUS_ATTR] = RUN_STATUS_FAILED
+    attrs["palette_run_failed_at_utc"] = failed_at_utc or utc_now_iso()
+    if error:
+        attrs["palette_run_error"] = str(error)
+
+
+def has_run_completion_contract(run_group: Any) -> bool:
+    return run_group.attrs.get(RUN_COMPLETION_CONTRACT_ATTR) == RUN_COMPLETION_CONTRACT
+
+
+def is_run_complete(run_group: Any, *, legacy_default: bool = True) -> bool:
+    """Return whether a run group is complete.
+
+    ``legacy_default=True`` preserves existing archives that predate this
+    contract. Once all active writers emit completion attrs, callers can switch
+    to strict mode.
+    """
+
+    attrs = run_group.attrs
+    status = attrs.get(RUN_COMPLETION_STATUS_ATTR)
+    if status is None and not has_run_completion_contract(run_group):
+        return bool(legacy_default)
+    return str(status).lower() == RUN_STATUS_COMPLETE
+
+
+def _group_names(parent_group: Any) -> list[str]:
+    if hasattr(parent_group, "group_keys"):
+        names = parent_group.group_keys()
+    else:
+        names = parent_group.keys()
+    return sorted(str(name) for name in names if isinstance(name, str))
+
+
+def _get_child(parent_group: Any, name: str) -> Optional[Any]:
+    try:
+        if name in parent_group:
+            return parent_group[name]
+    except Exception:
+        pass
+    try:
+        return parent_group.get(name)
+    except Exception:
+        return None
+
+
+def resolve_latest_complete_run_name(
+    parent_group: Any,
+    *,
+    latest_attr: str = "latest",
+    legacy_default: bool = True,
+) -> Optional[str]:
+    """Resolve the newest run that is complete under the run-completion contract."""
+
+    for attr in (latest_attr, RUN_LATEST_COMPLETE_ATTR):
+        candidate = parent_group.attrs.get(attr)
+        if not candidate:
+            continue
+        name = str(candidate)
+        child = _get_child(parent_group, name)
+        if child is not None and is_run_complete(child, legacy_default=legacy_default):
+            return name
+
+    for name in reversed(_group_names(parent_group)):
+        child = _get_child(parent_group, name)
+        if child is not None and is_run_complete(child, legacy_default=legacy_default):
+            return name
+    return None
+
+
+def resolve_latest_complete_run_group(
+    parent_group: Any,
+    *,
+    latest_attr: str = "latest",
+    legacy_default: bool = True,
+) -> tuple[Optional[str], Optional[Any]]:
+    name = resolve_latest_complete_run_name(
+        parent_group,
+        latest_attr=latest_attr,
+        legacy_default=legacy_default,
+    )
+    if name is None:
+        return None, None
+    return name, _get_child(parent_group, name)
+
+
+def note_pending_latest(parent_group: Any, run_name: str) -> None:
+    name = str(run_name)
+    parent_group.attrs[RUN_LATEST_PENDING_ATTR] = name
+    if parent_group.attrs.get("latest") != name:
+        return
+    previous_complete = parent_group.attrs.get(RUN_LATEST_COMPLETE_ATTR)
+    if previous_complete and _get_child(parent_group, str(previous_complete)) is not None:
+        parent_group.attrs["latest"] = str(previous_complete)
+        return
+    try:
+        del parent_group.attrs["latest"]
+    except Exception:
+        parent_group.attrs["latest"] = None

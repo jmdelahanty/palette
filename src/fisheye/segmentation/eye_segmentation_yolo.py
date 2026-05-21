@@ -32,12 +32,13 @@ from ..shared.provenance_attrs import (
     build_source_roi_pixel_attrs,
     resolve_source_keypoints_run,
 )
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, clean_mapping, normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..utils.system import get_environment_info, get_git_info
 
 
@@ -61,10 +62,14 @@ def _prepare_run_group(
         if run_name in parent:
             raise ValueError(f"eye_masks_runs/{run_name} already exists")
         run_group = parent.create_group(run_name)
-        parent.attrs["latest"] = run_name
+        mark_run_started(run_group, run_name=run_name, stage="eye_masks")
+        note_pending_latest(parent, run_name)
         console.print(f"Created run group: [cyan]eye_masks_runs/{run_name}[/cyan]")
         return run_group, run_name
-    return get_run_group(root, "eye_masks", console=console, create_new=True)
+    run_group, resolved_name = get_run_group(root, "eye_masks", console=console, create_new=True)
+    mark_run_started(run_group, run_name=resolved_name, stage="eye_masks")
+    note_pending_latest(parent, resolved_name)
+    return run_group, resolved_name
 
 
 def _as_optional_text(value: object) -> Optional[str]:
@@ -1302,6 +1307,7 @@ def segment_eye_masks_yolo(
             f"[green]✓[/green] Eye masks saved as [cyan]eye_masks_runs/{resolved_run_name}[/cyan] "
             f"({total_successful_eyes} successful eyes, {successful_pairs}/{total_rois} ROI pairs) in {duration:.1f}s"
         )
+        mark_run_complete(run_group, parent_group=root["eye_masks_runs"], run_name=resolved_run_name)
         _emit_eye_masks_status(
             registry=registry,
             root=root,

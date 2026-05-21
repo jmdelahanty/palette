@@ -55,12 +55,13 @@ from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
-from ..shared.registry_stage_complete import emit_stage_completion, extract_dataset_metadata
+from ..registry.stage_complete import emit_stage_completion, extract_dataset_metadata
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, coerce_positive_float, normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..utils.system import get_environment_info, get_git_info
 
 
@@ -721,10 +722,14 @@ def _prepare_run_group(root: zarr.Group, run_name: Optional[str], console: Conso
         if run_name in parent:
             raise ValueError(f"{parent_name}/{run_name} already exists")
         run_group = parent.create_group(run_name)
-        parent.attrs["latest"] = run_name
+        mark_run_started(run_group, run_name=run_name, stage=REFINED_STAGE_NAME)
+        note_pending_latest(parent, run_name)
         console.print(f"Created run group: [cyan]{parent_name}/{run_name}[/cyan]")
         return run_group, run_name
-    return get_run_group(root, REFINED_STAGE_NAME, console=console, create_new=True)
+    run_group, resolved_name = get_run_group(root, REFINED_STAGE_NAME, console=console, create_new=True)
+    mark_run_started(run_group, run_name=resolved_name, stage=REFINED_STAGE_NAME)
+    note_pending_latest(parent, resolved_name)
+    return run_group, resolved_name
 
 
 def _split_mask_by_keypoints(
@@ -2773,6 +2778,8 @@ def refine_eye_masks(
         f"[green]✓[/green] Refined eye masks saved to [cyan]{REFINED_STAGE_NAME}_runs/{resolved_run_name}[/cyan] "
         f"({successful_pairs}/{total_rois} ROI pairs refined)"
     )
+
+    mark_run_complete(run_group, parent_group=root[REFINED_STAGE_NAME + "_runs"], run_name=resolved_run_name)
 
     review_status = run_group.attrs.get("eye_mask_review_status")
     coverage_pct = _status_float(run_group.attrs.get("successful_roi_pair_rate"))

@@ -14,7 +14,7 @@ from rich.console import Console
 
 from ..detection.detect_keypoints_yolo import detect_keypoints_yolo
 from ..registry.db import Registry, RegistryPaths
-from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import as_float, normalize_attr
 
 _KEYPOINT_STEP_NAME = "keypoints"

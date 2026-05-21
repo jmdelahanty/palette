@@ -26,6 +26,11 @@ from fisheye.utils.system import (
     get_environment_summary,
     get_environment_info
 )
+from fisheye.shared.zarr_run_completion import (
+    mark_run_started,
+    note_pending_latest,
+    resolve_latest_complete_run_group,
+)
 
 ZARR_SCHEMA_VERSION = "3.0.0"
 
@@ -570,11 +575,12 @@ def add_processing_run(
         if run_name in parent_group:
             raise ValueError(f"{parent_group_name}/{run_name} already exists")
         run_group = parent_group.create_group(run_name)
-        parent_group.attrs["latest"] = run_name
+        note_pending_latest(parent_group, run_name)
         if console:
             console.print(f"Created run group: [cyan]{parent_group_name}/{run_name}[/cyan]")
     else:
         run_group, run_name = get_run_group(root, stage, create_new=True, console=console)
+        note_pending_latest(parent_group, run_name)
     
     # Add standard metadata
     run_group.attrs.update({
@@ -620,6 +626,7 @@ def add_processing_run(
     else:
         run_group.attrs['gpu_device'] = 'None'
     run_group.attrs['environment'] = env_info.get('environment', {})
+    mark_run_started(run_group, run_name=run_name, stage=stage)
 
     return run_group
 
@@ -645,14 +652,8 @@ def get_latest_run(root: zarr.Group, stage: str) -> Optional[zarr.Group]:
     else:
         return None
     
-    if 'latest' not in parent_group.attrs:
-        return None
-    
-    latest_run_name = parent_group.attrs['latest']
-    if not latest_run_name or latest_run_name not in parent_group:
-        return None
-    
-    return parent_group[latest_run_name]
+    _, latest_group = resolve_latest_complete_run_group(parent_group)
+    return latest_group
 
 
 def update_import_duration(root: zarr.Group, duration_seconds: float) -> None:

@@ -34,6 +34,7 @@ from ..shared.subject_mask_registry_status import emit_subject_mask_stage_comple
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..registry.db import Registry, RegistryPaths
 from ..utils.resolve_subject_mask_model import (
     build_resolution_payload,
@@ -433,7 +434,8 @@ def _prepare_run_group(
             )
         del parent[resolved_name]
     run_group = parent.create_group(resolved_name)
-    parent.attrs["latest"] = resolved_name
+    mark_run_started(run_group, run_name=str(resolved_name), stage="subject_masks")
+    note_pending_latest(parent, str(resolved_name))
     return run_group, str(resolved_name)
 
 
@@ -1184,6 +1186,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         },
     )
     write_stage_provenance(run_group, provenance)
+    mark_run_complete(run_group, parent_group=root["subject_mask_runs"], run_name=resolved_run_name)
     emit_subject_mask_stage_completion(
         root,
         zarr_path,

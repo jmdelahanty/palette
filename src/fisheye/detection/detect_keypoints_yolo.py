@@ -27,11 +27,12 @@ from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..pose.heading import compute_heading_from_spec
 from ..utils.system import get_environment_info, get_git_info
 from ..pose.schema import PoseSchema, normalize_kpt_shape, schema_payload_from_package
@@ -52,10 +53,14 @@ def _prepare_run_group(
         if run_name in parent:
             raise ValueError(f"keypoints_runs/{run_name} already exists")
         run_group = parent.create_group(run_name)
-        parent.attrs["latest"] = run_name
+        mark_run_started(run_group, run_name=run_name, stage="keypoints")
+        note_pending_latest(parent, run_name)
         console.print(f"Created run group: [cyan]keypoints_runs/{run_name}[/cyan]")
         return run_group, run_name
-    return get_run_group(root, "keypoints", console=console, create_new=True)
+    run_group, resolved_name = get_run_group(root, "keypoints", console=console, create_new=True)
+    mark_run_started(run_group, run_name=resolved_name, stage="keypoints")
+    note_pending_latest(parent, resolved_name)
+    return run_group, resolved_name
 
 
 def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
@@ -921,6 +926,8 @@ def detect_keypoints_yolo(
     if override_data is not None:
         status_details["refined_roi_overrides"] = int(override_data["count"])
         status_details["refined_roi_source"] = str(override_data["path"])
+
+    mark_run_complete(run_group, parent_group=root["keypoints_runs"], run_name=resolved_run_name)
 
     try:
         _emit_keypoint_step_status(

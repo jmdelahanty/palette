@@ -25,7 +25,7 @@ from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
-from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from fisheye.registry.stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries as discover_shared_registry_zarr_entries
 from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review

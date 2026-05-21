@@ -12,7 +12,7 @@ from typing import Any, Optional
 import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
-from fisheye.shared.registry_stage_complete import emit_stage_completion
+from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.type_conversions import clean_mapping, normalize_attr
 from fisheye.utils.backfill_subject_mask_runs import project_eye_mask_run_to_subject_mask_run
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload

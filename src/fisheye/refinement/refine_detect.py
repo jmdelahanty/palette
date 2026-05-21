@@ -23,9 +23,10 @@ from rich.console import Console
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
 from ..shared.refined_detect_curation import write_curated_refined_detect_surfaces
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..shared.zarr_helpers import open_zarr_group_direct
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -1283,7 +1284,8 @@ def create_refined_run(
     if run_name in refined_runs:
         raise ValueError(f"{refined_runs.path}/{run_name} already exists")
     refined_group = refined_runs.create_group(run_name)
-    refined_runs.attrs['latest'] = run_name
+    mark_run_started(refined_group, run_name=run_name, stage="refined_detect")
+    note_pending_latest(refined_runs, run_name)
     
     # Store root metadata
     created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
@@ -1479,6 +1481,8 @@ def create_refined_run(
                     console.print("[green]✓[/green] Detection quality visualization stored in refined run.")
             except Exception as exc:
                 console.print(f"[yellow]Warning:[/yellow] Failed to render detection visualization: {exc}")
+
+    mark_run_complete(refined_group, parent_group=refined_runs, run_name=run_name)
 
     detect_review_status = _parse_mapping(refined_group.attrs.get("detect_review_status"))
     _emit_refined_detect_status(

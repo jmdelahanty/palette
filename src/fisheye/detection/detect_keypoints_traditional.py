@@ -29,11 +29,17 @@ from dask.diagnostics import ProgressBar
 from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import resolve_materialized_crop_run
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    resolve_latest_complete_run_name,
+)
 from ..pose.heading import compute_heading_from_spec
 from ..pose.heuristics import (
     heuristic_profile_from_package,
@@ -105,7 +111,7 @@ def _resolve_traditional_crop_background_inputs(
     background_parent = root.get("background_runs")
     if background_parent is None:
         raise ValueError("Background stage not run. Run background before keypoints.")
-    latest_background = normalize_attr(background_parent.attrs.get("latest"))
+    latest_background = normalize_attr(resolve_latest_complete_run_name(background_parent, legacy_default=True))
     if not latest_background or latest_background not in background_parent:
         raise ValueError("Traditional keypoint detection requires background_runs.latest.")
     background_group = background_parent[latest_background]
@@ -659,6 +665,8 @@ def detect_keypoints(
     
     # Create run group
     keypoint_group, run_group_name = get_run_group(root, 'keypoints', console)
+    mark_run_started(keypoint_group, run_name=run_group_name, stage="keypoints")
+    note_pending_latest(root["keypoints_runs"], run_group_name)
     
     # Store metadata
     crop_group, latest_crop, latest_background = _resolve_traditional_crop_background_inputs(
@@ -1120,6 +1128,7 @@ def detect_keypoints(
     }
     if source_refined_run:
         status_details["source_refined_run"] = source_refined_run
+    mark_run_complete(keypoint_group, parent_group=root["keypoints_runs"], run_name=run_group_name)
     _emit_keypoint_step_status(
         root=root,
         zarr_path=Path(zarr_path).expanduser().resolve(),

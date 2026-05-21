@@ -29,6 +29,7 @@ from fisheye.shared.roi_pixel_contract import (
     normalize_pixel_contract,
 )
 from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.zarr_run_completion import is_run_complete
 
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
 
@@ -117,7 +118,7 @@ def resolve_crop_run(
 
     for attr_name in ("latest_any", "latest", "latest_materialized"):
         candidate = _normalize_run_name(crop_parent.attrs.get(attr_name))
-        if candidate and candidate in crop_parent:
+        if candidate and candidate in crop_parent and is_run_complete(crop_parent[candidate], legacy_default=True):
             return crop_parent, crop_parent[candidate], candidate
 
     raise ValueError("No crop run found; cannot resolve latest_any/latest/latest_materialized")
@@ -160,13 +161,13 @@ def resolve_materialized_crop_run(
 
     for attr_name in ("latest_materialized", "latest"):
         candidate = _normalize_run_name(crop_parent.attrs.get(attr_name))
-        if candidate and candidate in crop_parent:
+        if candidate and candidate in crop_parent and is_run_complete(crop_parent[candidate], legacy_default=True):
             run_group = crop_parent[candidate]
             if _resolve_storage_mode(run_group) == "materialized" and "roi_images" in run_group:
                 return crop_parent, run_group, candidate
 
     latest_any = _normalize_run_name(crop_parent.attrs.get("latest_any"))
-    if latest_any and latest_any in crop_parent:
+    if latest_any and latest_any in crop_parent and is_run_complete(crop_parent[latest_any], legacy_default=True):
         run_group = crop_parent[latest_any]
         if _resolve_storage_mode(run_group) != "materialized":
             raise ValueError(

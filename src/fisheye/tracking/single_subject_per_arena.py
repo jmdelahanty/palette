@@ -11,6 +11,7 @@ from rich.console import Console
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 from ..utils.system import get_environment_info
 
 
@@ -198,6 +199,10 @@ def write_single_subject_per_arena_tracking_run(
     )
 
     run_group, run_name = get_run_group(root, "tracking", console)
+    tracking_parent = root.get("tracking_runs")
+    if tracking_parent is not None:
+        mark_run_started(run_group, run_name=run_name, stage="track")
+        note_pending_latest(tracking_parent, run_name)
 
     n_rows = int(result.track_ids.shape[0])
     n_tracks = int(result.track_ids_present.shape[0])
@@ -309,6 +314,8 @@ def write_single_subject_per_arena_tracking_run(
         run_group.attrs["source_refined_run"] = source_refined_run
 
     write_stage_provenance(run_group, provenance)
+    if tracking_parent is not None:
+        mark_run_complete(run_group, parent_group=tracking_parent, run_name=run_name)
 
     return run_name, run_group, summary_statistics
 

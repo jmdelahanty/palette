@@ -17,20 +17,26 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 from .db import (
     Registry,
     RegistryPaths,
-    _extract_crop_quality_rows,
-    _extract_detect_performance_rows,
-    _extract_detect_quality_rows,
-    _extract_eye_mask_quality_rows,
-    _extract_eye_mask_performance_rows,
+    _import_zarr,
+)
+from .extractors.crop import _extract_crop_quality_rows
+from .extractors.detect_performance import _extract_detect_performance_rows
+from .extractors.keypoint_performance import (
     _extract_keypoint_performance_rows,
     _extract_keypoint_profile_rows,
-    _extract_keypoint_quality_rows,
+)
+from .extractors.masks import (
+    _extract_eye_mask_performance_rows,
+    _extract_eye_mask_quality_rows,
     _extract_subject_mask_component_quality_rows,
     _extract_subject_mask_performance_rows,
-    _import_zarr,
-    _open_zarr_group_non_consolidated,
 )
+from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.shared.zarr_run_completion import (
+    is_run_complete,
+    resolve_latest_complete_run_name,
+)
 from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
 from .stage_catalog import recording_status_stage_ids, recording_tuning_stage_ids
 
@@ -48,6 +54,18 @@ ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
 RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = recording_tuning_stage_ids()
 RECORDING_STEP_NAMES: tuple[str, ...] = recording_status_stage_ids()
 RECORDING_STEP_STATUS_VALUES: tuple[str, ...] = ("ok", "missing", "absent", "na", "error")
+
+
+def _open_zarr_group_non_consolidated(zarr_path: Path, *, mode: str = "r"):
+    """Open a zarr root using this module's monkeypatchable zarr importer."""
+    zarr = _import_zarr()
+    try:
+        return zarr.open_group(str(zarr_path), mode=mode, use_consolidated=False)
+    except TypeError:
+        try:
+            return zarr.open_group(str(zarr_path), mode=mode, consolidated=False)
+        except TypeError:
+            return zarr.open_group(str(zarr_path), mode=mode)
 
 
 @dataclass(frozen=True)
@@ -4919,7 +4937,16 @@ def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[objec
     if latest:
         try:
             if latest in parent:  # type: ignore[operator]
-                return latest, parent[latest], "latest_attr"  # type: ignore[index]
+                group = parent[latest]  # type: ignore[index]
+                if is_run_complete(group, legacy_default=True):
+                    return latest, group, "latest_attr"
+        except Exception:
+            pass
+    latest_complete = resolve_latest_complete_run_name(parent, legacy_default=True)
+    if latest_complete and latest_complete != latest:
+        try:
+            if latest_complete in parent:  # type: ignore[operator]
+                return latest_complete, parent[latest_complete], "latest_complete"  # type: ignore[index]
         except Exception:
             pass
 
@@ -4927,11 +4954,14 @@ def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[objec
     if not names:
         return None, None, "none"
 
-    fallback = names[-1]
-    try:
-        return fallback, parent[fallback], "sorted_fallback"  # type: ignore[index]
-    except Exception:
-        return fallback, None, "sorted_fallback_error"
+    for fallback in reversed(names):
+        try:
+            group = parent[fallback]  # type: ignore[index]
+        except Exception:
+            return fallback, None, "sorted_fallback_error"
+        if is_run_complete(group, legacy_default=True):
+            return fallback, group, "sorted_fallback"
+    return None, None, "none_complete"
 
 
 def _get_group_path(parent: object, path: str) -> Optional[object]:
@@ -4977,14 +5007,21 @@ def _resolve_latest_group_nested(
             latest = None
     if latest:
         latest_group = _get_group_path(parent, latest)
-        if latest_group is not None:
+        if latest_group is not None and is_run_complete(latest_group, legacy_default=True):
             return latest, latest_group, "latest_attr"
+    latest_complete = resolve_latest_complete_run_name(parent, legacy_default=True)
+    if latest_complete and latest_complete != latest:
+        latest_group = _get_group_path(parent, latest_complete)
+        if latest_group is not None:
+            return latest_complete, latest_group, "latest_complete"
 
     groups = _iter_group_paths(parent, max_depth=max_depth)
     if not groups:
         return None, None, "none"
-    fallback, group = groups[-1]
-    return fallback, group, "sorted_fallback"
+    for fallback, group in reversed(groups):
+        if is_run_complete(group, legacy_default=True):
+            return fallback, group, "sorted_fallback"
+    return None, None, "none_complete"
 
 
 def _group_names(parent: object) -> List[str]:

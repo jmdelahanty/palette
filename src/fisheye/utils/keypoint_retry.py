@@ -19,7 +19,7 @@ from ..pose.schema import resolve_keypoint_labels_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import read_reason_labels
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _as_text
 from ..shared.zarr.schema import get_run_group
 from ..detection.detect_keypoints_yolo import (

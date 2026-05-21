@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from ..utils.system import get_git_info, get_platform_info
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 
 
 def fast_mode_bincount(data_chunk: np.ndarray) -> np.ndarray:
@@ -166,7 +167,8 @@ def compute_background(
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
     run_name = f"background_{timestamp}"
     bg_group = parent_group.create_group(run_name)
-    parent_group.attrs['latest'] = run_name
+    mark_run_started(bg_group, run_name=run_name, stage="background")
+    note_pending_latest(parent_group, run_name)
     
     console.print(f"Created new run group: [cyan]background_runs/{run_name}[/cyan]")
     
@@ -251,6 +253,7 @@ def compute_background(
     results['duration_seconds'] = duration
     results['frames_used'] = len(frame_indices)
     results['run_name'] = run_name
+    mark_run_complete(bg_group, parent_group=parent_group, run_name=run_name)
     
     console.print(f"\n[green]Background computation completed in {duration:.2f} seconds[/green]")
     console.print(f"Results stored in: background_runs/{run_name}/background_{{full,ds}}")

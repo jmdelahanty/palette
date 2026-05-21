@@ -28,6 +28,12 @@ from ..shared.row_alignment import assert_row_alignment
 from ..shared.row_lineage import ROW_LINEAGE_ARRAYS, copy_row_lineage_arrays_with_fallback
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    resolve_latest_complete_run_name,
+)
 from ..utils.system import get_environment_info, get_git_info
 
 
@@ -62,8 +68,8 @@ def _resolve_keypoint_group(
             return raw[keypoint_run], keypoint_run, "keypoints_runs"
         raise ValueError(f"Keypoint run '{keypoint_run}' not found in refined or raw runs.")
 
-    refined_latest = refined.attrs.get("latest") if refined is not None else None
-    raw_latest = raw.attrs.get("latest") if raw is not None else None
+    refined_latest = resolve_latest_complete_run_name(refined, legacy_default=True) if refined is not None else None
+    raw_latest = resolve_latest_complete_run_name(raw, legacy_default=True) if raw is not None else None
 
     if refined is not None and refined_latest in refined:
         return refined[refined_latest], refined_latest, "refined_keypoints_runs"
@@ -132,6 +138,10 @@ def _apply_overrides(cfg: EyeSegmentationConfig, overrides: Optional[Dict[str, A
 
 def _prepare_run_group(root: zarr.Group, console: Console) -> Tuple[zarr.Group, str]:
     group, name = get_run_group(root, "eye_masks", console=console, create_new=True)
+    mark_run_started(group, run_name=name, stage="eye_masks")
+    parent = root.get("eye_masks_runs")
+    if parent is not None:
+        note_pending_latest(parent, name)
     return group, name
 
 
@@ -467,7 +477,7 @@ def segment_eye_masks(
     cfg = _apply_overrides(cfg, config_dict)
     if "crop_runs" not in root:
         raise ValueError("crop_runs missing from Zarr; run crop stage first")
-    crop_run = cfg.crop_run or root["crop_runs"].attrs.get("latest")
+    crop_run = cfg.crop_run or resolve_latest_complete_run_name(root["crop_runs"], legacy_default=True)
     if crop_run is None:
         raise ValueError("No crop run available")
     crop_group = root[f"crop_runs/{crop_run}"]
@@ -859,6 +869,7 @@ def segment_eye_masks(
 
     duration = time.perf_counter() - stage_start
     run_group.attrs['duration_seconds'] = float(duration)
+    mark_run_complete(run_group, parent_group=root.get("eye_masks_runs"), run_name=run_name)
 
     console.print(
         f"[green]✓[/green] Eye masks saved as [cyan]eye_masks_runs/{run_name}[/cyan] "

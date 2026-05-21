@@ -33,7 +33,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from rich.align import Align
 
 # Metadata helpers
-from ..shared.registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
@@ -60,6 +60,12 @@ from ..shared.crop_roi_layout import (
 )
 from ..shared.roi_pixel_contract import crop_run_pixel_contract
 from ..shared.type_conversions import normalize_attr
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
+    note_pending_latest,
+)
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -1644,6 +1650,8 @@ def crop_from_external_video(
         crop_group, run_name = get_run_group(root, 'crop', console)
         crop_parent = root.get("crop_runs")
         if crop_parent is not None and run_name is not None:
+            mark_run_started(crop_group, run_name=run_name, stage="crop")
+            note_pending_latest(crop_parent, run_name)
             _finalize_crop_parent_pointers(
                 crop_parent,
                 run_name=run_name,
@@ -2172,11 +2180,14 @@ def crop_from_external_video(
                 'complete': bool(success),
             }
             timestamp = datetime.now(timezone.utc).isoformat()
+            crop_parent = root.get("crop_runs")
             if success:
                 crop_group.attrs['status'] = 'completed'
                 crop_group.attrs['completed_at_utc'] = timestamp
                 crop_group.attrs.pop('error_message', None)
                 crop_group.attrs.pop('failed_at_utc', None)
+                if crop_parent is not None and run_name is not None:
+                    mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_name)
                 if verbose:
                     console.print("[debug] Crop run marked as completed")
             else:
@@ -2184,9 +2195,9 @@ def crop_from_external_video(
                 crop_group.attrs['failed_at_utc'] = timestamp
                 if error_message:
                     crop_group.attrs['error_message'] = error_message
+                mark_run_failed(crop_group, error=error_message)
                 if verbose:
                     console.print("[debug] Crop run marked as failed")
-            crop_parent = root.get("crop_runs")
             if crop_parent is not None and run_name is not None:
                 _finalize_crop_parent_pointers(
                     crop_parent,
@@ -3085,6 +3096,8 @@ def crop_detections(
     error_message: Optional[str] = None
     crop_parent = root.get("crop_runs")
     if crop_parent is not None:
+        mark_run_started(crop_group, run_name=run_group_name, stage="crop")
+        note_pending_latest(crop_parent, run_group_name)
         _finalize_crop_parent_pointers(
             crop_parent,
             run_name=run_group_name,
@@ -3588,6 +3601,7 @@ def crop_detections(
     crop_group.attrs.pop('error_message', None)
     crop_group.attrs.pop('failed_at_utc', None)
     if crop_parent is not None:
+        mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_group_name)
         _finalize_crop_parent_pointers(
             crop_parent,
             run_name=run_group_name,

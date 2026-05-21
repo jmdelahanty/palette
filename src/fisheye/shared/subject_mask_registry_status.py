@@ -7,7 +7,7 @@ from typing import Any, Mapping, Optional
 
 import zarr
 
-from .registry_stage_complete import emit_stage_completion
+from ..registry.stage_complete import emit_stage_completion
 from .type_conversions import clean_mapping, normalize_attr
 
 try:
