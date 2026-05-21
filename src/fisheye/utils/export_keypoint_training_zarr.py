@@ -113,6 +113,7 @@ class PoseMergeResult:
     source_specs: List[PoseMergeSourceSpec]
     input_format: str
     source_type: str
+    source_type_counts: Dict[str, int]
     keypoint_shape: Tuple[int, ...]
     keypoint_labels: List[str]
     skeleton_id: Optional[str]
@@ -152,19 +153,14 @@ _as_text = _shared_as_text
 BOX_ONLY_REASON_TAG = "fish_present_no_keypoints"
 
 
-def _collapse_source_type_values(values: Sequence[Any], *, fallback: str) -> str:
-    normalized = sorted(
-        {
-            str(value).strip().lower()
-            for value in values
-            if value is not None and str(value).strip()
-        }
-    )
-    if not normalized:
-        return str(fallback).strip().lower()
-    if len(normalized) == 1:
-        return normalized[0]
-    return "mixed"
+def _source_type_counts(values: Sequence[Any]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for value in values:
+        text = str(value).strip().lower() if value is not None else ""
+        if not text:
+            continue
+        counts[text] = int(counts.get(text, 0) + 1)
+    return dict(sorted(counts.items()))
 
 
 def _reason_has_tag(reason_value: object, tag: str) -> bool:
@@ -1149,10 +1145,11 @@ def _export_merged(
         expected_input_format=input_format,
         row_gate_policy=row_gate_policy,
     )
-    source_type = _collapse_source_type_values(
-        [spec.source_type_resolved for spec in source_specs],
-        fallback=requested_source_type,
-    )
+    source_type_counts = _source_type_counts([spec.source_type_resolved for spec in source_specs])
+    # Keep the merged artifact trainer-facing surface concrete. Heterogeneous
+    # refined/manual lineage belongs in row/source provenance, not in the surface
+    # identity consumed by trainers and viewers.
+    source_type = requested_source_type
     resolved_source_types = {spec.source_type_resolved for spec in source_specs}
     unsupported_source_types = sorted(resolved_source_types - prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES)
     if unsupported_source_types:
@@ -1467,6 +1464,7 @@ def _export_merged(
     crop_group.attrs.update(
         {
             "detection_source_type": source_type,
+            "source_type_resolved_counts": dict(source_type_counts),
             "includes_interpolated": bool(np.sum(det_source_dest[:] != 0) > 0),
             "n_real_detections": int(np.sum(det_source_dest[:] == 0)),
             "n_interpolated_detections": int(np.sum(det_source_dest[:] != 0)),
@@ -1504,7 +1502,9 @@ def _export_merged(
         "set_id": manifest_payload.get("set_id"),
         "set_name": manifest_payload.get("set_name"),
         "set_version": manifest_payload.get("set_version"),
-        "source_type_requested": source_type,
+        "source_type_requested": requested_source_type,
+        "source_type_resolved": source_type,
+        "source_type_resolved_counts": dict(source_type_counts),
         "input_format": input_format,
         "created_at_utc": _utc_now(),
         "manifest_path": str(manifest_path),
@@ -1579,6 +1579,7 @@ def _export_merged(
         source_specs=source_specs,
         input_format=input_format,
         source_type=source_type,
+        source_type_counts=dict(source_type_counts),
         keypoint_shape=keypoint_shape,
         keypoint_labels=keypoint_labels,
         skeleton_id=merged_skeleton_id,
@@ -2096,6 +2097,7 @@ def _build_merged_manifest_payload(
         "rig_id": merged_rig,
         "source_type_requested": requested_source_type,
         "source_type_resolved": merge_result.source_type,
+        "source_type_resolved_counts": dict(merge_result.source_type_counts),
         "source_crop_run": run_name,
         "input_format": merge_result.input_format,
         "roi_pixel_contract_name": merged_roi_contract_name,
@@ -2124,6 +2126,7 @@ def _build_merged_manifest_payload(
     payload["output_config_path"] = str(out_config)
     payload["source_type_requested"] = requested_source_type
     payload["source_type"] = merge_result.source_type
+    payload["source_type_resolved_counts"] = dict(merge_result.source_type_counts)
     payload["roi_pixel_contract_name"] = merged_roi_contract_name
     payload["roi_pixel_contract_names"] = sorted(roi_contract_names)
     payload["dish_design"] = merged_dish
@@ -2145,6 +2148,7 @@ def _build_merged_manifest_payload(
         "run_name": run_name,
         "input_format": merge_result.input_format,
         "source_type": merge_result.source_type,
+        "source_type_resolved_counts": dict(merge_result.source_type_counts),
         "roi_pixel_contract_name": merged_roi_contract_name,
         "roi_pixel_contract_names": sorted(roi_contract_names),
         "skeleton_id": merge_result.skeleton_id,
@@ -2243,6 +2247,7 @@ def _write_merge_summary(
         "zarr_path": str(out_zarr),
         "input_format": merge_result.input_format,
         "source_type": merge_result.source_type,
+        "source_type_resolved_counts": dict(merge_result.source_type_counts),
         "skeleton_id": merge_result.skeleton_id,
         "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
         "skeleton_signature": merge_result.skeleton_signature,

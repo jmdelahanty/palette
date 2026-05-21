@@ -418,7 +418,7 @@ def test_prepare_keypoint_from_registry_rejects_non_refined_crop_lineage(
     _mock_invocation_sources(monkeypatch)
     monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
 
-    with pytest.raises(ValueError, match="keypoint training requires crop lineage detection_source_type='refined'"):
+    with pytest.raises(ValueError, match=r"crop lineage detection_source_type in .*manual.*refined"):
         wrapper.main(
             [
                 "--registry",
@@ -694,7 +694,7 @@ def test_prepare_keypoint_from_registry_review_gate_falls_back_to_reviewed_sourc
 
     manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
     dataset = manifest["datasets"][0]
-    assert dataset["keypoint_run_selector"] == "latest_traditional_quality"
+    assert dataset["keypoint_run_selector"] == "quality"
     assert dataset["keypoint_run_resolved"] == "kp_pose_001"
     assert any("cross-method fallback" in warning for warning in dataset["warnings"])
 

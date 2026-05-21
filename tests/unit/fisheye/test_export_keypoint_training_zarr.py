@@ -242,7 +242,7 @@ def test_discover_merge_sources_rejects_non_refined_crop_lineage(tmp_path: Path)
     _write_source_pose_zarr(zarr_path, skeleton_id="pose_skel_shared", detection_source_type="filtered")
     manifest = _manifest_for_single_source(zarr_path)
 
-    with pytest.raises(ValueError, match="keypoint merged export requires crop lineage detection_source_type='refined'"):
+    with pytest.raises(ValueError, match=r"crop lineage detection_source_type in .*manual.*refined"):
         _discover_merge_sources(
             manifest,
             expected_input_format="gray",
@@ -466,6 +466,46 @@ def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: 
     assert summary["kpt_shape"] == [5, 3]
 
 
+def test_export_merged_keeps_mixed_lineage_out_of_surface_source_type(tmp_path: Path) -> None:
+    zarr_a = tmp_path / "source_refined.zarr"
+    zarr_b = tmp_path / "source_manual.zarr"
+    _write_source_pose_zarr(zarr_a, skeleton_id="pose_skel_shared", detection_source_type="refined")
+    _write_source_pose_zarr(zarr_b, skeleton_id="pose_skel_shared", detection_source_type="manual")
+    manifest = _manifest_for_sources(zarr_a, zarr_b)
+    manifest["source_type_requested"] = "refined"
+
+    manifest_path = tmp_path / "pose_set_mixed_lineage.manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    out_zarr = tmp_path / "pose_set_mixed_lineage_merged.zarr"
+
+    result = _export_merged(
+        manifest_payload=manifest,
+        manifest_path=manifest_path,
+        out_zarr=out_zarr,
+        merged_dataset_id=None,
+        overwrite=True,
+        train_ratio=0.8,
+        val_ratio=0.2,
+        test_ratio=0.0,
+        seed=42,
+        copy_batch_size=128,
+        row_gate_policy="raw_success",
+        invocation={},
+    )
+
+    assert result.source_type == "refined"
+    assert result.source_type_counts == {"manual": 1, "refined": 1}
+
+    root = zarr.open_group(str(out_zarr), mode="r", use_consolidated=False)
+    crop = root[f"crop_runs/{result.run_name}"]
+    assert crop.attrs["detection_source_type"] == "refined"
+    assert crop.attrs["source_type_resolved_counts"] == {"manual": 1, "refined": 1}
+    training_export = dict(root.attrs["training_export"])
+    assert training_export["source_type_requested"] == "refined"
+    assert training_export["source_type_resolved"] == "refined"
+    assert training_export["source_type_resolved_counts"] == {"manual": 1, "refined": 1}
+
+
 def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:
     payload = {
         "set_id": set_id,
@@ -496,6 +536,7 @@ def test_main_auto_aggregates_keypoint_data_card_by_default(tmp_path: Path, monk
         total_samples=4,
         source_specs=[],
         source_type="refined",
+        source_type_counts={"refined": 1},
         run_name="merged_export_smoke",
     )
 
@@ -570,6 +611,7 @@ def test_main_no_aggregate_training_data_card_disables_aggregation(tmp_path: Pat
         total_samples=2,
         source_specs=[],
         source_type="refined",
+        source_type_counts={"refined": 1},
         run_name="merged_export_smoke",
     )
 

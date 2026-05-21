@@ -116,19 +116,14 @@ def _infer_row_value(
     return mixed
 
 
-def _collapse_source_type_values(values: Sequence[Any], *, fallback: str) -> str:
-    normalized = sorted(
-        {
-            str(value).strip().lower()
-            for value in values
-            if value is not None and str(value).strip()
-        }
-    )
-    if not normalized:
-        return str(fallback).strip().lower()
-    if len(normalized) == 1:
-        return normalized[0]
-    return "mixed"
+def _source_type_counts(values: Sequence[Any]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for value in values:
+        text = str(value).strip().lower() if value is not None else ""
+        if not text:
+            continue
+        counts[text] = int(counts.get(text, 0) + 1)
+    return dict(sorted(counts.items()))
 
 
 def _build_set_name_query_signature(args: argparse.Namespace, *, model_input: str) -> Dict[str, Any]:
@@ -1804,16 +1799,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.out_config is not None:
         planned_out_manifest = args.out_manifest if args.out_manifest is not None else args.out_config.with_suffix(".manifest.json")
 
-    resolved_manifest_source_type = _collapse_source_type_values(
-        [dataset.get("source_type_resolved") for dataset in manifest_datasets],
-        fallback=DEFAULT_KEYPOINT_SOURCE_TYPE,
+    resolved_manifest_source_type_counts = _source_type_counts(
+        [dataset.get("source_type_resolved") for dataset in manifest_datasets]
     )
 
     manifest_payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "task": "pose",
-        "source_type": resolved_manifest_source_type,
+        "source_type": DEFAULT_KEYPOINT_SOURCE_TYPE,
         "source_type_requested": DEFAULT_KEYPOINT_SOURCE_TYPE,
+        "source_type_resolved_counts": resolved_manifest_source_type_counts,
         "input_format": args.input_format,
         "imgsz": manifest_imgsz,
         "datasets": manifest_datasets,
