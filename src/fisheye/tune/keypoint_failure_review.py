@@ -815,6 +815,7 @@ def _build_refined_keypoint_details(refined: zarr.Group) -> Dict[str, Any]:
 
 def _sync_registry_after_review_status(
     *,
+    root: Optional[zarr.Group] = None,
     zarr_path: str,
     refined_run: str,
     refined: zarr.Group,
@@ -829,6 +830,7 @@ def _sync_registry_after_review_status(
     resolved_zarr = Path(zarr_path).expanduser().resolve()
     registry = Registry(resolved_registry)
     try:
+        completion_root = root if root is not None else open_zarr_root(resolved_zarr, mode="r")
         dataset_id = str(context["dataset_id"])
         row = registry.conn.execute(
             """
@@ -862,7 +864,7 @@ def _sync_registry_after_review_status(
             source_frame_index_schema=None,
         )
         wrote = emit_stage_completion(
-            None,
+            completion_root,
             resolved_zarr,
             step_name="refined_keypoints",
             status="ok",
@@ -908,6 +910,7 @@ def _apply_review_status(
     refined_run: str,
     refined: zarr.Group,
     *,
+    root: Optional[zarr.Group] = None,
     zarr_path: str,
     state: str,
     method: str,
@@ -942,6 +945,7 @@ def _apply_review_status(
 
     refined_parent.attrs["keypoint_review_status_latest"] = refined_run
     sync_result = _sync_registry_after_review_status(
+        root=root,
         zarr_path=zarr_path,
         refined_run=refined_run,
         refined=refined,
@@ -1019,7 +1023,12 @@ def launch_review(
 
     using_latest = refined_run is None
     if refined_run is None:
-        refined_run = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+        try:
+            refined_run = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+        except Exception:
+            refined_run = None
+        if refined_run is None:
+            refined_run = _normalize_attr(refined_parent.attrs.get("latest"))
     if not refined_run:
         raise RuntimeError("Refined keypoint run not found.")
     try:
@@ -1091,6 +1100,7 @@ def launch_review(
                     refined_parent,
                     refined_run,
                     refined,
+                    root=root,
                     zarr_path=zarr_path,
                     state=review_state,
                     method="algorithmic",
@@ -1612,6 +1622,7 @@ def launch_review(
                 refined_parent,
                 refined_run,
                 refined,
+                root=root,
                 zarr_path=zarr_path,
                 state=state,
                 method=review_method,

@@ -228,6 +228,7 @@ def test_apply_review_status_triggers_registry_sync_hook(
         parent,
         "refined_1",
         run,
+        root=root,
         zarr_path=str(zarr_path),
         state="approved",
         method="manual",
@@ -241,6 +242,7 @@ def test_apply_review_status_triggers_registry_sync_hook(
     assert payload["intended_use"] == "full_recording"
     assert parent.attrs["keypoint_review_status_latest"] == "refined_1"
     assert sync["synced"] is True
+    assert seen["root"] is root
     assert seen["zarr_path"] == str(zarr_path)
     assert seen["refined_run"] == "refined_1"
 
@@ -356,6 +358,7 @@ def test_launch_review_auto_applies_algorithmic_status_for_no_reviewable_failure
         refined_run_arg,
         refined_arg,
         *,
+        root=None,
         zarr_path: str,
         state: str,
         method: str,
@@ -446,6 +449,7 @@ def test_launch_review_uses_direct_refined_run_lookup_when_parent_membership_is_
         refined_run_arg,
         refined_arg,
         *,
+        root=None,
         zarr_path: str,
         state: str,
         method: str,

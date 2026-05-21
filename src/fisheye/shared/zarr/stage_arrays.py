@@ -99,7 +99,7 @@ def _kind_from_numpy(dtype: np.dtype) -> str:
         return "float"
     if kind == "b":
         return "bool"
-    if kind in {"U", "S", "O"}:
+    if kind in {"U", "S", "O", "T"}:
         return "string"
     return kind
 
@@ -122,7 +122,7 @@ def _kind_from_any_dtype(dtype_obj: object) -> str:
                 return "float"
             if kind_attr == "b":
                 return "bool"
-            if kind_attr in {"U", "S", "O"}:
+            if kind_attr in {"U", "S", "O", "T"}:
                 return "string"
         if "string" in dtype_name or "utf" in dtype_name:
             return "string"
@@ -270,6 +270,7 @@ DETECT_SPEC = StageSpec(
             "n_detections",
             "int32",
             ("n_frames",),
+            required=False,
             description="Legacy alias of frame_counts.",
         ),
         ArraySpec(
@@ -301,6 +302,7 @@ _REFINED_DETECT_ARRAYS: Tuple[ArraySpec, ...] = (
         "n_detections",
         "int32",
         ("n_frames",),
+        required=False,
         description="Legacy alias of frame_counts.",
     ),
     ArraySpec(
@@ -395,7 +397,7 @@ KEYPOINTS_SPEC = StageSpec(
     specs=(
         ArraySpec("frame_indices", "int32", ("n_rois",)),
         ArraySpec("frame_counts", "int32", ("n_frames",)),
-        ArraySpec("n_rois", "int32", ("n_frames",), description="Legacy alias of frame_counts."),
+        ArraySpec("n_rois", "int32", ("n_frames",), required=False, description="Legacy alias of frame_counts."),
         ArraySpec("detection_indices", "int32", ("n_rois",)),
         ArraySpec("source_refined_row_ids", "int64", ("n_rois",), required=False),
         ArraySpec("source_detect_row_index", "int32", ("n_rois",), required=False),
@@ -445,7 +447,7 @@ REFINED_KEYPOINTS_SPEC = StageSpec(
     specs=(
         ArraySpec("frame_indices", "int32", ("n_rois",)),
         ArraySpec("frame_counts", "int32", ("n_frames",)),
-        ArraySpec("n_rois", "int32", ("n_frames",), description="Legacy alias of frame_counts."),
+        ArraySpec("n_rois", "int32", ("n_frames",), required=False, description="Legacy alias of frame_counts."),
         ArraySpec("detection_indices", "int32", ("n_rois",)),
         ArraySpec("source_refined_row_ids", "int64", ("n_rois",), required=False),
         ArraySpec("source_detect_row_index", "int32", ("n_rois",), required=False),

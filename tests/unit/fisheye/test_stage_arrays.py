@@ -19,6 +19,7 @@ from fisheye.shared.zarr.stage_arrays import (
     KEYPOINTS_SPEC,
     REFINED_DETECT_SPEC,
     REFINED_EYE_MASKS_SPEC,
+    REFINED_KEYPOINTS_SPEC,
     REFINED_SUBJECT_COMPONENT_METRICS,
     REFINED_SUBJECT_EYE_PAIR_METRICS,
     REFINED_SUBJECT_MASKS_SPEC,
@@ -250,7 +251,22 @@ def test_validate_run_missing_optional_arrays_are_warnings() -> None:
     result = validate_run(group, DETECT_SPEC)
     assert result.valid
     assert not result.errors
+    assert any("optional array 'n_detections'" in msg for msg in result.warnings)
     assert any("optional array 'centers_px'" in msg for msg in result.warnings)
+
+
+def test_legacy_count_aliases_are_not_required_for_current_specs() -> None:
+    for stage_spec, alias in (
+        (DETECT_SPEC, "n_detections"),
+        (KEYPOINTS_SPEC, "n_rois"),
+        (REFINED_KEYPOINTS_SPEC, "n_rois"),
+    ):
+        group = zarr.group()
+        _write_required_arrays(group, stage_spec)
+
+        result = validate_run(group, stage_spec)
+        assert result.valid, f"{stage_spec.stage_name} errors: {result.errors}"
+        assert any(f"optional array '{alias}'" in msg for msg in result.warnings)
 
 
 def test_validate_run_accepts_geometry_only_crop_group() -> None:
