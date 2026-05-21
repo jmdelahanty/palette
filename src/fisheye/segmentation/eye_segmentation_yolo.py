@@ -38,7 +38,12 @@ from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, clean_mapping, normalize_attr
 from ..shared.zarr.schema import get_run_group
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    resolve_latest_complete_run_name,
+)
 from ..utils.system import get_environment_info, get_git_info
 
 
@@ -111,8 +116,16 @@ def _resolve_keypoint_lineage(
             return source_run_name, "keypoints_runs"
         return source_run_name, source_group_name
 
-    refined_latest = _as_optional_text(refined_parent.attrs.get("latest")) if refined_parent is not None else None
-    raw_latest = _as_optional_text(raw_parent.attrs.get("latest")) if raw_parent is not None else None
+    refined_latest = (
+        _as_optional_text(resolve_latest_complete_run_name(refined_parent, legacy_default=True))
+        if refined_parent is not None
+        else None
+    )
+    raw_latest = (
+        _as_optional_text(resolve_latest_complete_run_name(raw_parent, legacy_default=True))
+        if raw_parent is not None
+        else None
+    )
 
     if refined_parent is not None and refined_latest in refined_parent:
         return refined_latest, "refined_keypoints_runs"

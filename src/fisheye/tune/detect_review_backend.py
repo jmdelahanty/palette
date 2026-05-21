@@ -10,6 +10,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.tune import detect_review as detect_review_mod
 
 
@@ -119,7 +120,10 @@ def resolve_review_context(
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_detect_runs found in archive.")
-    refined_run_name = refined_run or refined_parent.attrs.get("latest")
+    refined_run_name = refined_run or resolve_latest_complete_run_name(
+        refined_parent,
+        legacy_default=True,
+    )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")
     refined_group = refined_parent[str(refined_run_name)]

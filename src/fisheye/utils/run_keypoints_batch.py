@@ -27,6 +27,7 @@ from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
 from fisheye.registry.stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries as discover_shared_registry_zarr_entries
 from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review
 from fisheye.utils.batch_registry_model_resolution import ResolvedModel
@@ -215,7 +216,7 @@ def _has_keypoints(root: zarr.Group) -> bool:
     kp = root.get("keypoints_runs")
     if kp is None:
         return False
-    return bool(kp.attrs.get("latest"))
+    return bool(resolve_latest_complete_run_name(kp, legacy_default=True))
 
 
 def _has_crop(root: zarr.Group) -> bool:
@@ -264,7 +265,7 @@ def _has_background(root: zarr.Group) -> bool:
     bg = root.get("background_runs")
     if bg is None:
         return False
-    return bool(bg.attrs.get("latest"))
+    return bool(resolve_latest_complete_run_name(bg, legacy_default=True))
 
 
 def _has_keypoint_tuning(root: zarr.Group) -> bool:
@@ -282,7 +283,7 @@ def _latest_run(zarr_path: Path, group_name: str) -> Optional[str]:
     group = root.get(group_name)
     if group is None:
         return None
-    latest = group.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(group, legacy_default=True)
     return str(latest) if latest else None
 
 
@@ -298,7 +299,7 @@ def _keypoints_total_rois(zarr_path: Path, run_name: Optional[str]) -> Optional[
     group = root.get("keypoints_runs")
     if group is None:
         return None
-    resolved = run_name or group.attrs.get("latest")
+    resolved = run_name or resolve_latest_complete_run_name(group, legacy_default=True)
     if not resolved or resolved not in group:
         return None
     run_group = group[resolved]

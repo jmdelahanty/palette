@@ -80,7 +80,7 @@ def _extract_refined_detect_parent(root: zarr.Group) -> Optional[zarr.Group]:
 def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[Dict[str, Any]]:
     keypoints_parent = root.get("keypoints_runs")
     refined_parent = _extract_refined_parent(root)
-    if keypoints_parent is None or refined_parent is None:
+    if refined_parent is None:
         return []
 
     try:
@@ -92,12 +92,26 @@ def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List
     rows: List[Dict[str, Any]] = []
     for refined_run in refined_parent.group_keys():
         refined_group = refined_parent[refined_run]
-        source_keypoint_run = _decode_attr(refined_group.attrs.get("source_keypoints_run"))
-        if not source_keypoint_run or source_keypoint_run not in keypoints_parent:
+        source_keypoint_run = _decode_attr(
+            refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
+        )
+        if not source_keypoint_run:
             continue
 
-        source_group = keypoints_parent[source_keypoint_run]
-        keypoint_method = _decode_attr(source_group.attrs.get("method"))
+        source_group = (
+            keypoints_parent[source_keypoint_run]
+            if keypoints_parent is not None and source_keypoint_run in keypoints_parent
+            else None
+        )
+        keypoint_method = (
+            _decode_attr(source_group.attrs.get("method"))
+            if source_group is not None
+            else (
+                _decode_attr(refined_group.attrs.get("source_keypoint_method"))
+                or _decode_attr(refined_group.attrs.get("keypoint_method"))
+                or _decode_attr(refined_group.attrs.get("method"))
+            )
+        )
         review_status = _coerce_mapping(refined_group.attrs.get("keypoint_review_status"))
         review_state = _decode_attr(review_status.get("state")) if review_status else None
         review_method = _decode_attr(review_status.get("method")) if review_status else None
@@ -138,15 +152,30 @@ def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List
                 if usable_keypoints_rate is None:
                     usable_keypoints_rate = _format_ratio(usable_keypoints, total_keypoints)
 
-        keypoint_rows = int(source_group["keypoints_roi"].shape[0]) if "keypoints_roi" in source_group else None
-        raw_keypoints_success_rate = _as_float(source_group.attrs.get("success_rate"))
+        keypoint_rows = (
+            int(source_group["keypoints_roi"].shape[0])
+            if source_group is not None and "keypoints_roi" in source_group
+            else (int(refined_group["keypoints_roi"].shape[0]) if "keypoints_roi" in refined_group else None)
+        )
+        raw_keypoints_success_rate = _as_float(source_group.attrs.get("success_rate")) if source_group is not None else None
         raw_keypoints_successful: Optional[int] = None
         if raw_keypoints_success_rate is not None and keypoint_rows is not None:
             raw_keypoints_successful = int(round(raw_keypoints_success_rate * float(keypoint_rows)))
-        elif "detection_success" in source_group:
+        elif source_group is not None and "detection_success" in source_group:
             success_arr = source_group["detection_success"]
             raw_keypoints_successful = int(np.asarray(success_arr[:]).sum())
             raw_keypoints_success_rate = _format_ratio(raw_keypoints_successful, int(success_arr.shape[0]))
+        elif "source_success" in refined_group:
+            success_arr = refined_group["source_success"]
+            raw_keypoints_successful = int(np.asarray(success_arr[:]).sum())
+            raw_keypoints_success_rate = _format_ratio(raw_keypoints_successful, int(success_arr.shape[0]))
+        elif "refined_success" in refined_group:
+            success_arr = refined_group["refined_success"]
+            raw_keypoints_successful = int(np.asarray(success_arr[:]).sum())
+            raw_keypoints_success_rate = _format_ratio(raw_keypoints_successful, int(success_arr.shape[0]))
+        elif usable_keypoints is not None:
+            raw_keypoints_successful = int(usable_keypoints)
+            raw_keypoints_success_rate = _format_ratio(raw_keypoints_successful, keypoint_rows)
 
         rows.append(
             {

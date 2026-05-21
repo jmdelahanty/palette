@@ -18,6 +18,7 @@ from rich.console import Console
 
 from ..detection.detect_yolo import detect_yolo as run_detect_yolo
 from ..registry.stage_complete import emit_stage_completion
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 
 
 def _normalize_text(value: object) -> Optional[str]:
@@ -96,7 +97,7 @@ def _extract_detect_quality_pointer(detect_group: object) -> tuple[Optional[str]
     if quality_parent is None or not hasattr(quality_parent, "attrs"):
         return None, None, None
 
-    quality_run = _normalize_text(quality_parent.attrs.get("latest"))
+    quality_run = _normalize_text(resolve_latest_complete_run_name(quality_parent, legacy_default=True))
     if not quality_run or quality_run not in quality_parent:
         return quality_run, None, None
 
@@ -136,7 +137,11 @@ def _write_detect_step_status(
             if resolved_run_name and resolved_run_name in detect_parent:
                 detect_group = detect_parent[resolved_run_name]
             else:
-                latest_run = _normalize_text(detect_parent.attrs.get("latest")) if hasattr(detect_parent, "attrs") else None
+                latest_run = (
+                    _normalize_text(resolve_latest_complete_run_name(detect_parent, legacy_default=True))
+                    if hasattr(detect_parent, "attrs")
+                    else None
+                )
                 if latest_run and latest_run in detect_parent:
                     detect_group = detect_parent[latest_run]
                     resolved_run_name = resolved_run_name or latest_run

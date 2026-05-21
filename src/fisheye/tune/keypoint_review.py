@@ -26,6 +26,7 @@ from ..shared.frame_flags import (
     resolve_flagged_roi_indices,
 )
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..utils.zarr_io import open_zarr_root
 
 
@@ -33,7 +34,7 @@ def _get_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_keypoints_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_keypoints_runs found in archive.")
-    latest = refined_parent.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
     if not latest:
         raise RuntimeError("No refined keypoint runs recorded.")
     return latest
@@ -146,7 +147,7 @@ def _resolve_crop_group_for_target_flags(
         if refined is not None:
             resolved_crop_run = refined.attrs.get("source_crop_run")
     if not resolved_crop_run and crop_parent is not None:
-        resolved_crop_run = crop_parent.attrs.get("latest")
+        resolved_crop_run = resolve_latest_complete_run_name(crop_parent, legacy_default=True)
     if crop_parent is None or not resolved_crop_run:
         return None
     if resolved_crop_run not in crop_parent:

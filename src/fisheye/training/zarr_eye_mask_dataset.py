@@ -25,6 +25,7 @@ from rich.progress import (
 )
 from torch.utils.data import Dataset
 
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from .config import (
     EyeMaskTrainingConfig,
     EyeMaskDatasetConfig,
@@ -117,7 +118,10 @@ def load_yolo_targets(
         raise ValueError(f"'eye_masks_runs' group not found in Zarr store: {zarr_path}")
     eye_parent = root["eye_masks_runs"]
 
-    run_name: Optional[str] = eye_masks_run or eye_parent.attrs.get("latest")
+    run_name: Optional[str] = eye_masks_run or resolve_latest_complete_run_name(
+        eye_parent,
+        legacy_default=True,
+    )
     if (not run_name or run_name not in eye_parent) and eye_masks_method:
         candidates: List[str] = []
         for name in eye_parent.group_keys():
@@ -128,7 +132,7 @@ def load_yolo_targets(
             candidates.sort()
             run_name = candidates[-1]
     if run_name is None:
-        run_name = eye_parent.attrs.get("latest")
+        run_name = resolve_latest_complete_run_name(eye_parent, legacy_default=True)
     if not run_name:
         raise ValueError("YOLO eye mask run not found (no run specified and no 'latest' attr)")
     if run_name not in eye_parent:
@@ -176,7 +180,7 @@ def load_yolo_targets(
     if not crop_run:
         crop_parent = root.get("crop_runs", None)
         if crop_parent is not None:
-            crop_run = crop_parent.attrs.get("latest")
+            crop_run = resolve_latest_complete_run_name(crop_parent, legacy_default=True)
     if not crop_run:
         raise ValueError(
             f"Missing 'source_crop_run' attribute for eye mask run '{run_name}' and no latest crop run recorded"
@@ -818,16 +822,20 @@ class EyeMaskDatasetBundle:
 
 def _resolve_runs(root: zarr.Group, cfg: EyeMaskDatasetConfig) -> Tuple[str, str]:
     crop_parent = root.get("crop_runs")
-    if crop_parent is None or "latest" not in crop_parent.attrs:
-        raise ValueError(f"Zarr store '{root.store.path}' is missing crop_runs/latest")
-    crop_run = cfg.crop_run or crop_parent.attrs["latest"]
+    if crop_parent is None:
+        raise ValueError(f"Zarr store '{root.store.path}' is missing crop_runs")
+    crop_run = cfg.crop_run or resolve_latest_complete_run_name(crop_parent, legacy_default=True)
+    if not crop_run:
+        raise ValueError(f"Zarr store '{root.store.path}' has no complete crop run")
     if crop_run not in crop_parent:
         raise ValueError(f"Crop run '{crop_run}' not found in {root.store.path}")
 
     mask_parent = root.get("eye_masks_runs")
-    if mask_parent is None or "latest" not in mask_parent.attrs:
-        raise ValueError(f"Zarr store '{root.store.path}' is missing eye_masks_runs/latest")
-    mask_run = cfg.mask_run or mask_parent.attrs["latest"]
+    if mask_parent is None:
+        raise ValueError(f"Zarr store '{root.store.path}' is missing eye_masks_runs")
+    mask_run = cfg.mask_run or resolve_latest_complete_run_name(mask_parent, legacy_default=True)
+    if not mask_run:
+        raise ValueError(f"Zarr store '{root.store.path}' has no complete eye mask run")
     if mask_run not in mask_parent:
         raise ValueError(f"Eye mask run '{mask_run}' not found in {root.store.path}")
 
@@ -907,11 +915,15 @@ def _build_entries_for_dataset(
     array_name: Optional[str] = None
     if cfg.include_background_negatives:
         bg_parent = root.get("background_runs")
-        if bg_parent is None or "latest" not in bg_parent.attrs:
+        if bg_parent is None:
             raise ValueError(
                 f"Zarr store '{cfg.zarr_path}' is missing background runs required for background negatives"
             )
-        bg_run_name = cfg.background_run or bg_parent.attrs["latest"]
+        bg_run_name = cfg.background_run or resolve_latest_complete_run_name(bg_parent, legacy_default=True)
+        if not bg_run_name:
+            raise ValueError(
+                f"Zarr store '{cfg.zarr_path}' has no complete background run for background negatives"
+            )
         bg_group = root[f"background_runs/{bg_run_name}"]
         array_name = "background_ds" if cfg.background_from_downsampled else "background_full"
         if array_name not in bg_group:

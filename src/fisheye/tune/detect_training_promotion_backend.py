@@ -35,6 +35,12 @@ from fisheye.shared.refined_detect_curation import (
     _write_common_array,
 )
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_pending,
+    mark_run_started,
+    resolve_latest_complete_run_name,
+)
 from fisheye.tune import detect_review as detect_review_mod
 
 
@@ -122,7 +128,11 @@ def _resolve_refined_run(root: zarr.Group, refined_run: str | None) -> tuple[str
         raise RuntimeError(
             "Top-level promote_detection_frames cannot resolve clipped collections; use promote_clipped_detection_frames with explicit clip context."
         )
-    run_name = str(refined_run or parent.attrs.get("latest") or "").strip()
+    run_name = str(
+        refined_run
+        or resolve_latest_complete_run_name(parent, legacy_default=True)
+        or ""
+    ).strip()
     if not run_name or run_name not in parent:
         raise RuntimeError(f"Refined detect run not found: {run_name!r}")
     return run_name, parent[run_name]
@@ -159,7 +169,7 @@ def _resolve_training_crop_run(root: zarr.Group, requested: str | None) -> str:
     if requested:
         return str(requested)
     crop_parent = root.get("crop_runs")
-    latest = crop_parent.attrs.get("latest") if crop_parent is not None else None
+    latest = resolve_latest_complete_run_name(crop_parent, legacy_default=True) if crop_parent is not None else None
     return str(latest or DEFAULT_PROMOTED_CROP_RUN)
 
 
@@ -580,6 +590,8 @@ def _load_source_image(
 def _write_crop_payload(root: zarr.Group, crop_run: str, payload: Mapping[str, np.ndarray]) -> None:
     crop_parent = root.require_group("crop_runs")
     crop = crop_parent.require_group(crop_run)
+    mark_run_started(crop, run_name=str(crop_run), stage="crop")
+    mark_run_pending(crop_parent, str(crop_run))
     count = int(np.asarray(payload["bbox_norm_coords"]).shape[0])
     chunk = max(1, min(8192, count or 1))
     _replace_array(crop, "bbox_norm_coords", np.asarray(payload["bbox_norm_coords"], dtype=np.float32), chunks=(chunk, 4))
@@ -598,7 +610,7 @@ def _write_crop_payload(root: zarr.Group, crop_run: str, payload: Mapping[str, n
             "updated_at_utc": _utc_now(),
         }
     )
-    crop_parent.attrs["latest"] = str(crop_run)
+    mark_run_complete(crop, parent_group=crop_parent, run_name=str(crop_run))
 
 
 def _write_source_index(root: zarr.Group, source_index: Mapping[str, np.ndarray]) -> None:
@@ -626,11 +638,16 @@ def _resolve_training_refined_run(
     requested: str | None,
 ) -> tuple[str, zarr.Group]:
     parent = root.require_group("refined_detect_runs")
-    run_name = str(requested or parent.attrs.get("latest") or DEFAULT_PROMOTED_REFINED_RUN).strip()
+    run_name = str(
+        requested
+        or resolve_latest_complete_run_name(parent, legacy_default=True)
+        or DEFAULT_PROMOTED_REFINED_RUN
+    ).strip()
     if not run_name:
         run_name = DEFAULT_PROMOTED_REFINED_RUN
     run = parent.require_group(run_name)
-    parent.attrs["latest"] = run_name
+    mark_run_started(run, run_name=run_name, stage="refined_detect")
+    mark_run_pending(parent, run_name)
     parent.attrs["detect_review_status_latest"] = run_name
     return run_name, run
 
@@ -937,6 +954,7 @@ def _sync_training_refined_instances_from_crop(
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is not None:
         _drop_inline_consolidated_metadata(refined_parent)
+        mark_run_complete(refined_run, parent_group=refined_parent, run_name=run_name)
     return {
         "status": "ok",
         "refined_detect_run": run_name,

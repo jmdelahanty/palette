@@ -42,6 +42,7 @@ from fisheye.shared.refined_detect_curation import (
 )
 from fisheye.shared.refined_detect_resolution import resolve_detect_review_target
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.utils.accept_detect_review import (
     _pick_refined_parent_name,
     _write_profile_and_sync_registry,
@@ -53,7 +54,7 @@ def _get_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_detect_runs found in archive.")
-    latest = refined_parent.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
     if not latest:
         raise RuntimeError("No refined detect runs recorded.")
     return latest
@@ -128,7 +129,7 @@ def _resolve_review_arena_definitions(root: zarr.Group) -> List[Dict[str, Any]]:
 
     arena_parent = root.get("arena_assignment_runs")
     if arena_parent is not None:
-        latest = arena_parent.attrs.get("latest")
+        latest = resolve_latest_complete_run_name(arena_parent, legacy_default=True)
         if latest and latest in arena_parent:
             arena_group = arena_parent[latest]
             masks = _normalize_arena_definitions(arena_group.attrs.get("arena_definitions"))
@@ -1280,7 +1281,10 @@ def run_manual_review(
     if refined_parent is None:
         raise RuntimeError("No refined_detect_runs found in archive.")
 
-    refined_run_name = refined_run_name or refined_parent.attrs.get("latest")
+    refined_run_name = refined_run_name or resolve_latest_complete_run_name(
+        refined_parent,
+        legacy_default=True,
+    )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")
 
@@ -2087,7 +2091,10 @@ def run_retune_interactive(
     if refined_parent is None:
         raise RuntimeError("No refined_detect_runs found in archive.")
 
-    refined_run_name = refined_run_name or refined_parent.attrs.get("latest")
+    refined_run_name = refined_run_name or resolve_latest_complete_run_name(
+        refined_parent,
+        legacy_default=True,
+    )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")
 
@@ -2154,7 +2161,7 @@ def run_retune_interactive(
 
     if "background_runs" not in root:
         raise RuntimeError("Background stage not run. Run background computation first.")
-    latest_bg_run = root["background_runs"].attrs.get("latest")
+    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"], legacy_default=True)
     if not latest_bg_run:
         raise RuntimeError("No background runs found (missing latest background run).")
 
@@ -2281,7 +2288,10 @@ def run_retune_review(
     if refined_parent is None:
         raise RuntimeError("No refined_detect_runs found in archive.")
 
-    refined_run_name = refined_run_name or refined_parent.attrs.get("latest")
+    refined_run_name = refined_run_name or resolve_latest_complete_run_name(
+        refined_parent,
+        legacy_default=True,
+    )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")
 
@@ -2362,7 +2372,7 @@ def run_retune_review(
 
     if "background_runs" not in root:
         raise RuntimeError("Background stage not run. Run background computation first.")
-    latest_bg_run = root["background_runs"].attrs.get("latest")
+    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"], legacy_default=True)
     if not latest_bg_run:
         raise RuntimeError("No background runs found (missing latest background run).")
 

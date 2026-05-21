@@ -10,7 +10,7 @@ helpers and latest resolvers should trust them.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 RUN_COMPLETION_CONTRACT = "palette.zarr_run_completion.v1"
 RUN_COMPLETION_CONTRACT_ATTR = "palette_run_completion_contract"
@@ -134,6 +134,13 @@ def _get_child(parent_group: Any, name: str) -> Optional[Any]:
         return None
 
 
+def _normalize_name(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def resolve_latest_complete_run_name(
     parent_group: Any,
     *,
@@ -187,3 +194,143 @@ def note_pending_latest(parent_group: Any, run_name: str) -> None:
         del parent_group.attrs["latest"]
     except Exception:
         parent_group.attrs["latest"] = None
+
+
+def mark_run_pending(parent_group: Any, run_name: str) -> None:
+    """Publish a newly-created run as pending without changing ``latest``."""
+
+    parent_group.attrs[RUN_LATEST_PENDING_ATTR] = str(run_name)
+
+
+def describe_run_parent(
+    parent_group: Any,
+    *,
+    parent_path: str = "",
+    legacy_default: bool = True,
+) -> dict[str, Any]:
+    """Return a JSON-serializable completion summary for a run parent group."""
+
+    latest = _normalize_name(parent_group.attrs.get("latest"))
+    latest_complete = _normalize_name(parent_group.attrs.get(RUN_LATEST_COMPLETE_ATTR))
+    latest_pending = _normalize_name(parent_group.attrs.get(RUN_LATEST_PENDING_ATTR))
+    resolved_latest_complete = resolve_latest_complete_run_name(
+        parent_group,
+        legacy_default=legacy_default,
+    )
+
+    runs: list[dict[str, Any]] = []
+    incomplete_runs: list[str] = []
+    failed_runs: list[str] = []
+    for name in _group_names(parent_group):
+        child = _get_child(parent_group, name)
+        if child is None:
+            continue
+        status = _normalize_name(child.attrs.get(RUN_COMPLETION_STATUS_ATTR))
+        has_contract = has_run_completion_contract(child)
+        complete = is_run_complete(child, legacy_default=legacy_default)
+        if not complete:
+            incomplete_runs.append(name)
+        if status == RUN_STATUS_FAILED:
+            failed_runs.append(name)
+        runs.append(
+            {
+                "name": name,
+                "has_completion_contract": has_contract,
+                "completion_status": status or ("legacy_complete" if complete else "legacy_incomplete"),
+                "complete": complete,
+            }
+        )
+
+    unsafe_reasons: list[str] = []
+    latest_status: Optional[str] = None
+    latest_complete_status: Optional[str] = None
+    latest_exists = latest is not None and _get_child(parent_group, latest) is not None
+    if latest:
+        latest_child = _get_child(parent_group, latest)
+        if latest_child is None:
+            unsafe_reasons.append("latest_missing")
+        else:
+            latest_status = _normalize_name(latest_child.attrs.get(RUN_COMPLETION_STATUS_ATTR))
+            if not is_run_complete(latest_child, legacy_default=legacy_default):
+                reason_status = latest_status or (
+                    "legacy_missing_contract"
+                    if not has_run_completion_contract(latest_child)
+                    else "unknown"
+                )
+                unsafe_reasons.append(f"latest_incomplete:{reason_status}")
+
+    if latest_complete:
+        latest_complete_child = _get_child(parent_group, latest_complete)
+        if latest_complete_child is None:
+            unsafe_reasons.append("latest_complete_missing")
+        else:
+            latest_complete_status = _normalize_name(
+                latest_complete_child.attrs.get(RUN_COMPLETION_STATUS_ATTR)
+            )
+            if not is_run_complete(latest_complete_child, legacy_default=legacy_default):
+                reason_status = latest_complete_status or (
+                    "legacy_missing_contract"
+                    if not has_run_completion_contract(latest_complete_child)
+                    else "unknown"
+                )
+                unsafe_reasons.append(
+                    f"latest_complete_incomplete:{reason_status}"
+                )
+
+    return {
+        "parent_path": parent_path,
+        "latest": latest,
+        "latest_exists": latest_exists,
+        "latest_status": latest_status,
+        "latest_complete": latest_complete,
+        "latest_complete_status": latest_complete_status,
+        "latest_pending": latest_pending,
+        "resolved_latest_complete": resolved_latest_complete,
+        "run_count": len(runs),
+        "runs": runs,
+        "incomplete_runs": incomplete_runs,
+        "failed_runs": failed_runs,
+        "unsafe": bool(unsafe_reasons),
+        "unsafe_reasons": unsafe_reasons,
+    }
+
+
+def _looks_like_run_parent(group: Any, path: str, child_names: list[str]) -> bool:
+    if not child_names:
+        return False
+    attrs = getattr(group, "attrs", {})
+    if any(
+        attr in attrs
+        for attr in ("latest", RUN_LATEST_COMPLETE_ATTR, RUN_LATEST_PENDING_ATTR)
+    ):
+        return True
+    base = path.rstrip("/").rsplit("/", 1)[-1]
+    return base.endswith("_runs") or base == "quality_reports"
+
+
+def iter_run_parent_summaries(
+    root_group: Any,
+    *,
+    root_path: str = "",
+    legacy_default: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Yield completion summaries for run-parent-like groups in a Zarr tree."""
+
+    child_names = _group_names(root_group)
+    if _looks_like_run_parent(root_group, root_path, child_names):
+        yield describe_run_parent(
+            root_group,
+            parent_path=root_path,
+            legacy_default=legacy_default,
+        )
+
+    for name in child_names:
+        child = _get_child(root_group, name)
+        if child is None:
+            continue
+        child_path = f"{root_path}/{name}" if root_path else name
+        yield from iter_run_parent_summaries(
+            child,
+            root_path=child_path,
+            legacy_default=legacy_default,
+        )

@@ -23,6 +23,7 @@ from fisheye.utils.system import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
 
 DEFAULT_KEYPOINT_SOURCE_TYPE = "refined"
+ALLOWED_KEYPOINT_CROP_SOURCE_TYPES = frozenset({"refined", "manual"})
 
 
 def _add_arg(argv: List[str], flag: str, value: Optional[object]) -> None:
@@ -245,6 +246,57 @@ def _as_mapping(value: Any) -> Optional[Mapping[str, Any]]:
     return None
 
 
+def _row_get(row: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _dataset_id_rank(row: Mapping[str, Any]) -> Tuple[int, str]:
+    dataset_id = str(_row_get(row, "dataset_id", "") or "")
+    # Prefer canonical dataset IDs over registry collision suffixes when both
+    # entries point at the same physical zarr and both pass selection gates.
+    suffix_rank = 1 if ":z" in dataset_id else 0
+    return suffix_rank, dataset_id
+
+
+def _resolved_zarr_path_key(row: Mapping[str, Any]) -> str:
+    raw_path = Path(str(_row_get(row, "zarr_path", ""))).expanduser()
+    try:
+        return str(raw_path.resolve(strict=False))
+    except Exception:
+        return str(raw_path)
+
+
+def _dedupe_rows_by_zarr_path(
+    rows: Sequence[Mapping[str, Any]],
+) -> Tuple[List[Mapping[str, Any]], List[Dict[str, str]]]:
+    selected_by_path: Dict[str, Mapping[str, Any]] = {}
+    order: List[str] = []
+    exclusions: List[Dict[str, str]] = []
+    for row in rows:
+        key = _resolved_zarr_path_key(row)
+        current = selected_by_path.get(key)
+        if current is None:
+            selected_by_path[key] = row
+            order.append(key)
+            continue
+        candidates = sorted((current, row), key=_dataset_id_rank)
+        keep = candidates[0]
+        drop = candidates[1]
+        selected_by_path[key] = keep
+        exclusions.append(
+            {
+                "kept_dataset_id": str(_row_get(keep, "dataset_id", "") or ""),
+                "dropped_dataset_id": str(_row_get(drop, "dataset_id", "") or ""),
+                "zarr_path": key,
+                "reason": "duplicate_zarr_path",
+            }
+        )
+    return [selected_by_path[key] for key in order], exclusions
+
+
 def _normalize_kpt_shape(value: Any) -> Optional[Tuple[int, int]]:
     if not isinstance(value, (list, tuple)) or len(value) < 2:
         return None
@@ -306,36 +358,59 @@ def _resolve_effective_annotation_source(
     root: zarr.Group,
     *,
     source_keypoint_run: str,
-    source_keypoint_group: zarr.Group,
+    source_keypoint_group: Optional[zarr.Group],
     sample_count: int,
     refined_quality: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    source = {
-        "kind": "raw",
-        "parent_name": "keypoints_runs",
-        "run_name": str(source_keypoint_run),
-        "group": source_keypoint_group,
-        "keypoints_path": f"keypoints_runs/{source_keypoint_run}/keypoints_roi",
-        "success_path": (
-            f"keypoints_runs/{source_keypoint_run}/detection_success"
-            if "detection_success" in source_keypoint_group
-            else None
-        ),
-    }
+    source = None
+    if source_keypoint_group is not None:
+        source = {
+            "kind": "raw",
+            "parent_name": "keypoints_runs",
+            "run_name": str(source_keypoint_run),
+            "group": source_keypoint_group,
+            "keypoints_path": f"keypoints_runs/{source_keypoint_run}/keypoints_roi",
+            "success_path": (
+                f"keypoints_runs/{source_keypoint_run}/detection_success"
+                if "detection_success" in source_keypoint_group
+                else None
+            ),
+        }
 
     refined_run_name = _decode_attr(refined_quality.get("refined_keypoint_run"))
     refined_parent = _resolve_refined_parent(root)
     refined_parent_name = _resolve_refined_parent_name(root)
     if not refined_run_name or refined_parent is None or refined_parent_name is None:
+        if source is None:
+            raise ValueError(
+                f"No raw keypoint group or refined keypoint annotation source found for '{source_keypoint_run}'."
+            )
         return source
     if refined_run_name not in refined_parent:
+        if source is None:
+            raise ValueError(
+                f"Refined keypoint run '{refined_run_name}' not found and raw keypoint group is absent "
+                f"for '{source_keypoint_run}'."
+            )
         return source
 
     refined_group = refined_parent[refined_run_name]
-    refined_source_run = _decode_attr(refined_group.attrs.get("source_keypoints_run"))
+    refined_source_run = _decode_attr(
+        refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
+    )
     if refined_source_run != source_keypoint_run:
+        if source is None:
+            raise ValueError(
+                f"Refined keypoint run '{refined_run_name}' sources '{refined_source_run}', "
+                f"not requested source '{source_keypoint_run}', and raw keypoint group is absent."
+            )
         return source
     if "keypoints_roi" not in refined_group or "usable_keypoints" not in refined_group:
+        if source is None:
+            raise ValueError(
+                f"Refined keypoint run '{refined_run_name}' is missing keypoints_roi/usable_keypoints "
+                f"and raw keypoint group is absent for '{source_keypoint_run}'."
+            )
         return source
 
     refined_keypoints = refined_group["keypoints_roi"]
@@ -627,7 +702,9 @@ def _resolve_refined_keypoint_quality(
     candidates: List[Tuple[datetime, str]] = []
     for run_name in refined_parent.group_keys():
         run_group = refined_parent[run_name]
-        source_run = _decode_attr(run_group.attrs.get("source_keypoints_run"))
+        source_run = _decode_attr(
+            run_group.attrs.get("source_keypoints_run") or run_group.attrs.get("source_keypoint_run")
+        )
         if source_run != source_keypoint_run:
             continue
         ts = _parse_ts(run_group.attrs.get("created_utc") or run_group.attrs.get("timestamp_utc"))
@@ -694,17 +771,21 @@ def _resolve_reviewed_keypoint_run(
 ) -> Optional[Dict[str, Any]]:
     refined_parent = _resolve_refined_parent(root)
     keypoints_parent = root.get("keypoints_runs")
-    if refined_parent is None or keypoints_parent is None:
+    if refined_parent is None:
         return None
     refined_parent_name = _resolve_refined_parent_name(root)
 
     candidates: List[Tuple[datetime, str, str, Dict[str, Any]]] = []
     for refined_run_name in refined_parent.group_keys():
         refined_group = refined_parent[refined_run_name]
-        source_keypoint_run = _decode_attr(refined_group.attrs.get("source_keypoints_run"))
-        if not source_keypoint_run or source_keypoint_run not in keypoints_parent:
+        source_keypoint_run = _decode_attr(
+            refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
+        )
+        if not source_keypoint_run:
             continue
         if method_hint is not None:
+            if keypoints_parent is None or source_keypoint_run not in keypoints_parent:
+                continue
             source_method = _decode_attr(keypoints_parent[source_keypoint_run].attrs.get("method"))
             if source_method != method_hint:
                 continue
@@ -1025,6 +1106,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     selected_quality_rows_by_dataset: Dict[str, Mapping[str, Any]] = {}
     quality_exclusions: List[Dict[str, Any]] = []
     skeleton_exclusions: List[Dict[str, Any]] = []
+    duplicate_zarr_path_exclusions: List[Dict[str, str]] = []
     if quality_gate_active:
         dataset_ids_all = [str(row["dataset_id"]) for row in rows if row["dataset_id"]]
         strict_method = None
@@ -1147,9 +1229,24 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             if len(quality_exclusions) > 20:
                 print(f"  ... {len(quality_exclusions) - 20} more exclusion(s) omitted.")
 
+    rows, duplicate_zarr_path_exclusions = _dedupe_rows_by_zarr_path(rows)
+    if duplicate_zarr_path_exclusions:
+        print(
+            f"Skipped {len(duplicate_zarr_path_exclusions)} duplicate zarr-path dataset row(s) "
+            "before keypoint training selection."
+        )
+        for exclusion in duplicate_zarr_path_exclusions[:20]:
+            print(
+                "  - kept "
+                f"{exclusion['kept_dataset_id']} dropped {exclusion['dropped_dataset_id']} "
+                f"[{exclusion['reason']}] {exclusion['zarr_path']}"
+            )
+        if len(duplicate_zarr_path_exclusions) > 20:
+            print(f"  ... {len(duplicate_zarr_path_exclusions) - 20} more duplicate(s) omitted.")
+
     registry.close()
     if not rows:
-        raise SystemExit("No datasets remain after keypoint quality filtering.")
+        raise SystemExit("No datasets remain after keypoint quality filtering and zarr-path deduplication.")
 
     zarr_paths = [Path(row["zarr_path"]) for row in rows]
     resolved_set_name: Optional[str] = None
@@ -1238,10 +1335,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if ds_shape is None:
             raise ValueError(f"{zarr_path.name}: unable to resolve downsample shape for '{args.input_format}'.")
 
-        keypoint_run_resolved, keypoint_selector = _resolve_keypoint_run(root, args.keypoint_run)
         dataset_id_text = str(row["dataset_id"]) if row["dataset_id"] else ""
         quality_row = selected_quality_rows_by_dataset.get(dataset_id_text) if quality_gate_active else None
         method_hint = selector_method_hint
+        keypoints_parent = root.get("keypoints_runs")
+        keypoint_run_resolved: Optional[str] = None
+        keypoint_selector: Optional[str] = None
         if quality_row is not None:
             quality_source_run = _decode_attr(quality_row["source_keypoint_run"])
             if quality_source_run is None:
@@ -1254,14 +1353,19 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                     f"Selector '{args.keypoint_run}' required method '{method_hint}', "
                     f"quality-selected run method is '{quality_method}' (cross-method fallback)."
                 )
-            if quality_source_run != keypoint_run_resolved:
-                warnings.append(
-                    f"Selector '{args.keypoint_run}' resolved to '{keypoint_run_resolved}', "
-                    f"using quality-selected source keypoint run '{quality_source_run}' instead."
-                )
-                keypoint_selector = (keypoint_selector or "latest") + "_quality"
             keypoint_run_resolved = quality_source_run
-        elif quality_gate_active and selector_is_dynamic and (
+            keypoint_selector = "quality"
+        else:
+            try:
+                keypoint_run_resolved, keypoint_selector = _resolve_keypoint_run(root, args.keypoint_run)
+            except ValueError:
+                if not (
+                    quality_gate_active
+                    and selector_is_dynamic
+                    and (args.require_review_state is not None or args.require_review_intended_use is not None)
+                ):
+                    raise
+        if keypoint_run_resolved is None and quality_gate_active and selector_is_dynamic and (
             args.require_review_state is not None or args.require_review_intended_use is not None
         ):
             reviewed_choice = _resolve_reviewed_keypoint_run(
@@ -1304,7 +1408,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 )
             reviewed_source = str(reviewed_choice["source_keypoint_run"])
             if relaxed_method_hint:
-                reviewed_method = _decode_attr(root["keypoints_runs"][reviewed_source].attrs.get("method")) or "unknown"
+                reviewed_method = (
+                    _decode_attr(keypoints_parent[reviewed_source].attrs.get("method"))
+                    if keypoints_parent is not None and reviewed_source in keypoints_parent
+                    else "unknown"
+                )
                 warnings.append(
                     f"Selector '{args.keypoint_run}' found no reviewed run with method '{method_hint}'; "
                     f"using reviewed source keypoint run '{reviewed_source}' (method '{reviewed_method}')."
@@ -1318,10 +1426,45 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 keypoint_run_resolved = reviewed_source
                 keypoint_selector = (keypoint_selector or "latest") + "_reviewed"
 
-        kp_group = root["keypoints_runs"][keypoint_run_resolved]
-        if "keypoints_roi" not in kp_group:
-            raise ValueError(f"{zarr_path.name}: keypoint run '{keypoint_run_resolved}' missing keypoints_roi array.")
-        keypoints_arr = kp_group["keypoints_roi"]
+        if keypoint_run_resolved is None:
+            raise ValueError(f"{zarr_path.name}: unable to resolve keypoint run.")
+
+        kp_group: Optional[zarr.Group] = (
+            keypoints_parent[keypoint_run_resolved]
+            if keypoints_parent is not None and keypoint_run_resolved in keypoints_parent
+            else None
+        )
+        refined_quality = _resolve_refined_keypoint_quality(
+            root,
+            keypoint_run_resolved,
+            zarr_path=zarr_path,
+        )
+
+        if kp_group is not None:
+            if "keypoints_roi" not in kp_group:
+                raise ValueError(
+                    f"{zarr_path.name}: keypoint run '{keypoint_run_resolved}' missing keypoints_roi array."
+                )
+            keypoints_arr = kp_group["keypoints_roi"]
+        else:
+            refined_run_name = _decode_attr(refined_quality.get("refined_keypoint_run"))
+            refined_parent = _resolve_refined_parent(root)
+            if refined_parent is None or not refined_run_name or refined_run_name not in refined_parent:
+                raise ValueError(
+                    f"{zarr_path.name}: keypoint run '{keypoint_run_resolved}' not found in keypoints_runs "
+                    "and no matching refined_keypoints_runs annotation source is available."
+                )
+            refined_group = refined_parent[refined_run_name]
+            if "keypoints_roi" not in refined_group:
+                raise ValueError(
+                    f"{zarr_path.name}: refined keypoint run '{refined_run_name}' missing keypoints_roi array."
+                )
+            keypoints_arr = refined_group["keypoints_roi"]
+            warnings.append(
+                f"Using refined-only keypoint annotation source '{refined_run_name}' because "
+                f"raw keypoint run '{keypoint_run_resolved}' is not present."
+            )
+
         keypoint_shape = tuple(int(v) for v in keypoints_arr.shape)
         if len(keypoint_shape) < 2:
             raise ValueError(
@@ -1332,10 +1475,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         crop_parent = root.get("crop_runs")
         if crop_parent is None:
             raise ValueError(f"{zarr_path.name}: missing crop_runs group.")
-        source_crop_run = _decode_attr(kp_group.attrs.get("source_crop_run"))
+        source_attrs = kp_group.attrs if kp_group is not None else refined_group.attrs
+        source_crop_run = _decode_attr(source_attrs.get("source_crop_run"))
         if not source_crop_run:
             raise ValueError(
-                f"{zarr_path.name}: keypoint run '{keypoint_run_resolved}' missing source_crop_run. "
+                f"{zarr_path.name}: keypoint source '{keypoint_run_resolved}' missing source_crop_run. "
                 "Refusing ambiguous fallback to crop_runs/latest."
             )
         if source_crop_run not in crop_parent:
@@ -1356,20 +1500,20 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         source_type_resolved = _decode_attr(crop_group.attrs.get("detection_source_type"))
         source_type_resolved = str(source_type_resolved).strip().lower() if source_type_resolved is not None else None
-        if source_type_resolved != DEFAULT_KEYPOINT_SOURCE_TYPE:
+        if source_type_resolved not in ALLOWED_KEYPOINT_CROP_SOURCE_TYPES:
             raise ValueError(
-                f"{zarr_path.name}: keypoint training requires crop lineage "
-                f"detection_source_type={DEFAULT_KEYPOINT_SOURCE_TYPE!r}, observed "
-                f"{source_type_resolved or 'missing'!r} on crop run '{source_crop_run}'."
+                f"{zarr_path.name}: keypoint training requires crop lineage detection_source_type in "
+                f"{sorted(ALLOWED_KEYPOINT_CROP_SOURCE_TYPES)!r}, observed {source_type_resolved or 'missing'!r} "
+                f"on crop run '{source_crop_run}'."
             )
 
         keypoints_successful: Optional[int] = None
-        keypoints_success_rate = _as_float(kp_group.attrs.get("success_rate"))
-        keypoints_processed = _as_int(kp_group.attrs.get("keypoints_processed"))
+        keypoints_success_rate = _as_float(source_attrs.get("success_rate")) if kp_group is not None else None
+        keypoints_processed = _as_int(source_attrs.get("keypoints_processed")) if kp_group is not None else None
         if keypoints_success_rate is not None:
             denominator = keypoints_processed if keypoints_processed is not None else keypoints_total
             keypoints_successful = int(round(keypoints_success_rate * float(denominator)))
-        elif "detection_success" in kp_group:
+        elif kp_group is not None and "detection_success" in kp_group:
             success_arr = kp_group["detection_success"]
             if success_arr.shape[0] != keypoints_total:
                 raise ValueError(
@@ -1379,12 +1523,20 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             # Reading one boolean vector is cheap and gives an exact success count.
             keypoints_successful = int(success_arr[:].sum())
             keypoints_success_rate = _format_ratio(keypoints_successful, keypoints_total)
+        elif kp_group is None:
+            for success_name in ("usable_keypoints", "refined_success", "source_success"):
+                if success_name not in refined_group:
+                    continue
+                success_arr = refined_group[success_name]
+                if success_arr.shape[0] != keypoints_total:
+                    raise ValueError(
+                        f"{zarr_path.name}: {success_name} row mismatch "
+                        f"({success_name}={success_arr.shape[0]}, keypoints_roi={keypoints_total})."
+                    )
+                keypoints_successful = int(success_arr[:].sum())
+                keypoints_success_rate = _format_ratio(keypoints_successful, keypoints_total)
+                break
 
-        refined_quality = _resolve_refined_keypoint_quality(
-            root,
-            keypoint_run_resolved,
-            zarr_path=zarr_path,
-        )
         annotation_source = _resolve_effective_annotation_source(
             root,
             source_keypoint_run=keypoint_run_resolved,
@@ -1684,6 +1836,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             }
             for exclusion in [*quality_exclusions, *skeleton_exclusions]
         ],
+        "duplicate_zarr_path_exclusions": duplicate_zarr_path_exclusions,
         "invocation": invocation_payload,
     }
 

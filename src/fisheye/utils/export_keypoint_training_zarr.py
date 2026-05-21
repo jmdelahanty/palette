@@ -337,6 +337,31 @@ def _copy_rows_indexed(
             on_copied(stop - start)
 
 
+def _take_crop_or_source_rows(
+    values: np.ndarray,
+    selected: np.ndarray,
+    *,
+    source_detect_row_index: np.ndarray,
+    source_sample_count: int,
+    source_zarr: Path,
+    array_name: str,
+) -> np.ndarray:
+    if int(values.shape[0]) == int(source_sample_count):
+        return values[selected]
+    if int(source_detect_row_index.shape[0]) != int(source_sample_count):
+        raise ValueError(
+            f"{source_zarr}: source_detect_row_index length mismatch for {array_name} "
+            f"({source_detect_row_index.shape[0]} != {source_sample_count})."
+        )
+    mapped = np.asarray(source_detect_row_index[selected], dtype=np.int64)
+    if mapped.size and (int(mapped.min()) < 0 or int(mapped.max()) >= int(values.shape[0])):
+        raise ValueError(
+            f"{source_zarr}: source_detect_row_index points outside {array_name} "
+            f"(max index {int(mapped.max())}, rows {int(values.shape[0])})."
+        )
+    return values[mapped]
+
+
 def _write_string_array(group: zarr.Group, name: str, values: Sequence[str]) -> None:
     labels = np.asarray([str(value) for value in values], dtype=object)
     chunk_size = max(1, min(1024, int(labels.shape[0])))
@@ -717,8 +742,6 @@ def _discover_merge_sources(
         root = zarr.open_group(str(source_zarr), mode="r", use_consolidated=False)
 
         kp_parent = root.get("keypoints_runs")
-        if kp_parent is None:
-            raise ValueError(f"{source_zarr}: missing keypoints_runs group.")
         refined_parent_name: Optional[str] = None
         if "refined_keypoints_runs" in root:
             refined_parent_name = "refined_keypoints_runs"
@@ -727,14 +750,39 @@ def _discover_merge_sources(
 
         keypoint_run = _as_text(dataset.get("keypoint_run_resolved") or dataset.get("keypoint_run"))
         if not keypoint_run:
-            latest = _as_text(kp_parent.attrs.get("latest"))
+            latest = _as_text(kp_parent.attrs.get("latest")) if kp_parent is not None else None
             if latest:
                 keypoint_run = latest
         if not keypoint_run:
             raise ValueError(f"{source_zarr}: unable to resolve keypoint run.")
-        if keypoint_run not in kp_parent:
-            raise ValueError(f"{source_zarr}: keypoint run '{keypoint_run}' not found.")
-        kp_group = kp_parent[keypoint_run]
+        kp_group = kp_parent[keypoint_run] if kp_parent is not None and keypoint_run in kp_parent else None
+
+        annotation_group: Optional[zarr.Group] = kp_group
+        annotation_run = keypoint_run
+        annotation_parent_name = "keypoints_runs" if kp_group is not None else None
+        keypoints_path: Optional[str] = None
+        success_path: Optional[str] = None
+        if kp_group is not None:
+            keypoints_path = f"keypoints_runs/{keypoint_run}/keypoints_roi"
+            success_path = f"keypoints_runs/{keypoint_run}/detection_success"
+        else:
+            keypoints_path = _as_text(dataset.get("keypoints_array_path"))
+            success_path = _as_text(dataset.get("detection_success_path"))
+            annotation_parent_name = _as_text(dataset.get("annotation_source_parent"))
+            annotation_run = (
+                _as_text(dataset.get("annotation_source_run"))
+                or _as_text(dataset.get("refined_keypoint_run"))
+                or annotation_run
+            )
+            if not keypoints_path or not success_path or not annotation_parent_name or not annotation_run:
+                raise ValueError(
+                    f"{source_zarr}: keypoint run '{keypoint_run}' not found in keypoints_runs and "
+                    "manifest does not provide refined annotation paths."
+                )
+            group_path = f"{annotation_parent_name}/{annotation_run}"
+            if group_path not in root:
+                raise ValueError(f"{source_zarr}: annotation group '{group_path}' not found.")
+            annotation_group = root[group_path]
         dataset_id = (
             _as_text(dataset.get("dataset_id"))
             or _as_text(dataset.get("session_uuid"))
@@ -742,8 +790,10 @@ def _discover_merge_sources(
         )
 
         source_crop_run = _as_text(dataset.get("source_crop_run"))
-        if not source_crop_run:
+        if not source_crop_run and kp_group is not None:
             source_crop_run = _as_text(kp_group.attrs.get("source_crop_run"))
+        if not source_crop_run and annotation_group is not None:
+            source_crop_run = _as_text(annotation_group.attrs.get("source_crop_run"))
         if not source_crop_run:
             raise ValueError(
                 f"{source_zarr}: keypoint run '{keypoint_run}' missing source_crop_run; "
@@ -769,21 +819,21 @@ def _discover_merge_sources(
             raise ValueError(f"{source_zarr}: crop run '{source_crop_run}' missing roi_images.")
         if "bbox_norm_coords" not in crop_group:
             raise ValueError(f"{source_zarr}: crop run '{source_crop_run}' missing bbox_norm_coords.")
-        if "keypoints_roi" not in kp_group:
-            raise ValueError(f"{source_zarr}: keypoint run '{keypoint_run}' missing keypoints_roi.")
-        if "detection_success" not in kp_group:
-            raise ValueError(f"{source_zarr}: keypoint run '{keypoint_run}' missing detection_success.")
+        if keypoints_path not in root:
+            raise ValueError(f"{source_zarr}: keypoints array '{keypoints_path}' not found.")
+        if success_path not in root:
+            raise ValueError(f"{source_zarr}: success array '{success_path}' not found.")
 
         roi_arr = crop_group["roi_images"]
         bbox_arr = crop_group["bbox_norm_coords"]
-        keypoints_arr = kp_group["keypoints_roi"]
-        success_arr = kp_group["detection_success"]
+        keypoints_arr = root[keypoints_path]
+        success_arr = root[success_path]
 
         source_sample_count = int(roi_arr.shape[0])
-        if int(bbox_arr.shape[0]) != source_sample_count:
+        if int(bbox_arr.shape[0]) != source_sample_count and "source_detect_row_index" not in crop_group:
             raise ValueError(
-                f"{source_zarr}: bbox/roi row mismatch "
-                f"({bbox_arr.shape[0]} != {source_sample_count})."
+                f"{source_zarr}: bbox/roi row mismatch ({bbox_arr.shape[0]} != {source_sample_count}) "
+                "and crop run has no source_detect_row_index for row-map gather."
             )
         if int(keypoints_arr.shape[0]) != source_sample_count:
             raise ValueError(
@@ -833,12 +883,13 @@ def _discover_merge_sources(
             if dataset_roi_dtype != roi_dtype:
                 raise ValueError(f"{source_zarr}: roi dtype mismatch {dataset_roi_dtype} != {roi_dtype}.")
 
-        annotation_group = kp_group
-        annotation_run = keypoint_run
-        annotation_parent_name = "keypoints_runs"
+        if annotation_group is None or annotation_parent_name is None or not keypoints_path or not success_path:
+            raise ValueError(f"{source_zarr}: unable to resolve keypoint annotation source.")
 
         frame_indices_path = (
-            f"crop_runs/{source_crop_run}/frame_indices" if "frame_indices" in crop_group else None
+            f"crop_runs/{source_crop_run}/source_frame_indices"
+            if "source_frame_indices" in crop_group
+            else (f"crop_runs/{source_crop_run}/frame_indices" if "frame_indices" in crop_group else None)
         )
         detection_source_path = (
             f"crop_runs/{source_crop_run}/detection_source" if "detection_source" in crop_group else None
@@ -850,17 +901,15 @@ def _discover_merge_sources(
             or prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE
         )
         source_type_resolved = str(source_type_resolved).strip().lower()
-        if source_type_resolved != prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE:
+        if source_type_resolved not in prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES:
             raise ValueError(
-                f"{source_zarr}: keypoint merged export requires crop lineage "
-                f"detection_source_type={prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE!r}, observed "
-                f"{source_type_resolved!r} on crop run '{source_crop_run}'."
+                f"{source_zarr}: keypoint merged export requires crop lineage detection_source_type in "
+                f"{sorted(prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES)!r}, observed {source_type_resolved!r} "
+                f"on crop run '{source_crop_run}'."
             )
 
         dish_design, canvas_name, rig_id = _extract_identity(dataset)
 
-        keypoints_path = f"keypoints_runs/{keypoint_run}/keypoints_roi"
-        success_path = f"keypoints_runs/{keypoint_run}/detection_success"
         if (
             str(gate_stats.get("policy") or "").strip().lower() == "refined_usable"
             and gate_stats.get("refined_run")
@@ -1089,9 +1138,9 @@ def _export_merged(
         or manifest_payload.get("source_type")
         or prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE
     ).strip().lower()
-    if requested_source_type != prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE:
+    if requested_source_type not in prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES:
         raise ValueError(
-            "Keypoint merged export only supports refined-source manifests; "
+            "Keypoint merged export only supports reviewed refined/manual crop-source manifests; "
             f"observed source_type_requested={requested_source_type!r}."
         )
 
@@ -1104,10 +1153,12 @@ def _export_merged(
         [spec.source_type_resolved for spec in source_specs],
         fallback=requested_source_type,
     )
-    if source_type != prepare_pose.DEFAULT_KEYPOINT_SOURCE_TYPE:
+    resolved_source_types = {spec.source_type_resolved for spec in source_specs}
+    unsupported_source_types = sorted(resolved_source_types - prepare_pose.ALLOWED_KEYPOINT_CROP_SOURCE_TYPES)
+    if unsupported_source_types:
         raise ValueError(
-            "Keypoint merged export only supports refined-source datasets; "
-            f"resolved source_type={source_type!r}."
+            "Keypoint merged export only supports reviewed refined/manual crop-source datasets; "
+            f"unsupported source_type values={unsupported_source_types!r}."
         )
     merged_skeleton_id = _as_text(layout.get("skeleton_id"))
     merged_kpt_shape = _normalize_kpt_shape(layout.get("kpt_shape"))
@@ -1271,7 +1322,14 @@ def _export_merged(
             )
             keypoints = keypoints_all[selected]
             success = success_all[selected]
-            crop_bbox = bbox_all[selected]
+            crop_bbox = _take_crop_or_source_rows(
+                bbox_all,
+                selected,
+                source_detect_row_index=source_detect_row_index,
+                source_sample_count=spec.source_sample_count,
+                source_zarr=spec.source_zarr,
+                array_name=spec.bbox_path,
+            )
             local_total = int(spec.sample_count)
             box_only_mask = (
                 np.asarray(spec.box_only_selected_mask, dtype=np.bool_)
@@ -1321,12 +1379,14 @@ def _export_merged(
 
             if spec.detection_source_path:
                 detection_source = np.asarray(root[spec.detection_source_path][:], dtype=np.int8)
-                if detection_source.shape[0] != int(spec.source_sample_count):
-                    raise ValueError(
-                        f"{spec.source_zarr}: detection_source length mismatch "
-                        f"({detection_source.shape[0]} != {spec.source_sample_count})."
+                detection_source = _take_crop_or_source_rows(
+                    detection_source,
+                    selected,
+                    source_detect_row_index=source_detect_row_index,
+                    source_sample_count=spec.source_sample_count,
+                    source_zarr=spec.source_zarr,
+                    array_name=spec.detection_source_path,
                     )
-                detection_source = detection_source[selected]
             else:
                 detection_source = np.zeros(local_total, dtype=np.int8)
 

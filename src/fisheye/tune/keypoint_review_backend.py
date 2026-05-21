@@ -19,6 +19,7 @@ from ..refinement.keypoint_quality import (
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.frame_flags import append_flagged_frame, load_row_identity_arrays, row_identity_payload
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..utils.zarr_io import open_zarr_root
 from .keypoint_failure_review import (
     _DEFAULT_CONFIDENCE_THRESHOLD,
@@ -83,7 +84,7 @@ def _resolve_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_keypoints_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_keypoints_runs found in archive.")
-    latest = refined_parent.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
     if not latest:
         raise RuntimeError("No refined keypoint runs recorded.")
     return latest
@@ -238,7 +239,7 @@ def resolve_latest_refined_and_crop(
         crop_parent = root.get("crop_runs")
         if crop_parent is None:
             raise RuntimeError("No crop_runs found in archive.")
-        chosen_crop = crop_parent.attrs.get("latest")
+        chosen_crop = resolve_latest_complete_run_name(crop_parent, legacy_default=True)
         if not chosen_crop:
             raise RuntimeError("Cannot resolve default crop run.")
     crop_parent = root.get("crop_runs")

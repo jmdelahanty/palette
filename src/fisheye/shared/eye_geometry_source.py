@@ -11,6 +11,7 @@ import zarr
 
 from .provenance_attrs import resolve_source_keypoints_run
 from .refined_subject_eye_geometry import EYE_COMPONENTS
+from .zarr_run_completion import resolve_latest_complete_run_name
 
 
 EYE_GEOMETRY_STAGE_REFINED_SUBJECT = "refined_subject_masks_runs"
@@ -74,7 +75,7 @@ def _resolve_run_group(
         return (requested, group) if group is not None else (requested, None)
 
     if fallback_to_latest:
-        latest = _normalize_text(parent.attrs.get("latest"))
+        latest = _normalize_text(resolve_latest_complete_run_name(parent, legacy_default=True))
         if latest:
             group = _group_get(parent, latest)
             if group is not None:
@@ -306,7 +307,7 @@ def _find_latest_subject_eye_geometry(root: zarr.Group) -> tuple[Optional[str], 
     if parent is None:
         return None, None
 
-    latest = _normalize_text(parent.attrs.get("latest"))
+    latest = _normalize_text(resolve_latest_complete_run_name(parent, legacy_default=True))
     if latest:
         latest_group = _group_get(parent, latest)
         if latest_group is not None and _has_subject_eye_geometry(latest_group):
@@ -324,7 +325,7 @@ def _find_latest_subject_shape_eye_geometry(root: zarr.Group) -> tuple[Optional[
     if parent is None:
         return None, None
 
-    latest = _normalize_text(parent.attrs.get("latest"))
+    latest = _normalize_text(resolve_latest_complete_run_name(parent, legacy_default=True))
     if latest:
         latest_group = _group_get(parent, latest)
         if latest_group is not None and _has_subject_shape_eye_geometry(latest_group):

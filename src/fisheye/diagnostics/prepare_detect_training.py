@@ -35,6 +35,7 @@ from ..shared.refined_detect_curation import (
     has_curated_refined_detect_surface,
 )
 from ..shared.zarr_helpers import open_zarr_group_direct
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..utils.system import build_invocation_record
 
 
@@ -323,7 +324,7 @@ def _resolve_refined_group(root: zarr.Group, crop_group: Optional[zarr.Group]) -
     refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
     if refined_parent is None:
         return None
-    latest = refined_parent.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
     if isinstance(latest, (bytes, bytearray)):
         latest = latest.decode("utf-8", "ignore")
     if isinstance(latest, str) and latest in refined_parent:
@@ -984,8 +985,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         source_detection_decision_counts: Dict[str, int] = {}
         refined_group: Optional[zarr.Group] = None
 
-        if "crop_runs" in root and root["crop_runs"].attrs.get("latest"):
-            crop_run = root["crop_runs"].attrs.get("latest")
+        crop_run = (
+            resolve_latest_complete_run_name(root["crop_runs"], legacy_default=True)
+            if "crop_runs" in root
+            else None
+        )
+        detect_run = (
+            resolve_latest_complete_run_name(root["detect_runs"], legacy_default=True)
+            if "detect_runs" in root
+            else None
+        )
+        if crop_run:
             crop_group = root["crop_runs"][crop_run]
             if "bbox_norm_coords" not in crop_group:
                 raise ValueError(f"crop_runs/{crop_run} missing bbox_norm_coords in {zarr_path.name}.")
@@ -1001,8 +1011,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 unique, counts = np.unique(detection_source, return_counts=True)
                 detection_source_counts = {str(int(k)): int(v) for k, v in zip(unique.tolist(), counts.tolist())}
                 _log_timing(args.timing, f"{dataset_label}: read detection_source", phase_started)
-        elif "detect_runs" in root and root["detect_runs"].attrs.get("latest"):
-            detect_run = root["detect_runs"].attrs.get("latest")
+        elif detect_run:
             detect_group = root["detect_runs"][detect_run]
             if "bbox_norm_coords" not in detect_group:
                 raise ValueError(f"detect_runs/{detect_run} missing bbox_norm_coords in {zarr_path.name}.")

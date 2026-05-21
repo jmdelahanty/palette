@@ -33,6 +33,7 @@ from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.registry.stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.utils.backfill_subject_mask_runs import project_eye_mask_run_to_subject_mask_run
 from fisheye.utils.batch_registry_model_resolution import ResolvedModel
 from fisheye.utils.batch_registry_model_resolution import (
@@ -259,7 +260,7 @@ def _has_latest_run(root: zarr.Group, group_name: str) -> bool:
     parent = root.get(group_name)
     if parent is None:
         return False
-    return bool(parent.attrs.get("latest"))
+    return bool(resolve_latest_complete_run_name(parent, legacy_default=True))
 
 
 def _crop_pointer_exists(crop_parent: zarr.Group, pointer_names: Sequence[str]) -> bool:
@@ -626,7 +627,7 @@ def _latest_run(zarr_path: Path, group_name: str) -> Optional[str]:
     parent = root.get(group_name)
     if parent is None:
         return None
-    latest = parent.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(parent, legacy_default=True)
     return str(latest) if latest else None
 
 

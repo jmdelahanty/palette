@@ -41,6 +41,7 @@ from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..utils.zarr_io import open_zarr_root
 from ..refinement.keypoint_quality import (
     compute_geometry_metrics,
@@ -154,7 +155,7 @@ def _get_latest_run(root: zarr.Group, group_name: str) -> str:
     parent_name = f"{group_name}_runs"
     if parent_name not in root:
         raise RuntimeError(f"No '{parent_name}' group found in Zarr store.")
-    latest = root[parent_name].attrs.get("latest")
+    latest = resolve_latest_complete_run_name(root[parent_name], legacy_default=True)
     if not latest:
         raise RuntimeError(f"No runs recorded under '{parent_name}'.")
     return latest
@@ -1018,7 +1019,7 @@ def launch_review(
 
     using_latest = refined_run is None
     if refined_run is None:
-        refined_run = refined_parent.attrs.get("latest")
+        refined_run = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
     if not refined_run:
         raise RuntimeError("Refined keypoint run not found.")
     try:

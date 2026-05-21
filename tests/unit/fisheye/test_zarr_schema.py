@@ -154,10 +154,15 @@ class TestZarrSchema:
         run_group, run_name = get_run_group(root, 'detect')
         assert 'detect_runs' in root
         assert run_name in root['detect_runs']
-        assert root['detect_runs'].attrs['latest'] == run_name
+        assert root['detect_runs'].attrs.get('latest') is None
+        assert root['detect_runs'].attrs['latest_pending'] == run_name
         assert run_group == root['detect_runs'][run_name]
 
-        # Getting latest run should return existing when create_new=False
+        from fisheye.shared.zarr_run_completion import mark_run_complete
+
+        mark_run_complete(run_group, parent_group=root["detect_runs"], run_name=run_name)
+
+        # Getting latest run should return existing complete run when create_new=False
         run_group2, run_name2 = get_run_group(root, 'detect', create_new=False)
         assert run_name2 == run_name
         assert run_group2 == run_group

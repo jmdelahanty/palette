@@ -37,6 +37,7 @@ import zarr
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from ..pose.schema import resolve_keypoint_labels_from_attrs
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from .config import PoseConfig
 from .export_shared import (
     collect_export_env as _shared_collect_export_env,
@@ -440,87 +441,89 @@ def get_zarr_metadata(zarr_paths, console=None):
                             zarr_meta['fps'] = fallback_fps
             
             # Get crop info
-            if 'crop_runs' in root and 'latest' in root['crop_runs'].attrs:
-                latest_crop = root['crop_runs'].attrs['latest']
-                crop_group = root[f'crop_runs/{latest_crop}']
-                
-                zarr_meta['crop_info'] = {
-                    'run_name': latest_crop,
-                    'source_type': crop_group.attrs.get('detection_source_type', 'unknown'),
-                    'n_rois': crop_group['roi_images'].shape[0] if 'roi_images' in crop_group else 0,
-                    'roi_size': tuple(crop_group['roi_images'].shape[1:3]) if 'roi_images' in crop_group else (0, 0),
-                    'includes_interpolated': crop_group.attrs.get('includes_interpolated', False),
-                    'n_real_detections': crop_group.attrs.get('n_real_detections', 0),
-                    'n_interpolated_detections': crop_group.attrs.get('n_interpolated_detections', 0)
-                }
+            if 'crop_runs' in root:
+                latest_crop = resolve_latest_complete_run_name(root['crop_runs'], legacy_default=True)
+                if latest_crop:
+                    crop_group = root[f'crop_runs/{latest_crop}']
+
+                    zarr_meta['crop_info'] = {
+                        'run_name': latest_crop,
+                        'source_type': crop_group.attrs.get('detection_source_type', 'unknown'),
+                        'n_rois': crop_group['roi_images'].shape[0] if 'roi_images' in crop_group else 0,
+                        'roi_size': tuple(crop_group['roi_images'].shape[1:3]) if 'roi_images' in crop_group else (0, 0),
+                        'includes_interpolated': crop_group.attrs.get('includes_interpolated', False),
+                        'n_real_detections': crop_group.attrs.get('n_real_detections', 0),
+                        'n_interpolated_detections': crop_group.attrs.get('n_interpolated_detections', 0)
+                    }
             
             # Get keypoint detection info if available
-            if 'keypoints_runs' in root and 'latest' in root['keypoints_runs'].attrs:
-                latest_kp = root['keypoints_runs'].attrs['latest']
-                kp_group = root[f'keypoints_runs/{latest_kp}']
-                usable_keypoints = None
-                total_keypoints = None
-                usable_keypoints_rate = None
-                refined_run_name = None
-                refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
-                if refined_parent is not None:
-                    candidates = []
-                    for refined_run in refined_parent.group_keys():
-                        refined_group = refined_parent[refined_run]
-                        source_keypoint_run = (
-                            refined_group.attrs.get("source_keypoints_run")
-                            or refined_group.attrs.get("source_keypoint_run")
-                        )
-                        if source_keypoint_run is None or str(source_keypoint_run) != str(latest_kp):
-                            continue
-                        candidate_usable = None
-                        candidate_total = None
-                        if "usable_keypoints" in refined_group:
-                            usable_arr = refined_group["usable_keypoints"]
-                            candidate_total = int(usable_arr.shape[0])
-                            candidate_usable = int(np.asarray(usable_arr[:]).sum())
-                        summary_stats = refined_group.attrs.get("summary_statistics")
-                        if isinstance(summary_stats, Mapping):
-                            postprocess = summary_stats.get("postprocess")
-                            for payload in (postprocess, summary_stats):
-                                if not isinstance(payload, Mapping):
-                                    continue
-                                if candidate_usable is None:
-                                    try:
-                                        candidate_usable = int(payload.get("usable_keypoints"))
-                                    except Exception:
-                                        candidate_usable = None
-                                if candidate_total is None:
-                                    try:
-                                        candidate_total = int(payload.get("total_rois"))
-                                    except Exception:
-                                        candidate_total = None
-                        candidate_rate = (
-                            float(candidate_usable) / float(candidate_total)
-                            if candidate_usable is not None and candidate_total is not None and candidate_total > 0
-                            else None
-                        )
-                        candidate_ts = (
-                            str(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc") or "")
-                        )
-                        candidates.append((candidate_ts, str(refined_run), candidate_usable, candidate_total, candidate_rate))
-                    if candidates:
-                        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-                        _ts, refined_run_name, usable_keypoints, total_keypoints, usable_keypoints_rate = candidates[0]
+            if 'keypoints_runs' in root:
+                latest_kp = resolve_latest_complete_run_name(root['keypoints_runs'], legacy_default=True)
+                if latest_kp:
+                    kp_group = root[f'keypoints_runs/{latest_kp}']
+                    usable_keypoints = None
+                    total_keypoints = None
+                    usable_keypoints_rate = None
+                    refined_run_name = None
+                    refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
+                    if refined_parent is not None:
+                        candidates = []
+                        for refined_run in refined_parent.group_keys():
+                            refined_group = refined_parent[refined_run]
+                            source_keypoint_run = (
+                                refined_group.attrs.get("source_keypoints_run")
+                                or refined_group.attrs.get("source_keypoint_run")
+                            )
+                            if source_keypoint_run is None or str(source_keypoint_run) != str(latest_kp):
+                                continue
+                            candidate_usable = None
+                            candidate_total = None
+                            if "usable_keypoints" in refined_group:
+                                usable_arr = refined_group["usable_keypoints"]
+                                candidate_total = int(usable_arr.shape[0])
+                                candidate_usable = int(np.asarray(usable_arr[:]).sum())
+                            summary_stats = refined_group.attrs.get("summary_statistics")
+                            if isinstance(summary_stats, Mapping):
+                                postprocess = summary_stats.get("postprocess")
+                                for payload in (postprocess, summary_stats):
+                                    if not isinstance(payload, Mapping):
+                                        continue
+                                    if candidate_usable is None:
+                                        try:
+                                            candidate_usable = int(payload.get("usable_keypoints"))
+                                        except Exception:
+                                            candidate_usable = None
+                                    if candidate_total is None:
+                                        try:
+                                            candidate_total = int(payload.get("total_rois"))
+                                        except Exception:
+                                            candidate_total = None
+                            candidate_rate = (
+                                float(candidate_usable) / float(candidate_total)
+                                if candidate_usable is not None and candidate_total is not None and candidate_total > 0
+                                else None
+                            )
+                            candidate_ts = (
+                                str(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc") or "")
+                            )
+                            candidates.append((candidate_ts, str(refined_run), candidate_usable, candidate_total, candidate_rate))
+                        if candidates:
+                            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                            _ts, refined_run_name, usable_keypoints, total_keypoints, usable_keypoints_rate = candidates[0]
 
-                keypoint_labels = _resolve_tracking_labels(kp_group)
-                keypoint_skeleton = _resolve_tracking_skeleton(kp_group)
-                zarr_meta['tracking_info'] = {
-                    'run_name': latest_kp,
-                    'refined_run': refined_run_name,
-                    'keypoints_processed': int(kp_group.attrs.get('keypoints_processed', 0)),
-                    'success_rate': float(kp_group.attrs.get('success_rate', 0.0)),
-                    'usable_keypoints': usable_keypoints,
-                    'total_keypoints': total_keypoints,
-                    'usable_keypoints_rate': usable_keypoints_rate,
-                    'keypoint_labels': keypoint_labels,
-                    'keypoint_skeleton': keypoint_skeleton,
-                }
+                    keypoint_labels = _resolve_tracking_labels(kp_group)
+                    keypoint_skeleton = _resolve_tracking_skeleton(kp_group)
+                    zarr_meta['tracking_info'] = {
+                        'run_name': latest_kp,
+                        'refined_run': refined_run_name,
+                        'keypoints_processed': int(kp_group.attrs.get('keypoints_processed', 0)),
+                        'success_rate': float(kp_group.attrs.get('success_rate', 0.0)),
+                        'usable_keypoints': usable_keypoints,
+                        'total_keypoints': total_keypoints,
+                        'usable_keypoints_rate': usable_keypoints_rate,
+                        'keypoint_labels': keypoint_labels,
+                        'keypoint_skeleton': keypoint_skeleton,
+                    }
             else:
                 zarr_meta['tracking_info'] = {'warning': 'keypoints_runs not found; proceeding without precomputed keypoints metadata'}
             
@@ -1099,7 +1102,8 @@ def main(args) -> int:
             sampling_strategy=full_config.sampling_strategy.value if hasattr(full_config.sampling_strategy, 'value') else full_config.sampling_strategy,
             random_seed=full_config.random_seed,
             dataset_weights=full_config.dataset_weights,
-            split_ratio=default_split
+            split_ratio=default_split,
+            allow_source_mismatch=bool(full_config.allow_source_mismatch),
         )
         # Seed schema from config so registry in_progress rows can carry skeleton_id
         # before dataset metadata is loaded.

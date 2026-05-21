@@ -27,11 +27,18 @@ from ..shared.refined_detect_curation import (
     has_curated_refined_detect_surface,
     has_sparse_curated_refined_detect_instances_arrays,
 )
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _latest_complete(parent: Optional[zarr.Group]) -> Optional[str]:
+    if parent is None:
+        return None
+    return resolve_latest_complete_run_name(parent, legacy_default=True)
 
 
 # Configuration
@@ -340,7 +347,7 @@ class GlobalIndexManager:
                     requested_input_format = "gray"
                 
                 crop_parent = root.get('crop_runs')
-                latest_crop = crop_parent.attrs.get('latest') if crop_parent is not None else None
+                latest_crop = _latest_complete(crop_parent)
                 crop_group = None
                 uses_crop_data = False
                 if crop_parent is not None and latest_crop and latest_crop in crop_parent:
@@ -392,18 +399,14 @@ class GlobalIndexManager:
                     selected_detect_run: Optional[str] = None
 
                     if requested_source == "detect":
-                        detect_run_name = (
-                            detect_parent.attrs.get("latest") if detect_parent is not None else None
-                        )
+                        detect_run_name = _latest_complete(detect_parent)
                         if detect_parent is not None and detect_run_name and detect_run_name in detect_parent:
                             selected_source_type = "detect"
                             selected_group_path = f"detect_runs/{detect_run_name}"
                             selected_group = detect_parent[detect_run_name]
                             selected_detect_run = str(detect_run_name)
                     else:
-                        refined_run_name = (
-                            refined_parent.attrs.get("latest") if refined_parent is not None else None
-                        )
+                        refined_run_name = _latest_complete(refined_parent)
                         if refined_parent is not None and refined_run_name and refined_run_name in refined_parent:
                             refined_run = refined_parent[refined_run_name]
                             preferred_group: Optional[str] = None
@@ -456,7 +459,7 @@ class GlobalIndexManager:
                                 elif resolved.label == "raw":
                                     detect_run_name = (
                                         resolved.source_detect_run
-                                        or (detect_parent.attrs.get("latest") if detect_parent is not None else None)
+                                        or _latest_complete(detect_parent)
                                     )
                                     if detect_parent is not None and detect_run_name and detect_run_name in detect_parent:
                                         selected_source_type = "detect"
@@ -596,7 +599,7 @@ class GlobalIndexManager:
 
                     kp_parent = root['keypoints_runs']
                     if requested_kp_run in (None, 'latest'):
-                        latest_attr = kp_parent.attrs.get('latest')
+                        latest_attr = _latest_complete(kp_parent)
                         if not latest_attr:
                             raise KeyError(
                                 "Keypoints run group missing 'latest' attribute; specify 'keypoint_run' in config."
@@ -737,7 +740,7 @@ class GlobalIndexManager:
 
         # For pose task, also check keypoints validity
         if self.config.task == 'pose':
-            kp_run = metadata.keypoint_run or root['keypoints_runs'].attrs.get('latest')
+            kp_run = metadata.keypoint_run or _latest_complete(root['keypoints_runs'])
             if kp_run is None:
                 raise KeyError("Unable to determine keypoint run for pose dataset.")
             kp_group = root[f'keypoints_runs/{kp_run}']
@@ -1121,8 +1124,11 @@ class ZarrYOLODataset(Dataset):
 
                 if frame_indices is None:
                     detect_parent = root.get('detect_runs')
-                    if detect_parent is not None and 'latest' in detect_parent.attrs:
-                        detect_latest = detect_parent.attrs['latest']
+                    if detect_parent is not None:
+                        detect_latest = _latest_complete(detect_parent)
+                    else:
+                        detect_latest = None
+                    if detect_latest:
                         frame_indices = root[f'detect_runs/{detect_latest}/frame_indices'][:]
 
                 if frame_indices is None or frame_indices.shape[0] != self.bbox_cache[zarr_path].shape[0]:
@@ -1154,7 +1160,9 @@ class ZarrYOLODataset(Dataset):
         else:
             for zarr_path in self.zarr_roots.keys():
                 root = self.zarr_roots[zarr_path]
-                latest_crop = root['crop_runs'].attrs['latest']
+                latest_crop = _latest_complete(root['crop_runs'])
+                if latest_crop is None:
+                    raise KeyError(f"No complete crop run available for {Path(zarr_path).name}.")
                 crop_group = root[f'crop_runs/{latest_crop}']
                 roi_shape = crop_group['roi_images'].shape[1:3]
                 roi_h, roi_w = roi_shape
@@ -1165,7 +1173,7 @@ class ZarrYOLODataset(Dataset):
                 if metadata is not None:
                     kp_run_name = metadata.keypoint_run
                 if kp_run_name is None:
-                    kp_run_name = root['keypoints_runs'].attrs.get('latest')
+                    kp_run_name = _latest_complete(root['keypoints_runs'])
                 if kp_run_name is None:
                     raise KeyError(f"No keypoint run available for {Path(zarr_path).name}; specify 'keypoint_run' in config.")
 
@@ -1543,7 +1551,10 @@ class ZarrYOLODataset(Dataset):
         if self.config.task == 'detect':
             image_source_path = metadata.frame_array_path
         else:
-            image_source_path = f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images"
+            latest_crop = _latest_complete(root['crop_runs'])
+            if latest_crop is None:
+                raise KeyError(f"No complete crop run available for {Path(zarr_path).name}.")
+            image_source_path = f"crop_runs/{latest_crop}/roi_images"
         
         frame_idx = None
         read_start = time.perf_counter() if profile_enabled else 0.0

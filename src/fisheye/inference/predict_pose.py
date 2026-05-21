@@ -16,6 +16,7 @@ from ..detection.detect_keypoints_yolo import detect_keypoints_yolo
 from ..registry.db import Registry, RegistryPaths
 from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import as_float, normalize_attr
+from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 
 _KEYPOINT_STEP_NAME = "keypoints"
 _STATUS_SOURCE = "runtime_predict_pose"
@@ -193,7 +194,7 @@ def _collect_no_roi_payload(zarr_path: Path) -> Dict[str, object]:
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
         return details
-    latest_crop = normalize_attr(crop_parent.attrs.get("latest"))
+    latest_crop = normalize_attr(resolve_latest_complete_run_name(crop_parent, legacy_default=True))
     if latest_crop is not None:
         details["source_crop_run"] = latest_crop
     return details

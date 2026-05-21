@@ -14,6 +14,7 @@ import zarr
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.type_conversions import clean_mapping, normalize_attr
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.utils.backfill_subject_mask_runs import project_eye_mask_run_to_subject_mask_run
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
@@ -229,7 +230,7 @@ def _latest_eye_masks_run(zarr_path: Path) -> Optional[str]:
     parent = root.get("eye_masks_runs")
     if parent is None:
         return None
-    latest = parent.attrs.get("latest")
+    latest = resolve_latest_complete_run_name(parent, legacy_default=True)
     if latest is None:
         return None
     latest_name = str(latest)

@@ -27,6 +27,7 @@ from fisheye.utils.system import (
     get_environment_info
 )
 from fisheye.shared.zarr_run_completion import (
+    mark_run_pending,
     mark_run_started,
     note_pending_latest,
     resolve_latest_complete_run_group,
@@ -374,15 +375,15 @@ def get_run_group(
             run_group_name = f"{base_name}_{suffix:03d}"
             suffix += 1
         run_group = parent_group.create_group(run_group_name)
-        parent_group.attrs['latest'] = run_group_name
+        mark_run_started(run_group, run_name=run_group_name, stage=stage_name)
+        mark_run_pending(parent_group, run_group_name)
         
         if console:
             console.print(f"Created run group: [cyan]{parent_group_name}/{run_group_name}[/cyan]")
     else:
-        run_group_name = parent_group.attrs.get('latest')
-        if not run_group_name:
+        run_group_name, run_group = resolve_latest_complete_run_group(parent_group)
+        if not run_group_name or run_group is None:
             raise ValueError(f"No existing run found for {stage_name}")
-        run_group = parent_group[run_group_name]
     
     return run_group, run_group_name
 
@@ -575,7 +576,8 @@ def add_processing_run(
         if run_name in parent_group:
             raise ValueError(f"{parent_group_name}/{run_name} already exists")
         run_group = parent_group.create_group(run_name)
-        note_pending_latest(parent_group, run_name)
+        mark_run_started(run_group, run_name=run_name, stage=stage)
+        mark_run_pending(parent_group, run_name)
         if console:
             console.print(f"Created run group: [cyan]{parent_group_name}/{run_name}[/cyan]")
     else:

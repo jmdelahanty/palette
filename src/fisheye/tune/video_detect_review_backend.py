@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 import zarr
 
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 from fisheye.tune import detect_review as detect_review_mod
 
 
@@ -246,7 +247,11 @@ def _latest_refined_run(root: zarr.Group, refined_run: str | None = None) -> tup
     parent = root.get("refined_detect_runs")
     if parent is None:
         raise RuntimeError("No refined_detect_runs found in archive.")
-    run_name = str(refined_run or parent.attrs.get("latest") or "").strip()
+    run_name = str(
+        refined_run
+        or resolve_latest_complete_run_name(parent, legacy_default=True)
+        or ""
+    ).strip()
     if not run_name or run_name not in parent:
         raise RuntimeError("Refined detect run not found.")
     return run_name, parent[run_name]
