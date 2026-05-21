@@ -13,8 +13,10 @@ from .db import (
     extract_dataset_metadata,
     resolve_dataset_id,
 )
+from .stage_catalog import canonical_stage_id
 from .status_ledger import upsert_recording_step_status
 from .step_cascade import invalidate_downstream_steps
+from ..shared.zarr.stage_arrays import STAGES, StageSpec, validate_run
 from ..shared.zarr_run_completion import is_run_complete
 
 RegistryInput = Optional[Union[Registry, Path, str]]
@@ -39,6 +41,15 @@ _STEP_RUN_PARENTS = {
     "arena_assignment": ("arena_assignment_runs",),
     "assign_ids": ("arena_assignment_runs",),
     "track": ("tracking_runs",),
+    "tracks": ("tracking_runs",),
+}
+
+_STAGE_ARRAY_SPEC_ALIASES = {
+    "refine": "refined_detect",
+    "keypoints_refine": "refined_keypoints",
+    "assign_ids": "arena_assignment",
+    "track": "tracking",
+    "tracks": "tracking",
 }
 
 
@@ -100,6 +111,54 @@ def _resolve_completion_run_group(
             if candidate is not None:
                 return candidate
     return None
+
+
+def _stage_array_spec_for_completion(step_name: str) -> Optional[StageSpec]:
+    stage_name = _STAGE_ARRAY_SPEC_ALIASES.get(step_name, step_name)
+    if stage_name in STAGES:
+        return STAGES[stage_name]
+    try:
+        canonical_name = canonical_stage_id(step_name)
+    except KeyError:
+        canonical_name = step_name
+    stage_name = _STAGE_ARRAY_SPEC_ALIASES.get(canonical_name, canonical_name)
+    return STAGES.get(stage_name)
+
+
+def _validate_completion_run_group(
+    run_group: zarr.Group,
+    *,
+    step_name: str,
+    run_name: str,
+) -> list[str]:
+    if not is_run_complete(run_group, legacy_default=True):
+        raise RuntimeError(
+            f"Refusing to mark {step_name} run {run_name!r} ok because "
+            "the Zarr run-completion marker is not complete"
+        )
+
+    spec = _stage_array_spec_for_completion(step_name)
+    if spec is None:
+        return []
+
+    result = validate_run(run_group, spec)
+    if not result.valid:
+        errors = "; ".join(result.errors)
+        raise RuntimeError(
+            f"Refusing to mark {step_name} run {run_name!r} ok because "
+            f"required Zarr arrays failed validation: {errors}"
+        )
+    return list(result.warnings)
+
+
+def _merge_validation_warnings(
+    details_json: Optional[Mapping[str, Any]],
+    warnings: list[str],
+) -> Optional[dict[str, Any]]:
+    details = dict(details_json) if isinstance(details_json, Mapping) else {}
+    if warnings:
+        details["stage_array_validation_warnings"] = warnings
+    return details or None
 
 
 def _resolve_registry_input(
@@ -164,20 +223,23 @@ def emit_stage_completion(
             return False
 
         resolved_path = Path(zarr_path).expanduser().resolve()
-        if status == "ok" and run_name:
+        validation_warnings: list[str] = []
+        if status == "ok" and run_name and root is not None:
             completion_group = _resolve_completion_run_group(
                 root,
                 step_name=step_name,
                 run_name=run_name,
             )
-            if completion_group is not None and not is_run_complete(
-                completion_group,
-                legacy_default=True,
-            ):
+            if completion_group is None:
                 raise RuntimeError(
                     f"Refusing to mark {step_name} run {run_name!r} ok because "
-                    "the Zarr run-completion marker is not complete"
+                    "the Zarr run group could not be resolved"
                 )
+            validation_warnings = _validate_completion_run_group(
+                completion_group,
+                step_name=step_name,
+                run_name=run_name,
+            )
         if metadata is None:
             if root is None:
                 raise ValueError("root is required when metadata is not provided")
@@ -205,7 +267,7 @@ def emit_stage_completion(
             method=method,
             coverage_pct=coverage_pct,
             review_status_json=dict(review_status_json) if isinstance(review_status_json, Mapping) else None,
-            details_json=dict(details_json) if isinstance(details_json, Mapping) else None,
+            details_json=_merge_validation_warnings(details_json, validation_warnings),
             source=source,
             zarr_mtime_ns=safe_zarr_mtime_ns(resolved_path),
         )
