@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from fisheye.registry import stage_complete as stage_complete_mod
 from fisheye.registry.stage_complete import emit_stage_completion
 from fisheye.shared.zarr_run_completion import (
     RUN_COMPLETION_STATUS_ATTR,
@@ -45,6 +46,11 @@ def _add_valid_detect_arrays(run: FakeGroup) -> None:
     run["class_ids"] = FakeArray((2,), "int32")
     run["frame_counts"] = FakeArray((3,), "int32")
     run["n_detections"] = FakeArray((3,), "int32")
+
+
+def _add_valid_detect_quality_arrays(run: FakeGroup) -> None:
+    run["quality_flags"] = FakeArray((3,), "int8")
+    run["detection_quality_labels"] = FakeArray((2,), "int8")
 
 
 def test_latest_resolver_skips_incomplete_contract_run() -> None:
@@ -224,7 +230,37 @@ def test_emit_stage_completion_refuses_unresolved_ok_run(tmp_path: Path) -> None
     assert called is False
 
 
-def test_emit_stage_completion_refuses_complete_run_with_missing_required_arrays(tmp_path: Path) -> None:
+def test_emit_stage_completion_requires_root_for_ok_run_with_prebuilt_metadata(tmp_path: Path) -> None:
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    called = False
+
+    def _upsert(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+
+    wrote = emit_stage_completion(
+        None,
+        tmp_path / "archive.zarr",
+        step_name="detect",
+        status="ok",
+        source="unit_test",
+        run_name="detect_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=_upsert,
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is False
+    assert called is False
+
+
+def test_emit_stage_completion_records_invalid_arrays_without_blocking_by_default(tmp_path: Path) -> None:
     root = FakeGroup()
     detect_parent = FakeGroup()
     run = FakeGroup()
@@ -232,6 +268,53 @@ def test_emit_stage_completion_refuses_complete_run_with_missing_required_arrays
     detect_parent["detect_001"] = run
     mark_run_started(run, run_name="detect_001", stage="detect")
     mark_run_complete(run, parent_group=detect_parent, run_name="detect_001")
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    captured: dict[str, object] = {}
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="detect",
+        status="ok",
+        source="unit_test",
+        run_name="detect_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    details = captured["details_json"]
+    assert details["stage_array_validation_status"] == "invalid"  # type: ignore[index]
+    assert details["stage_array_validation_stage"] == "detect"  # type: ignore[index]
+    assert details["stage_array_validation_enforced"] is False  # type: ignore[index]
+    assert "detect: missing required array 'frame_indices'" in details["stage_array_validation_errors"]  # type: ignore[index]
+
+
+def test_emit_stage_completion_refuses_invalid_arrays_when_stage_is_enforced(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = FakeGroup()
+    detect_parent = FakeGroup()
+    run = FakeGroup()
+    root["detect_runs"] = detect_parent
+    detect_parent["detect_001"] = run
+    mark_run_started(run, run_name="detect_001", stage="detect")
+    mark_run_complete(run, parent_group=detect_parent, run_name="detect_001")
+
+    monkeypatch.setattr(
+        stage_complete_mod,
+        "_ENFORCE_STAGE_ARRAY_VALIDATION_FOR",
+        frozenset({"detect"}),
+    )
 
     class FakeRegistry:
         def close(self) -> None:
@@ -298,6 +381,116 @@ def test_emit_stage_completion_accepts_complete_opted_in_run(tmp_path: Path) -> 
     assert captured["step_name"] == "detect"
     assert captured["status"] == "ok"
     assert captured["details_json"]["existing"] == "kept"  # type: ignore[index]
+    assert captured["details_json"]["stage_array_validation_status"] == "ok"  # type: ignore[index]
+    assert captured["details_json"]["stage_array_validation_stage"] == "detect"  # type: ignore[index]
+    assert captured["details_json"]["stage_array_validation_enforced"] is False  # type: ignore[index]
     assert captured["details_json"]["stage_array_validation_warnings"] == [  # type: ignore[index]
         "detect: missing optional array 'centers_px'"
     ]
+
+
+def test_emit_stage_completion_non_ok_status_bypasses_run_validation(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    wrote = emit_stage_completion(
+        None,
+        tmp_path / "archive.zarr",
+        step_name="detect",
+        status="missing",
+        source="unit_test",
+        run_name="detect_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    assert captured["status"] == "missing"
+    assert captured["details_json"] is None
+
+
+def test_emit_stage_completion_records_missing_stage_spec_warning(tmp_path: Path) -> None:
+    root = FakeGroup()
+    parent = FakeGroup()
+    run = FakeGroup()
+    root["custom_stage_runs"] = parent
+    parent["custom_001"] = run
+    mark_run_started(run, run_name="custom_001", stage="custom_stage")
+    mark_run_complete(run, parent_group=parent, run_name="custom_001")
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="custom_stage",
+        status="ok",
+        source="unit_test",
+        run_name="custom_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    details = captured["details_json"]
+    assert details["stage_array_validation_status"] == "no_spec"  # type: ignore[index]
+    assert details["stage_array_validation_enforced"] is False  # type: ignore[index]
+    assert details["stage_array_validation_warnings"] == [  # type: ignore[index]
+        "no StageSpec for step 'custom_stage'; skipped array validation"
+    ]
+
+
+def test_emit_stage_completion_resolves_nested_detect_quality_run(tmp_path: Path) -> None:
+    root = FakeGroup()
+    detect_parent = FakeGroup()
+    detect_run = FakeGroup()
+    quality_parent = FakeGroup()
+    quality_run = FakeGroup()
+    root["detect_runs"] = detect_parent
+    detect_parent["detect_001"] = detect_run
+    detect_run["quality_reports"] = quality_parent
+    quality_parent["quality_001"] = quality_run
+    _add_valid_detect_quality_arrays(quality_run)
+    mark_run_started(quality_run, run_name="quality_001", stage="detect_quality")
+    mark_run_complete(quality_run, parent_group=quality_parent, run_name="quality_001")
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="detect_quality",
+        status="ok",
+        source="unit_test",
+        run_name="quality_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    details = captured["details_json"]
+    assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
+    assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]

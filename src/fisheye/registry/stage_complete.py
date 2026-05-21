@@ -45,12 +45,21 @@ _STEP_RUN_PARENTS = {
 }
 
 _STAGE_ARRAY_SPEC_ALIASES = {
+    # Defensive aliases for legacy callers and tests; current production
+    # writers mostly use canonical stage names.
     "refine": "refined_detect",
     "keypoints_refine": "refined_keypoints",
     "assign_ids": "arena_assignment",
     "track": "tracking",
     "tracks": "tracking",
 }
+
+# Stage-array specs were originally diagnostic contracts and still need a
+# writer-by-writer audit before every stage can be fail-closed. Keep array
+# validation shadowed by default while completion-marker enforcement remains
+# hard. Add canonical stage names here only after their writers are confirmed
+# to always emit the required arrays in ``shared.zarr.stage_arrays``.
+_ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset()
 
 
 def safe_zarr_mtime_ns(path: Path) -> Optional[int]:
@@ -130,7 +139,7 @@ def _validate_completion_run_group(
     *,
     step_name: str,
     run_name: str,
-) -> list[str]:
+) -> dict[str, Any]:
     if not is_run_complete(run_group, legacy_default=True):
         raise RuntimeError(
             f"Refusing to mark {step_name} run {run_name!r} ok because "
@@ -139,25 +148,43 @@ def _validate_completion_run_group(
 
     spec = _stage_array_spec_for_completion(step_name)
     if spec is None:
-        return []
+        return {
+            "stage_array_validation_status": "no_spec",
+            "stage_array_validation_enforced": False,
+            "stage_array_validation_warnings": [
+                f"no StageSpec for step {step_name!r}; skipped array validation"
+            ],
+        }
 
+    enforced = spec.stage_name in _ENFORCE_STAGE_ARRAY_VALIDATION_FOR
     result = validate_run(run_group, spec)
-    if not result.valid:
+    details: dict[str, Any] = {
+        "stage_array_validation_status": "ok" if result.valid else "invalid",
+        "stage_array_validation_stage": spec.stage_name,
+        "stage_array_validation_enforced": enforced,
+    }
+    if result.errors:
+        details["stage_array_validation_errors"] = list(result.errors)
+    if result.warnings:
+        details["stage_array_validation_warnings"] = list(result.warnings)
+
+    if enforced and not result.valid:
         errors = "; ".join(result.errors)
         raise RuntimeError(
             f"Refusing to mark {step_name} run {run_name!r} ok because "
             f"required Zarr arrays failed validation: {errors}"
         )
-    return list(result.warnings)
+    return details
 
 
-def _merge_validation_warnings(
+def _merge_validation_details(
     details_json: Optional[Mapping[str, Any]],
-    warnings: list[str],
+    validation_details: Mapping[str, Any],
 ) -> Optional[dict[str, Any]]:
     details = dict(details_json) if isinstance(details_json, Mapping) else {}
-    if warnings:
-        details["stage_array_validation_warnings"] = warnings
+    # The live validator is authoritative for these keys; overwrite any stale
+    # caller-supplied validation payload from an earlier attempt.
+    details.update(validation_details)
     return details or None
 
 
@@ -223,8 +250,13 @@ def emit_stage_completion(
             return False
 
         resolved_path = Path(zarr_path).expanduser().resolve()
-        validation_warnings: list[str] = []
-        if status == "ok" and run_name and root is not None:
+        validation_details: dict[str, Any] = {}
+        if status == "ok" and run_name:
+            if root is None:
+                raise RuntimeError(
+                    f"Refusing to mark {step_name} run {run_name!r} ok because "
+                    "root is required to verify Zarr run completion"
+                )
             completion_group = _resolve_completion_run_group(
                 root,
                 step_name=step_name,
@@ -235,7 +267,7 @@ def emit_stage_completion(
                     f"Refusing to mark {step_name} run {run_name!r} ok because "
                     "the Zarr run group could not be resolved"
                 )
-            validation_warnings = _validate_completion_run_group(
+            validation_details = _validate_completion_run_group(
                 completion_group,
                 step_name=step_name,
                 run_name=run_name,
@@ -267,7 +299,7 @@ def emit_stage_completion(
             method=method,
             coverage_pct=coverage_pct,
             review_status_json=dict(review_status_json) if isinstance(review_status_json, Mapping) else None,
-            details_json=_merge_validation_warnings(details_json, validation_warnings),
+            details_json=_merge_validation_details(details_json, validation_details),
             source=source,
             zarr_mtime_ns=safe_zarr_mtime_ns(resolved_path),
         )
