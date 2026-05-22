@@ -46,10 +46,18 @@ If any of those checks fail, the helper refuses to write an `ok`
 `recording_step_status` row. Non-`ok` statuses may bypass run-group validation
 when prebuilt dataset metadata is supplied.
 
+Nested writers whose run group is not under the default top-level parent should
+pass `completion_group_path`, for example
+`clips/clip_000000/cameras/2010093/detect_runs/<detect_run>/quality_reports/<quality_run>`.
+This lets the validator address clip-local run groups directly instead of
+depending on top-level parent scanning or consolidated metadata freshness.
+
 After the completion-marker check passes, `emit_stage_completion` also runs the
-stage-array validator. That validator is shadow-mode by default: validation
-status/errors are written into `details_json`, but array-contract failures only
-block completion for stages explicitly added to
+stage-array validator. Array validation is currently hard-enforced for
+`detect_quality`; all other stages remain shadow-mode until real-run telemetry
+shows their writers are contract-clean. Shadowed stages write validation
+status/errors into `details_json`, but array-contract failures only block
+completion for stages explicitly added to
 `_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`.
 
 Inspect shadow telemetry with:

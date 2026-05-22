@@ -56,7 +56,13 @@ def _emit_detect_quality_status(
     try:
         zp = Path(zarr_path).expanduser().resolve()
         root = open_zarr_group_direct(zp, mode="r")
-        emit_stage_completion(
+        completion_group_path = _join_group_path(
+            source_detect_family_path,
+            source_detect_run,
+            "quality_reports",
+            quality_run_name,
+        )
+        wrote = emit_stage_completion(
             root,
             zp,
             step_name="detect_quality",
@@ -77,7 +83,18 @@ def _emit_detect_quality_status(
             auto_registry_from_env=True,
             require_env_registry_exists=False,
             invalidate_on_ok=False,
+            completion_group_path=completion_group_path,
         )
+        if not wrote and console is not None:
+            from rich.console import Console as _Console
+            message = (
+                "failed to write recording step status for detect_quality: "
+                "registry unavailable or completion validation failed"
+            )
+            if isinstance(console, _Console):
+                console.print(f"[yellow]Warning:[/yellow] {message}")
+            else:
+                print(f"Warning: {message}")
     except Exception as exc:
         if console is not None:
             from rich.console import Console as _Console

@@ -97,8 +97,9 @@ Payload conventions:
 - `stage_array_validation_errors`: required-array failures, when present
 - `stage_array_validation_warnings`: optional-array or unknown-spec warnings
 
-Array validation is currently shadow-mode by default: the validator records what
-would fail, but only stages listed in
+Array validation is currently hard-enforced for `detect_quality` and
+shadow-mode for every other stage: the validator records what would fail, but
+only stages listed in
 `src/fisheye/registry/stage_complete.py::_ENFORCE_STAGE_ARRAY_VALIDATION_FOR`
 block registry completion on array-contract failures. Completion-marker
 validation is always hard for `ok` run writes.

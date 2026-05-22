@@ -88,12 +88,18 @@ Use `--fail-on-match` only in explicit gates; by default the command is a report
 
 ## Recommended Rollout
 
-1. Keep `_ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset()` until real-run smokes are recorded for each candidate.
-2. Use the shadow report command to collect real registry telemetry after the rooted keypoint/eye-mask wrappers run in production.
-3. Enable hard validation for `detect_quality` first; it has the smallest required surface and the easiest failure modes.
-4. Enable `detect`, `refined_detect`, and `crop` next as a single detection-family slice.
-5. Enable `subject_masks`, `refined_eye_masks`, and `tracking` only after one current writer smoke per stage.
-6. Leave `keypoints`, `eye_masks`, `arena_assignment`, and `background` shadow-only until the spec/writer mismatch is resolved.
+1. `detect_quality` is now the first hard-enforced stage after a real top-level
+   smoke produced `stage_array_validation_status="ok"` on 2026-05-22.
+2. Keep every other stage shadow-mode until real-run smokes are recorded for
+   each candidate.
+3. Use the shadow report command to collect real registry telemetry after the
+   rooted keypoint/eye-mask wrappers run in production.
+4. Enable `detect`, `refined_detect`, and `crop` next as a single
+   detection-family slice.
+5. Enable `subject_masks`, `refined_eye_masks`, and `tracking` only after one
+   current writer smoke per stage.
+6. Leave `keypoints`, `eye_masks`, `arena_assignment`, and `background`
+   shadow-only until the spec/writer mismatch is resolved.
 
 ## Follow-Up Checklist
 

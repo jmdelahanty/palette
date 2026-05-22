@@ -533,6 +533,103 @@ def test_emit_stage_completion_resolves_nested_detect_quality_run(tmp_path: Path
     details = captured["details_json"]
     assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
     assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]
+    assert details["stage_array_validation_enforced"] is True  # type: ignore[index]
+
+
+def test_emit_stage_completion_refuses_invalid_detect_quality_by_default(tmp_path: Path) -> None:
+    root = FakeGroup()
+    detect_parent = FakeGroup()
+    detect_run = FakeGroup()
+    quality_parent = FakeGroup()
+    quality_run = FakeGroup()
+    root["detect_runs"] = detect_parent
+    detect_parent["detect_001"] = detect_run
+    detect_run["quality_reports"] = quality_parent
+    quality_parent["quality_001"] = quality_run
+    mark_run_started(quality_run, run_name="quality_001", stage="detect_quality")
+    mark_run_complete(quality_run, parent_group=quality_parent, run_name="quality_001")
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    called = False
+
+    def _upsert(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="detect_quality",
+        status="ok",
+        source="unit_test",
+        run_name="quality_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=_upsert,
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is False
+    assert called is False
+
+
+def test_emit_stage_completion_uses_explicit_nested_completion_group_path(tmp_path: Path) -> None:
+    root = FakeGroup()
+    clips = FakeGroup()
+    clip = FakeGroup()
+    cameras = FakeGroup()
+    camera = FakeGroup()
+    detect_parent = FakeGroup()
+    detect_run = FakeGroup()
+    quality_parent = FakeGroup()
+    quality_run = FakeGroup()
+    root["clips"] = clips
+    clips["clip_000000"] = clip
+    clip["cameras"] = cameras
+    cameras["2010093"] = camera
+    camera["detect_runs"] = detect_parent
+    detect_parent["detect_clip"] = detect_run
+    detect_run["quality_reports"] = quality_parent
+    quality_parent["quality_clip"] = quality_run
+    _add_valid_detect_quality_arrays(quality_run)
+    mark_run_started(quality_run, run_name="quality_clip", stage="detect_quality")
+    mark_run_complete(quality_run, parent_group=quality_parent, run_name="quality_clip")
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="detect_quality",
+        status="ok",
+        source="unit_test",
+        run_name="quality_clip",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        completion_group_path=(
+            "clips/clip_000000/cameras/2010093/detect_runs/"
+            "detect_clip/quality_reports/quality_clip"
+        ),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    details = captured["details_json"]
+    assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
+    assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]
+    assert details["stage_array_validation_enforced"] is True  # type: ignore[index]
 
 
 def test_emit_stage_completion_resolves_detect_quality_by_direct_path_when_parent_metadata_stale(
@@ -598,6 +695,7 @@ def test_emit_stage_completion_resolves_detect_quality_by_direct_path_when_paren
     details = captured["details_json"]
     assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
     assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]
+    assert details["stage_array_validation_enforced"] is True  # type: ignore[index]
 
 
 def test_emit_stage_completion_resolves_tracks_alias_to_tracking_spec(tmp_path: Path) -> None:

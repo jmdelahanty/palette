@@ -56,11 +56,12 @@ _STAGE_ARRAY_SPEC_ALIASES = {
 }
 
 # Stage-array specs were originally diagnostic contracts and still need a
-# writer-by-writer audit before every stage can be fail-closed. Keep array
-# validation shadowed by default while completion-marker enforcement remains
-# hard. Add canonical stage names here only after their writers are confirmed
-# to always emit the required arrays in ``shared.zarr.stage_arrays``.
-_ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset()
+# writer-by-writer audit before every stage can be fail-closed. Completion-marker
+# enforcement remains hard for every ok run; array validation is hard only for
+# the staged allowlist below. Add canonical stage names here after real-run
+# shadow telemetry confirms that the current writers always emit the required
+# arrays in ``shared.zarr.stage_arrays``.
+_ENFORCE_STAGE_ARRAY_VALIDATION_FOR = frozenset({"detect_quality"})
 
 
 def safe_zarr_mtime_ns(path: Path) -> Optional[int]:
@@ -76,6 +77,7 @@ def _resolve_completion_run_group(
     step_name: str,
     run_name: Optional[str],
     zarr_path: Optional[Path] = None,
+    completion_group_path: Optional[str] = None,
 ) -> Optional[zarr.Group]:
     if root is None or not run_name:
         return None
@@ -87,6 +89,22 @@ def _resolve_completion_run_group(
             return open_zarr_group_direct(Path(zarr_path).joinpath(*parts), mode="r")
         except Exception:
             return None
+
+    if completion_group_path:
+        normalized_path = str(completion_group_path).strip().strip("/")
+        path_parts = [part for part in normalized_path.split("/") if part]
+        if any(part == ".." for part in path_parts):
+            return None
+        try:
+            group: Any = root
+            for part in path_parts:
+                group = group[part]
+            return group
+        except Exception:
+            pass
+        direct_group = _open_direct_child(*path_parts)
+        if direct_group is not None:
+            return direct_group
 
     if step_name == "detect_quality":
         try:
@@ -254,6 +272,7 @@ def emit_stage_completion(
     require_env_registry_exists: bool = True,
     invalidate_on_ok: bool = True,
     trigger_run_name: Optional[str] = None,
+    completion_group_path: Optional[str] = None,
     metadata: Optional[DatasetMetadata] = None,
     upsert_dataset_row: bool = True,
     resolve_dataset_id_fn: ResolveDatasetIdFn = resolve_dataset_id,
@@ -284,6 +303,7 @@ def emit_stage_completion(
                 step_name=step_name,
                 run_name=run_name,
                 zarr_path=resolved_path,
+                completion_group_path=completion_group_path,
             )
             if completion_group is None:
                 raise RuntimeError(
