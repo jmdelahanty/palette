@@ -129,6 +129,14 @@ def _kind_from_any_dtype(dtype_obj: object) -> str:
         return dtype_name
 
 
+def _is_group_like(obj: object) -> bool:
+    return isinstance(obj, zarr.Group) or (
+        hasattr(obj, "group_keys")
+        and hasattr(obj, "__contains__")
+        and hasattr(obj, "__getitem__")
+    )
+
+
 def _validate_specs(
     group: zarr.Group,
     specs: Tuple[ArraySpec, ...],
@@ -209,7 +217,7 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
                 errors.append(f"{spec.stage_name}: missing required subgroup '{subgroup_name}'")
                 continue
             subgroup = group[subgroup_name]
-            if not isinstance(subgroup, zarr.Group):
+            if not _is_group_like(subgroup):
                 errors.append(f"{spec.stage_name}: '{subgroup_name}' exists but is not a group")
                 continue
 
