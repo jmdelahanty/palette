@@ -12,6 +12,7 @@ from fisheye.shared.zarr_helpers import (
     first_array_length_in_group,
     normalize_zarr_path,
     read_zarr_array_mapping,
+    reconsolidate_zarr_metadata,
     resolve_zarr_run,
     safe_int,
     zarr_array_names,
@@ -319,3 +320,72 @@ def test_resolve_zarr_run_uses_store_path_file_uri_when_palette_annotation_missi
 
     assert run_name == "stimulus_999"
     assert run_group is sentinel
+
+
+def test_reconsolidate_zarr_metadata_records_attrs_and_calls_zarr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = _FakeGroup(path="detect_runs/detect_001/quality_reports")
+    opened: list[tuple[Path, str]] = []
+    consolidated: list[tuple[str, str | None]] = []
+
+    def _fake_open(path: str | Path, *, mode: str) -> _FakeGroup:
+        opened.append((Path(path), mode))
+        return target
+
+    def _fake_consolidate(store: str, *, path: str | None = None):
+        consolidated.append((store, path))
+        return target
+
+    monkeypatch.setattr("fisheye.shared.zarr_helpers.open_zarr_group_direct", _fake_open)
+    monkeypatch.setattr(zarr, "consolidate_metadata", _fake_consolidate)
+
+    zarr_path = tmp_path / "archive.zarr"
+    report = reconsolidate_zarr_metadata(
+        zarr_path,
+        group_path="detect_runs/detect_001/quality_reports",
+        policy="unit_test",
+    )
+
+    assert report["status"] == "ok"
+    assert report["zarr_path"] == str(zarr_path.resolve())
+    assert report["group_path"] == "detect_runs/detect_001/quality_reports"
+    assert opened == [
+        (
+            zarr_path.resolve() / "detect_runs" / "detect_001" / "quality_reports",
+            "r+",
+        )
+    ]
+    assert consolidated == [
+        (
+            str(zarr_path.resolve()),
+            "detect_runs/detect_001/quality_reports",
+        )
+    ]
+    assert target.attrs["metadata_consolidation_policy"] == "unit_test"
+    assert target.attrs["metadata_consolidation_status"] == "ok"
+    assert target.attrs["metadata_consolidation_group_path"] == "detect_runs/detect_001/quality_reports"
+
+
+def test_reconsolidate_zarr_metadata_returns_error_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = _FakeGroup()
+
+    def _fake_open(path: str | Path, *, mode: str) -> _FakeGroup:
+        return target
+
+    def _fake_consolidate(store: str, *, path: str | None = None):
+        raise TypeError("store does not support consolidated metadata")
+
+    monkeypatch.setattr("fisheye.shared.zarr_helpers.open_zarr_group_direct", _fake_open)
+    monkeypatch.setattr(zarr, "consolidate_metadata", _fake_consolidate)
+
+    report = reconsolidate_zarr_metadata(tmp_path / "archive.zarr", policy="unit_test")
+
+    assert report["status"] == "error"
+    assert "does not support" in report["error"]
+    assert target.attrs["metadata_consolidation_status"] == "error"
+    assert "does not support" in target.attrs["metadata_consolidation_error"]

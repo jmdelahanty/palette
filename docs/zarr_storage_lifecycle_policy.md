@@ -329,13 +329,20 @@ be able to discover groups and attrs from direct `zarr.json` metadata, or by
 opening with consolidated metadata disabled. Consolidated metadata is a
 performance and portability surface, not the only source of truth.
 
-The preferred future writer policy is to refresh consolidated metadata at the
-end of a successful mutation, after all arrays, groups, direct attrs, indexes,
-and parent `latest` attrs have been written and validated. Consolidation should
-be part of a shared finalization helper, not something each worker or inner loop
-does independently.
+The preferred writer policy is to refresh consolidated metadata at stable
+single-writer finalization boundaries, after all arrays, groups, direct attrs,
+indexes, and parent `latest` attrs have been written and validated.
+Consolidation is available through the shared
+`fisheye.shared.zarr_helpers.reconsolidate_zarr_metadata()` helper and the
+operator CLI:
 
-Planned helper behavior:
+```bash
+scripts/py -m fisheye.utils.reconsolidate_zarr_metadata /path/to/archive.zarr
+scripts/py -m fisheye.utils.reconsolidate_zarr_metadata /path/to/archive.zarr \
+  --group-path detect_runs/detect_001/quality_reports
+```
+
+Helper behavior:
 
 - write direct metadata first and make direct readers correct before
   consolidation runs;
@@ -349,10 +356,12 @@ Planned helper behavior:
 - keep external consumers on a fallback path that can read direct metadata when
   consolidated metadata is stale or absent.
 
-This policy is intentionally deferred because Palette still has many mutable
-writers and legacy stores. The near-term rule is: do not trust consolidated
-metadata for correctness on mutable analysis stores, but design new writers so a
-single finalization step can safely make consolidated metadata fresh later.
+Do not run consolidation from parallel workers that share an archive. For
+clipped workflows, per-clip workers should leave consolidated metadata alone and
+the recording-level finalizer should refresh it once shared writes are complete.
+The near-term rule remains: do not trust consolidated metadata for correctness
+on mutable analysis stores, but make finalized stores fresh when a single
+finalization step can safely do so.
 
 ## Recommended Near-Term Implementation Order
 

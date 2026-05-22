@@ -535,6 +535,71 @@ def test_emit_stage_completion_resolves_nested_detect_quality_run(tmp_path: Path
     assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]
 
 
+def test_emit_stage_completion_resolves_detect_quality_by_direct_path_when_parent_metadata_stale(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = FakeGroup()
+    detect_parent = FakeGroup()
+    detect_run = FakeGroup()
+    quality_parent = FakeGroup(
+        attrs={
+            "latest": "quality_fresh",
+            "latest_complete": "quality_fresh",
+        }
+    )
+    direct_quality_run = FakeGroup()
+    root["detect_runs"] = detect_parent
+    detect_parent["detect_001"] = detect_run
+    detect_run["quality_reports"] = quality_parent
+    _add_valid_detect_quality_arrays(direct_quality_run)
+    mark_run_started(direct_quality_run, run_name="quality_fresh", stage="detect_quality")
+    mark_run_complete(direct_quality_run, run_name="quality_fresh")
+
+    opened_paths: list[Path] = []
+
+    def _open_direct(path: Path, *, mode: str):  # type: ignore[no-untyped-def]
+        opened_paths.append(Path(path))
+        assert mode == "r"
+        return direct_quality_run
+
+    monkeypatch.setattr(stage_complete_mod, "open_zarr_group_direct", _open_direct)
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    zarr_path = tmp_path / "archive.zarr"
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        zarr_path,
+        step_name="detect_quality",
+        status="ok",
+        source="unit_test",
+        run_name="quality_fresh",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=lambda *args, **kwargs: captured.update(kwargs),
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is True
+    assert opened_paths == [
+        zarr_path.resolve()
+        / "detect_runs"
+        / "detect_001"
+        / "quality_reports"
+        / "quality_fresh"
+    ]
+    details = captured["details_json"]
+    assert details["stage_array_validation_status"] == "ok"  # type: ignore[index]
+    assert details["stage_array_validation_stage"] == "detect_quality"  # type: ignore[index]
+
+
 def test_emit_stage_completion_resolves_tracks_alias_to_tracking_spec(tmp_path: Path) -> None:
     root = FakeGroup()
     tracking_parent = FakeGroup()

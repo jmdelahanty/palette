@@ -202,6 +202,37 @@ def test_eye_masks_batch_sync_opens_root_for_each_ok_run(monkeypatch, tmp_path: 
     assert roots == [sentinel_root, sentinel_root]
 
 
+def test_detect_quality_status_opens_root_directly_for_fresh_run(monkeypatch, tmp_path: Path) -> None:
+    from fisheye.refinement import detect_quality
+
+    sentinel_root = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(detect_quality, "open_zarr_group_direct", lambda path, mode: sentinel_root)
+
+    def _emit(root, zarr_path, **kwargs):  # type: ignore[no-untyped-def]
+        captured["root"] = root
+        captured["zarr_path"] = zarr_path
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(detect_quality, "emit_stage_completion", _emit)
+
+    detect_quality._emit_detect_quality_status(
+        zarr_path=str(tmp_path / "archive.zarr"),
+        quality_run_name="detect_quality_001",
+        source_detect_run="detect_001",
+        source_detect_family_path="detect_runs",
+        quality_score={"grade": "A", "overall_score": 99.0, "coverage_score": 98.0},
+    )
+
+    assert captured["root"] is sentinel_root
+    assert captured["step_name"] == "detect_quality"
+    assert captured["status"] == "ok"
+    assert captured["run_name"] == "detect_quality_001"
+    assert captured["details_json"]["source_detect_run"] == "detect_001"  # type: ignore[index]
+
+
 def test_predict_pose_non_ok_status_still_bypasses_root_open(monkeypatch, tmp_path: Path) -> None:
     from fisheye.inference import predict_pose
 

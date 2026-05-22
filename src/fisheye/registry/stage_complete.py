@@ -17,6 +17,7 @@ from .stage_catalog import canonical_stage_id
 from .status_ledger import upsert_recording_step_status
 from .step_cascade import invalidate_downstream_steps
 from ..shared.zarr.stage_arrays import STAGES, StageSpec, validate_run
+from ..shared.zarr_helpers import open_zarr_group_direct
 from ..shared.zarr_run_completion import is_run_complete
 
 RegistryInput = Optional[Union[Registry, Path, str]]
@@ -74,9 +75,19 @@ def _resolve_completion_run_group(
     *,
     step_name: str,
     run_name: Optional[str],
+    zarr_path: Optional[Path] = None,
 ) -> Optional[zarr.Group]:
     if root is None or not run_name:
         return None
+
+    def _open_direct_child(*parts: str) -> Optional[zarr.Group]:
+        if zarr_path is None:
+            return None
+        try:
+            return open_zarr_group_direct(Path(zarr_path).joinpath(*parts), mode="r")
+        except Exception:
+            return None
+
     if step_name == "detect_quality":
         try:
             detect_parent = root.get("detect_runs")
@@ -102,6 +113,14 @@ def _resolve_completion_run_group(
                         return quality_parent[run_name]
                 except Exception:
                     pass
+                direct_child = _open_direct_child(
+                    "detect_runs",
+                    str(detect_name),
+                    "quality_reports",
+                    str(run_name),
+                )
+                if direct_child is not None:
+                    return direct_child
     for parent_name in _STEP_RUN_PARENTS.get(step_name, (f"{step_name}_runs",)):
         try:
             parent = root.get(parent_name)
@@ -119,6 +138,9 @@ def _resolve_completion_run_group(
                 candidate = None
             if candidate is not None:
                 return candidate
+        direct_child = _open_direct_child(str(parent_name), str(run_name))
+        if direct_child is not None:
+            return direct_child
     return None
 
 
@@ -261,6 +283,7 @@ def emit_stage_completion(
                 root,
                 step_name=step_name,
                 run_name=run_name,
+                zarr_path=resolved_path,
             )
             if completion_group is None:
                 raise RuntimeError(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, TypeAlias
 from urllib.parse import unquote, urlparse
@@ -230,6 +231,61 @@ def open_zarr_group_direct(path: str | Path, *, mode: str) -> zarr.Group:
         return zarr.open_group(str(resolved), mode=mode, consolidated=False)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def reconsolidate_zarr_metadata(
+    zarr_path: str | Path,
+    *,
+    group_path: str | None = None,
+    policy: str = "manual",
+    fail_on_error: bool = False,
+) -> dict[str, Any]:
+    """Refresh Zarr consolidated metadata for a root or subtree.
+
+    Consolidation is a finalization/compatibility operation, not the source of
+    correctness for mutable stores. Palette readers and registry validators must
+    still tolerate stale or absent consolidated metadata.
+    """
+
+    root_path = Path(zarr_path).expanduser().resolve()
+    normalized_group_path = normalize_zarr_path(group_path or "") if group_path else None
+    target_path = root_path / normalized_group_path if normalized_group_path else root_path
+    report: dict[str, Any] = {
+        "status": "ok",
+        "zarr_path": str(root_path),
+        "group_path": normalized_group_path,
+        "policy": str(policy),
+        "consolidated_at_utc": _utc_now_iso(),
+    }
+    try:
+        target_group = open_zarr_group_direct(target_path, mode="r+")
+        target_group.attrs["metadata_consolidation_policy"] = str(policy)
+        target_group.attrs["metadata_consolidation_status"] = "ok"
+        target_group.attrs["metadata_consolidated_at_utc"] = report["consolidated_at_utc"]
+        target_group.attrs["metadata_consolidation_group_path"] = normalized_group_path or ""
+        zarr.consolidate_metadata(
+            str(root_path),
+            path=normalized_group_path,
+        )
+    except Exception as exc:
+        report["status"] = "error"
+        report["error"] = str(exc)
+        try:
+            target_group = open_zarr_group_direct(target_path, mode="r+")
+            target_group.attrs["metadata_consolidation_policy"] = str(policy)
+            target_group.attrs["metadata_consolidation_status"] = "error"
+            target_group.attrs["metadata_consolidated_at_utc"] = report["consolidated_at_utc"]
+            target_group.attrs["metadata_consolidation_group_path"] = normalized_group_path or ""
+            target_group.attrs["metadata_consolidation_error"] = str(exc)
+        except Exception:
+            pass
+        if fail_on_error:
+            raise
+    return report
+
+
 def _open_group_direct(path: Path, *, mode: str) -> zarr.Group:
     return open_zarr_group_direct(path, mode=mode)
 
@@ -304,12 +360,15 @@ def resolve_zarr_run(
 
     latest = None
     if fallback_to_latest:
-        latest = _normalize_run_name(resolve_latest_complete_run_name(parent, legacy_default=True))
+        latest_attr = _normalize_run_name(parent.attrs.get("latest"))
+        latest_complete_attr = _normalize_run_name(parent.attrs.get("latest_complete"))
+        if latest_attr is not None or latest_complete_attr is not None or fallback_to_sorted is None:
+            latest = _normalize_run_name(resolve_latest_complete_run_name(parent, legacy_default=True))
         # Preserve the stale-consolidated-metadata fallback below: when the
         # parent cannot see the latest child but the filesystem can, the
         # completion resolver cannot inspect the run group.
         if latest is None:
-            raw_latest = _normalize_run_name(parent.attrs.get("latest"))
+            raw_latest = latest_attr
             if raw_latest is not None and raw_latest not in parent:
                 latest = raw_latest
     if latest is not None:

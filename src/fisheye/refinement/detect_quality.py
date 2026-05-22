@@ -22,6 +22,7 @@ from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr
+from ..shared.zarr_helpers import open_zarr_group_direct, reconsolidate_zarr_metadata
 from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
 
 _DETECT_QUALITY_STATUS_SOURCE = "runtime_detect_quality"
@@ -54,7 +55,7 @@ def _emit_detect_quality_status(
     """Write a detect_quality step status row to the registry (non-fatal)."""
     try:
         zp = Path(zarr_path).expanduser().resolve()
-        root = zarr.open(str(zp), mode="r")
+        root = open_zarr_group_direct(zp, mode="r")
         emit_stage_completion(
             root,
             zp,
@@ -475,6 +476,7 @@ def save_quality_report(
     console: Optional[Any] = None,
     detect_family_path: str = DEFAULT_DETECT_FAMILY_PATH,
     quality_run_name: Optional[str] = None,
+    consolidate_metadata: bool = False,
 ) -> str:
     """
     Save quality report to zarr file within the source detect run.
@@ -496,7 +498,7 @@ def save_quality_report(
     """
     from datetime import datetime
 
-    root = zarr.open(zarr_path, mode="a")
+    root = open_zarr_group_direct(zarr_path, mode="a")
 
     # Navigate to source detect run
     source_run = quality_report["source_run"]
@@ -676,6 +678,29 @@ def save_quality_report(
             print(f"  Multi-detection: {n_multi_detections}")
 
     mark_run_complete(quality_group, parent_group=quality_reports_group, run_name=run_name)
+
+    if consolidate_metadata:
+        report = reconsolidate_zarr_metadata(
+            zarr_path,
+            group_path=_join_group_path(detect_family_path, source_run, "quality_reports"),
+            policy="detect_quality_stage_finalization",
+            fail_on_error=False,
+        )
+        if report["status"] == "ok":
+            if console:
+                console.print(
+                    "[green]✓[/green] Consolidated metadata refreshed: "
+                    f"{report['group_path'] or '(root)'}"
+                )
+        else:
+            message = (
+                "Warning: failed to refresh consolidated metadata for "
+                f"{report['group_path'] or '(root)'}: {report.get('error')}"
+            )
+            if console:
+                console.print(f"[yellow]{message}[/yellow]")
+            else:
+                print(message)
 
     _emit_detect_quality_status(
         zarr_path=zarr_path,
@@ -910,6 +935,14 @@ Examples:
         default=None,
         help="Optional explicit quality report run name (default: timestamped detect_quality_<local_time>).",
     )
+    parser.add_argument(
+        "--consolidate-metadata",
+        action="store_true",
+        help=(
+            "Refresh consolidated metadata for the quality_reports parent after saving. "
+            "Use at single-writer/finalization boundaries, not parallel clip workers."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -992,6 +1025,7 @@ Examples:
                 console=console,
                 detect_family_path=args.detect_family_path,
                 quality_run_name=args.quality_run_name,
+                consolidate_metadata=args.consolidate_metadata,
             )
 
         sys.exit(0)
