@@ -170,6 +170,39 @@ def test_finalize_clipped_detect_refine_workflow_writes_collection_manifest(tmp_
     assert reopened["refined_detect_runs"].attrs["latest_collection"] == "wf"
 
 
+def test_finalize_clipped_detect_refine_workflow_uses_relocated_frame_index(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    plan_path = _write_plan(tmp_path / "plan.json", zarr_path=zarr_path, frame_count=3)
+    units = _load_plan_units(plan_path)
+    _write_recording_frame_index(tmp_path, units=units)
+    old_recording_dir = tmp_path.parent / f"{tmp_path.name}_old_recording"
+    old_recording_dir.mkdir()
+    (old_recording_dir / "recording_frame_index.parquet").write_text("stale source file", encoding="utf-8")
+    (tmp_path / "recording_frame_index_manifest.json").write_text(
+        json.dumps({"recording_frame_index_path": str(old_recording_dir / "recording_frame_index.parquet")}),
+        encoding="utf-8",
+    )
+    unit = units[0]
+    _write_sparse_refined_run(
+        root,
+        clip_id=unit["clip_id"],
+        camera_serial=unit["camera_serial"],
+        detect_run=unit["run_names"]["detect"],
+        refined_run=unit["run_names"]["refined_detect"],
+        frame_count=unit["frame_count"],
+    )
+
+    result = finalize_clipped_detect_refine_workflow(plan_path, apply=True)
+
+    assert result["status"] == "ok"
+    assert result["manifest"]["recording_frame_index_validation"]["path"] == str(
+        (tmp_path / "recording_frame_index.parquet").resolve()
+    )
+
+
 def test_finalize_clipped_detect_refine_workflow_fails_missing_refined_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     zarr.open_group(str(zarr_path), mode="w")

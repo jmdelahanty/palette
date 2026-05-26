@@ -272,10 +272,16 @@ Implementation status:
    source video only when no manifest is provided.
 
 Builder status: `fisheye.utils.build_review_proxy_videos` creates the proxy
-manifest and, with `--apply`, transcodes the selected clip-camera videos.
-It is dry-run by default. The default `--encoder auto` prefers `libx264` when
-available and falls back to NVENC H.264 encoders such as `h264_nvenc` on
-FFmpeg builds that do not include GPL x264 support.
+manifest and, with `--apply`, transcodes the selected clip-camera videos
+sequentially in the current process. It is dry-run by default. The default
+`--encoder auto` prefers `libx264` when available and falls back to NVENC H.264
+encoders such as `h264_nvenc` on FFmpeg builds that do not include GPL x264
+support.
+
+Do not run an all-clip `--apply` transcode on a cluster login node. For full
+recording proxy generation, use the single-job LSF wrapper. The wrapper submits
+one compute job that runs the builder sequentially over all selected clips; it
+does not yet fan out one job per clip.
 
 ```bash
 scripts/py -m fisheye.utils.build_review_proxy_videos \
@@ -289,11 +295,26 @@ scripts/py -m fisheye.utils.build_review_proxy_videos \
 Full apply for all clips:
 
 ```bash
+scripts/submit_review_proxy_videos_bsub.sh \
+  <recording_dir> \
+  --proxy-run-id <proxy_run_id> \
+  --proxy-width 1024 \
+  --proxy-height 1024 \
+  --encoder h264_nvenc \
+  --queue gpu_l4 \
+  --gpus 1
+```
+
+The direct builder remains useful for dry-runs or intentionally bounded smoke
+transcodes:
+
+```bash
 scripts/py -m fisheye.utils.build_review_proxy_videos \
   <recording_dir> \
   --proxy-run-id <proxy_run_id> \
   --proxy-width 1024 \
   --proxy-height 1024 \
+  --clip-id clip_000000 \
   --apply
 ```
 
@@ -302,6 +323,18 @@ The default output directory is:
 ```text
 <recording>/derived/review_proxy/video_detect/<proxy_run_id>/
 ```
+
+The LSF wrapper writes its job script and logs under:
+
+```text
+<recording>/derived/review_proxy/video_detect/<proxy_run_id>/bsub_submission_<run_id>/
+```
+
+Parallel proxy generation is safe in principle because proxy jobs are read-only
+against source clips and write unique proxy outputs, but the supported wrapper
+is intentionally one job for now to avoid uncontrolled shared-filesystem and GPU
+encoder contention. Per-clip proxy fan-out can be added later with a finalizer
+that verifies every proxy before writing the manifest.
 
 After proxies are built, run the video-backed reviewer against the analysis
 Zarr and pass the manifest explicitly:

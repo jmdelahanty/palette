@@ -11,6 +11,7 @@ const state = {
   frameCache: new Map(),
   pendingFrameFetches: new Map(),
   pendingEdits: new Map(),
+  clipOptionsSignature: "",
   isSaving: false,
   saveProgressText: "",
   playback: {
@@ -52,6 +53,8 @@ const saveProgressLine = document.getElementById("save-progress-line");
 const editModeLine = document.getElementById("edit-mode-line");
 const messages = document.getElementById("messages");
 const rendererLine = document.getElementById("renderer-line");
+const clipControls = document.getElementById("clip-controls");
+const clipSelect = document.getElementById("clip-select");
 const frameInput = document.getElementById("frame-input");
 const playBtn = document.getElementById("play-btn");
 const saveBtn = document.getElementById("save-btn");
@@ -132,6 +135,87 @@ function isPromotionEnabled() {
 
 function currentFrameNumber() {
   return Math.trunc(Number(state.framePayload?.parent_frame_index ?? frameInput.value ?? 0));
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function availableClipSources() {
+  const videos = Array.isArray(state.serverState?.videos) ? state.serverState.videos : [];
+  return videos
+    .filter((source) => source && (source.clip_id || source.parent_frame_start !== undefined))
+    .slice()
+    .sort((a, b) => {
+      const aStart = numberOrNull(a.parent_frame_start);
+      const bStart = numberOrNull(b.parent_frame_start);
+      if (aStart !== null && bStart !== null && aStart !== bStart) {
+        return aStart - bStart;
+      }
+      return String(a.clip_id || a.video_id || "").localeCompare(String(b.clip_id || b.video_id || ""));
+    });
+}
+
+function frameRangeText(startValue, endValue, prefix) {
+  const start = numberOrNull(startValue);
+  const end = numberOrNull(endValue);
+  if (start === null && end === null) {
+    return null;
+  }
+  if (start !== null && end !== null && start !== end) {
+    return `${prefix} ${start}-${end}`;
+  }
+  return `${prefix} ${start ?? end}`;
+}
+
+function formatClipOption(source, index) {
+  const label = source.clip_id || source.video_id || `video_${index}`;
+  const camera = source.camera_serial ? `cam ${source.camera_serial}` : null;
+  const parentRange = frameRangeText(source.parent_frame_start, source.parent_frame_end, "parent");
+  const localRange = frameRangeText(source.source_frame_start, source.source_frame_end, "local");
+  return [label, camera, parentRange, localRange].filter(Boolean).join(" | ");
+}
+
+function updateClipSelector(payload) {
+  if (!clipControls || !clipSelect) {
+    return;
+  }
+  const summary = state.serverState?.summary || {};
+  const sources = availableClipSources();
+  const visible = summary.mode === "clipped" && sources.length > 1;
+  clipControls.hidden = !visible;
+  if (!visible) {
+    state.clipOptionsSignature = "";
+    return;
+  }
+
+  const signature = sources
+    .map((source) => [
+      source.video_id,
+      source.clip_id,
+      source.camera_serial,
+      source.parent_frame_start,
+      source.parent_frame_end,
+      source.source_frame_start,
+      source.source_frame_end,
+    ].join(":"))
+    .join("|");
+  if (signature !== state.clipOptionsSignature) {
+    clipSelect.replaceChildren();
+    sources.forEach((source, index) => {
+      const option = document.createElement("option");
+      option.value = String(source.video_id || "");
+      option.textContent = formatClipOption(source, index);
+      clipSelect.appendChild(option);
+    });
+    state.clipOptionsSignature = signature;
+  }
+
+  const payloadVideoId = String(payload.video_id || "");
+  if (payloadVideoId) {
+    clipSelect.value = payloadVideoId;
+  }
 }
 
 function cloneBboxNorm(bboxNorm) {
@@ -709,6 +793,7 @@ function applyFramePayload(payload, { fit = false } = {}) {
   state.image.height = Number(payload.media_height || payload.height || 1);
   updateBoxFromPayload(payload);
   cacheFramePayload(payload);
+  updateClipSelector(payload);
   updateEditableControls();
   if (fit || state.viewport.scale <= 0) {
     setViewportToFit();
@@ -771,6 +856,22 @@ async function goToFrame() {
   pausePlayback();
   const value = Number(frameInput.value || 0);
   await loadFrame(value, { fit: false });
+}
+
+async function goToSelectedClip() {
+  pausePlayback();
+  const selectedVideoId = String(clipSelect?.value || "");
+  const source = availableClipSources().find((candidate) => String(candidate.video_id || "") === selectedVideoId);
+  if (!source) {
+    setMessage("Selected clip is not available.", true);
+    return;
+  }
+  const firstFrame = numberOrNull(source.parent_frame_start);
+  if (firstFrame === null) {
+    setMessage("Selected clip has no parent-frame range.", true);
+    return;
+  }
+  await loadFrame(firstFrame, { fit: false });
 }
 
 function lowConfidenceThreshold() {
@@ -1284,6 +1385,9 @@ function ensureEvents() {
   document.getElementById("next-btn").addEventListener("click", () => navigate(1));
   document.getElementById("prev-btn").addEventListener("click", () => navigate(-1));
   document.getElementById("go-btn").addEventListener("click", goToFrame);
+  if (clipSelect) {
+    clipSelect.addEventListener("change", goToSelectedClip);
+  }
   prevIssueBtn.addEventListener("click", () => searchFrame("missing_or_filtered", "prev"));
   nextIssueBtn.addEventListener("click", () => searchFrame("missing_or_filtered", "next"));
   nextLowConfBtn.addEventListener("click", () => searchFrame("low_confidence", "next"));

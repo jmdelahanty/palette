@@ -852,6 +852,17 @@ def _resolve_bbox_norm_reference_dimensions(
 
 
 def _resolved_total_frames(root: zarr.Group, refined_run: zarr.Group) -> int:
+    detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
+    if detect_group is not None:
+        total_frames = as_int(detect_group.attrs.get("total_frames"))
+        if total_frames is None:
+            total_frames = as_int(detect_group.attrs.get("n_frames"))
+        if total_frames is not None and total_frames >= 0:
+            return int(total_frames)
+        for name in ("frame_counts", "n_detections"):
+            if name in detect_group:
+                return int(detect_group[name].shape[0])
+
     total_frames = as_int(root.attrs.get("total_frames"))
     if total_frames is None:
         total_frames = as_int(root.attrs.get("n_frames"))
@@ -860,11 +871,6 @@ def _resolved_total_frames(root: zarr.Group, refined_run: zarr.Group) -> int:
     total_frames = as_int(refined_run.attrs.get("coverage_frames_total"))
     if total_frames is not None and total_frames >= 0:
         return int(total_frames)
-    detect_group, _source_detect_run = _resolve_bound_source_detect_group(root, refined_run)
-    if detect_group is not None:
-        for name in ("frame_counts", "n_detections"):
-            if name in detect_group:
-                return int(detect_group[name].shape[0])
     raw = root.get("raw_video")
     if raw is not None:
         total_frames = as_int(raw.attrs.get("total_frames"))

@@ -627,12 +627,12 @@ def test_clipped_session_uses_review_proxy_manifest(tmp_path: Path) -> None:
     pq.write_table(
         pa.table(
             {
-                "parent_frame_index": [0],
-                "camera_serial": ["2010093"],
-                "clip_id": ["clip_000000"],
-                "clip_local_frame_index": [0],
-                "recording_frame_id": [1],
-                "video_path": [str(source_video)],
+                "parent_frame_index": [0, 1, 2],
+                "camera_serial": ["2010093", "2010093", "2010093"],
+                "clip_id": ["clip_000000", "clip_000000", "clip_000000"],
+                "clip_local_frame_index": [0, 1, 2],
+                "recording_frame_id": [1, 2, 3],
+                "video_path": [str(source_video), str(source_video), str(source_video)],
             }
         ),
         frame_index,
@@ -677,6 +677,10 @@ def test_clipped_session_uses_review_proxy_manifest(tmp_path: Path) -> None:
     assert sources[0]["media_kind"] == "review_proxy_video"
     assert sources[0]["path"] == str(proxy_video.resolve())
     assert sources[0]["source_path"] == str(source_video.resolve())
+    assert sources[0]["parent_frame_start"] == 0
+    assert sources[0]["parent_frame_end"] == 2
+    assert sources[0]["source_frame_start"] == 0
+    assert sources[0]["source_frame_end"] == 2
 
 
 def test_clipped_session_requires_matching_proxy_entry(tmp_path: Path) -> None:

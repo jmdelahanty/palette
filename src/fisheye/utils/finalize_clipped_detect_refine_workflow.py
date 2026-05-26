@@ -100,9 +100,17 @@ def _resolve_recording_frame_index(plan: Mapping[str, Any]) -> Path | None:
         raise ValueError(f"recording_frame_index_manifest.json is not an object: {manifest_path}")
     raw_path = manifest.get("recording_frame_index_path") or "recording_frame_index.parquet"
     frame_index_path = Path(str(raw_path)).expanduser()
-    if not frame_index_path.is_absolute():
-        frame_index_path = recording_path / frame_index_path
-    return frame_index_path.resolve()
+    if frame_index_path.is_absolute():
+        resolved = frame_index_path.resolve()
+        relocated = recording_path / frame_index_path.name
+        if relocated.exists() and not resolved.is_relative_to(recording_path):
+            return relocated.resolve()
+        if resolved.exists():
+            return resolved
+        if relocated.exists():
+            return relocated.resolve()
+        return resolved
+    return (recording_path / frame_index_path).resolve()
 
 
 def _validate_recording_frame_index(

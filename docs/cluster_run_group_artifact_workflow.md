@@ -766,6 +766,23 @@ manifest that maps proxy clips back to the source clip timeline. The analysis
 Zarr remains the canonical detection/curation store; proxy videos are
 regenerable display artifacts.
 
+Full-recording proxy generation is supported as one LSF compute job:
+
+```bash
+scripts/submit_review_proxy_videos_bsub.sh \
+  <recording_dir> \
+  --proxy-run-id <proxy_run_id> \
+  --proxy-width 1024 \
+  --proxy-height 1024 \
+  --encoder h264_nvenc \
+  --queue gpu_l4 \
+  --gpus 1
+```
+
+The direct `fisheye.utils.build_review_proxy_videos --apply` command runs in
+the current process and should be reserved for dry-runs, one-clip smokes, or
+non-login-node execution.
+
 The batch wrappers can also plan against a direct Zarr directory path without
 registry discovery:
 

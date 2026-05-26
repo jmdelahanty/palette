@@ -290,7 +290,9 @@ If proxy videos move with the recording:
 - leave source detection coordinates unchanged.
 
 If proxy videos are not copied, rebuild them from the relocated source videos
-instead of preserving stale proxy manifests.
+instead of preserving stale proxy manifests. On LSF clusters, use
+`scripts/submit_review_proxy_videos_bsub.sh` for full-recording rebuilds so the
+sequential transcode runs on a compute node rather than a login node.
 
 ## Recommended Relocation Workflow
 

@@ -85,11 +85,14 @@ class ClippedFrameRecords:
         table: Any,
         selected_by_pair: Mapping[tuple[str, str], Mapping[str, Any]],
         video_id_by_path: Mapping[str, str],
+        video_id_by_pair: Mapping[tuple[str, str], str] | None = None,
     ) -> None:
         self._table = table
         self._columns = {name: table[name] for name in table.column_names}
         self._selected_by_pair = dict(selected_by_pair)
         self._video_id_by_path = dict(video_id_by_path)
+        self._video_id_by_pair = dict(video_id_by_pair or {})
+        self._video_frame_ranges: dict[str, dict[str, int]] | None = None
 
     def __len__(self) -> int:
         return int(self._table.num_rows)
@@ -132,6 +135,40 @@ class ClippedFrameRecords:
             camera_serial=camera_serial,
             recording_frame_id=int(self._value("recording_frame_id", parent_frame_index, 0)),
         )
+
+    def video_frame_ranges(self) -> dict[str, dict[str, int]]:
+        if self._video_frame_ranges is not None:
+            return self._video_frame_ranges
+
+        ranges: dict[str, dict[str, int]] = {}
+        for row_index in range(len(self)):
+            camera_serial = str(self._value("camera_serial", row_index, ""))
+            clip_id = str(self._value("clip_id", row_index, ""))
+            video_id = self._video_id_by_pair.get((camera_serial, clip_id))
+            if not video_id:
+                video_path = str(self._value("video_path", row_index, ""))
+                video_id = self._video_id_by_path.get(video_path)
+            if not video_id:
+                continue
+
+            parent_frame = int(self._value("parent_frame_index", row_index, row_index))
+            source_frame = int(self._value("clip_local_frame_index", row_index, row_index))
+            current = ranges.setdefault(
+                video_id,
+                {
+                    "parent_frame_start": parent_frame,
+                    "parent_frame_end": parent_frame,
+                    "source_frame_start": source_frame,
+                    "source_frame_end": source_frame,
+                },
+            )
+            current["parent_frame_start"] = min(current["parent_frame_start"], parent_frame)
+            current["parent_frame_end"] = max(current["parent_frame_end"], parent_frame)
+            current["source_frame_start"] = min(current["source_frame_start"], source_frame)
+            current["source_frame_end"] = max(current["source_frame_end"], source_frame)
+
+        self._video_frame_ranges = ranges
+        return ranges
 
 
 def _json_scalar(value: object) -> object:
@@ -625,6 +662,7 @@ def _clipped_session(
     fps = _resolve_fps(root, default=30.0)
     videos: dict[str, VideoSource] = {}
     video_id_by_path: dict[str, str] = {}
+    video_id_by_pair: dict[tuple[str, str], str] = {}
     proxy_by_pair = _load_review_proxy_manifest(review_proxy_manifest)
     for row in selected_runs:
         source = row.get("source") if isinstance(row.get("source"), Mapping) else {}
@@ -641,6 +679,7 @@ def _clipped_session(
         media_kind = "review_proxy_video" if proxy else "source_video"
         video_id = _video_id(media_path, prefix=clip_id or "clip")
         video_id_by_path[str(video_path)] = video_id
+        video_id_by_pair[(camera_serial, clip_id)] = video_id
         videos[video_id] = VideoSource(
             video_id=video_id,
             path=media_path,
@@ -670,6 +709,7 @@ def _clipped_session(
         table=table,
         selected_by_pair=selected_by_pair,
         video_id_by_path=video_id_by_path,
+        video_id_by_pair=video_id_by_pair,
     )
     return VideoDetectReviewSession(
         zarr_path=str(zarr_path),
@@ -756,6 +796,7 @@ def review_session_summary(session: VideoDetectReviewSession) -> dict[str, objec
 
 
 def video_sources_payload(session: VideoDetectReviewSession) -> list[dict[str, object]]:
+    ranges_by_video = _video_frame_ranges_by_source(session)
     return [
         {
             "video_id": source.video_id,
@@ -771,9 +812,45 @@ def video_sources_payload(session: VideoDetectReviewSession) -> list[dict[str, o
             "source_path": str(source.source_path) if source.source_path is not None else str(source.path),
             "clip_id": source.clip_id,
             "camera_serial": source.camera_serial,
+            **ranges_by_video.get(source.video_id, {}),
         }
         for source in session.videos.values()
     ]
+
+
+def _video_frame_ranges_by_source(session: VideoDetectReviewSession) -> dict[str, dict[str, int]]:
+    if hasattr(session.frame_records, "video_frame_ranges"):
+        return session.frame_records.video_frame_ranges()
+
+    total_frames = int(len(session.frame_records))
+    if len(session.videos) == 1:
+        video = next(iter(session.videos.values()))
+        source_end = max(0, int(video.frame_count) - 1) if video.frame_count is not None else max(0, total_frames - 1)
+        return {
+            video.video_id: {
+                "parent_frame_start": 0,
+                "parent_frame_end": max(0, total_frames - 1),
+                "source_frame_start": 0,
+                "source_frame_end": source_end,
+            }
+        }
+
+    ranges: dict[str, dict[str, int]] = {}
+    for record in session.frame_records:
+        current = ranges.setdefault(
+            record.video_id,
+            {
+                "parent_frame_start": int(record.parent_frame_index),
+                "parent_frame_end": int(record.parent_frame_index),
+                "source_frame_start": int(record.source_frame_index),
+                "source_frame_end": int(record.source_frame_index),
+            },
+        )
+        current["parent_frame_start"] = min(current["parent_frame_start"], int(record.parent_frame_index))
+        current["parent_frame_end"] = max(current["parent_frame_end"], int(record.parent_frame_index))
+        current["source_frame_start"] = min(current["source_frame_start"], int(record.source_frame_index))
+        current["source_frame_end"] = max(current["source_frame_end"], int(record.source_frame_index))
+    return ranges
 
 
 def _status_payload(payload: Mapping[str, object], row_idx: int) -> dict[str, object]:

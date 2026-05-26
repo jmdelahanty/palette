@@ -15,9 +15,10 @@ def get_total_frames(root: zarr.Group, detect_group: Optional[zarr.Group] = None
     
     Priority:
     1. detect_group.attrs['total_frames'] (most specific)
-    2. root.attrs['total_frames'] (standard location)
-    3. raw_video array shapes (if has_raw_video=True)
-    4. None (caller should infer from detection data)
+    2. detect_group frame_counts/n_detections length (specific run domain)
+    3. root.attrs['total_frames'] (standard location)
+    4. raw_video array shapes (if has_raw_video=True)
+    5. None (caller should infer from detection data)
     
     Args:
         root: Zarr root group
@@ -38,6 +39,9 @@ def get_total_frames(root: zarr.Group, detect_group: Optional[zarr.Group] = None
         n = detect_group.attrs.get('total_frames')
         if n is not None:
             return int(n)
+        for frame_count_name in ("frame_counts", "n_detections"):
+            if frame_count_name in detect_group:
+                return int(detect_group[frame_count_name].shape[0])
 
     # Prefer imported frame counts for sampled training data
     raw = root.get("raw_video") if "raw_video" in root else None

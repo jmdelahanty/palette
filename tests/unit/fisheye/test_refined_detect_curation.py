@@ -260,6 +260,9 @@ def _build_root_with_same_frame_raw_candidates(*, group_cls: type[_FakeGroup] = 
         class_ids=np.asarray([0, 0], dtype=np.int32),
         reason_labels=np.asarray(["raw", "raw"], dtype=object),
     )
+    frame_counts = np.asarray([0, 2, 0], dtype=np.int32)
+    detect_group.create_array("frame_counts", data=frame_counts, overwrite=True)
+    detect_group.create_array("n_detections", data=frame_counts, overwrite=True)
 
     refined_parent = root.create_group("refined_detect_runs")
     refined_parent.attrs["latest"] = "refined_detect_dup"
@@ -613,6 +616,46 @@ def test_write_curated_refined_detect_surfaces_uses_detect_frame_source_dimensio
     assert refined["instances"]["bbox_norm_coords"].chunks == (1, 4)
     assert refined["source_detections"]["bbox_img_xyxy"].chunks == (1, 4)
     assert refined["source_detections"]["bbox_norm_coords"].chunks == (1, 4)
+
+
+def test_write_curated_refined_detect_surfaces_uses_bound_detect_frame_counts_before_root_total() -> None:
+    root = _FakeGroup()
+    root.attrs["width"] = 4512
+    root.attrs["height"] = 4512
+    root.attrs["total_frames"] = 1_188_000
+
+    detect_path = "clips/clip_000000/cameras/2010095/detect_runs/detect_clip"
+    detect_group = root.require_group(detect_path)
+    detect_group.attrs["frame_source_shape"] = [3, 640, 640]
+    detect_group.create_array("frame_counts", data=np.asarray([1, 0, 1], dtype=np.int32), overwrite=True)
+
+    refined_family_path = "clips/clip_000000/cameras/2010095/refined_detect_runs"
+    refined_parent = root.require_group(refined_family_path)
+    refined = refined_parent.create_group("refined_detect_clip")
+    refined.attrs["source_detect_run"] = "detect_clip"
+    refined.attrs["source_detect_path"] = detect_path
+    refined.attrs["coverage_frames_total"] = 1_188_000
+
+    payload = write_curated_refined_detect_surfaces(
+        root,  # type: ignore[arg-type]
+        refined_family_path=refined_family_path,
+        refined_run_name="refined_detect_clip",
+        instance_frame_indices=np.asarray([0, 2], dtype=np.int32),
+        instance_bbox_norm_coords=np.asarray([[0.5, 0.5, 0.1, 0.1], [0.6, 0.6, 0.1, 0.1]], dtype=np.float64),
+        instance_source_kind_labels=np.asarray(["raw_detect", "raw_detect"], dtype=object),
+        instance_reason_labels=np.asarray(["clean", "clean"], dtype=object),
+        instance_source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+        source_detection_source_detect_row_index=np.asarray([0, 1], dtype=np.int32),
+        source_detection_frame_indices=np.asarray([0, 2], dtype=np.int32),
+        source_detection_bbox_norm_coords=np.asarray([[0.5, 0.5, 0.1, 0.1], [0.6, 0.6, 0.1, 0.1]], dtype=np.float64),
+        source_detection_decision_labels=np.asarray(["accepted", "accepted"], dtype=object),
+        source_detection_reason_labels=np.asarray(["clean", "clean"], dtype=object),
+    )
+
+    assert payload["rows_present"] == 2
+    assert refined["instances"]["frame_counts"].shape == (3,)
+    assert refined["instances"]["frame_offsets"].shape == (4,)
+    assert refined["instances"]["frame_counts"][:].tolist() == [1, 0, 1]
 
 
 def test_write_curated_refined_detect_surfaces_reuses_existing_sparse_groups_on_rerun() -> None:
