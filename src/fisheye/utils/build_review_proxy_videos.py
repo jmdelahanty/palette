@@ -30,6 +30,7 @@ DEFAULT_ENCODER = "auto"
 DEFAULT_H264_ENCODER = "libx264"
 DEFAULT_PRESET = "veryfast"
 DEFAULT_CRF = 23
+DEFAULT_SCALE_FLAGS = "lanczos"
 H264_ENCODER_PRIORITY = ("libx264", "h264_nvenc", "nvenc_h264", "nvenc", "libopenh264")
 NVENC_H264_ENCODERS = {"h264_nvenc", "nvenc_h264", "nvenc"}
 
@@ -45,6 +46,8 @@ class ReviewProxyOptions:
     encoder: str = DEFAULT_ENCODER
     preset: str = DEFAULT_PRESET
     crf: int = DEFAULT_CRF
+    hwaccel: str | None = None
+    scale_flags: str = DEFAULT_SCALE_FLAGS
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
     apply: bool = False
@@ -281,10 +284,14 @@ def build_ffmpeg_review_proxy_command(
     encoder: str = DEFAULT_H264_ENCODER,
     preset: str = DEFAULT_PRESET,
     crf: int = DEFAULT_CRF,
+    hwaccel: str | None = None,
+    scale_flags: str = DEFAULT_SCALE_FLAGS,
     overwrite: bool = False,
 ) -> list[str]:
     if proxy_width <= 0 or proxy_height <= 0:
         raise ValueError(f"Proxy dimensions must be positive, got {proxy_width}x{proxy_height}")
+    if not re.fullmatch(r"[A-Za-z0-9_+.-]+", str(scale_flags)):
+        raise ValueError(f"Unsafe FFmpeg scale flags value: {scale_flags!r}")
     command = [
         str(ffmpeg_bin),
         "-hide_banner",
@@ -292,16 +299,25 @@ def build_ffmpeg_review_proxy_command(
         "error",
         "-nostdin",
         "-y" if overwrite else "-n",
-        "-i",
-        str(source_video),
-        "-map",
-        "0:v:0",
-        "-an",
-        "-vf",
-        f"scale={int(proxy_width)}:{int(proxy_height)}:flags=lanczos",
-        "-c:v",
-        str(encoder),
     ]
+    hwaccel_value = str(hwaccel or "").strip()
+    if hwaccel_value and hwaccel_value.lower() not in {"none", "off", "false"}:
+        if not re.fullmatch(r"[A-Za-z0-9_+.-]+", hwaccel_value):
+            raise ValueError(f"Unsafe FFmpeg hwaccel value: {hwaccel!r}")
+        command.extend(["-hwaccel", hwaccel_value])
+    command.extend(
+        [
+            "-i",
+            str(source_video),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            f"scale={int(proxy_width)}:{int(proxy_height)}:flags={scale_flags}",
+            "-c:v",
+            str(encoder),
+        ]
+    )
     if encoder in NVENC_H264_ENCODERS:
         command.extend(["-preset", _nvenc_preset(preset), "-cq", str(int(crf)), "-b:v", "0"])
     elif encoder == "libopenh264":
@@ -452,6 +468,8 @@ def build_review_proxy_manifest(
             encoder=resolved_encoder,
             preset=options.preset,
             crf=options.crf,
+            hwaccel=options.hwaccel,
+            scale_flags=options.scale_flags,
             overwrite=options.overwrite,
         )
         clip_payload: dict[str, Any] = {
@@ -467,6 +485,8 @@ def build_review_proxy_manifest(
             "fps": fps,
             "frame_count": frame_count,
             "encoder": str(resolved_encoder),
+            "hwaccel": options.hwaccel,
+            "scale_flags": str(options.scale_flags),
             "ffmpeg_command": " ".join(shlex.quote(str(part)) for part in command),
         }
         if probe_error:
@@ -488,6 +508,8 @@ def build_review_proxy_manifest(
         "resolved_encoder": str(resolved_encoder),
         "preset": str(options.preset),
         "crf": int(options.crf),
+        "hwaccel": options.hwaccel,
+        "scale_flags": str(options.scale_flags),
         "frame_count_policy": "same_as_source_clip",
         "timebase_policy": "same_fps_same_frame_index",
         "coordinate_policy": "linear_scale_source_image_to_proxy_for_display_only",
@@ -546,6 +568,8 @@ def build_review_proxy_videos(
         "ffprobe_available": shutil.which(str(options.ffprobe_bin)) is not None,
         "encoder": str(manifest.get("encoder")),
         "resolved_encoder": str(manifest.get("resolved_encoder")),
+        "hwaccel": manifest.get("hwaccel"),
+        "scale_flags": str(manifest.get("scale_flags")),
         "host": socket.gethostname(),
         "pid": int(os.getpid()),
         "duration_seconds": float(time.perf_counter() - started),
@@ -572,6 +596,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--preset", default=DEFAULT_PRESET)
     parser.add_argument("--crf", type=int, default=DEFAULT_CRF)
+    parser.add_argument("--hwaccel", default=None, help="Optional FFmpeg input hardware acceleration, e.g. cuda.")
+    parser.add_argument("--scale-flags", default=DEFAULT_SCALE_FLAGS, help=f"FFmpeg scale filter flags (default: {DEFAULT_SCALE_FLAGS}).")
     parser.add_argument("--ffmpeg-bin", default="ffmpeg")
     parser.add_argument("--ffprobe-bin", default="ffprobe")
     parser.add_argument("--no-probe", action="store_true", help="Do not run ffprobe; use recording_clip_index metadata only.")
@@ -592,6 +618,7 @@ def _print_summary(result: Mapping[str, Any]) -> None:
     print(f"proxy_run_id: {result.get('proxy_run_id')}")
     print(f"clip_count: {result.get('clip_count')}")
     print(f"encoder: {result.get('encoder')} resolved={result.get('resolved_encoder')}")
+    print(f"hwaccel: {result.get('hwaccel')} scale_flags={result.get('scale_flags')}")
     print(f"ffmpeg_bin: {result.get('ffmpeg_bin')} available={result.get('ffmpeg_available')}")
     manifest = result.get("manifest")
     if isinstance(manifest, Mapping):
@@ -625,6 +652,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             encoder=str(args.encoder),
             preset=str(args.preset),
             crf=int(args.crf),
+            hwaccel=str(args.hwaccel) if args.hwaccel else None,
+            scale_flags=str(args.scale_flags),
             ffmpeg_bin=str(args.ffmpeg_bin),
             ffprobe_bin=str(args.ffprobe_bin),
             apply=bool(args.apply),

@@ -283,6 +283,14 @@ recording proxy generation, use the single-job LSF wrapper. The wrapper submits
 one compute job that runs the builder sequentially over all selected clips; it
 does not yet fan out one job per clip.
 
+Cluster timing on `sleepyfish_2026_05_05_17_45_30_cam2010095` showed that
+CPU decode plus Lanczos scaling was too slow for full recordings
+(`~58s` wall time for a 60s clip segment). The current LSF wrapper therefore
+defaults to `--hwaccel cuda --scale-flags bilinear`, which tested at `~22s`
+for the same 60s segment on an L4-class node. This is acceptable for review
+proxies because proxy pixels are display-only; canonical boxes remain in
+source-image coordinates.
+
 ```bash
 scripts/py -m fisheye.utils.build_review_proxy_videos \
   <recording_dir> \
@@ -301,6 +309,8 @@ scripts/submit_review_proxy_videos_bsub.sh \
   --proxy-width 1024 \
   --proxy-height 1024 \
   --encoder h264_nvenc \
+  --hwaccel cuda \
+  --scale-flags bilinear \
   --queue gpu_l4 \
   --gpus 1
 ```
@@ -315,6 +325,8 @@ scripts/py -m fisheye.utils.build_review_proxy_videos \
   --proxy-width 1024 \
   --proxy-height 1024 \
   --clip-id clip_000000 \
+  --hwaccel cuda \
+  --scale-flags bilinear \
   --apply
 ```
 

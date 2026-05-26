@@ -775,6 +775,8 @@ scripts/submit_review_proxy_videos_bsub.sh \
   --proxy-width 1024 \
   --proxy-height 1024 \
   --encoder h264_nvenc \
+  --hwaccel cuda \
+  --scale-flags bilinear \
   --queue gpu_l4 \
   --gpus 1
 ```
@@ -782,6 +784,12 @@ scripts/submit_review_proxy_videos_bsub.sh \
 The direct `fisheye.utils.build_review_proxy_videos --apply` command runs in
 the current process and should be reserved for dry-runs, one-clip smokes, or
 non-login-node execution.
+
+The review-proxy LSF wrapper defaults to CUDA input hwaccel and bilinear CPU
+scaling. This was substantially faster than CPU decode plus Lanczos scaling on
+the current cluster FFmpeg build, which exposes `h264_nvenc` but not
+`scale_cuda`/`scale_npp`. Proxies are display artifacts, so this speed/quality
+tradeoff does not affect canonical source-image detection coordinates.
 
 The batch wrappers can also plan against a direct Zarr directory path without
 registry discovery:

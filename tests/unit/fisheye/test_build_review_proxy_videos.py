@@ -102,6 +102,24 @@ def test_build_ffmpeg_review_proxy_command_uses_nvenc_quality_options(tmp_path: 
     assert "-crf" not in command
 
 
+def test_build_ffmpeg_review_proxy_command_can_use_hwaccel_and_bilinear_scale(tmp_path: Path) -> None:
+    command = build_ffmpeg_review_proxy_command(
+        ffmpeg_bin="ffmpeg",
+        source_video=tmp_path / "source.mp4",
+        output_video=tmp_path / "proxy.mp4",
+        proxy_width=1024,
+        proxy_height=1024,
+        encoder="h264_nvenc",
+        hwaccel="cuda",
+        scale_flags="bilinear",
+        overwrite=False,
+    )
+
+    assert command[command.index("-hwaccel") + 1] == "cuda"
+    assert command.index("-hwaccel") < command.index("-i")
+    assert command[command.index("-vf") + 1] == "scale=1024:1024:flags=bilinear"
+
+
 def test_resolve_review_proxy_encoder_prefers_libx264_then_nvenc() -> None:
     assert resolve_review_proxy_encoder("auto", runner=_fake_ffmpeg_encoders("h264_nvenc", "libx264")) == "libx264"
     assert resolve_review_proxy_encoder("auto", runner=_fake_ffmpeg_encoders("h264_nvenc")) == "h264_nvenc"
@@ -124,6 +142,8 @@ def test_build_review_proxy_manifest_plans_clipped_proxy(tmp_path: Path) -> None
     assert manifest["recording_id"] == "rec_a"
     assert manifest["encoder"] == "auto"
     assert manifest["resolved_encoder"] == "h264_nvenc"
+    assert manifest["hwaccel"] is None
+    assert manifest["scale_flags"] == "lanczos"
     assert manifest["clip_count"] == 1
     clip = manifest["clips"][0]
     assert clip["clip_id"] == "clip_000000"
@@ -136,6 +156,8 @@ def test_build_review_proxy_manifest_plans_clipped_proxy(tmp_path: Path) -> None
     assert clip["frame_count"] == 120
     assert clip["fps"] == 30.0
     assert clip["encoder"] == "h264_nvenc"
+    assert clip["hwaccel"] is None
+    assert clip["scale_flags"] == "lanczos"
     assert clip["proxy_video_path"].endswith(
         "derived/review_proxy/video_detect/proxy_a/clips/clip_000000/Cam2010093_1024x1024_h264.mp4"
     )

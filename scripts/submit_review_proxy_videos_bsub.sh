@@ -15,6 +15,8 @@ PROXY_HEIGHT=1024
 ENCODER="h264_nvenc"
 PRESET="veryfast"
 CRF=23
+HWACCEL="cuda"
+SCALE_FLAGS="bilinear"
 FFMPEG_BIN="ffmpeg"
 FFPROBE_BIN="ffprobe"
 LIMIT=""
@@ -49,6 +51,8 @@ Options:
   --encoder NAME                FFmpeg H.264 encoder (default: h264_nvenc)
   --preset NAME                 FFmpeg encoder preset (default: veryfast; NVENC maps to p3)
   --crf N                       H.264 quality value (default: 23; NVENC uses -cq)
+  --hwaccel NAME                FFmpeg input hwaccel (default: cuda; use none to disable)
+  --scale-flags NAME            FFmpeg scale flags (default: bilinear)
   --ffmpeg-bin PATH             ffmpeg binary (default: ffmpeg)
   --ffprobe-bin PATH            ffprobe binary (default: ffprobe)
   --clip-id ID                  Limit to a clip id; may be repeated
@@ -78,6 +82,8 @@ while [[ $# -gt 0 ]]; do
     --encoder) ENCODER="$2"; shift 2;;
     --preset) PRESET="$2"; shift 2;;
     --crf) CRF="$2"; shift 2;;
+    --hwaccel) HWACCEL="$2"; shift 2;;
+    --scale-flags) SCALE_FLAGS="$2"; shift 2;;
     --ffmpeg-bin) FFMPEG_BIN="$2"; shift 2;;
     --ffprobe-bin) FFPROBE_BIN="$2"; shift 2;;
     --clip-id) CLIP_IDS+=("$2"); shift 2;;
@@ -142,6 +148,8 @@ BUILDER_ARGS=(
   --encoder "$ENCODER"
   --preset "$PRESET"
   --crf "$CRF"
+  --hwaccel "$HWACCEL"
+  --scale-flags "$SCALE_FLAGS"
   --ffmpeg-bin "$FFMPEG_BIN"
   --ffprobe-bin "$FFPROBE_BIN"
 )
