@@ -291,6 +291,15 @@ for the same 60s segment on an L4-class node. This is acceptable for review
 proxies because proxy pixels are display-only; canonical boxes remain in
 source-image coordinates.
 
+Additional encoder comparison on the same 60s segment showed
+`--hwaccel cuda --scale-flags bilinear --encoder libx264 --preset ultrafast`
+was effectively tied with the NVENC encode path (`~22.3s`, `2.8 MB` output).
+That suggests the fast path is primarily CUDA decode plus cheaper bilinear
+scaling, not necessarily NVENC encoding. We are keeping the wrapper default at
+`h264_nvenc` for now because it is already validated in the wrapper path; x264
+ultrafast remains a plausible fallback or future default if GPU encode
+availability becomes a scheduling constraint.
+
 ```bash
 scripts/py -m fisheye.utils.build_review_proxy_videos \
   <recording_dir> \

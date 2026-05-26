@@ -791,6 +791,12 @@ the current cluster FFmpeg build, which exposes `h264_nvenc` but not
 `scale_cuda`/`scale_npp`. Proxies are display artifacts, so this speed/quality
 tradeoff does not affect canonical source-image detection coordinates.
 
+In one 60s smoke segment, `libx264` with `--preset ultrafast` was effectively
+tied with the NVENC encode path when both used CUDA input hwaccel and bilinear
+scaling. Keep `h264_nvenc` as the wrapper default for now, but treat x264
+ultrafast as a viable fallback if NVENC encode availability becomes the limiting
+resource.
+
 The batch wrappers can also plan against a direct Zarr directory path without
 registry discovery:
 
