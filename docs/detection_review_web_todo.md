@@ -309,7 +309,7 @@ scripts/py -m fisheye.utils.build_review_proxy_videos \
   --limit 1
 ```
 
-Full apply for all clips:
+Full apply for all clips can run as one compute job:
 
 ```bash
 scripts/submit_review_proxy_videos_bsub.sh \
@@ -323,6 +323,34 @@ scripts/submit_review_proxy_videos_bsub.sh \
   --queue gpu_l4 \
   --gpus 1
 ```
+
+For long clipped recordings, prefer the sharded LSF workflow. It submits one
+array job over clip shards, then a finalizer job that verifies all expected MP4s
+and writes the single final `manifest.json`. Shards intentionally do not write
+`manifest.json`; this avoids races and partial manifests.
+
+```bash
+scripts/submit_review_proxy_videos_sharded_bsub.sh \
+  <recording_dir> \
+  --proxy-run-id <proxy_run_id> \
+  --proxy-width 1024 \
+  --proxy-height 1024 \
+  --encoder h264_nvenc \
+  --hwaccel cuda \
+  --scale-flags bilinear \
+  --shard-count 4 \
+  --max-active 4 \
+  --queue gpu_l4 \
+  --gpus 1 \
+  --walltime 2:00 \
+  --overwrite \
+  --submit
+```
+
+The sharded workflow uses `--skip-existing-valid` by default, so reruns with the
+same `<proxy_run_id>` skip non-empty completed proxy MP4s and retry missing or
+incomplete outputs. Use `--no-skip-existing-valid` only when every shard should
+force a full re-transcode.
 
 The direct builder remains useful for dry-runs or intentionally bounded smoke
 transcodes:

@@ -785,6 +785,33 @@ The direct `fisheye.utils.build_review_proxy_videos --apply` command runs in
 the current process and should be reserved for dry-runs, one-clip smokes, or
 non-login-node execution.
 
+For long clipped recordings, the preferred workflow is sharded submission plus a
+manifest finalizer:
+
+```bash
+scripts/submit_review_proxy_videos_sharded_bsub.sh \
+  <recording_dir> \
+  --proxy-run-id <proxy_run_id> \
+  --proxy-width 1024 \
+  --proxy-height 1024 \
+  --encoder h264_nvenc \
+  --hwaccel cuda \
+  --scale-flags bilinear \
+  --shard-count 4 \
+  --max-active 4 \
+  --queue gpu_l4 \
+  --gpus 1 \
+  --walltime 2:00 \
+  --overwrite \
+  --submit
+```
+
+Shard jobs write proxy MP4s and shard summaries only. They pass
+`--defer-manifest` so no shard can publish a partial `manifest.json`. The
+dependent finalizer runs `--write-manifest-only --require-existing-proxies`,
+verifies every expected proxy exists, and then writes the only final manifest.
+This is the supported parallelization boundary for proxy generation.
+
 The review-proxy LSF wrapper defaults to CUDA input hwaccel and bilinear CPU
 scaling. This was substantially faster than CPU decode plus Lanczos scaling on
 the current cluster FFmpeg build, which exposes `h264_nvenc` but not

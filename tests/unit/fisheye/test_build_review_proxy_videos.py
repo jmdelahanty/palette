@@ -189,3 +189,82 @@ def test_build_review_proxy_videos_apply_writes_manifest_and_proxy(tmp_path: Pat
     assert proxy_path.exists()
     assert proxy_path.read_bytes() == b"proxy video"
     assert manifest["video_outputs"][0]["bytes"] == len(b"proxy video")
+
+
+def test_build_review_proxy_videos_defer_manifest_writes_proxy_without_final_manifest(tmp_path: Path) -> None:
+    _write_clip_index(tmp_path)
+    output_dir = tmp_path / "derived" / "review_proxy" / "video_detect" / "proxy_a"
+
+    def fake_ffmpeg(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if "-encoders" in command:
+            return _fake_ffmpeg_encoders("h264_nvenc")(command)
+        Path(command[-1]).write_bytes(b"proxy video")
+        return subprocess.CompletedProcess(list(command), 0, stdout="", stderr="")
+
+    result = build_review_proxy_videos(
+        tmp_path,
+        options=ReviewProxyOptions(output_dir=output_dir, proxy_run_id="proxy_a", apply=True, defer_manifest=True),
+        ffmpeg_runner=fake_ffmpeg,
+        ffprobe_runner=_fake_ffprobe,
+    )
+
+    assert result["status"] == "ok"
+    assert result["manifest_deferred"] is True
+    assert result["manifest_written"] is False
+    assert not Path(result["manifest_path"]).exists()
+    proxy_path = output_dir / "clips" / "clip_000000" / "Cam2010093_1024x1024_h264.mp4"
+    assert proxy_path.read_bytes() == b"proxy video"
+
+
+def test_build_review_proxy_videos_write_manifest_only_requires_existing_proxy(tmp_path: Path) -> None:
+    _write_clip_index(tmp_path)
+    output_dir = tmp_path / "derived" / "review_proxy" / "video_detect" / "proxy_a"
+    proxy_path = output_dir / "clips" / "clip_000000" / "Cam2010093_1024x1024_h264.mp4"
+    proxy_path.parent.mkdir(parents=True)
+    proxy_path.write_bytes(b"existing proxy")
+
+    result = build_review_proxy_videos(
+        tmp_path,
+        options=ReviewProxyOptions(
+            output_dir=output_dir,
+            proxy_run_id="proxy_a",
+            write_manifest_only=True,
+            require_existing_proxies=True,
+        ),
+        ffmpeg_runner=_fake_ffmpeg_encoders("h264_nvenc"),
+        ffprobe_runner=_fake_ffprobe,
+    )
+
+    manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
+    assert result["status"] == "ok"
+    assert result["manifest_written"] is True
+    assert manifest["video_outputs"][0]["status"] == "existing"
+    assert manifest["video_outputs"][0]["bytes"] == len(b"existing proxy")
+
+
+def test_build_review_proxy_videos_skip_existing_valid_proxy(tmp_path: Path) -> None:
+    _write_clip_index(tmp_path)
+    output_dir = tmp_path / "derived" / "review_proxy" / "video_detect" / "proxy_a"
+    proxy_path = output_dir / "clips" / "clip_000000" / "Cam2010093_1024x1024_h264.mp4"
+    proxy_path.parent.mkdir(parents=True)
+    proxy_path.write_bytes(b"existing proxy")
+
+    def fake_ffmpeg(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if "-encoders" in command:
+            return _fake_ffmpeg_encoders("h264_nvenc")(command)
+        raise AssertionError("ffmpeg should not run when skip-existing-valid is active")
+
+    result = build_review_proxy_videos(
+        tmp_path,
+        options=ReviewProxyOptions(
+            output_dir=output_dir,
+            proxy_run_id="proxy_a",
+            apply=True,
+            skip_existing_valid=True,
+        ),
+        ffmpeg_runner=fake_ffmpeg,
+        ffprobe_runner=_fake_ffprobe,
+    )
+
+    manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["video_outputs"][0]["status"] == "skipped_existing"

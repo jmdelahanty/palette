@@ -54,6 +54,10 @@ class ReviewProxyOptions:
     overwrite: bool = False
     probe: bool = True
     limit: int | None = None
+    defer_manifest: bool = False
+    write_manifest_only: bool = False
+    require_existing_proxies: bool = False
+    skip_existing_valid: bool = False
 
 
 def _utc_now() -> str:
@@ -361,10 +365,43 @@ def _write_proxy_video(
         raise RuntimeError(f"ffmpeg reported success but did not create {tmp_video}")
     os.replace(tmp_video, output_video)
     return {
+        "status": "written",
         "output_video": str(output_video),
         "elapsed_seconds": float(elapsed),
         "bytes": int(output_video.stat().st_size),
     }
+
+
+def _existing_proxy_output(output_video: Path) -> dict[str, Any] | None:
+    if not output_video.exists() or not output_video.is_file():
+        return None
+    size = int(output_video.stat().st_size)
+    if size <= 0:
+        return None
+    return {
+        "status": "existing",
+        "output_video": str(output_video),
+        "elapsed_seconds": 0.0,
+        "bytes": size,
+    }
+
+
+def _require_existing_proxy_outputs(clips: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    outputs: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for clip in clips:
+        output_video = Path(str(clip["proxy_video_path"]))
+        existing = _existing_proxy_output(output_video)
+        if existing is None:
+            missing.append(str(output_video))
+        else:
+            outputs.append(existing)
+    if missing:
+        preview = "\n".join(f"  - {path}" for path in missing[:20])
+        if len(missing) > 20:
+            preview += f"\n  ... {len(missing) - 20} more missing proxies"
+        raise FileNotFoundError(f"Missing required review proxy videos:\n{preview}")
+    return outputs
 
 
 def _output_video_path(output_dir: Path, *, clip_id: str, source_video: Path, proxy_width: int, proxy_height: int) -> Path:
@@ -529,6 +566,10 @@ def build_review_proxy_videos(
     ffprobe_runner: CommandRunner = _run_subprocess,
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    if options.apply and options.write_manifest_only:
+        raise ValueError("--apply and --write-manifest-only are mutually exclusive")
+    if options.defer_manifest and options.write_manifest_only:
+        raise ValueError("--defer-manifest and --write-manifest-only are mutually exclusive")
     manifest = build_review_proxy_manifest(
         recording_dir,
         options=options,
@@ -542,16 +583,30 @@ def build_review_proxy_videos(
     if options.apply:
         for clip in manifest["clips"]:
             command = shlex.split(str(clip["ffmpeg_command"]))
+            output_video = Path(str(clip["proxy_video_path"]))
+            existing = _existing_proxy_output(output_video) if options.skip_existing_valid else None
+            if existing is not None:
+                outputs.append({**existing, "status": "skipped_existing"})
+                continue
             outputs.append(
                 _write_proxy_video(
                     command=command,
-                    output_video=Path(str(clip["proxy_video_path"])),
+                    output_video=output_video,
                     overwrite=options.overwrite,
                     runner=ffmpeg_runner,
                 )
             )
         manifest = {**manifest, "status": "ok", "materialized_at_utc": _utc_now(), "video_outputs": outputs}
+        if options.defer_manifest:
+            manifest = {**manifest, "manifest_deferred": True}
+        else:
+            _atomic_write_json(manifest_path, manifest, overwrite=options.overwrite)
+            manifest = {**manifest, "manifest_written": True}
+    elif options.write_manifest_only or options.require_existing_proxies:
+        outputs = _require_existing_proxy_outputs(manifest["clips"])
+        manifest = {**manifest, "status": "ok", "materialized_at_utc": _utc_now(), "video_outputs": outputs}
         _atomic_write_json(manifest_path, manifest, overwrite=options.overwrite)
+        manifest = {**manifest, "manifest_written": True}
     else:
         manifest = {**manifest, "status": "dry_run", "dry_run_only": True}
     return {
@@ -570,6 +625,8 @@ def build_review_proxy_videos(
         "resolved_encoder": str(manifest.get("resolved_encoder")),
         "hwaccel": manifest.get("hwaccel"),
         "scale_flags": str(manifest.get("scale_flags")),
+        "manifest_written": bool(manifest.get("manifest_written", False)),
+        "manifest_deferred": bool(manifest.get("manifest_deferred", False)),
         "host": socket.gethostname(),
         "pid": int(os.getpid()),
         "duration_seconds": float(time.perf_counter() - started),
@@ -605,6 +662,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-serial", action="append", help="Limit to one or more camera serials.")
     parser.add_argument("--limit", type=int, help="Limit selected clip-camera rows for smoke testing.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing proxy artifacts.")
+    parser.add_argument("--skip-existing-valid", action="store_true", help="Skip non-empty existing proxy MP4 outputs during --apply.")
+    parser.add_argument("--defer-manifest", action="store_true", help="With --apply, transcode selected clips but do not write manifest.json.")
+    parser.add_argument("--write-manifest-only", action="store_true", help="Verify expected proxies exist and write manifest.json without transcoding.")
+    parser.add_argument("--require-existing-proxies", action="store_true", help="Require every expected proxy MP4 to exist before writing a manifest.")
     parser.add_argument("--apply", action="store_true", help="Transcode videos and write manifest.")
     parser.add_argument("--json", action="store_true", help="Print full JSON result.")
     return parser
@@ -619,6 +680,7 @@ def _print_summary(result: Mapping[str, Any]) -> None:
     print(f"clip_count: {result.get('clip_count')}")
     print(f"encoder: {result.get('encoder')} resolved={result.get('resolved_encoder')}")
     print(f"hwaccel: {result.get('hwaccel')} scale_flags={result.get('scale_flags')}")
+    print(f"manifest_written: {result.get('manifest_written')} manifest_deferred={result.get('manifest_deferred')}")
     print(f"ffmpeg_bin: {result.get('ffmpeg_bin')} available={result.get('ffmpeg_available')}")
     manifest = result.get("manifest")
     if isinstance(manifest, Mapping):
@@ -660,6 +722,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             overwrite=bool(args.overwrite),
             probe=not bool(args.no_probe),
             limit=args.limit,
+            defer_manifest=bool(args.defer_manifest),
+            write_manifest_only=bool(args.write_manifest_only),
+            require_existing_proxies=bool(args.require_existing_proxies),
+            skip_existing_valid=bool(args.skip_existing_valid),
         ),
         clip_ids=args.clip_id,
         camera_serials=args.camera_serial,
