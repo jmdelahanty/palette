@@ -30,9 +30,12 @@ reviewed path list is:
 docs/diagnostics/git_history_cleanup_paths_2026-05-28.txt
 ```
 
-The list contains 41 explicit paths/path-prefixes. In the current history it
-matches 731 historical blob paths, totaling about 450.3 MiB of uncompressed blob
-payload.
+The list contains 52 explicit paths/path-prefixes. The first audit pass matched
+731 historical blob paths and about 450.3 MiB of uncompressed blob payload.
+Disposable-clone rehearsal showed additional duplicate-path blobs after the
+first rewrite pass, so the list now includes exact duplicate paths plus
+generated-output directory prefixes (`results/`, `minute_plots/`,
+`fish_trajectories_csv/`).
 
 The list intentionally targets generated/local/runtime artifacts:
 
@@ -90,6 +93,51 @@ git count-objects -vH
 If `git-filter-repo` is not installed, install it outside this repository or use
 a managed environment that already provides it. Do not add it as a Palette
 dependency.
+
+## Rehearsal Result
+
+Disposable mirror clone:
+
+```text
+/tmp/palette-history-cleanup-20260528175855.git
+```
+
+Rehearsal command:
+
+```bash
+git filter-repo \
+  --paths-from-file /home/delahantyj@hhmi.org/gitrepos/palette/docs/diagnostics/git_history_cleanup_paths_2026-05-28.txt \
+  --invert-paths \
+  --force
+```
+
+Storage result:
+
+```text
+before size-pack: 955.97 MiB
+after size-pack:   18.50 MiB
+```
+
+Verification result:
+
+```text
+target path matches after rewrite: 0
+normal clone status: clean
+git diff --check: pass
+py_compile src/fisheye/shared/zarr_discovery.py: pass
+```
+
+Largest intentionally retained historical blobs after rewrite:
+
+```text
+test_frames/frame_0038.jpg
+test_frames/frame_0001.jpg
+keypoints_to_boundingbox.ipynb
+raw_video_to_boundingbox.ipynb
+```
+
+Those are excluded from the first cleanup because they are fixture/notebook-like
+artifacts and should be reviewed separately before removal.
 
 ## Verification Before Force-Push
 

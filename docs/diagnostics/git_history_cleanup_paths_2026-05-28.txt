@@ -24,6 +24,8 @@ yolov8n-seg.pt
 yolov8n.pt
 yolov8s-pose.pt
 yolov8s.pt
+src/yolo11n.pt
+src/yolov8n.pt
 hope.engine
 palette.engine
 out.zip
@@ -36,6 +38,15 @@ extracted_2010096_scale_image.png
 zarr_predictions_visualization.png
 results/annotated_frame_0001.jpg
 results/annotated_frame_0038.jpg
+results/annotated_frame_0002.jpg
+results/annotated_frame_0039.jpg
 results/detection_grid.png
+results/
 fish_trajectories_csv/all_trajectories_plot.png
+fish_trajectories_csv/
 exp1_trajectories_5min.svg
+parallel_analysis.png
+frame_mapping_with_chaser.png
+roi3_comparison.png
+minute_plots/individual_fish_minutes.png
+minute_plots/
