@@ -10,7 +10,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 import zarr
 
@@ -18,6 +18,7 @@ from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
 )
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs, load_path_list
 
 
 @dataclass
@@ -27,38 +28,6 @@ class ReviewPlan:
     source_label: Optional[str]
     status: str
     reason: Optional[str] = None
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
-
-
-def _load_paths_file(path: Path) -> List[Path]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Failed to read {path}: {exc}") from exc
-
-    items: List[Path] = []
-    for line in lines:
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
-        items.append(Path(value))
-    return items
 
 
 def _normalize_path(path: Path) -> str:
@@ -135,7 +104,7 @@ def _source_label(run_group: zarr.Group) -> Optional[str]:
 
 def _build_plans(roots: List[Path], recursive: bool, only_manual: bool) -> List[ReviewPlan]:
     plans: List[ReviewPlan] = []
-    for zarr_path in _iter_zarr(roots, recursive):
+    for zarr_path in iter_filesystem_zarrs(roots, recursive):
         try:
             root = zarr.open(str(zarr_path), mode="r")
         except Exception as exc:
@@ -332,7 +301,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     file_list_paths: List[Path] = []
     if args.file_list:
         for path in args.file_list:
-            file_list_paths.extend(_load_paths_file(path))
+            file_list_paths.extend(load_path_list(path, wrap_errors=True))
 
     frame_map: dict[str, List[int]] = {}
     if args.frame_list:

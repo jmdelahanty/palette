@@ -8,9 +8,11 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import zarr
+
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs, load_path_list
 
 from ..shared.stage_provenance import (
     STAGE_PROVENANCE_CONTRACT_NAME,
@@ -61,21 +63,6 @@ REQUIRED_FIELDS = ["timestamp", "parameters", "inputs"]
 OPTIONAL_FIELDS = ["git", "environment"]
 
 
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
-
-
 def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> str:
     for key in ("zarr_use", "zarr_purpose"):
         purpose = root.attrs.get(key)
@@ -90,18 +77,6 @@ def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> str:
     if name.endswith("_training.zarr"):
         return "training"
     return "unknown"
-
-
-def _read_file_list(path: Path) -> List[Path]:
-    if not path.exists():
-        raise FileNotFoundError(path)
-    items: List[Path] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
-        items.append(Path(value))
-    return items
 
 
 def _latest_run(group: zarr.Group) -> Optional[str]:
@@ -461,7 +436,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     roots: List[Path] = []
     if args.file_list:
         for path in args.file_list:
-            roots.extend(_read_file_list(path))
+            roots.extend(load_path_list(path))
     roots.extend(args.paths)
     if not roots:
         roots = [Path("/nvme1/recordings")]
@@ -470,7 +445,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     results_payload: Dict[str, Dict[str, Any]] = {}
     has_failures = False
-    for zarr_path in _iter_zarr(roots, args.recursive):
+    for zarr_path in iter_filesystem_zarrs(roots, args.recursive):
         root = zarr.open(str(zarr_path), mode="r")
         if args.zarr_use != "any":
             observed = _infer_zarr_use(root, zarr_path)

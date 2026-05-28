@@ -204,7 +204,7 @@ def test_main_strict_returns_nonzero_on_refinement_contract_failure(monkeypatch,
     )
     fake_path = Path("/fake/recording.zarr")
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
-    monkeypatch.setattr(mod, "_iter_zarr", lambda *_args, **_kwargs: iter([fake_path]))
+    monkeypatch.setattr(mod, "iter_filesystem_zarrs", lambda *_args, **_kwargs: iter([fake_path]))
 
     rc = mod.main([str(fake_path), "--strict", "--no-check-consistency"])
     assert rc == 1
@@ -231,7 +231,7 @@ def test_main_strict_returns_nonzero_on_detect_contract_failure(monkeypatch, cap
     )
     fake_path = Path("/fake/recording.zarr")
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
-    monkeypatch.setattr(mod, "_iter_zarr", lambda *_args, **_kwargs: iter([fake_path]))
+    monkeypatch.setattr(mod, "iter_filesystem_zarrs", lambda *_args, **_kwargs: iter([fake_path]))
 
     rc = mod.main([str(fake_path), "--strict", "--no-check-consistency"])
     assert rc == 1
@@ -248,7 +248,11 @@ def test_main_zarr_use_filter_runs_checks_only_for_matching_archives(monkeypatch
         training_path: training_root,
     }
 
-    monkeypatch.setattr(mod, "_iter_zarr", lambda *_args, **_kwargs: iter([analysis_path, training_path]))
+    monkeypatch.setattr(
+        mod,
+        "iter_filesystem_zarrs",
+        lambda *_args, **_kwargs: iter([analysis_path, training_path]),
+    )
     monkeypatch.setattr(mod.zarr, "open", lambda path, mode="r": root_lookup[Path(path)])  # noqa: ARG005
 
     seen: list[Path] = []
@@ -295,7 +299,7 @@ def test_main_strict_keeps_legacy_stage_compatible_until_backfill(monkeypatch, c
     )
     fake_path = Path("/fake/recording.zarr")
     monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
-    monkeypatch.setattr(mod, "_iter_zarr", lambda *_args, **_kwargs: iter([fake_path]))
+    monkeypatch.setattr(mod, "iter_filesystem_zarrs", lambda *_args, **_kwargs: iter([fake_path]))
 
     rc = mod.main([str(fake_path), "--strict", "--no-check-consistency"])
     assert rc == 0

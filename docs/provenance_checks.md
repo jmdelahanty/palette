@@ -23,6 +23,11 @@ Example:
 scripts/py -m fisheye.diagnostics.check_provenance_capture /nvme1/recordings --recursive
 ```
 
+Input discovery accepts explicit `.zarr` paths, recording roots with
+`*/zarr/*.zarr`, and root-level `*.zarr` stores. With `--recursive`, it scans
+for `*.zarr` below each root. `--file-list` accepts one path per line and skips
+blank/comment lines.
+
 Optional subject metadata validation:
 
 ```bash
@@ -46,12 +51,16 @@ Stage names:
 - `refined_keypoints`
 - `eye_masks`
 - `refined_eye_masks`
+- `subject_masks`
+- `refined_subject_masks`
 - `arena_assignment`
 
 Strict mode:
 
 - `--strict` returns non-zero when required checks fail.
-- In strict mode, refinement stages additionally require:
+- In strict mode, migrated offline stages additionally require the stage
+  provenance contract when the run's recorded stage name matches the accepted
+  stage aliases:
   - `provenance.contract.name == "palette_stage_provenance"`
   - `provenance.contract.version >= 1`
 

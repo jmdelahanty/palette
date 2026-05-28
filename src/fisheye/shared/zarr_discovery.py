@@ -13,6 +13,44 @@ class RegistryZarrEntry:
     camera_id: Optional[str] = None
 
 
+def load_path_list(path: Path, *, wrap_errors: bool = False) -> list[Path]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        if wrap_errors:
+            raise RuntimeError(f"Failed to read {path}: {exc}") from exc
+        raise
+
+    items: list[Path] = []
+    for line in lines:
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        items.append(Path(value))
+    return items
+
+
+def iter_filesystem_zarrs(paths: Iterable[Path], recursive: bool) -> Iterable[Path]:
+    for path in paths:
+        path = path.expanduser()
+        if path.is_dir() and path.suffix == ".zarr":
+            yield path
+            continue
+        if not path.exists():
+            continue
+        if recursive:
+            yield from path.rglob("*.zarr")
+        else:
+            yield from path.glob("*/zarr/*.zarr")
+            yield from path.glob("*.zarr")
+
+
+def discover_filesystem_zarrs(paths: Iterable[Path], *, recursive: bool) -> list[Path]:
+    return list(iter_filesystem_zarrs(paths, recursive))
+
+
 def _is_within_scope(path: Path, scope: Path) -> bool:
     try:
         path.relative_to(scope)

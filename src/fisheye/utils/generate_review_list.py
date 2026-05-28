@@ -9,11 +9,12 @@ import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Dict
+from typing import List, Optional, Dict
 
 import zarr
 
 from fisheye.registry.db import Registry
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs, load_path_list
 from fisheye.utils.crop_quality_freshness import is_crop_quality_row_fresh
 
 
@@ -27,38 +28,6 @@ class ReviewCandidate:
     review_method: Optional[str] = None
     review_intended_use: Optional[str] = None
     run_name: Optional[str] = None
-
-
-def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
-
-
-def _load_paths_file(path: Path) -> List[Path]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Failed to read {path}: {exc}") from exc
-
-    items: List[Path] = []
-    for line in lines:
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
-        items.append(Path(value))
-    return items
 
 
 def _latest_run(parent: zarr.Group) -> Optional[str]:
@@ -118,7 +87,7 @@ def _build_candidates(
     include_missing_runs: bool,
 ) -> List[ReviewCandidate]:
     candidates: List[ReviewCandidate] = []
-    for zarr_path in _iter_zarr(roots, recursive):
+    for zarr_path in iter_filesystem_zarrs(roots, recursive):
         try:
             root = zarr.open(str(zarr_path), mode="r")
         except Exception as exc:
@@ -392,7 +361,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     file_list_paths: List[Path] = []
     if args.file_list:
         for path in args.file_list:
-            file_list_paths.extend(_load_paths_file(path))
+            file_list_paths.extend(load_path_list(path, wrap_errors=True))
 
     if args.paths:
         roots = list(args.paths) + file_list_paths

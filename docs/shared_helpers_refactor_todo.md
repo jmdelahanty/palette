@@ -2,6 +2,8 @@
 
 Initial audit: 2026-02-24
 Updated: 2026-03-06 (C4 completion + Item 1 batch-1 + status refresh)
+Updated: 2026-05-28 (zarr filesystem discovery helper + review/diagnostic
+adoption)
 
 Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 (vendored `decord/` excluded).
@@ -32,7 +34,7 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
 | 4. Model loading/device helper | [ ] Not started | YOLO model load/device placement remains copy-pasted across many files. |
 | 5. CLI shared argument builders | [~] Partial | Added shared builders for apply/dry-run, logging, and registry discovery; migrated 4 core batch runners. |
 | 6. Plot save/finalize helper | [ ] Not started | `tight_layout/savefig/close` boilerplate remains duplicated. |
-| 7. Registry zarr discovery factory | [~] Partial | Added shared `zarr_discovery.py`; migrated discovery in detection/crop/keypoint/eye-mask runners. |
+| 7. Zarr discovery factory | [~] Partial | Shared `zarr_discovery.py` now covers registry discovery plus initial filesystem zarr/path-list helpers. Registry batch discovery and the first review/diagnostic filesystem callers are migrated; many filesystem variants remain intentionally unnormalized. |
 | 8. Root/log-dir resolution | [~] Partial | Added shared `environment.py`; migrated root/log-dir helpers in 4 core batch runners. |
 | 9. Ensure-group pattern | [~] Partial | `require_group` usage exists, but many files still use `if not in root: create_group`. |
 | 10. Bbox/keypoint utilities | [ ] Not started | No shared `bbox_utils.py`; duplicated local implementations remain. |
@@ -593,11 +595,26 @@ sequence across 68+ files.
 
 ---
 
-### 7. Registry Zarr Discovery Factory
+### 7. Zarr Discovery Factory
 
 - [x] Create `discover_zarrs(source, registry_path, scope_paths, **filters)` in
       `fisheye/shared/zarr_discovery.py`
 - [x] Migrate 4 batch scripts that each implement `_discover_zarrs_from_registry()`
+- [x] Add shared filesystem helpers:
+  - `iter_filesystem_zarrs(paths, recursive)`
+  - `discover_filesystem_zarrs(paths, recursive=...)`
+  - `load_path_list(path, wrap_errors=False)`
+- [x] Migrate the first exact-match filesystem/path-list callers:
+  - `utils/review_crops.py`
+  - `utils/review_refined_detections.py`
+  - `utils/show_keypoint_review_status.py`
+  - `utils/repair_keypoint_review_status.py`
+  - `utils/generate_review_list.py`
+  - `diagnostics/check_provenance_capture.py`
+- [ ] Decide whether to normalize narrower historical filesystem scans that only
+      search `*/zarr/*.zarr` / `rglob("zarr/*.zarr")`. These should not be
+      mechanically migrated to the broader helper without an explicit behavior
+      decision.
 
 **Pattern (repeated in 4 files, ~60 lines each):**
 ```python
@@ -618,13 +635,21 @@ def _discover_zarrs_from_registry(
         registry.close()
 ```
 
-**Affected files:**
+**Registry-discovery affected files:**
 - `utils/run_detections_batch.py` — `_discover_analysis_zarrs_from_registry()` (lines 169-228)
 - `utils/crop_batch.py` — `_discover_zarrs_from_registry()` (lines 364-425)
 - `utils/run_keypoints_batch.py` — similar discovery function
 - `utils/run_eye_masks_batch.py` — similar discovery function
 
-**Est. savings:** ~200 lines across 4 files.
+**Filesystem-discovery migrated files:**
+- `utils/review_crops.py`
+- `utils/review_refined_detections.py`
+- `utils/show_keypoint_review_status.py`
+- `utils/repair_keypoint_review_status.py`
+- `utils/generate_review_list.py`
+- `diagnostics/check_provenance_capture.py`
+
+**Est. savings:** ~350 lines across registry and initial filesystem callers.
 
 ---
 
@@ -868,7 +893,7 @@ src/fisheye/cli/
 | Argparse groups (5)           | Partial |               ~500 |            25+ |
 | Plot save boilerplate (6)     | Open   |                 ~300 |            68+ |
 | Dataset metadata (C2)         | Done   |                 ~200 |            14  |
-| Registry zarr discovery (7)   | Done   |                 ~200 |              4 |
+| Zarr discovery (7)            | Partial |               ~350 |             10 |
 | Model loader (4)              | Open   |                 ~200 |            24  |
 | Root path resolution (8)      | Partial |               ~200 |            33  |
 | Lineage tracking (14)         | Partial |               ~150 |              8 |

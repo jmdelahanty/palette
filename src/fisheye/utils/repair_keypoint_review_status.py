@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Optional
 from collections.abc import Mapping
 
 import numpy as np
 import zarr
+
+from fisheye.shared.zarr_discovery import iter_filesystem_zarrs, load_path_list
 
 
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
@@ -69,32 +71,6 @@ def _coerce_mapping(value: object) -> Optional[Dict[str, object]]:
         except Exception:
             return None
     return None
-
-
-def _iter_zarr(paths: Iterable[Path], recursive: bool) -> Iterable[Path]:
-    for path in paths:
-        path = path.expanduser()
-        if path.is_dir() and path.suffix == ".zarr":
-            yield path
-            continue
-        if not path.exists():
-            continue
-        if recursive:
-            yield from path.rglob("*.zarr")
-        else:
-            yield from path.glob("*/zarr/*.zarr")
-            yield from path.glob("*.zarr")
-
-
-def _load_paths_file(path: Path) -> list[Path]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    items: list[Path] = []
-    for line in lines:
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
-        items.append(Path(value))
-    return items
 
 
 def _load_group_attrs(group_path: Path) -> Dict[str, object]:
@@ -198,13 +174,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     roots: list[Path] = []
     if args.file_list:
         for file_list in args.file_list:
-            roots.extend(_load_paths_file(file_list))
+            roots.extend(load_path_list(file_list))
     if args.paths:
         roots.extend(args.paths)
     if not roots:
         roots = [Path("/nvme1/recordings")]
 
-    zarr_paths = sorted({p.resolve() for p in _iter_zarr(roots, args.recursive)})
+    zarr_paths = sorted({p.resolve() for p in iter_filesystem_zarrs(roots, args.recursive)})
     if not zarr_paths:
         print("No Zarr paths found.")
         return 1

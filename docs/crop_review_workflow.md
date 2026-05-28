@@ -4,7 +4,7 @@ This note captures how to inspect ROI crops and record approvals for training
 data.
 
 Registry-backed crop review/status planning is tracked in:
-`docs/crop_review_registry_todo.md`.
+`docs/archive/crop_review_registry_todo.md`.
 
 ## Quick review (single recording)
 
@@ -30,6 +30,10 @@ Use `--file-list` to review a specific subset.
 Use `--review-intended-use full_recording` (plus optional `--review-state`,
 `--review-method`, `--reviewer`, `--review-notes`) to forward review defaults to
 each launched viewer.
+
+Discovery accepts explicit `.zarr` paths, recording roots containing
+`*/zarr/*.zarr`, and root-level `*.zarr` stores. With `--recursive`, it scans
+for any nested `*.zarr`.
 
 ## Generating review lists
 
