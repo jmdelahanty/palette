@@ -2,8 +2,24 @@
 
 <!-- todo-meta
 status: active
-last_updated: 2026-05-20
+last_updated: 2026-05-28
 -->
+
+## Document Status
+
+This document is the implementation-status record for browser detection review.
+Do not add broad clipped-storage or relocation policy here. Use the narrower
+contracts instead:
+
+- `docs/clipped_finalized_detect_collection_contract.md` for clipped finalized
+  collection resolution, frame mapping, and source/proxy coordinate semantics;
+- `docs/review_proxy_video_contract.md` for browser proxy-video manifests,
+  sharded generation, and proxy display semantics;
+- `docs/analysis_to_training_promotion_contract.md` for analysis-edit to
+  training-Zarr promotion;
+- `docs/recording_store_relocation_components.md` and
+  `docs/recording_store_relocation_runbook.md` for storage-root migration and
+  review-proxy relocation.
 
 ## Goal
 
@@ -174,6 +190,9 @@ shape Crimson needs:
 - run lookup under
   `clips/<clip_id>/cameras/<camera_serial>/refined_detect_runs/<run>`.
 
+The canonical resolver contract is
+`docs/clipped_finalized_detect_collection_contract.md`.
+
 The recommended browser path for long clipped videos is to build review proxy
 MP4s and pass `--review-proxy-manifest`. Directly serving original
 high-resolution clips remains a diagnostic fallback, not the preferred operator
@@ -181,85 +200,7 @@ review path.
 
 ## Review Proxy Videos For Clipped Analysis
 
-The first video-backed analysis viewer (`video_detect_review_web`) can resolve
-clipped parent frames and refined boxes, but direct browser playback of the
-original clip MP4s is a poor review substrate. The sleepyfish smoke clips are
-`4512x4512` HEVC, roughly `14 GB` per 30-minute clip, and the MP4 `moov` atom is
-at the end of the file. A browser `<video>` element may need multiple range
-requests plus large HEVC decode work before it can display one exact review
-frame. This is much less predictable than PyNvVideoCodec/Crimson decoding.
-
-Preferred design: create derived browser-review proxy videos outside the
-analysis Zarr and point the web viewer at a manifest. The proxy is cache data,
-not canonical analysis truth.
-
-Suggested layout:
-
-```text
-<recording>/
-  clips/
-  zarr/
-  derived/
-    review_proxy/
-      video_detect/
-        <proxy_run_id>/
-          manifest.json
-          clips/
-            clip_000000/
-              Cam2010093_1024_h264.mp4
-            clip_000001/
-              Cam2010093_1024_h264.mp4
-```
-
-Proxy contract:
-
-- Same `clip_id`, `camera_serial`, frame count, FPS, and frame-index timeline as
-  the source clip.
-- Lower display resolution, initially `1024x1024` or `1280x1280`.
-- Browser-friendly codec/container, initially H.264 MP4 with faststart metadata.
-- One manifest entry per `(clip_id, camera_serial)`.
-- Boxes remain stored/read in source-image coordinates; the frontend scales
-  overlays to the displayed proxy dimensions. Proxy pixels are display-only.
-- Proxies may be regenerated, cleaned by TTL, or copied to shared cache such as
-  `/misc/public/palette_cache`; they should not be written into the canonical
-  analysis Zarr.
-
-Example manifest shape:
-
-```json
-{
-  "schema_version": "palette.review_proxy.video.v1",
-  "recording_id": "sleepyfish_2026_05_05_17_45_30_cam2010093",
-  "source_recording_dir": "/groups/johnson/johnsonlab/jeremy/palette_smoke/sleepyfish_2026_05_05_17_45_30_cam2010093",
-  "proxy_width": 1024,
-  "proxy_height": 1024,
-  "frame_count_policy": "same_as_source_clip",
-  "timebase_policy": "same_fps_same_frame_index",
-  "coordinate_policy": "scale_source_image_to_proxy_for_display_only",
-  "clips": [
-    {
-      "clip_id": "clip_000000",
-      "camera_serial": "2010093",
-      "source_video_path": ".../clips/clip_000000/Cam2010093_....mp4",
-      "proxy_video_path": ".../derived/review_proxy/video_detect/<proxy_run_id>/clips/clip_000000/Cam2010093_1024_h264.mp4",
-      "source_width": 4512,
-      "source_height": 4512,
-      "proxy_width": 1024,
-      "proxy_height": 1024,
-      "fps": 30,
-      "frame_count": 54000
-    }
-  ]
-}
-```
-
-Planned viewer interface:
-
-```bash
-scripts/py -m fisheye.tune.video_detect_review_web \
-  <analysis.zarr> \
-  --review-proxy-manifest <recording>/derived/review_proxy/video_detect/<proxy_run_id>/manifest.json
-```
+Review proxies are now covered by `docs/review_proxy_video_contract.md`.
 
 Implementation status:
 
@@ -268,139 +209,10 @@ Implementation status:
    videos and writes the manifest.
 3. [x] Add proxy manifest resolution in `video_detect_review_backend.py`.
 4. [ ] Add validation that proxy frame count/FPS matches the source clip.
-5. [x] Prefer proxy media in the browser when a manifest is provided; fall back to
-   source video only when no manifest is provided.
+5. [x] Prefer proxy media in the browser when a manifest is provided; fall back
+   to source video only when no manifest is provided.
 
-Builder status: `fisheye.utils.build_review_proxy_videos` creates the proxy
-manifest and, with `--apply`, transcodes the selected clip-camera videos
-sequentially in the current process. It is dry-run by default. The default
-`--encoder auto` prefers `libx264` when available and falls back to NVENC H.264
-encoders such as `h264_nvenc` on FFmpeg builds that do not include GPL x264
-support.
-
-Do not run an all-clip `--apply` transcode on a cluster login node. For full
-recording proxy generation, use the single-job LSF wrapper. The wrapper submits
-one compute job that runs the builder sequentially over all selected clips; it
-does not yet fan out one job per clip.
-
-Cluster timing on `sleepyfish_2026_05_05_17_45_30_cam2010095` showed that
-CPU decode plus Lanczos scaling was too slow for full recordings
-(`~58s` wall time for a 60s clip segment). The current LSF wrapper therefore
-defaults to `--hwaccel cuda --scale-flags bilinear`, which tested at `~22s`
-for the same 60s segment on an L4-class node. This is acceptable for review
-proxies because proxy pixels are display-only; canonical boxes remain in
-source-image coordinates.
-
-Additional encoder comparison on the same 60s segment showed
-`--hwaccel cuda --scale-flags bilinear --encoder libx264 --preset ultrafast`
-was effectively tied with the NVENC encode path (`~22.3s`, `2.8 MB` output).
-That suggests the fast path is primarily CUDA decode plus cheaper bilinear
-scaling, not necessarily NVENC encoding. We are keeping the wrapper default at
-`h264_nvenc` for now because it is already validated in the wrapper path; x264
-ultrafast remains a plausible fallback or future default if GPU encode
-availability becomes a scheduling constraint.
-
-```bash
-scripts/py -m fisheye.utils.build_review_proxy_videos \
-  <recording_dir> \
-  --proxy-run-id <proxy_run_id> \
-  --proxy-width 1024 \
-  --proxy-height 1024 \
-  --limit 1
-```
-
-Full apply for all clips can run as one compute job:
-
-```bash
-scripts/submit_review_proxy_videos_bsub.sh \
-  <recording_dir> \
-  --proxy-run-id <proxy_run_id> \
-  --proxy-width 1024 \
-  --proxy-height 1024 \
-  --encoder h264_nvenc \
-  --hwaccel cuda \
-  --scale-flags bilinear \
-  --queue gpu_l4 \
-  --gpus 1
-```
-
-For long clipped recordings, prefer the sharded LSF workflow. It submits one
-array job over clip shards, then a finalizer job that verifies all expected MP4s
-and writes the single final `manifest.json`. Shards intentionally do not write
-`manifest.json`; this avoids races and partial manifests.
-
-```bash
-scripts/submit_review_proxy_videos_sharded_bsub.sh \
-  <recording_dir> \
-  --proxy-run-id <proxy_run_id> \
-  --proxy-width 1024 \
-  --proxy-height 1024 \
-  --encoder h264_nvenc \
-  --hwaccel cuda \
-  --scale-flags bilinear \
-  --shard-count 4 \
-  --max-active 4 \
-  --queue gpu_l4 \
-  --gpus 1 \
-  --walltime 2:00 \
-  --overwrite \
-  --submit
-```
-
-The sharded workflow uses `--skip-existing-valid` by default, so reruns with the
-same `<proxy_run_id>` skip non-empty completed proxy MP4s and retry missing or
-incomplete outputs. Use `--no-skip-existing-valid` only when every shard should
-force a full re-transcode.
-
-The direct builder remains useful for dry-runs or intentionally bounded smoke
-transcodes:
-
-```bash
-scripts/py -m fisheye.utils.build_review_proxy_videos \
-  <recording_dir> \
-  --proxy-run-id <proxy_run_id> \
-  --proxy-width 1024 \
-  --proxy-height 1024 \
-  --clip-id clip_000000 \
-  --hwaccel cuda \
-  --scale-flags bilinear \
-  --apply
-```
-
-The default output directory is:
-
-```text
-<recording>/derived/review_proxy/video_detect/<proxy_run_id>/
-```
-
-The LSF wrapper writes its job script and logs under:
-
-```text
-<recording>/derived/review_proxy/video_detect/<proxy_run_id>/bsub_submission_<run_id>/
-```
-
-Parallel proxy generation is safe in principle because proxy jobs are read-only
-against source clips and write unique proxy outputs, but the supported wrapper
-is intentionally one job for now to avoid uncontrolled shared-filesystem and GPU
-encoder contention. Per-clip proxy fan-out can be added later with a finalizer
-that verifies every proxy before writing the manifest.
-
-After proxies are built, run the video-backed reviewer against the analysis
-Zarr and pass the manifest explicitly:
-
-```bash
-scripts/py -m fisheye.tune.video_detect_review_web \
-  <recording>/zarr/<recording>_analysis.zarr \
-  --review-proxy-manifest <recording>/derived/review_proxy/video_detect/<proxy_run_id>/manifest.json \
-  --host 0.0.0.0 \
-  --port 8790
-```
-
-When a proxy manifest is present, the backend still resolves detections in
-source-image coordinates and exposes both source and proxy dimensions to the
-frontend. The proxy MP4 is used only as the media source for display.
-
-### Video-Backed Review UI Status
+## Video-Backed Review UI Status
 
 `video_detect_review_web` now supports clipped analysis inspection against
 finalized refined-detect collections and optional proxy videos. It is read-only

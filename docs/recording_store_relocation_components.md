@@ -1,7 +1,7 @@
 # Recording Store Relocation Components
 <!-- contract-meta
 status: active_design
-last_verified: 2026-05-19
+last_verified: 2026-05-28
 purpose: Define the migratory surfaces that must be inspected or rewritten when moving Palette recordings and Zarrs between storage roots.
 -->
 
@@ -18,6 +18,12 @@ and review proxy artifacts.
 
 This document defines the components that are migratory and the policy for
 rewriting them.
+
+For an operator sequence, use
+`docs/recording_store_relocation_runbook.md`. For clipped finalized detect
+collection resolution, use
+`docs/clipped_finalized_detect_collection_contract.md`. For review proxy
+manifest and generation semantics, use `docs/review_proxy_video_contract.md`.
 
 ## Path Classes
 
@@ -224,6 +230,8 @@ experiment_index/finalized_runs/<collection_id>
 ```
 
 Those manifests are active resolver surfaces for viewers and importers.
+The consumer-facing resolver contract is defined in
+`docs/clipped_finalized_detect_collection_contract.md`.
 
 Fields to inspect:
 
@@ -281,6 +289,7 @@ manifest explicitly models a current command template.
 
 Review proxy videos are derived for UI performance. They are optional but
 active when a web reviewer is launched with `--review-proxy-manifest`.
+The proxy-video contract is defined in `docs/review_proxy_video_contract.md`.
 
 If proxy videos move with the recording:
 
@@ -290,9 +299,13 @@ If proxy videos move with the recording:
 - leave source detection coordinates unchanged.
 
 If proxy videos are not copied, rebuild them from the relocated source videos
-instead of preserving stale proxy manifests. On LSF clusters, use
-`scripts/submit_review_proxy_videos_bsub.sh` for full-recording rebuilds so the
-sequential transcode runs on a compute node rather than a login node.
+instead of preserving stale proxy manifests. On LSF clusters, prefer
+`scripts/submit_review_proxy_videos_sharded_bsub.sh` for long clipped
+recordings. It writes proxy MP4s from bounded shard jobs and publishes the final
+`manifest.json` only from a dependent finalizer. Use
+`scripts/submit_review_proxy_videos_bsub.sh` only when one sequential compute
+job is the intended scheduling unit. Do not run full-recording proxy generation
+on a login node.
 
 ## Recommended Relocation Workflow
 
@@ -317,11 +330,78 @@ Minimum validation gates:
 - task dry run selects the relocated Zarr, for example detection training
   preflight reports valid boxes.
 
-## Sleepyfish Smoke Example
+## Sleepyfish Migration Example
 
-For
-`sleepyfish_2026_05_05_17_45_30_cam2010093`, the `/groups` clipped training
-Zarr was made parity-equivalent to the `/nvme1` clipped training Zarr by:
+As of 2026-05-28, the sleepyfish clipped-recording set was migrated from
+`/nvme1/recordings` to
+`/groups/johnson/johnsonlab/jeremy/recordings` for cameras `2010093` through
+`2010096`.
+
+Physical recording roots:
+
+- copied `sleepyfish_2026_05_05_17_45_30_cam2010093`;
+- copied `sleepyfish_2026_05_05_17_45_30_cam2010094`;
+- retained/verified the previously copied `sleepyfish_2026_05_05_17_45_30_cam2010095`;
+- copied `sleepyfish_2026_05_05_17_45_30_cam2010096`.
+
+Each relocated root has 22 rolling `clip_*` directories and the expected
+recording-level sidecars:
+
+- `recording_manifest.json`;
+- `recording_clip_index.json`;
+- `recording_frame_index.parquet`;
+- `zarr/<recording>_clipped_training.zarr`.
+
+Registry migration:
+
+- backed up `/nvme1/palette_registry.sqlite` before writes;
+- updated `recordings.recording_path` for all four sleepyfish recordings to the
+  PRFS recording root;
+- retargeted active `datasets.zarr_path`,
+  `datasets.source_recording_frame_index_path`,
+  `detection_data_profile.profile_json`, and path-bearing training-set JSON
+  fields from `/nvme1/recordings/sleepyfish...` to
+  `/groups/johnson/johnsonlab/jeremy/recordings/sleepyfish...`;
+- recomputed `datasets.path_hash` for the retargeted active dataset rows;
+- added a separate cam `2010093` clipped-training dataset row
+  (`sleepyfish_2026_05_05_17_45_30_cam2010093:z3fdd176a8abc`) because the
+  unsuffixed `2010093` dataset id already represents the older palette-smoke
+  analysis Zarr;
+- moved the cam `2010093` training detection profiles from the analysis dataset
+  id to the new clipped-training dataset id;
+- removed duplicate suffixed training dataset rows for cams `2010094`,
+  `2010095`, and `2010096` after confirming they pointed at the same physical
+  Zarr paths as the canonical unsuffixed rows;
+- deleted duplicate current quality/status rows for those suffixed ids and
+  preserved their `recording_step_status_history` events by moving them onto the
+  canonical dataset ids.
+
+Registry validation:
+
+- zero remaining `/nvme1/recordings/sleepyfish_2026_05_05_17_45_30_cam201009`
+  references in registry text columns;
+- no remaining references to the removed suffixed duplicate ids;
+- no duplicate active sleepyfish Zarr paths in `datasets`;
+- `PRAGMA foreign_key_check` clean;
+- `PRAGMA quick_check` returned `ok`.
+
+Review proxy migration:
+
+- cam `2010093`: copied the existing all-clips proxy run from the old
+  `palette_smoke` root into the relocated recording root and rewrote the copied
+  manifest active paths to the relocated root;
+- cam `2010094`: generated a sharded proxy run under the relocated recording
+  root;
+- cam `2010095`: verified the existing relocated proxy run;
+- cam `2010096`: generated a sharded proxy run under the relocated recording
+  root.
+
+All four relocated sleepyfish recordings now have self-contained
+`derived/review_proxy/video_detect/<proxy_run_id>/manifest.json` files with
+22 proxy clips and no missing proxy-video paths.
+
+Earlier cam `2010093` parity work made the `/groups` clipped training Zarr
+equivalent to the `/nvme1` clipped training Zarr by:
 
 - copying missing `crop_runs`, `keypoints_runs`, and
   `refined_keypoints_runs`;
@@ -331,9 +411,7 @@ Zarr was made parity-equivalent to the `/nvme1` clipped training Zarr by:
   `/groups`;
 - rewriting active fields in `*_clipped_training_manifest.json`;
 - preserving historical `copied_detection_runs_from=/nvme1/...`;
-- updating the canonical registry dataset row to the `/groups` Zarr;
-- pruning the duplicate suffixed registry row after confirming it was not in
-  any training set.
+- retargeting the registry training surface to the `/groups` Zarr.
 
 Observed validation:
 
