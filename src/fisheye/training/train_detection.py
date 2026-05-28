@@ -87,6 +87,8 @@ def _parse_trtexec_device_info_text(raw_text: str) -> dict:
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface
 class YoloCompatibleDataLoader(DataLoader):
     profile_collector = None
+    shape_collector = None
+    shape_mode = "unknown"
 
     def reset(self):
         pass
@@ -94,9 +96,10 @@ class YoloCompatibleDataLoader(DataLoader):
     def __iter__(self):
         iterator = super().__iter__()
         profiler = self.profile_collector
-        if profiler is None:
+        shape_collector = self.shape_collector
+        if profiler is None and shape_collector is None:
             return iterator
-        return _ProfilingIterator(iterator, profiler)
+        return _ObservingIterator(iterator, profiler, shape_collector, mode=self.shape_mode)
 
 
 class ChunkAwareBatchSampler:
@@ -167,10 +170,12 @@ class ChunkAwareBatchSampler:
         return math.ceil(self._total_samples / self.batch_size)
 
 
-class _ProfilingIterator:
-    def __init__(self, iterator, profiler):
+class _ObservingIterator:
+    def __init__(self, iterator, profiler, shape_collector=None, *, mode: str = "unknown"):
         self._iterator = iterator
         self._profiler = profiler
+        self._shape_collector = shape_collector
+        self._mode = str(mode or "unknown")
 
     def __iter__(self):
         return self
@@ -178,7 +183,10 @@ class _ProfilingIterator:
     def __next__(self):
         wait_start = time.perf_counter()
         batch = next(self._iterator)
-        self._profiler.record_batch_wait(time.perf_counter() - wait_start, batch)
+        if self._profiler is not None:
+            self._profiler.record_batch_wait(time.perf_counter() - wait_start, batch)
+        if self._shape_collector is not None:
+            self._shape_collector.record_batch(self._mode, batch)
         return batch
 
 
@@ -314,6 +322,93 @@ class InputPipelineProfiler:
         console.print(table)
         for note in summary.get("notes", []):
             console.print(f"[dim]- {note}[/dim]")
+
+
+class TrainingShapeObserver:
+    """Collect observed dataloader tensor shapes in the main process."""
+
+    def __init__(self) -> None:
+        self._mode_counts: dict[str, int] = defaultdict(int)
+        self._shape_counts: dict[str, dict[tuple[int, int, int], int]] = defaultdict(lambda: defaultdict(int))
+
+    def record_batch(self, mode: str, batch) -> None:
+        if not isinstance(batch, dict):
+            return
+        images = batch.get("img")
+        if not isinstance(images, torch.Tensor) or images.ndim != 4:
+            return
+        mode_key = str(mode or "unknown")
+        batch_size, channels, height, width = [int(v) for v in images.shape]
+        self._mode_counts[mode_key] += int(batch_size)
+        self._shape_counts[mode_key][(channels, height, width)] += int(batch_size)
+
+    def summary(self) -> dict:
+        modes = {}
+        for mode, shape_counts in sorted(self._shape_counts.items()):
+            shapes = [
+                {
+                    "channels": int(channels),
+                    "height": int(height),
+                    "width": int(width),
+                    "samples": int(samples),
+                }
+                for (channels, height, width), samples in sorted(
+                    shape_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ]
+            modes[mode] = {
+                "samples": int(self._mode_counts.get(mode, 0)),
+                "unique_shape_count": len(shapes),
+                "shapes": shapes,
+            }
+        return {"modes": modes}
+
+
+def _source_frame_shape_summary(zarr_metadata: dict) -> list[dict]:
+    rows = []
+    for dataset_name, meta in sorted(zarr_metadata.items()):
+        if not isinstance(meta, dict) or "error" in meta:
+            continue
+        frame_h = meta.get("frame_height")
+        frame_w = meta.get("frame_width")
+        if frame_h is None or frame_w is None:
+            continue
+        rows.append(
+            {
+                "dataset": str(dataset_name),
+                "frame_height": int(frame_h),
+                "frame_width": int(frame_w),
+            }
+        )
+    return rows
+
+
+def _build_model_input_shape_accounting(
+    *,
+    requested_imgsz,
+    rect: bool,
+    ultralytics_train_imgsz: tuple[int, int],
+    zarr_metadata: dict,
+    shape_observer: TrainingShapeObserver | None,
+) -> dict:
+    requested_h, requested_w = _normalize_imgsz(requested_imgsz)
+    payload = {
+        "requested_imgsz": _imgsz_to_config_value(requested_h, requested_w),
+        "requested_imgsz_hw": [int(requested_h), int(requested_w)],
+        "rect": bool(rect),
+        "ultralytics_train_imgsz": _imgsz_to_config_value(*ultralytics_train_imgsz),
+        "ultralytics_train_imgsz_hw": [int(ultralytics_train_imgsz[0]), int(ultralytics_train_imgsz[1])],
+        "source_frame_shapes": _source_frame_shape_summary(zarr_metadata),
+        "observed_dataloader_batch_shapes": (
+            shape_observer.summary() if shape_observer is not None else {"modes": {}}
+        ),
+        "notes": [
+            "Ultralytics train mode normalizes rectangular imgsz requests to a scalar max-side value.",
+            "Observed dataloader shapes are batch tensors yielded to the trainer before device preprocessing.",
+        ],
+    }
+    return payload
 
 
 _ACTIVE_INPUT_PIPELINE_PROFILER: InputPipelineProfiler | None = None
@@ -1606,6 +1701,7 @@ def main(args):
     chunk_locality_sampling_flag = False
     num_workers_value = 16
     prefetch_factor_value = None
+    shape_observer = TrainingShapeObserver()
     profile_mode = bool(getattr(args, "profile", False))
     if profile_mode:
         num_workers_value = 0
@@ -1672,25 +1768,32 @@ def main(args):
                 drop_last=False,
                 shuffle=True,
             )
-            return YoloCompatibleDataLoader(
+            loader = YoloCompatibleDataLoader(
                 dataset,
                 batch_sampler=batch_sampler,
                 collate_fn=det_collate_fn,
                 **loader_kwargs,
             )
+            loader.shape_collector = shape_observer
+            loader.shape_mode = mode
+            return loader
 
-        return YoloCompatibleDataLoader(
+        loader = YoloCompatibleDataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=is_train,
             collate_fn=det_collate_fn,
             **loader_kwargs,
         )
+        loader.shape_collector = shape_observer
+        loader.shape_mode = mode
+        return loader
 
     DetTrainer.get_dataloader = get_zarr_dataloader
 
     # Get training params
     training_params = full_config.training_params.model_dump(exclude_none=True)
+    requested_training_imgsz = training_params.get("imgsz")
     training_params, custom_loader_augment = _apply_zarr_loader_training_param_overrides(training_params)
     persistent_workers_flag = bool(custom_loader_augment.get("persistent_workers", False))
     chunk_locality_sampling_flag = bool(custom_loader_augment.get("chunk_locality_sampling", False))
@@ -1884,6 +1987,13 @@ def main(args):
         run_dir=Path(results.save_dir),
         console=console,
     )
+    model_input_shape_accounting = _build_model_input_shape_accounting(
+        requested_imgsz=requested_training_imgsz,
+        rect=bool(training_params.get("rect", False)),
+        ultralytics_train_imgsz=(effective_img_h, effective_img_w),
+        zarr_metadata=zarr_metadata,
+        shape_observer=shape_observer,
+    )
 
     # Log training metadata
     console.print("\n[bold cyan] Logging Training Report...[/bold cyan]")
@@ -1912,6 +2022,7 @@ def main(args):
             'source_zarr_metadata': zarr_metadata,
             'custom_loader_augmentation': custom_loader_augment,
             'effective_imgsz': [int(effective_img_h), int(effective_img_w)],
+            'model_input_shape_accounting': model_input_shape_accounting,
             'effective_training_params': dict(training_params),
             'input_pipeline_profile': input_profile_payload,
             'source_type_resolution': {
@@ -1971,6 +2082,15 @@ def main(args):
         final_metrics_payload.setdefault("status_detail", "training_complete")
         final_metrics_payload.setdefault("imgsz_h", int(effective_img_h))
         final_metrics_payload.setdefault("imgsz_w", int(effective_img_w))
+        final_metrics_payload.setdefault("requested_imgsz", model_input_shape_accounting["requested_imgsz_hw"])
+        final_metrics_payload.setdefault(
+            "ultralytics_train_imgsz",
+            model_input_shape_accounting["ultralytics_train_imgsz_hw"],
+        )
+        final_metrics_payload.setdefault(
+            "model_input_shape_accounting",
+            model_input_shape_accounting,
+        )
         if input_profile_payload is not None:
             final_metrics_payload.setdefault("input_pipeline_profile", input_profile_payload)
         _record_registry_training_run(

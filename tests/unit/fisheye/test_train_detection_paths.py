@@ -16,6 +16,7 @@ from fisheye.training.train_detection import (
     _cleanup_trainer_dataloaders,
     _apply_zarr_loader_training_param_overrides,
     _build_default_run_name,
+    _build_model_input_shape_accounting,
     _export_detection_artifacts,
     _extract_runtime_imgsz,
     _infer_set_slug,
@@ -23,6 +24,7 @@ from fisheye.training.train_detection import (
     _should_enable_rect_for_non_square_inputs,
     ChunkAwareBatchSampler,
     InputPipelineProfiler,
+    TrainingShapeObserver,
     get_zarr_metadata,
     _snapshot_training_inputs,
     _strip_manifest_suffixes,
@@ -294,6 +296,49 @@ def test_input_pipeline_profiler_collects_stage_timings() -> None:
     assert summary["stages"]["preprocess_to_device"]["calls"] == 1
     assert summary["stages"]["dataloader_wait"]["samples"] == 8
     assert summary["stages"]["preprocess_to_device"]["samples"] == 8
+
+
+def test_training_shape_observer_records_batch_shapes() -> None:
+    observer = TrainingShapeObserver()
+    observer.record_batch("train", {"img": torch.zeros((8, 3, 800, 8192), dtype=torch.uint8)})
+    observer.record_batch("train", {"img": torch.zeros((4, 3, 800, 8192), dtype=torch.uint8)})
+    observer.record_batch("val", {"img": torch.zeros((2, 3, 768, 1280), dtype=torch.uint8)})
+
+    summary = observer.summary()
+
+    assert summary["modes"]["train"]["samples"] == 12
+    assert summary["modes"]["train"]["unique_shape_count"] == 1
+    assert summary["modes"]["train"]["shapes"] == [
+        {"channels": 3, "height": 800, "width": 8192, "samples": 12}
+    ]
+    assert summary["modes"]["val"]["shapes"] == [
+        {"channels": 3, "height": 768, "width": 1280, "samples": 2}
+    ]
+
+
+def test_build_model_input_shape_accounting_separates_requested_ultralytics_and_observed() -> None:
+    observer = TrainingShapeObserver()
+    observer.record_batch("train", {"img": torch.zeros((1, 3, 800, 8192), dtype=torch.uint8)})
+
+    payload = _build_model_input_shape_accounting(
+        requested_imgsz=[768, 1280],
+        rect=True,
+        ultralytics_train_imgsz=(1280, 1280),
+        zarr_metadata={"dan.zarr": {"frame_height": 800, "frame_width": 8192}},
+        shape_observer=observer,
+    )
+
+    assert payload["requested_imgsz"] == [768, 1280]
+    assert payload["requested_imgsz_hw"] == [768, 1280]
+    assert payload["rect"] is True
+    assert payload["ultralytics_train_imgsz"] == 1280
+    assert payload["ultralytics_train_imgsz_hw"] == [1280, 1280]
+    assert payload["source_frame_shapes"] == [
+        {"dataset": "dan.zarr", "frame_height": 800, "frame_width": 8192}
+    ]
+    assert payload["observed_dataloader_batch_shapes"]["modes"]["train"]["shapes"] == [
+        {"channels": 3, "height": 800, "width": 8192, "samples": 1}
+    ]
 
 
 def test_cleanup_trainer_dataloaders_shuts_down_worker_iterators() -> None:
