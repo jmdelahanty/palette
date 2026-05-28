@@ -1,3 +1,0 @@
-[submodule "decord"]
-	path = decord
-	url = https://github.com/dmlc/decord.git

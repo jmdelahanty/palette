@@ -12,6 +12,10 @@ __marimo__/
 # Virtual environments
 .venv/
 
+# Local dependency checkouts / wheels
+/decord/
+/*.whl
+
 # Logs
 *.log
 
@@ -21,17 +25,30 @@ __marimo__/
 
 # Local data/output
 alignment_diagnostics/
+detection_plots/
 diagnostics_output/
+diagnostics/*.txt
 nvme1/
 runs/
 notes.md
+todo.txt
+gpu_results.json
+eye_mask_frame_flags.json
 keypoint_frame_flags.json
+keypoint_nudge_flags.json
+eye_mask_manual_list.txt
+keypoint_manual_list.txt
 retune_flags*
 retune_frame_flags*
+
+# Local model checkpoints / downloaded defaults
+/*.pt
 
 # Local extracted/reference PNGs
 /*.png
 /src/fisheye/utils/*.png
+/src/fisheye/analysis/plots/
+/src/fisheye/visualization/plots/
 
 # Generated Manim render outputs
 media/

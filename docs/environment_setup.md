@@ -30,13 +30,14 @@ environment's `lib/` directory to `LD_LIBRARY_PATH` before launching Python, so
 native wheels such as Decord can resolve conda-provided shared libraries without
 requiring `conda activate`.
 
-## Local Decord Wheel
+## Optional Local Decord Wheel
 
-Some Palette video paths use the local Decord wheel stored in this repository.
-Install it after the editable package if needed:
+Some Palette video paths can use Decord. Palette no longer tracks the Decord
+source checkout or wheel in git; keep those artifacts outside the repository and
+install a compatible wheel after the editable package if needed:
 
 ```bash
-$HOME/miniforge3/envs/palette-py311/bin/python -m pip install ./decord-0.6.0-cp311-cp311-linux_x86_64.whl
+$HOME/miniforge3/envs/palette-py311/bin/python -m pip install /path/to/decord-0.6.0-cp311-cp311-linux_x86_64.whl
 ```
 
 Use the matching Miniconda path if applicable.
@@ -54,7 +55,7 @@ git pull --ff-only
 conda env remove -n palette-py311 -y
 conda env create -n palette-py311 -f environment.yml
 $HOME/miniforge3/envs/palette-py311/bin/python -m pip install -e .
-$HOME/miniforge3/envs/palette-py311/bin/python -m pip install ./decord-0.6.0-cp311-cp311-linux_x86_64.whl
+$HOME/miniforge3/envs/palette-py311/bin/python -m pip install /path/to/decord-0.6.0-cp311-cp311-linux_x86_64.whl
 scripts/py -c 'import cv2, decord; print("cv2/decord ok")'
 ```
 
