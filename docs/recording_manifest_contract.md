@@ -123,6 +123,7 @@ Example known schema:
 
 - `artifact_schema_id="behavior_v1"`
 - `artifact_schema_id="video_only_v1"`
+- `artifact_schema_id="orange_external_ipc_single_clip_v1"`
 - future: `artifact_schema_id="orange_rolling_clips_v1"`
 
 For `behavior_v1`, integrity currently checks required artifact types:
@@ -149,6 +150,30 @@ Recommended manifest content:
 
 `video_only_v1` does not currently trigger the `behavior_v1` required-artifact
 integrity check, so missing H5/CSV sidecars are tolerated.
+
+For `orange_external_ipc_single_clip_v1`, the recording comes from an Orange
+`external_ipc` batch with Citrus H5 context plus an ingest-authoritative
+full-frame external recorder video. Recommended manifest content:
+
+- include the normal recording identity fields from the Citrus H5
+- include `recording_backend="external_ipc"`, `orange_session_id`,
+  `orange_producer`, and `orange_recording_mode` when known
+- include one full-frame camera video entry under `files.cams`
+- include compatibility camera sidecars under `files.cams`:
+  `Cam*.mp4`, `Cam*_meta.csv`, and `Cam*_keyframe.json`
+- the compatibility `Cam*_meta.csv` may be copied from the crop metadata table
+  when that table shares the same `recording_frame_id` / timestamp clock as the
+  full-frame video
+- preserve cropped video and crop-native sidecars under
+  `files.derived` / `derived/external_crop_recorder/`
+- preserve external recorder diagnostics under
+  `files.derived` / `derived/external_recorder/`
+- do not include shard intermediates such as `*_shard*_gpu*.mp4`,
+  `*_keyframes_shard*.json`, or `*_encode_shard*.csv`
+
+`orange_external_ipc_single_clip_v1` is an organizer-side compatibility layout
+for single-clip external IPC sessions. It is not the rolling-clip collection
+contract.
 
 For future Orange rolling-clip recordings, keep clips as children of one
 recording/session rather than separate recording rows. The authoritative clip

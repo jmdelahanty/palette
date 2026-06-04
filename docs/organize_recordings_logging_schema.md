@@ -49,7 +49,12 @@ Emitted once at the beginning of the run.
   "dest_root": "/nvme1/recordings",
   "rename_cams": true,
   "write_manifest": true,
-  "snapshot_mode": "split"
+  "snapshot_mode": "split",
+  "video_only": false,
+  "external_ipc": false,
+  "metadata_csv": null,
+  "run_video_diagnostics": false,
+  "run_h5_diagnostics": false
 }
 ```
 

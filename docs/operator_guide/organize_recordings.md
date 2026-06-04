@@ -257,6 +257,63 @@ shared sidecars into each recording, moves the keyframe summary to `cams/`,
 moves per-camera diagnostic sidecars to `derived/`, and patches
 `recording_manifest.json` `files.raw` / `files.cams` / `files.derived`.
 
+### Orange `external_ipc` batches with full-frame and crop videos
+
+Newer Orange sessions may write a batch root with `recording_session.json`,
+`external_recorder/`, `external_crop_recorder/`, and Citrus H5 files under
+`citrus/`. In this layout, the merged full-frame external recorder MP4 is the
+ingest-authoritative camera video, while the cropped MP4 is a sidecar useful for
+review/debugging. Shard intermediates are implementation details and should not
+be copied into canonical recording folders.
+
+`organize_recordings` auto-detects this layout when `recording_session.json`
+contains `recording_outputs` from `external_ipc`; `--external-ipc` can be passed
+to make the mode explicit.
+
+Dry-run first:
+
+```bash
+scripts/py -m fisheye.utils.organize_recordings \
+  "$PALETTE_STAGING_ROOT/2026_05_29_14_11_07" \
+  --external-ipc \
+  --dest-root "$PALETTE_RECORDINGS_ROOT" \
+  --dry-run
+```
+
+Expected planning behavior:
+
+- each Citrus H5 becomes one recording folder, as in legacy multi-arena Citrus
+  batches
+- `cams/` receives the merged full-frame `external_recorder/Cam*_external.mp4`
+  renamed to the normal `Cam<id>_<session>.mp4` convention
+- `cams/` also receives a compatibility `Cam<id>_<session>_meta.csv` copied
+  from the crop metadata table, because it has the same recording-frame clock
+  and lets existing single-video frame-index builders discover the recording
+- `cams/` receives `Cam<id>_<session>_keyframe.json` from the full-frame
+  external recorder keyframe summary
+- crop outputs and crop-specific metadata are preserved under
+  `derived/external_crop_recorder/`
+- full external recorder diagnostics that are not part of the compatibility
+  camera bundle are preserved under `derived/external_recorder/`
+- files with shard names such as `*_shard*_gpu*.mp4`,
+  `*_keyframes_shard*.json`, and `*_encode_shard*.csv` are intentionally ignored
+
+Apply only after the dry-run has no unexpected `missing` entries:
+
+```bash
+scripts/py -m fisheye.utils.organize_recordings \
+  "$PALETTE_STAGING_ROOT/2026_05_29_14_11_07" \
+  --external-ipc \
+  --dest-root "$PALETTE_RECORDINGS_ROOT" \
+  --write-manifest \
+  --apply
+```
+
+The organizer preserves Orange acquisition-host absolute paths by remapping
+paths below the transferred batch directory name back under the local staging
+batch root. This allows `recording_session.json` written on the rig to remain
+the source of truth after transfer.
+
 ## Step 3: Apply the organization
 
 Once the dry-run looks correct, apply it:
@@ -364,6 +421,7 @@ separate video and H5 summaries. Downstream import entry points now refuse
 
 - `scripts/py -m fisheye.analysis.create_analysis_zarr ...`
 - `scripts/py -m fisheye.utils.import_recording_analysis ...`
+- `scripts/py -m fisheye.utils.import_organized_recordings_analysis ...`
 - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline ...`
 - `scripts/py -m fisheye.utils.import_recordings_analysis ...`
 
@@ -377,6 +435,37 @@ See [video_diagnostics.md](video_diagnostics.md),
 [h5_diagnostics.md](h5_diagnostics.md), and
 [test_data.md](test_data.md) for the full CLI, output reference, and the shared
 real-data fixture convention under `/nvme1/palette_test_data`.
+
+## Create Analysis Archives After Organizing
+
+After `organize_recordings --apply`, use the import-only batch command to create
+analysis zarrs from the organized `raw/*.h5` and `cams/*.mp4` layout:
+
+```bash
+scripts/py -m fisheye.utils.import_organized_recordings_analysis \
+  "$PALETTE_RECORDINGS_ROOT" \
+  --dry-run
+
+scripts/py -m fisheye.utils.import_organized_recordings_analysis \
+  "$PALETTE_RECORDINGS_ROOT" \
+  --apply
+```
+
+For a single organize run, pass the organizer JSONL log so only recordings from
+that run are imported:
+
+```bash
+scripts/py -m fisheye.utils.import_organized_recordings_analysis \
+  --organize-log "$PALETTE_RECORDINGS_ROOT/logs/organize_recordings/<run>.jsonl" \
+  --dry-run
+```
+
+This command only creates/updates `zarr/<recording>_analysis.zarr`, imports
+source-video metadata, and imports H5 stimulus metadata. It does not run
+detection, refinement, keypoints, or registry scans. The older
+`fisheye.utils.import_recordings_analysis --apply` command is a full pipeline
+wrapper despite its name, so use it only when you intentionally want inference
+stages after import.
 
 ## Logs
 

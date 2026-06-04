@@ -55,6 +55,12 @@ Related detect batch contract:
 
 ## Canonical Orchestrators
 
+- Batch import-only orchestrator:
+  - Module: `fisheye.utils.import_organized_recordings_analysis`
+  - Behavior: resolve already organized recording directories, then run
+    `process_recording_import` per recording.
+  - Explicit non-goal: no detect, refine, keypoints, or registry scan
+    orchestration.
 - Single recording orchestrator:
   - Module: `fisheye.utils.run_recording_analysis_pipeline`
   - Required execution order:
@@ -65,7 +71,12 @@ Related detect batch contract:
     5. register (optional)
 - Batch orchestrator:
   - Module: `fisheye.utils.import_recordings_analysis`
-  - Behavior: resolve many recording plans, then run single-recording pipeline per plan.
+  - Behavior: resolve many recording plans, then run the full
+    single-recording analysis pipeline per plan.
+  - Naming warning: despite `import_` in the module name, `--apply` is not
+    import-only; it proceeds into detect/refine unless those pipeline options
+    are changed. Use `import_organized_recordings_analysis` when the desired
+    action is only creating/importing analysis archives.
 
 ## Stage Order Invariant
 
@@ -102,6 +113,7 @@ Supported entry points:
   - `scripts/py -m fisheye.utils.import_recording_analysis --recording-only ...`
   - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-only ...`
 - Batch:
+  - `scripts/py -m fisheye.utils.import_organized_recordings_analysis --recording-only ...`
   - `scripts/py -m fisheye.utils.import_recordings_analysis --recording-only ...`
   - Equivalent explicit form: `--no-import-stimulus`
 

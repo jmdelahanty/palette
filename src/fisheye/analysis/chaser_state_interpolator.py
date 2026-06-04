@@ -19,6 +19,12 @@ from fisheye.shared.json_safety import decode_null_terminated_text
 
 
 DEFAULT_TIMESTAMP_DELTA_NS = 8_333_333  # ~8.33ms for 120 Hz stimulus rendering
+TIMESTAMP_FIELD_CANDIDATES = (
+    "timestamp_ns",
+    "timestamp_ns_session",
+    "relative_timestamp_ns",
+    "timestamp_ns_epoch",
+)
 
 
 @dataclass
@@ -328,7 +334,7 @@ def interpolate_metadata(
 
     stim_field = _resolve_field(frame_metadata.dtype.names or (), ("stimulus_frame_num", "frame_number", "stim_frame_num"))
     cam_field = _resolve_field(frame_metadata.dtype.names or (), ("triggering_camera_frame_id", "camera_frame_id"))
-    ts_field = _resolve_field(frame_metadata.dtype.names or (), ("timestamp_ns", "timestamp_ns_session", "relative_timestamp_ns"))
+    ts_field = _resolve_field(frame_metadata.dtype.names or (), TIMESTAMP_FIELD_CANDIDATES)
 
     camera_to_stim: Dict[int, List[int]] = {}
     camera_to_ts: Dict[int, List[int]] = {}
@@ -449,7 +455,7 @@ def interpolate_chaser_states(
     stim_field = _resolve_field(chaser_states.dtype.names or (), ("stimulus_frame_num", "frame_number", "stim_frame_num"))
     timestamp_field = _resolve_field(
         chaser_states.dtype.names or (),
-        ("timestamp_ns_session", "relative_timestamp_ns", "timestamp_ns"),
+        TIMESTAMP_FIELD_CANDIDATES,
         required=False,
     )
     camera_field = _resolve_field(
