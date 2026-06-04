@@ -35,7 +35,7 @@ from ..shared.frame_flags import (
     resolve_flagged_roi_indices,
 )
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
-from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
+from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
 
 _TRADITIONAL_HEURISTIC_METHOD = "traditional_pose"
@@ -935,7 +935,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"success={keypoint_result['success']} failed={keypoint_result['failed']}"
             )
             if args.apply and int(keypoint_result.get("patched", 0)) > 0:
-                stale_marked = mark_downstream_eye_mask_runs_stale(
+                stale_marked = mark_downstream_subject_mask_runs_stale(
                     root,
                     source_keypoint_group="keypoints_runs",
                     source_keypoints_run=str(keypoints_run),
@@ -944,7 +944,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     reason="keypoint_patch_from_crops_raw",
                 )
                 if stale_marked:
-                    print(f"  marked_downstream_eye_masks_stale={stale_marked}")
+                    print(f"  marked_downstream_refined_subject_masks_stale={stale_marked}")
         else:
             print(f"  keypoints_run={keypoints_run} (raw patch skipped)")
 
@@ -967,7 +967,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     f"frames={refined_result['frames']}"
                 )
             if args.apply and int(refined_result.get("patched", 0)) > 0:
-                stale_marked = mark_downstream_eye_mask_runs_stale(
+                stale_marked = mark_downstream_subject_mask_runs_stale(
                     root,
                     source_keypoint_group=str(refined_result.get("refined_group_name") or "refined_keypoints_runs"),
                     source_keypoints_run=str(refined_result.get("refined_run") or ""),
@@ -976,7 +976,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     reason="keypoint_patch_from_crops_refined",
                 )
                 if stale_marked:
-                    print(f"  marked_downstream_eye_masks_stale={stale_marked}")
+                    print(f"  marked_downstream_refined_subject_masks_stale={stale_marked}")
 
         if not args.apply:
             print("  (dry-run) use --apply to write changes")

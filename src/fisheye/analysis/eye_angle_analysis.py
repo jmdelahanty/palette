@@ -3,8 +3,8 @@
 Frame-wise eye angle computation for Palette archives.
 
 This module derives head-relative eye angles, per-eye kinematics, and quality
-flags from canonical refined-subject eye geometry, legacy refined-eye geometry
-fallbacks, and their source keypoint headings. The results are stored under
+flags from canonical subject-mask eye geometry and its source keypoint headings.
+The results are stored under
 ``analysis/eye_angle_runs/<run>`` with full provenance metadata so downstream
 tools can consume clean, frame-aligned measurements.
 """
@@ -41,7 +41,6 @@ from fisheye.shared.provenance_attrs import (
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.detect_reason_codec import REASON_BYTES_ENCODING, REASON_BYTES_MIN_WIDTH
 from fisheye.shared.eye_geometry_source import (
-    EYE_GEOMETRY_STAGE_REFINED_EYE,
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
     resolve_eye_geometry_source,
@@ -225,7 +224,6 @@ def _source_geometry_kind(stage_group: str) -> str:
     return {
         EYE_GEOMETRY_STAGE_SUBJECT_SHAPE: "subject_shape_eye_geometry",
         EYE_GEOMETRY_STAGE_REFINED_SUBJECT: "refined_subject_eye_geometry",
-        EYE_GEOMETRY_STAGE_REFINED_EYE: "legacy_refined_eye_geometry",
     }.get(str(stage_group), "unknown_eye_geometry")
 
 
@@ -1657,7 +1655,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Compute head-relative eye angles and QA flags from subject-shape or "
-            "refined-subject eye geometry, with refined-eye compatibility fallback."
+            "refined-subject eye geometry."
         )
     )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
@@ -1670,14 +1668,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--refined-eye-run",
-        type=str,
-        help=(
-            "Compatibility refined eye mask run under refined_eye_masks_runs. "
-            "When it maps to refined_subject_masks_runs, canonical subject-eye geometry is used."
-        ),
-    )
-    parser.add_argument(
         "--refined-subject-run",
         type=str,
         help="Canonical refined_subject_masks_runs/<run> providing eye geometry (default: latest with LR eyes).",
@@ -1685,7 +1675,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keypoint-run",
         type=str,
-        help="Refined keypoint run providing heading and ROI coordinates (default: inferred from refined eye run or latest).",
+        help="Refined keypoint run providing heading and ROI coordinates (default: inferred from subject eye geometry lineage or latest).",
     )
     parser.add_argument(
         "--run-name",
@@ -1786,14 +1776,12 @@ def _resolve_eye_angle_inputs(
     *,
     subject_shape_run: Optional[str],
     refined_subject_run: Optional[str],
-    refined_eye_run: Optional[str],
     keypoint_run: Optional[str],
 ) -> EyeAngleInputContext:
     eye_geometry = resolve_eye_geometry_source(
         root,
         subject_shape_run=subject_shape_run,
         refined_subject_run=refined_subject_run,
-        refined_eye_run=refined_eye_run,
         prefer_subject_shape=True,
         prefer_subject=True,
     )
@@ -2020,7 +2008,6 @@ def _process_and_write_eye_angle_chunk(
     *,
     subject_shape_run: Optional[str],
     refined_subject_run: Optional[str],
-    refined_eye_run: Optional[str],
     keypoint_run: Optional[str],
     eye_angle_run: str,
     start_row: int,
@@ -2033,7 +2020,6 @@ def _process_and_write_eye_angle_chunk(
         root,
         subject_shape_run=subject_shape_run,
         refined_subject_run=refined_subject_run,
-        refined_eye_run=refined_eye_run,
         keypoint_run=keypoint_run,
     )
     run_group = root["analysis"]["eye_angle_runs"][eye_angle_run]
@@ -2150,7 +2136,6 @@ def run(args: argparse.Namespace) -> None:
         root,
         subject_shape_run=args.subject_shape_run,
         refined_subject_run=args.refined_subject_run,
-        refined_eye_run=args.refined_eye_run,
         keypoint_run=args.keypoint_run,
     )
     eye_geometry = context.eye_geometry
@@ -2207,9 +2192,6 @@ def run(args: argparse.Namespace) -> None:
         worker_refined_subject_run = (
             eye_geometry.run_name if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT else None
         )
-        worker_refined_eye_run = (
-            eye_geometry.run_name if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_REFINED_EYE else None
-        )
         worker_subject_shape_run = (
             eye_geometry.run_name if eye_geometry.stage_group == EYE_GEOMETRY_STAGE_SUBJECT_SHAPE else None
         )
@@ -2218,7 +2200,6 @@ def run(args: argparse.Namespace) -> None:
                 worker_zarr_path,
                 subject_shape_run=worker_subject_shape_run,
                 refined_subject_run=worker_refined_subject_run,
-                refined_eye_run=worker_refined_eye_run,
                 keypoint_run=keypoint_run_name,
                 eye_angle_run=resolved_run_name,
                 start_row=start_row,

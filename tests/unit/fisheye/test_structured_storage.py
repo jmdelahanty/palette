@@ -2,6 +2,8 @@ import numpy as np
 import zarr
 
 from fisheye.analysis.chaser_state_interpolator import (
+    analyze_frame_gaps,
+    interpolate_metadata,
     load_structured_dataset,
     pick_chunks,
     write_columnar_dataset,
@@ -64,3 +66,26 @@ def test_write_columnar_dataset_empty_roundtrip(tmp_path):
     assert loaded.shape == (0,)
     assert loaded.dtype == dtype
     assert loaded_attrs["n_bouts"] == 0
+
+
+def test_interpolate_metadata_accepts_epoch_timestamp_field():
+    dtype = np.dtype(
+        [
+            ("stimulus_frame_num", np.uint64),
+            ("triggering_camera_frame_id", np.uint64),
+            ("timestamp_ns_epoch", np.int64),
+        ]
+    )
+    data = np.zeros(2, dtype=dtype)
+    data["stimulus_frame_num"] = np.array([100, 102], dtype=np.uint64)
+    data["triggering_camera_frame_id"] = np.array([10, 12], dtype=np.uint64)
+    data["timestamp_ns_epoch"] = np.array([1_000, 3_000], dtype=np.int64)
+
+    stats = analyze_frame_gaps(data, console=None)
+    combined, mask = interpolate_metadata(data, stats, console=None)
+
+    assert combined.shape == (3,)
+    assert mask.tolist() == [True, False, True]
+    assert combined["stimulus_frame_num"].tolist() == [100, 101, 102]
+    assert combined["triggering_camera_frame_id"].tolist() == [10, 11, 12]
+    assert combined["timestamp_ns_epoch"].tolist() == [1_000, 2_000, 3_000]

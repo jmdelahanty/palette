@@ -18,7 +18,7 @@ from ..refinement.keypoint_quality import (
 )
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.frame_flags import append_flagged_frame, load_row_identity_arrays, row_identity_payload
-from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
+from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name
 from ..utils.zarr_io import open_zarr_root
 from .keypoint_failure_review import (
@@ -726,7 +726,7 @@ def save_roi_correction(
     if changed:
         _mark_edit_applied(session.edit_applied_arr, roi_idx)
         stale_touched = int(
-            mark_downstream_eye_mask_runs_stale(
+            mark_downstream_subject_mask_runs_stale(
                 session.root,
                 source_keypoint_group="refined_keypoints_runs",
                 source_keypoints_run=str(session.refined_run),
@@ -768,7 +768,7 @@ def _mark_manual_state_changed(
         return 0
     _mark_edit_applied(session.edit_applied_arr, roi_idx)
     return int(
-        mark_downstream_eye_mask_runs_stale(
+        mark_downstream_subject_mask_runs_stale(
             session.root,
             source_keypoint_group="refined_keypoints_runs",
             source_keypoints_run=str(session.refined_run),

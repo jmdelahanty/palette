@@ -21,7 +21,6 @@ DEFAULT_KEYS = [
     "detection_tuning",
     "keypoint_tuning",
     "subject_mask_tuning",
-    "eye_mask_tuning",
     "subdish_mask_tuning",
 ]
 SUBJECT_MASK_TUNING_KEY = "subject_mask_tuning"

@@ -237,7 +237,7 @@ def test_eye_angle_dashboard_default_source_uses_variant_schema() -> None:
 def test_eye_angle_source_geometry_kind_maps_known_sources() -> None:
     assert eye_angle_analysis._source_geometry_kind("analysis/subject_shape_runs") == "subject_shape_eye_geometry"
     assert eye_angle_analysis._source_geometry_kind("refined_subject_masks_runs") == "refined_subject_eye_geometry"
-    assert eye_angle_analysis._source_geometry_kind("refined_eye_masks_runs") == "legacy_refined_eye_geometry"
+    assert eye_angle_analysis._source_geometry_kind("refined_eye_masks_runs") == "unknown_eye_geometry"
     assert eye_angle_analysis._source_geometry_kind("unknown") == "unknown_eye_geometry"
 
 
@@ -559,7 +559,6 @@ def test_eye_angle_overlay_draws_vectors_from_actual_subject_shape_geometry() ->
             "source_refined_subject_masks_run": "refined_001",
         },
         refined_subject_run="refined_001",
-        refined_eye_run=None,
     )
 
     assert masks.shape == (2, 2, 4, 4)

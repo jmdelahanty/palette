@@ -14,7 +14,6 @@ from zarr.storage import MemoryStore
 
 from fisheye.utils import audit_refined_mask_metrics as audit_mod
 from fisheye.shared.zarr.stage_arrays import (
-    REFINED_EYE_MASKS_SPEC,
     REFINED_SUBJECT_COMPONENT_ARRAYS,
     REFINED_SUBJECT_COMPONENT_METRICS,
     REFINED_SUBJECT_EYE_CONTOURS,
@@ -142,20 +141,6 @@ def _write_refined_subject_eye_geometry(parent: zarr.Group, component_name: str)
     component = parent.require_group(component_name)
     _write_specs(component.require_group("geometry"), REFINED_SUBJECT_EYE_GEOMETRY)
     _write_specs(component.require_group("contours"), REFINED_SUBJECT_EYE_CONTOURS)
-
-
-def test_audit_refined_eye_mask_metrics_accepts_current_surface() -> None:
-    root = _root()
-    parent = root.create_group("refined_eye_masks_runs")
-    parent.attrs["latest"] = "refined_eye_masks_001"
-    run = parent.create_group("refined_eye_masks_001")
-    _write_stage(run, REFINED_EYE_MASKS_SPEC)
-
-    summary = audit_refined_mask_metrics(root, stage="refined_eye_masks")
-
-    assert summary["valid"] is True
-    assert summary["audited_runs"]["refined_eye_masks"] == ["refined_eye_masks_001"]
-    assert summary["errors"] == []
 
 
 def test_audit_refined_subject_mask_metrics_accepts_components_and_eye_relations() -> None:

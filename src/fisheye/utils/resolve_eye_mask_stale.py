@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Resolve downstream eye-mask stale markers after intentional keypoint nudges."""
+"""Resolve downstream subject-mask stale markers after intentional keypoint nudges.
+
+Deprecated name: this CLI used to resolve legacy eye-mask stale markers. Phase 1
+re-points keypoint edit invalidation to refined-subject mask runs while keeping
+the old module path as an operator-compatible shim.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import zarr
 
-from ..shared.keypoint_stale import resolve_downstream_eye_mask_runs_stale
+from ..shared.subject_mask_stale import resolve_downstream_subject_mask_runs_stale
 
 
 def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
@@ -157,7 +162,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"{zarr_path}: skipped ({err})")
             continue
 
-        touched = resolve_downstream_eye_mask_runs_stale(
+        touched = resolve_downstream_subject_mask_runs_stale(
             root,
             source_keypoint_group=str(source_group),
             source_keypoints_run=str(source_run),
@@ -168,7 +173,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         if touched == 0:
             summary["skipped"] += 1
-            print(f"{zarr_path}: no stale runs to resolve for {source_group}/{source_run}")
+            print(f"{zarr_path}: no subject-mask stale runs to resolve for {source_group}/{source_run}")
             continue
 
         summary["resolved"] += touched

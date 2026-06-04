@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pytest
 
-from fisheye.shared.eye_geometry_source import EYE_GEOMETRY_STAGE_REFINED_EYE
 from fisheye.shared.eye_geometry_source import EYE_GEOMETRY_STAGE_REFINED_SUBJECT
 from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
 from fisheye.utils import export_eye_mask_training_zarr as export_mod
@@ -154,29 +154,25 @@ def test_resolver_prefers_latest_refined_subject_geometry() -> None:
     np.testing.assert_array_equal(np.asarray(source.ellipse_success[:]), np.asarray([[True, True], [False, True]]))
 
 
-def test_explicit_derived_refined_eye_run_resolves_canonical_subject() -> None:
+def test_explicit_refined_subject_run_resolves_canonical_subject() -> None:
     root = _FakeGroup()
     eye = _add_refined_eye_run(root)
     eye.attrs["source_refined_subject_masks_run"] = "refined_subject_001"
     _add_refined_subject_run(root)
 
-    source = resolve_eye_geometry_source(root, refined_eye_run="refined_eye_001")
+    source = resolve_eye_geometry_source(root, refined_subject_run="refined_subject_001")
 
     assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
     assert source.run_name == "refined_subject_001"
-    assert source.lineage_attrs["source_keypoints_run"] == "refined_kp_001"
+    assert source.source_refined_eye_run == "refined_eye_001"
 
 
-def test_resolver_falls_back_to_refined_eye_masks() -> None:
+def test_resolver_rejects_legacy_only_refined_eye_masks() -> None:
     root = _FakeGroup()
     _add_refined_eye_run(root)
 
-    source = resolve_eye_geometry_source(root)
-
-    assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_EYE
-    assert source.run_name == "refined_eye_001"
-    assert source.ellipse_params.shape == (2, 2, 5)
-    np.testing.assert_array_equal(np.asarray(source.eye_separation[:]), np.asarray([4.0, 5.0], dtype=np.float32))
+    with pytest.raises(ValueError, match="No canonical subject-shape or refined-subject eye geometry found"):
+        resolve_eye_geometry_source(root)
 
 
 def test_eye_mask_training_export_auto_selects_refined_subject_geometry() -> None:

@@ -16,17 +16,17 @@ def _make_training_zarr(path: Path, *, keypoint_run: str = "refined_keypoints_00
     kp_parent.create_group(keypoint_run)
     kp_parent.attrs["latest"] = keypoint_run
 
-    eye_parent = root.create_group("refined_eye_masks_runs")
-    eye_run = eye_parent.create_group("refined_eye_masks_001")
-    eye_parent.attrs["latest"] = "refined_eye_masks_001"
-    eye_run.attrs.update(
+    subject_parent = root.create_group("refined_subject_masks_runs")
+    subject_run = subject_parent.create_group("refined_subject_masks_001")
+    subject_parent.attrs["latest"] = "refined_subject_masks_001"
+    subject_run.attrs.update(
         {
             "source_keypoints_run": keypoint_run,
             "source_keypoint_group": "refined_keypoints_runs",
-            "source_keypoint_stale": {
+            "source_subject_mask_stale": {
                 "state": "stale",
                 "reason": "keypoint_manual_correction",
-                "timestamp": "2026-02-12T00:00:00+00:00",
+                "timestamp_utc": "2026-02-12T00:00:00+00:00",
             },
         }
     )
@@ -43,7 +43,7 @@ def test_main_dry_run_reports_would_resolve(tmp_path: Path, capsys: pytest.Captu
     assert "Dry run summary" in out
 
     root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
-    payload = dict(root["refined_eye_masks_runs"]["refined_eye_masks_001"].attrs["source_keypoint_stale"])
+    payload = dict(root["refined_subject_masks_runs"]["refined_subject_masks_001"].attrs["source_subject_mask_stale"])
     assert payload["state"] == "stale"
 
 
@@ -67,7 +67,7 @@ def test_main_apply_resolves_stale(tmp_path: Path, capsys: pytest.CaptureFixture
     assert "Apply summary" in out
 
     root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
-    payload = dict(root["refined_eye_masks_runs"]["refined_eye_masks_001"].attrs["source_keypoint_stale"])
+    payload = dict(root["refined_subject_masks_runs"]["refined_subject_masks_001"].attrs["source_subject_mask_stale"])
     assert payload["state"] == "resolved"
     assert payload["resolution"] == "manual_accept_after_keypoint_nudge_preserve_masks"
     assert payload["resolved_by"] == "tester"

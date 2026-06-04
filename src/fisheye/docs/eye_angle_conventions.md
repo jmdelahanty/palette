@@ -1,6 +1,6 @@
 # Eye-Angle Metrics: Data Layout and Computation
 
-This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and refined eye geometry. It reflects the v5 eye-angle run schema and v7 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, and a machine-readable variant schema classifies those surfaces for UI selection. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
+This note summarizes where the eye-angle products are written inside a Palette archive and how each quantity is derived from the upstream detections, keypoints, and subject-mask eye geometry. It reflects the v5 eye-angle run schema and v7 output schema: the ellipse major axis is the canonical stored eye-orientation axis, gaze/minor direction is derived from that resolved major axis, BEAST/Johnson-style and Bianco/Engert-style vergence surfaces are available without changing the existing total-vergence surface, and a machine-readable variant schema classifies those surfaces for UI selection. For a field-by-field user guide to every angle variant, see `docs/eye_angle_variants.md`.
 
 ## Where the data lives
 
@@ -36,8 +36,9 @@ Current runs resolve eye geometry through `fisheye.shared.eye_geometry_source`.
 The preferred source is `analysis/subject_shape_runs/<run>` when it contains
 `eye_left` and `eye_right` component ellipse geometry. If no subject-shape
 geometry is available, the resolver falls back to
-`refined_subject_masks_runs/<run>` with eye component geometry, then to
-historical `refined_eye_masks_runs/<run>` data as a compatibility fallback.
+`refined_subject_masks_runs/<run>` with eye component geometry. Phase 1 of
+eye-mask severance removed the Palette-side fallback to historical
+`refined_eye_masks_runs/<run>` geometry.
 
 The referenced sources are captured in run attributes:
 
@@ -61,15 +62,15 @@ The referenced sources are captured in run attributes:
 - `source_eye_geometry_stage` and `source_eye_geometry_run`: the actual stage
   and run used for geometry.
 - `source_geometry_kind`: normalized geometry role, one of
-  `subject_shape_eye_geometry`, `refined_subject_eye_geometry`, or
-  `legacy_refined_eye_geometry`; unknown future stages are recorded as
+  `subject_shape_eye_geometry` or `refined_subject_eye_geometry`; unknown future
+  or historical stages are recorded as
   `unknown_eye_geometry`.
 - `source_subject_shape_run`: subject-shape source when analysis-facing shape
   geometry was used.
 - `source_refined_subject_masks_run`: canonical refined-subject source when
   available.
-- `source_refined_eye_run`: compatibility refined-eye source when one was used
-  or mapped.
+- `source_refined_eye_run`: historical lineage only when a subject-mask source
+  was seeded from compatibility refined-eye data.
 - `source_keypoints_run`: canonical refined keypoint source. The legacy
   `source_keypoint_run` alias may be mirrored during migration.
 

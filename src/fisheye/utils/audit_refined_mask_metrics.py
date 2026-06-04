@@ -12,7 +12,6 @@ import zarr
 
 from fisheye.utils.zarr_io import open_zarr_root
 from fisheye.shared.zarr.stage_arrays import (
-    REFINED_EYE_MASKS_SPEC,
     REFINED_SUBJECT_COMPONENT_ARRAYS,
     REFINED_SUBJECT_COMPONENT_METRICS,
     REFINED_SUBJECT_EYE_CONTOURS,
@@ -23,7 +22,7 @@ from fisheye.shared.zarr.stage_arrays import (
     validate_run,
 )
 
-REFINED_MASK_STAGES = ("refined_eye_masks", "refined_subject_masks")
+REFINED_MASK_STAGES = ("refined_subject_masks",)
 _EYE_COMPONENTS = ("eye_left", "eye_right")
 
 
@@ -98,34 +97,6 @@ def _mask_labels(run_group: zarr.Group) -> set[str]:
     if not isinstance(labels, (list, tuple)):
         return set()
     return {str(label) for label in labels}
-
-
-def _audit_refined_eye_runs(
-    root: zarr.Group,
-    *,
-    run_name: Optional[str],
-    latest_only: bool,
-    errors: list[str],
-    warnings: list[str],
-) -> list[str]:
-    parent = root.get("refined_eye_masks_runs")
-    run_names = _selected_run_names(parent, run_name, latest_only=latest_only)
-    if parent is None:
-        warnings.append("refined_eye_masks_runs: stage group missing")
-        return []
-    if run_name and not run_names:
-        errors.append(f"refined_eye_masks_runs/{run_name}: run not found")
-        return []
-
-    for name in run_names:
-        _append_validation(
-            group=parent[name],
-            spec=REFINED_EYE_MASKS_SPEC,
-            path=f"refined_eye_masks_runs/{name}",
-            errors=errors,
-            warnings=warnings,
-        )
-    return run_names
 
 
 def _audit_refined_subject_run(
@@ -249,22 +220,13 @@ def audit_refined_mask_metrics(
 
     stage_key = str(stage).strip().lower()
     if stage_key not in {"all", *REFINED_MASK_STAGES}:
-        raise ValueError(f"Unsupported stage {stage!r}; expected all, refined_eye_masks, or refined_subject_masks.")
+        raise ValueError(f"Unsupported stage {stage!r}; expected all or refined_subject_masks.")
     if run_name and stage_key == "all":
-        raise ValueError("run_name requires stage='refined_eye_masks' or stage='refined_subject_masks'.")
+        raise ValueError("run_name requires stage='refined_subject_masks'.")
 
     errors: list[str] = []
     warnings: list[str] = []
     audited: dict[str, list[str]] = {}
-
-    if stage_key in {"all", "refined_eye_masks"}:
-        audited["refined_eye_masks"] = _audit_refined_eye_runs(
-            root,
-            run_name=run_name,
-            latest_only=latest_only,
-            errors=errors,
-            warnings=warnings,
-        )
 
     if stage_key in {"all", "refined_subject_masks"}:
         audited["refined_subject_masks"] = _audit_refined_subject_runs(
@@ -319,7 +281,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print the full JSON summary.")
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.run_name and args.stage == "all":
-        parser.error("--run requires --stage refined_eye_masks or --stage refined_subject_masks.")
+        parser.error("--run requires --stage refined_subject_masks.")
 
     summary = audit_refined_mask_metrics_zarr(
         args.zarr_path,

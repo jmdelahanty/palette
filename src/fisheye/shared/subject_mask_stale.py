@@ -8,7 +8,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
+from .provenance_attrs import resolve_source_keypoints_run
+
 MAX_STALE_INDEX_HISTORY = 2048
+_EYE_COMPONENT_NAMES = ("eye_left", "eye_right", "eyes_union")
 
 _COMPONENT_SOURCE_ATTR_NAMES = {
     "subject_body": "source_body_subject_mask_run",
@@ -46,6 +49,16 @@ def _trimmed_sorted_ints(values: Sequence[int]) -> List[int]:
     return merged
 
 
+def _merge_int_list(existing: object, new_values: Sequence[int]) -> List[int]:
+    return _trimmed_sorted_ints(_coerce_int_list(existing) + [int(v) for v in new_values])
+
+
+def _iter_group_names(parent: zarr.Group) -> List[str]:
+    if hasattr(parent, "group_keys"):
+        return sorted(str(name) for name in parent.group_keys())
+    return sorted(str(name) for name in parent.keys())
+
+
 def _iter_component_groups(run_group: zarr.Group) -> Iterable[Tuple[str, zarr.Group]]:
     components = run_group.get("components")
     if not isinstance(components, zarr.Group):
@@ -55,6 +68,31 @@ def _iter_component_groups(run_group: zarr.Group) -> Iterable[Tuple[str, zarr.Gr
     else:  # pragma: no cover - compatibility
         names = sorted(str(name) for name in components.keys())
     return [(name, components[name]) for name in names]
+
+
+def _matches_source_keypoint_lineage(
+    attrs: Mapping[str, Any],
+    *,
+    source_keypoint_group: str,
+    source_keypoints_run: str,
+) -> bool:
+    run_source = resolve_source_keypoints_run(attrs)
+    if str(run_source) != str(source_keypoints_run):
+        return False
+
+    if not source_keypoint_group:
+        return True
+
+    run_group_name = attrs.get("source_keypoint_group")
+    if run_group_name not in (None, "", source_keypoint_group):
+        return False
+    return True
+
+
+def _subject_stale_component_names(run_group: zarr.Group) -> List[str]:
+    component_names = [name for name, _group in _iter_component_groups(run_group)]
+    eye_names = [name for name in _EYE_COMPONENT_NAMES if name in set(component_names)]
+    return eye_names or component_names
 
 
 def _component_source_subject_mask_run(
@@ -150,6 +188,106 @@ def sync_source_subject_mask_stale_payload(
     return payload
 
 
+def mark_downstream_subject_mask_runs_stale(
+    root: zarr.Group,
+    *,
+    source_keypoint_group: str,
+    source_keypoints_run: str,
+    roi_indices: Sequence[int],
+    frame_indices: Sequence[int],
+    reason: str,
+    extra: Optional[Mapping[str, object]] = None,
+) -> int:
+    """Mark refined-subject mask runs that depend on a keypoint run as stale.
+
+    This is the subject-mask successor to the legacy eye-mask
+    ``source_keypoint_stale`` marker. It writes the canonical
+    ``source_subject_mask_stale`` payload and component pending-row markers so
+    existing subject-mask stale resolution tools can acknowledge the update.
+    """
+
+    if not source_keypoint_group or not source_keypoints_run:
+        return 0
+
+    roi_values = sorted(set(int(v) for v in roi_indices))
+    frame_values = sorted(set(int(v) for v in frame_indices))
+    if not roi_values and not frame_values:
+        return 0
+
+    parent = root.get("refined_subject_masks_runs")
+    if not isinstance(parent, zarr.Group):
+        return 0
+
+    timestamp = _utc_now()
+    touched = 0
+
+    for run_name in _iter_group_names(parent):
+        run_group = parent[run_name]
+        attrs = dict(run_group.attrs)
+        if not _matches_source_keypoint_lineage(
+            attrs,
+            source_keypoint_group=source_keypoint_group,
+            source_keypoints_run=source_keypoints_run,
+        ):
+            continue
+
+        existing = attrs.get("source_subject_mask_stale")
+        payload: Dict[str, Any] = dict(existing) if isinstance(existing, Mapping) else {}
+        for key in ("resolved_at_utc", "resolution", "resolved_by", "resolved_notes", "stale_timestamp_utc"):
+            payload.pop(key, None)
+
+        component_names = _subject_stale_component_names(run_group)
+        existing_components = payload.get("components")
+        components_payload: Dict[str, Dict[str, Any]] = (
+            {str(key): dict(value) for key, value in existing_components.items() if isinstance(value, Mapping)}
+            if isinstance(existing_components, Mapping)
+            else {}
+        )
+
+        components_parent = run_group.get("components")
+        for component_name in component_names:
+            component_payload = components_payload.setdefault(str(component_name), {})
+            component_payload["roi_indices"] = _merge_int_list(component_payload.get("roi_indices"), roi_values)
+            component_payload["frame_indices"] = _merge_int_list(component_payload.get("frame_indices"), frame_values)
+            if isinstance(components_parent, zarr.Group) and component_name in components_parent:
+                component_group = components_parent[component_name]
+                source_run = _component_source_subject_mask_run(
+                    run_group,
+                    component_name=component_name,
+                    component_group=component_group,
+                )
+                if source_run:
+                    component_payload["source_subject_mask_run"] = source_run
+                component_group.attrs["source_update_pending_rows"] = _merge_int_list(
+                    component_group.attrs.get("source_update_pending_rows"),
+                    roi_values,
+                )
+                source_row_stale = component_group.get("source_row_stale")
+                if source_row_stale is not None:
+                    row_count = int(getattr(source_row_stale, "shape", (0,))[0])
+                    for roi_idx in roi_values:
+                        if 0 <= int(roi_idx) < row_count:
+                            source_row_stale[int(roi_idx)] = True
+
+        payload["state"] = "stale"
+        payload["timestamp_utc"] = timestamp
+        payload["reason"] = str(reason).strip() or "keypoint_source_rows_changed"
+        payload["source_keypoint_group"] = source_keypoint_group
+        payload["source_keypoints_run"] = source_keypoints_run
+        payload["roi_indices"] = _merge_int_list(payload.get("roi_indices"), roi_values)
+        payload["frame_indices"] = _merge_int_list(payload.get("frame_indices"), frame_values)
+        payload["component_names"] = sorted(components_payload)
+        payload["components"] = components_payload
+        if extra:
+            for key, value in extra.items():
+                payload[str(key)] = value
+
+        run_group.attrs["source_subject_mask_stale"] = payload
+        touched += 1
+
+    return touched
+
+
 def resolve_refined_subject_mask_run_stale(
     run_group: zarr.Group,
     *,
@@ -227,6 +365,8 @@ def resolve_downstream_subject_mask_runs_stale(
     *,
     refined_run: Optional[str] = None,
     source_subject_mask_run: Optional[str] = None,
+    source_keypoint_group: Optional[str] = None,
+    source_keypoints_run: Optional[str] = None,
     resolution: str,
     reviewer: Optional[str] = None,
     notes: Optional[str] = None,
@@ -252,6 +392,13 @@ def resolve_downstream_subject_mask_runs_stale(
             candidate = run_group.attrs.get("source_subject_mask_run")
             if str(candidate or "").strip() != str(source_subject_mask_run).strip():
                 continue
+        if source_keypoints_run:
+            if not _matches_source_keypoint_lineage(
+                dict(run_group.attrs),
+                source_keypoint_group=str(source_keypoint_group or ""),
+                source_keypoints_run=str(source_keypoints_run),
+            ):
+                continue
         touched += resolve_refined_subject_mask_run_stale(
             run_group,
             resolution=resolution,
@@ -265,6 +412,7 @@ def resolve_downstream_subject_mask_runs_stale(
 
 __all__ = [
     "collect_active_subject_mask_stale",
+    "mark_downstream_subject_mask_runs_stale",
     "resolve_downstream_subject_mask_runs_stale",
     "resolve_refined_subject_mask_run_stale",
     "sync_source_subject_mask_stale_payload",

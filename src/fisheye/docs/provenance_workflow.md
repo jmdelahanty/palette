@@ -20,8 +20,9 @@ Current mask-local eye geometry authority is `refined_subject_masks_runs/<run>`
 when that run contains `eye_left` and `eye_right` components.
 `analysis/subject_shape_runs/<run>` is the preferred analysis-facing coherent
 body/eyes/swim shape surface. `analysis/eye_angle_runs` consumes subject-shape
-eye geometry when available, then falls back to refined-subject geometry and
-legacy `refined_eye_masks_runs` compatibility data.
+eye geometry when available, then falls back to refined-subject geometry. Phase
+1 of eye-mask severance removed Palette-side eye-angle fallback to legacy
+`refined_eye_masks_runs` compatibility data.
 Shared fish-relative body-frame outputs should materialize under
 `analysis/subject_shape_runs/<run>/body_frame/` when a subject-shape run
 produces them; analysis-local body-frame caches remain support data.
@@ -44,11 +45,11 @@ Relevant provenance attributes:
 | `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
 | `tracking_runs/<run>` | `track_ids`, `track_arena_ids` | `source_detect_run`, `source_refined_run`, `source_arena_assignment_run`, `tracking_qc_state` |
 
-Keypoint-lineage attribute contract for eye-mask stages:
+Keypoint-lineage attribute contract for legacy eye-mask stages:
 
 - Canonical attr is `source_keypoints_run`.
 - `source_keypoint_run` is a legacy compatibility alias and should not be used as the primary key in new tooling.
-- Writers for new eye-mask/refined-eye-mask runs should write canonical lineage (and may mirror the legacy alias during migration).
+- Legacy writers should write canonical lineage (and may mirror the legacy alias during migration).
 - Readers/diagnostics resolve canonical first, then legacy alias fallback.
 - `check_eye_masks` reports legacy-only lineage as `legacy` (warning) and missing/empty lineage as `incomplete`.
 

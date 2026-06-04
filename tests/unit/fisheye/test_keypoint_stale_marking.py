@@ -2,12 +2,133 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import zarr
 
 from fisheye.shared.keypoint_stale import (
     mark_downstream_eye_mask_runs_stale,
     resolve_downstream_eye_mask_runs_stale,
 )
+from fisheye.shared.subject_mask_stale import (
+    mark_downstream_subject_mask_runs_stale,
+    resolve_downstream_subject_mask_runs_stale,
+)
+
+
+def test_mark_downstream_subject_mask_runs_stale_marks_matching_refined_subject_runs(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("refined_subject_masks_runs")
+    run = parent.create_group("refined_subject_masks_001")
+    run.attrs.update(
+        {
+            "source_keypoints_run": "refined_keypoints_001",
+            "source_keypoint_group": "refined_keypoints_runs",
+            "mask_labels": ["subject_body", "eye_left", "eye_right"],
+        }
+    )
+    components = run.create_group("components")
+    for component_name in ("subject_body", "eye_left", "eye_right"):
+        component = components.create_group(component_name)
+        component.create_array("source_row_stale", data=np.array([False, False, False], dtype=bool), overwrite=True)
+
+    other = parent.create_group("refined_subject_masks_002")
+    other.attrs.update(
+        {
+            "source_keypoints_run": "refined_keypoints_999",
+            "source_keypoint_group": "refined_keypoints_runs",
+        }
+    )
+
+    touched = mark_downstream_subject_mask_runs_stale(
+        root,
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_keypoints_001",
+        roi_indices=[1],
+        frame_indices=[1234],
+        reason="keypoint_manual_correction",
+    )
+    assert touched == 1
+
+    root_live = zarr.open_group(str(zarr_path), mode="r")
+    run = root_live["refined_subject_masks_runs/refined_subject_masks_001"]
+    payload = dict(run.attrs["source_subject_mask_stale"])
+    assert payload["state"] == "stale"
+    assert payload["reason"] == "keypoint_manual_correction"
+    assert payload["source_keypoint_group"] == "refined_keypoints_runs"
+    assert payload["source_keypoints_run"] == "refined_keypoints_001"
+    assert payload["roi_indices"] == [1]
+    assert payload["frame_indices"] == [1234]
+    assert payload["component_names"] == ["eye_left", "eye_right"]
+    assert dict(payload["components"]["eye_left"])["roi_indices"] == [1]
+    assert list(run["components/eye_left/source_row_stale"][:]) == [False, True, False]
+    assert "source_subject_mask_stale" not in root_live["refined_subject_masks_runs/refined_subject_masks_002"].attrs
+
+
+def test_resolve_downstream_subject_mask_runs_stale_filters_keypoint_lineage(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("refined_subject_masks_runs")
+    run = parent.create_group("refined_subject_masks_001")
+    run.attrs.update(
+        {
+            "source_keypoints_run": "refined_keypoints_001",
+            "source_keypoint_group": "refined_keypoints_runs",
+        }
+    )
+
+    mark_downstream_subject_mask_runs_stale(
+        root,
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_keypoints_001",
+        roi_indices=[1],
+        frame_indices=[1234],
+        reason="keypoint_manual_correction",
+    )
+
+    touched = resolve_downstream_subject_mask_runs_stale(
+        root,
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_keypoints_001",
+        resolution="manual_accept_after_keypoint_nudge_preserve_masks",
+        reviewer="tester",
+    )
+    assert touched == 1
+    payload = dict(root["refined_subject_masks_runs/refined_subject_masks_001"].attrs["source_subject_mask_stale"])
+    assert payload["state"] == "resolved"
+    assert payload["resolution"] == "manual_accept_after_keypoint_nudge_preserve_masks"
+    assert payload["resolved_by"] == "tester"
+
+
+def test_resolve_downstream_subject_mask_runs_stale_allows_keypoint_group_wildcard(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("refined_subject_masks_runs")
+    run = parent.create_group("refined_subject_masks_001")
+    run.attrs.update(
+        {
+            "source_keypoints_run": "refined_keypoints_001",
+            "source_keypoint_group": "refined_keypoints_runs",
+        }
+    )
+
+    mark_downstream_subject_mask_runs_stale(
+        root,
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_keypoints_001",
+        roi_indices=[1],
+        frame_indices=[1234],
+        reason="keypoint_manual_correction",
+    )
+
+    touched = resolve_downstream_subject_mask_runs_stale(
+        root,
+        source_keypoints_run="refined_keypoints_001",
+        resolution="manual_accept_after_keypoint_nudge_preserve_masks",
+    )
+    assert touched == 1
+    payload = dict(root["refined_subject_masks_runs/refined_subject_masks_001"].attrs["source_subject_mask_stale"])
+    assert payload["state"] == "resolved"
 
 
 def test_mark_downstream_eye_mask_runs_stale_marks_matching_runs(tmp_path: Path) -> None:

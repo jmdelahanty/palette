@@ -487,13 +487,13 @@ def test_save_roi_correction_no_change_does_not_mark_stale_or_edit() -> None:
         touched.update(kwargs)
         return 7
 
-    original_mark = mod.mark_downstream_eye_mask_runs_stale
+    original_mark = mod.mark_downstream_subject_mask_runs_stale
     original = mod.ReviewSession
-    mod.mark_downstream_eye_mask_runs_stale = _fake_mark  # type: ignore[assignment]
+    mod.mark_downstream_subject_mask_runs_stale = _fake_mark  # type: ignore[assignment]
     try:
         result = mod.save_roi_correction(session, position=0, points=base_points)
     finally:
-        mod.mark_downstream_eye_mask_runs_stale = original_mark
+        mod.mark_downstream_subject_mask_runs_stale = original_mark
         mod.ReviewSession = original
 
     assert result["changed"] is False
@@ -515,7 +515,7 @@ def test_mark_no_keypoints_updates_failure_state_and_reason(monkeypatch) -> None
         stale_calls.append(dict(kwargs))
         return 3
 
-    monkeypatch.setattr(mod, "mark_downstream_eye_mask_runs_stale", _fake_mark)
+    monkeypatch.setattr(mod, "mark_downstream_subject_mask_runs_stale", _fake_mark)
 
     result = mod.mark_no_keypoints(session, position=0)
 
@@ -532,7 +532,7 @@ def test_mark_no_keypoints_updates_failure_state_and_reason(monkeypatch) -> None
 
 def test_mark_detection_issue_and_clear_failure_label(monkeypatch) -> None:
     session = _build_session(keypoint_count=5)
-    monkeypatch.setattr(mod, "mark_downstream_eye_mask_runs_stale", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(mod, "mark_downstream_subject_mask_runs_stale", lambda *_args, **_kwargs: 1)
 
     result = mod.mark_detection_issue(session, position=0)
     assert result["action"] == "mark_detection_issue"
@@ -644,7 +644,7 @@ def test_web_endpoints_cover_action_filter_jump_and_review_status(monkeypatch) -
         reviewer="tester",
     )
 
-    monkeypatch.setattr(mod, "mark_downstream_eye_mask_runs_stale", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(mod, "mark_downstream_subject_mask_runs_stale", lambda *_args, **_kwargs: 0)
 
     def _fake_apply(refined_parent: object, refined_run: str, refined: object, **kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
         payload = {"state": kwargs["state"], "method": kwargs["method"], "intended_use": kwargs["intended_use"]}

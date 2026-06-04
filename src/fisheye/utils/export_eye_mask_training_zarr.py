@@ -32,7 +32,6 @@ from fisheye.shared.detect_reason_codec import (
     write_reason_columns,
 )
 from fisheye.shared.eye_geometry_source import (
-    EYE_GEOMETRY_STAGE_REFINED_EYE,
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EyeGeometrySource,
     resolve_eye_geometry_source,
@@ -63,7 +62,7 @@ EYE_ROW_GATE_POLICIES = ("all_rows", "usable_only", "usable_plus_explicit_negati
 EYE_EXPORT_STAGE_CHOICES = (
     "auto",
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
-    EYE_GEOMETRY_STAGE_REFINED_EYE,
+    "refined_eye_masks_runs",
     "eye_masks_runs",
 )
 
@@ -492,7 +491,7 @@ def _resolve_eye_source(
         try:
             source = resolve_eye_geometry_source(
                 root,
-                refined_eye_run=eye_run,
+                refined_subject_run=eye_run,
                 prefer_subject=True,
             )
             return source.stage_group, source.run_name, source.group, source
@@ -507,13 +506,8 @@ def _resolve_eye_source(
         if source.stage_group != EYE_GEOMETRY_STAGE_REFINED_SUBJECT:
             raise ValueError("No refined_subject_masks_runs source with canonical eye geometry found.")
         return source.stage_group, source.run_name, source.group, source
-    elif eye_stage == EYE_GEOMETRY_STAGE_REFINED_EYE:
-        source = resolve_eye_geometry_source(
-            root,
-            refined_eye_run=eye_run or "latest",
-            prefer_subject=True,
-        )
-        return source.stage_group, source.run_name, source.group, source
+    elif eye_stage == "refined_eye_masks_runs":
+        stage_order = ["refined_eye_masks_runs"]
     else:
         stage_order = ["eye_masks_runs"]
 
@@ -2517,7 +2511,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help=(
             "Eye-mask stage selector. auto prefers refined_subject_masks_runs eye geometry, "
-            "then refined_eye_masks_runs, then eye_masks_runs."
+            "then eye_masks_runs. refined_eye_masks_runs remains explicit legacy-only."
         ),
     )
     parser.add_argument("--eye-run", help="Optional explicit eye-mask run name.")

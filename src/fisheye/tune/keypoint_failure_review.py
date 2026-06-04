@@ -38,7 +38,7 @@ from ..shared.frame_flags import (
     row_identity_payload,
 )
 from ..shared.keypoint_temporal_heading import refresh_refined_keypoint_heading_fields
-from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
+from ..shared.subject_mask_stale import mark_downstream_subject_mask_runs_stale
 from ..registry.stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
 from ..shared.zarr_run_completion import resolve_latest_complete_run_name
@@ -1377,7 +1377,7 @@ def launch_review(
 
         if changed:
             _mark_edit_applied(edit_applied_arr, roi_idx)
-            stale_touched = mark_downstream_eye_mask_runs_stale(
+            stale_touched = mark_downstream_subject_mask_runs_stale(
                 root,
                 source_keypoint_group="refined_keypoints_runs",
                 source_keypoints_run=str(refined_run),
@@ -1387,7 +1387,7 @@ def launch_review(
             )
             print(f"Saved manual correction for ROI {roi_idx}.")
             if stale_touched:
-                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+                print(f"Marked {stale_touched} downstream refined-subject mask run(s) stale.")
         else:
             print(f"No changes for ROI {roi_idx}; skipped stale marker update.")
 
@@ -1445,7 +1445,7 @@ def launch_review(
 
         if changed:
             _mark_edit_applied(edit_applied_arr, roi_idx)
-            stale_touched = mark_downstream_eye_mask_runs_stale(
+            stale_touched = mark_downstream_subject_mask_runs_stale(
                 root,
                 source_keypoint_group="refined_keypoints_runs",
                 source_keypoints_run=str(refined_run),
@@ -1455,7 +1455,7 @@ def launch_review(
             )
             print(f"Marked fish-present/no-keypoints for ROI {roi_idx} (frame {frame_idx}).")
             if stale_touched:
-                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+                print(f"Marked {stale_touched} downstream refined-subject mask run(s) stale.")
         else:
             print(f"No changes for ROI {roi_idx} (frame {frame_idx}); skipped stale marker update.")
 
@@ -1527,7 +1527,7 @@ def launch_review(
 
         if changed:
             _mark_edit_applied(edit_applied_arr, roi_idx)
-            stale_touched = mark_downstream_eye_mask_runs_stale(
+            stale_touched = mark_downstream_subject_mask_runs_stale(
                 root,
                 source_keypoint_group="refined_keypoints_runs",
                 source_keypoints_run=str(refined_run),
@@ -1537,7 +1537,7 @@ def launch_review(
             )
             print(f"Marked detection issue for ROI {roi_idx} (frame {frame_idx}).")
             if stale_touched:
-                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+                print(f"Marked {stale_touched} downstream refined-subject mask run(s) stale.")
         else:
             print(f"No changes for ROI {roi_idx} (frame {frame_idx}); skipped stale marker update.")
 
@@ -1573,7 +1573,7 @@ def launch_review(
 
         if changed:
             _mark_edit_applied(edit_applied_arr, roi_idx)
-            stale_touched = mark_downstream_eye_mask_runs_stale(
+            stale_touched = mark_downstream_subject_mask_runs_stale(
                 root,
                 source_keypoint_group="refined_keypoints_runs",
                 source_keypoints_run=str(refined_run),
@@ -1586,7 +1586,7 @@ def launch_review(
                 f"{', '.join(present)}."
             )
             if stale_touched:
-                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+                print(f"Marked {stale_touched} downstream refined-subject mask run(s) stale.")
         else:
             print(f"No changes for ROI {roi_idx} (frame {frame_idx}); skipped stale marker update.")
         update_display()

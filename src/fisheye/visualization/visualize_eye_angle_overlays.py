@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Interactive explorer that overlays refined eye masks and signed eye-angle
+Interactive explorer that overlays subject-mask eye channels and signed eye-angle
 metrics on the ROI crops used by the eye pipeline. Supports toggling between
 major-axis (nasal-positive) and minor-axis (temporal-positive) angle
 interpretations for side-by-side evaluation. Schema v2 treats the minor axis as
 the preferred gaze axis, so the viewer opens in minor-axis mode when available.
 
 Loads a Palette archive, pulls the specified (or latest) eye-angle analysis run
-along with its corresponding refined eye masks and keypoint crops, then renders
+along with its corresponding refined-subject eye masks and keypoint crops, then renders
 each ROI with:
   * Grayscale crop
   * Colored mask overlays (left/right or per-channel)
@@ -33,7 +33,6 @@ from matplotlib.widgets import Button, Slider
 from fisheye.analysis.eye_angle_io import load_eye_angle_run_tables
 from fisheye.pose.schema import resolve_required_keypoint_indices_from_attrs
 from fisheye.shared.eye_geometry_source import (
-    EYE_GEOMETRY_STAGE_REFINED_EYE,
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
     EYE_GEOMETRY_STAGE_SUBJECT_SHAPE,
     resolve_eye_geometry_source,
@@ -495,8 +494,15 @@ def _resolve_eye_angle_geometry_source(
         )
     if source_stage == EYE_GEOMETRY_STAGE_REFINED_SUBJECT:
         return resolve_eye_geometry_source(root, refined_subject_run=source_run)
-    if source_stage == EYE_GEOMETRY_STAGE_REFINED_EYE:
-        return resolve_eye_geometry_source(root, refined_eye_run=source_run)
+    if source_stage == "refined_eye_masks_runs":
+        refined_subject_run = run_attrs.get("source_refined_subject_masks_run")
+        if refined_subject_run:
+            return resolve_eye_geometry_source(root, refined_subject_run=str(refined_subject_run))
+        raise RuntimeError(
+            "This eye-angle run records legacy refined_eye_masks_runs as its geometry source "
+            "and has no source_refined_subject_masks_run lineage. Recompute eye angles from "
+            "subject-shape or refined-subject geometry."
+        )
 
     subject_shape_run = run_attrs.get("source_subject_shape_run")
     if subject_shape_run:
@@ -509,19 +515,17 @@ def _load_display_masks_and_geometry(
     *,
     run_attrs: Mapping[str, object],
     refined_subject_run: Optional[str],
-    refined_eye_run: Optional[str],
 ):
     geometry_source = _resolve_eye_angle_geometry_source(root, run_attrs=run_attrs)
     mask_source = resolve_eye_geometry_source(
         root,
         refined_subject_run=refined_subject_run,
-        refined_eye_run=refined_eye_run,
         prefer_subject=True,
     )
     if mask_source.masks_roi is None:
         raise RuntimeError(
             "Resolved eye-angle geometry does not include masks; pass --refined-subject-run "
-            "or --refined-eye-run for overlay pixels."
+            "for overlay pixels."
         )
     return mask_source.masks_roi, geometry_source.ellipse_params
 
@@ -677,10 +681,9 @@ def _load_angles(root: zarr.Group, run_name: str, prefer_smoothed: bool) -> tupl
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Overlay refined eye masks with signed eye-angle metrics on ROI crops.")
+    parser = argparse.ArgumentParser(description="Overlay subject-mask eye channels with signed eye-angle metrics on ROI crops.")
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
     parser.add_argument("--eye-angle-run", dest="eye_angle_run", help="Specific analysis/eye_angle_runs/<run> to visualize.")
-    parser.add_argument("--refined-eye-run", dest="refined_run", help="Specific compatibility refined_eye_masks_runs/<run> to use.")
     parser.add_argument("--refined-subject-run", dest="refined_subject_run", help="Specific canonical refined_subject_masks_runs/<run> to use.")
     parser.add_argument("--keypoint-run", dest="keypoint_run", help="Specific keypoints_runs/<run> providing ROI images.")
     parser.add_argument("--alpha", type=float, default=0.55, help="Mask overlay alpha (default 0.55).")
@@ -715,15 +718,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     source_stage = str(run_group.attrs.get("source_eye_geometry_stage") or "")
     source_run = str(run_group.attrs.get("source_eye_geometry_run") or "")
     refined_subject_run = args.refined_subject_run
-    refined_run = args.refined_run
     if refined_subject_run is None and source_stage == "refined_subject_masks_runs" and source_run:
         refined_subject_run = source_run
-    if refined_run is None and source_stage == "refined_eye_masks_runs" and source_run:
-        refined_run = source_run
     if refined_subject_run is None:
         refined_subject_run = run_group.attrs.get("source_refined_subject_masks_run")
-    if refined_run is None:
-        refined_run = run_group.attrs.get("source_refined_eye_run")
     keypoint_run = _resolve_keypoint_run_name(
         explicit_keypoint_run=args.keypoint_run,
         run_attrs=run_group.attrs,
@@ -738,7 +736,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         root,
         run_attrs=run_group.attrs,
         refined_subject_run=refined_subject_run,
-        refined_eye_run=refined_run,
     )
 
     if roi_images.shape[0] != masks.shape[0]:
