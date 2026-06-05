@@ -8,6 +8,7 @@ from fisheye.detection.detect_keypoints_yolo import (
     _create_output_arrays,
     _extract_keypoint_confidences,
     _extract_pose_bbox_xyxy_roi,
+    _prepare_model_inputs,
 )
 
 
@@ -84,3 +85,46 @@ def test_extract_pose_bbox_xyxy_roi_returns_nan_when_missing() -> None:
 
     assert actual.shape == (4,)
     assert np.isnan(actual).all()
+
+
+def test_prepare_model_inputs_tensor_mode_returns_normalized_bchw_tensor() -> None:
+    batch = np.full((2, 32, 32), 255, dtype=np.uint8)
+
+    actual, mode = _prepare_model_inputs(batch, input_mode="tensor", imgsz=32, device=None)
+
+    assert mode == "tensor"
+    assert isinstance(actual, torch.Tensor)
+    assert actual.shape == (2, 3, 32, 32)
+    assert actual.dtype == torch.float32
+    assert float(actual.max()) == 1.0
+
+
+def test_prepare_model_inputs_numpy_list_preserves_legacy_rgb_arrays() -> None:
+    batch = np.zeros((2, 32, 32), dtype=np.uint8)
+
+    actual, mode = _prepare_model_inputs(batch, input_mode="numpy-list", imgsz=32, device=None)
+
+    assert mode == "numpy-list"
+    assert isinstance(actual, list)
+    assert len(actual) == 2
+    assert actual[0].shape == (32, 32, 3)
+
+
+def test_prepare_model_inputs_tensor_mode_rejects_imgsz_mismatch() -> None:
+    batch = np.zeros((2, 32, 32), dtype=np.uint8)
+
+    try:
+        _prepare_model_inputs(batch, input_mode="tensor", imgsz=64, device=None)
+    except ValueError as exc:
+        assert "imgsz=32" in str(exc)
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("tensor mode should reject non-equivalent imgsz")
+
+
+def test_prepare_model_inputs_auto_falls_back_for_imgsz_mismatch() -> None:
+    batch = np.zeros((2, 32, 32), dtype=np.uint8)
+
+    actual, mode = _prepare_model_inputs(batch, input_mode="auto", imgsz=64, device=None)
+
+    assert mode == "numpy-list"
+    assert isinstance(actual, list)

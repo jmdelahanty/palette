@@ -321,6 +321,12 @@ Examples:
         action="store_true",
         help="Collect per-stage timing diagnostics and store them in the output run attrs.",
     )
+    parser.add_argument(
+        "--input-mode",
+        choices=("numpy-list", "tensor", "auto"),
+        default="numpy-list",
+        help="Ultralytics input preparation mode (default: legacy numpy-list).",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -349,6 +355,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             roi_cache_dir=args.roi_cache_dir,
             roi_live_acceleration=args.roi_live_acceleration,
             roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
+            input_mode=args.input_mode,
             profile_timings=args.profile_timings,
             verbose=args.verbose,
             registry=(status_context.registry_path if status_context is not None else None),

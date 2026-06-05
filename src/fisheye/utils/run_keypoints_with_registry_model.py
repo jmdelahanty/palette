@@ -180,6 +180,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Collect per-stage timing diagnostics and store them in the output keypoint run attrs.",
     )
+    parser.add_argument(
+        "--input-mode",
+        choices=("numpy-list", "tensor", "auto"),
+        default="numpy-list",
+        help="Ultralytics input preparation mode (default: legacy numpy-list).",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output.")
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
@@ -242,6 +248,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         mask_threshold=args.mask_threshold,
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
+        input_mode=args.input_mode,
         profile_timings=bool(args.profile_timings),
         registry=registry_path,
     )

@@ -41,6 +41,7 @@ from ultralytics import YOLO, __version__ as ultralytics_version
 DEFAULT_POSE_SCHEMA_NAME = "traditional_v1"
 _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
+_KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")
 
 
 def _prepare_run_group(
@@ -297,6 +298,63 @@ def _repeat_to_rgb(batch: np.ndarray) -> List[np.ndarray]:
     return [np.repeat(img[..., None], 3, axis=2) for img in batch]
 
 
+def _normalize_input_mode(value: str) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    if text not in _KEYPOINT_INPUT_MODES:
+        choices = ", ".join(_KEYPOINT_INPUT_MODES)
+        raise ValueError(f"Invalid keypoint input mode '{value}'. Expected one of: {choices}")
+    return text
+
+
+def _tensor_input_blocker(batch: np.ndarray, *, imgsz: int) -> Optional[str]:
+    if batch.ndim != 3:
+        return f"expected ROI batch shape (N, H, W), got {batch.shape}"
+    _, height, width = batch.shape
+    if height != width:
+        return f"tensor mode requires square ROIs, got {height}x{width}"
+    if int(imgsz) != int(height):
+        return f"tensor mode requires imgsz={height} to match ROI size, got {imgsz}"
+    if height % 32 or width % 32:
+        return f"tensor mode requires ROI dimensions divisible by 32, got {height}x{width}"
+    return None
+
+
+def _prepare_model_inputs(
+    batch: np.ndarray,
+    *,
+    input_mode: str,
+    imgsz: int,
+    device: Optional[str],
+) -> Tuple[object, str]:
+    """Prepare one ROI batch for Ultralytics prediction.
+
+    ``numpy-list`` preserves the legacy path. ``tensor`` avoids constructing a
+    Python list of RGB numpy arrays and instead supplies normalized BCHW data.
+    ``auto`` uses tensor mode only when the geometry is equivalent to the legacy
+    path; otherwise it falls back to the list path.
+    """
+    mode = _normalize_input_mode(input_mode)
+    blocker = _tensor_input_blocker(batch, imgsz=imgsz)
+    if mode == "tensor" and blocker is not None:
+        raise ValueError(f"Cannot use keypoint tensor input mode: {blocker}")
+    if mode == "numpy-list" or blocker is not None:
+        return _repeat_to_rgb(batch), "numpy-list"
+
+    if not batch.flags.c_contiguous or not batch.flags.writeable:
+        batch = np.array(batch, copy=True, order="C")
+    scale_by_255 = not np.issubdtype(batch.dtype, np.floating)
+    if not scale_by_255 and batch.size:
+        scale_by_255 = bool(np.nanmax(batch) > 1.0 + np.finfo(np.float32).eps)
+
+    tensor = torch.from_numpy(batch)
+    if device:
+        tensor = tensor.to(torch.device(device), non_blocking=True)
+    tensor = tensor.float()
+    if scale_by_255:
+        tensor = tensor.div_(255.0)
+    return tensor[:, None, :, :].expand(-1, 3, -1, -1).contiguous(), "tensor"
+
+
 def _select_detection(result) -> Optional[int]:
     boxes = getattr(result, "boxes", None)
     if boxes is None or boxes is False:
@@ -415,6 +473,7 @@ def detect_keypoints_yolo(
     roi_cache_manifest: Optional[Path] = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
+    input_mode: str = "numpy-list",
     profile_timings: bool = False,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
@@ -497,6 +556,7 @@ def detect_keypoints_yolo(
         )
 
     imgsz = imgsz or max(roi_h, roi_w)
+    resolved_input_mode = _normalize_input_mode(input_mode)
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
     run_group.attrs["keypoint_labels"] = list(pose_schema_obj.node_names)
@@ -629,27 +689,34 @@ def detect_keypoints_yolo(
                         batch_roi_np[valid] = override_rois[local_map[valid]]
 
             with timing_profiler.time("input_prepare", items=batch_count):
-                rgb_inputs = _repeat_to_rgb(batch_roi_np)
-            with timing_profiler.time("model_predict", items=batch_count):
-                results = model.predict(
-                    rgb_inputs,
-                    imgsz=imgsz,
-                    conf=conf,
-                    iou=iou,
-                    max_det=max_det,
+                model_inputs, effective_input_mode = _prepare_model_inputs(
+                    batch_roi_np,
+                    input_mode=resolved_input_mode,
+                    imgsz=int(imgsz),
                     device=torch_device,
-                    verbose=verbose,
-                    stream=False,
+                )
+            with timing_profiler.time("model_predict", items=batch_count):
+                results = tuple(
+                    model.predict(
+                        model_inputs,
+                        imgsz=imgsz,
+                        conf=conf,
+                        iou=iou,
+                        max_det=max_det,
+                        device=torch_device,
+                        verbose=verbose,
+                        stream=True,
+                    )
                 )
 
-            batch_keypoints_roi = np.full((len(rgb_inputs), n_keypoints, 2), np.nan, dtype=np.float64)
+            batch_keypoints_roi = np.full((batch_count, n_keypoints, 2), np.nan, dtype=np.float64)
             batch_keypoints_img = np.full_like(batch_keypoints_roi, np.nan)
             batch_keypoints_norm = np.full_like(batch_keypoints_roi, np.nan)
-            batch_heading = np.full(len(rgb_inputs), np.nan, dtype=np.float64)
-            batch_conf = np.full(len(rgb_inputs), np.nan, dtype=np.float64)
-            batch_keypoint_conf = np.full((len(rgb_inputs), n_keypoints), np.nan, dtype=np.float64)
-            batch_success = np.zeros(len(rgb_inputs), dtype=bool)
-            batch_pose_bbox_roi = np.full((len(rgb_inputs), 4), np.nan, dtype=np.float32)
+            batch_heading = np.full(batch_count, np.nan, dtype=np.float64)
+            batch_conf = np.full(batch_count, np.nan, dtype=np.float64)
+            batch_keypoint_conf = np.full((batch_count, n_keypoints), np.nan, dtype=np.float64)
+            batch_success = np.zeros(batch_count, dtype=bool)
+            batch_pose_bbox_roi = np.full((batch_count, 4), np.nan, dtype=np.float32)
 
             with timing_profiler.time("result_decode", items=batch_count):
                 for i, (res, top_left) in enumerate(zip(results, batch_coords)):
@@ -803,6 +870,8 @@ def detect_keypoints_yolo(
             "roi_live_acceleration": str(roi_live_acceleration),
             "roi_live_gpu_chunk_frames": int(roi_live_gpu_chunk_frames),
             "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
+            "input_mode_requested": resolved_input_mode,
+            "input_mode_effective": effective_input_mode,
             # Maintained for API compatibility with pipeline/batch configs.
             "mask_threshold": float(mask_threshold),
         },
@@ -820,6 +889,8 @@ def detect_keypoints_yolo(
         "inference_duration_seconds": float(total_time),
         "inference_poses_per_second": float(inference_rate),
         "profile_timings_enabled": bool(profile_timings),
+        "input_mode_requested": resolved_input_mode,
+        "input_mode_effective": effective_input_mode,
     })
     if timing_profiler.enabled:
         run_group.attrs["timing_profile"] = timing_profiler.summary(
@@ -828,6 +899,7 @@ def detect_keypoints_yolo(
             notes=[
                 "roi_read measures ROI slice fetch from the active crop image source.",
                 "model_predict wraps Ultralytics predict(), including model-side preprocessing and postprocessing.",
+                "tensor input mode supplies normalized BCHW tensors and bypasses the legacy numpy-list RGB expansion.",
                 "output_write measures Zarr writes for keypoint outputs and lineage flags.",
             ],
         )
@@ -872,6 +944,8 @@ def detect_keypoints_yolo(
             "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
             "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+            "input_mode_requested": resolved_input_mode,
+            "input_mode_effective": effective_input_mode,
             "source_detect_run": source_detect_run or "unknown",
             "source_refined_run": source_refined_run,
             "frame_source": crop_source.frame_source_kind,
@@ -920,6 +994,8 @@ def detect_keypoints_yolo(
         "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
         "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
         "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
+        "input_mode_requested": resolved_input_mode,
+        "input_mode_effective": effective_input_mode,
     }
     if source_refined_run:
         status_details["source_refined_run"] = source_refined_run
@@ -1022,6 +1098,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Collect per-stage timing diagnostics and store them in the output run attrs.",
     )
+    parser.add_argument(
+        "--input-mode",
+        choices=_KEYPOINT_INPUT_MODES,
+        default="numpy-list",
+        help=(
+            "Input preparation mode for Ultralytics prediction. 'numpy-list' preserves the legacy "
+            "RGB numpy-list path; 'tensor' feeds normalized BCHW tensors directly; 'auto' uses "
+            "tensor mode only when ROI geometry is equivalent to the legacy path."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -1047,6 +1133,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
+        input_mode=args.input_mode,
         profile_timings=args.profile_timings,
         registry=args.registry,
     )

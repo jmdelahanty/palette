@@ -1284,6 +1284,7 @@ def _run_yolo(
                 mask_threshold=params.get("mask_threshold", 0.5),
                 roi_cache_policy=params.get("roi_cache_policy", "auto"),
                 roi_cache_dir=params.get("roi_cache_dir"),
+                input_mode=params.get("input_mode", "numpy-list"),
                 verbose=params.get("verbose", False),
                 registry=registry,
                 console=console,
@@ -1302,6 +1303,7 @@ def _run_yolo(
         mask_threshold=params.get("mask_threshold", 0.5),
         roi_cache_policy=params.get("roi_cache_policy", "auto"),
         roi_cache_dir=params.get("roi_cache_dir"),
+        input_mode=params.get("input_mode", "numpy-list"),
         verbose=params.get("verbose", False),
         registry=registry,
         console=None,
@@ -1727,6 +1729,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Override keypoint method from config.",
     )
     parser.add_argument(
+        "--input-mode",
+        choices=("numpy-list", "tensor", "auto"),
+        help=(
+            "Override YOLO keypoint input preparation mode. 'tensor' feeds normalized BCHW tensors "
+            "directly when ROI geometry is compatible."
+        ),
+    )
+    parser.add_argument(
         "--scheduler",
         choices=["threads", "processes", "single-threaded", "distributed"],
         default=None,
@@ -1960,6 +1970,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         skip_existing = False
 
     config = _load_config(args.config)
+    if args.input_mode is not None:
+        config.setdefault("keypoints", {})["input_mode"] = str(args.input_mode)
     refine_cfg = config.setdefault("refine_keypoints", {})
     if args.no_refine_post_audit:
         refine_cfg["post_refinement_audit"] = False
