@@ -205,6 +205,7 @@ def _set_crop_pixel_contract_attrs(
     )
     crop_group.attrs["roi_image_representation"] = contract.get("image_representation")
     crop_group.attrs["roi_pixel_contract"] = contract
+    crop_group.attrs["roi_pixel_contract_name"] = contract.get("name")
     return contract
 
 
@@ -1253,6 +1254,7 @@ def materialize_external_roi_cache(
     )
     cache_root.attrs["roi_image_representation"] = pixel_contract.get("image_representation")
     cache_root.attrs["roi_pixel_contract"] = pixel_contract
+    cache_root.attrs["roi_pixel_contract_name"] = pixel_contract.get("name")
 
     decode_seconds = 0.0
     compute_seconds = 0.0
@@ -1388,6 +1390,7 @@ def materialize_external_roi_cache(
         "gpu_chunk_frames": int(gpu_chunk_frames),
         "roi_image_representation": pixel_contract.get("image_representation"),
         "roi_pixel_contract": pixel_contract,
+        "roi_pixel_contract_name": pixel_contract.get("name"),
         "video_path": str(video_path),
         "cache_path": str(cache_path),
         "verbose": bool(verbose),
@@ -1858,6 +1861,7 @@ def crop_from_external_video(
                 "roi_shard_len": crop_group.attrs.get("roi_shard_len"),
                 "roi_image_representation": crop_group.attrs.get("roi_image_representation"),
                 "roi_pixel_contract": crop_group.attrs.get("roi_pixel_contract"),
+                "roi_pixel_contract_name": crop_group.attrs.get("roi_pixel_contract_name"),
             },
             parameter_source=str(crop_group.attrs.get("parameter_source") or "config"),
             inputs={
@@ -3245,6 +3249,7 @@ def crop_detections(
             **dict(crop_params),
             "roi_image_representation": crop_group.attrs.get("roi_image_representation"),
             "roi_pixel_contract": crop_group.attrs.get("roi_pixel_contract"),
+            "roi_pixel_contract_name": crop_group.attrs.get("roi_pixel_contract_name"),
         },
         parameter_source=param_source,
         inputs={
@@ -3711,6 +3716,7 @@ def _roi_cache_worker_main(argv: Optional[List[str]] = None) -> int:
                 "cache_gpu_chunk_frames": result.get("gpu_chunk_frames"),
                 "roi_image_representation": result.get("roi_image_representation"),
                 "roi_pixel_contract": result.get("roi_pixel_contract"),
+                "roi_pixel_contract_name": result.get("roi_pixel_contract_name"),
                 "roi_cache_worker_result": json.dumps(result, sort_keys=True, default=str),
             }
         )

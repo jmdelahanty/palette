@@ -611,6 +611,7 @@ def _build_manifest(
     limit_rows: int | None,
 ) -> dict[str, Any]:
     roi_h, roi_w = int(roi_size[0]), int(roi_size[1])
+    pixel_contract = orange_mono_pynvvc_luma_pixel_contract()
     row_columns = [
         "roi_row_index",
         "camera_serial",
@@ -661,7 +662,8 @@ def _build_manifest(
             "duration_seconds": float(duration_seconds),
             "decode_backend_requested": "pynvvc_luma",
             "decode_backend_effective": "pynvvc_luma",
-            "pixel_contract": orange_mono_pynvvc_luma_pixel_contract(),
+            "pixel_contract": pixel_contract,
+            "pixel_contract_name": pixel_contract.get("name"),
             "timing": dict(timing_summary),
             "limit_rows": None if limit_rows is None else int(limit_rows),
             "format_note": (

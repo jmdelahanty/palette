@@ -15,6 +15,7 @@ from fisheye.utils.export_detect_training_zarr import (
     MergeSourceSpec,
     _build_merged_manifest_payload,
     _copy_indexed_frames,
+    _discover_merge_sources,
     _ensure_suffix,
     _export_merged,
     _normalize_manifest_stem,
@@ -58,6 +59,8 @@ def _dataset_manifest(detection_source_path: str | None) -> DatasetManifest:
 def _write_detect_source_zarr(path: Path) -> None:
     root = zarr.open_group(str(path), mode="w")
     raw = root.create_group("raw_video")
+    raw.attrs["pixel_contract_name"] = "legacy_gray_uint8_v1"
+    raw.attrs["decode_backend"] = "legacy_import_gray"
     raw.create_array(
         "images_ds",
         data=np.arange(6 * 8 * 8, dtype=np.uint8).reshape(6, 8, 8),
@@ -183,6 +186,15 @@ def test_export_merged_detect_training_zarr_preserves_source_row_lineage(tmp_pat
     assert result.total_interpolated == 0
     validate_merged_training_zarr(out_zarr, expected_input_format="gray", expected_total_samples=4)
     root = zarr.open_group(str(out_zarr), mode="r")
+    raw = root["raw_video"]
+    assert raw.attrs["pixel_contract_name"] == "legacy_gray_uint8_v1"
+    assert raw.attrs["decode_backend"] == "legacy_import_gray"
+    assert raw["images_ds"].attrs["pixel_contract_name"] == "legacy_gray_uint8_v1"
+    assert raw["images_ds"].attrs["decode_backend"] == "legacy_import_gray"
+    assert root.attrs["training_export"]["pixel_contract_name"] == "legacy_gray_uint8_v1"
+    assert root.attrs["training_export"]["pixel_contract_names_by_format"] == {
+        "gray": ["legacy_gray_uint8_v1"]
+    }
     latest = root["refined_detect_runs"].attrs["latest"]
     instances = root[f"refined_detect_runs/{latest}/instances"]
     assert "crop_runs" not in root
@@ -259,6 +271,44 @@ def test_export_merged_detect_training_zarr_rejects_interpolated_source_rows(tmp
             include_rgb=False,
             copy_batch_size=2,
             invocation={},
+        )
+
+
+def test_discover_merge_sources_rejects_required_pixel_contract_mismatch(tmp_path: Path) -> None:
+    source_zarr = tmp_path / "source_detect.zarr"
+    _write_detect_source_zarr(source_zarr)
+    manifest = TrainingManifest(
+        created_at_utc="2026-02-06T00:00:00+00:00",
+        task="detect",
+        source_type="refined",
+        input_format="gray",
+        imgsz=[640, 640],
+        datasets=[
+            DatasetManifest(
+                name="source_dataset",
+                zarr_path=str(source_zarr),
+                dataset_id="source_dataset",
+                session_uuid="source_dataset",
+                crop_run=None,
+                bbox_array_path="refined_detect_runs/refined_detect_001/instances/bbox_norm_coords",
+                detection_source_type="refined",
+                detection_source_path="refined_detect_runs/refined_detect_001/instances",
+                includes_interpolated=False,
+                input_format="gray",
+                images_ds_shape=[8, 8],
+                total_bboxes=4,
+                invalid_bboxes=0,
+            )
+        ],
+        provenance_policy="warn",
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "pixel contract mismatch"):
+        _discover_merge_sources(
+            manifest,
+            need_gray=True,
+            need_rgb=False,
+            required_pixel_contract_name="orange_mono_pynvvc_luma_uint8_v1",
         )
 
 

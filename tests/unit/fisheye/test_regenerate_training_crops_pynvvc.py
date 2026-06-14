@@ -147,6 +147,7 @@ def test_regenerate_training_crops_pynvvc_writes_new_luma_crop_run(
     assert target.attrs["status"] == "completed"
     assert target.attrs["source_crop_run"] == "crop_001"
     assert target.attrs["roi_pixel_contract"]["name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
+    assert target.attrs["roi_pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
     assert np.array_equal(target["source_frame_indices"][:], np.array([0, 2, 4], dtype=np.int64))
     expected = np.stack(
         [

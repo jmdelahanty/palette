@@ -605,6 +605,7 @@ def regenerate_training_crops_pynvvc(
         "decode_chunk_frames": int(decode_chunk_frames),
         "roi_chunk_len": int(layout.roi_chunk_len),
         "pixel_contract": contract,
+        "pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
         "set_latest": bool(set_latest),
         "consolidate_metadata": bool(consolidate_metadata),
     }
@@ -631,6 +632,7 @@ def regenerate_training_crops_pynvvc(
             "crop_pixel_migration_version": "training_orange_mono_pynvvc_luma_v1",
             "roi_image_representation": contract.get("image_representation"),
             "roi_pixel_contract": contract,
+            "roi_pixel_contract_name": ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME,
             "source_frame_index_mapping": frame_mapping,
             "source_frame_index_mode_requested": str(source_frame_index_mode),
             "source_frame_indices_min": int(source_frame_indices.min()) if source_frame_indices.size else None,

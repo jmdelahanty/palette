@@ -186,6 +186,7 @@ def test_build_flat_roi_cache_roundtrips_through_manifest(tmp_path: Path) -> Non
     assert manifest["builder"]["timing"]["read_seconds_total"] >= 0
     assert manifest["builder"]["timing"]["write_seconds_total"] >= 0
     assert manifest["builder"]["pixel_contract"]["name"] == "crop_image_source_uint8_grayscale"
+    assert manifest["builder"]["pixel_contract_name"] == "crop_image_source_uint8_grayscale"
 
     assert progress_events[0]["event"] == "start"
     assert progress_events[-1]["event"] == "complete"
@@ -324,6 +325,7 @@ def test_build_flat_roi_cache_pynvvc_luma_streams_rows_in_source_order(
 
     assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
     assert manifest["builder"]["pixel_contract"]["name"] == "nv12_luma_plane_uint8"
+    assert manifest["builder"]["pixel_contract_name"] == "nv12_luma_plane_uint8"
     assert manifest["builder"]["timing"]["decoded_frames"] == 3
     assert manifest["builder"]["timing"]["rows"] == 3
     assert any(
@@ -364,6 +366,7 @@ def test_build_flat_roi_cache_auto_prefers_pynvvc_luma_for_geometry_only(
 
     assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
     assert manifest["builder"]["pixel_contract"]["name"] == "nv12_luma_plane_uint8"
+    assert manifest["builder"]["pixel_contract_name"] == "nv12_luma_plane_uint8"
     cache = open_flat_roi_cache(manifest["manifest_path"], expected_shape=expected.shape)
     try:
         np.testing.assert_array_equal(cache[:], expected)

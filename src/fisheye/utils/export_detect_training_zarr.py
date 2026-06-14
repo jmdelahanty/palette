@@ -87,6 +87,10 @@ class MergeSourceSpec:
     gray_chunks: Optional[Tuple[int, ...]]
     rgb_chunks: Optional[Tuple[int, ...]]
     fps: Optional[float]
+    gray_pixel_contract_name: Optional[str] = None
+    rgb_pixel_contract_name: Optional[str] = None
+    gray_decode_backend: Optional[str] = None
+    rgb_decode_backend: Optional[str] = None
 
 
 @dataclass
@@ -392,6 +396,112 @@ def _normalize_input_format(value: Optional[str]) -> Optional[str]:
     if text == "both":
         return "both"
     return None
+
+
+_PIXEL_CONTRACT_NAME_ATTRS = (
+    "pixel_contract_name",
+    "raw_pixel_contract_name",
+    "source_pixel_contract_name",
+)
+_DECODE_BACKEND_ATTRS = (
+    "decode_backend",
+    "decode_backend_effective",
+    "source_decode_backend",
+)
+
+
+def _as_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _first_attr_text(attrs: Any, names: Sequence[str]) -> Optional[str]:
+    for name in names:
+        try:
+            value = attrs.get(name)
+        except Exception:
+            value = None
+        text = _as_text(value)
+        if text:
+            return text
+    return None
+
+
+def _raw_image_attr_text(raw_group: zarr.Group, array_name: str, names: Sequence[str]) -> Optional[str]:
+    if array_name in raw_group:
+        text = _first_attr_text(raw_group[array_name].attrs, names)
+        if text:
+            return text
+    return _first_attr_text(raw_group.attrs, names)
+
+
+def _collapse_metadata_values(
+    values: Sequence[Optional[str]],
+    *,
+    mixed_label: str,
+    partial_label: str,
+) -> Optional[str]:
+    observed = [str(value) for value in values if value]
+    if not observed:
+        return None
+    if len(observed) != len(values):
+        return partial_label
+    unique = sorted(set(observed))
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) > 1:
+        return mixed_label
+    return None
+
+
+def _format_raw_metadata_summary(
+    source_specs: Sequence[MergeSourceSpec],
+    *,
+    need_gray: bool,
+    need_rgb: bool,
+) -> dict[str, Any]:
+    contract_names_by_format: dict[str, list[str]] = {}
+    decode_backends_by_format: dict[str, list[str]] = {}
+    if need_gray:
+        contract_names_by_format["gray"] = sorted(
+            {str(spec.gray_pixel_contract_name) for spec in source_specs if spec.gray_pixel_contract_name}
+        )
+        decode_backends_by_format["gray"] = sorted(
+            {str(spec.gray_decode_backend) for spec in source_specs if spec.gray_decode_backend}
+        )
+    if need_rgb:
+        contract_names_by_format["rgb"] = sorted(
+            {str(spec.rgb_pixel_contract_name) for spec in source_specs if spec.rgb_pixel_contract_name}
+        )
+        decode_backends_by_format["rgb"] = sorted(
+            {str(spec.rgb_decode_backend) for spec in source_specs if spec.rgb_decode_backend}
+        )
+    return {
+        "pixel_contract_names_by_format": contract_names_by_format,
+        "decode_backends_by_format": decode_backends_by_format,
+        "gray_pixel_contract_name": _collapse_metadata_values(
+            [spec.gray_pixel_contract_name for spec in source_specs],
+            mixed_label="mixed_raw_video_pixel_contracts",
+            partial_label="partial_raw_video_pixel_contracts",
+        ),
+        "rgb_pixel_contract_name": _collapse_metadata_values(
+            [spec.rgb_pixel_contract_name for spec in source_specs],
+            mixed_label="mixed_raw_video_pixel_contracts",
+            partial_label="partial_raw_video_pixel_contracts",
+        ),
+        "gray_decode_backend": _collapse_metadata_values(
+            [spec.gray_decode_backend for spec in source_specs],
+            mixed_label="mixed_decode_backends",
+            partial_label="partial_decode_backends",
+        ),
+        "rgb_decode_backend": _collapse_metadata_values(
+            [spec.rgb_decode_backend for spec in source_specs],
+            mixed_label="mixed_decode_backends",
+            partial_label="partial_decode_backends",
+        ),
+    }
 
 
 def validate_merged_training_zarr(
@@ -1118,6 +1228,7 @@ def _discover_merge_sources(
     *,
     need_gray: bool,
     need_rgb: bool,
+    required_pixel_contract_name: Optional[str] = None,
 ) -> Tuple[List[MergeSourceSpec], Dict[str, Any]]:
     specs: List[MergeSourceSpec] = []
     gray_shape: Optional[Tuple[int, ...]] = None
@@ -1160,6 +1271,40 @@ def _discover_merge_sources(
             if has_rgb and raw["images_ds_rgb"].chunks
             else None
         )
+        dataset_gray_pixel_contract_name = (
+            _raw_image_attr_text(raw, "images_ds", _PIXEL_CONTRACT_NAME_ATTRS)
+            if has_gray
+            else None
+        )
+        dataset_rgb_pixel_contract_name = (
+            _raw_image_attr_text(raw, "images_ds_rgb", _PIXEL_CONTRACT_NAME_ATTRS)
+            if has_rgb
+            else None
+        )
+        dataset_gray_decode_backend = (
+            _raw_image_attr_text(raw, "images_ds", _DECODE_BACKEND_ATTRS)
+            if has_gray
+            else None
+        )
+        dataset_rgb_decode_backend = (
+            _raw_image_attr_text(raw, "images_ds_rgb", _DECODE_BACKEND_ATTRS)
+            if has_rgb
+            else None
+        )
+
+        required_contract = _as_text(required_pixel_contract_name)
+        if required_contract:
+            required_checks: list[tuple[str, Optional[str]]] = []
+            if need_gray:
+                required_checks.append(("raw_video/images_ds", dataset_gray_pixel_contract_name))
+            if need_rgb:
+                required_checks.append(("raw_video/images_ds_rgb", dataset_rgb_pixel_contract_name))
+            for surface_name, observed_name in required_checks:
+                if observed_name != required_contract:
+                    raise ValueError(
+                        f"{source_zarr}: {surface_name} pixel contract mismatch "
+                        f"({observed_name!r} != {required_contract!r})."
+                    )
 
         if need_gray and dataset_gray_shape is not None:
             if gray_shape is None:
@@ -1214,6 +1359,10 @@ def _discover_merge_sources(
                 gray_chunks=dataset_gray_chunks,
                 rgb_chunks=dataset_rgb_chunks,
                 fps=float(fps) if isinstance(fps, (int, float)) else None,
+                gray_pixel_contract_name=dataset_gray_pixel_contract_name,
+                rgb_pixel_contract_name=dataset_rgb_pixel_contract_name,
+                gray_decode_backend=dataset_gray_decode_backend,
+                rgb_decode_backend=dataset_rgb_decode_backend,
             )
         )
 
@@ -1254,6 +1403,7 @@ def _export_merged(
     include_rgb: bool,
     copy_batch_size: int,
     invocation: Dict[str, Any],
+    required_pixel_contract_name: Optional[str] = None,
 ) -> MergeResult:
     train_input_format = str(manifest.input_format).strip().lower()
     if train_input_format not in {"gray", "rgb"}:
@@ -1261,7 +1411,12 @@ def _export_merged(
     need_gray = train_input_format == "gray"
     need_rgb = train_input_format == "rgb" or include_rgb
 
-    source_specs, layout = _discover_merge_sources(manifest, need_gray=need_gray, need_rgb=need_rgb)
+    source_specs, layout = _discover_merge_sources(
+        manifest,
+        need_gray=need_gray,
+        need_rgb=need_rgb,
+        required_pixel_contract_name=required_pixel_contract_name,
+    )
     total_samples = int(sum(spec.sample_count for spec in source_specs))
 
     _ensure_writable_destination(out_zarr, overwrite=overwrite)
@@ -1334,6 +1489,11 @@ def _export_merged(
             chunks=gray_chunks,
             overwrite=True,
         )
+        raw_metadata = _format_raw_metadata_summary(source_specs, need_gray=True, need_rgb=False)
+        if raw_metadata["gray_pixel_contract_name"]:
+            gray_dest.attrs["pixel_contract_name"] = raw_metadata["gray_pixel_contract_name"]
+        if raw_metadata["gray_decode_backend"]:
+            gray_dest.attrs["decode_backend"] = raw_metadata["gray_decode_backend"]
     if need_rgb:
         rgb_shape = tuple(layout["rgb_shape"])
         rgb_dtype = np.dtype(layout["rgb_dtype"])
@@ -1345,6 +1505,11 @@ def _export_merged(
             chunks=rgb_chunks,
             overwrite=True,
         )
+        raw_metadata = _format_raw_metadata_summary(source_specs, need_gray=False, need_rgb=True)
+        if raw_metadata["rgb_pixel_contract_name"]:
+            rgb_dest.attrs["pixel_contract_name"] = raw_metadata["rgb_pixel_contract_name"]
+        if raw_metadata["rgb_decode_backend"]:
+            rgb_dest.attrs["decode_backend"] = raw_metadata["rgb_decode_backend"]
 
     resolution: Optional[List[int]] = None
     if train_input_format == "gray" and layout["gray_shape"] is not None:
@@ -1573,6 +1738,25 @@ def _export_merged(
     raw_attrs: Dict[str, Any] = {
         "downsample_formats": downsample_formats,
     }
+    raw_metadata = _format_raw_metadata_summary(source_specs, need_gray=need_gray, need_rgb=need_rgb)
+    selected_pixel_contract_name = (
+        raw_metadata["gray_pixel_contract_name"]
+        if train_input_format == "gray"
+        else raw_metadata["rgb_pixel_contract_name"]
+    )
+    selected_decode_backend = (
+        raw_metadata["gray_decode_backend"]
+        if train_input_format == "gray"
+        else raw_metadata["rgb_decode_backend"]
+    )
+    if selected_pixel_contract_name:
+        raw_attrs["pixel_contract_name"] = selected_pixel_contract_name
+    if selected_decode_backend:
+        raw_attrs["decode_backend"] = selected_decode_backend
+    if any(raw_metadata["pixel_contract_names_by_format"].values()):
+        raw_attrs["pixel_contract_names_by_format"] = raw_metadata["pixel_contract_names_by_format"]
+    if any(raw_metadata["decode_backends_by_format"].values()):
+        raw_attrs["decode_backends_by_format"] = raw_metadata["decode_backends_by_format"]
     if resolution is not None:
         raw_attrs["downsampled_resolution"] = resolution
     fps_values = [float(value) for value in layout["fps_values"] if value is not None]
@@ -1622,6 +1806,11 @@ def _export_merged(
         "invocation": invocation,
         "source_dataset_ids": [spec.dataset_id for spec in source_specs],
         "source_zarr_paths": [str(spec.source_zarr) for spec in source_specs],
+        "required_pixel_contract_name": _as_text(required_pixel_contract_name),
+        "pixel_contract_name": selected_pixel_contract_name,
+        "pixel_contract_names_by_format": raw_metadata["pixel_contract_names_by_format"],
+        "decode_backend": selected_decode_backend,
+        "decode_backends_by_format": raw_metadata["decode_backends_by_format"],
         "split": {
             "train_ratio": float(train_ratio),
             "val_ratio": float(val_ratio),
@@ -1754,6 +1943,10 @@ def _build_merged_manifest_payload(
                 "dataset_id": spec.dataset_id,
                 "zarr_path": str(spec.source_zarr),
                 "sample_count": int(spec.sample_count),
+                "gray_pixel_contract_name": spec.gray_pixel_contract_name,
+                "rgb_pixel_contract_name": spec.rgb_pixel_contract_name,
+                "gray_decode_backend": spec.gray_decode_backend,
+                "rgb_decode_backend": spec.rgb_decode_backend,
                 "dish_design": dish,
                 "canvas_name": canvas,
                 "rig_id": rig,
@@ -1763,6 +1956,18 @@ def _build_merged_manifest_payload(
     merged_dish = _collapse(dish_values, mixed_label="mixed_dishes")
     merged_canvas = _collapse(canvas_values, mixed_label="mixed_canvas")
     merged_rig = _collapse(rig_values, mixed_label="mixed_rigs")
+    include_gray = merge_result.training_input_format == "gray"
+    include_rgb = merge_result.training_input_format == "rgb" or bool(include_rgb)
+    raw_metadata = _format_raw_metadata_summary(
+        merge_result.source_specs,
+        need_gray=include_gray,
+        need_rgb=include_rgb,
+    )
+    selected_pixel_contract_name = (
+        raw_metadata["gray_pixel_contract_name"]
+        if merge_result.training_input_format == "gray"
+        else raw_metadata["rgb_pixel_contract_name"]
+    )
 
     if merge_result.training_input_format == "gray":
         spatial_shape = list(merge_result.source_specs[0].gray_shape or ())
@@ -1786,6 +1991,7 @@ def _build_merged_manifest_payload(
         "includes_interpolated": False,
         "interpolation_policy": "forbidden_for_merged_training_export",
         "input_format": merge_result.training_input_format,
+        "pixel_contract_name": selected_pixel_contract_name,
         "images_ds_shape": spatial_shape,
         "total_bboxes": int(merge_result.total_samples),
         "invalid_bboxes": 0,
@@ -1806,6 +2012,9 @@ def _build_merged_manifest_payload(
         "downsample_formats": merge_result.downsample_formats,
         "training_input_format": merge_result.training_input_format,
         "include_rgb": bool(include_rgb),
+        "pixel_contract_name": selected_pixel_contract_name,
+        "pixel_contract_names_by_format": raw_metadata["pixel_contract_names_by_format"],
+        "decode_backends_by_format": raw_metadata["decode_backends_by_format"],
         "canonical_label_path": f"refined_detect_runs/{run_name}/instances",
         "interpolation_policy": "forbidden_for_merged_training_export",
         "split": {
@@ -1896,11 +2105,20 @@ def _write_merge_summary(
     test_ratio: float,
     seed: int,
 ) -> None:
+    include_gray = merge_result.training_input_format == "gray"
+    include_rgb = "rgb" in merge_result.downsample_formats
+    raw_metadata = _format_raw_metadata_summary(
+        merge_result.source_specs,
+        need_gray=include_gray,
+        need_rgb=include_rgb,
+    )
     payload = {
         "created_at_utc": _utc_now(),
         "zarr_path": str(out_zarr),
         "downsample_formats": merge_result.downsample_formats,
         "training_input_format": merge_result.training_input_format,
+        "pixel_contract_names_by_format": raw_metadata["pixel_contract_names_by_format"],
+        "decode_backends_by_format": raw_metadata["decode_backends_by_format"],
         "counts": {
             "total_samples": int(merge_result.total_samples),
             "real": int(merge_result.total_real),
@@ -1982,6 +2200,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="In merged mode, also export raw_video/images_ds_rgb (requires RGB arrays in all sources).",
     )
     parser.add_argument(
+        "--required-pixel-contract-name",
+        help=(
+            "Optional merged-export guard: require each copied raw-video image surface "
+            "to carry this pixel_contract_name."
+        ),
+    )
+    parser.add_argument(
         "--registry",
         type=Path,
         help="Optional registry SQLite path. In merged mode, registers merged dataset and updates training_set linkage.",
@@ -2039,6 +2264,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 manifest,
                 need_gray=str(manifest.input_format).strip().lower() == "gray",
                 need_rgb=str(manifest.input_format).strip().lower() == "rgb" or bool(args.include_rgb),
+                required_pixel_contract_name=args.required_pixel_contract_name,
             )
             print("Dry run: validation passed, no files written.")
             return 0
@@ -2056,6 +2282,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             include_rgb=bool(args.include_rgb),
             copy_batch_size=int(args.copy_batch_size),
             invocation=invocation,
+            required_pixel_contract_name=args.required_pixel_contract_name,
         )
 
         if not args.skip_validate:

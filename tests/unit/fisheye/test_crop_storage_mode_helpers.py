@@ -12,6 +12,7 @@ from fisheye.tracking.crop import (  # noqa: E402
     _enforce_training_materialized_crop_contract,
     _finalize_crop_parent_pointers,
     _infer_archive_use,
+    _set_crop_pixel_contract_attrs,
 )
 
 
@@ -94,3 +95,19 @@ def test_enforce_training_materialized_crop_contract_rejects_geometry_only() -> 
         assert "Training zarrs require materialized crop runs" in str(exc)
     else:  # pragma: no cover - defensive
         raise AssertionError("Expected training geometry-only crop enforcement to fail")
+
+
+def test_set_crop_pixel_contract_attrs_stamps_scalar_name() -> None:
+    root = zarr.group()
+    crop_group = root.create_group("crop")
+
+    contract = _set_crop_pixel_contract_attrs(
+        crop_group,
+        crop_storage_mode="materialized",
+        video_source_type="zarr",
+        acceleration="cpu",
+    )
+
+    assert crop_group.attrs["roi_pixel_contract"] == contract
+    assert crop_group.attrs["roi_pixel_contract_name"] == contract["name"]
+    assert crop_group.attrs["roi_image_representation"] == contract["image_representation"]

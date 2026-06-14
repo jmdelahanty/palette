@@ -281,6 +281,7 @@ def _build_manifest(
     decode_backend_effective: str,
 ) -> dict[str, Any]:
     roi_h, roi_w = source.roi_shape
+    pixel_contract = flat_cache_pixel_contract_for_backend(decode_backend_effective)
     return {
         "schema": FLAT_ROI_CACHE_SCHEMA,
         "layout": FLAT_ROI_CACHE_LAYOUT,
@@ -312,7 +313,8 @@ def _build_manifest(
             "duration_seconds": float(duration_seconds),
             "decode_backend_requested": str(decode_backend_requested),
             "decode_backend_effective": str(decode_backend_effective),
-            "pixel_contract": flat_cache_pixel_contract_for_backend(decode_backend_effective),
+            "pixel_contract": pixel_contract,
+            "pixel_contract_name": pixel_contract.get("name"),
             "timing": dict(timing_summary),
             "format_note": (
                 "flat_bin_v1 stores all ROI rows contiguously as raw uint8 bytes. "

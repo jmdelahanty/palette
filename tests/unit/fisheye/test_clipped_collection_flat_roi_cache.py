@@ -134,6 +134,7 @@ def test_build_clipped_collection_flat_roi_cache_writes_pixels_and_row_index(
     assert manifest["array"]["shape"] == [2, 2, 2]
     assert manifest["builder"]["decode_backend_effective"] == "pynvvc_luma"
     assert manifest["builder"]["pixel_contract"]["name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert manifest["builder"]["pixel_contract_name"] == "orange_mono_pynvvc_luma_uint8_v1"
     assert progress_events[0]["event"] == "start"
     assert progress_events[-1]["event"] == "complete"
 
