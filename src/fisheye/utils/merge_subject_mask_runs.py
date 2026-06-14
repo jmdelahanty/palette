@@ -28,6 +28,7 @@ from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest, require_runs_parent
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -389,13 +390,14 @@ def merge_subject_mask_runs(
         return summary
 
     start = time.perf_counter()
-    parent = root.require_group("subject_mask_runs")
+    parent = require_runs_parent(root, "subject_mask_runs")
     if run_name in parent:
         if not overwrite:
             raise ValueError(f"subject_mask_runs/{run_name} already exists. Pass overwrite=True to replace it.")
         del parent[run_name]
     run_group = parent.create_group(run_name)
-    parent.attrs["latest"] = run_name
+    mark_run_started(run_group, run_name=run_name, stage="subject_masks")
+    note_pending_latest(parent, run_name)
 
     run_group.attrs.update(
         {
@@ -636,6 +638,7 @@ def merge_subject_mask_runs(
         },
     )
     write_stage_provenance(run_group, provenance)
+    mark_run_complete(run_group, parent_group=parent, run_name=run_name)
     summary["duration_seconds"] = duration
     return summary
 

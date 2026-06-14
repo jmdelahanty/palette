@@ -1,16 +1,17 @@
 """Completion markers for Palette Zarr run groups.
 
 The contract is intentionally attr-based so it works for both Zarr v2/v3 and
-existing fake-group unit tests. Legacy runs without these attrs are treated as
-complete by default for read compatibility; runs that opt in with
-``palette_run_completion_contract`` must reach ``complete`` before status
-helpers and latest resolvers should trust them.
+existing fake-group unit tests. Parent groups stamped with
+``palette_completion_epoch >= 1`` are strict: unmarked children are not trusted
+as complete. Unstamped legacy parents still treat unmarked children as complete
+for read compatibility until the backfill tool verifies and stamps them.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
+import warnings
 
 RUN_COMPLETION_CONTRACT = "palette.zarr_run_completion.v1"
 RUN_COMPLETION_CONTRACT_ATTR = "palette_run_completion_contract"
@@ -21,14 +22,53 @@ RUN_NAME_ATTR = "palette_run_name"
 RUN_STAGE_ATTR = "palette_run_stage"
 RUN_LATEST_COMPLETE_ATTR = "latest_complete"
 RUN_LATEST_PENDING_ATTR = "latest_pending"
+COMPLETION_EPOCH_ATTR = "palette_completion_epoch"
+COMPLETION_EPOCH_STRICT = 1
 
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_COMPLETE = "complete"
 RUN_STATUS_FAILED = "failed"
 
+_LEGACY_COMPLETION_WARNING_KEYS: set[str] = set()
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def effective_legacy_default(parent_group: Any) -> bool:
+    """Return whether unmarked child runs remain legacy-complete for a parent."""
+
+    epoch = _coerce_int(getattr(parent_group, "attrs", {}).get(COMPLETION_EPOCH_ATTR))
+    return not (epoch is not None and epoch >= COMPLETION_EPOCH_STRICT)
+
+
+def _has_children(parent_group: Any) -> bool:
+    """Conservatively report whether a runs-parent already has child groups."""
+
+    try:
+        return bool(_group_names(parent_group))
+    except Exception:
+        return True
+
+
+def require_runs_parent(root: Any, name: str) -> Any:
+    """Return a runs-parent group, stamping new empty parents as strict."""
+
+    parent = root.require_group(name)
+    attrs = parent.attrs
+    if attrs.get(COMPLETION_EPOCH_ATTR) is None and not _has_children(parent):
+        attrs[COMPLETION_EPOCH_ATTR] = COMPLETION_EPOCH_STRICT
+    return parent
 
 
 def mark_run_started(
@@ -99,10 +139,37 @@ def has_run_completion_contract(run_group: Any) -> bool:
     return run_group.attrs.get(RUN_COMPLETION_CONTRACT_ATTR) == RUN_COMPLETION_CONTRACT
 
 
+def _is_unmarked_legacy_run(run_group: Any) -> bool:
+    attrs = run_group.attrs
+    return attrs.get(RUN_COMPLETION_STATUS_ATTR) is None and not has_run_completion_contract(run_group)
+
+
+def _parent_warning_key(parent_group: Any) -> str:
+    for attr in ("store_path", "path", "name"):
+        value = getattr(parent_group, attr, None)
+        if value not in (None, ""):
+            return f"{attr}:{value}"
+    return f"id:{id(parent_group)}"
+
+
+def _warn_legacy_completion_acceptance(parent_group: Any) -> None:
+    key = _parent_warning_key(parent_group)
+    if key in _LEGACY_COMPLETION_WARNING_KEYS:
+        return
+    _LEGACY_COMPLETION_WARNING_KEYS.add(key)
+    warnings.warn(
+        "Zarr run parent has no strict completion epoch; treating unmarked "
+        "child runs as legacy-complete for compatibility. Backfill completion "
+        "markers and stamp palette_completion_epoch to make this fail-closed.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
 def is_run_complete(run_group: Any, *, legacy_default: bool = True) -> bool:
     """Return whether a run group is complete.
 
-    ``legacy_default=True`` preserves existing archives that predate this
+    The default legacy compatibility mode preserves existing archives that predate this
     contract. Once all active writers emit completion attrs, callers can switch
     to strict mode.
     """
@@ -114,6 +181,24 @@ def is_run_complete(run_group: Any, *, legacy_default: bool = True) -> bool:
     return str(status).lower() == RUN_STATUS_COMPLETE
 
 
+def is_run_complete_in_parent(
+    parent_group: Any,
+    run_group: Any,
+    *,
+    legacy_default: bool | None = None,
+) -> bool:
+    """Return run completion using parent-scoped strictness metadata."""
+
+    effective_default = (
+        effective_legacy_default(parent_group)
+        if legacy_default is None
+        else bool(legacy_default)
+    )
+    if effective_default and _is_unmarked_legacy_run(run_group):
+        _warn_legacy_completion_acceptance(parent_group)
+    return is_run_complete(run_group, legacy_default=effective_default)
+
+
 def _group_names(parent_group: Any) -> list[str]:
     if hasattr(parent_group, "group_keys"):
         names = parent_group.group_keys()
@@ -123,13 +208,23 @@ def _group_names(parent_group: Any) -> list[str]:
 
 
 def _get_child(parent_group: Any, name: str) -> Optional[Any]:
+    parts = [part for part in str(name).split("/") if part]
+    if len(parts) > 1:
+        child = parent_group
+        for part in parts:
+            child = _get_child(child, part)
+            if child is None:
+                return None
+        return child
+
+    lookup_name = parts[0] if parts else str(name)
     try:
-        if name in parent_group:
-            return parent_group[name]
+        if lookup_name in parent_group:
+            return parent_group[lookup_name]
     except Exception:
         pass
     try:
-        return parent_group.get(name)
+        return parent_group.get(lookup_name)
     except Exception:
         return None
 
@@ -145,7 +240,7 @@ def resolve_latest_complete_run_name(
     parent_group: Any,
     *,
     latest_attr: str = "latest",
-    legacy_default: bool = True,
+    legacy_default: bool | None = None,
 ) -> Optional[str]:
     """Resolve the newest run that is complete under the run-completion contract."""
 
@@ -155,12 +250,20 @@ def resolve_latest_complete_run_name(
             continue
         name = str(candidate)
         child = _get_child(parent_group, name)
-        if child is not None and is_run_complete(child, legacy_default=legacy_default):
+        if child is not None and is_run_complete_in_parent(
+            parent_group,
+            child,
+            legacy_default=legacy_default,
+        ):
             return name
 
     for name in reversed(_group_names(parent_group)):
         child = _get_child(parent_group, name)
-        if child is not None and is_run_complete(child, legacy_default=legacy_default):
+        if child is not None and is_run_complete_in_parent(
+            parent_group,
+            child,
+            legacy_default=legacy_default,
+        ):
             return name
     return None
 
@@ -169,7 +272,7 @@ def resolve_latest_complete_run_group(
     parent_group: Any,
     *,
     latest_attr: str = "latest",
-    legacy_default: bool = True,
+    legacy_default: bool | None = None,
 ) -> tuple[Optional[str], Optional[Any]]:
     name = resolve_latest_complete_run_name(
         parent_group,
@@ -206,7 +309,7 @@ def describe_run_parent(
     parent_group: Any,
     *,
     parent_path: str = "",
-    legacy_default: bool = True,
+    legacy_default: bool | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-serializable completion summary for a run parent group."""
 
@@ -227,7 +330,11 @@ def describe_run_parent(
             continue
         status = _normalize_name(child.attrs.get(RUN_COMPLETION_STATUS_ATTR))
         has_contract = has_run_completion_contract(child)
-        complete = is_run_complete(child, legacy_default=legacy_default)
+        complete = is_run_complete_in_parent(
+            parent_group,
+            child,
+            legacy_default=legacy_default,
+        )
         if not complete:
             incomplete_runs.append(name)
         if status == RUN_STATUS_FAILED:
@@ -251,7 +358,11 @@ def describe_run_parent(
             unsafe_reasons.append("latest_missing")
         else:
             latest_status = _normalize_name(latest_child.attrs.get(RUN_COMPLETION_STATUS_ATTR))
-            if not is_run_complete(latest_child, legacy_default=legacy_default):
+            if not is_run_complete_in_parent(
+                parent_group,
+                latest_child,
+                legacy_default=legacy_default,
+            ):
                 reason_status = latest_status or (
                     "legacy_missing_contract"
                     if not has_run_completion_contract(latest_child)
@@ -267,7 +378,11 @@ def describe_run_parent(
             latest_complete_status = _normalize_name(
                 latest_complete_child.attrs.get(RUN_COMPLETION_STATUS_ATTR)
             )
-            if not is_run_complete(latest_complete_child, legacy_default=legacy_default):
+            if not is_run_complete_in_parent(
+                parent_group,
+                latest_complete_child,
+                legacy_default=legacy_default,
+            ):
                 reason_status = latest_complete_status or (
                     "legacy_missing_contract"
                     if not has_run_completion_contract(latest_complete_child)
@@ -279,6 +394,8 @@ def describe_run_parent(
 
     return {
         "parent_path": parent_path,
+        "completion_epoch": _coerce_int(parent_group.attrs.get(COMPLETION_EPOCH_ATTR)),
+        "legacy_default": effective_legacy_default(parent_group) if legacy_default is None else bool(legacy_default),
         "latest": latest,
         "latest_exists": latest_exists,
         "latest_status": latest_status,
@@ -312,7 +429,7 @@ def iter_run_parent_summaries(
     root_group: Any,
     *,
     root_path: str = "",
-    legacy_default: bool = True,
+    legacy_default: bool | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield completion summaries for run-parent-like groups in a Zarr tree."""
 

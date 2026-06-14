@@ -230,7 +230,7 @@ def _latest_eye_masks_run(zarr_path: Path) -> Optional[str]:
     parent = root.get("eye_masks_runs")
     if parent is None:
         return None
-    latest = resolve_latest_complete_run_name(parent, legacy_default=True)
+    latest = resolve_latest_complete_run_name(parent)
     if latest is None:
         return None
     latest_name = str(latest)

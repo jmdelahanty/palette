@@ -363,7 +363,7 @@ def resolve_zarr_run(
         latest_attr = _normalize_run_name(parent.attrs.get("latest"))
         latest_complete_attr = _normalize_run_name(parent.attrs.get("latest_complete"))
         if latest_attr is not None or latest_complete_attr is not None or fallback_to_sorted is None:
-            latest = _normalize_run_name(resolve_latest_complete_run_name(parent, legacy_default=True))
+            latest = _normalize_run_name(resolve_latest_complete_run_name(parent))
         # Preserve the stale-consolidated-metadata fallback below: when the
         # parent cannot see the latest child but the filesystem can, the
         # completion resolver cannot inspect the run group.

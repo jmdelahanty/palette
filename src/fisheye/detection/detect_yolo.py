@@ -48,7 +48,12 @@ from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
 from fisheye.shared.pynvvc_luma_rgb import preprocess_nv12_rgb
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.schema import get_run_group
-from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from fisheye.utils.import_video_metadata import write_video_metadata
 from fisheye.utils.system import get_environment_info, get_git_info
 
@@ -1130,7 +1135,7 @@ def detect_yolo(
         run_name = str(run_name).strip()
         if not run_name or "/" in run_name or run_name in {".", ".."}:
             raise ValueError(f"Invalid detect run name: {run_name!r}")
-        parent_group = root.require_group("detect_runs")
+        parent_group = require_runs_parent(root, "detect_runs")
         if run_name in parent_group:
             raise ValueError(f"detect_runs/{run_name} already exists")
         detect_group = parent_group.create_group(run_name)
@@ -1693,7 +1698,7 @@ def detect_yolo(
     provenance_record["timing"] = dict(timing_summary)
     write_stage_provenance(detect_group, provenance_record)
     
-    mark_run_complete(detect_group, parent_group=root["detect_runs"], run_name=run_name)
+    mark_run_complete(detect_group, parent_group=parent_group, run_name=run_name)
     
     console.print(f"[green]✓[/green] Detections saved")
     

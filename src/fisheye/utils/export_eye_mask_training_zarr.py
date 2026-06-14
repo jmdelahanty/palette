@@ -37,6 +37,11 @@ from fisheye.shared.eye_geometry_source import (
     resolve_eye_geometry_source,
 )
 from fisheye.shared.type_conversions import normalize_attr as _as_text
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils.refined_eye_masks_compat import refined_eye_masks_compat_context
 
 try:
@@ -1536,9 +1541,9 @@ def export_merged_eye_mask_training_zarr_from_sources(
         }
     )
 
-    dst_crop_parent = dst_root.create_group("crop_runs")
-    dst_crop_parent.attrs["latest"] = run_name
+    dst_crop_parent = require_runs_parent(dst_root, "crop_runs")
     dst_crop = dst_crop_parent.create_group(run_name)
+    mark_run_started(dst_crop, run_name=run_name, stage="crop")
     roi_shape = (total_samples, *tuple(int(v) for v in ref_source.roi_images.shape[1:]))
     roi_images_dest = dst_crop.create_array(
         "roi_images",
@@ -1563,9 +1568,9 @@ def export_merged_eye_mask_training_zarr_from_sources(
         overwrite=True,
     )
 
-    dst_eye_parent = dst_root.create_group("eye_masks_runs")
-    dst_eye_parent.attrs["latest"] = run_name
+    dst_eye_parent = require_runs_parent(dst_root, "eye_masks_runs")
     dst_eye = dst_eye_parent.create_group(run_name)
+    mark_run_started(dst_eye, run_name=run_name, stage="eye_masks")
     mask_channel_count = 1 if normalized_label_mode == "union" else int(ref_source.masks_roi.shape[1])
     masks_shape = (
         total_samples,
@@ -2003,6 +2008,8 @@ def export_merged_eye_mask_training_zarr_from_sources(
         )
         summary["source_subject_mask_run"] = resolved_sources[0].selection.source_subject_mask_run
         summary["source_crop_run"] = resolved_sources[0].selection.crop_run
+    mark_run_complete(dst_crop, parent_group=dst_crop_parent, run_name=run_name)
+    mark_run_complete(dst_eye, parent_group=dst_eye_parent, run_name=run_name)
     return summary
 
 

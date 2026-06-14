@@ -39,6 +39,7 @@ from ..shared.subject_mask_chunks import (
 )
 from ..shared.subject_mask_stale import sync_source_subject_mask_stale_payload
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest, require_runs_parent
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 
@@ -1506,6 +1507,8 @@ def _create_refined_subject_run_from_component_seeds(
     edit_applied = np.zeros((total_rois, len(component_names)), dtype=bool)
 
     run_group = refined_parent.create_group(target_run)
+    mark_run_started(run_group, run_name=target_run, stage=REFINED_SUBJECT_STAGE_NAME)
+    note_pending_latest(refined_parent, target_run)
     run_group.create_array(
         "detection_source",
         data=np.asarray(reference_source.detection_source[:], dtype=np.int8),
@@ -1687,7 +1690,7 @@ def _create_refined_subject_run_from_component_seeds(
         from ..shared.refined_subject_eye_geometry import write_refined_subject_eye_geometry
 
         write_refined_subject_eye_geometry(run_group)
-    refined_parent.attrs["latest"] = target_run
+    mark_run_complete(run_group, parent_group=refined_parent, run_name=target_run)
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
     return RefinedSubjectMaskRun(
         run_name=target_run,
@@ -1705,7 +1708,7 @@ def _open_or_create_refined_subject_run(
     refined_run: Optional[str],
     components: Sequence[str],
 ) -> RefinedSubjectMaskRun:
-    refined_parent = root.require_group("refined_subject_masks_runs")
+    refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
     target_run = refined_run
     if target_run is None:
         latest = refined_parent.attrs.get("latest")

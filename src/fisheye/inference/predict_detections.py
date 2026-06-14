@@ -97,7 +97,7 @@ def _extract_detect_quality_pointer(detect_group: object) -> tuple[Optional[str]
     if quality_parent is None or not hasattr(quality_parent, "attrs"):
         return None, None, None
 
-    quality_run = _normalize_text(resolve_latest_complete_run_name(quality_parent, legacy_default=True))
+    quality_run = _normalize_text(resolve_latest_complete_run_name(quality_parent))
     if not quality_run or quality_run not in quality_parent:
         return quality_run, None, None
 
@@ -138,7 +138,7 @@ def _write_detect_step_status(
                 detect_group = detect_parent[resolved_run_name]
             else:
                 latest_run = (
-                    _normalize_text(resolve_latest_complete_run_name(detect_parent, legacy_default=True))
+                    _normalize_text(resolve_latest_complete_run_name(detect_parent))
                     if hasattr(detect_parent, "attrs")
                     else None
                 )

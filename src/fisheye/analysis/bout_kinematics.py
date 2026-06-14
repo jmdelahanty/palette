@@ -36,6 +36,12 @@ from fisheye.shared.plot_artifacts import (
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_failed,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -2958,10 +2964,7 @@ def compute_and_save_bout_kinematics(
         analysis = root.create_group("analysis")
     else:
         analysis = root["analysis"]
-    if "bout_kinematics_runs" not in analysis:
-        parent = analysis.create_group("bout_kinematics_runs")
-    else:
-        parent = analysis["bout_kinematics_runs"]
+    parent = require_runs_parent(analysis, "bout_kinematics_runs")
 
     if run_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -2974,6 +2977,7 @@ def compute_and_save_bout_kinematics(
         del parent[run_name]
 
     run_group = parent.create_group(run_name)
+    mark_run_started(run_group, run_name=run_name, stage="bout_kinematics")
     run_group.attrs["status"] = "running"
     created_at_utc = datetime.now(timezone.utc).isoformat()
     source_refs = {
@@ -3299,10 +3303,11 @@ def compute_and_save_bout_kinematics(
             run_group.attrs["status"] = "failed"
             run_group.attrs["failure_stage"] = "bout_kinematics_visualization"
             run_group.attrs["failure_reason"] = f"{type(exc).__name__}: {exc}"
+            mark_run_failed(run_group, error=f"{type(exc).__name__}: {exc}")
             raise
 
     run_group.attrs["status"] = "complete"
-    parent.attrs["latest"] = run_name
+    mark_run_complete(run_group, parent_group=parent, run_name=run_name)
 
     return str(run_name)
 

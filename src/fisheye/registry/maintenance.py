@@ -34,7 +34,7 @@ from .extractors.masks import (
 from .extractors.quality import _extract_detect_quality_rows, _extract_keypoint_quality_rows
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.shared.zarr_run_completion import (
-    is_run_complete,
+    is_run_complete_in_parent,
     resolve_latest_complete_run_name,
 )
 from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
@@ -4938,11 +4938,11 @@ def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[objec
         try:
             if latest in parent:  # type: ignore[operator]
                 group = parent[latest]  # type: ignore[index]
-                if is_run_complete(group, legacy_default=True):
+                if is_run_complete_in_parent(parent, group):
                     return latest, group, "latest_attr"
         except Exception:
             pass
-    latest_complete = resolve_latest_complete_run_name(parent, legacy_default=True)
+    latest_complete = resolve_latest_complete_run_name(parent)
     if latest_complete and latest_complete != latest:
         try:
             if latest_complete in parent:  # type: ignore[operator]
@@ -4959,7 +4959,7 @@ def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[objec
             group = parent[fallback]  # type: ignore[index]
         except Exception:
             return fallback, None, "sorted_fallback_error"
-        if is_run_complete(group, legacy_default=True):
+        if is_run_complete_in_parent(parent, group):
             return fallback, group, "sorted_fallback"
     return None, None, "none_complete"
 
@@ -5007,9 +5007,9 @@ def _resolve_latest_group_nested(
             latest = None
     if latest:
         latest_group = _get_group_path(parent, latest)
-        if latest_group is not None and is_run_complete(latest_group, legacy_default=True):
+        if latest_group is not None and is_run_complete_in_parent(parent, latest_group):
             return latest, latest_group, "latest_attr"
-    latest_complete = resolve_latest_complete_run_name(parent, legacy_default=True)
+    latest_complete = resolve_latest_complete_run_name(parent)
     if latest_complete and latest_complete != latest:
         latest_group = _get_group_path(parent, latest_complete)
         if latest_group is not None:
@@ -5019,7 +5019,7 @@ def _resolve_latest_group_nested(
     if not groups:
         return None, None, "none"
     for fallback, group in reversed(groups):
-        if is_run_complete(group, legacy_default=True):
+        if is_run_complete_in_parent(parent, group):
             return fallback, group, "sorted_fallback"
     return None, None, "none_complete"
 

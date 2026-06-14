@@ -668,15 +668,15 @@ def main(
     zarr_path = Path(args.zarr_path).expanduser().resolve()
     root = zarr.open(str(zarr_path), mode="a")
 
-    eye_parent = root.require_group("eye_masks_runs")
+    eye_parent = root.get("eye_masks_runs")
     source_run_name = args.eye_mask_run
     src_run = None
     if source_run_name:
-        if source_run_name not in eye_parent:
+        if eye_parent is None or source_run_name not in eye_parent:
             raise ValueError(f"Source eye mask run '{source_run_name}' not found.")
         src_run = eye_parent[source_run_name]
-    else:
-        latest = resolve_latest_complete_run_name(eye_parent, legacy_default=True)
+    elif eye_parent is not None:
+        latest = resolve_latest_complete_run_name(eye_parent)
         if latest and latest in eye_parent and not args.crop_run:
             source_run_name = latest
             src_run = eye_parent[latest]
@@ -871,7 +871,7 @@ def main(
     keypoints_parent = root.get("keypoints_runs")
     latest_keypoints = None
     if keypoints_parent is not None:
-        latest_keypoints = resolve_latest_complete_run_name(keypoints_parent, legacy_default=True)
+        latest_keypoints = resolve_latest_complete_run_name(keypoints_parent)
     requested_keypoints_run = _resolve_source_keypoints_run_for_unet(
         explicit_keypoints_run=args.keypoints_run,
         source_attrs=src_attrs,

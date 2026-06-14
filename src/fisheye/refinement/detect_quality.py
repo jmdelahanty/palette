@@ -23,7 +23,12 @@ from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr_helpers import open_zarr_group_direct, reconsolidate_zarr_metadata
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 
 _DETECT_QUALITY_STATUS_SOURCE = "runtime_detect_quality"
 DEFAULT_DETECT_FAMILY_PATH = "detect_runs"
@@ -525,10 +530,7 @@ def save_quality_report(
     detect_group = root[_join_group_path(detect_family_path, source_run)]
 
     # Create quality_reports subgroup if needed
-    if "quality_reports" not in detect_group:
-        detect_group.create_group("quality_reports")
-
-    quality_reports_group = detect_group["quality_reports"]
+    quality_reports_group = require_runs_parent(detect_group, "quality_reports")
 
     # Create timestamped or explicitly named run.
     if quality_run_name is not None:

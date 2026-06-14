@@ -13,6 +13,7 @@ import zarr
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.refined_detect_review import DEFAULT_DETECT_GROUP_PREFERENCE, resolve_refined_detect_group
 from fisheye.shared.run_lineage_fingerprint import build_run_lineage_payload, write_run_lineage_attrs
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
 
 SCHEMA_NAME = "detection_dataset_profile"
@@ -898,12 +899,13 @@ def write_detection_profile(
             raise
 
     analysis_group = _get_or_create_group(root, "analysis")
-    runs_parent = _get_or_create_group(analysis_group, "detection_profile_runs")
+    runs_parent = require_runs_parent(analysis_group, "detection_profile_runs")
     if run_name in runs_parent:
         if not overwrite:
             raise FileExistsError(f"analysis/detection_profile_runs/{run_name} already exists")
         del runs_parent[run_name]
     run_group = runs_parent.create_group(run_name)
+    mark_run_started(run_group, run_name=run_name, stage="detection_profile")
 
     coverage = summary.get("coverage", {})
     dataset = summary.get("dataset", {})
@@ -962,6 +964,7 @@ def write_detection_profile(
         overwrite=True,
     )
     runs_parent.attrs["latest"] = run_name
+    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
 
     return DetectionProfileWriteResult(
         run_name=run_name,

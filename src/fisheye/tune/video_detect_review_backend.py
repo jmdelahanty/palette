@@ -286,7 +286,7 @@ def _latest_refined_run(root: zarr.Group, refined_run: str | None = None) -> tup
         raise RuntimeError("No refined_detect_runs found in archive.")
     run_name = str(
         refined_run
-        or resolve_latest_complete_run_name(parent, legacy_default=True)
+        or resolve_latest_complete_run_name(parent)
         or ""
     ).strip()
     if not run_name or run_name not in parent:

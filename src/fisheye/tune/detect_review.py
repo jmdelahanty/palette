@@ -54,7 +54,7 @@ def _get_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_detect_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_detect_runs found in archive.")
-    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    latest = resolve_latest_complete_run_name(refined_parent)
     if not latest:
         raise RuntimeError("No refined detect runs recorded.")
     return latest
@@ -129,7 +129,7 @@ def _resolve_review_arena_definitions(root: zarr.Group) -> List[Dict[str, Any]]:
 
     arena_parent = root.get("arena_assignment_runs")
     if arena_parent is not None:
-        latest = resolve_latest_complete_run_name(arena_parent, legacy_default=True)
+        latest = resolve_latest_complete_run_name(arena_parent)
         if latest and latest in arena_parent:
             arena_group = arena_parent[latest]
             masks = _normalize_arena_definitions(arena_group.attrs.get("arena_definitions"))
@@ -1283,7 +1283,6 @@ def run_manual_review(
 
     refined_run_name = refined_run_name or resolve_latest_complete_run_name(
         refined_parent,
-        legacy_default=True,
     )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")
@@ -2093,7 +2092,6 @@ def run_retune_interactive(
 
     refined_run_name = refined_run_name or resolve_latest_complete_run_name(
         refined_parent,
-        legacy_default=True,
     )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")
@@ -2161,7 +2159,7 @@ def run_retune_interactive(
 
     if "background_runs" not in root:
         raise RuntimeError("Background stage not run. Run background computation first.")
-    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"], legacy_default=True)
+    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"])
     if not latest_bg_run:
         raise RuntimeError("No background runs found (missing latest background run).")
 
@@ -2290,7 +2288,6 @@ def run_retune_review(
 
     refined_run_name = refined_run_name or resolve_latest_complete_run_name(
         refined_parent,
-        legacy_default=True,
     )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")
@@ -2372,7 +2369,7 @@ def run_retune_review(
 
     if "background_runs" not in root:
         raise RuntimeError("Background stage not run. Run background computation first.")
-    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"], legacy_default=True)
+    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"])
     if not latest_bg_run:
         raise RuntimeError("No background runs found (missing latest background run).")
 

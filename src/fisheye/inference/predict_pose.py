@@ -195,7 +195,7 @@ def _collect_no_roi_payload(zarr_path: Path) -> Dict[str, object]:
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
         return details
-    latest_crop = normalize_attr(resolve_latest_complete_run_name(crop_parent, legacy_default=True))
+    latest_crop = normalize_attr(resolve_latest_complete_run_name(crop_parent))
     if latest_crop is not None:
         details["source_crop_run"] = latest_crop
     return details

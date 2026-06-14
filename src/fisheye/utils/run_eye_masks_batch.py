@@ -261,7 +261,7 @@ def _has_latest_run(root: zarr.Group, group_name: str) -> bool:
     parent = root.get(group_name)
     if parent is None:
         return False
-    return bool(resolve_latest_complete_run_name(parent, legacy_default=True))
+    return bool(resolve_latest_complete_run_name(parent))
 
 
 def _crop_pointer_exists(crop_parent: zarr.Group, pointer_names: Sequence[str]) -> bool:
@@ -628,7 +628,7 @@ def _latest_run(zarr_path: Path, group_name: str) -> Optional[str]:
     parent = root.get(group_name)
     if parent is None:
         return None
-    latest = resolve_latest_complete_run_name(parent, legacy_default=True)
+    latest = resolve_latest_complete_run_name(parent)
     return str(latest) if latest else None
 
 

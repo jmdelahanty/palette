@@ -32,6 +32,7 @@ from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest, require_runs_parent
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -1591,7 +1592,7 @@ def write_sam_subject_mask_run(
     profile_timings: bool = False,
     timing_profile_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    parent = root.require_group("subject_mask_runs")
+    parent = require_runs_parent(root, "subject_mask_runs")
     if output_run in parent and not overwrite:
         raise ValueError(
             f"subject_mask_runs/{output_run} already exists. Pass --overwrite to replace it."
@@ -1606,7 +1607,8 @@ def write_sam_subject_mask_run(
     created_at = _utc_now()
 
     run_group = parent.create_group(output_run)
-    parent.attrs["latest"] = output_run
+    mark_run_started(run_group, run_name=output_run, stage="subject_masks")
+    note_pending_latest(parent, output_run)
     source_crop_group = inputs.crop_group if inputs.crop_group is not None else crop_group
     source_crop_source = inputs.crop_source
     source_crop_storage_mode = (
@@ -1864,6 +1866,7 @@ def write_sam_subject_mask_run(
         },
     )
     write_stage_provenance(run_group, provenance)
+    mark_run_complete(run_group, parent_group=parent, run_name=output_run)
     return summary_statistics
 
 

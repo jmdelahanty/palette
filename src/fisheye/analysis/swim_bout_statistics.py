@@ -40,6 +40,7 @@ from chaser_analysis.swimming_bout_analysis import (
     EnhancedBoutAnalyzer,
     CalibrationData,
 )
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.system import get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -902,7 +903,7 @@ def _save_report_to_zarr(
     """Persist swim bout analysis results under analysis/swim_bout_runs."""
     root = open_zarr_root(zarr_path, mode="a")
     analysis = root.require_group("analysis")
-    runs_parent = analysis.require_group("swim_bout_runs")
+    runs_parent = require_runs_parent(analysis, "swim_bout_runs")
 
     if run_name:
         target_name = run_name
@@ -913,7 +914,7 @@ def _save_report_to_zarr(
         raise ValueError(f"Run '{target_name}' already exists in analysis/swim_bout_runs")
 
     run_group = runs_parent.create_group(target_name)
-    runs_parent.attrs["latest"] = target_name
+    mark_run_started(run_group, run_name=target_name, stage="swim_bout_statistics")
 
     for dataset_name, array in storage.items():
         with warnings.catch_warnings():
@@ -927,6 +928,7 @@ def _save_report_to_zarr(
         for name, array in storage.items()
     }
     run_group.attrs["report_version"] = "1.0"
+    mark_run_complete(run_group, parent_group=runs_parent, run_name=target_name)
 
     if verbose:
         print(f"Saved swim bout analysis to analysis/swim_bout_runs/{target_name}")

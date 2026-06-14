@@ -68,8 +68,8 @@ def _resolve_keypoint_group(
             return raw[keypoint_run], keypoint_run, "keypoints_runs"
         raise ValueError(f"Keypoint run '{keypoint_run}' not found in refined or raw runs.")
 
-    refined_latest = resolve_latest_complete_run_name(refined, legacy_default=True) if refined is not None else None
-    raw_latest = resolve_latest_complete_run_name(raw, legacy_default=True) if raw is not None else None
+    refined_latest = resolve_latest_complete_run_name(refined) if refined is not None else None
+    raw_latest = resolve_latest_complete_run_name(raw) if raw is not None else None
 
     if refined is not None and refined_latest in refined:
         return refined[refined_latest], refined_latest, "refined_keypoints_runs"
@@ -477,7 +477,7 @@ def segment_eye_masks(
     cfg = _apply_overrides(cfg, config_dict)
     if "crop_runs" not in root:
         raise ValueError("crop_runs missing from Zarr; run crop stage first")
-    crop_run = cfg.crop_run or resolve_latest_complete_run_name(root["crop_runs"], legacy_default=True)
+    crop_run = cfg.crop_run or resolve_latest_complete_run_name(root["crop_runs"])
     if crop_run is None:
         raise ValueError("No crop run available")
     crop_group = root[f"crop_runs/{crop_run}"]

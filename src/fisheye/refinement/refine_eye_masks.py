@@ -61,7 +61,12 @@ from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, coerce_positive_float, normalize_attr
 from ..shared.zarr.schema import get_run_group
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..utils.system import get_environment_info, get_git_info
 
 
@@ -717,7 +722,7 @@ def _compute_local_refine_stats(
 
 def _prepare_run_group(root: zarr.Group, run_name: Optional[str], console: Console) -> Tuple[zarr.Group, str]:
     parent_name = f"{REFINED_STAGE_NAME}_runs"
-    parent = root.require_group(parent_name)
+    parent = require_runs_parent(root, parent_name)
     if run_name:
         if run_name in parent:
             raise ValueError(f"{parent_name}/{run_name} already exists")

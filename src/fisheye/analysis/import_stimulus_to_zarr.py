@@ -110,6 +110,7 @@ from fisheye.shared.citrus_enums import (
     STIMULUS_MODE_NAME_TO_ID,
 )
 from fisheye.shared.json_safety import json_attr_safe, strict_json_dumps
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 
 
 def _log(console: Optional[Console], message: str) -> None:
@@ -1551,7 +1552,7 @@ def import_stimulus_to_zarr(
 
     root = zarr.open(zarr_path, mode="a")
     analysis = root.require_group("analysis")
-    runs_parent = analysis.require_group("stimulus_runs")
+    runs_parent = require_runs_parent(analysis, "stimulus_runs")
 
     if run_name is None:
         run_name = datetime.now(timezone.utc).strftime("stimulus_%Y%m%d_%H%M%S")
@@ -1565,6 +1566,7 @@ def import_stimulus_to_zarr(
         del runs_parent[run_name]
 
     run_group = runs_parent.create_group(run_name)
+    mark_run_started(run_group, run_name=run_name, stage="stimulus")
     with h5py.File(resolved_h5, "r") as h5:
         _materialize_analysis_calibration(
             root,
@@ -1868,7 +1870,7 @@ def import_stimulus_to_zarr(
         run_attrs["source_stimulus_video_path"] = str(rendered_video)
     run_group.attrs.update(run_attrs)
 
-    runs_parent.attrs["latest"] = run_name
+    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
     _log(console, f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]")
     return run_name
 

@@ -26,6 +26,12 @@ from fisheye.shared.subject_mask_chunks import subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from fisheye.utils.zarr_io import open_zarr_root
 
 
@@ -481,11 +487,12 @@ def backfill_subject_mask_run(
         return summary
 
     start = time.perf_counter()
-    subject_parent = root.require_group("subject_mask_runs")
+    subject_parent = require_runs_parent(root, "subject_mask_runs")
     if existing and overwrite:
         del subject_parent[target_run]
     run_group = subject_parent.create_group(target_run)
-    subject_parent.attrs["latest"] = target_run
+    mark_run_started(run_group, run_name=target_run, stage="subject_masks")
+    note_pending_latest(subject_parent, target_run)
 
     run_group.attrs.update(
         {
@@ -642,6 +649,7 @@ def backfill_subject_mask_run(
     }
     run_group.attrs["duration_seconds"] = duration
     run_group.attrs["summary_statistics"] = summary_statistics
+    mark_run_complete(run_group, parent_group=subject_parent, run_name=target_run)
     summary["duration_seconds"] = duration
     return summary
 

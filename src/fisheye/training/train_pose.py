@@ -442,7 +442,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             
             # Get crop info
             if 'crop_runs' in root:
-                latest_crop = resolve_latest_complete_run_name(root['crop_runs'], legacy_default=True)
+                latest_crop = resolve_latest_complete_run_name(root['crop_runs'])
                 if latest_crop:
                     crop_group = root[f'crop_runs/{latest_crop}']
 
@@ -458,7 +458,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             
             # Get keypoint detection info if available
             if 'keypoints_runs' in root:
-                latest_kp = resolve_latest_complete_run_name(root['keypoints_runs'], legacy_default=True)
+                latest_kp = resolve_latest_complete_run_name(root['keypoints_runs'])
                 if latest_kp:
                     kp_group = root[f'keypoints_runs/{latest_kp}']
                     usable_keypoints = None

@@ -20,6 +20,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import zarr
 
+from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.utils.system import get_environment_summary, get_git_info, get_platform_info
 
 
@@ -209,7 +210,7 @@ def _create_common_groups(root: zarr.Group, *, camera_serials: Sequence[str]) ->
     experiment_index.require_group("finalized_runs")
     root.require_group("clips")
     for family in CLIP_RUN_FAMILIES:
-        family_group = root.require_group(family)
+        family_group = require_runs_parent(root, family)
         family_group.attrs["latest"] = None
         family_group.attrs["scope"] = "parent_finalized_or_aggregated"
 

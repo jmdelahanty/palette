@@ -74,7 +74,7 @@ def _get_group_with_fallback(root: zarr.Group, primary: str, legacy: str) -> Opt
 def _latest_complete(parent: Optional[zarr.Group]) -> Optional[str]:
     if parent is None:
         return None
-    return resolve_latest_complete_run_name(parent, legacy_default=True)
+    return resolve_latest_complete_run_name(parent)
 
 
 @dataclass

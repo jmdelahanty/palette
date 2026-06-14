@@ -84,7 +84,7 @@ def _resolve_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_keypoints_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_keypoints_runs found in archive.")
-    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    latest = resolve_latest_complete_run_name(refined_parent)
     if not latest:
         raise RuntimeError("No refined keypoint runs recorded.")
     return latest
@@ -239,7 +239,7 @@ def resolve_latest_refined_and_crop(
         crop_parent = root.get("crop_runs")
         if crop_parent is None:
             raise RuntimeError("No crop_runs found in archive.")
-        chosen_crop = resolve_latest_complete_run_name(crop_parent, legacy_default=True)
+        chosen_crop = resolve_latest_complete_run_name(crop_parent)
         if not chosen_crop:
             raise RuntimeError("Cannot resolve default crop run.")
     crop_parent = root.get("crop_runs")

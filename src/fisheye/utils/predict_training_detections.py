@@ -22,6 +22,7 @@ import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.system import get_environment_info, get_git_info
 
 
@@ -348,12 +349,13 @@ def run_training_zarr_prediction(
     raw_video = root["raw_video"]
     frame_array = raw_video[selection.path.split("/", 1)[1]]
 
-    detect_parent = root.require_group("detect_runs")
+    detect_parent = require_runs_parent(root, "detect_runs")
     if run_name in detect_parent and not overwrite:
         raise ValueError(f"detect run already exists: detect_runs/{run_name}; pass --overwrite to replace it.")
     if run_name in detect_parent and overwrite:
         del detect_parent[run_name]
     detect_group = detect_parent.require_group(run_name)
+    mark_run_started(detect_group, run_name=run_name, stage="detect")
 
     model = YOLO(str(Path(spec.artifact_path).expanduser()))
     if cpu:
@@ -504,7 +506,7 @@ def run_training_zarr_prediction(
     )
     write_stage_provenance(detect_group, provenance)
 
-    detect_parent.attrs["latest"] = run_name
+    mark_run_complete(detect_group, parent_group=detect_parent, run_name=run_name)
     return {
         "ok": True,
         "zarr_path": str(zarr_path),

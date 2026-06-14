@@ -52,6 +52,7 @@ from fisheye.shared.stage_provenance import (
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.zarr_helpers import resolve_zarr_run
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.system import get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -1927,7 +1928,7 @@ def write_stimulus_response_run(
         )
 
     analysis = root.require_group("analysis")
-    parent = analysis.require_group("stimulus_response_runs")
+    parent = require_runs_parent(analysis, "stimulus_response_runs")
 
     if run_name is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -1939,7 +1940,7 @@ def write_stimulus_response_run(
         del parent[run_name]
 
     run_group = parent.create_group(run_name)
-    parent.attrs["latest"] = run_name
+    mark_run_started(run_group, run_name=run_name, stage="stimulus_response")
 
     # Provenance.
     fish_ids = global_metrics["fish_id"].tolist()
@@ -2023,6 +2024,7 @@ def write_stimulus_response_run(
             f"  Wrote stimulus_response_runs/{run_name}/ "
             f"({len(steps)} steps, {len(fish_ids)} fish, layout {layout})"
         )
+        mark_run_complete(run_group, parent_group=parent, run_name=run_name)
         return run_name
 
     # Global group.
@@ -2200,6 +2202,7 @@ def write_stimulus_response_run(
         f"  Wrote stimulus_response_runs/{run_name}/ "
         f"({len(steps)} steps, {len(fish_ids)} fish)"
     )
+    mark_run_complete(run_group, parent_group=parent, run_name=run_name)
     return run_name
 
 

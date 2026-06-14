@@ -21,6 +21,7 @@ from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 from .megabouts_convention_audit import resample_tail_keypoints
@@ -339,7 +340,7 @@ def _prepare_run_group(
     overwrite: bool,
 ) -> zarr.Group:
     analysis = root.require_group("analysis")
-    parent = analysis.require_group("tail_posture_view_runs")
+    parent = require_runs_parent(analysis, "tail_posture_view_runs")
     if target_run in parent:
         if not overwrite:
             raise ValueError(
@@ -347,6 +348,7 @@ def _prepare_run_group(
             )
         del parent[target_run]
     run_group = parent.create_group(target_run)
+    mark_run_started(run_group, run_name=target_run, stage="tail_posture_view")
     _set_reason_bytes_attrs(run_group)
 
     row_index = run_group.require_group("row_index")
@@ -575,9 +577,10 @@ def write_tail_posture_view_run_group(
     run_group.attrs["valid_row_count"] = valid_count
     run_group.attrs["invalid_row_count"] = invalid_count
     run_group.attrs["failure_reason_counts"] = reason_counts
-    root["analysis"]["tail_posture_view_runs"].attrs["latest"] = target_run
+    parent = root["analysis"]["tail_posture_view_runs"]
+    mark_run_complete(run_group, parent_group=parent, run_name=target_run)
     if str(view_family):
-        root["analysis"]["tail_posture_view_runs"].attrs[f"latest_{view_family}"] = target_run
+        parent.attrs[f"latest_{view_family}"] = target_run
 
     summary.update(
         {

@@ -10,6 +10,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.detection_profile import infer_zarr_use
 
 
@@ -861,12 +862,13 @@ def write_keypoint_profile(
             raise
 
     analysis_group = _get_or_create_group(root, "analysis")
-    runs_parent = _get_or_create_group(analysis_group, "keypoint_profile_runs")
+    runs_parent = require_runs_parent(analysis_group, "keypoint_profile_runs")
     if run_name in runs_parent:
         if not overwrite:
             raise FileExistsError(f"analysis/keypoint_profile_runs/{run_name} already exists")
         del runs_parent[run_name]
     run_group = runs_parent.create_group(run_name)
+    mark_run_started(run_group, run_name=run_name, stage="keypoint_profile")
 
     dataset = summary.get("dataset", {})
     source = summary.get("source", {})
@@ -895,6 +897,7 @@ def write_keypoint_profile(
         }
     )
     runs_parent.attrs["latest"] = run_name
+    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
 
     return KeypointProfileWriteResult(
         run_name=run_name,

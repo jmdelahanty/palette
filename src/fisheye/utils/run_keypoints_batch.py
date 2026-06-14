@@ -217,7 +217,7 @@ def _has_keypoints(root: zarr.Group) -> bool:
     kp = root.get("keypoints_runs")
     if kp is None:
         return False
-    return bool(resolve_latest_complete_run_name(kp, legacy_default=True))
+    return bool(resolve_latest_complete_run_name(kp))
 
 
 def _has_crop(root: zarr.Group) -> bool:
@@ -266,7 +266,7 @@ def _has_background(root: zarr.Group) -> bool:
     bg = root.get("background_runs")
     if bg is None:
         return False
-    return bool(resolve_latest_complete_run_name(bg, legacy_default=True))
+    return bool(resolve_latest_complete_run_name(bg))
 
 
 def _has_keypoint_tuning(root: zarr.Group) -> bool:
@@ -284,7 +284,7 @@ def _latest_run(zarr_path: Path, group_name: str) -> Optional[str]:
     group = root.get(group_name)
     if group is None:
         return None
-    latest = resolve_latest_complete_run_name(group, legacy_default=True)
+    latest = resolve_latest_complete_run_name(group)
     return str(latest) if latest else None
 
 
@@ -300,7 +300,7 @@ def _keypoints_total_rois(zarr_path: Path, run_name: Optional[str]) -> Optional[
     group = root.get("keypoints_runs")
     if group is None:
         return None
-    resolved = run_name or resolve_latest_complete_run_name(group, legacy_default=True)
+    resolved = run_name or resolve_latest_complete_run_name(group)
     if not resolved or resolved not in group:
         return None
     run_group = group[resolved]

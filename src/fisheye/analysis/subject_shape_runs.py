@@ -35,6 +35,7 @@ from ..shared.json_safety import json_attr_safe
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from ..shared.refined_subject_masks_io import (
     RefinedSubjectMasksRunTables,
     load_refined_subject_masks_run_tables,
@@ -961,7 +962,7 @@ def _prepare_subject_shape_run(
     total_rows = int(masks.shape[0])
     components = tuple(name for name, _idx in component_indices)
     analysis_group = root.require_group("analysis")
-    parent = analysis_group.require_group("subject_shape_runs")
+    parent = require_runs_parent(analysis_group, "subject_shape_runs")
     if target_run in parent:
         if not overwrite:
             raise ValueError(
@@ -969,6 +970,7 @@ def _prepare_subject_shape_run(
             )
         del parent[target_run]
     run_group = parent.create_group(target_run)
+    mark_run_started(run_group, run_name=target_run, stage="subject_shape")
 
     row_index = run_group.require_group("row_index")
     copy_result = copy_row_lineage_arrays(
@@ -2501,7 +2503,7 @@ def write_subject_shape_run_group(
     }
     run_group.attrs["subject_shape_chunk_timings"] = list(_json_safe(chunk_timings))
     parent = root["analysis"]["subject_shape_runs"]
-    parent.attrs["latest"] = target_run
+    mark_run_complete(run_group, parent_group=parent, run_name=target_run)
     summary.update(
         {
             "status": "updated",

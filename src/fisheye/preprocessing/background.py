@@ -13,7 +13,12 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from ..utils.system import get_git_info, get_platform_info
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 
 
 def fast_mode_bincount(data_chunk: np.ndarray) -> np.ndarray:
@@ -163,7 +168,7 @@ def compute_background(
     console.print(f"Using [cyan]{method}[/cyan] method")
     
     # Create timestamped run group (matching the old tracker.py pattern)
-    parent_group = root.require_group('background_runs')
+    parent_group = require_runs_parent(root, 'background_runs')
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
     run_name = f"background_{timestamp}"
     bg_group = parent_group.create_group(run_name)

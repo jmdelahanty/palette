@@ -122,7 +122,6 @@ def resolve_review_context(
         raise RuntimeError("No refined_detect_runs found in archive.")
     refined_run_name = refined_run or resolve_latest_complete_run_name(
         refined_parent,
-        legacy_default=True,
     )
     if not refined_run_name or refined_run_name not in refined_parent:
         raise RuntimeError("Refined detect run not found.")

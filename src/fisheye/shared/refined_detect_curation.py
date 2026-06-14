@@ -304,7 +304,7 @@ def resolve_curated_refined_detect_run(
 ) -> Tuple[zarr.Group, str]:
     refined_parent, _ = _resolve_refined_parent(root)
     resolved_name = normalize_attr(run_name) or normalize_attr(
-        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+        resolve_latest_complete_run_name(refined_parent)
     )
     if not resolved_name or resolved_name not in refined_parent:
         raise ValueError("No refined detect run available.")
@@ -2118,7 +2118,7 @@ def write_curated_refined_detect_surfaces(
 ) -> Dict[str, Any]:
     refined_parent, _ = _resolve_refined_parent(root, refined_family_path=refined_family_path)
     resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
-        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+        resolve_latest_complete_run_name(refined_parent)
     )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
@@ -2557,7 +2557,7 @@ def update_curated_refined_detect_rows(
 ) -> Dict[str, Any]:
     refined_parent, _ = _resolve_refined_parent(root)
     resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
-        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+        resolve_latest_complete_run_name(refined_parent)
     )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
@@ -2670,7 +2670,7 @@ def write_curated_refined_detect_root(
 ) -> Dict[str, Any]:
     refined_parent, _ = _resolve_refined_parent(root)
     resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
-        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+        resolve_latest_complete_run_name(refined_parent)
     )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")
@@ -2831,7 +2831,7 @@ def materialize_refined_detect_curation(
 
     refined_parent, parent_name = _resolve_refined_parent(root)
     resolved_refined_run_name = normalize_attr(refined_run_name) or normalize_attr(
-        resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+        resolve_latest_complete_run_name(refined_parent)
     )
     if not resolved_refined_run_name or resolved_refined_run_name not in refined_parent:
         raise ValueError("No refined detect run available.")

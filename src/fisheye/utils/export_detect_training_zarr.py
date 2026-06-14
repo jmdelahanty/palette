@@ -33,6 +33,11 @@ from fisheye.shared.refined_detect_curation import (
 )
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.zarr_helpers import open_zarr_group_direct
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils.system import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_name, get_downsample_array_path
 
@@ -198,9 +203,9 @@ def _export_dataset(plan: ExportPlan, *, overwrite: bool, run_name: str, manifes
         raise KeyError(f"Missing downsampled frames for format '{plan.input_format}' in {plan.source_zarr}")
     _copy_array(raw_src[array_name], raw_dest, array_name)
 
-    crop_parent = dest_root.require_group("crop_runs")
-    crop_parent.attrs["latest"] = run_name
+    crop_parent = require_runs_parent(dest_root, "crop_runs")
     crop_group = crop_parent.require_group(run_name)
+    mark_run_started(crop_group, run_name=run_name, stage="crop")
     bbox_src = src_root[plan.bbox_path]
     _copy_array(bbox_src, crop_group, "bbox_norm_coords")
     total_samples = int(bbox_src.shape[0])
@@ -277,6 +282,7 @@ def _export_dataset(plan: ExportPlan, *, overwrite: bool, run_name: str, manifes
             },
         }
     )
+    mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_name)
 
 
 def _update_manifest_paths(
@@ -1261,13 +1267,13 @@ def _export_merged(
     _ensure_writable_destination(out_zarr, overwrite=overwrite)
     out_root = zarr.open_group(str(out_zarr), mode="w")
     raw_group = out_root.require_group("raw_video")
-    refined_parent = out_root.require_group("refined_detect_runs")
+    refined_parent = require_runs_parent(out_root, "refined_detect_runs")
     source_index_group = out_root.require_group("source_index")
     split_group = out_root.require_group("splits")
 
     run_name = f"merged_export_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    refined_parent.attrs["latest"] = run_name
     refined_run = refined_parent.require_group(run_name)
+    mark_run_started(refined_run, run_name=run_name, stage="refined_detect")
 
     vector_chunks = (max(1, min(8192, total_samples)),)
 
@@ -1650,6 +1656,7 @@ def _export_merged(
             "created_at_utc": _utc_now(),
         }
     )
+    mark_run_complete(refined_run, parent_group=refined_parent, run_name=run_name)
 
     return MergeResult(
         run_name=run_name,

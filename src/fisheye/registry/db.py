@@ -1077,7 +1077,7 @@ def _infer_detection_source_type(path: Optional[str], fallback: Optional[Any]) -
 def _resolve_latest_group_name(parent: Optional[zarr.Group]) -> Optional[str]:
     if parent is None:
         return None
-    return resolve_latest_complete_run_name(parent, legacy_default=True)
+    return resolve_latest_complete_run_name(parent)
 
 
 def _build_detection_source_records(root: zarr.Group) -> List[Dict[str, Any]]:

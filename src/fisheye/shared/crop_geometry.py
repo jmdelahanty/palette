@@ -109,7 +109,7 @@ def normalize_roi_size(value: Optional[Sequence[int]]) -> Tuple[int, int]:
 def infer_preferred_roi_size(root: zarr.Group) -> Tuple[int, int]:
     crop_parent = root.get("crop_runs")
     if crop_parent is not None:
-        latest = normalize_attr(resolve_latest_complete_run_name(crop_parent, legacy_default=True))
+        latest = normalize_attr(resolve_latest_complete_run_name(crop_parent))
         if latest and latest in crop_parent:
             latest_group = crop_parent[latest]
             roi_size_attr = latest_group.attrs.get("roi_size")

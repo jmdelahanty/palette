@@ -8,6 +8,11 @@ import numpy as np
 import pytest
 
 from fisheye.registry.db import Registry
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_ATTR,
+    COMPLETION_EPOCH_STRICT,
+    RUN_COMPLETION_STATUS_ATTR,
+)
 from fisheye.utils import backfill_eye_mask_profiles as backfill_mod
 from fisheye.utils.eye_mask_profile import (
     build_eye_mask_profile_summary,
@@ -446,8 +451,10 @@ def test_write_eye_mask_profile_writes_run_attrs_and_latest_pointer() -> None:
 
     parent = root["analysis/eye_mask_profile_runs"]
     assert parent.attrs["latest"] == "eye_mask_profile_2026-02-25_10-10-10"
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
 
     run_group = parent["eye_mask_profile_2026-02-25_10-10-10"]
+    assert run_group.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
     assert run_group.attrs["schema_name"] == "eye_mask_dataset_profile"
     assert run_group.attrs["schema_version"] == "v1"
     assert run_group.attrs["source_stage_group"] == "refined_eye_masks_runs"

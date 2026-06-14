@@ -26,6 +26,7 @@ from ..shared.provenance_attrs import (
 )
 from ..shared.row_lineage import assert_row_lineage_sources_equal
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
+from ..shared.zarr_run_completion import require_runs_parent
 from ..tune.refined_subject_mask_review import (
     RefinedSubjectComponentSeed,
     SourceSubjectMaskRun,
@@ -1096,7 +1097,7 @@ def assemble_refined_subject_run(
     if dry_run:
         return summary
 
-    refined_parent = root.require_group("refined_subject_masks_runs")
+    refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
     if target_run in refined_parent:
         if not overwrite:
             raise ValueError(

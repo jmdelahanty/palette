@@ -259,7 +259,7 @@ def resolve_refined_subject_masks_run(
         raise RefinedSubjectMasksIOError("No refined_subject_masks_runs group found.")
 
     if run_name is None or str(run_name).strip().lower() in {"", "latest"}:
-        latest = resolve_latest_complete_run_name(parent, legacy_default=True)
+        latest = resolve_latest_complete_run_name(parent)
         if latest and latest in parent:
             resolved = latest
         else:
@@ -457,7 +457,7 @@ def discover_refined_subject_masks_run_options(root: zarr.Group) -> list[Refined
     parent = root.get(REFINED_SUBJECT_MASKS_RUN_PARENT)
     if parent is None:
         return []
-    latest = resolve_latest_complete_run_name(parent, legacy_default=True)
+    latest = resolve_latest_complete_run_name(parent)
     options: list[RefinedSubjectMasksRunOption] = []
     for run_name in _group_keys(parent):
         try:

@@ -39,6 +39,7 @@ from fisheye.shared.provenance_attrs import (
     resolve_source_keypoints_run,
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.shared.detect_reason_codec import REASON_BYTES_ENCODING, REASON_BYTES_MIN_WIDTH
 from fisheye.shared.eye_geometry_source import (
     EYE_GEOMETRY_STAGE_REFINED_SUBJECT,
@@ -1786,7 +1787,9 @@ def _resolve_eye_angle_inputs(
         prefer_subject=True,
     )
 
-    kp_parent = root.require_group("refined_keypoints_runs")
+    kp_parent = root.get("refined_keypoints_runs")
+    if kp_parent is None:
+        raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
     keypoint_run_name = _resolve_keypoint_run_name(
         explicit_keypoint_run=keypoint_run,
         refined_attrs=dict(eye_geometry.lineage_attrs),
@@ -2128,7 +2131,7 @@ def run(args: argparse.Namespace) -> None:
     root = _open_archive_for_eye_angle(args.zarr_path)
 
     analysis_group = root.require_group("analysis")
-    parent_group = analysis_group.require_group("eye_angle_runs")
+    parent_group = require_runs_parent(analysis_group, "eye_angle_runs")
 
     backend = _normalize_execution_backend(args.execution_backend)
     scheduler_key = _normalize_scheduler(args.scheduler)
@@ -2167,6 +2170,7 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError(f"Run '{resolved_run_name}' already exists in analysis/eye_angle_runs.")
 
     run_group = parent_group.create_group(resolved_run_name)
+    mark_run_started(run_group, run_name=resolved_run_name, stage="eye_angle")
     output_layout = str(args.layout)
     run_group.attrs["status"] = "running"
     run_group.attrs["layout"] = output_layout
@@ -3265,8 +3269,6 @@ def run(args: argparse.Namespace) -> None:
     )
     if args.include_chunk_timings:
         run_group.attrs["eye_angle_chunk_timings"] = json.loads(json.dumps(chunk_timings, default=_to_serializable))
-    parent_group.attrs["latest"] = resolved_run_name
-
     provenance = {
         "script": "fisheye.analysis.eye_angle_analysis",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -3529,6 +3531,7 @@ def run(args: argparse.Namespace) -> None:
     }
     run_group.attrs["provenance"] = json.loads(json.dumps(provenance, default=_to_serializable))
     write_best_effort_run_lineage_attrs(run_group, run_family="eye_angle_run")
+    mark_run_complete(run_group, parent_group=parent_group, run_name=resolved_run_name)
 
     if not args.quiet:
         console.print(

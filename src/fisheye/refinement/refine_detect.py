@@ -26,7 +26,12 @@ from ..shared.refined_detect_curation import write_curated_refined_detect_surfac
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..shared.zarr_helpers import open_zarr_group_direct
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -1271,7 +1276,7 @@ def create_refined_run(
     duration = time.perf_counter() - start_time
     
     # Create refined detect group
-    refined_runs = root.require_group(refined_family_path)
+    refined_runs = require_runs_parent(root, refined_family_path)
     
     # Create timestamped or explicitly named run.
     if refined_run_name is not None:

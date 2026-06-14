@@ -25,6 +25,7 @@ from ..shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
     note_pending_latest,
+    require_runs_parent,
     resolve_latest_complete_run_name,
 )
 from ..utils.system import get_git_info, get_platform_info
@@ -290,14 +291,14 @@ def detect_fish(
     git_info = get_git_info()
     platform_info = get_platform_info(collect_ip=False, disk_path=zarr_path)
     
-    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"], legacy_default=True)
+    latest_bg_run = resolve_latest_complete_run_name(root["background_runs"])
     if latest_bg_run is None:
         raise ValueError("Traditional detection requires a complete background run.")
     _require_imported_detection_inputs(root, latest_bg_run)
     console.print(f"Using background: [cyan]{latest_bg_run}[/cyan]")
     
     # Create detect runs group
-    parent_group = root.require_group('detect_runs')
+    parent_group = require_runs_parent(root, 'detect_runs')
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
     run_name = f"detect_{timestamp}"
     detect_group = parent_group.create_group(run_name)

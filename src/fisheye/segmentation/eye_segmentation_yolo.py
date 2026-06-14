@@ -42,6 +42,7 @@ from ..shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
     note_pending_latest,
+    require_runs_parent,
     resolve_latest_complete_run_name,
 )
 from ..utils.system import get_environment_info, get_git_info
@@ -62,7 +63,7 @@ def _prepare_run_group(
     run_name: Optional[str],
     console: Console,
 ) -> Tuple[zarr.Group, str]:
-    parent = root.require_group("eye_masks_runs")
+    parent = require_runs_parent(root, "eye_masks_runs")
     if run_name:
         if run_name in parent:
             raise ValueError(f"eye_masks_runs/{run_name} already exists")
@@ -117,12 +118,12 @@ def _resolve_keypoint_lineage(
         return source_run_name, source_group_name
 
     refined_latest = (
-        _as_optional_text(resolve_latest_complete_run_name(refined_parent, legacy_default=True))
+        _as_optional_text(resolve_latest_complete_run_name(refined_parent))
         if refined_parent is not None
         else None
     )
     raw_latest = (
-        _as_optional_text(resolve_latest_complete_run_name(raw_parent, legacy_default=True))
+        _as_optional_text(resolve_latest_complete_run_name(raw_parent))
         if raw_parent is not None
         else None
     )

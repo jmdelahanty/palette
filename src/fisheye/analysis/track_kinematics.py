@@ -39,6 +39,7 @@ from fisheye.shared.stage_provenance import (
     write_stage_provenance,
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.utils.system import get_git_info, get_environment_info
 from fisheye.utils.zarr_io import open_zarr_root
@@ -505,7 +506,7 @@ def ensure_track_kinematics_run_group(
         raise ValueError("run_type must be 'online' or 'offline'")
 
     analysis = root.require_group("analysis")
-    track_parent = analysis.require_group("track_kinematics_runs")
+    track_parent = require_runs_parent(analysis, "track_kinematics_runs")
     type_parent = track_parent.require_group(run_type)
 
     if run_name:
@@ -525,14 +526,31 @@ def ensure_track_kinematics_run_group(
         run_name = f"{prefix}_{timestamp}"
 
     run_group = type_parent.create_group(run_name)
-
-    # Update convenience attributes
-    track_parent.attrs["latest"] = f"{run_type}/{run_name}"
-    attr_key = "latest_online" if run_type == "online" else "latest_offline"
-    type_parent.attrs["latest"] = run_name
-    track_parent.attrs[attr_key] = run_name
+    mark_run_started(
+        run_group,
+        run_name=f"{run_type}/{run_name}",
+        stage="track_kinematics",
+    )
 
     return run_name, run_group
+
+
+def mark_track_kinematics_run_complete(
+    root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    run_type: str,
+) -> None:
+    """Publish a nested track-kinematics run while preserving convenience attrs."""
+
+    track_parent = root["analysis"]["track_kinematics_runs"]
+    type_parent = track_parent[run_type]
+    qualified_name = f"{run_type}/{run_name}"
+    mark_run_complete(run_group, parent_group=track_parent, run_name=qualified_name)
+    type_parent.attrs["latest"] = run_name
+    attr_key = "latest_online" if run_type == "online" else "latest_offline"
+    track_parent.attrs[attr_key] = run_name
 
 
 def _nan_array(shape: Tuple[int, ...], dtype: np.dtype = np.float32) -> np.ndarray:
@@ -2312,9 +2330,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 if stimulus_run_name:
                     try:
                         import json
-                        analysis_group = root.require_group("analysis")
-                        stimulus_parent = analysis_group.require_group("stimulus_runs")
-                        if stimulus_run_name in stimulus_parent:
+                        analysis_group = root.get("analysis")
+                        stimulus_parent = (
+                            analysis_group.get("stimulus_runs") if analysis_group is not None else None
+                        )
+                        if stimulus_parent is not None and stimulus_run_name in stimulus_parent:
                             stim_group = stimulus_parent[stimulus_run_name]
                             coord_transform_raw = stim_group.attrs.get("coordinate_transform")
 
@@ -2463,6 +2483,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     write_best_effort_run_lineage_attrs(
                         run_group,
                         run_family="track_kinematics_run",
+                    )
+                    mark_track_kinematics_run_complete(
+                        root,
+                        run_group,
+                        run_name=run_name,
+                        run_type="online",
                     )
 
                     console.print(
@@ -2764,6 +2790,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         write_best_effort_run_lineage_attrs(
                             offline_group,
                             run_family="track_kinematics_run",
+                        )
+                        mark_track_kinematics_run_complete(
+                            root,
+                            offline_group,
+                            run_name=offline_run_name,
+                            run_type="offline",
                         )
 
                         console.print(

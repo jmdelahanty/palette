@@ -74,7 +74,7 @@ def _resolve_run_group(
         return (requested, group) if group is not None else (requested, None)
 
     if fallback_to_latest:
-        latest = _normalize_text(resolve_latest_complete_run_name(parent, legacy_default=True))
+        latest = _normalize_text(resolve_latest_complete_run_name(parent))
         if latest:
             group = _group_get(parent, latest)
             if group is not None:
@@ -275,7 +275,7 @@ def _find_latest_subject_eye_geometry(root: zarr.Group) -> tuple[Optional[str], 
     if parent is None:
         return None, None
 
-    latest = _normalize_text(resolve_latest_complete_run_name(parent, legacy_default=True))
+    latest = _normalize_text(resolve_latest_complete_run_name(parent))
     if latest:
         latest_group = _group_get(parent, latest)
         if latest_group is not None and _has_subject_eye_geometry(latest_group):
@@ -293,7 +293,7 @@ def _find_latest_subject_shape_eye_geometry(root: zarr.Group) -> tuple[Optional[
     if parent is None:
         return None, None
 
-    latest = _normalize_text(resolve_latest_complete_run_name(parent, legacy_default=True))
+    latest = _normalize_text(resolve_latest_complete_run_name(parent))
     if latest:
         latest_group = _group_get(parent, latest)
         if latest_group is not None and _has_subject_shape_eye_geometry(latest_group):

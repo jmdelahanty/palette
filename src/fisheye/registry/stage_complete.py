@@ -18,7 +18,7 @@ from .status_ledger import upsert_recording_step_status
 from .step_cascade import invalidate_downstream_steps
 from ..shared.zarr.stage_arrays import STAGES, StageSpec, validate_run
 from ..shared.zarr_helpers import open_zarr_group_direct
-from ..shared.zarr_run_completion import is_run_complete
+from ..shared.zarr_run_completion import is_run_complete_in_parent
 
 RegistryInput = Optional[Union[Registry, Path, str]]
 ResolveDatasetIdFn = Callable[[zarr.Group, Path], Tuple[str, Optional[str]]]
@@ -78,33 +78,56 @@ def _resolve_completion_run_group(
     run_name: Optional[str],
     zarr_path: Optional[Path] = None,
     completion_group_path: Optional[str] = None,
-) -> Optional[zarr.Group]:
+) -> Optional[tuple[zarr.Group, zarr.Group]]:
     if root is None or not run_name:
         return None
 
-    def _open_direct_child(*parts: str) -> Optional[zarr.Group]:
-        if zarr_path is None:
+    def _open_direct_path(*parts: str) -> Optional[zarr.Group]:
+        if zarr_path is None or not parts:
             return None
         try:
             return open_zarr_group_direct(Path(zarr_path).joinpath(*parts), mode="r")
         except Exception:
             return None
 
+    def _get_child_from_parent(parent: zarr.Group, name: str) -> Optional[zarr.Group]:
+        try:
+            if name in parent:
+                return parent[name]
+        except Exception:
+            pass
+        try:
+            candidate = parent.get(name)
+        except Exception:
+            candidate = None
+        return candidate
+
     if completion_group_path:
         normalized_path = str(completion_group_path).strip().strip("/")
         path_parts = [part for part in normalized_path.split("/") if part]
         if any(part == ".." for part in path_parts):
             return None
-        try:
-            group: Any = root
-            for part in path_parts:
-                group = group[part]
-            return group
-        except Exception:
-            pass
-        direct_group = _open_direct_child(*path_parts)
-        if direct_group is not None:
-            return direct_group
+        if path_parts:
+            memory_parent: Optional[zarr.Group] = None
+            try:
+                parent: Any = root
+                for part in path_parts[:-1]:
+                    parent = parent[part]
+                memory_parent = parent
+                child = _get_child_from_parent(parent, path_parts[-1])
+                if child is not None:
+                    return parent, child
+            except Exception:
+                pass
+            if memory_parent is not None:
+                direct_child = _open_direct_path(*path_parts)
+                if direct_child is not None:
+                    return memory_parent, direct_child
+            direct_parent = _open_direct_path(*path_parts[:-1])
+            if direct_parent is not None:
+                direct_child = _get_child_from_parent(direct_parent, path_parts[-1])
+                if direct_child is not None:
+                    return direct_parent, direct_child
 
     if step_name == "detect_quality":
         try:
@@ -126,39 +149,42 @@ def _resolve_completion_run_group(
                     quality_parent = None
                 if quality_parent is None:
                     continue
-                try:
-                    if run_name in quality_parent:
-                        return quality_parent[run_name]
-                except Exception:
-                    pass
-                direct_child = _open_direct_child(
+                child = _get_child_from_parent(quality_parent, run_name)
+                if child is not None:
+                    return quality_parent, child
+                direct_child = _open_direct_path(
                     "detect_runs",
                     str(detect_name),
                     "quality_reports",
                     str(run_name),
                 )
                 if direct_child is not None:
-                    return direct_child
+                    return quality_parent, direct_child
+                direct_parent = _open_direct_path(
+                    "detect_runs",
+                    str(detect_name),
+                    "quality_reports",
+                )
+                if direct_parent is not None:
+                    direct_child = _get_child_from_parent(direct_parent, run_name)
+                    if direct_child is not None:
+                        return direct_parent, direct_child
     for parent_name in _STEP_RUN_PARENTS.get(step_name, (f"{step_name}_runs",)):
         try:
             parent = root.get(parent_name)
         except Exception:
             parent = None
         if parent is None:
-            continue
-        try:
-            if run_name in parent:
-                return parent[run_name]
-        except Exception:
-            try:
-                candidate = parent.get(run_name)
-            except Exception:
-                candidate = None
-            if candidate is not None:
-                return candidate
-        direct_child = _open_direct_child(str(parent_name), str(run_name))
+            direct_parent = _open_direct_path(str(parent_name))
+            if direct_parent is None:
+                continue
+            parent = direct_parent
+        child = _get_child_from_parent(parent, run_name)
+        if child is not None:
+            return parent, child
+        direct_child = _open_direct_path(str(parent_name), str(run_name))
         if direct_child is not None:
-            return direct_child
+            return parent, direct_child
     return None
 
 
@@ -175,12 +201,13 @@ def _stage_array_spec_for_completion(step_name: str) -> Optional[StageSpec]:
 
 
 def _validate_completion_run_group(
+    parent_group: zarr.Group,
     run_group: zarr.Group,
     *,
     step_name: str,
     run_name: str,
 ) -> dict[str, Any]:
-    if not is_run_complete(run_group, legacy_default=True):
+    if not is_run_complete_in_parent(parent_group, run_group):
         raise RuntimeError(
             f"Refusing to mark {step_name} run {run_name!r} ok because "
             "the Zarr run-completion marker is not complete"
@@ -298,19 +325,21 @@ def emit_stage_completion(
                     f"Refusing to mark {step_name} run {run_name!r} ok because "
                     "root is required to verify Zarr run completion"
                 )
-            completion_group = _resolve_completion_run_group(
+            completion_groups = _resolve_completion_run_group(
                 root,
                 step_name=step_name,
                 run_name=run_name,
                 zarr_path=resolved_path,
                 completion_group_path=completion_group_path,
             )
-            if completion_group is None:
+            if completion_groups is None:
                 raise RuntimeError(
                     f"Refusing to mark {step_name} run {run_name!r} ok because "
                     "the Zarr run group could not be resolved"
                 )
+            completion_parent_group, completion_group = completion_groups
             validation_details = _validate_completion_run_group(
+                completion_parent_group,
                 completion_group,
                 step_name=step_name,
                 run_name=run_name,

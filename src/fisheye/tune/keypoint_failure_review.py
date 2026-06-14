@@ -155,7 +155,7 @@ def _get_latest_run(root: zarr.Group, group_name: str) -> str:
     parent_name = f"{group_name}_runs"
     if parent_name not in root:
         raise RuntimeError(f"No '{parent_name}' group found in Zarr store.")
-    latest = resolve_latest_complete_run_name(root[parent_name], legacy_default=True)
+    latest = resolve_latest_complete_run_name(root[parent_name])
     if not latest:
         raise RuntimeError(f"No runs recorded under '{parent_name}'.")
     return latest
@@ -1024,7 +1024,7 @@ def launch_review(
     using_latest = refined_run is None
     if refined_run is None:
         try:
-            refined_run = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+            refined_run = resolve_latest_complete_run_name(refined_parent)
         except Exception:
             refined_run = None
         if refined_run is None:

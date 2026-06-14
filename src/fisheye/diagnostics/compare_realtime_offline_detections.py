@@ -33,6 +33,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_failed,
     mark_run_pending,
     mark_run_started,
+    require_runs_parent,
     resolve_latest_complete_run_name,
 )
 from fisheye.visualization.plot_detection_epoch_heatmaps import EpochWindow
@@ -159,7 +160,7 @@ def _resolve_raw_detect_group(root: zarr.Group, run_name: Optional[str]) -> tupl
         raise ValueError("Archive has no detect_runs group.")
     resolved = str(run_name).strip() if run_name else None
     if not resolved:
-        resolved = resolve_latest_complete_run_name(parent, legacy_default=True)
+        resolved = resolve_latest_complete_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
         resolved = str(latest).strip() if latest else None
@@ -174,7 +175,7 @@ def _resolve_refined_detect_group(root: zarr.Group, run_name: Optional[str]) -> 
         raise ValueError("Archive has no refined_detect_runs group.")
     resolved = str(run_name).strip() if run_name else None
     if not resolved:
-        resolved = resolve_latest_complete_run_name(parent, legacy_default=True)
+        resolved = resolve_latest_complete_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
         resolved = str(latest).strip() if latest else None
@@ -709,7 +710,7 @@ def write_comparison_run(
 ) -> str:
     root = _open_root(zarr_path, mode="a")
     analysis = root.require_group("analysis")
-    parent = analysis.require_group("detection_comparison_runs")
+    parent = require_runs_parent(analysis, "detection_comparison_runs")
     run_name = result.run_name
     if run_name in parent:
         if not overwrite:

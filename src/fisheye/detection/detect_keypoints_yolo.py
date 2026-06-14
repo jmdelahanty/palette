@@ -32,7 +32,12 @@ from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..pose.heading import compute_heading_from_spec
 from ..utils.system import get_environment_info, get_git_info
 from ..pose.schema import PoseSchema, normalize_kpt_shape, schema_payload_from_package
@@ -49,7 +54,7 @@ def _prepare_run_group(
     run_name: Optional[str],
     console: Console,
 ) -> Tuple[zarr.Group, str]:
-    parent = root.require_group("keypoints_runs")
+    parent = require_runs_parent(root, "keypoints_runs")
     if run_name:
         if run_name in parent:
             raise ValueError(f"keypoints_runs/{run_name} already exists")

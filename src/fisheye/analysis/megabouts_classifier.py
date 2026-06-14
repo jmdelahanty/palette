@@ -37,6 +37,7 @@ from fisheye.analysis.megabouts_classifier_inputs import (
 from fisheye.shared.json_safety import json_attr_safe
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -373,11 +374,7 @@ def build_per_bout_classification_table(
 
 def _resolve_parent(root: zarr.Group) -> zarr.Group:
     analysis = root["analysis"] if "analysis" in root else root.create_group("analysis")
-    return (
-        analysis["bout_classification_runs"]
-        if "bout_classification_runs" in analysis
-        else analysis.create_group("bout_classification_runs")
-    )
+    return require_runs_parent(analysis, "bout_classification_runs")
 
 
 def write_megabouts_classification_run(
@@ -403,6 +400,7 @@ def write_megabouts_classification_run(
         del parent[resolved_run_name]
 
     run_group = parent.create_group(resolved_run_name)
+    mark_run_started(run_group, run_name=resolved_run_name, stage="bout_classification")
     created_at_utc = _utc_now()
     runtime_attrs = _runtime_attrs(result.runtime)
     table = build_per_bout_classification_table(pack, result)
@@ -507,7 +505,6 @@ def write_megabouts_classification_run(
         },
     )
     per_bout.attrs["source_swim_bout_path"] = source_refs.get("swim_bout_level")
-    parent.attrs["latest"] = resolved_run_name
 
     zarr_path = getattr(root, "_palette_fs_path", None)
     env_info = get_environment_info(
@@ -531,6 +528,7 @@ def write_megabouts_classification_run(
     )
     write_stage_provenance(run_group, provenance)
     write_best_effort_run_lineage_attrs(run_group, run_family="bout_classification_run")
+    mark_run_complete(run_group, parent_group=parent, run_name=resolved_run_name)
     return resolved_run_name
 
 

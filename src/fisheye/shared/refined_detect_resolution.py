@@ -70,7 +70,7 @@ def resolve_active_curated_refined_run_name(
             raise ValueError(f"Refined detect run not found: {requested}")
         return requested if has_curated_refined_detect_surface(refined_parent[requested]) else None
 
-    latest = normalize_attr(resolve_latest_complete_run_name(refined_parent, legacy_default=True))
+    latest = normalize_attr(resolve_latest_complete_run_name(refined_parent))
     if latest and latest in refined_parent and has_curated_refined_detect_surface(refined_parent[latest]):
         return latest
 
@@ -112,7 +112,7 @@ def resolve_detection_read_source(
     if refined_parent is not None:
         resolved_refined_run = normalize_attr(refined_run)
         if resolved_refined_run is None:
-            resolved_refined_run = normalize_attr(resolve_latest_complete_run_name(refined_parent, legacy_default=True))
+            resolved_refined_run = normalize_attr(resolve_latest_complete_run_name(refined_parent))
             if resolved_refined_run is None:
                 names = _sorted_group_names(refined_parent)
                 resolved_refined_run = names[-1] if names else None
@@ -154,7 +154,7 @@ def resolve_detection_read_source(
 
     detect_parent = root.get("detect_runs")
     if detect_parent is not None:
-        detect_run_name = normalize_attr(resolve_latest_complete_run_name(detect_parent, legacy_default=True))
+        detect_run_name = normalize_attr(resolve_latest_complete_run_name(detect_parent))
         if detect_run_name is None:
             names = _sorted_group_names(detect_parent)
             detect_run_name = names[-1] if names else None

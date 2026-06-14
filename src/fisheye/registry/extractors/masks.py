@@ -117,7 +117,7 @@ def _run_names(parent: zarr.Group) -> List[str]:
 def _resolve_latest_group_name(parent: Optional[zarr.Group]) -> Optional[str]:
     if parent is None:
         return None
-    return resolve_latest_complete_run_name(parent, legacy_default=True)
+    return resolve_latest_complete_run_name(parent)
 
 
 def _resolve_source_keypoints_run(attrs: Mapping[str, Any]) -> Optional[str]:

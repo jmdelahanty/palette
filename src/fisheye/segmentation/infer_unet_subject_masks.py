@@ -34,7 +34,12 @@ from ..shared.subject_mask_registry_status import emit_subject_mask_stage_comple
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..registry.db import Registry, RegistryPaths
 from ..utils.resolve_subject_mask_model import (
     build_resolution_payload,
@@ -417,7 +422,7 @@ def _prepare_run_group(
     run_name: Optional[str],
     overwrite: bool,
 ) -> Tuple[zarr.Group, str]:
-    parent = root.require_group("subject_mask_runs")
+    parent = require_runs_parent(root, "subject_mask_runs")
     resolved_name = run_name
     if resolved_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")

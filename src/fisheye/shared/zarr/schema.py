@@ -30,6 +30,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_pending,
     mark_run_started,
     note_pending_latest,
+    require_runs_parent,
     resolve_latest_complete_run_group,
 )
 
@@ -361,9 +362,11 @@ def get_run_group(
     
     parent_group_name = f'{stage_name}_runs'
     
-    if parent_group_name not in root:
-        parent_group = root.create_group(parent_group_name)
+    if create_new:
+        parent_group = require_runs_parent(root, parent_group_name)
     else:
+        if parent_group_name not in root:
+            raise ValueError(f"No runs found for {stage}")
         parent_group = root[parent_group_name]
     
     if create_new:
@@ -570,7 +573,7 @@ def add_processing_run(
         env_info = get_environment_info()
 
     parent_group_name = f"{stage}_runs"
-    parent_group = root.require_group(parent_group_name)
+    parent_group = require_runs_parent(root, parent_group_name)
 
     if run_name:
         if run_name in parent_group:

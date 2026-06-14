@@ -34,6 +34,11 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.frame_flags import resolve_row_identity_arrays
 from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.utils.system import build_invocation_record
 
@@ -1168,16 +1173,16 @@ def _export_merged(
 
     _ensure_writable_destination(out_zarr, overwrite=overwrite)
     out_root = zarr.open_group(str(out_zarr), mode="w")
-    crop_parent = out_root.require_group("crop_runs")
-    keypoint_parent = out_root.require_group("keypoints_runs")
+    crop_parent = require_runs_parent(out_root, "crop_runs")
+    keypoint_parent = require_runs_parent(out_root, "keypoints_runs")
     split_group = out_root.require_group("splits")
     source_index_group = out_root.require_group("source_index")
 
     run_name = f"merged_export_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    crop_parent.attrs["latest"] = run_name
-    keypoint_parent.attrs["latest"] = run_name
     crop_group = crop_parent.require_group(run_name)
     keypoint_group = keypoint_parent.require_group(run_name)
+    mark_run_started(crop_group, run_name=run_name, stage="crop")
+    mark_run_started(keypoint_group, run_name=run_name, stage="keypoints")
 
     roi_shape = tuple(layout["roi_shape"])
     roi_dtype = np.dtype(layout["roi_dtype"])
@@ -1566,6 +1571,8 @@ def _export_merged(
             "created_at_utc": _utc_now(),
         }
     )
+    mark_run_complete(crop_group, parent_group=crop_parent, run_name=run_name)
+    mark_run_complete(keypoint_group, parent_group=keypoint_parent, run_name=run_name)
 
     return PoseMergeResult(
         run_name=run_name,

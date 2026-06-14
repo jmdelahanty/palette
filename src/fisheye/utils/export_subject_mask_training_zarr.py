@@ -16,6 +16,11 @@ from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.frame_flags import resolve_row_identity_arrays
 from fisheye.shared.type_conversions import normalize_attr as _as_text
+from fisheye.shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    require_runs_parent,
+)
 from fisheye.utils.export_eye_mask_training_zarr import (
     _json_dict,
     _json_list,
@@ -711,9 +716,9 @@ def export_merged_subject_mask_training_zarr_from_sources(
         }
     )
 
-    crop_parent = root.create_group("crop_runs")
-    crop_parent.attrs["latest"] = export_run_name
+    crop_parent = require_runs_parent(root, "crop_runs")
     crop_group = crop_parent.create_group(export_run_name)
+    mark_run_started(crop_group, run_name=export_run_name, stage="crop")
     vector_chunks = (max(1, min(8192, total_samples)),)
     bbox_chunks = (max(1, min(8192, total_samples)), max(1, bbox_shape[0] if bbox_shape else 4))
 
@@ -753,9 +758,9 @@ def export_merged_subject_mask_training_zarr_from_sources(
         overwrite=True,
     )
 
-    subject_parent = root.create_group("subject_mask_runs")
-    subject_parent.attrs["latest"] = export_run_name
+    subject_parent = require_runs_parent(root, "subject_mask_runs")
     subject_group = subject_parent.create_group(export_run_name)
+    mark_run_started(subject_group, run_name=export_run_name, stage="subject_masks")
     masks_dest = subject_group.create_array(
         "masks_roi",
         shape=(total_samples, len(target_labels), *mask_shape),
@@ -977,6 +982,9 @@ def export_merged_subject_mask_training_zarr_from_sources(
         )
         training_export["registry_registration"] = registry_summary
         root.attrs["training_export"] = training_export
+
+    mark_run_complete(crop_group, parent_group=crop_parent, run_name=export_run_name)
+    mark_run_complete(subject_group, parent_group=subject_parent, run_name=export_run_name)
 
     return {
         "out_zarr": str(out_path),

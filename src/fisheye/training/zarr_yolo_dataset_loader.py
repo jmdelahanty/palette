@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 def _latest_complete(parent: Optional[zarr.Group]) -> Optional[str]:
     if parent is None:
         return None
-    return resolve_latest_complete_run_name(parent, legacy_default=True)
+    return resolve_latest_complete_run_name(parent)
 
 
 # Configuration

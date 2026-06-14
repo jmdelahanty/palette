@@ -324,7 +324,7 @@ def _resolve_refined_group(root: zarr.Group, crop_group: Optional[zarr.Group]) -
     refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
     if refined_parent is None:
         return None
-    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    latest = resolve_latest_complete_run_name(refined_parent)
     if isinstance(latest, (bytes, bytearray)):
         latest = latest.decode("utf-8", "ignore")
     if isinstance(latest, str) and latest in refined_parent:
@@ -986,12 +986,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         refined_group: Optional[zarr.Group] = None
 
         crop_run = (
-            resolve_latest_complete_run_name(root["crop_runs"], legacy_default=True)
+            resolve_latest_complete_run_name(root["crop_runs"])
             if "crop_runs" in root
             else None
         )
         detect_run = (
-            resolve_latest_complete_run_name(root["detect_runs"], legacy_default=True)
+            resolve_latest_complete_run_name(root["detect_runs"])
             if "detect_runs" in root
             else None
         )

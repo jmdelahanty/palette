@@ -24,6 +24,8 @@ class StageSpec:
     zarr_group: str
     specs: Tuple[ArraySpec, ...]
     subgroups: Dict[str, Tuple[ArraySpec, ...]] = field(default_factory=dict)
+    required_attrs: Tuple[str, ...] = ()
+    required_attr_values: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,18 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
     errors: List[str] = []
     warnings: List[str] = []
 
+    attrs = getattr(group, "attrs", {})
+    for attr_name in spec.required_attrs:
+        if attr_name not in attrs:
+            errors.append(f"{spec.stage_name}: missing required attr '{attr_name}'")
+    for attr_name, expected_value in spec.required_attr_values.items():
+        if attr_name not in attrs:
+            errors.append(f"{spec.stage_name}: missing required attr '{attr_name}'")
+        elif attrs[attr_name] != expected_value:
+            errors.append(
+                f"{spec.stage_name}: attr '{attr_name}' expected {expected_value!r}, got {attrs[attr_name]!r}"
+            )
+
     if spec.specs:
         _validate_specs(
             group,
@@ -255,13 +269,310 @@ RAW_VIDEO_SPEC = StageSpec(
     ),
 )
 
+STIMULUS_SPEC = StageSpec(
+    stage_name="stimulus",
+    zarr_group="analysis/stimulus_runs/<run>/",
+    specs=(
+        ArraySpec(
+            "interpolation_mask",
+            "bool",
+            ("n_metadata_frames",),
+            description="Per-row flag for interpolated stimulus metadata records.",
+        ),
+    ),
+    subgroups={
+        "video_metadata/frame_metadata": (
+            ArraySpec(
+                "stimulus_frame_num",
+                "uint64",
+                ("n_metadata_frames",),
+                description="Stimulus frame counter in the imported H5 metadata stream.",
+            ),
+        ),
+        "frame_alignment": (
+            ArraySpec(
+                "camera_to_metadata_index",
+                "int64",
+                ("n_camera_frames",),
+                description="Absolute camera frame to stimulus metadata row map; missing frames are -1.",
+            ),
+        ),
+    },
+)
+
+KEYPOINT_PROFILE_SPEC = StageSpec(
+    stage_name="keypoint_profile",
+    zarr_group="analysis/keypoint_profile_runs/<run>/",
+    specs=(),
+    required_attrs=(
+        "schema_name",
+        "schema_version",
+        "created_at_utc",
+        "profile_summary",
+    ),
+)
+
+DETECTION_PROFILE_SPEC = StageSpec(
+    stage_name="detection_profile",
+    zarr_group="analysis/detection_profile_runs/<run>/",
+    specs=(),
+    required_attrs=(
+        "schema_name",
+        "schema_version",
+        "created_at_utc",
+        "profile_summary",
+    ),
+)
+
+EYE_MASK_PROFILE_SPEC = StageSpec(
+    stage_name="eye_mask_profile",
+    zarr_group="analysis/eye_mask_profile_runs/<run>/",
+    specs=(),
+    required_attrs=(
+        "schema_name",
+        "schema_version",
+        "created_at_utc",
+        "profile_summary",
+    ),
+)
+
+SUBJECT_SHAPE_SPEC = StageSpec(
+    stage_name="subject_shape",
+    zarr_group="analysis/subject_shape_runs/<run>/",
+    specs=(),
+    required_attrs=(
+        "schema_id",
+        "schema_version",
+        "method",
+        "method_version",
+        "created_at_utc",
+        "row_axis",
+        "source_refined_subject_masks_run",
+        "source_refs",
+    ),
+    subgroups={
+        "row_index": (
+            ArraySpec("frame_indices", "int32", ("n_rows",)),
+            ArraySpec("source_refined_row_ids", "int64", ("n_rows",)),
+        ),
+        "components/subject_body": (
+            ArraySpec("mask_present", "bool", ("n_rows",)),
+            ArraySpec("area_px", "float32", ("n_rows",)),
+            ArraySpec("centroid_xy", "float32", ("n_rows", 2)),
+            ArraySpec("centroid_valid", "bool", ("n_rows",)),
+            ArraySpec("bbox_xyxy", "float32", ("n_rows", 4)),
+            ArraySpec("bbox_valid", "bool", ("n_rows",)),
+        ),
+    },
+)
+
+TAIL_POSTURE_VIEW_SPEC = StageSpec(
+    stage_name="tail_posture_view",
+    zarr_group="analysis/tail_posture_view_runs/<run>/",
+    specs=(
+        ArraySpec("valid", "bool", ("n_rows",)),
+        ArraySpec("failure_reason_bytes", "uint8", ("n_rows", "width")),
+        ArraySpec("frame_index", "int32/int64", ("n_rows",)),
+        ArraySpec("head_xy", "float32", ("n_rows", 2)),
+        ArraySpec("head_yaw_rad", "float32", ("n_rows",)),
+        ArraySpec("tail_keypoints_xy", "float32", ("n_rows", "n_tail_keypoints", 2)),
+        ArraySpec("tail_angle_rad", "float32", ("n_rows", "n_tail_angles")),
+        ArraySpec("tail_angle_deg", "float32", ("n_rows", "n_tail_angles")),
+    ),
+    required_attrs=(
+        "schema_id",
+        "schema_version",
+        "method",
+        "method_version",
+        "created_at_utc",
+        "row_axis",
+        "view_family",
+        "source_subject_shape_run",
+        "source_subject_shape_path",
+        "source_tail_geometry_kind",
+        "head_source",
+        "keypoint_count",
+        "angle_count",
+        "angle_convention",
+        "angle_units_primary",
+        "frame_index_source",
+        "source_refs",
+        "algorithm_provenance",
+    ),
+    subgroups={
+        "row_index": (
+            ArraySpec("frame_indices", "int32", ("n_rows",)),
+            ArraySpec("source_refined_row_ids", "int64", ("n_rows",)),
+        ),
+    },
+)
+
+BOUT_CLASSIFICATION_SPEC = StageSpec(
+    stage_name="bout_classification",
+    zarr_group="analysis/bout_classification_runs/<run>/",
+    specs=(),
+    required_attrs=(
+        "schema_id",
+        "schema_version",
+        "classifier_family",
+        "classifier_name",
+        "source_mode",
+        "row_axis",
+        "invalid_window_policy",
+        "source_refs",
+        "parameters",
+    ),
+    subgroups={
+        "per_bout": (
+            ArraySpec("source_bout_id", "int32/int64", ("n_bouts",)),
+            ArraySpec("start_frame", "int32/int64", ("n_bouts",)),
+            ArraySpec("end_frame", "int32/int64", ("n_bouts",)),
+            ArraySpec("window_start_frame", "int32/int64", ("n_bouts",)),
+            ArraySpec("window_end_frame", "int32/int64", ("n_bouts",)),
+            ArraySpec("HB1_frame", "int32/int64", ("n_bouts",)),
+            ArraySpec("HB1_offset_frames", "int32/int64", ("n_bouts",)),
+            ArraySpec("category_id", "int32/int64", ("n_bouts",)),
+            ArraySpec("category_label_bytes", "uint8", ("n_bouts", "width")),
+            ArraySpec("subcategory_id", "int32/int64", ("n_bouts",)),
+            ArraySpec("sign", "int32/int64", ("n_bouts",)),
+            ArraySpec("probability", "float32", ("n_bouts",)),
+            ArraySpec("tail_valid_fraction", "float32", ("n_bouts",)),
+            ArraySpec("traj_valid_fraction", "float32", ("n_bouts",)),
+            ArraySpec("max_consecutive_tail_invalid", "int32/int64", ("n_bouts",)),
+            ArraySpec("max_consecutive_traj_invalid", "int32/int64", ("n_bouts",)),
+            ArraySpec("source_window_valid", "bool", ("n_bouts",)),
+            ArraySpec("classified", "bool", ("n_bouts",)),
+            ArraySpec("valid", "bool", ("n_bouts",)),
+            ArraySpec("failure_reason_bytes", "uint8", ("n_bouts", "width")),
+        ),
+    },
+)
+
+TAIL_KINEMATICS_SPEC = StageSpec(
+    stage_name="tail_kinematics",
+    zarr_group="analysis/tail_kinematics_runs/<run>/",
+    specs=(
+        ArraySpec("valid", "bool", ("n_rows",)),
+        ArraySpec("failure_reason_bytes", "uint8", ("n_rows", "width")),
+        ArraySpec("frame_index", "int32/int64", ("n_rows",)),
+        ArraySpec("tail_angle_sample_s", "float32/float64", ("n_tail_samples",)),
+        ArraySpec("tail_angle_rad", "float32", ("n_rows", "n_tail_samples")),
+        ArraySpec("tail_angle_deg", "float32", ("n_rows", "n_tail_samples")),
+        ArraySpec("tail_tip_angle_rad", "float32", ("n_rows",)),
+        ArraySpec("tail_tip_angle_deg", "float32", ("n_rows",)),
+        ArraySpec("max_abs_tail_angle_rad", "float32", ("n_rows",)),
+        ArraySpec("max_abs_tail_angle_deg", "float32", ("n_rows",)),
+        ArraySpec("tail_angle_rms_rad", "float32", ("n_rows",)),
+        ArraySpec("tail_angle_rms_deg", "float32", ("n_rows",)),
+    ),
+    required_attrs=(
+        "schema_id",
+        "schema_version",
+        "method",
+        "method_version",
+        "created_at_utc",
+        "row_axis",
+        "source_subject_shape_run",
+        "source_subject_shape_path",
+        "source_tail_geometry_kind",
+        "tail_angle_sample_count",
+        "frame_index_source",
+        "source_refs",
+    ),
+    subgroups={
+        "row_index": (
+            ArraySpec("frame_indices", "int32", ("n_rows",)),
+            ArraySpec("source_refined_row_ids", "int64", ("n_rows",)),
+        ),
+    },
+)
+
+TRACK_KINEMATICS_SPEC = StageSpec(
+    stage_name="track_kinematics",
+    zarr_group="analysis/track_kinematics_runs/<run_type>/<run>/",
+    specs=(
+        ArraySpec("track_ids", "int32/int64", ("n_tracks",)),
+        ArraySpec("track_arena_ids", "int32/int64", ("n_tracks",)),
+    ),
+    required_attrs=(
+        "track_manifest",
+        "provenance",
+        "created_at_utc",
+        "git_commit",
+        "git_branch",
+        "method",
+        "fps",
+        "source_tracking_run",
+        "summary",
+        "num_tracks",
+    ),
+)
+
+EYE_ANGLE_SPEC = StageSpec(
+    stage_name="eye_angle",
+    zarr_group="analysis/eye_angle_runs/<run>/",
+    specs=(),
+    required_attrs=(
+        "report_version",
+        "provenance",
+        "source_eye_geometry_stage",
+        "source_eye_geometry_run",
+        "source_keypoint_run",
+        "source_keypoints_run",
+        "fps",
+        "num_detections",
+        "num_frames",
+    ),
+    required_attr_values={"status": "complete"},
+    subgroups={
+        "support": (
+            ArraySpec("frame_indices", "int32/int64", ("n_rows",)),
+            ArraySpec("time_seconds", "float32/float64", ("n_rows",)),
+            ArraySpec("ellipse_major", "float32/float64", ("n_rows",)),
+            ArraySpec("ellipse_minor", "float32/float64", ("n_rows",)),
+            ArraySpec("ellipse_ratio", "float32/float64", ("n_rows",)),
+        ),
+    },
+)
+
+BOUT_KINEMATICS_SPEC = StageSpec(
+    stage_name="bout_kinematics",
+    zarr_group="analysis/bout_kinematics_runs/<run>/",
+    specs=(),
+    required_attrs=(
+        "schema_version",
+        "method_version",
+        "created_at_utc",
+        "parameters",
+        "provenance",
+        "source_refs",
+        "source_track_id",
+        "source_swim_bout_run",
+        "source_swim_bout_speed_level",
+        "source_track_kinematics_run",
+        "default_heading_level",
+        "heading_levels",
+    ),
+    required_attr_values={
+        "schema_id": "analysis.bout_kinematics_runs",
+        "method": "heading_window_and_within_bout_metrics",
+        "row_axis": "swim_bout_rows",
+    },
+)
+
 BACKGROUND_SPEC = StageSpec(
     stage_name="background",
     zarr_group="background_runs/<run>/",
     specs=(
         ArraySpec("background_full", "uint8", ("H", "W"), required=False),
         ArraySpec("background_ds", "uint8", ("H_ds", "W_ds"), required=False),
-        ArraySpec("frame_indices", "int32", ("n_samples",)),
+        ArraySpec(
+            "frame_indices",
+            "int32",
+            ("n_samples",),
+            required=False,
+            description="Optional materialized sample list; current writer records source_frame_indices in attrs.",
+        ),
     ),
 )
 
@@ -443,9 +754,27 @@ KEYPOINTS_SPEC = StageSpec(
             description="True when both temporal heading deltas exceed the configured outlier threshold; omitted when temporal-heading review is disabled (for example sampled imports).",
         ),
         ArraySpec("n_keypoints", "int32", ("n_frames",)),
-        ArraySpec("triangle_angles", "float64", ("n_rois", 3)),
-        ArraySpec("triangle_angles_raw", "float64", ("n_rois", 3)),
-        ArraySpec("triangle_area", "float64", ("n_rois",)),
+        ArraySpec(
+            "triangle_angles",
+            "float64",
+            ("n_rois", 3),
+            required=False,
+            description="Traditional triangle compatibility/QC output; not emitted by general YOLO pose skeletons.",
+        ),
+        ArraySpec(
+            "triangle_angles_raw",
+            "float64",
+            ("n_rois", 3),
+            required=False,
+            description="Traditional triangle compatibility/QC output; not emitted by general YOLO pose skeletons.",
+        ),
+        ArraySpec(
+            "triangle_area",
+            "float64",
+            ("n_rois",),
+            required=False,
+            description="Traditional triangle compatibility/QC output; not emitted by general YOLO pose skeletons.",
+        ),
     ),
 )
 
@@ -466,7 +795,13 @@ REFINED_KEYPOINTS_SPEC = StageSpec(
         ArraySpec("keypoints_norm", "float64", ("n_rois", "n_keypoints", 2)),
         ArraySpec("heading", "float64", ("n_rois",)),
         ArraySpec("confidence", "float64", ("n_rois",)),
-        ArraySpec("keypoint_confidences", "float64", ("n_rois", "n_keypoints")),
+        ArraySpec(
+            "keypoint_confidences",
+            "float64",
+            ("n_rois", "n_keypoints"),
+            required=False,
+            description="Copied from source run when present.",
+        ),
         ArraySpec(
             "effective_threshold",
             "float64",
@@ -542,10 +877,28 @@ REFINED_KEYPOINTS_SPEC = StageSpec(
             required=False,
             description="Optional validity mask for schema-driven derived keypoint metrics.",
         ),
-        ArraySpec("edit_applied", "bool", ("n_rois",)),
-        ArraySpec("reason_bytes", "uint8", ("n_rois", "width")),
-        ArraySpec("reason", "string", ("n_rois",)),
-        ArraySpec("failure_indices", "int32", ("n_failures",)),
+        ArraySpec(
+            "edit_applied",
+            "bool",
+            ("n_rois",),
+            required=False,
+            description="Current writer emits this manual-edit marker; older refined keypoint runs may omit it.",
+        ),
+        ArraySpec(
+            "reason_bytes",
+            "uint8",
+            ("n_rois", "width"),
+            required=False,
+            description="TensorStore-safe reason encoding; older runs may only carry reason strings.",
+        ),
+        ArraySpec("reason", "string", ("n_rois",), required=False),
+        ArraySpec(
+            "failure_indices",
+            "int32",
+            ("n_failures",),
+            required=False,
+            description="Derived source-failure index list; omitted by older refined keypoint runs.",
+        ),
     ),
 )
 
@@ -730,7 +1083,7 @@ ARENA_ASSIGNMENT_SPEC = StageSpec(
     zarr_group="arena_assignment_runs/<run>/",
     specs=(
         ArraySpec("arena_ids", "int32", ("n_detections",)),
-        ArraySpec("confidence", "float32", ("n_detections",)),
+        ArraySpec("confidence", "float32", ("n_detections",), required=False),
     ),
 )
 
@@ -749,6 +1102,17 @@ TRACKING_SPEC = StageSpec(
 
 STAGES: Dict[str, StageSpec] = {
     RAW_VIDEO_SPEC.stage_name: RAW_VIDEO_SPEC,
+    STIMULUS_SPEC.stage_name: STIMULUS_SPEC,
+    DETECTION_PROFILE_SPEC.stage_name: DETECTION_PROFILE_SPEC,
+    EYE_MASK_PROFILE_SPEC.stage_name: EYE_MASK_PROFILE_SPEC,
+    KEYPOINT_PROFILE_SPEC.stage_name: KEYPOINT_PROFILE_SPEC,
+    SUBJECT_SHAPE_SPEC.stage_name: SUBJECT_SHAPE_SPEC,
+    TAIL_POSTURE_VIEW_SPEC.stage_name: TAIL_POSTURE_VIEW_SPEC,
+    BOUT_CLASSIFICATION_SPEC.stage_name: BOUT_CLASSIFICATION_SPEC,
+    TAIL_KINEMATICS_SPEC.stage_name: TAIL_KINEMATICS_SPEC,
+    TRACK_KINEMATICS_SPEC.stage_name: TRACK_KINEMATICS_SPEC,
+    EYE_ANGLE_SPEC.stage_name: EYE_ANGLE_SPEC,
+    BOUT_KINEMATICS_SPEC.stage_name: BOUT_KINEMATICS_SPEC,
     BACKGROUND_SPEC.stage_name: BACKGROUND_SPEC,
     DETECT_SPEC.stage_name: DETECT_SPEC,
     DETECT_QUALITY_SPEC.stage_name: DETECT_QUALITY_SPEC,
@@ -769,6 +1133,17 @@ __all__ = [
     "StageSpec",
     "ValidationResult",
     "RAW_VIDEO_SPEC",
+    "STIMULUS_SPEC",
+    "DETECTION_PROFILE_SPEC",
+    "EYE_MASK_PROFILE_SPEC",
+    "KEYPOINT_PROFILE_SPEC",
+    "SUBJECT_SHAPE_SPEC",
+    "TAIL_POSTURE_VIEW_SPEC",
+    "BOUT_CLASSIFICATION_SPEC",
+    "TAIL_KINEMATICS_SPEC",
+    "TRACK_KINEMATICS_SPEC",
+    "EYE_ANGLE_SPEC",
+    "BOUT_KINEMATICS_SPEC",
     "BACKGROUND_SPEC",
     "DETECT_SPEC",
     "DETECT_QUALITY_SPEC",

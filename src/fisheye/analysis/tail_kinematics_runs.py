@@ -20,6 +20,7 @@ from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 from .subject_shape_io import SubjectShapeRunTables, load_subject_shape_run_tables, resolve_subject_shape_run
@@ -445,7 +446,7 @@ def _prepare_tail_kinematics_run(
     overwrite: bool,
 ) -> zarr.Group:
     analysis = root.require_group("analysis")
-    parent = analysis.require_group("tail_kinematics_runs")
+    parent = require_runs_parent(analysis, "tail_kinematics_runs")
     if target_run in parent:
         if not overwrite:
             raise ValueError(
@@ -453,6 +454,7 @@ def _prepare_tail_kinematics_run(
             )
         del parent[target_run]
     run_group = parent.create_group(target_run)
+    mark_run_started(run_group, run_name=target_run, stage="tail_kinematics")
     _set_reason_bytes_attrs(run_group)
 
     source_refined_run = shape_group.attrs.get("source_refined_subject_masks_run")
@@ -687,7 +689,11 @@ def write_tail_kinematics_run_group(
     run_group.attrs["rows_per_second"] = float(row_count / duration_seconds) if duration_seconds > 0.0 else float("inf")
     run_group.attrs["valid_row_count"] = valid_count
     run_group.attrs["invalid_row_count"] = invalid_count
-    root["analysis"]["tail_kinematics_runs"].attrs["latest"] = target_run
+    mark_run_complete(
+        run_group,
+        parent_group=root["analysis"]["tail_kinematics_runs"],
+        run_name=target_run,
+    )
 
     reason_counts: dict[str, int] = {}
     for reason in np.asarray(batch.failure_reason, dtype=object).tolist():

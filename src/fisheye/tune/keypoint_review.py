@@ -34,7 +34,7 @@ def _get_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_keypoints_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_keypoints_runs found in archive.")
-    latest = resolve_latest_complete_run_name(refined_parent, legacy_default=True)
+    latest = resolve_latest_complete_run_name(refined_parent)
     if not latest:
         raise RuntimeError("No refined keypoint runs recorded.")
     return latest
@@ -147,7 +147,7 @@ def _resolve_crop_group_for_target_flags(
         if refined is not None:
             resolved_crop_run = refined.attrs.get("source_crop_run")
     if not resolved_crop_run and crop_parent is not None:
-        resolved_crop_run = resolve_latest_complete_run_name(crop_parent, legacy_default=True)
+        resolved_crop_run = resolve_latest_complete_run_name(crop_parent)
     if crop_parent is None or not resolved_crop_run:
         return None
     if resolved_crop_run not in crop_parent:

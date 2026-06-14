@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
+import warnings
 
 import numpy as np
 import zarr
@@ -8,16 +11,26 @@ import zarr
 from fisheye.registry import stage_complete as stage_complete_mod
 from fisheye.registry.db import DatasetMetadata, Registry
 from fisheye.registry.stage_complete import emit_stage_completion
+from fisheye.shared import zarr_run_completion as completion_mod
+from fisheye.utils import backfill_completion_epoch as backfill_mod
+from fisheye.utils import triage_completion_epoch_blockers as triage_mod
 from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_ATTR,
+    COMPLETION_EPOCH_STRICT,
+    RUN_COMPLETED_AT_ATTR,
     RUN_COMPLETION_STATUS_ATTR,
     RUN_STATUS_RUNNING,
     describe_run_parent,
+    effective_legacy_default,
     iter_run_parent_summaries,
     is_run_complete,
+    is_run_complete_in_parent,
     mark_run_complete,
+    mark_run_failed,
     mark_run_pending,
     mark_run_started,
     note_pending_latest,
+    require_runs_parent,
     resolve_latest_complete_run_name,
 )
 
@@ -25,14 +38,37 @@ from fisheye.shared.zarr_run_completion import (
 class FakeGroup(dict[str, object]):
     def __init__(self, *, attrs: dict[str, object] | None = None) -> None:
         super().__init__()
-        self.attrs = attrs or {}
+        self.attrs = attrs if attrs is not None else {}
 
     def group_keys(self):
         return [key for key, value in self.items() if isinstance(value, FakeGroup)]
 
+    def require_group(self, name: str) -> "FakeGroup":
+        group: FakeGroup = self
+        for part in [piece for piece in str(name).split("/") if piece]:
+            child = group.get(part)
+            if child is None:
+                child = FakeGroup()
+                group[part] = child
+            if not isinstance(child, FakeGroup):
+                raise TypeError(f"{part!r} exists and is not a group")
+            group = child
+        return group
+
     @property
     def path(self) -> str:
         return "/fake"
+
+
+class FailingSetAttrs(dict[str, object]):
+    def __init__(self, *, fail_keys: set[str]) -> None:
+        super().__init__()
+        self.fail_keys = fail_keys
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if key in self.fail_keys:
+            raise RuntimeError(f"refusing attr write for {key}")
+        super().__setitem__(key, value)
 
 
 class FakeArray:
@@ -92,6 +128,97 @@ def _add_valid_tracking_arrays(run: FakeGroup) -> None:
     run["track_arena_ids"] = FakeArray((1,), "int32")
 
 
+def _add_valid_track_kinematics_surface(run: FakeGroup) -> None:
+    run["track_ids"] = FakeArray((2,), "int32")
+    run["track_arena_ids"] = FakeArray((2,), "int32")
+    for attr_name in (
+        "track_manifest",
+        "provenance",
+        "created_at_utc",
+        "git_commit",
+        "git_branch",
+        "method",
+        "fps",
+        "source_tracking_run",
+        "summary",
+        "num_tracks",
+    ):
+        run.attrs[attr_name] = "ok"
+
+
+def test_require_runs_parent_stamps_new_empty_parent_strict() -> None:
+    root = FakeGroup()
+
+    parent = require_runs_parent(root, "detect_runs")
+
+    assert root["detect_runs"] is parent
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
+    assert effective_legacy_default(parent) is False
+
+
+def test_require_runs_parent_leaves_existing_parent_legacy_until_backfill() -> None:
+    root = FakeGroup()
+    parent = FakeGroup()
+    parent["legacy_run"] = FakeGroup()
+    root["detect_runs"] = parent
+
+    resolved = require_runs_parent(root, "detect_runs")
+
+    assert resolved is parent
+    assert COMPLETION_EPOCH_ATTR not in parent.attrs
+    assert effective_legacy_default(parent) is True
+
+
+def test_parent_epoch_controls_unmarked_child_completion() -> None:
+    parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT})
+    run = FakeGroup()
+    parent["run_001"] = run
+
+    assert is_run_complete(run) is True
+    assert is_run_complete_in_parent(parent, run) is False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        assert is_run_complete_in_parent(parent, run, legacy_default=True) is True
+    assert resolve_latest_complete_run_name(parent) is None
+    assert resolve_latest_complete_run_name(parent, legacy_default=True) == "run_001"
+
+
+def test_legacy_parent_warns_once_when_accepting_unmarked_child() -> None:
+    completion_mod._LEGACY_COMPLETION_WARNING_KEYS.clear()
+    parent = FakeGroup()
+    parent["run_001"] = FakeGroup()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert resolve_latest_complete_run_name(parent) == "run_001"
+        assert resolve_latest_complete_run_name(parent) == "run_001"
+
+    matching = [
+        warning
+        for warning in caught
+        if "treating unmarked child runs as legacy-complete" in str(warning.message)
+    ]
+    assert len(matching) == 1
+
+
+def test_strict_parent_stray_unmarked_group_cannot_win_latest_resolution() -> None:
+    parent = FakeGroup(
+        attrs={
+            COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT,
+            "latest": "zzz_debug",
+            "latest_complete": "run_001",
+        }
+    )
+    complete = FakeGroup()
+    stray = FakeGroup()
+    parent["run_001"] = complete
+    parent["zzz_debug"] = stray
+    mark_run_complete(complete, parent_group=parent, run_name="run_001")
+    parent.attrs["latest"] = "zzz_debug"
+
+    assert resolve_latest_complete_run_name(parent) == "run_001"
+
+
 def test_latest_resolver_skips_incomplete_contract_run() -> None:
     parent = FakeGroup(attrs={"latest": "new"})
     legacy = FakeGroup()
@@ -116,6 +243,19 @@ def test_mark_complete_publishes_latest_and_latest_complete() -> None:
     assert is_run_complete(run) is True
     assert parent.attrs["latest"] == "run_001"
     assert parent.attrs["latest_complete"] == "run_001"
+
+
+def test_latest_resolver_handles_slash_qualified_nested_run_names() -> None:
+    parent = FakeGroup()
+    run = parent.require_group("offline/run_001")
+    mark_run_started(run, run_name="offline/run_001", stage="track_kinematics")
+
+    mark_run_complete(run, parent_group=parent, run_name="offline/run_001")
+
+    assert resolve_latest_complete_run_name(parent) == "offline/run_001"
+    summary = describe_run_parent(parent, parent_path="analysis/track_kinematics_runs")
+    assert summary["resolved_latest_complete"] == "offline/run_001"
+    assert summary["latest_exists"] is True
 
 
 def test_note_pending_latest_restores_previous_complete_pointer() -> None:
@@ -236,6 +376,43 @@ def test_emit_stage_completion_refuses_incomplete_opted_in_run(tmp_path: Path) -
     assert wrote is False
 
 
+def test_emit_stage_completion_refuses_unmarked_run_under_strict_parent(tmp_path: Path) -> None:
+    root = FakeGroup()
+    detect_parent = FakeGroup(attrs={COMPLETION_EPOCH_ATTR: COMPLETION_EPOCH_STRICT})
+    run = FakeGroup()
+    root["detect_runs"] = detect_parent
+    detect_parent["detect_001"] = run
+    _add_valid_detect_arrays(run)
+
+    class FakeRegistry:
+        def close(self) -> None:
+            pass
+
+    called = False
+
+    def _upsert(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+
+    wrote = emit_stage_completion(
+        root,  # type: ignore[arg-type]
+        tmp_path / "archive.zarr",
+        step_name="detect",
+        status="ok",
+        source="unit_test",
+        run_name="detect_001",
+        registry=FakeRegistry(),  # type: ignore[arg-type]
+        auto_registry_from_env=False,
+        upsert_dataset_row=False,
+        metadata=type("Metadata", (), {"dataset_id": "d", "recording_id": "r"})(),
+        upsert_step_status_fn=_upsert,
+        invalidate_steps_fn=lambda *args, **kwargs: None,
+    )
+
+    assert wrote is False
+    assert called is False
+
+
 def test_emit_stage_completion_refuses_unresolved_ok_run(tmp_path: Path) -> None:
     root = FakeGroup()
     root["detect_runs"] = FakeGroup()
@@ -267,6 +444,1294 @@ def test_emit_stage_completion_refuses_unresolved_ok_run(tmp_path: Path) -> None
 
     assert wrote is False
     assert called is False
+
+
+def test_legacy_default_true_production_uses_are_retired() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    pattern = re.compile(r"legacy_default\s*=\s*True")
+    matches: list[str] = []
+    for path in (repo_root / "src" / "fisheye").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if pattern.search(line):
+                matches.append(f"{path.relative_to(repo_root)}:{line_no}")
+
+    assert not matches, "\n".join(matches)
+
+
+def test_raw_runs_parent_creation_uses_completion_helper() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    pattern = re.compile(r"(?:require_group|create_group)\(\s*[\"'][^\"']*_runs[\"']")
+    allowed = {
+        # finalized_runs is an experiment_index collection table, not a stage run parent.
+        "src/fisheye/utils/create_clipped_analysis_zarr.py",
+        "src/fisheye/utils/finalize_clipped_detect_refine_workflow.py",
+    }
+    matches: list[str] = []
+    for path in (repo_root / "src" / "fisheye").rglob("*.py"):
+        relative = path.relative_to(repo_root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if not pattern.search(line):
+                continue
+            if relative in allowed and "finalized_runs" in line:
+                continue
+            matches.append(f"{relative}:{line_no}:{line.strip()}")
+
+    assert not matches, "\n".join(matches)
+
+
+def test_backfill_marks_valid_legacy_child_before_stamping_parent() -> None:
+    parent = FakeGroup()
+    child = FakeGroup()
+    _add_valid_detect_arrays(child)
+    parent["detect_001"] = child
+
+    dry_report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=False,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert dry_report["status"] == "would_stamp"
+    assert dry_report["would_mark_child_count"] == 1
+    assert dry_report["marked_child_count"] == 0
+    assert COMPLETION_EPOCH_ATTR not in parent.attrs
+    assert RUN_COMPLETION_STATUS_ATTR not in child.attrs
+
+    apply_report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert apply_report["status"] == "stamped"
+    assert apply_report["would_mark_child_count"] == 1
+    assert apply_report["marked_child_count"] == 1
+    assert child.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
+    assert child.attrs["palette_run_stage"] == "detect"
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
+    completed_at = child.attrs[RUN_COMPLETED_AT_ATTR]
+
+    second_apply_report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-11T00:00:00+00:00",
+    )
+
+    assert second_apply_report["status"] == "already_strict"
+    assert second_apply_report["would_mark_child_count"] == 0
+    assert second_apply_report["marked_child_count"] == 0
+    assert child.attrs[RUN_COMPLETED_AT_ATTR] == completed_at
+
+
+def test_backfill_ignores_nonlatest_invalid_legacy_child_when_stamping_parent() -> None:
+    parent = FakeGroup(attrs={"latest": "detect_good", "latest_complete": "detect_good"})
+    good = FakeGroup()
+    bad = FakeGroup()
+    _add_valid_detect_arrays(good)
+    parent["detect_good"] = good
+    parent["detect_old_bad"] = bad
+
+    dry_report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=False,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert dry_report["status"] == "would_stamp"
+    assert dry_report["unverified_child_count"] == 0
+    assert dry_report["ignored_legacy_child_count"] == 1
+    assert dry_report["would_mark_child_count"] == 1
+    by_name = {child["run_name"]: child for child in dry_report["children"]}
+    assert by_name["detect_old_bad"]["verification"] == "invalid"
+    assert by_name["detect_old_bad"]["ignored_for_parent_epoch"] is True
+    assert by_name["detect_old_bad"]["ignore_reason"] == "non_latest_legacy_contract_mismatch"
+
+    apply_report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert apply_report["status"] == "stamped"
+    assert apply_report["ignored_legacy_child_count"] == 1
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
+    assert good.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
+    assert RUN_COMPLETION_STATUS_ATTR not in bad.attrs
+    assert is_run_complete_in_parent(parent, good) is True
+    assert is_run_complete_in_parent(parent, bad) is False
+
+
+def test_backfill_blocks_parent_when_latest_legacy_child_is_invalid() -> None:
+    parent = FakeGroup(attrs={"latest": "detect_bad"})
+    good = FakeGroup()
+    bad = FakeGroup()
+    _add_valid_detect_arrays(good)
+    parent["detect_good"] = good
+    parent["detect_bad"] = bad
+
+    report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert report["status"] == "blocked"
+    assert report["unverified_child_count"] == 1
+    assert report["ignored_legacy_child_count"] == 0
+    assert report["would_mark_child_count"] == 0
+    assert COMPLETION_EPOCH_ATTR not in parent.attrs
+    assert RUN_COMPLETION_STATUS_ATTR not in good.attrs
+    assert RUN_COMPLETION_STATUS_ATTR not in bad.attrs
+
+
+def test_backfill_write_failure_leaves_parent_epoch_unstamped() -> None:
+    parent = FakeGroup(attrs=FailingSetAttrs(fail_keys={COMPLETION_EPOCH_ATTR}))
+    child = FakeGroup()
+    _add_valid_detect_arrays(child)
+    parent["detect_001"] = child
+
+    report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert report["status"] == "write_failed"
+    assert report["write_error_phase"] == "stamp_parent_epoch"
+    assert report["write_error_type"] == "RuntimeError"
+    assert report["would_mark_child_count"] == 1
+    assert report["marked_child_count"] == 1
+    assert child.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
+    assert COMPLETION_EPOCH_ATTR not in parent.attrs
+
+
+def test_backfill_blocks_parent_without_stage_spec() -> None:
+    parent = FakeGroup()
+    parent["legacy_001"] = FakeGroup()
+
+    report = backfill_mod._summarize_parent(
+        "analysis/custom_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert report["status"] == "blocked"
+    assert report["stage_spec_available"] is False
+    assert report["unverified_child_count"] == 1
+    assert COMPLETION_EPOCH_ATTR not in parent.attrs
+
+
+def test_backfill_stamps_parent_with_already_contracted_incomplete_children() -> None:
+    parent = FakeGroup()
+    running = FakeGroup()
+    failed = FakeGroup()
+    parent["running_001"] = running
+    parent["failed_001"] = failed
+    mark_run_started(running, run_name="running_001", stage="detect")
+    mark_run_started(failed, run_name="failed_001", stage="detect")
+    mark_run_failed(failed, error="boom")
+
+    report = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert report["status"] == "stamped"
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
+    assert report["marked_child_count"] == 0
+    by_name = {child["run_name"]: child for child in report["children"]}
+    assert by_name["running_001"]["verification"] == "has_contract"
+    assert by_name["running_001"]["completion_status"] == "running"
+    assert by_name["failed_001"]["verification"] == "has_contract"
+    assert by_name["failed_001"]["completion_status"] == "failed"
+    assert is_run_complete_in_parent(parent, running) is False
+    assert is_run_complete_in_parent(parent, failed) is False
+
+
+def test_backfill_keeps_heterogeneous_analysis_families_unmapped_until_validated() -> None:
+    # These legacy families have multiple historical layouts in real stores.
+    # They should stay no-spec/deferred until they get layout-specific validators.
+    for parent_path in (
+        "analysis/swim_bout_runs",
+        "analysis/stimulus_response_runs",
+    ):
+        parent = FakeGroup()
+        parent["legacy_001"] = FakeGroup()
+
+        report = backfill_mod._summarize_parent(
+            parent_path,
+            parent,
+            apply=False,
+            timestamp_utc="2026-06-10T00:00:00+00:00",
+        )
+
+        assert report["status"] == "blocked"
+        assert report["stage"] is None
+        assert report["stage_spec_available"] is False
+        assert report["children"][0]["reason"] == "no_stage_array_spec"
+
+
+def test_backfill_parent_filters_skip_nonmatching_parent_without_mutation() -> None:
+    parent = FakeGroup()
+    child = FakeGroup()
+    parent["detect_001"] = child
+
+    filtered = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+        selected_stages=frozenset({"crop"}),
+    )
+
+    assert filtered["status"] == "filtered"
+    assert filtered["reason"] == "filter_mismatch"
+    assert filtered["stage"] == "detect"
+    assert filtered["filter"] == {"stages": ["crop"], "parent_paths": []}
+    assert COMPLETION_EPOCH_ATTR not in parent.attrs
+    assert RUN_COMPLETION_STATUS_ATTR not in child.attrs
+
+    selected = backfill_mod._summarize_parent(
+        "detect_runs",
+        parent,
+        apply=False,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+        selected_stages=frozenset({"detect"}),
+    )
+
+    assert selected["status"] == "blocked"
+    assert selected["unverified_child_count"] == 1
+
+
+def test_backfill_apply_requires_filter_unless_broad_apply_is_explicit() -> None:
+    assert (
+        backfill_mod._apply_filter_error(
+            apply=True,
+            stages=[],
+            parent_paths=[],
+            allow_broad_apply=False,
+        )
+        is not None
+    )
+    assert (
+        backfill_mod._apply_filter_error(
+            apply=True,
+            stages=["subject_masks"],
+            parent_paths=[],
+            allow_broad_apply=False,
+        )
+        is None
+    )
+    assert (
+        backfill_mod._apply_filter_error(
+            apply=True,
+            stages=[],
+            parent_paths=[],
+            allow_broad_apply=True,
+        )
+        is None
+    )
+    assert (
+        backfill_mod._apply_filter_error(
+            apply=False,
+            stages=[],
+            parent_paths=[],
+            allow_broad_apply=False,
+        )
+        is None
+    )
+
+
+def test_backfill_post_apply_expectations_require_apply(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def _fake_discover(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("zarr discovery should not run for invalid apply-only expectations")
+
+    def _fake_backfill(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("backfill should not run for invalid apply-only expectations")
+
+    monkeypatch.setattr(backfill_mod, "_discover_zarrs", _fake_discover)
+    monkeypatch.setattr(backfill_mod, "backfill_completion_epoch", _fake_backfill)
+
+    try:
+        backfill_mod.main(
+            [
+                "--recordings-root",
+                str(tmp_path / "recordings"),
+                "--stage",
+                "detect",
+                "--expect-applied-stamped-parent-count",
+                "1",
+            ]
+        )
+    except SystemExit as exc:
+        assert "--expect-applied-stamped-parent-count can only be used with --apply" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit from apply-only expectation without --apply")
+
+
+def test_backfill_expected_count_errors_report_drift() -> None:
+    report = {
+        "store_count": 2,
+        "non_ok_store_count": 0,
+        "blocked_parent_count": 0,
+        "filtered_parent_count": 5,
+        "would_stamp_parent_count": 7,
+        "write_failed_parent_count": 0,
+        "would_mark_child_count": 11,
+        "ignored_legacy_child_count": 3,
+    }
+
+    assert backfill_mod._expected_count_errors(
+        report,
+        {
+            "store_count": 2,
+            "non_ok_store_count": 0,
+            "blocked_parent_count": 0,
+            "filtered_parent_count": 5,
+            "would_stamp_parent_count": 7,
+            "write_failed_parent_count": 0,
+            "would_mark_child_count": 11,
+            "ignored_legacy_child_count": 3,
+        },
+    ) == []
+    assert backfill_mod._expected_count_errors(
+        report,
+        {
+            "blocked_parent_count": 1,
+            "non_ok_store_count": 1,
+            "would_stamp_parent_count": 8,
+            "write_failed_parent_count": 1,
+            "would_mark_child_count": 12,
+            "ignored_legacy_child_count": 4,
+        },
+    ) == [
+        "blocked_parent_count: expected 1, observed 0",
+        "non_ok_store_count: expected 1, observed 0",
+        "would_stamp_parent_count: expected 8, observed 7",
+        "write_failed_parent_count: expected 1, observed 0",
+        "would_mark_child_count: expected 12, observed 11",
+        "ignored_legacy_child_count: expected 4, observed 3",
+    ]
+
+
+def _fake_backfill_report(
+    *,
+    apply: bool,
+    blocked_parent_count: int = 0,
+    filtered_parent_count: int = 0,
+    would_stamp_parent_count: int = 0,
+    stamped_parent_count: int = 0,
+    non_ok_store_count: int = 0,
+    write_failed_parent_count: int = 0,
+    would_mark_child_count: int = 0,
+    marked_child_count: int = 0,
+) -> dict[str, object]:
+    blocked_parent = {
+        "parent_path": "detect_runs",
+        "status": "blocked",
+        "stage": "detect",
+        "stage_spec_available": True,
+        "child_count": 1,
+        "verified_child_count": 0,
+        "unverified_child_count": 1,
+        "latest": "detect_bad",
+        "latest_complete": None,
+        "children": [
+            {
+                "run_name": "detect_bad",
+                "verification": "invalid",
+                "errors": ["detect: missing required array 'frame_indices'"],
+            }
+        ],
+    }
+    write_failed_parent = {
+        "parent_path": "detect_runs",
+        "status": "write_failed",
+        "stage": "detect",
+        "stage_spec_available": True,
+        "child_count": 1,
+        "verified_child_count": 1,
+        "unverified_child_count": 0,
+        "marked_child_count": 1,
+        "latest": "detect_001",
+        "latest_complete": None,
+        "write_error_phase": "stamp_parent_epoch",
+        "write_error_type": "RuntimeError",
+        "children": [
+            {
+                "run_name": "detect_001",
+                "verification": "validated_legacy_complete",
+                "marked_complete": True,
+            }
+        ],
+    }
+    parents = []
+    if blocked_parent_count:
+        parents.extend(blocked_parent.copy() for _ in range(blocked_parent_count))
+    if write_failed_parent_count:
+        parents.extend(write_failed_parent.copy() for _ in range(write_failed_parent_count))
+    summary = backfill_mod._build_summary(
+        [
+            {
+                "zarr_path": "/tmp/fake.zarr",
+                "parents": parents,
+            }
+        ]
+    )
+    return {
+        "schema_id": "palette.backfill_completion_epoch_report.v1",
+        "timestamp_utc": "2026-06-10T00:00:00+00:00",
+        "apply": apply,
+        "filters": {"stages": ["detect"], "parent_paths": []},
+        "store_count": 1,
+        "ok_store_count": 1,
+        "non_ok_store_count": non_ok_store_count,
+        "blocked_parent_count": blocked_parent_count,
+        "filtered_parent_count": filtered_parent_count,
+        "would_stamp_parent_count": would_stamp_parent_count,
+        "stamped_parent_count": stamped_parent_count,
+        "write_failed_parent_count": write_failed_parent_count,
+        "would_mark_child_count": would_mark_child_count,
+        "marked_child_count": marked_child_count,
+        "summary": summary,
+        "stores": [
+            {
+                "zarr_path": "/tmp/fake.zarr",
+                "status": "ok",
+                "parent_count": len(parents),
+                "non_ok_store_count": 0,
+                "blocked_parent_count": blocked_parent_count,
+                "filtered_parent_count": filtered_parent_count,
+                "would_stamp_parent_count": would_stamp_parent_count,
+                "stamped_parent_count": stamped_parent_count,
+                "write_failed_parent_count": write_failed_parent_count,
+                "would_mark_child_count": would_mark_child_count,
+                "marked_child_count": marked_child_count,
+                "parents": parents,
+            }
+        ],
+    }
+
+
+def test_backfill_main_apply_aborts_on_blocked_preflight_without_mutation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[bool] = []
+
+    def _fake_backfill(*_args, apply: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(bool(apply))
+        if apply:
+            raise AssertionError("apply call should not run after blocked preflight")
+        return _fake_backfill_report(apply=False, blocked_parent_count=1)
+
+    monkeypatch.setattr(backfill_mod, "backfill_completion_epoch", _fake_backfill)
+
+    output_json = tmp_path / "blocked_preflight.json"
+    blocked_jsonl = tmp_path / "blocked_preflight.jsonl"
+    try:
+        backfill_mod.main(
+            [
+                str(tmp_path / "fake.zarr"),
+                "--stage",
+                "detect",
+                "--apply",
+                "--output-json",
+                str(output_json),
+                "--blocked-jsonl",
+                str(blocked_jsonl),
+                "--no-stdout",
+            ]
+        )
+    except SystemExit as exc:
+        assert "Refusing --apply because selected scope contains blocked parents" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit from blocked apply preflight")
+
+    assert calls == [False]
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["apply_aborted"] is True
+    assert payload["apply_abort_reason"] == "blocked_parents_present"
+    rows = [json.loads(line) for line in blocked_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["parent_path"] == "detect_runs"
+
+
+def test_backfill_main_apply_aborts_on_expectation_drift_without_mutation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[bool] = []
+
+    def _fake_backfill(*_args, apply: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(bool(apply))
+        if apply:
+            raise AssertionError("apply call should not run after drift preflight")
+        return _fake_backfill_report(
+            apply=False,
+            blocked_parent_count=0,
+            filtered_parent_count=2,
+            would_stamp_parent_count=3,
+        )
+
+    monkeypatch.setattr(backfill_mod, "backfill_completion_epoch", _fake_backfill)
+
+    output_json = tmp_path / "drift_preflight.json"
+    try:
+        backfill_mod.main(
+            [
+                str(tmp_path / "fake.zarr"),
+                "--stage",
+                "detect",
+                "--apply",
+                "--expect-would-stamp-parent-count",
+                "4",
+                "--output-json",
+                str(output_json),
+                "--summary-only",
+                "--no-stdout",
+            ]
+        )
+    except SystemExit as exc:
+        assert "preflight counts differ" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit from drifted apply preflight")
+
+    assert calls == [False]
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["apply_aborted"] is True
+    assert payload["apply_abort_reason"] == "expectation_mismatch"
+    assert payload["expectation_errors"] == [
+        "would_stamp_parent_count: expected 4, observed 3"
+    ]
+
+
+def test_backfill_main_apply_aborts_on_non_ok_store_preflight_without_mutation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[bool] = []
+
+    def _fake_backfill(*_args, apply: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(bool(apply))
+        if apply:
+            raise AssertionError("apply call should not run after non-ok store preflight")
+        return _fake_backfill_report(
+            apply=False,
+            blocked_parent_count=0,
+            filtered_parent_count=0,
+            would_stamp_parent_count=0,
+            non_ok_store_count=1,
+        )
+
+    monkeypatch.setattr(backfill_mod, "backfill_completion_epoch", _fake_backfill)
+
+    output_json = tmp_path / "non_ok_store_preflight.json"
+    try:
+        backfill_mod.main(
+            [
+                str(tmp_path / "missing.zarr"),
+                "--stage",
+                "detect",
+                "--apply",
+                "--allow-blocked-apply",
+                "--output-json",
+                str(output_json),
+                "--summary-only",
+                "--no-stdout",
+            ]
+        )
+    except SystemExit as exc:
+        assert "one or more target zarr stores are missing" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit from non-ok store apply preflight")
+
+    assert calls == [False]
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["apply_aborted"] is True
+    assert payload["apply_abort_reason"] == "non_ok_stores_present"
+    assert payload["preflight_counts"]["non_ok_store_count"] == 1
+
+
+def test_backfill_main_allow_blocked_apply_is_explicit_partial_apply_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[bool] = []
+
+    def _fake_backfill(*_args, apply: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(bool(apply))
+        return _fake_backfill_report(
+            apply=apply,
+            blocked_parent_count=1,
+            filtered_parent_count=0,
+            would_stamp_parent_count=2 if not apply else 0,
+        )
+
+    monkeypatch.setattr(backfill_mod, "backfill_completion_epoch", _fake_backfill)
+
+    output_json = tmp_path / "allowed_blocked_apply.json"
+    rc = backfill_mod.main(
+        [
+            str(tmp_path / "fake.zarr"),
+            "--stage",
+            "detect",
+            "--apply",
+            "--allow-blocked-apply",
+            "--expect-blocked-parent-count",
+            "1",
+            "--expect-would-stamp-parent-count",
+            "2",
+            "--output-json",
+            str(output_json),
+            "--no-stdout",
+        ]
+    )
+
+    assert rc == 0
+    assert calls == [False, True]
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["apply"] is True
+    assert "apply_aborted" not in payload
+    assert payload["expected_counts"] == {
+        "blocked_parent_count": 1,
+        "would_stamp_parent_count": 2,
+    }
+    assert payload["preflight_counts"]["blocked_parent_count"] == 1
+    assert payload["preflight_counts"]["would_stamp_parent_count"] == 2
+    assert payload["preflight_counts"]["stamped_parent_count"] == 0
+
+
+def test_backfill_main_apply_exits_nonzero_on_write_failure_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[bool] = []
+
+    def _fake_backfill(*_args, apply: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(bool(apply))
+        return _fake_backfill_report(
+            apply=apply,
+            blocked_parent_count=0,
+            filtered_parent_count=0,
+            would_stamp_parent_count=1 if not apply else 0,
+            write_failed_parent_count=1 if apply else 0,
+        )
+
+    monkeypatch.setattr(backfill_mod, "backfill_completion_epoch", _fake_backfill)
+
+    output_json = tmp_path / "write_failed_apply.json"
+    write_failed_jsonl = tmp_path / "write_failed_apply.jsonl"
+    try:
+        backfill_mod.main(
+            [
+                str(tmp_path / "fake.zarr"),
+                "--stage",
+                "detect",
+                "--apply",
+                "--expect-would-stamp-parent-count",
+                "1",
+                "--output-json",
+                str(output_json),
+                "--write-failed-jsonl",
+                str(write_failed_jsonl),
+                "--summary-only",
+                "--no-stdout",
+            ]
+        )
+    except SystemExit as exc:
+        assert "failed during attr writes" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit from write-failed apply")
+
+    assert calls == [False, True]
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["apply_failed"] is True
+    assert payload["apply_failure_reason"] == "write_failed_parents_present"
+    assert payload["write_failed_parent_count"] == 1
+    assert payload["preflight_counts"]["would_stamp_parent_count"] == 1
+    rows = [
+        json.loads(line)
+        for line in write_failed_jsonl.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["schema_id"] == "palette.backfill_completion_epoch_write_failed_parent.v1"
+    assert rows[0]["parent_path"] == "detect_runs"
+    assert rows[0]["stage"] == "detect"
+    assert rows[0]["write_error_phase"] == "stamp_parent_epoch"
+
+
+def test_backfill_main_apply_exits_nonzero_on_post_apply_count_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[bool] = []
+
+    def _fake_backfill(*_args, apply: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(bool(apply))
+        if not apply:
+            return _fake_backfill_report(
+                apply=False,
+                blocked_parent_count=0,
+                filtered_parent_count=0,
+                would_stamp_parent_count=2,
+            )
+        return _fake_backfill_report(
+            apply=True,
+            blocked_parent_count=0,
+            filtered_parent_count=0,
+            stamped_parent_count=1,
+            marked_child_count=4,
+        )
+
+    monkeypatch.setattr(backfill_mod, "backfill_completion_epoch", _fake_backfill)
+
+    output_json = tmp_path / "post_apply_drift.json"
+    try:
+        backfill_mod.main(
+            [
+                str(tmp_path / "fake.zarr"),
+                "--stage",
+                "detect",
+                "--apply",
+                "--expect-would-stamp-parent-count",
+                "2",
+                "--expect-applied-stamped-parent-count",
+                "2",
+                "--expect-applied-marked-child-count",
+                "5",
+                "--output-json",
+                str(output_json),
+                "--summary-only",
+                "--no-stdout",
+            ]
+        )
+    except SystemExit as exc:
+        assert "Post-apply counts differed" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit from post-apply count drift")
+
+    assert calls == [False, True]
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["apply_failed"] is True
+    assert payload["apply_failure_reason"] == "post_apply_expectation_mismatch"
+    assert payload["post_apply_expected_counts"] == {
+        "stamped_parent_count": 2,
+        "marked_child_count": 5,
+    }
+    assert payload["post_apply_expectation_errors"] == [
+        "stamped_parent_count: expected 2, observed 1",
+        "marked_child_count: expected 5, observed 4",
+    ]
+    assert payload["preflight_counts"]["would_stamp_parent_count"] == 2
+
+
+def test_backfill_summary_counts_blocked_and_stampable_parents() -> None:
+    blocked = {
+        "parent_path": "analysis/custom_runs",
+        "status": "blocked",
+        "stage": None,
+        "child_count": 1,
+        "unverified_child_count": 1,
+        "children": [
+            {
+                "run_name": "legacy_001",
+                "verification": "unverified",
+                "reason": "no_stage_array_spec",
+            }
+        ],
+    }
+    invalid = {
+        "parent_path": "detect_runs",
+        "status": "blocked",
+        "stage": "detect",
+        "child_count": 1,
+        "unverified_child_count": 1,
+        "children": [
+            {
+                "run_name": "bad_detect",
+                "verification": "invalid",
+                "errors": ["detect: missing required array 'frame_indices'"],
+            }
+        ],
+    }
+    deprecated = {
+        "parent_path": "eye_masks_runs",
+        "status": "blocked",
+        "stage": "eye_masks",
+        "child_count": 1,
+        "unverified_child_count": 1,
+        "children": [
+            {
+                "run_name": "eye_masks_001",
+                "verification": "invalid",
+                "errors": ["eye_masks: missing required array 'masks_roi'"],
+            }
+        ],
+    }
+    stampable = {
+        "parent_path": "crop_runs",
+        "status": "would_stamp",
+        "stage": "crop",
+        "child_count": 1,
+        "unverified_child_count": 0,
+        "latest": "crop_good",
+        "latest_complete": "crop_good",
+        "children": [
+            {
+                "run_name": "crop_old_bad",
+                "verification": "invalid",
+                "ignored_for_parent_epoch": True,
+                "ignore_reason": "non_latest_legacy_contract_mismatch",
+                "errors": ["crop: missing required array 'bbox_norm_coords'"],
+            }
+        ],
+    }
+    write_failed = {
+        "parent_path": "detect_runs",
+        "status": "write_failed",
+        "stage": "detect",
+        "child_count": 1,
+        "marked_child_count": 1,
+        "write_error_phase": "stamp_parent_epoch",
+        "write_error_type": "RuntimeError",
+        "children": [],
+    }
+
+    summary = backfill_mod._build_summary(
+        [
+            {
+                "zarr_path": "/tmp/example.zarr",
+                "parents": [blocked, invalid, deprecated, stampable, write_failed],
+            }
+        ]
+    )
+
+    assert summary["parent_status_counts"] == {
+        "blocked": 3,
+        "would_stamp": 1,
+        "write_failed": 1,
+    }
+    assert summary["blocked_parent_counts_by_stage_or_path"] == {
+        "analysis/custom_runs": 1,
+        "detect": 1,
+        "eye_masks": 1,
+    }
+    assert summary["would_stamp_parent_counts_by_stage_or_path"] == {"crop": 1}
+    assert summary["write_failed_parent_counts_by_stage_or_path"] == {"detect": 1}
+    assert summary["write_failed_parent_ranked_by_stage_or_path"] == [
+        {"key": "detect", "count": 1},
+    ]
+    assert summary["write_failed_parent_examples"] == [
+        {
+            "zarr_path": "/tmp/example.zarr",
+            "parent_path": "detect_runs",
+            "stage": "detect",
+            "child_count": 1,
+            "marked_child_count": 1,
+            "write_error_phase": "stamp_parent_epoch",
+            "write_error_run_name": None,
+            "write_error_type": "RuntimeError",
+        }
+    ]
+    assert summary["blocked_child_reason_counts"] == {"invalid": 2, "no_stage_array_spec": 1}
+    assert summary["blocked_child_first_error_counts_top50"] == {
+        "detect: missing required array 'frame_indices'": 1,
+        "eye_masks: missing required array 'masks_roi'": 1,
+    }
+    assert summary["ignored_legacy_child_reason_counts"] == {"invalid": 1}
+    assert summary["ignored_legacy_child_first_error_counts_top50"] == {
+        "crop: missing required array 'bbox_norm_coords'": 1,
+    }
+    assert summary["ignored_legacy_parent_examples"] == [
+        {
+            "zarr_path": "/tmp/example.zarr",
+            "parent_path": "crop_runs",
+            "stage": "crop",
+            "latest": "crop_good",
+            "latest_complete": "crop_good",
+            "ignored_legacy_child_count": 1,
+        }
+    ]
+    assert summary["blocked_parent_ranked_by_stage_or_path"] == [
+        {"key": "analysis/custom_runs", "count": 1},
+        {"key": "detect", "count": 1},
+        {"key": "eye_masks", "count": 1},
+    ]
+    assert summary["would_stamp_parent_ranked_by_stage_or_path"] == [
+        {"key": "crop", "count": 1},
+    ]
+    assert summary["blocked_child_first_error_ranked_top50"] == [
+        {"key": "detect: missing required array 'frame_indices'", "count": 1},
+        {"key": "eye_masks: missing required array 'masks_roi'", "count": 1},
+    ]
+    assert summary["backfill_scope_plan"] == [
+        {
+            "key": "detect",
+            "recommendation": "write_failed_retry_after_fix",
+            "blocked_parent_count": 1,
+            "would_stamp_parent_count": 0,
+            "stamped_parent_count": 0,
+            "write_failed_parent_count": 1,
+            "filter": {"stage": "detect"},
+        },
+        {
+            "key": "crop",
+            "recommendation": "ready_to_apply_if_approved",
+            "blocked_parent_count": 0,
+            "would_stamp_parent_count": 1,
+            "stamped_parent_count": 0,
+            "write_failed_parent_count": 0,
+            "filter": {"stage": "crop"},
+        },
+        {
+            "key": "analysis/custom_runs",
+            "recommendation": "blocked_triage_required",
+            "blocked_parent_count": 1,
+            "would_stamp_parent_count": 0,
+            "stamped_parent_count": 0,
+            "write_failed_parent_count": 0,
+            "filter": {"parent_path": "analysis/custom_runs"},
+        },
+        {
+            "key": "eye_masks",
+            "recommendation": "deprecated_scope_not_backfilled",
+            "blocked_parent_count": 1,
+            "would_stamp_parent_count": 0,
+            "stamped_parent_count": 0,
+            "write_failed_parent_count": 0,
+            "filter": {"stage": "eye_masks"},
+        },
+    ]
+
+
+def test_backfill_verifies_nested_track_kinematics_children() -> None:
+    parent = FakeGroup()
+    run = parent.require_group("offline/tk_001")
+    _add_valid_track_kinematics_surface(run)
+
+    report = backfill_mod._summarize_parent(
+        "analysis/track_kinematics_runs",
+        parent,
+        apply=False,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert report["status"] == "would_stamp"
+    assert report["stage"] == "track_kinematics"
+    assert report["child_count"] == 1
+    assert report["children"][0]["run_name"] == "offline/tk_001"
+    assert report["children"][0]["verification"] == "validated_legacy_complete"
+
+
+def test_backfill_apply_marks_nested_track_kinematics_children_complete() -> None:
+    parent = FakeGroup()
+    run = parent.require_group("offline/tk_001")
+    _add_valid_track_kinematics_surface(run)
+
+    report = backfill_mod._summarize_parent(
+        "analysis/track_kinematics_runs",
+        parent,
+        apply=True,
+        timestamp_utc="2026-06-10T00:00:00+00:00",
+    )
+
+    assert report["status"] == "stamped"
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
+    assert run.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
+    assert run.attrs["palette_run_name"] == "offline/tk_001"
+
+
+def test_backfill_blocked_parent_jsonl_rows_are_compact_for_triage(tmp_path: Path) -> None:
+    report = {
+        "timestamp_utc": "2026-06-10T00:00:00+00:00",
+        "apply": False,
+        "stores": [
+            {
+                "zarr_path": "/tmp/example.zarr",
+                "parents": [
+                    {
+                        "parent_path": "detect_runs",
+                        "status": "blocked",
+                        "stage": "detect",
+                        "stage_spec_available": True,
+                        "child_count": 4,
+                        "verified_child_count": 1,
+                        "unverified_child_count": 2,
+                        "ignored_legacy_child_count": 1,
+                        "latest": "bad_detect",
+                        "latest_complete": "good_detect",
+                        "children": [
+                            {
+                                "run_name": "bad_detect",
+                                "verification": "invalid",
+                                "errors": ["detect: missing required array 'frame_indices'"],
+                                "warnings": ["optional array missing"],
+                            },
+                            {
+                                "run_name": "custom",
+                                "verification": "unverified",
+                                "reason": "no_stage_array_spec",
+                            },
+                            {
+                                "run_name": "old_ignored_detect",
+                                "verification": "invalid",
+                                "ignored_for_parent_epoch": True,
+                                "ignore_reason": "non_latest_legacy_contract_mismatch",
+                                "errors": ["detect: missing required array 'scores'"],
+                            },
+                            {
+                                "run_name": "good_detect",
+                                "verification": "has_contract",
+                            },
+                        ],
+                    },
+                    {
+                        "parent_path": "crop_runs",
+                        "status": "would_stamp",
+                        "stage": "crop",
+                        "children": [],
+                    },
+                ],
+            }
+        ],
+    }
+
+    rows = backfill_mod._blocked_parent_rows(report, max_children=1)
+
+    assert len(rows) == 1
+    assert rows[0]["zarr_path"] == "/tmp/example.zarr"
+    assert rows[0]["parent_path"] == "detect_runs"
+    assert rows[0]["blocked_child_reason_counts"] == {
+        "invalid": 1,
+        "no_stage_array_spec": 1,
+    }
+    assert rows[0]["blocked_child_first_error_counts_top10"] == {
+        "detect: missing required array 'frame_indices'": 1,
+    }
+    assert rows[0]["blocked_child_examples"] == [
+        {
+            "run_name": "bad_detect",
+            "verification": "invalid",
+            "first_error": "detect: missing required array 'frame_indices'",
+            "error_count": 1,
+            "warning_count": 1,
+        }
+    ]
+
+    output_jsonl = tmp_path / "blocked.jsonl"
+    backfill_mod._write_jsonl_rows(rows, output_jsonl)
+
+    persisted = [json.loads(line) for line in output_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert persisted == rows
+
+
+def test_backfill_write_failed_parent_jsonl_rows_are_compact_for_triage(tmp_path: Path) -> None:
+    report = {
+        "timestamp_utc": "2026-06-10T00:00:00+00:00",
+        "apply": True,
+        "stores": [
+            {
+                "zarr_path": "/tmp/example.zarr",
+                "parents": [
+                    {
+                        "parent_path": "detect_runs",
+                        "status": "write_failed",
+                        "stage": "detect",
+                        "stage_spec_available": True,
+                        "child_count": 2,
+                        "marked_child_count": 1,
+                        "completion_epoch_before": None,
+                        "completion_epoch_after": None,
+                        "latest": "detect_001",
+                        "latest_complete": None,
+                        "write_error_phase": "stamp_parent_epoch",
+                        "write_error_type": "RuntimeError",
+                        "write_error": "refusing attr write",
+                        "children": [],
+                    },
+                    {
+                        "parent_path": "crop_runs",
+                        "status": "stamped",
+                        "stage": "crop",
+                        "children": [],
+                    },
+                ],
+            }
+        ],
+    }
+
+    rows = backfill_mod._write_failed_parent_rows(report)
+
+    assert rows == [
+        {
+            "schema_id": "palette.backfill_completion_epoch_write_failed_parent.v1",
+            "timestamp_utc": "2026-06-10T00:00:00+00:00",
+            "apply": True,
+            "zarr_path": "/tmp/example.zarr",
+            "parent_path": "detect_runs",
+            "status": "write_failed",
+            "stage": "detect",
+            "stage_spec_available": True,
+            "child_count": 2,
+            "marked_child_count": 1,
+            "completion_epoch_before": None,
+            "completion_epoch_after": None,
+            "latest": "detect_001",
+            "latest_complete": None,
+            "write_error_phase": "stamp_parent_epoch",
+            "write_error_run_name": None,
+            "write_error_type": "RuntimeError",
+            "write_error": "refusing attr write",
+        }
+    ]
+
+    output_jsonl = tmp_path / "write_failed.jsonl"
+    backfill_mod._write_jsonl_rows(rows, output_jsonl)
+
+    persisted = [json.loads(line) for line in output_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert persisted == rows
+
+
+def test_backfill_summary_payload_preserves_apply_abort_metadata() -> None:
+    report = {
+        "timestamp_utc": "2026-06-10T00:00:00+00:00",
+        "apply": False,
+        "filters": {"stages": ["crop"], "parent_paths": []},
+        "store_count": 1,
+        "ok_store_count": 1,
+        "non_ok_store_count": 0,
+        "blocked_parent_count": 1,
+        "filtered_parent_count": 2,
+        "would_stamp_parent_count": 3,
+        "stamped_parent_count": 0,
+        "marked_child_count": 0,
+        "summary": {
+            "parent_status_counts": {"blocked": 1, "filtered": 2, "would_stamp": 3},
+        },
+        "apply_aborted": True,
+        "apply_abort_reason": "blocked_parents_present",
+        "apply_abort_message": "Refusing --apply because selected scope contains blocked parents.",
+        "expected_counts": {"blocked_parent_count": 0},
+        "expectation_errors": ["blocked_parent_count: expected 0, observed 1"],
+    }
+
+    payload = backfill_mod._summary_payload(report)
+
+    assert payload["schema_id"] == "palette.backfill_completion_epoch_report.v1.summary"
+    assert payload["apply_aborted"] is True
+    assert payload["apply_abort_reason"] == "blocked_parents_present"
+    assert "Refusing --apply" in payload["apply_abort_message"]
+    assert payload["expected_counts"] == {"blocked_parent_count": 0}
+    assert payload["expectation_errors"] == ["blocked_parent_count: expected 0, observed 1"]
+
+
+def test_completion_epoch_blocker_triage_groups_recommendations(tmp_path: Path) -> None:
+    rows = [
+        {
+            "zarr_path": "/tmp/a.zarr",
+            "parent_path": "analysis/custom_runs",
+            "stage": None,
+            "stage_spec_available": False,
+            "latest": "custom_001",
+            "blocked_child_reason_counts": {"no_stage_array_spec": 2},
+            "blocked_child_first_error_counts_top10": {},
+            "blocked_child_examples": [
+                {"run_name": "custom_001", "verification": "unverified"},
+            ],
+        },
+        {
+            "zarr_path": "/tmp/b.zarr",
+            "parent_path": "refined_detect_runs",
+            "stage": "refined_detect",
+            "stage_spec_available": True,
+            "latest": "refine_001",
+            "blocked_child_reason_counts": {"invalid": 1},
+            "blocked_child_first_error_counts_top10": {
+                "refined_detect: missing required subgroup 'source_detections'": 1,
+            },
+            "blocked_child_examples": [
+                {
+                    "run_name": "refine_001",
+                    "verification": "invalid",
+                    "first_error": "refined_detect: missing required subgroup 'source_detections'",
+                },
+            ],
+        },
+        {
+            "zarr_path": "/tmp/c.zarr",
+            "parent_path": "analysis/swim_bout_runs",
+            "stage": None,
+            "stage_spec_available": False,
+            "latest": "bouts_001",
+            "blocked_child_reason_counts": {"no_stage_array_spec": 1},
+            "blocked_child_first_error_counts_top10": {},
+            "blocked_child_examples": [
+                {"run_name": "bouts_001", "verification": "unverified"},
+            ],
+        },
+        {
+            "zarr_path": "/tmp/d.zarr",
+            "parent_path": "eye_masks_runs",
+            "stage": "eye_masks",
+            "stage_spec_available": True,
+            "latest": "eye_masks_001",
+            "blocked_child_reason_counts": {"invalid": 1},
+            "blocked_child_first_error_counts_top10": {
+                "eye_masks: missing required array 'masks_roi'": 1,
+            },
+            "blocked_child_examples": [
+                {
+                    "run_name": "eye_masks_001",
+                    "verification": "invalid",
+                    "first_error": "eye_masks: missing required array 'masks_roi'",
+                },
+            ],
+        },
+    ]
+
+    report = triage_mod.build_triage_report(rows, examples_per_group=1)
+
+    assert report["schema_id"] == "palette.completion_epoch_blocker_triage.v1"
+    assert report["blocked_parent_count"] == 4
+    by_key = {group["key"]: group for group in report["groups"]}
+    assert by_key["analysis/custom_runs"]["recommendation"] == "add_stage_array_spec_or_defer_scope"
+    assert by_key["eye_masks"]["recommendation"] == "defer_deprecated_scope"
+    assert (
+        by_key["analysis/swim_bout_runs"]["recommendation"]
+        == "defer_scope_until_layout_specific_validator"
+    )
+    assert (
+        by_key["refined_detect"]["recommendation"]
+        == "review_stage_spec_compatibility_or_backfill_missing_surface"
+    )
+    assert by_key["refined_detect"]["blocked_child_first_error_counts_top20"] == [
+        {
+            "key": "refined_detect: missing required subgroup 'source_detections'",
+            "count": 1,
+        }
+    ]
+
+    blocked_jsonl = tmp_path / "blocked.jsonl"
+    blocked_jsonl.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    persisted_rows = triage_mod._read_jsonl(blocked_jsonl)
+    assert persisted_rows == rows
 
 
 def test_emit_stage_completion_requires_root_for_ok_run_with_prebuilt_metadata(tmp_path: Path) -> None:

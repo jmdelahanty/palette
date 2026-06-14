@@ -75,7 +75,12 @@ from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, normalize_attr
 from ..shared.zarr_helpers import open_zarr_group_direct
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..utils.system import get_environment_info, get_git_info
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
@@ -480,12 +485,6 @@ class KeypointRefinementParams:
                 params.max_triangle_area = float(config["max_triangle_area"])
             source = config.get("parameter_source", "config")
         return params, source
-
-
-def _ensure_group(root: zarr.Group, name: str) -> zarr.Group:
-    if name in root:
-        return root[name]
-    return root.create_group(name)
 
 
 def _copy_array(src: zarr.Array, dst_group: zarr.Group, name: str) -> None:
@@ -1103,7 +1102,7 @@ def create_refined_keypoint_run(
         )
 
     # Prepare destination group
-    kp_refined_root = _ensure_group(root, REFINED_KEYPOINT_GROUP)
+    kp_refined_root = require_runs_parent(root, REFINED_KEYPOINT_GROUP)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_name = f"refined_keypoints_{timestamp}"
     kp_refined = kp_refined_root.create_group(run_name)

@@ -28,7 +28,12 @@ from ..shared.subject_mask_registry_status import emit_subject_mask_stage_comple
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
-from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest
+from ..shared.zarr_run_completion import (
+    mark_run_complete,
+    mark_run_started,
+    note_pending_latest,
+    require_runs_parent,
+)
 from ..tune import subject_mask_tuner as tuning
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
@@ -345,7 +350,7 @@ def _prepare_run_group(
     output_run: Optional[str],
     overwrite: bool,
 ) -> tuple[zarr.Group, str]:
-    parent = root.require_group("subject_mask_runs")
+    parent = require_runs_parent(root, "subject_mask_runs")
     run_name = output_run
     if run_name is None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")

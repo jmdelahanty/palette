@@ -20,6 +20,7 @@ from ..shared.detect_reason_codec import read_reason_labels, write_reason_column
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.zarr_run_completion import mark_run_complete, mark_run_started, note_pending_latest, require_runs_parent
 from ..utils.refined_eye_masks_compat import (
     DERIVED_REFINED_EYE_MASKS_COMPAT_ROLE as DERIVED_COMPAT_ROLE,
 )
@@ -551,7 +552,7 @@ def materialize_refined_eye_masks_compat(
     width = int(eye_masks.shape[3])
 
     component_source_groups, coarse_source_run = _resolve_eye_component_source_subject_runs(root, refined_group)
-    compat_parent = root.require_group("refined_eye_masks_runs")
+    compat_parent = require_runs_parent(root, "refined_eye_masks_runs")
 
     carryover_attrs: dict[str, object] = {}
     raw_eye_run, source_refined_eye_run = _resolve_source_eye_runs(
@@ -733,6 +734,8 @@ def materialize_refined_eye_masks_compat(
     if target_run in compat_parent:
         del compat_parent[target_run]
     run_group = compat_parent.create_group(target_run)
+    mark_run_started(run_group, run_name=target_run, stage="refined_eye_masks")
+    note_pending_latest(compat_parent, target_run)
     chunk_rois = max(1, min(256, total_rois))
     run_group.create_array("masks_roi", data=eye_masks, chunks=(chunk_rois, 2, height, width), overwrite=True)
     run_group.create_array("ellipse_params", data=ellipse_params, chunks=(chunk_rois, 2, 5), overwrite=True)
@@ -935,7 +938,7 @@ def materialize_refined_eye_masks_compat(
     )
     write_stage_provenance(run_group, provenance)
     refined_group.attrs["compat_refined_eye_masks_run"] = target_run
-    compat_parent.attrs["latest"] = target_run
+    mark_run_complete(run_group, parent_group=compat_parent, run_name=target_run)
     compat_parent.attrs["eye_mask_review_status_latest"] = target_run
 
     from ..tune.eye_mask_review import _update_postprocess_summary

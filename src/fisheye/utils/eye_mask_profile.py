@@ -21,6 +21,7 @@ import zarr
 
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.utils.detection_profile import infer_zarr_use
 from fisheye.utils.refined_eye_masks_compat import refined_eye_masks_compat_context
 
@@ -1012,12 +1013,13 @@ def write_eye_mask_profile(
             raise
 
     analysis_group = _get_or_create_group(root, "analysis")
-    runs_parent = _get_or_create_group(analysis_group, "eye_mask_profile_runs")
+    runs_parent = require_runs_parent(analysis_group, "eye_mask_profile_runs")
     if run_name in runs_parent:
         if not overwrite:
             raise FileExistsError(f"analysis/eye_mask_profile_runs/{run_name} already exists")
         del runs_parent[run_name]
     run_group = runs_parent.create_group(run_name)
+    mark_run_started(run_group, run_name=run_name, stage="eye_mask_profile")
 
     dataset = summary.get("dataset", {})
     source = summary.get("source", {})
@@ -1052,6 +1054,7 @@ def write_eye_mask_profile(
         }
     )
     runs_parent.attrs["latest"] = run_name
+    mark_run_complete(run_group, parent_group=runs_parent, run_name=run_name)
 
     return EyeMaskProfileWriteResult(
         run_name=run_name,

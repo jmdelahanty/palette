@@ -39,6 +39,7 @@ from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_pending,
     mark_run_started,
+    require_runs_parent,
     resolve_latest_complete_run_name,
 )
 from fisheye.tune import detect_review as detect_review_mod
@@ -130,7 +131,7 @@ def _resolve_refined_run(root: zarr.Group, refined_run: str | None) -> tuple[str
         )
     run_name = str(
         refined_run
-        or resolve_latest_complete_run_name(parent, legacy_default=True)
+        or resolve_latest_complete_run_name(parent)
         or ""
     ).strip()
     if not run_name or run_name not in parent:
@@ -169,7 +170,7 @@ def _resolve_training_crop_run(root: zarr.Group, requested: str | None) -> str:
     if requested:
         return str(requested)
     crop_parent = root.get("crop_runs")
-    latest = resolve_latest_complete_run_name(crop_parent, legacy_default=True) if crop_parent is not None else None
+    latest = resolve_latest_complete_run_name(crop_parent) if crop_parent is not None else None
     return str(latest or DEFAULT_PROMOTED_CROP_RUN)
 
 
@@ -588,7 +589,7 @@ def _load_source_image(
 
 
 def _write_crop_payload(root: zarr.Group, crop_run: str, payload: Mapping[str, np.ndarray]) -> None:
-    crop_parent = root.require_group("crop_runs")
+    crop_parent = require_runs_parent(root, "crop_runs")
     crop = crop_parent.require_group(crop_run)
     mark_run_started(crop, run_name=str(crop_run), stage="crop")
     mark_run_pending(crop_parent, str(crop_run))
@@ -637,10 +638,10 @@ def _resolve_training_refined_run(
     root: zarr.Group,
     requested: str | None,
 ) -> tuple[str, zarr.Group]:
-    parent = root.require_group("refined_detect_runs")
+    parent = require_runs_parent(root, "refined_detect_runs")
     run_name = str(
         requested
-        or resolve_latest_complete_run_name(parent, legacy_default=True)
+        or resolve_latest_complete_run_name(parent)
         or DEFAULT_PROMOTED_REFINED_RUN
     ).strip()
     if not run_name:

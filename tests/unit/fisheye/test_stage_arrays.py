@@ -13,9 +13,15 @@ from zarr.core.dtype import VariableLengthUTF8
 from zarr.storage import MemoryStore
 
 from fisheye.shared.zarr.stage_arrays import (
+    BOUT_KINEMATICS_SPEC,
+    BOUT_CLASSIFICATION_SPEC,
     CROP_SPEC,
+    DETECTION_PROFILE_SPEC,
     DETECT_SPEC,
+    EYE_ANGLE_SPEC,
+    EYE_MASK_PROFILE_SPEC,
     EYE_MASKS_SPEC,
+    KEYPOINT_PROFILE_SPEC,
     KEYPOINTS_SPEC,
     REFINED_DETECT_SPEC,
     REFINED_EYE_MASKS_SPEC,
@@ -24,6 +30,11 @@ from fisheye.shared.zarr.stage_arrays import (
     REFINED_SUBJECT_EYE_PAIR_METRICS,
     REFINED_SUBJECT_MASKS_SPEC,
     STAGES,
+    STIMULUS_SPEC,
+    SUBJECT_SHAPE_SPEC,
+    TAIL_POSTURE_VIEW_SPEC,
+    TAIL_KINEMATICS_SPEC,
+    TRACK_KINEMATICS_SPEC,
     ArraySpec,
     StageSpec,
     array_specs_by_name,
@@ -46,6 +57,13 @@ DEFAULT_DIMS: Dict[str, int] = {
     "n_samples": 3,
     "n_failures": 2,
     "n_points": 7,
+    "n_bouts": 4,
+    "n_tail_keypoints": 11,
+    "n_tail_angles": 10,
+    "n_tail_samples": 10,
+    "n_tracks": 2,
+    "n_metadata_frames": 6,
+    "n_camera_frames": 4,
     "H": 8,
     "W": 8,
     "H_ds": 4,
@@ -149,6 +167,11 @@ def _write_required_specs(group: zarr.Group, specs: Tuple[ArraySpec, ...]) -> No
 
 
 def _write_required_arrays(group: zarr.Group, stage_spec: StageSpec) -> None:
+    for attr_name in stage_spec.required_attrs:
+        group.attrs[attr_name] = "ok"
+    for attr_name, attr_value in stage_spec.required_attr_values.items():
+        group.attrs[attr_name] = attr_value
+
     _write_required_specs(group, stage_spec.specs)
 
     for subgroup_name, subgroup_specs in stage_spec.subgroups.items():
@@ -159,7 +182,12 @@ def _write_required_arrays(group: zarr.Group, stage_spec: StageSpec) -> None:
 def test_all_stage_specs_define_arrays() -> None:
     for name, stage_spec in STAGES.items():
         assert stage_spec.stage_name == name
-        assert stage_spec.specs or stage_spec.subgroups
+        assert (
+            stage_spec.specs
+            or stage_spec.subgroups
+            or stage_spec.required_attrs
+            or stage_spec.required_attr_values
+        )
 
 
 def test_validate_run_accepts_detect_crop_keypoints_and_eye_masks_groups() -> None:
@@ -174,6 +202,137 @@ def test_validate_run_accepts_detect_crop_keypoints_and_eye_masks_groups() -> No
 
         result = validate_run(group, stage_spec)
         assert result.valid, f"{stage_spec.stage_name} errors: {result.errors}"
+
+
+def test_validate_run_accepts_minimal_stimulus_import_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, STIMULUS_SPEC)
+
+    result = validate_run(group, STIMULUS_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_attrs_only_keypoint_profile_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, KEYPOINT_PROFILE_SPEC)
+
+    result = validate_run(group, KEYPOINT_PROFILE_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_attrs_only_detection_profile_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, DETECTION_PROFILE_SPEC)
+
+    result = validate_run(group, DETECTION_PROFILE_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_attrs_only_eye_mask_profile_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, EYE_MASK_PROFILE_SPEC)
+
+    result = validate_run(group, EYE_MASK_PROFILE_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_minimal_subject_shape_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, SUBJECT_SHAPE_SPEC)
+
+    result = validate_run(group, SUBJECT_SHAPE_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_minimal_tail_posture_view_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, TAIL_POSTURE_VIEW_SPEC)
+
+    result = validate_run(group, TAIL_POSTURE_VIEW_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_minimal_bout_classification_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, BOUT_CLASSIFICATION_SPEC)
+
+    result = validate_run(group, BOUT_CLASSIFICATION_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_minimal_tail_kinematics_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, TAIL_KINEMATICS_SPEC)
+
+    result = validate_run(group, TAIL_KINEMATICS_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_minimal_track_kinematics_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, TRACK_KINEMATICS_SPEC)
+
+    result = validate_run(group, TRACK_KINEMATICS_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_minimal_eye_angle_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, EYE_ANGLE_SPEC)
+
+    result = validate_run(group, EYE_ANGLE_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_accepts_minimal_bout_kinematics_surface() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, BOUT_KINEMATICS_SPEC)
+
+    result = validate_run(group, BOUT_KINEMATICS_SPEC)
+
+    assert result.valid, result.errors
+    assert not result.errors
+
+
+def test_validate_run_reports_missing_required_attrs() -> None:
+    group = zarr.group()
+    group.attrs["schema_name"] = "keypoint_dataset_profile"
+
+    result = validate_run(group, KEYPOINT_PROFILE_SPEC)
+
+    assert not result.valid
+    assert any("missing required attr 'profile_summary'" in msg for msg in result.errors)
+
+
+def test_validate_run_reports_wrong_required_attr_value() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, EYE_ANGLE_SPEC)
+    group.attrs["status"] = "running"
+
+    result = validate_run(group, EYE_ANGLE_SPEC)
+
+    assert not result.valid
+    assert any("attr 'status' expected 'complete', got 'running'" in msg for msg in result.errors)
 
 
 def test_refined_mask_stage_specs_cover_writer_metric_surfaces() -> None:

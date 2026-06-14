@@ -297,7 +297,7 @@ def _resolve_raw_detect_group(root: zarr.Group, run_name: Optional[str]) -> tupl
         raise ValueError("Archive has no detect_runs group.")
     resolved = str(run_name).strip() if run_name else None
     if not resolved:
-        resolved = resolve_latest_complete_run_name(parent, legacy_default=True)
+        resolved = resolve_latest_complete_run_name(parent)
     if not resolved:
         latest = parent.attrs.get("latest")
         resolved = str(latest).strip() if latest else None

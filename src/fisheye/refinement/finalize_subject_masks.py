@@ -45,6 +45,7 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_storage_chunks,
 )
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
+from ..shared.zarr_run_completion import require_runs_parent
 from ..tune.refined_subject_mask_review import (
     DEFAULT_REVIEW_INTENDED_USE,
     DEFAULT_REVIEW_METHOD,
@@ -2139,7 +2140,7 @@ def finalize_subject_mask_run(
     if dry_run:
         return summary
 
-    refined_parent = root.require_group("refined_subject_masks_runs")
+    refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
     if target_run in refined_parent:
         if not overwrite:
             raise ValueError(

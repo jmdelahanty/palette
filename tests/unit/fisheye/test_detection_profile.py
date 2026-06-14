@@ -7,6 +7,11 @@ from typing import Any
 import numpy as np
 
 from fisheye.registry.db import Registry
+from fisheye.shared.zarr_run_completion import (
+    COMPLETION_EPOCH_ATTR,
+    COMPLETION_EPOCH_STRICT,
+    RUN_COMPLETION_STATUS_ATTR,
+)
 from fisheye.utils import backfill_detection_profiles as backfill_mod
 from fisheye.utils import detection_profile as detection_profile_mod
 from fisheye.utils.detection_profile import build_detection_profile_summary, write_detection_profile
@@ -263,8 +268,10 @@ def test_write_detection_profile_writes_run_attrs_and_latest_pointer() -> None:
 
     parent = root["analysis/detection_profile_runs"]
     assert parent.attrs["latest"] == "detection_profile_2026-02-24_10-10-10"
+    assert parent.attrs[COMPLETION_EPOCH_ATTR] == COMPLETION_EPOCH_STRICT
 
     run_group = parent["detection_profile_2026-02-24_10-10-10"]
+    assert run_group.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
     assert run_group.attrs["schema_name"] == "detection_dataset_profile"
     assert run_group.attrs["schema_version"] == "v1"
     assert run_group.attrs["source_detection_path"] == "detect_runs/detect_001"
@@ -331,7 +338,7 @@ def test_write_detection_profile_handles_flaky_group_lookup() -> None:
     assert "detection_profile_2026-02-24_10-25-25" in runs_parent
 
 
-def test_write_detection_profile_falls_back_to_open_group_lookup(monkeypatch) -> None:
+def test_write_detection_profile_reuses_flaky_lookup_parent_with_completion_marker(monkeypatch) -> None:
     root = _make_detect_root()
     analysis = root.create_group("analysis")
     runs_parent = analysis.create_group("detection_profile_runs")
@@ -345,12 +352,8 @@ def test_write_detection_profile_falls_back_to_open_group_lookup(monkeypatch) ->
         miss_key="detection_profile_runs",
     )
 
-    opened_paths: list[str] = []
-
     def _fake_open_group(*_args, **kwargs):
         path = kwargs.get("path")
-        if isinstance(path, str):
-            opened_paths.append(path)
         if path == "analysis/detection_profile_runs":
             return runs_parent
         raise KeyError(path)
@@ -366,10 +369,10 @@ def test_write_detection_profile_falls_back_to_open_group_lookup(monkeypatch) ->
     )
 
     assert result.run_name == "detection_profile_2026-02-24_10-30-30"
-    assert "analysis/detection_profile_runs" in opened_paths
     assert runs_parent.attrs["latest"] == "detection_profile_2026-02-24_10-30-30"
     assert "existing_run" in runs_parent
-    assert "detection_profile_2026-02-24_10-30-30" in runs_parent
+    run_group = runs_parent["detection_profile_2026-02-24_10-30-30"]
+    assert run_group.attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
 
 
 def test_build_detection_profile_summary_prefers_manual_refined_group() -> None:

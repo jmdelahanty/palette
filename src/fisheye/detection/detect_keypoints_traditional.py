@@ -111,7 +111,7 @@ def _resolve_traditional_crop_background_inputs(
     background_parent = root.get("background_runs")
     if background_parent is None:
         raise ValueError("Background stage not run. Run background before keypoints.")
-    latest_background = normalize_attr(resolve_latest_complete_run_name(background_parent, legacy_default=True))
+    latest_background = normalize_attr(resolve_latest_complete_run_name(background_parent))
     if not latest_background or latest_background not in background_parent:
         raise ValueError("Traditional keypoint detection requires background_runs.latest.")
     background_group = background_parent[latest_background]

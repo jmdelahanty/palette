@@ -48,6 +48,8 @@ from rich.console import Console
 from rich.table import Table
 from scipy.signal import savgol_filter
 
+from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
+
 
 TRANSITION_REASON_OK = 0
 TRANSITION_REASON_FIRST_SAMPLE = 1
@@ -686,7 +688,7 @@ def summarize_tracks(tracks: Dict[int, TrackSpeeds]) -> List[Dict[str, float]]:
 def ensure_speed_run_group(root: zarr.Group, run_name: Optional[str]) -> Tuple[str, zarr.Group]:
     """Create /analysis/speed_runs/<run_name> (with auto timestamp if needed)."""
     analysis = root.require_group("analysis")
-    speed_parent = analysis.require_group("speed_runs")
+    speed_parent = require_runs_parent(analysis, "speed_runs")
 
     if run_name:
         if run_name in speed_parent:
@@ -696,7 +698,7 @@ def ensure_speed_run_group(root: zarr.Group, run_name: Optional[str]) -> Tuple[s
         run_name = f"speed_{timestamp}"
 
     run_group = speed_parent.create_group(run_name)
-    speed_parent.attrs["latest"] = run_name
+    mark_run_started(run_group, run_name=run_name, stage="speed")
     return run_name, run_group
 
 
@@ -1050,6 +1052,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         }
     )
     run_group.attrs["num_tracks"] = len(ordered_track_ids)
+    mark_run_complete(run_group, parent_group=root["analysis"]["speed_runs"], run_name=run_name)
 
     console.print(f"[green]✓[/green] Saved speed run to [bold]analysis/speed_runs/{run_name}[/bold]")
 
