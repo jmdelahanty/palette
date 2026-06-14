@@ -11,6 +11,7 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -481,8 +482,6 @@ def _write_flat_cache_payload_pynvvc_luma(
     progress_every_batches: int,
     started: float,
 ) -> tuple[dict[str, Any], str | None, str]:
-    import torch
-
     reader = _open_pynvvc_luma_reader(Path(str(source.frame_source_path)))
     try:
         source_height = int(reader.source_height)
@@ -496,120 +495,35 @@ def _write_flat_cache_payload_pynvvc_luma(
                 )
 
         frame_to_roi = _frame_to_roi_indices(source.frame_indices)
-        max_frame = int(max(frame_to_roi)) if frame_to_roi else -1
         row_stride = int(source.roi_shape[0]) * int(source.roi_shape[1])
         timing = _new_timing()
         last_progress = started
         rows_written_mask = np.zeros(int(source.total_rois), dtype=bool)
         batch_index = 0
-        decoded_frame_index = 0
-        read_batch_frames = max(1, int(getattr(source, "roi_live_gpu_chunk_frames", 32) or 32))
+        staging_row_capacity = max(1, int(batch_size))
 
         with bin_tmp.open("w+b") as handle:
             handle.truncate(int(total_bytes))
-            while decoded_frame_index <= max_frame:
-                decode_count = min(read_batch_frames, max_frame - decoded_frame_index + 1)
-                read_started = time.perf_counter()
-                frames = reader.decode_next(decode_count)
-                read_seconds = time.perf_counter() - read_started
-                if not frames:
-                    break
-
-                decoded_frame_ids = [decoded_frame_index + offset for offset in range(len(frames))]
-                skipped_batch_frames = sum(1 for frame_idx in decoded_frame_ids if frame_idx not in frame_to_roi)
-                decode_accounted = False
-                for frame_offset, frame_tensor in enumerate(frames):
-                    frame_idx = decoded_frame_index + frame_offset
-                    roi_ids = frame_to_roi.get(frame_idx)
-                    if not roi_ids:
-                        continue
-
-                    batch_index += 1
-                    crop_started = time.perf_counter()
-                    crops = _crop_pynvvc_luma_frame(
-                        frame_tensor,
-                        roi_ids=roi_ids,
-                        roi_coordinates_full=source.roi_coordinates_full,
-                        roi_shape=source.roi_shape,
-                        video_shape=(source_height, source_width),
-                    )
-                    if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
-                        torch.cuda.synchronize()
-                    contiguous_started = time.perf_counter()
-                    crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
-                    contiguous_seconds = time.perf_counter() - contiguous_started
-                    crop_seconds = time.perf_counter() - crop_started - contiguous_seconds
-
-                    serialize_started = time.perf_counter()
-                    payloads = [
-                        np.ascontiguousarray(crops_cpu[local_idx], dtype=np.uint8).tobytes(order="C")
-                        for local_idx in range(crops_cpu.shape[0])
-                    ]
-                    serialize_seconds = time.perf_counter() - serialize_started
-
-                    write_started = time.perf_counter()
-                    for roi_id, payload in zip(roi_ids, payloads):
-                        handle.seek(int(roi_id) * row_stride)
-                        handle.write(payload)
-                        rows_written_mask[int(roi_id)] = True
-                    write_seconds = time.perf_counter() - write_started
-
-                    batch_rows = int(len(roi_ids))
-                    batch_bytes = int(batch_rows * row_stride)
-                    account_decode = not decode_accounted
-                    decode_accounted = True
-                    _record_timing_batch(
-                        timing,
-                        batch_rows=batch_rows,
-                        batch_bytes=batch_bytes,
-                        read_seconds=read_seconds if account_decode else 0.0,
-                        contiguous_seconds=contiguous_seconds,
-                        serialize_seconds=serialize_seconds,
-                        write_seconds=write_seconds,
-                        sha_seconds=0.0,
-                        batch_index=batch_index,
-                        decode_seconds=read_seconds if account_decode else 0.0,
-                        crop_seconds=crop_seconds,
-                        decoded_frames=len(frames) if account_decode else 0,
-                        skipped_frames=skipped_batch_frames if account_decode else 0,
-                    )
-                    last_progress = _maybe_emit_batch_progress(
-                        progress_callback=progress_callback,
-                        batch_index=batch_index,
-                        batch_payload={
-                            "index": int(batch_index),
-                            "frame_index": int(frame_idx),
-                            "rows": batch_rows,
-                            "bytes": batch_bytes,
-                            "read_seconds": float(read_seconds if account_decode else 0.0),
-                            "decode_seconds": float(read_seconds if account_decode else 0.0),
-                            "crop_seconds": float(crop_seconds),
-                            "contiguous_seconds": float(contiguous_seconds),
-                            "serialize_seconds": float(serialize_seconds),
-                            "write_seconds": float(write_seconds),
-                            "sha256_seconds": 0.0,
-                            "read_rows_per_second": _rate(batch_rows, crop_seconds + contiguous_seconds),
-                            "write_mib_per_second": _rate(batch_bytes / (1024 * 1024), write_seconds),
-                            "decode_backend": "pynvvc_luma",
-                        },
-                        timing=timing,
-                        total_rois=int(source.total_rois),
-                        total_bytes=total_bytes,
-                        started=started,
-                        last_progress=last_progress,
-                        progress_interval_seconds=progress_interval_seconds,
-                        progress_every_batches=progress_every_batches,
-                    )
-                    del crops, crops_cpu, payloads
-
-                if not decode_accounted:
-                    timing["read_seconds_total"] += float(read_seconds)
-                    timing["decode_seconds_total"] += float(read_seconds)
-                    timing["decoded_frames"] += int(len(frames))
-                    timing["skipped_frames"] += int(len(frames))
-
-                decoded_frame_index += len(frames)
-                del frames
+            batch_index, last_progress = _write_pynvvc_luma_streamed_rois(
+                reader=reader,
+                frame_to_roi=frame_to_roi,
+                roi_coordinates_full=source.roi_coordinates_full,
+                roi_shape=source.roi_shape,
+                video_shape=(source_height, source_width),
+                handle=handle,
+                row_stride=row_stride,
+                rows_written_mask=rows_written_mask,
+                total_rois=int(source.total_rois),
+                total_bytes=total_bytes,
+                timing=timing,
+                batch_index=batch_index,
+                last_progress=last_progress,
+                started=started,
+                progress_callback=progress_callback,
+                progress_interval_seconds=progress_interval_seconds,
+                progress_every_batches=progress_every_batches,
+                staging_row_capacity=staging_row_capacity,
+            )
 
         rows_written = int(rows_written_mask.sum())
         if rows_written != int(source.total_rois):
@@ -645,6 +559,340 @@ def _frame_to_roi_indices(frame_indices: np.ndarray) -> dict[int, list[int]]:
     for roi_idx, frame_idx in enumerate(np.asarray(frame_indices, dtype=np.int64).reshape(-1)):
         mapping.setdefault(int(frame_idx), []).append(int(roi_idx))
     return mapping
+
+
+class _AsyncRoiPayloadWriter:
+    """Async writer that owns host payload buffers until their writes finish."""
+
+    def __init__(
+        self,
+        *,
+        handle: Any,
+        row_stride: int,
+        roi_shape: tuple[int, int],
+        staging_row_capacity: int,
+        pinned_buffer_count: int = 2,
+    ) -> None:
+        self._handle = handle
+        self._row_stride = int(row_stride)
+        self._capacity = max(1, int(staging_row_capacity))
+        self._roi_shape = (int(roi_shape[0]), int(roi_shape[1]))
+        self._pinned_buffer_count = max(1, int(pinned_buffer_count))
+        self._pinned_buffers: list[Any | None] = [None] * self._pinned_buffer_count
+        self._pending: list[Future[float] | None] = [None] * self._pinned_buffer_count
+        self._next_pinned = 0
+        self._owned_pending: list[Future[float]] = []
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="flat-roi-cache-writer")
+        self.write_seconds_total = 0.0
+        self.write_wait_seconds_total = 0.0
+        self.pinned_buffer_wait_seconds_total = 0.0
+        self.writer_submit_seconds_total = 0.0
+        self.flush_count = 0
+
+    def submit_tensor_batch(self, tensor: Any, roi_ids: Sequence[int]) -> tuple[float, str]:
+        ids = np.ascontiguousarray(np.asarray(roi_ids, dtype=np.int64).reshape(-1))
+        if int(tensor.shape[0]) != ids.shape[0]:
+            raise ValueError(f"ROI id/crop count mismatch: {ids.shape[0]} ids, {int(tensor.shape[0])} crops")
+        if not bool(getattr(tensor, "is_cuda", False)):
+            transfer_started = time.perf_counter()
+            crops = np.ascontiguousarray(tensor.cpu().numpy(), dtype=np.uint8)
+            transfer_seconds = float(time.perf_counter() - transfer_started)
+            self._owned_pending.append(self._submit(ids, crops))
+            return transfer_seconds, "pageable_cpu_tensor"
+
+        try:
+            import torch
+
+            index = self._reserve_pinned_buffer()
+            pinned = self._ensure_pinned_buffer(index=index, dtype=tensor.dtype)
+            row_count = int(tensor.shape[0])
+            crops_view = pinned[:row_count]
+            transfer_started = time.perf_counter()
+            crops_view.copy_(tensor, non_blocking=True)
+            torch.cuda.current_stream(device=tensor.device).synchronize()
+            transfer_seconds = float(time.perf_counter() - transfer_started)
+            self._pending[index] = self._submit(ids, crops_view.numpy())
+            return transfer_seconds, "pinned_non_blocking_direct_write"
+        except RuntimeError:
+            transfer_started = time.perf_counter()
+            crops = np.ascontiguousarray(tensor.cpu().numpy(), dtype=np.uint8)
+            transfer_seconds = float(time.perf_counter() - transfer_started)
+            self._owned_pending.append(self._submit(ids, crops))
+            return transfer_seconds, "pageable_fallback"
+
+    def close(self) -> None:
+        try:
+            for index in range(len(self._pending)):
+                self._wait_for_pinned_buffer(index)
+            while self._owned_pending:
+                future = self._owned_pending.pop(0)
+                self._wait_for_future(future)
+        finally:
+            self._executor.shutdown(wait=True)
+
+    def _submit(self, ids: np.ndarray, crops: np.ndarray) -> Future[float]:
+        submit_started = time.perf_counter()
+        self.flush_count += 1
+        future = self._executor.submit(
+            _write_owned_roi_payload_batch,
+            self._handle,
+            self._row_stride,
+            ids,
+            crops,
+        )
+        self.writer_submit_seconds_total += float(time.perf_counter() - submit_started)
+        return future
+
+    def _reserve_pinned_buffer(self) -> int:
+        index = self._next_pinned
+        wait_before = float(self.write_wait_seconds_total)
+        self._wait_for_pinned_buffer(index)
+        self.pinned_buffer_wait_seconds_total += float(self.write_wait_seconds_total - wait_before)
+        self._next_pinned = (self._next_pinned + 1) % self._pinned_buffer_count
+        return index
+
+    def _ensure_pinned_buffer(self, *, index: int, dtype: Any) -> Any:
+        import torch
+
+        roi_h, roi_w = self._roi_shape
+        expected_shape = (self._capacity, roi_h, roi_w)
+        buffer = self._pinned_buffers[index]
+        if (
+            buffer is None
+            or tuple(int(v) for v in buffer.shape) != expected_shape
+            or buffer.dtype != dtype
+        ):
+            buffer = torch.empty(expected_shape, dtype=dtype, device="cpu", pin_memory=True)
+            self._pinned_buffers[index] = buffer
+        return buffer
+
+    def _wait_for_pinned_buffer(self, index: int) -> None:
+        future = self._pending[index]
+        if future is None:
+            return
+        self._wait_for_future(future)
+        self._pending[index] = None
+
+    def _wait_for_future(self, future: Future[float]) -> None:
+        wait_started = time.perf_counter()
+        write_seconds = float(future.result())
+        self.write_wait_seconds_total += float(time.perf_counter() - wait_started)
+        self.write_seconds_total += write_seconds
+
+
+def _write_owned_roi_payload_batch(
+    handle: Any,
+    row_stride: int,
+    roi_ids: np.ndarray,
+    crops: np.ndarray,
+) -> float:
+    write_started = time.perf_counter()
+    ids = np.asarray(roi_ids, dtype=np.int64).reshape(-1)
+    if ids.size == 0:
+        return 0.0
+    crops_array = np.asarray(crops, dtype=np.uint8)
+    if _is_contiguous_increasing_ids(ids):
+        handle.seek(int(ids[0]) * int(row_stride))
+        _write_contiguous_payload(handle, crops_array)
+        return float(time.perf_counter() - write_started)
+    order = np.argsort(ids, kind="stable")
+    ids_sorted = ids[order]
+    crops_sorted = np.ascontiguousarray(crops_array[order])
+    run_start = 0
+    while run_start < ids_sorted.size:
+        run_end = run_start + 1
+        while run_end < ids_sorted.size and int(ids_sorted[run_end]) == int(ids_sorted[run_end - 1]) + 1:
+            run_end += 1
+        handle.seek(int(ids_sorted[run_start]) * int(row_stride))
+        _write_contiguous_payload(handle, crops_sorted[run_start:run_end])
+        run_start = run_end
+    return float(time.perf_counter() - write_started)
+
+
+def _write_contiguous_payload(handle: Any, array: np.ndarray) -> None:
+    payload = np.ascontiguousarray(array, dtype=np.uint8)
+    handle.write(memoryview(payload.reshape(-1)))
+
+
+def _is_contiguous_increasing_ids(ids: np.ndarray) -> bool:
+    if ids.size <= 1:
+        return True
+    return bool(np.all(ids[1:] == ids[:-1] + 1))
+
+
+def _write_pynvvc_luma_streamed_rois(
+    *,
+    reader: Any,
+    frame_to_roi: Mapping[int, Sequence[int]],
+    roi_coordinates_full: np.ndarray,
+    roi_shape: tuple[int, int],
+    video_shape: tuple[int, int],
+    handle: Any,
+    row_stride: int,
+    rows_written_mask: np.ndarray,
+    total_rois: int,
+    total_bytes: int,
+    timing: dict[str, Any],
+    batch_index: int,
+    last_progress: float,
+    started: float,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    progress_interval_seconds: float,
+    progress_every_batches: int,
+    staging_row_capacity: int,
+    progress_context: Mapping[str, Any] | None = None,
+) -> tuple[int, float]:
+    import torch
+
+    max_frame = int(max(frame_to_roi)) if frame_to_roi else -1
+    decoded_frame_index = 0
+    writer = _AsyncRoiPayloadWriter(
+        handle=handle,
+        row_stride=row_stride,
+        roi_shape=roi_shape,
+        staging_row_capacity=staging_row_capacity,
+    )
+    gpu_crop_batches: list[Any] = []
+    gpu_roi_id_batches: list[np.ndarray] = []
+    gpu_staged_rows = 0
+
+    def flush_gpu_staging() -> None:
+        nonlocal gpu_crop_batches, gpu_roi_id_batches, gpu_staged_rows
+        if gpu_staged_rows <= 0:
+            return
+        cat_started = time.perf_counter()
+        gpu_batch = torch.cat(gpu_crop_batches, dim=0).contiguous()
+        cat_seconds = time.perf_counter() - cat_started
+
+        serialize_started = time.perf_counter()
+        roi_ids_cpu = np.concatenate(gpu_roi_id_batches).astype(np.int64, copy=False)
+        serialize_seconds = time.perf_counter() - serialize_started
+
+        transfer_started = time.perf_counter()
+        transfer_copy_seconds, transfer_mode = writer.submit_tensor_batch(gpu_batch, roi_ids_cpu)
+        transfer_seconds = time.perf_counter() - transfer_started
+        contiguous_seconds = float(cat_seconds + transfer_seconds)
+
+        timing["contiguous_seconds_total"] += float(contiguous_seconds)
+        timing["gpu_cat_seconds_total"] += float(cat_seconds)
+        timing["gpu_to_host_seconds_total"] += float(transfer_copy_seconds)
+        timing["transfer_submit_seconds_total"] += float(transfer_seconds)
+        if transfer_mode == "pinned_non_blocking_direct_write":
+            timing["pinned_transfer_batches"] += 1
+        else:
+            timing["pageable_transfer_batches"] += 1
+        timing["serialize_seconds_total"] += float(serialize_seconds)
+        timing["gpu_staging_flushes"] += 1
+        gpu_crop_batches = []
+        gpu_roi_id_batches = []
+        gpu_staged_rows = 0
+        del gpu_batch, roi_ids_cpu
+
+    try:
+        frame_iter = reader.iter_frames()
+        while decoded_frame_index <= max_frame:
+            read_started = time.perf_counter()
+            try:
+                frame_tensor = next(frame_iter)
+            except StopIteration:
+                break
+            read_seconds = time.perf_counter() - read_started
+            frame_idx = int(decoded_frame_index)
+            lookup_started = time.perf_counter()
+            roi_ids = frame_to_roi.get(frame_idx)
+            timing["frame_lookup_seconds_total"] += float(time.perf_counter() - lookup_started)
+            if not roi_ids:
+                timing["read_seconds_total"] += float(read_seconds)
+                timing["decode_seconds_total"] += float(read_seconds)
+                timing["decoded_frames"] += 1
+                timing["skipped_frames"] += 1
+                decoded_frame_index += 1
+                continue
+
+            batch_index += 1
+            crop_started = time.perf_counter()
+            crops = _crop_pynvvc_luma_frame(
+                frame_tensor,
+                roi_ids=roi_ids,
+                roi_coordinates_full=roi_coordinates_full,
+                roi_shape=roi_shape,
+                video_shape=video_shape,
+            )
+            crop_seconds = time.perf_counter() - crop_started
+            staging_started = time.perf_counter()
+            gpu_crop_batches.append(crops.detach())
+            gpu_roi_id_batches.append(np.asarray(roi_ids, dtype=np.int64))
+            gpu_staged_rows += int(len(roi_ids))
+            timing["staging_append_seconds_total"] += float(time.perf_counter() - staging_started)
+            if gpu_staged_rows >= int(staging_row_capacity):
+                flush_gpu_staging()
+            mask_started = time.perf_counter()
+            for roi_id in roi_ids:
+                rows_written_mask[int(roi_id)] = True
+            timing["rows_mask_seconds_total"] += float(time.perf_counter() - mask_started)
+
+            batch_rows = int(len(roi_ids))
+            batch_bytes = int(batch_rows * row_stride)
+            _record_timing_batch(
+                timing,
+                batch_rows=batch_rows,
+                batch_bytes=batch_bytes,
+                read_seconds=read_seconds,
+                contiguous_seconds=0.0,
+                serialize_seconds=0.0,
+                write_seconds=0.0,
+                sha_seconds=0.0,
+                batch_index=batch_index,
+                decode_seconds=read_seconds,
+                crop_seconds=crop_seconds,
+                decoded_frames=1,
+                skipped_frames=0,
+            )
+            batch_payload = {
+                "index": int(batch_index),
+                "frame_index": int(frame_idx),
+                "rows": batch_rows,
+                "bytes": batch_bytes,
+                "read_seconds": float(read_seconds),
+                "decode_seconds": float(read_seconds),
+                "crop_seconds": float(crop_seconds),
+                "contiguous_seconds": 0.0,
+                "serialize_seconds": 0.0,
+                "write_seconds": 0.0,
+                "sha256_seconds": 0.0,
+                "read_rows_per_second": _rate(batch_rows, crop_seconds),
+                "write_mib_per_second": 0.0,
+                "decode_backend": "pynvvc_luma",
+                "gpu_staged_rows": int(gpu_staged_rows),
+            }
+            if progress_context:
+                batch_payload.update(progress_context)
+            progress_started = time.perf_counter()
+            last_progress = _maybe_emit_batch_progress(
+                progress_callback=progress_callback,
+                batch_index=batch_index,
+                batch_payload=batch_payload,
+                timing=timing,
+                total_rois=int(total_rois),
+                total_bytes=total_bytes,
+                started=started,
+                last_progress=last_progress,
+                progress_interval_seconds=progress_interval_seconds,
+                progress_every_batches=progress_every_batches,
+            )
+            timing["progress_emit_seconds_total"] += float(time.perf_counter() - progress_started)
+            decoded_frame_index += 1
+            del crops, frame_tensor
+    finally:
+        flush_gpu_staging()
+        writer.close()
+
+    timing["write_seconds_total"] += float(writer.write_seconds_total)
+    timing["write_wait_seconds_total"] += float(writer.write_wait_seconds_total)
+    timing["pinned_buffer_wait_seconds_total"] += float(writer.pinned_buffer_wait_seconds_total)
+    timing["writer_submit_seconds_total"] += float(writer.writer_submit_seconds_total)
+    timing["write_flushes"] += int(writer.flush_count)
+    return int(batch_index), float(last_progress)
 
 
 def _crop_pynvvc_luma_frame(
@@ -693,11 +941,25 @@ def _new_timing() -> dict[str, Any]:
         "decode_seconds_total": 0.0,
         "crop_seconds_total": 0.0,
         "contiguous_seconds_total": 0.0,
+        "gpu_cat_seconds_total": 0.0,
+        "gpu_to_host_seconds_total": 0.0,
+        "transfer_submit_seconds_total": 0.0,
         "serialize_seconds_total": 0.0,
         "write_seconds_total": 0.0,
+        "write_wait_seconds_total": 0.0,
+        "pinned_buffer_wait_seconds_total": 0.0,
+        "writer_submit_seconds_total": 0.0,
+        "frame_lookup_seconds_total": 0.0,
+        "staging_append_seconds_total": 0.0,
+        "rows_mask_seconds_total": 0.0,
+        "progress_emit_seconds_total": 0.0,
         "sha256_seconds_total": 0.0,
         "decoded_frames": 0,
         "skipped_frames": 0,
+        "write_flushes": 0,
+        "gpu_staging_flushes": 0,
+        "pinned_transfer_batches": 0,
+        "pageable_transfer_batches": 0,
         "batches": 0,
         "rows": 0,
         "bytes": 0,
@@ -893,13 +1155,29 @@ def _timing_summary(
         "bytes": int(timing.get("bytes", 0)),
         "read_seconds_total": float(timing.get("read_seconds_total", 0.0)),
         "contiguous_seconds_total": float(timing.get("contiguous_seconds_total", 0.0)),
+        "gpu_cat_seconds_total": float(timing.get("gpu_cat_seconds_total", 0.0)),
+        "gpu_to_host_seconds_total": float(timing.get("gpu_to_host_seconds_total", 0.0)),
+        "transfer_submit_seconds_total": float(timing.get("transfer_submit_seconds_total", 0.0)),
         "serialize_seconds_total": float(timing.get("serialize_seconds_total", 0.0)),
         "write_seconds_total": float(timing.get("write_seconds_total", 0.0)),
+        "write_wait_seconds_total": float(timing.get("write_wait_seconds_total", 0.0)),
+        "pinned_buffer_wait_seconds_total": float(
+            timing.get("pinned_buffer_wait_seconds_total", 0.0)
+        ),
+        "writer_submit_seconds_total": float(timing.get("writer_submit_seconds_total", 0.0)),
+        "frame_lookup_seconds_total": float(timing.get("frame_lookup_seconds_total", 0.0)),
+        "staging_append_seconds_total": float(timing.get("staging_append_seconds_total", 0.0)),
+        "rows_mask_seconds_total": float(timing.get("rows_mask_seconds_total", 0.0)),
+        "progress_emit_seconds_total": float(timing.get("progress_emit_seconds_total", 0.0)),
         "sha256_seconds_total": float(timing.get("sha256_seconds_total", 0.0)),
         "decode_seconds_total": float(timing.get("decode_seconds_total", 0.0)),
         "crop_seconds_total": float(timing.get("crop_seconds_total", 0.0)),
         "decoded_frames": int(timing.get("decoded_frames", 0)),
         "skipped_frames": int(timing.get("skipped_frames", 0)),
+        "write_flushes": int(timing.get("write_flushes", 0)),
+        "gpu_staging_flushes": int(timing.get("gpu_staging_flushes", 0)),
+        "pinned_transfer_batches": int(timing.get("pinned_transfer_batches", 0)),
+        "pageable_transfer_batches": int(timing.get("pageable_transfer_batches", 0)),
         "rows_per_second": float(_rate(total_rois, duration_seconds)),
         "mib_per_second": float(_rate(total_bytes / (1024 * 1024), duration_seconds)),
         "read_rows_per_second": float(

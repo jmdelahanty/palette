@@ -477,8 +477,6 @@ def _write_collection_payload_pynvvc_luma(
     progress_every_batches: int,
     started: float,
 ) -> dict[str, Any]:
-    import torch
-
     total_rois = int(row_index.num_rows)
     timing = flat_cache_mod._new_timing()
     last_progress = started
@@ -526,110 +524,27 @@ def _write_collection_payload_pynvvc_luma(
                         "PyNvVideoCodec source dimensions do not match zarr metadata: "
                         f"decoder={source_width}x{source_height}, metadata={expected_w}x{expected_h}."
                     )
-                decoded_frame_index = 0
-                while decoded_frame_index <= max_frame:
-                    decode_count = min(int(gpu_chunk_frames), max_frame - decoded_frame_index + 1)
-                    read_started = time.perf_counter()
-                    frames = reader.decode_next(decode_count)
-                    read_seconds = time.perf_counter() - read_started
-                    if not frames:
-                        break
-                    decoded_frame_ids = [decoded_frame_index + offset for offset in range(len(frames))]
-                    skipped_batch_frames = sum(1 for frame_idx in decoded_frame_ids if frame_idx not in frame_to_roi)
-                    decode_accounted = False
-                    for frame_offset, frame_tensor in enumerate(frames):
-                        frame_idx = decoded_frame_index + frame_offset
-                        roi_ids = frame_to_roi.get(frame_idx)
-                        if not roi_ids:
-                            continue
-                        batch_index += 1
-                        crop_started = time.perf_counter()
-                        crops = flat_cache_mod._crop_pynvvc_luma_frame(
-                            frame_tensor,
-                            roi_ids=roi_ids,
-                            roi_coordinates_full=coords_full,
-                            roi_shape=roi_size,
-                            video_shape=(source_height, source_width),
-                        )
-                        if torch.cuda.is_available() and getattr(crops, "is_cuda", False):
-                            torch.cuda.synchronize()
-                        contiguous_started = time.perf_counter()
-                        crops_cpu = np.ascontiguousarray(crops.cpu().numpy(), dtype=np.uint8)
-                        contiguous_seconds = time.perf_counter() - contiguous_started
-                        crop_seconds = time.perf_counter() - crop_started - contiguous_seconds
-                        serialize_started = time.perf_counter()
-                        payloads = [
-                            np.ascontiguousarray(crops_cpu[local_idx], dtype=np.uint8).tobytes(order="C")
-                            for local_idx in range(crops_cpu.shape[0])
-                        ]
-                        serialize_seconds = time.perf_counter() - serialize_started
-                        write_started = time.perf_counter()
-                        for roi_id, payload in zip(roi_ids, payloads):
-                            handle.seek(int(roi_id) * row_stride)
-                            handle.write(payload)
-                            rows_written[int(roi_id)] = True
-                        write_seconds = time.perf_counter() - write_started
-                        batch_rows = int(len(roi_ids))
-                        batch_bytes = int(batch_rows * row_stride)
-                        account_decode = not decode_accounted
-                        decode_accounted = True
-                        flat_cache_mod._record_timing_batch(
-                            timing,
-                            batch_rows=batch_rows,
-                            batch_bytes=batch_bytes,
-                            read_seconds=read_seconds if account_decode else 0.0,
-                            contiguous_seconds=contiguous_seconds,
-                            serialize_seconds=serialize_seconds,
-                            write_seconds=write_seconds,
-                            sha_seconds=0.0,
-                            batch_index=batch_index,
-                            decode_seconds=read_seconds if account_decode else 0.0,
-                            crop_seconds=crop_seconds,
-                            decoded_frames=len(frames) if account_decode else 0,
-                            skipped_frames=skipped_batch_frames if account_decode else 0,
-                        )
-                        last_progress = flat_cache_mod._maybe_emit_batch_progress(
-                            progress_callback=progress_callback,
-                            batch_index=batch_index,
-                            batch_payload={
-                                "index": int(batch_index),
-                                "video_path": str(video_path),
-                                "frame_index": int(frame_idx),
-                                "rows": batch_rows,
-                                "bytes": batch_bytes,
-                                "read_seconds": float(read_seconds if account_decode else 0.0),
-                                "decode_seconds": float(read_seconds if account_decode else 0.0),
-                                "crop_seconds": float(crop_seconds),
-                                "contiguous_seconds": float(contiguous_seconds),
-                                "serialize_seconds": float(serialize_seconds),
-                                "write_seconds": float(write_seconds),
-                                "sha256_seconds": 0.0,
-                                "read_rows_per_second": flat_cache_mod._rate(
-                                    batch_rows,
-                                    crop_seconds + contiguous_seconds,
-                                ),
-                                "write_mib_per_second": flat_cache_mod._rate(
-                                    batch_bytes / (1024 * 1024),
-                                    write_seconds,
-                                ),
-                                "decode_backend": "pynvvc_luma",
-                            },
-                            timing=timing,
-                            total_rois=total_rois,
-                            total_bytes=total_bytes,
-                            started=started,
-                            last_progress=last_progress,
-                            progress_interval_seconds=progress_interval_seconds,
-                            progress_every_batches=progress_every_batches,
-                        )
-                        del crops, crops_cpu, payloads
-                    if not decode_accounted:
-                        timing["read_seconds_total"] += float(read_seconds)
-                        timing["decode_seconds_total"] += float(read_seconds)
-                        timing["decoded_frames"] += int(len(frames))
-                        timing["skipped_frames"] += int(len(frames))
-                    decoded_frame_index += len(frames)
-                    del frames
+                batch_index, last_progress = flat_cache_mod._write_pynvvc_luma_streamed_rois(
+                    reader=reader,
+                    frame_to_roi=frame_to_roi,
+                    roi_coordinates_full=coords_full,
+                    roi_shape=roi_size,
+                    video_shape=(source_height, source_width),
+                    handle=handle,
+                    row_stride=row_stride,
+                    rows_written_mask=rows_written,
+                    total_rois=total_rois,
+                    total_bytes=total_bytes,
+                    timing=timing,
+                    batch_index=batch_index,
+                    last_progress=last_progress,
+                    started=started,
+                    progress_callback=progress_callback,
+                    progress_interval_seconds=progress_interval_seconds,
+                    progress_every_batches=progress_every_batches,
+                    staging_row_capacity=max(1024, int(gpu_chunk_frames)),
+                    progress_context={"video_path": str(video_path)},
+                )
             finally:
                 reader.close()
 

@@ -103,12 +103,59 @@ class _FakePynvvcReader:
         self._offset = 0
 
     def decode_next(self, count: int):
-        result = self._frames[self._offset : self._offset + int(count)]
-        self._offset += len(result)
-        return result
+        raise AssertionError("flat ROI cache writers must not retain decode_next() decoder surfaces")
+
+    def iter_frames(self):
+        while self._offset < len(self._frames):
+            frame = self._frames[self._offset]
+            self._offset += 1
+            yield frame
 
     def close(self) -> None:
         pass
+
+
+def test_write_owned_roi_payload_batch_fast_path_writes_contiguous_rows(tmp_path: Path) -> None:
+    payload_path = tmp_path / "payload.bin"
+    row_stride = 4
+    crops = np.arange(3 * 2 * 2, dtype=np.uint8).reshape(3, 2, 2)
+
+    with payload_path.open("w+b") as handle:
+        handle.truncate(6 * row_stride)
+        elapsed = flat_cache_mod._write_owned_roi_payload_batch(
+            handle,
+            row_stride,
+            np.array([2, 3, 4], dtype=np.int64),
+            crops,
+        )
+
+    payload = np.fromfile(payload_path, dtype=np.uint8).reshape(6, 2, 2)
+    expected = np.zeros((6, 2, 2), dtype=np.uint8)
+    expected[2:5] = crops
+    assert elapsed >= 0
+    np.testing.assert_array_equal(payload, expected)
+
+
+def test_write_owned_roi_payload_batch_sorts_sparse_rows(tmp_path: Path) -> None:
+    payload_path = tmp_path / "payload.bin"
+    row_stride = 4
+    crops = np.arange(3 * 2 * 2, dtype=np.uint8).reshape(3, 2, 2)
+
+    with payload_path.open("w+b") as handle:
+        handle.truncate(6 * row_stride)
+        flat_cache_mod._write_owned_roi_payload_batch(
+            handle,
+            row_stride,
+            np.array([4, 2, 3], dtype=np.int64),
+            crops,
+        )
+
+    payload = np.fromfile(payload_path, dtype=np.uint8).reshape(6, 2, 2)
+    expected = np.zeros((6, 2, 2), dtype=np.uint8)
+    expected[4] = crops[0]
+    expected[2] = crops[1]
+    expected[3] = crops[2]
+    np.testing.assert_array_equal(payload, expected)
 
 
 def test_build_flat_roi_cache_roundtrips_through_manifest(tmp_path: Path) -> None:
