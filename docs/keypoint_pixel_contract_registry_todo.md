@@ -19,10 +19,9 @@ Writers already carry some of the right attrs:
   `roi_images`, but it does not carry cache/read-mode attrs because that path is
   not cache-backed.
 - `src/fisheye/utils/run_keypoints_batch.py` refreshes
-  `keypoint_performance` and `keypoint_quality` after batch runs, but the
-  performance extractor does not yet preserve pixel-contract fields.
+  `keypoint_performance` and `keypoint_quality` after batch runs.
 
-Registry audit against `/nvme1/palette_registry.sqlite`:
+Pre-migration registry audit against `/nvme1/palette_registry.sqlite`:
 
 - `keypoint_performance`: 478 rows, 167 datasets, 58 recordings.
 - methods: `yolo_pose` 365, `traditional_pose` 105, `merged_export` 6, blank 2.
@@ -39,14 +38,42 @@ Registry audit against `/nvme1/palette_registry.sqlite`:
   `source_roi_read_mode=flat_bin_roi_cache`; one sweep run also reports
   `input_mode_effective=tensor`.
 
-Conclusion: writer-side provenance is partially present, but the stable registry
-surface is not queryable enough. Consumers that need to filter by keypoint model
-input currently have to parse `recording_step_status.details_json`, which is the
-wrong long-term surface.
+Post-migration live refresh against `/nvme1/palette_registry.sqlite`:
+
+- Applied schema migration 55.
+- Refreshed 166/167 datasets selected from existing `keypoint_performance`
+  rows; the remaining dataset path was missing.
+- Refreshed 167/179 datasets selected from `recording_step_status` keypoint OK
+  rows; 12 dataset paths were missing.
+- `keypoint_performance`: 485 rows.
+- methods: `yolo_pose` 372, `traditional_pose` 105, `merged_export` 6, blank 2.
+- `source_roi_pixel_contract_name`: 410 missing, 67
+  `orange_mono_pynvvc_luma_uint8_v1`, 8 `nv12_luma_plane_uint8`.
+- `source_roi_read_mode`: 440 missing, 19 `temporary_cache`, 18
+  `materialized_crop_run`, 8 `flat_bin_roi_cache`.
+- `input_mode_effective`: 481 missing, 4 `tensor`.
+- GoodCopBadCop current rows now appear in
+  `recording_keypoint_performance_latest` with
+  `source_roi_pixel_contract_name=nv12_luma_plane_uint8` and
+  `source_roi_read_mode=flat_bin_roi_cache`.
+
+Conclusion: the stable registry surface is now queryable for current/newer runs,
+but historical rows remain under-labeled. Consumers should treat missing
+`source_roi_pixel_contract_name` as unknown, not equivalent.
 
 ## Target Registry Fields
 
-Add these nullable columns to `keypoint_performance` and current/latest views:
+Implemented on 2026-06-15:
+
+- nullable `keypoint_performance` columns for the fields below,
+- extraction from `keypoints_runs/<run>.attrs` with `provenance.inputs`
+  fallback,
+- projection through `keypoint_performance_latest` and
+  `recording_keypoint_performance_latest`,
+- focused tests for cache-backed YOLO-style attrs and traditional
+  materialized-crop attrs.
+
+Fields:
 
 - `source_crop_storage_mode`
 - `source_crop_signature`
@@ -69,28 +96,28 @@ less stable as query dimensions.
 
 ## Implementation Checklist
 
-1. Add a numbered registry migration for the new `keypoint_performance` columns
+1. [x] Add a numbered registry migration for the new `keypoint_performance` columns
    and refresh `keypoint_performance_latest` plus
    `recording_keypoint_performance_latest`.
-2. Extend `registry/extractors/keypoint_performance.py` to extract the fields
+2. [x] Extend `registry/extractors/keypoint_performance.py` to extract the fields
    from run attrs first, then fall back to `provenance.inputs` where available.
-3. Add tests for the extractor and views using both YOLO/cache-backed attrs and
+3. [x] Add tests for the extractor and views using both YOLO/cache-backed attrs and
    traditional/materialized-crop attrs.
-4. Add an inline refresh path for direct keypoint writers, mirroring crop:
+4. [ ] Add an inline refresh path for direct keypoint writers, mirroring crop:
    successful keypoint completion should refresh `keypoint_performance` for the
    current Zarr without requiring a later batch wrapper or full registry scan.
-5. Re-scan or targeted-refresh `/nvme1` after the migration so recent status
+5. [x] Re-scan or targeted-refresh `/nvme1` after the migration so recent status
    telemetry is reflected in `keypoint_performance`.
-6. Update keypoint training/export registry filters to use
+6. [ ] Update keypoint training/export registry filters to use
    `keypoint_performance.source_roi_pixel_contract_name` when selecting source
    runs. Mixed contracts should be detected and reported by default; allow them
    only through an explicit compatibility group or override recorded in the
    exported manifest.
-7. Document the allowed current contracts:
+7. [ ] Document the allowed current contracts:
    `orange_mono_pynvvc_luma_uint8_v1` for materialized PyNvVC luma crop runs and
    `nv12_luma_plane_uint8` for the current flat ROI cache path until that cache
    contract is renamed or normalized.
-8. After one production refresh, add a registry audit query that reports
+8. [ ] After one production refresh, add a registry audit query that reports
    keypoint runs with missing `source_roi_pixel_contract_name` among current
    source-analysis datasets.
 

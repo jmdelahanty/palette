@@ -64,6 +64,47 @@ def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _lookup_attr(attrs: Mapping[str, Any], fallback: Mapping[str, Any], key: str) -> Any:
+    value = attrs.get(key)
+    if value is not None:
+        return value
+    return fallback.get(key)
+
+
+def _as_bool_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y"}:
+            return 1
+        if text in {"0", "false", "no", "n"}:
+            return 0
+    coerced = _as_int(value)
+    return int(coerced) if coerced is not None else None
+
+
+def _resolve_source_roi_pixel_contract(
+    attrs: Mapping[str, Any],
+    provenance_inputs: Mapping[str, Any],
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    contract = (
+        _coerce_mapping(_lookup_attr(attrs, provenance_inputs, "source_roi_pixel_contract"))
+        or _coerce_mapping(_lookup_attr(attrs, provenance_inputs, "roi_pixel_contract"))
+    )
+    contract_name = (
+        _decode_attr(_lookup_attr(attrs, provenance_inputs, "source_roi_pixel_contract_name"))
+        or _decode_attr(_lookup_attr(attrs, provenance_inputs, "roi_pixel_contract_name"))
+    )
+    if contract and contract_name is None:
+        contract_name = _decode_attr(contract.get("name"))
+    return contract, contract_name
+
+
 def _open_child_group(parent: Any, key: str) -> Any:
     store = getattr(parent, "store", None)
     if store is None:
@@ -182,8 +223,13 @@ def _extract_keypoint_performance_rows(
         summary = _coerce_mapping(attrs.get("summary_statistics")) or {}
         parameters = _coerce_mapping(attrs.get("parameters")) or {}
         provenance = _coerce_mapping(attrs.get("provenance")) or {}
+        provenance_inputs = _coerce_mapping(provenance.get("inputs")) or {}
         model_resolution = _coerce_mapping(provenance.get("model_resolution")) or {}
         model_resolution_selected = _coerce_mapping(model_resolution.get("selected")) or {}
+        source_roi_pixel_contract, source_roi_pixel_contract_name = _resolve_source_roi_pixel_contract(
+            attrs,
+            provenance_inputs,
+        )
 
         keypoint_created_utc = (
             _decode_attr(attrs.get("created_at_utc"))
@@ -263,6 +309,53 @@ def _extract_keypoint_performance_rows(
                 "source_crop_run": _decode_attr(attrs.get("source_crop_run")),
                 "source_detect_run": _decode_attr(attrs.get("source_detect_run")),
                 "source_refined_run": _decode_attr(attrs.get("source_refined_run")),
+                "source_crop_storage_mode": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "source_crop_storage_mode")
+                ),
+                "source_crop_signature": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "source_crop_signature")
+                ),
+                "source_crop_revision": _as_int(
+                    _lookup_attr(attrs, provenance_inputs, "source_crop_revision")
+                ),
+                "source_roi_image_representation": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "source_roi_image_representation")
+                ),
+                "source_roi_pixel_contract_name": source_roi_pixel_contract_name,
+                "source_roi_pixel_contract_json": (
+                    _canonical_json_text(source_roi_pixel_contract)
+                    if source_roi_pixel_contract
+                    else None
+                ),
+                "source_roi_read_mode": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "source_roi_read_mode")
+                ),
+                "roi_cache_policy": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "roi_cache_policy")
+                ),
+                "source_roi_cache_used": _as_bool_int(
+                    _lookup_attr(attrs, provenance_inputs, "source_roi_cache_used")
+                    if _lookup_attr(attrs, provenance_inputs, "source_roi_cache_used") is not None
+                    else _lookup_attr(attrs, provenance_inputs, "roi_cache_used")
+                ),
+                "source_roi_cache_backend": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "source_roi_cache_backend")
+                    or _lookup_attr(attrs, provenance_inputs, "roi_cache_backend")
+                ),
+                "source_roi_live_acceleration_effective": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "source_roi_live_acceleration_effective")
+                    or _lookup_attr(attrs, provenance_inputs, "roi_live_acceleration_effective")
+                ),
+                "source_roi_live_gpu_chunk_frames": _as_int(
+                    _lookup_attr(attrs, provenance_inputs, "source_roi_live_gpu_chunk_frames")
+                    or _lookup_attr(attrs, provenance_inputs, "roi_live_gpu_chunk_frames")
+                ),
+                "input_mode_requested": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "input_mode_requested")
+                ),
+                "input_mode_effective": _decode_attr(
+                    _lookup_attr(attrs, provenance_inputs, "input_mode_effective")
+                ),
                 "total_rois": total_rois,
                 "successful_detections": successful_detections,
                 "failed_detections": failed_detections,

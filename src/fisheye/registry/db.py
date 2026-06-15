@@ -5063,12 +5063,34 @@ class Registry(RegistryMigrationMixin):
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
+                for key in (
+                    "source_crop_storage_mode",
+                    "source_crop_signature",
+                    "source_crop_revision",
+                    "source_roi_image_representation",
+                    "source_roi_pixel_contract_name",
+                    "source_roi_pixel_contract_json",
+                    "source_roi_read_mode",
+                    "roi_cache_policy",
+                    "source_roi_cache_used",
+                    "source_roi_cache_backend",
+                    "source_roi_live_acceleration_effective",
+                    "source_roi_live_gpu_chunk_frames",
+                    "input_mode_requested",
+                    "input_mode_effective",
+                ):
+                    payload.setdefault(key, None)
                 self.conn.execute(
                     """
                     INSERT INTO keypoint_performance (
                         dataset_id, keypoint_run, keypoint_created_utc, recording_id, zarr_use,
                         keypoint_method, model_run_id, model_set_id, model_path, model_name,
                         source_crop_run, source_detect_run, source_refined_run,
+                        source_crop_storage_mode, source_crop_signature, source_crop_revision,
+                        source_roi_image_representation, source_roi_pixel_contract_name, source_roi_pixel_contract_json,
+                        source_roi_read_mode, roi_cache_policy, source_roi_cache_used, source_roi_cache_backend,
+                        source_roi_live_acceleration_effective, source_roi_live_gpu_chunk_frames,
+                        input_mode_requested, input_mode_effective,
                         total_rois, successful_detections, failed_detections, success_rate_percent,
                         frames_with_keypoints, mean_confidence,
                         duration_seconds, inference_duration_seconds, keypoints_per_second, inference_average_fps,
@@ -5079,6 +5101,11 @@ class Registry(RegistryMigrationMixin):
                         :dataset_id, :keypoint_run, :keypoint_created_utc, :recording_id, :zarr_use,
                         :keypoint_method, :model_run_id, :model_set_id, :model_path, :model_name,
                         :source_crop_run, :source_detect_run, :source_refined_run,
+                        :source_crop_storage_mode, :source_crop_signature, :source_crop_revision,
+                        :source_roi_image_representation, :source_roi_pixel_contract_name, :source_roi_pixel_contract_json,
+                        :source_roi_read_mode, :roi_cache_policy, :source_roi_cache_used, :source_roi_cache_backend,
+                        :source_roi_live_acceleration_effective, :source_roi_live_gpu_chunk_frames,
+                        :input_mode_requested, :input_mode_effective,
                         :total_rois, :successful_detections, :failed_detections, :success_rate_percent,
                         :frames_with_keypoints, :mean_confidence,
                         :duration_seconds, :inference_duration_seconds, :keypoints_per_second, :inference_average_fps,

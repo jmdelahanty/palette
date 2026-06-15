@@ -69,6 +69,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
     (52, "dataset_source_layout_metadata", "_migration_052_dataset_source_layout_metadata"),
     (53, "model_deployment_artifacts", "_migration_053_model_deployment_artifacts"),
     (54, "crop_quality_pixel_contract_columns", "_migration_054_crop_quality_pixel_contract_columns"),
+    (55, "keypoint_performance_pixel_contract_columns", "_migration_055_keypoint_performance_pixel_contract_columns"),
 )
 
 
