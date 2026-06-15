@@ -7349,6 +7349,84 @@ def test_backfill_crop_quality_dry_run_and_apply(tmp_path: Path) -> None:
     registry.close()
 
 
+def test_backfill_crop_quality_uses_non_consolidated_attrs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    _create_crop_quality_zarr(zarr_path)
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM crop_quality WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    fresh_root = _FakeGroup(attrs={"session_uuid": "crop_quality_session"})
+    crop_parent = fresh_root.add_group("crop_runs", attrs={"latest": "crop_001"})
+    crop = crop_parent.add_group(
+        "crop_001",
+        attrs={
+            "created_at_utc": "2026-02-10T00:00:00+00:00",
+            "detection_source_type": "manual",
+            "detection_source_path": "refined_detect_runs/refined_001/manual",
+            "crop_storage_mode": "materialized",
+            "roi_image_representation": "uint8_grayscale_roi_v1",
+            "roi_pixel_contract_name": "decord_rgb_channel_mean_uint8",
+            "roi_pixel_contract": {
+                "schema": "palette_roi_pixel_contract_v1",
+                "name": "decord_rgb_channel_mean_uint8",
+                "image_representation": "uint8_grayscale_roi_v1",
+                "dtype": "uint8",
+            },
+            "summary_statistics": {
+                "total_frames": 4,
+                "frames_with_crops": 4,
+                "total_rois_cropped": 4,
+                "percent_frames_with_crops": 100.0,
+            },
+        },
+    )
+    crop.add_array("frame_counts", np.array([1, 1, 1, 1], dtype=np.int32))
+    crop.add_array("bbox_norm_coords", np.zeros((4, 4), dtype=np.float32))
+
+    opened: list[tuple[Path, str]] = []
+
+    def fake_open_non_consolidated(path: Path, *, mode: str = "r") -> _FakeGroup:
+        opened.append((Path(path), mode))
+        return fresh_root
+
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._open_zarr_group_non_consolidated",
+        fake_open_non_consolidated,
+    )
+
+    applied = _backfill_crop_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+
+    assert opened == [(zarr_path, "r")]
+    assert applied["rows_inserted"] == 1
+    row = registry.conn.execute(
+        """
+        SELECT roi_pixel_contract_name, roi_pixel_contract_json
+        FROM crop_quality_current
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert str(row["roi_pixel_contract_name"]) == "decord_rgb_channel_mean_uint8"
+    payload = json.loads(str(row["roi_pixel_contract_json"]))
+    assert payload["name"] == "decord_rgb_channel_mean_uint8"
+    registry.close()
+
+
 def test_backfill_crop_quality_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"

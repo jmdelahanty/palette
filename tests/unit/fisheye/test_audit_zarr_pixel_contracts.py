@@ -74,6 +74,51 @@ def test_audit_crop_run_reads_contract_name_from_structured_contract(tmp_path: P
     assert roi_row["backfill"]["status"] == "present"
 
 
+def test_crop_contract_report_focuses_current_crop_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "fish_training.zarr"
+    report_path = tmp_path / "crop_report.json"
+    output_path = tmp_path / "audit.jsonl"
+    contract = orange_mono_pynvvc_luma_pixel_contract()
+    _write_node(zarr_path)
+    _write_node(zarr_path / "crop_runs", attrs={"latest_complete": "crop_current"})
+    _write_node(zarr_path / "crop_runs" / "crop_old", attrs={})
+    _write_node(
+        zarr_path / "crop_runs" / "crop_current",
+        attrs={
+            "crop_storage_mode": "materialized",
+            "roi_pixel_contract": contract,
+            "roi_pixel_contract_name": contract["name"],
+        },
+    )
+
+    assert (
+        main(
+            [
+                str(zarr_path),
+                "--output-jsonl",
+                str(output_path),
+                "--crop-contract-report-json",
+                str(report_path),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    current_row = next(row for row in rows if row["surface_path"] == "crop_runs/crop_current")
+    old_row = next(row for row in rows if row["surface_path"] == "crop_runs/crop_old")
+
+    assert current_row["is_current_crop_run"] is True
+    assert current_row["current_crop_selector"] == "crop_runs.attrs.latest_complete"
+    assert old_row["is_current_crop_run"] is False
+    assert report["current_crop_run_rows"] == 1
+    assert report["current_crop_runs_with_contract"] == 1
+    assert report["current_crop_runs_missing_contract"] == 0
+    assert report["contract_counts"] == {"orange_mono_pynvvc_luma_uint8_v1": 1}
+    assert report["crop_storage_mode_counts"] == {"materialized": 1}
+
+
 def test_audit_main_writes_jsonl(tmp_path: Path) -> None:
     zarr_path = tmp_path / "detect_merged.zarr"
     output = tmp_path / "audit.jsonl"
@@ -202,6 +247,130 @@ def test_apply_safe_scalar_name_backfill_updates_crop_run_metadata(tmp_path: Pat
     assert crop_payload["attributes"]["roi_pixel_contract_name"] == "orange_mono_pynvvc_luma_uint8_v1"
     assert action_row["status"] == "updated"
     assert summary_payload["safe_scalar_name_backfill_action_counts"] == {"updated": 1}
+
+
+def test_apply_inferred_legacy_crop_contract_updates_crop_run_metadata(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "fish_analysis.zarr"
+    output = tmp_path / "audit.jsonl"
+    summary = tmp_path / "summary.json"
+    crop_path = zarr_path / "crop_runs" / "crop_legacy"
+    _write_node(zarr_path)
+    _write_node(zarr_path / "crop_runs", attrs={"latest": "crop_legacy"})
+    _write_node(
+        crop_path,
+        attrs={
+            "crop_storage_mode": "materialized",
+            "video_source_type": "external",
+            "roi_live_acceleration_effective": "gpu",
+        },
+    )
+
+    assert (
+        main(
+            [
+                str(zarr_path),
+                "--apply-inferred-legacy-crop-contracts",
+                "--output-jsonl",
+                str(output),
+                "--summary-json",
+                str(summary),
+            ]
+        )
+        == 0
+    )
+
+    crop_payload = json.loads((crop_path / "zarr.json").read_text(encoding="utf-8"))
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    action_row = next(row for row in rows if row["record_type"] == "inferred_legacy_crop_contract_action")
+    summary_payload = json.loads(summary.read_text(encoding="utf-8"))
+
+    assert crop_payload["attributes"]["roi_pixel_contract_name"] == "decord_rgb_channel_mean_uint8"
+    assert crop_payload["attributes"]["roi_pixel_contract"]["name"] == "decord_rgb_channel_mean_uint8"
+    assert action_row["status"] == "updated"
+    assert action_row["roi_pixel_contract_name"] == "decord_rgb_channel_mean_uint8"
+    assert summary_payload["inferred_legacy_crop_contract_action_counts"] == {"updated": 1}
+
+
+def test_apply_inferred_legacy_crop_contract_can_limit_to_current_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "fish_analysis.zarr"
+    output = tmp_path / "audit.jsonl"
+    current_path = zarr_path / "crop_runs" / "crop_current"
+    old_path = zarr_path / "crop_runs" / "crop_old"
+    _write_node(zarr_path)
+    _write_node(zarr_path / "crop_runs", attrs={"latest_complete": "crop_current"})
+    for crop_path in (current_path, old_path):
+        _write_node(
+            crop_path,
+            attrs={
+                "crop_storage_mode": "materialized",
+                "video_source_type": "external",
+                "roi_live_acceleration_effective": "gpu",
+            },
+        )
+
+    assert (
+        main(
+            [
+                str(zarr_path),
+                "--apply-inferred-legacy-crop-contracts",
+                "--apply-current-crop-runs-only",
+                "--output-jsonl",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    current_payload = json.loads((current_path / "zarr.json").read_text(encoding="utf-8"))
+    old_payload = json.loads((old_path / "zarr.json").read_text(encoding="utf-8"))
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    action_rows = [row for row in rows if row["record_type"] == "inferred_legacy_crop_contract_action"]
+
+    assert len(action_rows) == 1
+    assert action_rows[0]["surface_path"] == "crop_runs/crop_current"
+    assert current_payload["attributes"]["roi_pixel_contract_name"] == "decord_rgb_channel_mean_uint8"
+    assert "roi_pixel_contract_name" not in old_payload["attributes"]
+
+
+def test_apply_inferred_legacy_crop_contract_refuses_canonical_contract(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "fish_analysis.zarr"
+    output = tmp_path / "audit.jsonl"
+    crop_path = zarr_path / "crop_runs" / "crop_bad"
+    contract = orange_mono_pynvvc_luma_pixel_contract()
+    _write_node(zarr_path)
+    _write_node(zarr_path / "crop_runs", attrs={"latest": "crop_bad"})
+    _write_node(crop_path, attrs={"crop_storage_mode": "materialized"})
+
+    def fake_guidance(**kwargs):
+        return {
+            "status": "infer_from_crop_run_attrs",
+            "confidence": "medium",
+            "action": "test only",
+            "suggested_roi_pixel_contract_name": contract["name"],
+            "suggested_roi_pixel_contract": contract,
+        }
+
+    monkeypatch.setattr(audit_zarr_pixel_contracts, "_backfill_guidance", fake_guidance)
+
+    assert (
+        main(
+            [
+                str(zarr_path),
+                "--apply-inferred-legacy-crop-contracts",
+                "--output-jsonl",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    crop_payload = json.loads((crop_path / "zarr.json").read_text(encoding="utf-8"))
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    action_row = next(row for row in rows if row["record_type"] == "inferred_legacy_crop_contract_action")
+
+    assert "roi_pixel_contract_name" not in crop_payload["attributes"]
+    assert action_row["status"] == "skipped"
+    assert action_row["reason"] == "refusing_to_infer_current_canonical_contract"
 
 
 def test_source_video_backfill_plan_jsonl_is_report_only(tmp_path: Path) -> None:

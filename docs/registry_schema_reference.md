@@ -171,6 +171,10 @@ CREATE TABLE analytics_exports (
 | `includes_interpolated` | `INTEGER` | yes | no | `` |
 | `n_real_detections` | `INTEGER` | yes | no | `` |
 | `n_interpolated_detections` | `INTEGER` | yes | no | `` |
+| `crop_storage_mode` | `TEXT` | yes | no | `` |
+| `roi_image_representation` | `TEXT` | yes | no | `` |
+| `roi_pixel_contract_name` | `TEXT` | yes | no | `` |
+| `roi_pixel_contract_json` | `TEXT` | yes | no | `` |
 | `review_state` | `TEXT` | yes | no | `` |
 | `review_method` | `TEXT` | yes | no | `` |
 | `review_intended_use` | `TEXT` | yes | no | `` |
@@ -200,6 +204,10 @@ CREATE TABLE crop_quality (
                 includes_interpolated INTEGER,
                 n_real_detections INTEGER,
                 n_interpolated_detections INTEGER,
+                crop_storage_mode TEXT,
+                roi_image_representation TEXT,
+                roi_pixel_contract_name TEXT,
+                roi_pixel_contract_json TEXT,
                 review_state TEXT,
                 review_method TEXT,
                 review_intended_use TEXT,
@@ -2658,6 +2666,10 @@ CREATE VIEW analytics_export_overview AS
 | `includes_interpolated` | `INTEGER` | yes | no | `` |
 | `n_real_detections` | `INTEGER` | yes | no | `` |
 | `n_interpolated_detections` | `INTEGER` | yes | no | `` |
+| `crop_storage_mode` | `TEXT` | yes | no | `` |
+| `roi_image_representation` | `TEXT` | yes | no | `` |
+| `roi_pixel_contract_name` | `TEXT` | yes | no | `` |
+| `roi_pixel_contract_json` | `TEXT` | yes | no | `` |
 | `review_state` | `TEXT` | yes | no | `` |
 | `review_method` | `TEXT` | yes | no | `` |
 | `review_intended_use` | `TEXT` | yes | no | `` |
@@ -2700,6 +2712,10 @@ CREATE VIEW crop_quality_current AS
                 includes_interpolated,
                 n_real_detections,
                 n_interpolated_detections,
+                crop_storage_mode,
+                roi_image_representation,
+                roi_pixel_contract_name,
+                roi_pixel_contract_json,
                 review_state,
                 review_method,
                 review_intended_use,
@@ -4608,6 +4624,10 @@ CREATE VIEW merged_training_datasets AS
 | `includes_interpolated` | `INTEGER` | yes | no | `` |
 | `n_real_detections` | `INTEGER` | yes | no | `` |
 | `n_interpolated_detections` | `INTEGER` | yes | no | `` |
+| `crop_storage_mode` | `TEXT` | yes | no | `` |
+| `roi_image_representation` | `TEXT` | yes | no | `` |
+| `roi_pixel_contract_name` | `TEXT` | yes | no | `` |
+| `roi_pixel_contract_json` | `TEXT` | yes | no | `` |
 | `review_state` | `TEXT` | yes | no | `` |
 | `review_method` | `TEXT` | yes | no | `` |
 | `review_intended_use` | `TEXT` | yes | no | `` |
@@ -4677,6 +4697,10 @@ CREATE VIEW recording_crop_quality_current AS
                 includes_interpolated,
                 n_real_detections,
                 n_interpolated_detections,
+                crop_storage_mode,
+                roi_image_representation,
+                roi_pixel_contract_name,
+                roi_pixel_contract_json,
                 review_state,
                 review_method,
                 review_intended_use,

@@ -5458,11 +5458,16 @@ class Registry(RegistryMigrationMixin):
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
+                payload.setdefault("crop_storage_mode", None)
+                payload.setdefault("roi_image_representation", None)
+                payload.setdefault("roi_pixel_contract_name", None)
+                payload.setdefault("roi_pixel_contract_json", None)
                 self.conn.execute(
                     """
                     INSERT INTO crop_quality (
                         dataset_id, crop_run, recording_id, zarr_use, crop_created_utc,
                         source_detect_run, source_refined_run, detection_source_type, detection_source_path,
+                        crop_storage_mode, roi_image_representation, roi_pixel_contract_name, roi_pixel_contract_json,
                         total_rois, frames_with_crops, total_frames, percent_frames_with_crops,
                         includes_interpolated, n_real_detections, n_interpolated_detections,
                         review_state, review_method, review_intended_use, review_reviewer,
@@ -5471,6 +5476,7 @@ class Registry(RegistryMigrationMixin):
                     VALUES (
                         :dataset_id, :crop_run, :recording_id, :zarr_use, :crop_created_utc,
                         :source_detect_run, :source_refined_run, :detection_source_type, :detection_source_path,
+                        :crop_storage_mode, :roi_image_representation, :roi_pixel_contract_name, :roi_pixel_contract_json,
                         :total_rois, :frames_with_crops, :total_frames, :percent_frames_with_crops,
                         :includes_interpolated, :n_real_detections, :n_interpolated_detections,
                         :review_state, :review_method, :review_intended_use, :review_reviewer,
@@ -6549,6 +6555,8 @@ class Registry(RegistryMigrationMixin):
                 input_shape=export_payload.get("input_shape"),
                 imgsz=export_payload.get("imgsz"),
             )
+            if max_batch is None:
+                max_batch = self._int_or_none(export_payload.get("max_batch"))
             nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
                 manifest_payload=manifest_payload if isinstance(manifest_payload, dict) else None,
                 metadata=metadata if isinstance(metadata, dict) else None,
@@ -6717,6 +6725,8 @@ class Registry(RegistryMigrationMixin):
                 input_shape=export_payload.get("input_shape"),
                 imgsz=export_payload.get("imgsz"),
             )
+            if max_batch is None:
+                max_batch = self._int_or_none(export_payload.get("max_batch"))
             nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
                 manifest_payload=manifest_payload if isinstance(manifest_payload, dict) else None,
                 metadata=metadata if isinstance(metadata, dict) else None,

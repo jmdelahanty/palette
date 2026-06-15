@@ -3126,7 +3126,6 @@ def _backfill_eye_mask_profiles(
         """
     ).fetchall()
     scope_roots = _normalize_scope_paths(scope_paths)
-    zarr = _import_zarr()
     summary: Dict[str, int] = {
         "datasets_scanned": 0,
         "datasets_skipped_existing": 0,
@@ -4030,6 +4029,10 @@ def _crop_quality_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
         row.get("source_refined_run"),
         row.get("detection_source_type"),
         row.get("detection_source_path"),
+        row.get("crop_storage_mode"),
+        row.get("roi_image_representation"),
+        row.get("roi_pixel_contract_name"),
+        row.get("roi_pixel_contract_json"),
         row.get("total_rois"),
         row.get("frames_with_crops"),
         row.get("total_frames"),
@@ -4111,10 +4114,7 @@ def _backfill_crop_quality(
             continue
 
         try:
-            try:
-                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-            except TypeError:
-                root = zarr.open_group(str(zarr_path), mode="r")
+            root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
             extracted_rows = _extract_crop_quality_rows(
                 root,
                 zarr_path=zarr_path,

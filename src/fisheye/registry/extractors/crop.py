@@ -10,6 +10,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.roi_pixel_contract import normalize_pixel_contract
 from fisheye.shared.type_conversions import normalize_attr as _decode_attr
 
 
@@ -55,6 +56,15 @@ def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _canonical_json_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    except TypeError:
+        return json.dumps(str(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
 def _normalize_path_text(value: Any) -> Optional[str]:
     text = _decode_attr(value)
     if not text:
@@ -68,6 +78,27 @@ def _crop_run_names(crop_parent: zarr.Group) -> List[str]:
     except Exception:
         names = [name for name in crop_parent.keys() if isinstance(name, str)]
     return sorted(str(name) for name in names)
+
+
+def _infer_crop_storage_mode(crop_group: zarr.Group) -> Optional[str]:
+    explicit = _decode_attr(crop_group.attrs.get("crop_storage_mode"))
+    if explicit:
+        return str(explicit)
+    if "roi_images" in crop_group:
+        return "materialized"
+    if "roi_coordinates_full" in crop_group or "bbox_norm_coords" in crop_group:
+        return "geometry_only"
+    return None
+
+
+def _resolve_crop_pixel_contract(crop_group: zarr.Group) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    contract = normalize_pixel_contract(
+        crop_group.attrs.get("roi_pixel_contract") or crop_group.attrs.get("crop_pixel_contract")
+    )
+    contract_name = _decode_attr(crop_group.attrs.get("roi_pixel_contract_name"))
+    if not contract_name and contract:
+        contract_name = _decode_attr(contract.get("name"))
+    return contract, str(contract_name) if contract_name else None
 
 
 def _extract_crop_quality_rows(
@@ -105,6 +136,13 @@ def _extract_crop_quality_rows(
         source_refined_run = _decode_attr(crop_group.attrs.get("source_refined_run"))
         detection_source_type = _decode_attr(crop_group.attrs.get("detection_source_type"))
         detection_source_path = _normalize_path_text(crop_group.attrs.get("detection_source_path"))
+        crop_storage_mode = _infer_crop_storage_mode(crop_group)
+        roi_pixel_contract, roi_pixel_contract_name = _resolve_crop_pixel_contract(crop_group)
+        roi_image_representation = (
+            _decode_attr(crop_group.attrs.get("roi_image_representation"))
+            or _decode_attr(roi_pixel_contract.get("image_representation") if roi_pixel_contract else None)
+        )
+        roi_pixel_contract_json = _canonical_json_text(roi_pixel_contract) if roi_pixel_contract else None
 
         total_rois = _as_int(summary.get("total_rois_cropped"))
         if total_rois is None and "roi_images" in crop_group:
@@ -176,6 +214,10 @@ def _extract_crop_quality_rows(
                 "source_refined_run": source_refined_run,
                 "detection_source_type": detection_source_type,
                 "detection_source_path": detection_source_path,
+                "crop_storage_mode": crop_storage_mode,
+                "roi_image_representation": roi_image_representation,
+                "roi_pixel_contract_name": roi_pixel_contract_name,
+                "roi_pixel_contract_json": roi_pixel_contract_json,
                 "total_rois": total_rois,
                 "frames_with_crops": frames_with_crops,
                 "total_frames": total_frames,

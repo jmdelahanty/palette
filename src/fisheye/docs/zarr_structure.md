@@ -330,10 +330,12 @@ Attributes:
 - `detect_review_status_ref` (refined run path where review status lives)
 - `detection_selection_policy` (policy label used for auto source selection)
 - `crop_signature` (signature of crop inputs: source path/type, ROI size, parameters hash)
-- `roi_image_representation` and `roi_pixel_contract` describe the model-facing
-  ROI pixel surface. The current representation is `uint8_grayscale_roi_v1`;
-  the contract records the conversion path, for example OpenCV BGR-to-gray,
-  Decord channel mean, geometry-only deferred pixels, or PyNv flat-cache luma.
+- `roi_image_representation`, `roi_pixel_contract`, and
+  `roi_pixel_contract_name` describe the model-facing ROI pixel surface. The
+  current representation is `uint8_grayscale_roi_v1`; the structured contract
+  records the conversion path, for example OpenCV BGR-to-gray, Decord channel
+  mean, geometry-only deferred pixels, or PyNv flat-cache luma. The scalar
+  contract name is duplicated intentionally for registry/query/export filters.
 - `crop_review_status` (review status payload for this crop run, optional)
 - `crop_review_signature` (signature snapshot stored when crop review was set)
 - `source_refined_row_ids_available`, `source_refined_row_id_policy`, and
@@ -1248,11 +1250,13 @@ Stimulus run data imported from Citrus H5 files. Each run contains:
 - `import_version`: Import script version
 - `protocol_json`: Protocol definition (JSON string)
 - `arena_config_json`: Arena/calibration configuration (JSON string)
-- `coordinate_transform`: Coordinate system info (JSON string)
+- `coordinate_transform`: Legacy run-level coordinate system info (JSON string; omitted on new imports when child groups declare local coordinate frames)
   - `texture_dimensions`: Stimulus texture size (typically [358, 358])
   - `camera_dimensions`: Camera resolution (typically [4512, 4512])
   - `texture_to_camera_scale`: Scale factor (~12.6)
   - `coordinate_note`: Description of coordinate spaces
+- `legacy_texture_to_camera_transform`: Legacy texture-to-camera transform retained for older consumers when child groups declare their own coordinate metadata.
+- `coordinate_transform_status`: Indicates whether the run-level transform is legacy authoritative or suppressed because child-group coordinate metadata is authoritative.
 - Gap analysis stats: `total_frames`, `missing_frames`, `max_gap_size`, etc.
 
 **Arrays**:
@@ -1322,9 +1326,16 @@ All fields stored as separate columnar arrays. Key fields include:
 - `trial_state`: PRE/TRAINING/POST period (uint8)
 - `chase_sequence_active`: Whether chase is active (bool)
 
-**IMPORTANT**: Chaser positions (`pos_x_px`, `pos_y_px`, `target_x_px`, `target_y_px`)
-are in **texture space** (358×358 pixels), NOT camera space (4512×4512). Use
-`texture_to_camera_scale` from `coordinate_transform` if conversion is needed.
+**IMPORTANT**: Chaser position coordinate space is group-local. Prefer
+`tracking_data/chaser_states.attrs.coordinate_frame`,
+`coordinate_origin`, and `position_fields` over run-level metadata. Legacy runs
+without group-local coordinate attrs used texture-space positions
+(358×358 pixels) and may expose `coordinate_transform`. New external-IPC runs
+can use `coordinate_frame="arena_relative_canvas_px"`, where positions are
+relative to the active arena origin; convert to canvas pixels by adding
+`calibration/arena_geometry.attrs.arena_origin_in_canvas_{x,y}_px`. Use
+`target_clamped_pos_x/y` for arena-constrained target positions; `target_pos_x/y`
+may intentionally lie outside the active arena.
 
 **Events Structure** (`events/`):
 Events are stored in columnar format with separate arrays for each field:

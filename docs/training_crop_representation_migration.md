@@ -358,7 +358,14 @@ Decode access policy:
      identity migration provenance.
    - Write contract fields into manifests.
 5. Update registry surfaces.
-   - Track crop pixel contract for training candidates.
+   - [x] Track crop pixel contract for crop-quality candidates:
+     `crop_quality` now stores `crop_storage_mode`, `roi_image_representation`,
+     `roi_pixel_contract_name`, and `roi_pixel_contract_json`.
+   - [x] Backfill current `/nvme1/recordings` crop-run Zarr metadata with
+     explicit legacy crop contracts where safe to infer.
+   - [x] Refresh the active `/nvme1/palette_registry.sqlite` crop-quality rows
+     after migration so those fields are populated in SQLite for active
+     non-smoke `/nvme1` source-analysis rows.
    - Allow filtering training candidates by crop contract.
    - Record model expected input contract.
 6. Batch migrate training Zarrs.

@@ -1,7 +1,7 @@
 # Geometry-Only Crop Workflow Cache Design
 <!-- contract-meta
 status: design
-last_verified: 2026-05-16
+last_verified: 2026-06-05
 purpose: Define the target policy for geometry-only analysis crop runs, shared workflow ROI caches, and optional flat binary crop-cache transport.
 -->
 
@@ -354,6 +354,32 @@ dependency equivalent to `-w done(<crop_jobid>)`, so it remains pending until
 the crop job exits successfully. If the crop job fails, the cache job does not
 start.
 
+For local workstation batches, use the Python wrapper instead of submitting LSF
+jobs:
+
+```bash
+scripts/py -m fisheye.utils.crop_flat_roi_cache_batch \
+  /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains GoodCopBadCop \
+  --source-type refined \
+  --selection-policy full_recording \
+  --crop-storage-mode geometry_only \
+  --workflow-id goodcopbadcop_crop_cache_20260604 \
+  --cache-root /nvme1/palette_roi_cache \
+  --cache-decode-backend pynvvc_luma \
+  --roi-live-acceleration gpu \
+  --apply
+```
+
+`crop_flat_roi_cache_batch` is dry-run by default. In apply mode it processes
+archives serially: create or reuse the crop run, resolve the resulting crop
+run, then call `build_flat_roi_cache` into
+`<cache-root>/<workflow-id>/roi_cache`. Existing matching crop runs are not
+recomputed unless `--force-new` is passed, and existing matching flat-cache
+manifests are reused unless `--overwrite-cache` is passed.
+
 For finalized clipped refined-detect collections, skip synthetic crop-run
 creation and submit the collection-aware cache builder directly:
 
@@ -473,6 +499,8 @@ Future crop runs record this in attrs as:
 - `roi_pixel_contract`: structured conversion metadata with contract name,
   source-frame representation, dtype/shape/order, padding behavior, and
   production status.
+- `roi_pixel_contract_name`: scalar copy of `roi_pixel_contract.name`, used as
+  the cheap registry/export filter key.
 
 Downstream pose and segmentation runs copy the effective reader/cache contract
 as:
@@ -529,6 +557,53 @@ materialization path:
 Historical crop parity checks remain useful for quantifying the migration, but
 the production question is now consistency with the explicit `pynvvc_luma_v1`
 contract, not strict equality with old OpenCV/Decord-derived crop pixels.
+
+### PyNvVideoCodec Surface Lifetime
+
+The `pynvvc_luma` cache builder must not retain decoded frame tensors returned
+by PyNvVideoCodec across decoder advancement. Palette receives those tensors via
+`torch.from_dlpack(frame)`, which should be treated as a view over
+decoder-owned GPU memory. Empirical GoodCopBadCop validation on 2026-06-05
+showed that collecting a batch of decoded frame tensors with `decode_next(N)`
+and cropping them later can corrupt cache rows: earlier tensors may point at
+surfaces reused for later frames.
+
+Accepted safe policy:
+
+- Iterate decoded frames one at a time.
+- For frames with no ROI rows, decode and skip without copying/cropping.
+- For frames with ROI rows, crop immediately while the decoder surface is still
+  current.
+- Clone/copy only the derived ROI tensors into owned staging memory.
+- Batch only owned ROI payloads for host transfer and disk writes.
+
+Rejected optimization:
+
+- "Decode many full frames, then batch-crop later" is unsafe unless the decoded
+  full frames are first cloned into owned GPU memory or PyNvVideoCodec provides
+  a documented retained-surface guarantee.
+- Cloning full 4512x4512 luma frames was tested conceptually during the
+  2026-06-05 GoodCopBadCop investigation and is the wrong tradeoff for this
+  cache: it preserves correctness but loses the benefit of copying only
+  512x512 ROI pixels.
+
+The current safe persisted-cache path is therefore "immediate ROI clone, then
+batched owned-ROI writes." A future direct inference path may keep ROI tensors
+on GPU and avoid this flat-cache disk write, but persisted flat caches must own
+their bytes before decoder advancement.
+
+Transfer/write policy for the persisted flat cache:
+
+- Concatenate only owned ROI tensors, not borrowed decoder frame tensors.
+- Prefer a small ring of reusable pinned host buffers for GPU-to-host ROI
+  payload copies.
+- Hand each pinned host buffer directly to the asynchronous writer and do not
+  reuse that buffer until its write future completes.
+- Write contiguous ROI row runs as a single file write; retain sparse-row
+  sorting as a fallback for non-sequential cache construction.
+- Track `gpu_cat_seconds_total`, `gpu_to_host_seconds_total`, pinned/pageable
+  transfer counts, and writer wait time in the manifest timing block so cache
+  builds can be evaluated from artifacts rather than anecdotes.
 
 ### Finalized Clipped Collection Cache
 

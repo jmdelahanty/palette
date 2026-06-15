@@ -1,5 +1,6 @@
 """Unit tests for crop review quality registry extraction and views."""
 
+import json
 from pathlib import Path
 import sys
 
@@ -9,6 +10,7 @@ import zarr
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
+from fisheye.shared.roi_pixel_contract import crop_run_pixel_contract
 
 
 def _create_crop_archive(path: Path, *, session_uuid: str) -> None:
@@ -43,6 +45,16 @@ def _create_crop_archive(path: Path, *, session_uuid: str) -> None:
     crop_new.attrs["source_detect_run"] = "detect_001"
     crop_new.attrs["source_refined_run"] = "refined_001"
     crop_new.attrs["status"] = "completed"
+    crop_new.attrs["crop_storage_mode"] = "materialized"
+    crop_new.attrs["video_source_type"] = "external"
+    crop_new.attrs["roi_live_acceleration_effective"] = "gpu"
+    crop_contract = crop_run_pixel_contract(
+        crop_storage_mode="materialized",
+        video_source_type="external",
+        acceleration="gpu",
+    )
+    crop_new.attrs["roi_pixel_contract"] = crop_contract
+    crop_new.attrs["roi_pixel_contract_name"] = crop_contract["name"]
     crop_new.attrs["includes_interpolated"] = True
     crop_new.attrs["n_real_detections"] = 3
     crop_new.attrs["n_interpolated_detections"] = 1
@@ -136,6 +148,10 @@ def test_register_from_root_populates_crop_quality_and_latest_views(tmp_path: Pa
             review_notes,
             source_refined_run,
             detection_source_type,
+            crop_storage_mode,
+            roi_image_representation,
+            roi_pixel_contract_name,
+            roi_pixel_contract_json,
             includes_interpolated,
             n_real_detections,
             n_interpolated_detections,
@@ -154,6 +170,10 @@ def test_register_from_root_populates_crop_quality_and_latest_views(tmp_path: Pa
     assert str(latest["review_notes"]) == "looks good"
     assert str(latest["source_refined_run"]) == "refined_001"
     assert str(latest["detection_source_type"]) == "manual"
+    assert str(latest["crop_storage_mode"]) == "materialized"
+    assert str(latest["roi_image_representation"]) == "uint8_grayscale_roi_v1"
+    assert str(latest["roi_pixel_contract_name"]) == "decord_rgb_channel_mean_uint8"
+    assert json.loads(str(latest["roi_pixel_contract_json"]))["name"] == "decord_rgb_channel_mean_uint8"
     assert int(latest["includes_interpolated"]) == 1
     assert int(latest["n_real_detections"]) == 3
     assert int(latest["n_interpolated_detections"]) == 1
@@ -161,7 +181,7 @@ def test_register_from_root_populates_crop_quality_and_latest_views(tmp_path: Pa
 
     rec_latest = registry.conn.execute(
         """
-        SELECT recording_id, dataset_id, crop_run, review_state
+        SELECT recording_id, dataset_id, crop_run, review_state, roi_pixel_contract_name
         FROM recording_crop_quality_current
         WHERE recording_id = ?;
         """,
@@ -171,6 +191,7 @@ def test_register_from_root_populates_crop_quality_and_latest_views(tmp_path: Pa
     assert str(rec_latest["dataset_id"]) == dataset_id
     assert str(rec_latest["crop_run"]) == "crop_new"
     assert str(rec_latest["review_state"]) == "approved"
+    assert str(rec_latest["roi_pixel_contract_name"]) == "decord_rgb_channel_mean_uint8"
     registry.close()
 
 

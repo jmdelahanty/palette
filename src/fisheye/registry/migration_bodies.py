@@ -1972,6 +1972,10 @@ class RegistryMigrationMixin:
                 source_refined_run TEXT,
                 detection_source_type TEXT,
                 detection_source_path TEXT,
+                crop_storage_mode TEXT,
+                roi_image_representation TEXT,
+                roi_pixel_contract_name TEXT,
+                roi_pixel_contract_json TEXT,
                 total_rois INTEGER,
                 frames_with_crops INTEGER,
                 total_frames INTEGER,
@@ -2002,6 +2006,10 @@ class RegistryMigrationMixin:
                 "source_refined_run": "TEXT",
                 "detection_source_type": "TEXT",
                 "detection_source_path": "TEXT",
+                "crop_storage_mode": "TEXT",
+                "roi_image_representation": "TEXT",
+                "roi_pixel_contract_name": "TEXT",
+                "roi_pixel_contract_json": "TEXT",
                 "total_rois": "INTEGER",
                 "frames_with_crops": "INTEGER",
                 "total_frames": "INTEGER",
@@ -2056,6 +2064,10 @@ class RegistryMigrationMixin:
                 source_refined_run,
                 detection_source_type,
                 detection_source_path,
+                crop_storage_mode,
+                roi_image_representation,
+                roi_pixel_contract_name,
+                roi_pixel_contract_json,
                 total_rois,
                 frames_with_crops,
                 total_frames,
@@ -2117,6 +2129,10 @@ class RegistryMigrationMixin:
                 source_refined_run,
                 detection_source_type,
                 detection_source_path,
+                crop_storage_mode,
+                roi_image_representation,
+                roi_pixel_contract_name,
+                roi_pixel_contract_json,
                 total_rois,
                 frames_with_crops,
                 total_frames,
@@ -2148,6 +2164,11 @@ class RegistryMigrationMixin:
             WHERE _rn = 1;
             """
         )
+
+    def _migration_054_crop_quality_pixel_contract_columns(self) -> None:
+        """Expose crop pixel-contract metadata in crop-quality registry views."""
+
+        self._migration_014_crop_quality_registry()
 
     def _migration_015_eye_mask_performance_registry(self) -> None:
         cur = self.conn.cursor()

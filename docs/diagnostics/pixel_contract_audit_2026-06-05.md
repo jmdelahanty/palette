@@ -1,7 +1,7 @@
 # Pixel Contract Audit
 <!-- contract-meta
 status: current
-last_verified: 2026-06-05
+last_verified: 2026-06-14
 purpose: Record persisted-pixel/decode-contract audit results and the implementation checklist for making training and recording Zarr pixel metadata enforceable.
 -->
 
@@ -292,6 +292,336 @@ merged source-video rows missing source_video_path: 19
 Treat merged exports as derived artifacts: repair source Zarr metadata first,
 then re-export rather than manually patching merged artifacts.
 
+## Follow-Up Run: 2026-06-14
+
+Reports:
+
+```text
+/tmp/palette_pixel_contract_audit_recordings_20260614.jsonl
+/tmp/palette_pixel_contract_audit_recordings_20260614.summary.json
+/tmp/palette_pixel_contract_audit_recordings_crop_focus_20260614.jsonl
+/tmp/palette_pixel_contract_audit_recordings_crop_focus_20260614.summary.json
+/tmp/palette_current_crop_contract_report_20260614.json
+/tmp/palette_current_crop_contract_backfill_apply_nvme1_20260614.jsonl
+/tmp/palette_current_crop_contract_backfill_apply_nvme1_20260614.summary.json
+/tmp/palette_current_crop_contract_report_nvme1_apply_20260614.json
+/tmp/palette_current_crop_contract_backfill_verify_nvme1_20260614.jsonl
+/tmp/palette_current_crop_contract_backfill_verify_nvme1_20260614.summary.json
+/tmp/palette_current_crop_contract_report_nvme1_verify_20260614.json
+/tmp/palette_pixel_contract_audit_merged_training_20260614.jsonl
+/tmp/palette_pixel_contract_audit_merged_training_20260614.summary.json
+```
+
+Recording/registry command:
+
+```bash
+scripts/py -m fisheye.utils.audit_zarr_pixel_contracts \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains /recordings/ \
+  --include-source-video-metadata \
+  --skip-missing-zarrs \
+  --output-jsonl /tmp/palette_pixel_contract_audit_recordings_20260614.jsonl \
+  --summary-json /tmp/palette_pixel_contract_audit_recordings_20260614.summary.json \
+  --summary-to-stderr
+```
+
+Focused current-crop command:
+
+```bash
+scripts/py -m fisheye.utils.audit_zarr_pixel_contracts \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains /recordings/ \
+  --skip-missing-zarrs \
+  --output-jsonl /tmp/palette_pixel_contract_audit_recordings_crop_focus_20260614.jsonl \
+  --summary-json /tmp/palette_pixel_contract_audit_recordings_crop_focus_20260614.summary.json \
+  --crop-contract-report-json /tmp/palette_current_crop_contract_report_20260614.json \
+  --summary-to-stderr
+```
+
+Merged-training command:
+
+```bash
+scripts/py -m fisheye.utils.audit_zarr_pixel_contracts \
+  /nvme1/training/datasets \
+  --recursive \
+  --skip-missing-zarrs \
+  --output-jsonl /tmp/palette_pixel_contract_audit_merged_training_20260614.jsonl \
+  --summary-json /tmp/palette_pixel_contract_audit_merged_training_20260614.summary.json \
+  --summary-to-stderr
+```
+
+Current `/nvme1` registry recording audit:
+
+```text
+zarr_count: 129
+row_count: 732
+surface_counts:
+  raw_video: 117
+  raw_video_array: 112
+  crop_run: 190
+  crop_roi_images: 184
+source_video_scope_counts:
+  single_video: 129
+source_video_backfill_status_counts:
+  present: 117
+  missing_source_video_path: 12
+missing_field_counts:
+  decode_backend: 229
+  pixel_contract: 229
+  roi_pixel_contract: 248
+```
+
+Current pixel-contract backfill categories:
+
+```text
+present: 126
+legacy_import_gray_under_labeled: 217
+infer_from_crop_run_attrs: 125
+parent_crop_contract_missing: 123
+unknown_raw_video_contract: 12
+```
+
+Current-crop focused report:
+
+```text
+zarrs_with_crop_runs: 117
+zarrs_with_current_crop_run: 117
+zarrs_missing_current_crop_selector: 0
+crop_run_rows_scanned: 198
+current_crop_run_rows: 117
+current_crop_runs_with_contract: 8
+current_crop_runs_missing_contract: 109
+contract_counts:
+  orange_mono_pynvvc_luma_uint8_v1: 8
+  geometry_only_deferred_uint8_grayscale: 4
+  missing: 105
+crop_storage_mode_counts:
+  geometry_only: 4
+  materialized: 113
+backfill_status_counts:
+  present: 8
+  safe_scalar_name_backfill: 4
+  infer_from_crop_run_attrs: 105
+```
+
+The current-crop report uses `crop_runs.attrs.latest`, `latest_complete`, or
+`latest_any` as the current-run selector. As of this scan, every Zarr with crop
+runs has one of those selectors. The four `safe_scalar_name_backfill` rows are
+clipped-training crop runs on PRFS with a structured
+`roi_pixel_contract.name` but no scalar `roi_pixel_contract_name`; these are
+safe metadata-only repairs when those stores are in the active write scope. The
+105 `infer_from_crop_run_attrs` rows are current historical materialized crop
+runs and should remain legacy-labeled unless regenerated.
+
+Current-crop contract apply on `/nvme1/recordings`:
+
+```bash
+scripts/py -m fisheye.utils.audit_zarr_pixel_contracts \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains /nvme1/recordings \
+  --skip-missing-zarrs \
+  --apply-safe-scalar-name-backfill \
+  --apply-inferred-legacy-crop-contracts \
+  --apply-current-crop-runs-only \
+  --output-jsonl /tmp/palette_current_crop_contract_backfill_apply_nvme1_20260614.jsonl \
+  --summary-json /tmp/palette_current_crop_contract_backfill_apply_nvme1_20260614.summary.json \
+  --crop-contract-report-json /tmp/palette_current_crop_contract_report_nvme1_apply_20260614.json \
+  --summary-to-stderr
+```
+
+Apply result:
+
+```text
+inferred_legacy_crop_contract_action_counts:
+  updated: 105
+safe_scalar_name_backfill_action_counts: {}
+```
+
+Verify command:
+
+```bash
+scripts/py -m fisheye.utils.audit_zarr_pixel_contracts \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains /nvme1/recordings \
+  --skip-missing-zarrs \
+  --output-jsonl /tmp/palette_current_crop_contract_backfill_verify_nvme1_20260614.jsonl \
+  --summary-json /tmp/palette_current_crop_contract_backfill_verify_nvme1_20260614.summary.json \
+  --crop-contract-report-json /tmp/palette_current_crop_contract_report_nvme1_verify_20260614.json \
+  --summary-to-stderr
+```
+
+Verified `/nvme1` current-crop state after the apply:
+
+```text
+zarrs_with_crop_runs: 113
+zarrs_with_current_crop_run: 113
+zarrs_missing_current_crop_selector: 0
+current_crop_run_rows: 113
+current_crop_runs_with_contract: 113
+current_crop_runs_missing_contract: 0
+contract_counts:
+  decord_rgb_channel_mean_uint8: 53
+  raw_video_images_full_to_uint8_grayscale: 52
+  geometry_only_deferred_uint8_grayscale: 4
+  orange_mono_pynvvc_luma_uint8_v1: 4
+```
+
+The apply was metadata-only. It wrote `roi_pixel_contract` and
+`roi_pixel_contract_name` to current crop-run groups whose contract could be
+inferred from existing `crop_storage_mode`/`video_source_type`/acceleration
+attrs. It did not rewrite `roi_images`, did not stamp historical crops as
+`orange_mono_pynvvc_luma_uint8_v1`, and did not touch older non-current crop
+runs because `--apply-current-crop-runs-only` was used.
+
+The broad `/nvme1` post-verify audit still reports 38 crop-contract missing
+fields (`infer_from_crop_run_attrs: 20`, `parent_crop_contract_missing: 18`).
+Those are older non-current crop runs and their child `roi_images`, not current
+training candidates.
+
+Existing `/nvme1/palette_registry.sqlite` rows still need a crop-quality refresh
+to make the new contract fields queryable from registry views. The code now
+extracts/stores `crop_storage_mode`, `roi_image_representation`,
+`roi_pixel_contract_name`, and `roi_pixel_contract_json`, but the existing
+SQLite registry was not refreshed as part of this metadata-only Zarr apply.
+
+Registry crop-quality refresh on `/nvme1/recordings`:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  /nvme1/recordings \
+  --registry /nvme1/palette_registry.sqlite \
+  --refresh-crop-quality \
+  --dry-run
+
+scripts/py -m fisheye.registry.maintenance \
+  /nvme1/recordings \
+  --registry /nvme1/palette_registry.sqlite \
+  --refresh-crop-quality
+```
+
+The first apply exposed a maintenance bug: crop-quality refresh attempted
+`zarr.open_group(..., consolidated=False)`, but the active zarr version expects
+`use_consolidated=False`. The TypeError fallback opened with default metadata,
+which could read stale consolidated attrs and miss the freshly stamped crop
+contracts. `maintenance._backfill_crop_quality` now uses the repository's
+non-consolidated opener helper.
+
+Patched refresh result:
+
+```text
+dry-run after opener fix:
+  scanned: 117
+  missing: 0
+  errors: 0
+  no_quality: 4
+  inserted: 0
+  updated: 105
+  deleted: 0
+  unchanged: 38
+
+apply after opener fix:
+  scanned: 117
+  missing: 0
+  errors: 0
+  no_quality: 4
+  inserted: 0
+  updated: 105
+  deleted: 0
+  unchanged: 38
+```
+
+Registry verification after refresh:
+
+```text
+crop_quality rows: 281
+rows with roi_pixel_contract_name: 113
+rows with roi_pixel_contract_json: 113
+
+active non-smoke /nvme1 source-analysis crop_quality_current rows:
+  total: 112
+  named: 112
+  decord_rgb_channel_mean_uint8: 104
+  geometry_only_deferred_uint8_grayscale: 8
+```
+
+The one remaining unnamed `/nvme1/recordings` source-analysis current row is the
+smoke analysis Zarr under `/nvme1/recordings/smoke/`, which is excluded from
+active coverage.
+
+Surface-level breakdown:
+
+```text
+raw_video:
+  legacy_import_gray_under_labeled: 113
+  unknown_raw_video_contract: 4
+raw_video_array:
+  legacy_import_gray_under_labeled: 104
+  unknown_raw_video_contract: 8
+crop_run:
+  present: 65
+  infer_from_crop_run_attrs: 125
+crop_roi_images:
+  present: 61
+  parent_crop_contract_missing: 123
+```
+
+Interpretation of the 2026-06-14 recording scan:
+
+- The safe crop scalar-name repair remains complete: no remaining
+  `safe_scalar_name_backfill` actions were reported.
+- The source-video metadata backfill remains complete for accessible active
+  single-video recordings except the same twelve stale-looking cross-camera
+  `sickyfish_2026_02_23...*_training.zarr` rows with no source-video path.
+- The remaining raw-video gaps are historical contract-labeling gaps, not
+  evidence that current writers failed to stamp new `pynvvc_luma` crop/cache
+  contracts.
+- The 125 `infer_from_crop_run_attrs` rows are historical materialized crop runs
+  that can be labeled with medium-confidence legacy contracts if strict
+  reproduction requires it, but they should not be promoted to the current
+  `orange_mono_pynvvc_luma_uint8_v1` contract without regeneration or parity
+  evidence.
+
+The twelve source-video metadata gaps are cross-camera training rows under:
+
+```text
+/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010093/zarr/*_training.zarr
+/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010094/zarr/*_training.zarr
+/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010095/zarr/*_training.zarr
+/nvme1/recordings/sickyfish_2026_02_23_16_23_35_cam2010096/zarr/*_training.zarr
+```
+
+The four `unknown_raw_video_contract` zarrs are same-camera
+`sickyfish_2026_02_23...*_training.zarr` artifacts. Treat these as legacy
+training artifacts unless a separate writer audit proves their raw-video
+decoder/conversion contract.
+
+Current merged-training audit:
+
+```text
+zarr_count: 19
+row_count: 65
+surface_counts:
+  merged_training_root: 19
+  raw_video: 8
+  raw_video_array: 8
+  crop_run: 19
+  crop_roi_images: 11
+missing_field_counts:
+  decode_backend: 35
+  pixel_contract: 35
+  roi_pixel_contract: 30
+backfill_status_counts:
+  missing_export_contract: 19
+  requires_source_contract_audit: 16
+  unknown_crop_contract: 19
+  parent_crop_contract_missing: 11
+```
+
+Existing merged training exports remain under-labeled legacy artifacts. New
+detection merged exports now aggregate source raw-video pixel contracts and can
+enforce `--required-pixel-contract-name`; old merged exports should be re-exported
+from source-contract-aware inputs rather than manually patched.
+
 ## Interpretation
 
 Do not backfill old raw-video images as `pynvvc_luma` unless they are regenerated
@@ -336,6 +666,24 @@ legacy artifacts until re-exported or audited against source rows.
 - [x] Verify materialized crop, geometry-only crop, flat ROI cache, and clipped flat
   ROI cache writers all stamp a contract name and structured contract.
 - [x] Add unit coverage for scalar-name stamping.
+
+2a. Label current historical crop runs without promoting them to the canonical
+    PyNvVC-luma contract.
+
+- [x] Add an explicit `--apply-inferred-legacy-crop-contracts` mode for
+  medium-confidence legacy crop contracts inferred from
+  `crop_storage_mode`/`video_source_type`/acceleration attrs.
+- [x] Add `--apply-current-crop-runs-only` so metadata repair can target only the
+  current crop run selected by `latest`, `latest_complete`, or `latest_any`.
+- [x] Refuse to infer `orange_mono_pynvvc_luma_uint8_v1`; canonical luma
+  contract still requires regeneration or parity evidence.
+- [x] Apply current-only inferred legacy crop contracts to `/nvme1/recordings`.
+- [x] Verify current crop runs in `/nvme1/recordings` are now fully labeled:
+  `113/113` current crop runs have a contract.
+- [ ] Apply the safe scalar-name repair to active PRFS clipped-training crop runs
+  if those stores remain in active use.
+- [x] Refresh `/nvme1/palette_registry.sqlite` crop-quality rows so the new crop
+  contract columns are queryable from registry views.
 
 3. Add raw-video pixel contract fields to future imports and clipped builders.
 

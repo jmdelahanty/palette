@@ -190,6 +190,15 @@ def _contract_from_attrs(attrs: Mapping[str, Any]) -> tuple[dict[str, Any] | Non
     return None, None, None
 
 
+def _crop_run_name_from_surface_path(surface_path: Any) -> str | None:
+    if not isinstance(surface_path, str):
+        return None
+    parts = surface_path.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "crop_runs":
+        return parts[1]
+    return None
+
+
 def _first_text(attrs: Mapping[str, Any], names: Sequence[str]) -> str | None:
     for name in names:
         value = attrs.get(name)
@@ -828,36 +837,51 @@ def audit_zarr_path(candidate: ZarrCandidate, *, include_source_video_metadata: 
 
     crop_parent = candidate.path / "crop_runs"
     if _path_exists(crop_parent):
+        crop_parent_node = _read_node(crop_parent)
+        crop_parent_attrs = crop_parent_node["attributes"]
+        latest_crop_run = None
+        current_crop_selector = None
+        for selector_attr in ("latest", "latest_complete", "latest_any"):
+            latest_crop_run = _first_text(crop_parent_attrs, (selector_attr,))
+            if latest_crop_run:
+                current_crop_selector = f"crop_runs.attrs.{selector_attr}"
+                break
         for run_name in _iter_child_names(crop_parent):
             run_path = crop_parent / run_name
             run_node = _read_node(run_path)
             run_attrs = run_node["attributes"]
             _, parent_contract_name, _ = _contract_from_attrs(run_attrs)
-            rows.append(
-                _surface_row(
-                    candidate=candidate,
-                    zarr_kind=zarr_kind,
-                    surface_type="crop_run",
-                    surface_path=f"crop_runs/{run_name}",
-                    node=run_node,
-                    root_attrs=root_attrs,
-                    raw_attrs=raw_attrs,
-                )
+            crop_row = _surface_row(
+                candidate=candidate,
+                zarr_kind=zarr_kind,
+                surface_type="crop_run",
+                surface_path=f"crop_runs/{run_name}",
+                node=run_node,
+                root_attrs=root_attrs,
+                raw_attrs=raw_attrs,
             )
+            crop_row["crop_run_name"] = run_name
+            crop_row["latest_crop_run_name"] = latest_crop_run
+            crop_row["is_current_crop_run"] = bool(latest_crop_run and latest_crop_run == run_name)
+            crop_row["current_crop_selector"] = current_crop_selector
+            rows.append(crop_row)
             roi_node = _read_node(run_path / "roi_images")
             if roi_node["exists"]:
-                rows.append(
-                    _surface_row(
-                        candidate=candidate,
-                        zarr_kind=zarr_kind,
-                        surface_type="crop_roi_images",
-                        surface_path=f"crop_runs/{run_name}/roi_images",
-                        node=roi_node,
-                        root_attrs=root_attrs,
-                        raw_attrs=raw_attrs,
-                        inherited_contract_name=parent_contract_name,
-                    )
+                roi_row = _surface_row(
+                    candidate=candidate,
+                    zarr_kind=zarr_kind,
+                    surface_type="crop_roi_images",
+                    surface_path=f"crop_runs/{run_name}/roi_images",
+                    node=roi_node,
+                    root_attrs=root_attrs,
+                    raw_attrs=raw_attrs,
+                    inherited_contract_name=parent_contract_name,
                 )
+                roi_row["crop_run_name"] = run_name
+                roi_row["latest_crop_run_name"] = latest_crop_run
+                roi_row["is_current_crop_run"] = bool(latest_crop_run and latest_crop_run == run_name)
+                roi_row["current_crop_selector"] = current_crop_selector
+                rows.append(roi_row)
 
     return rows
 
@@ -1018,9 +1042,13 @@ def _summary(rows: Sequence[Mapping[str, Any]], *, candidates: Sequence[ZarrCand
     by_source_video_missing = Counter()
     by_source_video_backfill = Counter()
     by_safe_scalar_action = Counter()
+    by_inferred_legacy_crop_action = Counter()
     by_source_video_fingerprint_action = Counter()
     by_source_video_colorimetry_action = Counter()
     for row in rows:
+        if row.get("record_type") == "inferred_legacy_crop_contract_action":
+            by_inferred_legacy_crop_action[str(row.get("status"))] += 1
+            continue
         if row.get("record_type") == "source_video_ffprobe_colorimetry_action":
             by_source_video_colorimetry_action[str(row.get("status"))] += 1
             continue
@@ -1057,8 +1085,70 @@ def _summary(rows: Sequence[Mapping[str, Any]], *, candidates: Sequence[ZarrCand
         "source_video_missing_field_counts": dict(sorted(by_source_video_missing.items())),
         "source_video_backfill_status_counts": dict(sorted(by_source_video_backfill.items())),
         "safe_scalar_name_backfill_action_counts": dict(sorted(by_safe_scalar_action.items())),
+        "inferred_legacy_crop_contract_action_counts": dict(sorted(by_inferred_legacy_crop_action.items())),
         "source_video_stat_fingerprint_action_counts": dict(sorted(by_source_video_fingerprint_action.items())),
         "source_video_ffprobe_colorimetry_action_counts": dict(sorted(by_source_video_colorimetry_action.items())),
+    }
+
+
+def _crop_contract_report(rows: Sequence[Mapping[str, Any]], *, candidates: Sequence[ZarrCandidate]) -> dict[str, Any]:
+    crop_rows = [
+        row
+        for row in rows
+        if row.get("record_type") == "pixel_contract_surface" and row.get("surface_type") == "crop_run"
+    ]
+    current_rows = [row for row in crop_rows if row.get("is_current_crop_run")]
+    zarrs_with_crop_runs = {str(row.get("zarr_path")) for row in crop_rows if row.get("zarr_path")}
+    zarrs_with_current_crop = {str(row.get("zarr_path")) for row in current_rows if row.get("zarr_path")}
+    zarrs_missing_current_selector = sorted(zarrs_with_crop_runs - zarrs_with_current_crop)
+
+    contract_counts = Counter(str(row.get("pixel_contract_name") or "missing") for row in current_rows)
+    backfill_counts = Counter(
+        str((row.get("backfill") or {}).get("status"))
+        for row in current_rows
+        if isinstance(row.get("backfill"), Mapping)
+    )
+    storage_counts = Counter(
+        str((row.get("relevant_attrs") or {}).get("crop_storage_mode") or "missing")
+        for row in current_rows
+        if isinstance(row.get("relevant_attrs"), Mapping)
+    )
+    representation_counts = Counter(
+        str((row.get("relevant_attrs") or {}).get("roi_image_representation") or "missing")
+        for row in current_rows
+        if isinstance(row.get("relevant_attrs"), Mapping)
+    )
+    missing_contract_rows = [
+        {
+            "zarr_path": row.get("zarr_path"),
+            "zarr_kind": row.get("zarr_kind"),
+            "crop_run": row.get("crop_run_name") or _crop_run_name_from_surface_path(row.get("surface_path")),
+            "surface_path": row.get("surface_path"),
+            "missing_fields": list(row.get("missing_fields") or []),
+            "backfill_status": (row.get("backfill") or {}).get("status") if isinstance(row.get("backfill"), Mapping) else None,
+            "recommended_action": (row.get("backfill") or {}).get("action") if isinstance(row.get("backfill"), Mapping) else None,
+        }
+        for row in current_rows
+        if row.get("missing_fields")
+    ]
+
+    return {
+        "record_type": "current_crop_contract_report",
+        "audit_utc": _utc_now(),
+        "zarr_count": len(candidates),
+        "zarrs_with_crop_runs": len(zarrs_with_crop_runs),
+        "zarrs_with_current_crop_run": len(zarrs_with_current_crop),
+        "zarrs_missing_current_crop_selector": len(zarrs_missing_current_selector),
+        "crop_run_rows_scanned": len(crop_rows),
+        "current_crop_run_rows": len(current_rows),
+        "current_crop_runs_with_contract": sum(1 for row in current_rows if not row.get("missing_fields")),
+        "current_crop_runs_missing_contract": sum(1 for row in current_rows if row.get("missing_fields")),
+        "contract_counts": dict(sorted(contract_counts.items())),
+        "backfill_status_counts": dict(sorted(backfill_counts.items())),
+        "crop_storage_mode_counts": dict(sorted(storage_counts.items())),
+        "roi_image_representation_counts": dict(sorted(representation_counts.items())),
+        "missing_contract_rows": missing_contract_rows,
+        "zarrs_missing_current_selector_examples": zarrs_missing_current_selector[:25],
     }
 
 
@@ -1320,7 +1410,11 @@ def apply_source_video_ffprobe_colorimetry(rows: Sequence[Mapping[str, Any]], *,
     return actions
 
 
-def apply_safe_scalar_name_backfill(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def apply_safe_scalar_name_backfill(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    current_crop_runs_only: bool = False,
+) -> list[dict[str, Any]]:
     """Apply only the high-confidence crop scalar-name metadata backfill."""
 
     actions: list[dict[str, Any]] = []
@@ -1328,6 +1422,8 @@ def apply_safe_scalar_name_backfill(rows: Sequence[Mapping[str, Any]]) -> list[d
         if row.get("record_type") != "pixel_contract_surface":
             continue
         if row.get("surface_type") != "crop_run":
+            continue
+        if current_crop_runs_only and not row.get("is_current_crop_run"):
             continue
         backfill = row.get("backfill") if isinstance(row.get("backfill"), Mapping) else {}
         if backfill.get("status") != "safe_scalar_name_backfill":
@@ -1364,6 +1460,104 @@ def apply_safe_scalar_name_backfill(rows: Sequence[Mapping[str, Any]]) -> list[d
                 "surface_path": row.get("surface_path"),
                 "metadata_format": row.get("metadata_format"),
                 "roi_pixel_contract_name": str(suggested_name),
+                "status": "updated" if updated else "skipped",
+                "reason": reason,
+            }
+        )
+    return actions
+
+
+def apply_inferred_legacy_crop_contracts(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    current_crop_runs_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Apply medium-confidence legacy crop contracts inferred from crop-run attrs.
+
+    This does not infer or promote current canonical PyNvVC-luma contracts. It
+    only labels historical materialized crop runs with the legacy representation
+    implied by their existing storage/source/acceleration metadata.
+    """
+
+    actions: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("record_type") != "pixel_contract_surface":
+            continue
+        if row.get("surface_type") != "crop_run":
+            continue
+        if current_crop_runs_only and not row.get("is_current_crop_run"):
+            continue
+        backfill = row.get("backfill") if isinstance(row.get("backfill"), Mapping) else {}
+        if backfill.get("status") != "infer_from_crop_run_attrs":
+            continue
+
+        suggested_contract = backfill.get("suggested_roi_pixel_contract")
+        if not isinstance(suggested_contract, Mapping):
+            actions.append(
+                {
+                    "record_type": "inferred_legacy_crop_contract_action",
+                    "audit_utc": _utc_now(),
+                    "zarr_path": row.get("zarr_path"),
+                    "surface_path": row.get("surface_path"),
+                    "status": "skipped",
+                    "reason": "missing_suggested_contract",
+                }
+            )
+            continue
+
+        suggested_name = str(
+            backfill.get("suggested_roi_pixel_contract_name") or suggested_contract.get("name") or ""
+        ).strip()
+        if not suggested_name:
+            actions.append(
+                {
+                    "record_type": "inferred_legacy_crop_contract_action",
+                    "audit_utc": _utc_now(),
+                    "zarr_path": row.get("zarr_path"),
+                    "surface_path": row.get("surface_path"),
+                    "status": "skipped",
+                    "reason": "missing_suggested_name",
+                }
+            )
+            continue
+        if suggested_name == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME:
+            actions.append(
+                {
+                    "record_type": "inferred_legacy_crop_contract_action",
+                    "audit_utc": _utc_now(),
+                    "zarr_path": row.get("zarr_path"),
+                    "surface_path": row.get("surface_path"),
+                    "roi_pixel_contract_name": suggested_name,
+                    "status": "skipped",
+                    "reason": "refusing_to_infer_current_canonical_contract",
+                }
+            )
+            continue
+
+        values = {
+            "roi_pixel_contract": _json_safe(dict(suggested_contract)),
+            "roi_pixel_contract_name": suggested_name,
+        }
+        node_path = Path(str(row["zarr_path"])) / str(row["surface_path"])
+        try:
+            updated, reason = _set_node_attrs(
+                node_path,
+                metadata_format=str(row.get("metadata_format")) if row.get("metadata_format") else None,
+                values=values,
+            )
+        except OSError as exc:
+            updated, reason = False, f"os_error:{exc}"
+
+        actions.append(
+            {
+                "record_type": "inferred_legacy_crop_contract_action",
+                "audit_utc": _utc_now(),
+                "zarr_path": row.get("zarr_path"),
+                "zarr_kind": row.get("zarr_kind"),
+                "surface_path": row.get("surface_path"),
+                "metadata_format": row.get("metadata_format"),
+                "roi_pixel_contract_name": suggested_name,
+                "roi_pixel_contract": _json_safe(dict(suggested_contract)),
                 "status": "updated" if updated else "skipped",
                 "reason": reason,
             }
@@ -1434,6 +1628,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-jsonl", type=Path, help="Write audit rows to this JSONL path. Defaults to stdout.")
     parser.add_argument("--summary-json", type=Path, help="Write aggregate summary JSON.")
     parser.add_argument(
+        "--crop-contract-report-json",
+        type=Path,
+        help="Write a focused report for the current crop run in each Zarr, using crop_runs latest/latest_complete/latest_any attrs.",
+    )
+    parser.add_argument(
         "--source-video-backfill-plan-jsonl",
         type=Path,
         help="Write a dry-run source-video metadata backfill plan derived from source_video_metadata rows.",
@@ -1442,6 +1641,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--apply-safe-scalar-name-backfill",
         action="store_true",
         help="Apply only the safe crop-run roi_pixel_contract.name -> roi_pixel_contract_name metadata backfill.",
+    )
+    parser.add_argument(
+        "--apply-inferred-legacy-crop-contracts",
+        action="store_true",
+        help=(
+            "Apply medium-confidence legacy crop-run contracts inferred from existing "
+            "crop_storage_mode/video_source_type/acceleration attrs. This refuses to "
+            "infer the current canonical PyNvVC-luma contract."
+        ),
+    )
+    parser.add_argument(
+        "--apply-current-crop-runs-only",
+        action="store_true",
+        help=(
+            "Limit crop-contract apply modes to the current crop run selected by "
+            "crop_runs latest/latest_complete/latest_any attrs."
+        ),
     )
     parser.add_argument(
         "--apply-source-video-stat-fingerprint",
@@ -1476,7 +1692,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows.extend(audit_zarr_path(candidate, include_source_video_metadata=include_source_video_metadata))
 
     if args.apply_safe_scalar_name_backfill:
-        rows.extend(apply_safe_scalar_name_backfill(rows))
+        rows.extend(
+            apply_safe_scalar_name_backfill(
+                rows,
+                current_crop_runs_only=bool(args.apply_current_crop_runs_only),
+            )
+        )
+    if args.apply_inferred_legacy_crop_contracts:
+        rows.extend(
+            apply_inferred_legacy_crop_contracts(
+                rows,
+                current_crop_runs_only=bool(args.apply_current_crop_runs_only),
+            )
+        )
     if args.apply_source_video_stat_fingerprint:
         rows.extend(apply_source_video_stat_fingerprints(rows))
     if args.apply_source_video_ffprobe_colorimetry:
@@ -1484,6 +1712,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.source_video_backfill_plan_jsonl is not None:
         _write_jsonl(args.source_video_backfill_plan_jsonl, source_video_backfill_plan_rows(rows))
     summary = _summary(rows, candidates=candidates)
+    if args.crop_contract_report_json is not None:
+        args.crop_contract_report_json.parent.mkdir(parents=True, exist_ok=True)
+        args.crop_contract_report_json.write_text(
+            json.dumps(_json_safe(_crop_contract_report(rows, candidates=candidates)), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     _write_jsonl(args.output_jsonl, rows)
     if args.summary_json is not None:
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
