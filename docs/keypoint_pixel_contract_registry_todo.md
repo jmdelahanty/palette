@@ -71,7 +71,9 @@ Implemented on 2026-06-15:
 - projection through `keypoint_performance_latest` and
   `recording_keypoint_performance_latest`,
 - focused tests for cache-backed YOLO-style attrs and traditional
-  materialized-crop attrs.
+  materialized-crop attrs,
+- inline `keypoint_performance` refresh from successful direct YOLO and
+  traditional keypoint completion status emission.
 
 Fields:
 
@@ -103,7 +105,7 @@ less stable as query dimensions.
    from run attrs first, then fall back to `provenance.inputs` where available.
 3. [x] Add tests for the extractor and views using both YOLO/cache-backed attrs and
    traditional/materialized-crop attrs.
-4. [ ] Add an inline refresh path for direct keypoint writers, mirroring crop:
+4. [x] Add an inline refresh path for direct keypoint writers, mirroring crop:
    successful keypoint completion should refresh `keypoint_performance` for the
    current Zarr without requiring a later batch wrapper or full registry scan.
 5. [x] Re-scan or targeted-refresh `/nvme1` after the migration so recent status

@@ -27,6 +27,7 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 from ..registry.db import RegistryPaths
+from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import resolve_materialized_crop_run
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..registry.stage_complete import emit_stage_completion
@@ -165,6 +166,16 @@ def _emit_keypoint_step_status(
     registry_path = _resolve_registry_path(registry)
     if registry_path is None:
         return
+    status_details = dict(details)
+    status_details.update(
+        refresh_keypoint_performance_details(
+            root=root,
+            zarr_path=zarr_path,
+            run_name=run_name,
+            registry_path=registry_path,
+            console=console,
+        )
+    )
     emit_stage_completion(
         root,
         zarr_path,
@@ -174,7 +185,7 @@ def _emit_keypoint_step_status(
         run_name=run_name,
         method=method,
         coverage_pct=coverage_pct,
-        details_json=details,
+        details_json=status_details,
         console=console,
         registry=registry_path,
         auto_registry_from_env=False,

@@ -5116,6 +5116,42 @@ class Registry(RegistryMigrationMixin):
                     payload,
                 )
 
+    def refresh_keypoint_performance_from_root(self, root: zarr.Group, zarr_path: Path) -> Tuple[str, int]:
+        """Refresh only the keypoint-performance registry surface for one Zarr root."""
+
+        metadata = extract_dataset_metadata(root, zarr_path)
+        dataset_id = self._resolve_effective_dataset_id(
+            base_dataset_id=metadata.dataset_id,
+            session_uuid=metadata.session_uuid,
+            zarr_path=zarr_path,
+        )
+        self.upsert_dataset(
+            dataset_id,
+            session_uuid=metadata.session_uuid,
+            zarr_path=zarr_path,
+            recording_id=metadata.recording_id,
+            zarr_purpose=metadata.zarr_purpose,
+            zarr_use=metadata.zarr_use,
+            source_layout=metadata.source_layout,
+            source_frame_index_path=metadata.source_frame_index_path,
+            source_recording_frame_index_path=metadata.source_recording_frame_index_path,
+            source_frame_index_schema=metadata.source_frame_index_schema,
+        )
+        dataset_row = self.conn.execute(
+            "SELECT recording_id, zarr_use FROM datasets WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchone()
+        recording_id = _decode_attr(dataset_row["recording_id"]) if dataset_row is not None else None
+        zarr_use = _decode_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
+        keypoint_performance_rows = _extract_keypoint_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_keypoint_performance(dataset_id, keypoint_performance_rows)
+        return dataset_id, len(keypoint_performance_rows)
+
     def replace_eye_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
