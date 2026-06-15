@@ -61,6 +61,21 @@ Conclusion: the stable registry surface is now queryable for current/newer runs,
 but historical rows remain under-labeled. Consumers should treat missing
 `source_roi_pixel_contract_name` as unknown, not equivalent.
 
+Coverage reporting added on 2026-06-15:
+
+- `scripts/py -m fisheye.utils.report_keypoint_contract_coverage` reports
+  `keypoint_performance` contract coverage without writing to the registry.
+- It can inspect all keypoint rows, latest-per-dataset rows, or
+  latest-per-recording rows, and can emit JSONL for downstream triage.
+- Group status separates explicit mixing from unknown data:
+  `mixed_explicit`, `mixed_with_unknown`, `explicit_with_unknown`,
+  `unknown_only`, and `explicit_single`.
+- The current Orange/luma pair,
+  `orange_mono_pynvvc_luma_uint8_v1` plus `nv12_luma_plane_uint8`, is treated as
+  a candidate-compatible set for reporting. This does not make them globally
+  equivalent; training/export code should still record any explicit override in
+  the exported manifest.
+
 ## Target Registry Fields
 
 Implemented on 2026-06-15:
@@ -115,11 +130,11 @@ less stable as query dimensions.
    runs. Mixed contracts should be detected and reported by default; allow them
    only through an explicit compatibility group or override recorded in the
    exported manifest.
-7. [ ] Document the allowed current contracts:
+7. [x] Document the allowed current contracts:
    `orange_mono_pynvvc_luma_uint8_v1` for materialized PyNvVC luma crop runs and
    `nv12_luma_plane_uint8` for the current flat ROI cache path until that cache
    contract is renamed or normalized.
-8. [ ] After one production refresh, add a registry audit query that reports
+8. [x] After one production refresh, add a registry audit query that reports
    keypoint runs with missing `source_roi_pixel_contract_name` among current
    source-analysis datasets.
 
