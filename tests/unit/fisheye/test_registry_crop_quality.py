@@ -208,3 +208,76 @@ def test_register_from_root_handles_archive_without_crop_runs(tmp_path: Path) ->
     assert count is not None
     assert int(count["n"]) == 0
     registry.close()
+
+
+def test_refresh_crop_quality_from_root_populates_pixel_contract(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_refresh" / "zarr" / "rec_refresh_analysis.zarr"
+    _create_crop_archive(zarr_path, session_uuid="rec_refresh_uuid")
+
+    dataset_id, row_count = registry.refresh_crop_quality_from_root(
+        zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path,
+    )
+
+    assert row_count == 2
+    latest = registry.conn.execute(
+        """
+        SELECT crop_run, roi_pixel_contract_name
+        FROM crop_quality_current
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert latest is not None
+    assert str(latest["crop_run"]) == "crop_new"
+    assert str(latest["roi_pixel_contract_name"]) == "decord_rgb_channel_mean_uint8"
+    registry.close()
+
+
+def test_crop_step_status_refreshes_crop_quality_pixel_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from fisheye.tracking import crop as crop_module
+
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "recordings" / "rec_inline" / "zarr" / "rec_inline_analysis.zarr"
+    _create_crop_archive(zarr_path, session_uuid="rec_inline_uuid")
+    monkeypatch.setenv("PALETTE_REGISTRY_PATH", str(registry_path))
+
+    captured_details = {}
+
+    def fake_emit_stage_completion(*args, **kwargs):
+        captured_details.update(dict(kwargs["details_json"]))
+        return True
+
+    monkeypatch.setattr(crop_module, "emit_stage_completion", fake_emit_stage_completion)
+    crop_module._emit_crop_step_status(
+        root=zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path=str(zarr_path),
+        status="ok",
+        run_name="crop_new",
+        method="pytest",
+        coverage_pct=100.0,
+        review_status=None,
+        details={"reason": "present"},
+        console=None,
+    )
+
+    registry = Registry(registry_path)
+    latest = registry.conn.execute(
+        """
+        SELECT crop_run, roi_pixel_contract_name
+        FROM crop_quality_current
+        WHERE recording_id = ?;
+        """,
+        ("rec_inline_uuid",),
+    ).fetchone()
+    assert latest is not None
+    assert str(latest["crop_run"]) == "crop_new"
+    assert str(latest["roi_pixel_contract_name"]) == "decord_rgb_channel_mean_uint8"
+    assert captured_details["crop_quality_refresh_status"] == "ok"
+    assert captured_details["crop_quality_refresh_run"] == "crop_new"
+    assert captured_details["crop_quality_refresh_run_present"] is True
+    registry.close()

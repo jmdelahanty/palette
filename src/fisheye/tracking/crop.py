@@ -33,6 +33,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from rich.align import Align
 
 # Metadata helpers
+from ..registry.db import Registry, RegistryPaths
 from ..registry.stage_complete import emit_stage_completion
 from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
 from ..shared.refined_detect_review import (
@@ -367,6 +368,50 @@ def _build_crop_stage_provenance(
     return {key: value for key, value in provenance.items() if value is not None}
 
 
+def _refresh_crop_quality_inline(
+    *,
+    root: zarr.Group,
+    zarr_file: Path,
+    run_name: str,
+    console: Optional[Console],
+) -> Dict[str, Any]:
+    registry_path = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    registry: Optional[Registry] = None
+    try:
+        registry = Registry(registry_path)
+        dataset_id, row_count = registry.refresh_crop_quality_from_root(root, zarr_file)
+        refreshed_row = registry.conn.execute(
+            """
+            SELECT 1
+            FROM crop_quality
+            WHERE dataset_id = ? AND crop_run = ?
+            LIMIT 1;
+            """,
+            (dataset_id, str(run_name)),
+        ).fetchone()
+        return {
+            "crop_quality_refresh_status": "ok",
+            "crop_quality_refresh_dataset_id": dataset_id,
+            "crop_quality_refresh_rows": int(row_count),
+            "crop_quality_refresh_run": str(run_name),
+            "crop_quality_refresh_run_present": refreshed_row is not None,
+        }
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                "[yellow]Warning:[/yellow] failed to refresh crop_quality "
+                f"for crop run {run_name!r}: {exc}"
+            )
+        return {
+            "crop_quality_refresh_status": "error",
+            "crop_quality_refresh_run": str(run_name),
+            "crop_quality_refresh_reason": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        if registry is not None:
+            registry.close()
+
+
 def _emit_crop_step_status(
     *,
     root: zarr.Group,
@@ -380,6 +425,16 @@ def _emit_crop_step_status(
     console: Optional[Console],
 ) -> None:
     zarr_file = Path(zarr_path).expanduser().resolve()
+    status_details = dict(details)
+    if status == "ok" and run_name:
+        status_details.update(
+            _refresh_crop_quality_inline(
+                root=root,
+                zarr_file=zarr_file,
+                run_name=run_name,
+                console=console,
+            )
+        )
     emit_stage_completion(
         root,
         zarr_file,
@@ -390,7 +445,7 @@ def _emit_crop_step_status(
         method=method,
         coverage_pct=coverage_pct,
         review_status_json=review_status,
-        details_json=details,
+        details_json=status_details,
         console=console,
         warning_label="crop",
         auto_registry_from_env=True,

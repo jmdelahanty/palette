@@ -5486,6 +5486,42 @@ class Registry(RegistryMigrationMixin):
                     payload,
                 )
 
+    def refresh_crop_quality_from_root(self, root: zarr.Group, zarr_path: Path) -> Tuple[str, int]:
+        """Refresh only the crop-quality registry surface for one Zarr root."""
+
+        metadata = extract_dataset_metadata(root, zarr_path)
+        dataset_id = self._resolve_effective_dataset_id(
+            base_dataset_id=metadata.dataset_id,
+            session_uuid=metadata.session_uuid,
+            zarr_path=zarr_path,
+        )
+        self.upsert_dataset(
+            dataset_id,
+            session_uuid=metadata.session_uuid,
+            zarr_path=zarr_path,
+            recording_id=metadata.recording_id,
+            zarr_purpose=metadata.zarr_purpose,
+            zarr_use=metadata.zarr_use,
+            source_layout=metadata.source_layout,
+            source_frame_index_path=metadata.source_frame_index_path,
+            source_recording_frame_index_path=metadata.source_recording_frame_index_path,
+            source_frame_index_schema=metadata.source_frame_index_schema,
+        )
+        dataset_row = self.conn.execute(
+            "SELECT recording_id, zarr_use FROM datasets WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchone()
+        recording_id = _decode_attr(dataset_row["recording_id"]) if dataset_row is not None else None
+        zarr_use = _decode_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
+        crop_quality_rows = _extract_crop_quality_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_crop_quality(dataset_id, crop_quality_rows)
+        return dataset_id, len(crop_quality_rows)
+
     def refresh_detect_quality_for_dataset(self, dataset_id: str, *, zarr_path: Path) -> int:
         root = _open_zarr_group_non_consolidated(zarr_path, mode="r")
         rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
