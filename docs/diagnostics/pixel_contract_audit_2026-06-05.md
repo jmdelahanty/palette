@@ -478,11 +478,11 @@ fields (`infer_from_crop_run_attrs: 20`, `parent_crop_contract_missing: 18`).
 Those are older non-current crop runs and their child `roi_images`, not current
 training candidates.
 
-Existing `/nvme1/palette_registry.sqlite` rows still need a crop-quality refresh
-to make the new contract fields queryable from registry views. The code now
-extracts/stores `crop_storage_mode`, `roi_image_representation`,
-`roi_pixel_contract_name`, and `roi_pixel_contract_json`, but the existing
-SQLite registry was not refreshed as part of this metadata-only Zarr apply.
+After the metadata-only Zarr apply, existing `/nvme1/palette_registry.sqlite`
+rows still needed a crop-quality refresh to make the new contract fields
+queryable from registry views. The code now extracts/stores
+`crop_storage_mode`, `roi_image_representation`, `roi_pixel_contract_name`, and
+`roi_pixel_contract_json`; the refresh below populated those fields in SQLite.
 
 Registry crop-quality refresh on `/nvme1/recordings`:
 
