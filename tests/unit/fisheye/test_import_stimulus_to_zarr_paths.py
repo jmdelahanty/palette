@@ -69,6 +69,9 @@ homography_matrix:
         cam.attrs["pixels_per_mm_camera"] = 50.0
         cam.attrs["pixels_per_mm_projector"] = 5.0
         cam.create_dataset("homography_matrix_yml", data=homography_yml.encode("utf-8"))
+        projected_surface = cam.create_group("scale_models").create_group("projected_surface")
+        projected_surface.attrs["model_name"] = "projected_surface"
+        projected_surface.create_dataset("scale_image_png_buffer", data=np.array([1, 2, 3], dtype=np.uint8))
 
 
 def _write_stimulus_h5_with_arena_relative_chaser_states(path: Path) -> None:
@@ -217,6 +220,25 @@ def test_import_omits_source_stimulus_video_path_when_rendered_mp4_missing(tmp_p
     assert "source_stimulus_video_path" not in run_group.attrs
 
 
+def test_import_creates_missing_zarr_root_after_h5_resolves(tmp_path: Path) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "created_analysis.zarr"
+
+    _write_minimal_stimulus_h5(h5_path)
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_created_root",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    assert run_name in root["analysis"]["stimulus_runs"]
+
+
 def test_import_materializes_h5_calibration_to_analysis_calibration(tmp_path: Path) -> None:
     h5_path = tmp_path / "session.h5"
     zarr_path = tmp_path / "sample_analysis.zarr"
@@ -249,6 +271,12 @@ def test_import_materializes_h5_calibration_to_analysis_calibration(tmp_path: Pa
 
     run_calib = root["analysis"]["stimulus_runs"][run_name]["calibration"]["2010093"]
     np.testing.assert_allclose(run_calib["homography_matrix"][:], calib["homography_matrix"][:])
+    projected_surface = run_calib["scale_models"]["projected_surface"]
+    assert projected_surface.attrs["model_name"] == "projected_surface"
+    np.testing.assert_array_equal(
+        projected_surface["scale_image_png_buffer"][:],
+        np.array([1, 2, 3], dtype=np.uint8),
+    )
 
 
 def test_import_keeps_legacy_run_coordinate_transform_without_group_local_positions(tmp_path: Path) -> None:

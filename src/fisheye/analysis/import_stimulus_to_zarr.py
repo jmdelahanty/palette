@@ -215,6 +215,35 @@ def _parse_homography_matrix_yml(raw: object) -> Optional[np.ndarray]:
     return None
 
 
+def _find_default_h5_for_zarr_path(zarr_path: Path) -> Optional[Path]:
+    """Locate a likely stimulus H5 alongside a zarr path without opening zarr."""
+
+    parent_dir = zarr_path.parent
+    if not parent_dir.exists():
+        return None
+
+    zarr_stem = zarr_path.name
+    if zarr_stem.endswith(".zarr"):
+        zarr_stem = zarr_stem[:-5]
+
+    candidates = sorted(parent_dir.glob("*.h5"))
+    if not candidates:
+        return None
+
+    exact = [path for path in candidates if path.stem == zarr_stem]
+    if exact:
+        return exact[0]
+
+    contains = [path for path in candidates if zarr_stem in path.stem]
+    if len(contains) == 1:
+        return contains[0]
+
+    try:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except Exception:
+        return candidates[0]
+
+
 def _first_camera_config(arena_config: Dict[str, object]) -> Dict[str, object]:
     camera_configs = arena_config.get("camera_calibrations")
     if not isinstance(camera_configs, list) or not camera_configs:
@@ -249,6 +278,54 @@ def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
     if name in group:
         del group[name]
     group.create_array(name, data=data, chunks=data.shape, overwrite=True)
+
+
+def _copy_h5_attrs_to_zarr_attrs(src: h5py.Group | h5py.Dataset, dst: zarr.Group) -> None:
+    for attr_name, attr_value in src.attrs.items():
+        dst.attrs[attr_name] = _normalize_attr_value(attr_value)
+
+
+def _copy_h5_dataset_to_zarr_mirror(src: h5py.Dataset, dst: zarr.Group, name: str) -> None:
+    data = src[()]
+    if isinstance(data, bytes):
+        dst.attrs[name] = data.decode("utf-8", "ignore")
+    elif np.isscalar(data) or (isinstance(data, np.ndarray) and data.ndim == 0):
+        dst.attrs[name] = data.item() if hasattr(data, "item") else data
+    else:
+        arr = np.asarray(data)
+        if name in dst:
+            del dst[name]
+        dst.create_array(
+            name,
+            data=arr,
+            chunks=arr.shape,
+            overwrite=True,
+        )
+
+
+def _copy_h5_group_to_zarr_mirror(src: h5py.Group, dst: zarr.Group) -> None:
+    """Mirror an H5 group into a Zarr group for archival stimulus metadata.
+
+    Existing stimulus imports stored scalar H5 datasets as Zarr attributes and
+    non-scalar datasets as arrays. Preserve that contract recursively so newer
+    nested calibration snapshots do not fail when a child is a group.
+    """
+
+    _copy_h5_attrs_to_zarr_attrs(src, dst)
+    source_children = set(src.keys())
+    existing_children = set(getattr(dst, "group_keys", lambda: [])())
+    existing_children.update(getattr(dst, "array_keys", lambda: [])())
+    for leftover in existing_children - source_children:
+        del dst[leftover]
+
+    for child_name, child in src.items():
+        if isinstance(child, h5py.Group):
+            if child_name in dst and not isinstance(dst[child_name], zarr.Group):
+                del dst[child_name]
+            child_dst = dst.require_group(child_name)
+            _copy_h5_group_to_zarr_mirror(child, child_dst)
+        elif isinstance(child, h5py.Dataset):
+            _copy_h5_dataset_to_zarr_mirror(child, dst, child_name)
 
 
 def _materialize_analysis_calibration(
@@ -1597,11 +1674,9 @@ def import_stimulus_to_zarr(
     """Main import routine."""
     console = Console() if verbose else None
 
-    calib_manager = CalibrationManager(str(zarr_path), verbose=verbose, console=console)
-
     resolved_h5: Optional[Path] = stimulus_h5
     if resolved_h5 is None:
-        auto_h5 = calib_manager.find_default_h5()
+        auto_h5 = _find_default_h5_for_zarr_path(zarr_path)
         if auto_h5:
             resolved_h5 = auto_h5
             _log(console, f"[dim]Auto-detected stimulus H5: {auto_h5}[/dim]")
@@ -1610,6 +1685,10 @@ def import_stimulus_to_zarr(
             "Stimulus H5 not specified and no .h5 file found alongside the zarr. "
             "Provide one explicitly."
         )
+
+    zarr_path.parent.mkdir(parents=True, exist_ok=True)
+    zarr.open_group(str(zarr_path), mode="a")
+    calib_manager = CalibrationManager(str(zarr_path), verbose=verbose, console=console)
 
     # Ensure calibration metadata is populated before ingesting stimulus data
     try:
@@ -1847,30 +1926,7 @@ def import_stimulus_to_zarr(
                 if not isinstance(cam_src, h5py.Group):
                     continue
                 cam_dst = calib_dst.require_group(cam_id)
-
-                for attr_name, attr_value in cam_src.attrs.items():
-                    if isinstance(attr_value, bytes):
-                        attr_value = attr_value.decode("utf-8", "ignore")
-                    elif isinstance(attr_value, np.generic):
-                        attr_value = attr_value.item()
-                    cam_dst.attrs[attr_name] = attr_value
-
-                for dset_name, dset in cam_src.items():
-                    data = dset[()]
-                    if isinstance(data, bytes):
-                        cam_dst.attrs[dset_name] = data.decode("utf-8", "ignore")
-                    elif np.isscalar(data) or (isinstance(data, np.ndarray) and data.ndim == 0):
-                        cam_dst.attrs[dset_name] = data.item() if hasattr(data, "item") else data
-                    else:
-                        arr = np.asarray(data)
-                        if dset_name in cam_dst:
-                            del cam_dst[dset_name]
-                        cam_dst.create_array(
-                            dset_name,
-                            data=arr,
-                            chunks=arr.shape,
-                            overwrite=True,
-                        )
+                _copy_h5_group_to_zarr_mirror(cam_src, cam_dst)
 
                 if "homography_matrix_yml" in cam_src and "homography_matrix" not in cam_dst:
                     matrix = _parse_homography_matrix_yml(cam_src["homography_matrix_yml"][()])
