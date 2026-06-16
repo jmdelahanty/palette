@@ -20,6 +20,11 @@ Workstation poller:
 /home/delahantyj@hhmi.org/bin/citrus_staging_marker_poller.sh
 ```
 
+The cron entry for this poller belongs on the local desktop/workstation only.
+Do not run polling cron jobs on the login node. The login node is used only as
+an SSH-accessible LSF submit host after the workstation poller has validated and
+claimed a completion marker.
+
 Production staging root:
 
 ```text
