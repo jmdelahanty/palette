@@ -512,6 +512,14 @@ It is weaker as a default when:
 
 ### 10f. Recommended direction
 
+Update note, 2026-06-04: this section predates the mixed-mode reader migration.
+YOLO pose, YOLO eye masks, U-Net eye masks, U-Net subject masks, subject
+segmentation, SAM subject masks, and several visualizers now consume
+`CropImageSource` and can read geometry-only crop runs or flat ROI cache
+manifests. See `docs/crop_reader_geometry_only_inventory_2026-05-16.md` for the
+current reader inventory and
+`docs/geometry_only_crop_workflow_cache_design.md` for the active cache design.
+
 1. **Add a compatibility phase before any default switch.** Today, multiple
    components still hard-require `crop_runs/<run>/roi_images` (YOLO
    keypoints/eye masks, traditional pipelines, tuners, and several diagnostics).

@@ -1,7 +1,7 @@
 # Crop Reader Geometry-Only Inventory - 2026-05-16
 <!-- contract-meta
 status: inventory
-last_verified: 2026-05-16
+last_verified: 2026-06-04
 purpose: Classify Palette crop readers before making analysis crop runs default to geometry-only.
 -->
 
@@ -72,6 +72,17 @@ become analysis workflows.
 | Storage/export utilities | `src/fisheye/utils/export_sharded_zarr_clone.py` | Preserve existing array-selection semantics; geometry-only support here means skipping absent `roi_images`, not reconstructing them. |
 | Registry, schema, and metadata summaries | `src/fisheye/registry/db.py`, `src/fisheye/shared/zarr/stage_arrays.py`, `src/fisheye/utils/backfill_crop_storage_metadata.py`, `src/fisheye/utils/crop_batch.py`, `src/fisheye/utils/run_keypoints_batch.py`, `src/fisheye/utils/run_eye_masks_batch.py` | These should treat `roi_images` as conditional and use storage-mode-aware pointers. |
 | Analysis summaries | `src/fisheye/analysis/chaser_phase_analysis.py`, `src/fisheye/training/train_pose.py` | These only summarize ROI counts/shapes and should tolerate absent `roi_images` when used on geometry-only analysis archives. |
+
+## Workflow Cache Builders
+
+These tools do not make new canonical crop-stage surfaces. They create or
+consume workflow-local caches backed by canonical `crop_runs` geometry.
+
+| Area | Paths | Notes |
+|------|-------|-------|
+| Flat ROI cache builder | `src/fisheye/utils/build_flat_roi_cache.py` | Materializes one crop run into a `flat_bin_v1` cache. |
+| Local crop + cache batch | `src/fisheye/utils/crop_flat_roi_cache_batch.py` | Serial local wrapper: create/reuse crop run, then build/reuse a flat ROI cache. |
+| Cluster crop + cache submitter | `scripts/submit_crop_flat_roi_cache_bsub.sh` | LSF two-job wrapper for crop geometry plus dependent flat-cache publication. |
 
 ## Batch Planner Implications
 

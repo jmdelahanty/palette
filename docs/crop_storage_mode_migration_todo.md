@@ -146,6 +146,7 @@ Date anchored: 2026-03-06.
 - [x] Add a flat binary workflow-cache backend and submit wrappers for cluster
   smoke testing:
   - `scripts/py -m fisheye.utils.build_flat_roi_cache`
+  - `scripts/py -m fisheye.utils.crop_flat_roi_cache_batch`
   - `scripts/submit_flat_roi_cache_bsub.sh`
   - `scripts/submit_crop_flat_roi_cache_bsub.sh`
   These caches are workflow artifacts, not canonical crop runs. The 2026-05-16
@@ -216,12 +217,12 @@ Date anchored: 2026-03-06.
 
 ## Phase 5: Writer Opt-In Mode
 
-- [ ] Add an explicit crop writer mode:
+- [x] Add an explicit crop writer mode:
   `crop_storage_mode = materialized | geometry_only`.
-- [ ] Ensure geometry-only runs do not become `crop_runs.latest`.
-- [ ] Add explicit pointer attrs:
+- [x] Ensure geometry-only runs do not become `crop_runs.latest`.
+- [x] Add explicit pointer attrs:
   `latest_materialized` and `latest_any`.
-- [ ] Add `latest_geometry_only` only if a real consumer needs it.
+- [x] Do not add `latest_geometry_only` until a real consumer needs it.
 - [ ] Add an explicit materialization command to generate `roi_images` from a
   geometry-only run.
 - [ ] Ensure materialization preserves row identity and provenance back to the

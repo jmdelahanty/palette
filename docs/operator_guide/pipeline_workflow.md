@@ -268,7 +268,46 @@ crop source defaults to the canonical current refined surface
 `refined_detect_runs/{run_id}/instances`, with legacy fallback only for older
 archives.
 
-**What it writes:** `crop_runs/{run_id}/` with ROI image arrays.
+**What it writes:** `crop_runs/{run_id}/`. Analysis archives may use
+`crop_storage_mode=geometry_only`, while training/export artifacts should remain
+materialized.
+
+For local workflows that will immediately run keypoints or segmentation on
+geometry-only crops, build the flat ROI cache in the same serial pass:
+
+```bash
+scripts/py -m fisheye.utils.crop_flat_roi_cache_batch \
+  /nvme1/recordings \
+  --recursive \
+  --source-type refined \
+  --selection-policy full_recording \
+  --workflow-id local_crop_cache_YYYYMMDD \
+  --cache-root /nvme1/palette_roi_cache \
+  --cache-decode-backend pynvvc_luma \
+  --roi-live-acceleration gpu \
+  --apply
+```
+
+The cache is workflow-local scratch data consumed by downstream ROI-model
+stages via `--roi-cache-manifest`; the durable stage remains `crop_runs`.
+
+Example handoff to direct ROI-model commands:
+
+```bash
+ZARR=/path/to/recording_analysis.zarr
+CACHE_MANIFEST=/nvme1/palette_roi_cache/local_crop_cache_YYYYMMDD/roi_cache/<cache>.flat_roi_cache.json
+
+scripts/py -m fisheye.detection.detect_keypoints_yolo "$ZARR" \
+  --model /path/to/keypoint_model.pt \
+  --roi-cache-manifest "$CACHE_MANIFEST"
+
+scripts/py -m fisheye.segmentation.infer_unet_subject_masks "$ZARR" \
+  --checkpoint /path/to/subject_mask_model.pt \
+  --roi-cache-manifest "$CACHE_MANIFEST"
+```
+
+The manifest is the API boundary. Downstream stages validate it against the
+selected archive and crop run before memory-mapping the payload.
 
 ### 6. Keypoints
 
