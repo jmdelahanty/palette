@@ -76,6 +76,34 @@ Coverage reporting added on 2026-06-15:
   equivalent; training/export code should still record any explicit override in
   the exported manifest.
 
+Keypoint training/export preflight gate added on 2026-06-16:
+
+- `prepare_keypoint_training_from_registry` now matches each selected
+  `keypoint_run_resolved` to `keypoint_performance` and refuses source runs with
+  missing `source_roi_pixel_contract_name`.
+- Single-contract source sets pass by default and write
+  `required_roi_pixel_contract_name` plus `keypoint_contract_policy` into the
+  manifest.
+- Mixed explicit contracts fail by default. They are allowed only with repeated
+  `--compatible-keypoint-contract` values, and the manifest records the
+  compatibility group, contract counts, read-mode counts, cache-backend counts,
+  and input-mode counts.
+- Per-dataset manifest rows now carry the selected keypoint run's ROI contract,
+  read mode, cache backend, input mode, crop signature, and crop revision from
+  `keypoint_performance`.
+- Live GoodCopBadCop keypoint rows are currently single-contract
+  `nv12_luma_plane_uint8` with `flat_bin_roi_cache`/`flat_bin_v1`, so they do not
+  require a mixed-contract override.
+
+Remaining consumer mismatch:
+
+- GoodCopBadCop is not selectable through the existing prepare preflight yet
+  because `query_datasets(..., model_input='gray')` requires registry
+  `has_images_ds`/`downsample_formats_json` metadata. These external-video /
+  crop-cache analysis Zarrs have keypoint/crop sources but no stored
+  `raw_video/images_ds` surface. That is separate from the keypoint contract
+  gate and should be handled by a later model-input/source-selection cleanup.
+
 ## Target Registry Fields
 
 Implemented on 2026-06-15:
@@ -125,7 +153,7 @@ less stable as query dimensions.
    current Zarr without requiring a later batch wrapper or full registry scan.
 5. [x] Re-scan or targeted-refresh `/nvme1` after the migration so recent status
    telemetry is reflected in `keypoint_performance`.
-6. [ ] Update keypoint training/export registry filters to use
+6. [x] Update keypoint training/export registry filters to use
    `keypoint_performance.source_roi_pixel_contract_name` when selecting source
    runs. Mixed contracts should be detected and reported by default; allow them
    only through an explicit compatibility group or override recorded in the

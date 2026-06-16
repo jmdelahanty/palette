@@ -104,6 +104,10 @@ def _create_minimal_pose_zarr(
     refined_runtime_kpt_shape: tuple[int, int] | None = None,
     refined_pose_schema_name: str | None = None,
     detection_source_type: str = "refined",
+    source_roi_pixel_contract_name: str | None = "orange_mono_pynvvc_luma_uint8_v1",
+    source_roi_read_mode: str | None = "materialized_crop_run",
+    source_roi_cache_backend: str | None = None,
+    input_mode_effective: str | None = None,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["session_uuid"] = session_uuid
@@ -119,6 +123,9 @@ def _create_minimal_pose_zarr(
     crop_parent.attrs["latest"] = "crop_pose_001"
     crop_group = crop_parent.create_group("crop_pose_001")
     crop_group.attrs["detection_source_type"] = detection_source_type
+    if source_roi_pixel_contract_name is not None:
+        crop_group.attrs["roi_pixel_contract_name"] = source_roi_pixel_contract_name
+        crop_group.attrs["roi_pixel_contract"] = {"name": source_roi_pixel_contract_name}
     crop_group.create_array(
         "roi_images",
         data=np.zeros((roi_rows, 64, 64), dtype=np.uint8),
@@ -144,6 +151,15 @@ def _create_minimal_pose_zarr(
         kp_group.attrs["pose_schema"] = pose_schema_payload
     if include_source_crop_run:
         kp_group.attrs["source_crop_run"] = "crop_pose_001"
+    if source_roi_pixel_contract_name is not None:
+        kp_group.attrs["source_roi_pixel_contract_name"] = source_roi_pixel_contract_name
+        kp_group.attrs["source_roi_pixel_contract"] = {"name": source_roi_pixel_contract_name}
+    if source_roi_read_mode is not None:
+        kp_group.attrs["source_roi_read_mode"] = source_roi_read_mode
+    if source_roi_cache_backend is not None:
+        kp_group.attrs["source_roi_cache_backend"] = source_roi_cache_backend
+    if input_mode_effective is not None:
+        kp_group.attrs["input_mode_effective"] = input_mode_effective
     if include_success_rate:
         kp_group.attrs["success_rate"] = 0.75
     kp_group.attrs["keypoints_processed"] = keypoints_rows
@@ -284,6 +300,13 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
     assert manifest["datasets"][0]["keypoints_successful"] == 3
     assert manifest["datasets"][0]["dish_design"] == "cedar"
     assert manifest["datasets"][0]["canvas_name"] == "DefaultScreen"
+    assert manifest["required_roi_pixel_contract_name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert manifest["keypoint_contract_policy"]["status"] == "single_contract"
+    assert manifest["keypoint_contract_policy"]["contract_counts"] == {
+        "orange_mono_pynvvc_luma_uint8_v1": 1
+    }
+    assert manifest["datasets"][0]["source_roi_pixel_contract_name"] == "orange_mono_pynvvc_luma_uint8_v1"
+    assert manifest["datasets"][0]["source_roi_read_mode"] == "materialized_crop_run"
 
     db = Registry(registry_path)
     row = db.conn.execute(
@@ -404,6 +427,148 @@ def test_prepare_keypoint_from_registry_defaults_manifest_source_type_to_refined
     assert manifest["source_type_requested"] == "refined"
     assert manifest["source_type"] == "refined"
     assert manifest["datasets"][0]["source_type_resolved"] == "refined"
+
+
+def test_prepare_keypoint_from_registry_rejects_missing_keypoint_contract(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(zarr_path, source_roi_pixel_contract_name=None)
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="missing keypoint ROI pixel contracts"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--input-format",
+                "gray",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_rejects_mixed_contracts_without_compatibility(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_a = tmp_path / "pose_a.zarr"
+    zarr_b = tmp_path / "pose_b.zarr"
+    _create_minimal_pose_zarr(
+        zarr_a,
+        session_uuid="session_pose_a",
+        source_roi_pixel_contract_name="orange_mono_pynvvc_luma_uint8_v1",
+    )
+    _create_minimal_pose_zarr(
+        zarr_b,
+        session_uuid="session_pose_b",
+        source_roi_pixel_contract_name="nv12_luma_plane_uint8",
+        source_roi_read_mode="flat_bin_roi_cache",
+        source_roi_cache_backend="flat_bin_v1",
+        input_mode_effective="tensor",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_a)
+    _seed_registry(registry_path, zarr_b)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="Mixed keypoint ROI pixel contracts detected"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--input-format",
+                "gray",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_allows_mixed_contracts_with_explicit_group(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_a = tmp_path / "pose_a.zarr"
+    zarr_b = tmp_path / "pose_b.zarr"
+    _create_minimal_pose_zarr(
+        zarr_a,
+        session_uuid="session_pose_a",
+        source_roi_pixel_contract_name="orange_mono_pynvvc_luma_uint8_v1",
+    )
+    _create_minimal_pose_zarr(
+        zarr_b,
+        session_uuid="session_pose_b",
+        source_roi_pixel_contract_name="nv12_luma_plane_uint8",
+        source_roi_read_mode="flat_bin_roi_cache",
+        source_roi_cache_backend="flat_bin_v1",
+        input_mode_effective="tensor",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_a)
+    _seed_registry(registry_path, zarr_b)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    out_config = tmp_path / "pose_config.yaml"
+    out_manifest = tmp_path / "pose_manifest.json"
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--input-format",
+            "gray",
+            "--compatible-keypoint-contract",
+            "orange_mono_pynvvc_luma_uint8_v1",
+            "--compatible-keypoint-contract",
+            "nv12_luma_plane_uint8",
+            "--out-config",
+            str(out_config),
+            "--out-manifest",
+            str(out_manifest),
+        ]
+    )
+    assert rc == 0
+
+    manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
+    policy = manifest["keypoint_contract_policy"]
+    assert policy["status"] == "mixed_explicit_allowed"
+    assert policy["required_roi_pixel_contract_name"] is None
+    assert policy["contract_counts"] == {
+        "nv12_luma_plane_uint8": 1,
+        "orange_mono_pynvvc_luma_uint8_v1": 1,
+    }
+    assert policy["read_mode_counts"] == {
+        "flat_bin_roi_cache": 1,
+        "materialized_crop_run": 1,
+    }
+    assert policy["cache_backend_counts"] == {"<missing>": 1, "flat_bin_v1": 1}
+    assert policy["input_mode_counts"] == {"<missing>": 1, "tensor": 1}
+    assert manifest["query_filter"]["compatible_keypoint_contracts"] == [
+        "orange_mono_pynvvc_luma_uint8_v1",
+        "nv12_luma_plane_uint8",
+    ]
+    dataset_contracts = {
+        dataset["dataset_id"]: dataset["required_roi_pixel_contract_name"]
+        for dataset in manifest["datasets"]
+    }
+    assert dataset_contracts == {
+        "session_pose_a": "orange_mono_pynvvc_luma_uint8_v1",
+        "session_pose_b": "nv12_luma_plane_uint8",
+    }
 
 
 def test_prepare_keypoint_from_registry_rejects_non_refined_crop_lineage(

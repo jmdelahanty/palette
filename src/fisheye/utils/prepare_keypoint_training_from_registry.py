@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ from fisheye.utils.zarr_metadata import get_downsample_array_path, get_downsampl
 
 DEFAULT_KEYPOINT_SOURCE_TYPE = "refined"
 ALLOWED_KEYPOINT_CROP_SOURCE_TYPES = frozenset({"refined", "manual"})
+MISSING_CONTRACT_LABEL = "<missing>"
 
 
 def _add_arg(argv: List[str], flag: str, value: Optional[object]) -> None:
@@ -124,6 +126,170 @@ def _source_type_counts(values: Sequence[Any]) -> Dict[str, int]:
             continue
         counts[text] = int(counts.get(text, 0) + 1)
     return dict(sorted(counts.items()))
+
+
+def _parse_csv_values(values: Optional[Sequence[str]]) -> Tuple[str, ...]:
+    if not values:
+        return ()
+    parsed: List[str] = []
+    for value in values:
+        for part in str(value).split(","):
+            text = part.strip()
+            if text:
+                parsed.append(text)
+    return tuple(dict.fromkeys(parsed))
+
+
+def _contract_count_value(value: Any) -> str:
+    text = _decode_attr(value)
+    if text is None:
+        return MISSING_CONTRACT_LABEL
+    text = str(text).strip()
+    return text if text else MISSING_CONTRACT_LABEL
+
+
+def _contract_counts(rows: Sequence[Mapping[str, Any]], key: str) -> Dict[str, int]:
+    return dict(sorted(Counter(_contract_count_value(row.get(key)) for row in rows).items()))
+
+
+def _query_keypoint_performance_rows(
+    registry: Registry,
+    *,
+    dataset_ids: Sequence[str],
+) -> Dict[str, Dict[str, Mapping[str, Any]]]:
+    ids = [str(dataset_id) for dataset_id in dict.fromkeys(dataset_ids) if str(dataset_id).strip()]
+    rows_by_dataset: Dict[str, Dict[str, Mapping[str, Any]]] = {dataset_id: {} for dataset_id in ids}
+    if not ids:
+        return rows_by_dataset
+
+    fields = [
+        "dataset_id",
+        "keypoint_run",
+        "keypoint_created_utc",
+        "keypoint_method",
+        "source_crop_run",
+        "source_crop_storage_mode",
+        "source_crop_signature",
+        "source_crop_revision",
+        "source_roi_image_representation",
+        "source_roi_pixel_contract_name",
+        "source_roi_read_mode",
+        "roi_cache_policy",
+        "source_roi_cache_used",
+        "source_roi_cache_backend",
+        "source_roi_live_acceleration_effective",
+        "source_roi_live_gpu_chunk_frames",
+        "input_mode_requested",
+        "input_mode_effective",
+        "updated_utc",
+    ]
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        sql = (
+            f"SELECT {', '.join(fields)} "
+            "FROM keypoint_performance "
+            f"WHERE dataset_id IN ({placeholders}) "
+            "ORDER BY dataset_id, COALESCE(keypoint_created_utc, updated_utc) DESC, keypoint_run DESC"
+        )
+        for row in registry.conn.execute(sql, chunk):
+            dataset_id = str(row["dataset_id"])
+            keypoint_run = _decode_attr(row["keypoint_run"])
+            if not keypoint_run:
+                continue
+            rows_by_dataset.setdefault(dataset_id, {})
+            rows_by_dataset[dataset_id][str(keypoint_run)] = dict(row)
+    return rows_by_dataset
+
+
+def _missing_keypoint_performance_row(
+    *,
+    dataset_id: str,
+    keypoint_run: str,
+) -> Dict[str, Any]:
+    return {
+        "dataset_id": dataset_id,
+        "keypoint_run": keypoint_run,
+        "keypoint_created_utc": None,
+        "keypoint_method": None,
+        "source_crop_run": None,
+        "source_crop_storage_mode": None,
+        "source_crop_signature": None,
+        "source_crop_revision": None,
+        "source_roi_image_representation": None,
+        "source_roi_pixel_contract_name": None,
+        "source_roi_read_mode": None,
+        "roi_cache_policy": None,
+        "source_roi_cache_used": None,
+        "source_roi_cache_backend": None,
+        "source_roi_live_acceleration_effective": None,
+        "source_roi_live_gpu_chunk_frames": None,
+        "input_mode_requested": None,
+        "input_mode_effective": None,
+        "updated_utc": None,
+        "registry_row_missing": True,
+    }
+
+
+def _build_keypoint_contract_policy(
+    datasets: Sequence[Mapping[str, Any]],
+    *,
+    compatible_contracts: Sequence[str],
+) -> Dict[str, Any]:
+    contract_counts = _contract_counts(datasets, "source_roi_pixel_contract_name")
+    read_mode_counts = _contract_counts(datasets, "source_roi_read_mode")
+    cache_backend_counts = _contract_counts(datasets, "source_roi_cache_backend")
+    input_mode_counts = _contract_counts(datasets, "input_mode_effective")
+    missing_count = int(contract_counts.get(MISSING_CONTRACT_LABEL, 0))
+    explicit_contracts = sorted(
+        contract for contract in contract_counts if contract != MISSING_CONTRACT_LABEL
+    )
+    compatible_set = set(compatible_contracts)
+
+    if missing_count:
+        missing_datasets = [
+            str(dataset.get("dataset_id") or dataset.get("name") or dataset.get("zarr_path"))
+            for dataset in datasets
+            if _contract_count_value(dataset.get("source_roi_pixel_contract_name")) == MISSING_CONTRACT_LABEL
+        ]
+        raise ValueError(
+            "Keypoint training selection contains missing keypoint ROI pixel contracts "
+            f"({missing_count}/{len(datasets)} dataset(s)): {', '.join(missing_datasets[:10])}. "
+            "Refresh keypoint_performance or regenerate the keypoint run with "
+            "source_roi_pixel_contract_name before exporting."
+        )
+
+    if len(explicit_contracts) > 1:
+        if not compatible_set:
+            raise ValueError(
+                "Mixed keypoint ROI pixel contracts detected: "
+                f"{explicit_contracts}. Re-run with --compatible-keypoint-contract for each "
+                "contract only after validating that this mix is acceptable for the export."
+            )
+        if not set(explicit_contracts) <= compatible_set:
+            raise ValueError(
+                "Mixed keypoint ROI pixel contracts are not covered by the requested compatibility group. "
+                f"observed={explicit_contracts}, compatible={sorted(compatible_set)}"
+            )
+        status = "mixed_explicit_allowed"
+    elif len(explicit_contracts) == 1:
+        status = "single_contract"
+    else:
+        status = "empty"
+
+    return {
+        "schema_version": "palette.keypoint_roi_pixel_contract_policy.v1",
+        "status": status,
+        "strict_missing_contracts": True,
+        "mixed_contracts_require_explicit_compatibility": True,
+        "compatible_contracts": list(compatible_contracts),
+        "explicit_contracts": explicit_contracts,
+        "required_roi_pixel_contract_name": explicit_contracts[0] if len(explicit_contracts) == 1 else None,
+        "contract_counts": contract_counts,
+        "read_mode_counts": read_mode_counts,
+        "cache_backend_counts": cache_backend_counts,
+        "input_mode_counts": input_mode_counts,
+    }
 
 
 def _build_set_name_query_signature(args: argparse.Namespace, *, model_input: str) -> Dict[str, Any]:
@@ -837,6 +1003,7 @@ def _build_query_filter_payload(
         "min_usable_keypoints_rate": args.min_usable_keypoints_rate,
         "require_review_state": args.require_review_state,
         "require_review_intended_use": args.require_review_intended_use,
+        "compatible_keypoint_contracts": list(args.compatible_keypoint_contracts),
         "base_config_path": str(args.base_config),
         "imgsz_override": int(args.imgsz) if args.imgsz is not None else None,
         "set_name": set_name,
@@ -892,6 +1059,8 @@ def _print_summary(
         print(f"  Zarr: {dataset['zarr_path']}")
         print(f"  Source crop run: {dataset.get('source_crop_run') or 'N/A'}")
         print(f"  Crop source type: {dataset.get('source_type_resolved')}")
+        print(f"  ROI pixel contract: {dataset.get('source_roi_pixel_contract_name') or 'missing'}")
+        print(f"  ROI read mode: {dataset.get('source_roi_read_mode') or 'missing'}")
         print(f"  Keypoint run: {dataset.get('keypoint_run_resolved')}")
         if dataset.get("refined_keypoint_run"):
             print(f"  Refined keypoint run: {dataset.get('refined_keypoint_run')}")
@@ -1001,6 +1170,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "for the requested method, allow fallback to a reviewed run from a different method."
         ),
     )
+    parser.add_argument(
+        "--compatible-keypoint-contract",
+        action="append",
+        help=(
+            "Allow a mixed explicit keypoint ROI pixel-contract export when all selected contracts are "
+            "covered by this compatibility group. Repeatable and comma-separated values are accepted. "
+            "Single-contract exports do not require this flag."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--register", action="store_true", help="Record training set metadata in the registry.")
     parser.add_argument(
@@ -1012,6 +1190,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     cli_argv = [str(token) for token in (list(argv) if argv is not None else list(sys.argv[1:]))]
     args = parser.parse_args(cli_argv)
     args.input_format = _normalize_input_format(args.input_format)
+    args.compatible_keypoint_contracts = _parse_csv_values(args.compatible_keypoint_contract)
     if args.min_usable_keypoints_rate is not None and not (0.0 <= args.min_usable_keypoints_rate <= 1.0):
         raise ValueError("--min-usable-keypoints-rate must be between 0 and 1.")
 
@@ -1239,6 +1418,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if len(duplicate_zarr_path_exclusions) > 20:
             print(f"  ... {len(duplicate_zarr_path_exclusions) - 20} more duplicate(s) omitted.")
 
+    keypoint_performance_by_dataset = _query_keypoint_performance_rows(
+        registry,
+        dataset_ids=[str(row["dataset_id"]) for row in rows if row["dataset_id"]],
+    )
+
     registry.close()
     if not rows:
         raise SystemExit("No datasets remain after keypoint quality filtering and zarr-path deduplication.")
@@ -1424,6 +1608,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if keypoint_run_resolved is None:
             raise ValueError(f"{zarr_path.name}: unable to resolve keypoint run.")
 
+        keypoint_perf_row = dict(
+            keypoint_performance_by_dataset.get(dataset_id_text, {}).get(str(keypoint_run_resolved))
+            or _missing_keypoint_performance_row(
+                dataset_id=dataset_id_text,
+                keypoint_run=str(keypoint_run_resolved),
+            )
+        )
+
         kp_group: Optional[zarr.Group] = (
             keypoints_parent[keypoint_run_resolved]
             if keypoints_parent is not None and keypoint_run_resolved in keypoints_parent
@@ -1481,6 +1673,17 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             raise ValueError(
                 f"{zarr_path.name}: source crop run '{source_crop_run}' not found in crop_runs for "
                 f"keypoint run '{keypoint_run_resolved}'."
+            )
+        registry_source_crop_run = _decode_attr(keypoint_perf_row.get("source_crop_run"))
+        if (
+            not bool(keypoint_perf_row.get("registry_row_missing"))
+            and registry_source_crop_run
+            and registry_source_crop_run != source_crop_run
+        ):
+            raise ValueError(
+                f"{zarr_path.name}: stale keypoint_performance row for keypoint run "
+                f"'{keypoint_run_resolved}' (registry source_crop_run={registry_source_crop_run!r}, "
+                f"zarr source_crop_run={source_crop_run!r}). Refresh keypoint_performance before export."
             )
 
         crop_group = crop_parent[source_crop_run]
@@ -1701,6 +1904,32 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "source_type_requested": DEFAULT_KEYPOINT_SOURCE_TYPE,
                 "source_type_resolved": source_type_resolved,
                 "source_crop_run": source_crop_run,
+                "source_crop_storage_mode": _decode_attr(keypoint_perf_row.get("source_crop_storage_mode")),
+                "source_crop_signature": _decode_attr(keypoint_perf_row.get("source_crop_signature")),
+                "source_crop_revision": _as_int(keypoint_perf_row.get("source_crop_revision")),
+                "source_roi_image_representation": _decode_attr(
+                    keypoint_perf_row.get("source_roi_image_representation")
+                ),
+                "source_roi_pixel_contract_name": _decode_attr(
+                    keypoint_perf_row.get("source_roi_pixel_contract_name")
+                ),
+                "required_roi_pixel_contract_name": _decode_attr(
+                    keypoint_perf_row.get("source_roi_pixel_contract_name")
+                ),
+                "source_roi_read_mode": _decode_attr(keypoint_perf_row.get("source_roi_read_mode")),
+                "roi_cache_policy": _decode_attr(keypoint_perf_row.get("roi_cache_policy")),
+                "source_roi_cache_used": keypoint_perf_row.get("source_roi_cache_used"),
+                "source_roi_cache_backend": _decode_attr(keypoint_perf_row.get("source_roi_cache_backend")),
+                "source_roi_live_acceleration_effective": _decode_attr(
+                    keypoint_perf_row.get("source_roi_live_acceleration_effective")
+                ),
+                "source_roi_live_gpu_chunk_frames": _as_int(
+                    keypoint_perf_row.get("source_roi_live_gpu_chunk_frames")
+                ),
+                "input_mode_requested": _decode_attr(keypoint_perf_row.get("input_mode_requested")),
+                "input_mode_effective": _decode_attr(keypoint_perf_row.get("input_mode_effective")),
+                "keypoint_performance_registry_used": not bool(keypoint_perf_row.get("registry_row_missing")),
+                "keypoint_performance_registry_updated_utc": _decode_attr(keypoint_perf_row.get("updated_utc")),
                 "input_format": args.input_format,
                 "images_ds_shape": [int(ds_shape[0]), int(ds_shape[1])],
                 "keypoint_run_requested": args.keypoint_run,
@@ -1750,6 +1979,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if args.skeleton_id is not None:
             raise SystemExit("No datasets remain after skeleton filtering.")
         raise SystemExit("No datasets remain after keypoint training selection.")
+
+    keypoint_contract_policy = _build_keypoint_contract_policy(
+        manifest_datasets,
+        compatible_contracts=args.compatible_keypoint_contracts,
+    )
 
     base_config["datasets"] = dataset_entries
     base_config["task"] = "pose"
@@ -1812,6 +2046,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "input_format": args.input_format,
         "imgsz": manifest_imgsz,
         "datasets": manifest_datasets,
+        "required_roi_pixel_contract_name": keypoint_contract_policy.get("required_roi_pixel_contract_name"),
+        "keypoint_contract_policy": keypoint_contract_policy,
         "base_config_path": str(args.base_config),
         "output_config_path": str(args.out_config) if args.out_config else None,
         "output_manifest_path": str(planned_out_manifest) if planned_out_manifest else None,
