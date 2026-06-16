@@ -582,6 +582,17 @@ def _normalize_imgsz(value: Any) -> tuple[int, int]:
     return 640, 640
 
 
+def _positive_int_attr(args: Any, name: str, default: Optional[int] = None) -> Optional[int]:
+    value = getattr(args, name, default)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _resolve_export_device(device_value: Any) -> str:
     text = str(device_value or "").strip().lower()
     if not text:
@@ -664,6 +675,21 @@ def _export_pose_onnx_artifacts(
 
     img_h, img_w = _normalize_imgsz(training_params.get("imgsz"))
     export_device = _resolve_export_device(training_params.get("device"))
+    onnx_dynamic = bool(getattr(args, "onnx_dynamic", False))
+    onnx_batch = _positive_int_attr(args, "onnx_batch", 1) or 1
+    trt_min_batch = _positive_int_attr(args, "trt_min_batch", None)
+    trt_opt_batch = _positive_int_attr(args, "trt_opt_batch", None)
+    trt_max_batch = _positive_int_attr(args, "trt_max_batch", None)
+    if onnx_dynamic:
+        trt_min_batch = trt_min_batch or 1
+        trt_opt_batch = trt_opt_batch or onnx_batch
+        trt_max_batch = trt_max_batch or max(trt_opt_batch, onnx_batch)
+    effective_max_batch = trt_max_batch if onnx_dynamic else onnx_batch
+    input_shape: list[Any] = (
+        ["dynamic", 3, int(img_h), int(img_w)]
+        if onnx_dynamic
+        else [int(onnx_batch), 3, int(img_h), int(img_w)]
+    )
     onnx_path = existing_onnx_path or canonical_onnx_path
     onnx_manifest_path = onnx_dir / f"{run_id}.onnx.manifest.json"
     export_info["onnx_path"] = str(onnx_path)
@@ -672,13 +698,18 @@ def _export_pose_onnx_artifacts(
     if existing_onnx_path is None:
         try:
             console.print("[bold cyan]Exporting ONNX...[/bold cyan]")
-            exported = model.export(
-                format="onnx",
-                imgsz=[img_h, img_w],
-                opset=int(args.onnx_opset),
-                simplify=bool(args.onnx_simplify),
-                device=export_device,
-            )
+            export_kwargs = {
+                "format": "onnx",
+                "imgsz": [img_h, img_w],
+                "opset": int(args.onnx_opset),
+                "simplify": bool(args.onnx_simplify),
+                "device": export_device,
+            }
+            if onnx_dynamic:
+                export_kwargs["dynamic"] = True
+            if onnx_dynamic or onnx_batch != 1:
+                export_kwargs["batch"] = int(onnx_batch)
+            exported = model.export(**export_kwargs)
             exported_path = _coerce_export_path(exported)
             if exported_path is None or not exported_path.exists():
                 export_info["errors"].append("onnx_export_failed")
@@ -701,8 +732,10 @@ def _export_pose_onnx_artifacts(
     export_info["onnx_sha256"] = onnx_sha
     export_info["onnx_source"] = "existing" if existing_onnx_path else "exported"
     export_info["onnx_opset"] = int(args.onnx_opset)
-    export_info["input_shape"] = [1, 3, int(img_h), int(img_w)]
+    export_info["input_shape"] = list(input_shape)
     export_info["imgsz"] = [int(img_h), int(img_w)]
+    export_info["dynamic_shapes"] = bool(onnx_dynamic)
+    export_info["max_batch"] = int(effective_max_batch) if effective_max_batch else None
     export_info["build_env"] = {
         "torch_version": str(torch.__version__),
         "cuda_version": str(torch.version.cuda) if getattr(torch.version, "cuda", None) else None,
@@ -724,11 +757,14 @@ def _export_pose_onnx_artifacts(
         },
         "export": {
             "source": "existing" if existing_onnx_path else "exported",
-            "input_shape": [1, 3, int(img_h), int(img_w)],
+            "input_shape": list(input_shape),
             "imgsz": [img_h, img_w],
             "opset": int(args.onnx_opset),
             "simplify": bool(args.onnx_simplify),
             "device": export_device,
+            "dynamic": bool(onnx_dynamic),
+            "batch": int(onnx_batch),
+            "max_batch": int(effective_max_batch) if effective_max_batch else None,
         },
         "build_env": export_info.get("build_env"),
         "source_manifest": {
@@ -771,6 +807,48 @@ def _export_pose_onnx_artifacts(
         trt_cmd.append("--profiling")
     if args.trt_verbose:
         trt_cmd.append("--verbose")
+    builder_optimization_level = getattr(args, "trt_builder_optimization_level", None)
+    if builder_optimization_level is not None:
+        trt_cmd.extend(["--builder-optimization-level", str(int(builder_optimization_level))])
+    trt_profile: dict[str, Any] = {}
+    explicit_min_shapes = getattr(args, "trt_min_shapes", None)
+    explicit_opt_shapes = getattr(args, "trt_opt_shapes", None)
+    explicit_max_shapes = getattr(args, "trt_max_shapes", None)
+    input_name = str(getattr(args, "trt_input_name", "images") or "images")
+    if explicit_min_shapes:
+        trt_cmd.extend(["--min-shapes", str(explicit_min_shapes)])
+        trt_profile["min_shapes"] = str(explicit_min_shapes)
+    if explicit_opt_shapes:
+        trt_cmd.extend(["--opt-shapes", str(explicit_opt_shapes)])
+        trt_profile["opt_shapes"] = str(explicit_opt_shapes)
+    if explicit_max_shapes:
+        trt_cmd.extend(["--max-shapes", str(explicit_max_shapes)])
+        trt_profile["max_shapes"] = str(explicit_max_shapes)
+    if onnx_dynamic and not (explicit_min_shapes or explicit_opt_shapes or explicit_max_shapes):
+        min_shape = f"{input_name}:{int(trt_min_batch)}x3x{int(img_h)}x{int(img_w)}"
+        opt_shape = f"{input_name}:{int(trt_opt_batch)}x3x{int(img_h)}x{int(img_w)}"
+        max_shape = f"{input_name}:{int(trt_max_batch)}x3x{int(img_h)}x{int(img_w)}"
+        trt_cmd.extend(
+            [
+                "--min-shapes",
+                min_shape,
+                "--opt-shapes",
+                opt_shape,
+                "--max-shapes",
+                max_shape,
+            ]
+        )
+        trt_profile.update(
+            {
+                "input_name": input_name,
+                "min_batch": int(trt_min_batch),
+                "opt_batch": int(trt_opt_batch),
+                "max_batch": int(trt_max_batch),
+                "min_shapes": min_shape,
+                "opt_shapes": opt_shape,
+                "max_shapes": max_shape,
+            }
+        )
     export_info["trt_command"] = trt_cmd
     export_info["trt_log_path"] = str(trt_log_path)
 
@@ -802,18 +880,27 @@ def _export_pose_onnx_artifacts(
         "onnx_manifest_path": str(onnx_manifest_path),
         "export": {
             "precision": str(args.trt_precision),
-            "input_shape": [1, 3, int(img_h), int(img_w)],
+            "input_shape": list(input_shape),
             "imgsz": [int(img_h), int(img_w)],
             "opset": int(args.onnx_opset),
             "device": export_device,
+            "dynamic": bool(onnx_dynamic),
+            "batch": int(onnx_batch),
+            "max_batch": int(effective_max_batch) if effective_max_batch else None,
         },
         "trt": {
             "precision": str(args.trt_precision),
             "cuda_graph": bool(args.trt_cuda_graph),
             "profiling": bool(args.trt_profiling),
             "verbose": bool(args.trt_verbose),
+            "builder_optimization_level": (
+                int(builder_optimization_level)
+                if builder_optimization_level is not None
+                else None
+            ),
             "trtexec_path": str(trtexec_path) if trtexec_path else None,
             "command": trt_cmd,
+            "profile": trt_profile,
         },
         "logs": {"tensorrt_export": str(trt_log_path)},
         "build_env": build_env,
@@ -1608,5 +1695,30 @@ Examples:
     parser.add_argument("--trt-cuda-graph", action="store_true", help="Enable TensorRT CUDA graph.")
     parser.add_argument("--trt-profiling", action="store_true", help="Enable TensorRT profiling outputs.")
     parser.add_argument("--trt-verbose", action="store_true", help="Enable verbose TensorRT build logs.")
+    parser.add_argument(
+        "--onnx-dynamic",
+        action="store_true",
+        help="Export ONNX with a dynamic batch dimension for TensorRT profile builds.",
+    )
+    parser.add_argument(
+        "--onnx-batch",
+        type=int,
+        default=1,
+        help="Batch dimension to use during ONNX export. For dynamic export this is the nominal export batch.",
+    )
+    parser.add_argument("--trt-input-name", default="images", help="TensorRT input tensor name for generated shape profiles.")
+    parser.add_argument("--trt-min-batch", type=int, help="TensorRT generated profile minimum batch.")
+    parser.add_argument("--trt-opt-batch", type=int, help="TensorRT generated profile optimum batch.")
+    parser.add_argument("--trt-max-batch", type=int, help="TensorRT generated profile maximum batch.")
+    parser.add_argument("--trt-min-shapes", help="Explicit TensorRT minShapes profile string.")
+    parser.add_argument("--trt-opt-shapes", help="Explicit TensorRT optShapes profile string.")
+    parser.add_argument("--trt-max-shapes", help="Explicit TensorRT maxShapes profile string.")
+    parser.add_argument(
+        "--trt-builder-optimization-level",
+        type=int,
+        choices=range(0, 6),
+        metavar="{0..5}",
+        help="TensorRT builder effort level. trtexec defaults to 3; 5 spends more build time searching tactics.",
+    )
     args = parser.parse_args()
     raise SystemExit(main(args))

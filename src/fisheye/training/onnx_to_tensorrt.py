@@ -135,6 +135,30 @@ def parse_args():
         action='store_true',
         help='Enable exporting of timing, output, and profile data to JSON files.'
     )
+    parser.add_argument(
+        '--min-shapes',
+        type=str,
+        default=None,
+        help='Optional TensorRT optimization profile minShapes string, e.g. images:1x3x512x512.',
+    )
+    parser.add_argument(
+        '--opt-shapes',
+        type=str,
+        default=None,
+        help='Optional TensorRT optimization profile optShapes string, e.g. images:1024x3x512x512.',
+    )
+    parser.add_argument(
+        '--max-shapes',
+        type=str,
+        default=None,
+        help='Optional TensorRT optimization profile maxShapes string, e.g. images:2048x3x512x512.',
+    )
+    parser.add_argument(
+        '--builder-optimization-level',
+        type=int,
+        default=None,
+        help='Optional TensorRT builder optimization level. trtexec defaults to 3; current max is usually 5.',
+    )
     return parser.parse_args()
 
 def main(args):
@@ -180,6 +204,14 @@ def main(args):
         command.append("--fp16")
     elif args.precision == 'int8':
         command.append("--int8")
+    if args.min_shapes:
+        command.append(f"--minShapes={args.min_shapes}")
+    if args.opt_shapes:
+        command.append(f"--optShapes={args.opt_shapes}")
+    if args.max_shapes:
+        command.append(f"--maxShapes={args.max_shapes}")
+    if args.builder_optimization_level is not None:
+        command.append(f"--builderOptimizationLevel={int(args.builder_optimization_level)}")
     if args.verbose:
         command.append("--verbose")
     if args.cuda_graph:

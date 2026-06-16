@@ -667,3 +667,78 @@ def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) 
     assert trt_row[21] == 1
     assert json.loads(trt_row[22]) == ["TRT::EfficientNMS_TRT"]
     assert json.loads(trt_row[23]) == {"TRT::EfficientNMS_TRT": "1"}
+
+
+def test_registry_record_model_export_uses_manifest_max_batch_for_dynamic_shapes(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "palette_registry.sqlite"
+    registry = Registry(registry_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("abc", encoding="utf-8")
+
+    run_id = "run_dynamic_export_001"
+    registry.record_training_run(
+        run_id=run_id,
+        set_id="pose_set_v001",
+        config_path=config_path,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+        final_metrics={"stage": "done"},
+    )
+
+    export_manifest = {
+        "export": {
+            "opset": 13,
+            "input_shape": ["dynamic", 3, 512, 512],
+            "imgsz": [512, 512],
+            "max_batch": 1024,
+        }
+    }
+    onnx_path = tmp_path / "pose.onnx"
+    onnx_manifest = tmp_path / "pose.onnx.manifest.json"
+    trt_path = tmp_path / "pose_fp16.engine"
+    trt_manifest = tmp_path / "pose_fp16.tensorrt.manifest.json"
+    onnx_path.write_text("onnx", encoding="utf-8")
+    trt_path.write_text("engine", encoding="utf-8")
+    onnx_manifest.write_text(json.dumps(export_manifest), encoding="utf-8")
+    trt_manifest.write_text(json.dumps(export_manifest), encoding="utf-8")
+
+    registry.record_model_export(
+        run_id=run_id,
+        export_type="onnx",
+        path=onnx_path,
+        manifest_path=onnx_manifest,
+        metadata={"sha256": "onnx_sha"},
+    )
+    registry.record_model_export(
+        run_id=run_id,
+        export_type="tensorrt",
+        path=trt_path,
+        manifest_path=trt_manifest,
+        metadata={"sha256": "trt_sha", "precision": "fp16"},
+    )
+    registry.close()
+
+    with sqlite3.connect(registry_path) as conn:
+        onnx_row = conn.execute(
+            """
+            SELECT input_shape, img_h, img_w, max_batch, dynamic_shapes
+            FROM onnx_models
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        trt_row = conn.execute(
+            """
+            SELECT input_shape, img_h, img_w, max_batch, dynamic_shapes
+            FROM tensorrt_models
+            WHERE run_id = ? AND precision = 'fp16'
+            """,
+            (run_id,),
+        ).fetchone()
+
+    assert onnx_row == ('["dynamic", 3, 512, 512]', 512, 512, 1024, 1)
+    assert trt_row == ('["dynamic", 3, 512, 512]', 512, 512, 1024, 1)

@@ -104,5 +104,30 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable verbose TensorRT builder logging.",
     )
+    parser.add_argument(
+        "--onnx-dynamic",
+        action="store_true",
+        help="Export ONNX with a dynamic batch dimension for TensorRT profile builds.",
+    )
+    parser.add_argument(
+        "--onnx-batch",
+        type=int,
+        default=1,
+        help="Batch dimension to use during ONNX export. For dynamic export this is the nominal export batch.",
+    )
+    parser.add_argument("--trt-input-name", default="images", help="TensorRT input tensor name for generated shape profiles.")
+    parser.add_argument("--trt-min-batch", type=int, help="TensorRT generated profile minimum batch.")
+    parser.add_argument("--trt-opt-batch", type=int, help="TensorRT generated profile optimum batch.")
+    parser.add_argument("--trt-max-batch", type=int, help="TensorRT generated profile maximum batch.")
+    parser.add_argument("--trt-min-shapes", help="Explicit TensorRT minShapes profile string.")
+    parser.add_argument("--trt-opt-shapes", help="Explicit TensorRT optShapes profile string.")
+    parser.add_argument("--trt-max-shapes", help="Explicit TensorRT maxShapes profile string.")
+    parser.add_argument(
+        "--trt-builder-optimization-level",
+        type=int,
+        choices=range(0, 6),
+        metavar="{0..5}",
+        help="TensorRT builder effort level. trtexec defaults to 3; 5 spends more build time searching tactics.",
+    )
     args = parser.parse_args()
     raise SystemExit(main(args))
