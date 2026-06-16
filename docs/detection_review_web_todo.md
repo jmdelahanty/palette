@@ -1,15 +1,16 @@
-# Detection Review Web TODO (Training Zarr Editing)
+# Detection Review Web Status And Remaining Work
 
 <!-- todo-meta
 status: active
-last_updated: 2026-05-28
+last_updated: 2026-06-04
 -->
 
 ## Document Status
 
-This document is the implementation-status record for browser detection review.
-Do not add broad clipped-storage or relocation policy here. Use the narrower
-contracts instead:
+This document is no longer a first-slice implementation TODO. It is the
+current-status and remaining-work record for browser detection review. Keep
+broad clipped-storage, relocation, and promotion policy in the narrower
+contracts:
 
 - `docs/clipped_finalized_detect_collection_contract.md` for clipped finalized
   collection resolution, frame mapping, and source/proxy coordinate semantics;
@@ -23,12 +24,18 @@ contracts instead:
 
 ## Goal
 
-Build a browser review flow for detection curation that writes to training/refinement zarr
-surfaces with the same persistence semantics as `detect_review.py`, while keeping the current Matplotlib/manual reviewer untouched.
+Maintain browser review flows for detection curation with the same persistence
+semantics as the existing refined-detect/manual-review writers.
 
-The first deliverable is a **single-frame MVP**: load one frame at a time, view/edit the box, save, and navigate.
+The original single-frame materialized-image MVP is implemented. Remaining work
+is production hardening, validation, and follow-up features across the two
+browser surfaces:
 
-## Current baseline (what exists today)
+- `detect_review_web` for materialized-frame archives such as training Zarrs.
+- `video_detect_review_web` for source-video-backed analysis review, including
+  clipped finalized collections and optional review-proxy media.
+
+## Current Persistence Baseline
 
 Editable detection artifacts are in `refined_detect_runs/<run>` and handled by:
 
@@ -58,9 +65,9 @@ Current manual save semantics already include:
 - optional source-detection sync (`source_surface_*` fields)
 - curated provenance metadata via shared write helpers
 
-## High-level web architecture
+## Implemented Web Architecture
 
-Add a dedicated backend and thin stdlib server:
+The materialized-image reviewer uses a dedicated backend and thin stdlib server:
 
 - `src/fisheye/tune/detect_review_backend.py`
   - backend/session primitives
@@ -69,18 +76,19 @@ Add a dedicated backend and thin stdlib server:
 - `src/fisheye/tune/detect_review_web/static/`
   - minimal canvas UI
 
-This keeps existing manual review operational and lets web parity be built incrementally.
+This keeps existing manual review operational while browser parity is built
+incrementally.
 
-## Slice 1 MVP (recommended first implementation)
+## Implemented Materialized-Image MVP
 
-Keep scope strict:
+Implemented scope:
 - [x] canonical refined frame-axis review path only (`variant=refined`)
 - [x] `review_all/targets` semantics only
 - [x] one box per frame
 - [x] no arena-aware mode
 - [x] no status transition shortcuts beyond save+nav
 
-### Backend functions to implement
+### Backend functions implemented
 
 1. [x] `resolve_review_context(...)`
    - open root with `open_zarr_group_direct(..., mode="a", use_consolidated=False)`
@@ -121,9 +129,11 @@ Keep scope strict:
 - [x] keys: `n` next, `p` previous, `s` save, `q` quit
 - [x] compact status strip with frame + reason + flags
 
-## Testing requirements (browser-free first)
+## Browser-Free Test Coverage
 
-Add/extend tests in `tests/unit/fisheye/test_detect_review_backend.py`:
+Unit coverage exists in `tests/unit/fisheye/test_detect_review_backend.py` for
+the initial backend save semantics. Keep extending this file before adding
+browser-only behavior:
 
 - in-memory/fake-group coverage for both dense curated semantics and mocked read path
 - present edit updates:
@@ -138,7 +148,7 @@ Add/extend tests in `tests/unit/fisheye/test_detect_review_backend.py`:
 - reason/readable reason-byte consistency for edited rows
 - verify mutable open path uses `use_consolidated=False`
 
-## What to defer
+## Deferred Feature Work
 
 - replacing `run_manual_review(...)` UI
 - `frame_arena` and multi-slot per frame support

@@ -1,5 +1,8 @@
 # Detect vs Pose Merged-Set Behavior Checklist
 
+Archived 2026-06-04. This checklist is complete and operator-validated; keep it
+as historical validation evidence rather than active implementation work.
+
 Purpose: verify that pose merged-set creation behavior matches detection workflow expectations, while keeping pose-specific quality gates intact.
 
 Status note (updated February 22, 2026): checklist items are now both code-verified and operator-validated on a real registry.

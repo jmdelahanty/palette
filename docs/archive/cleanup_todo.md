@@ -1,5 +1,9 @@
 # Cleanup TODO
 
+Archived 2026-06-04. This generic cleanup list is superseded by the repo
+hygiene diagnostics, git-history cleanup notes, and focused implementation
+TODOs.
+
 ## Decide Artifact Policy
 - Decide whether model weights, wheels, zips, and plots should live in git, Git LFS, or external storage.
 - If using Git LFS, define which extensions are LFS tracked (e.g., .pt, .whl, .zip, .png).

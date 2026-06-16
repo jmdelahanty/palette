@@ -2,7 +2,7 @@
 
 Purpose: track the implementation steps to split analysis archive creation/provenance from `detect_yolo`, while keeping migration-safe, operator-first behavior.
 
-## Current state (2026-02-09)
+## Current state (2026-06-04)
 
 - `detect_yolo` can create a minimal output archive when missing (legacy compatibility path).
 - New module `fisheye.analysis.create_analysis_zarr` now exists with:
@@ -13,11 +13,20 @@ Purpose: track the implementation steps to split analysis archive creation/prove
   - archive create/ensure with `zarr_purpose=analysis`
   - automatic source-video metadata import in apply mode (with opt-out/overwrite flags)
   - optional stimulus import and optional registry scan
-- Batch flow `import_recordings_analysis` currently orchestrates:
+- Import-only helpers now exist for organized recordings:
+  - `fisheye.utils.import_recording_analysis` creates/imports one recording
+    analysis archive.
+  - `fisheye.utils.import_organized_recordings_analysis` consumes an
+    `organize_recordings` JSONL log and imports the selected organized
+    recording directories without running detect/refine.
+- The older batch flow `import_recordings_analysis` still orchestrates the
+  broader analysis pipeline:
   - YOLO detect
   - stimulus import
   - optional refine
   - optional registry rescan
+- Its name is therefore broader than its current behavior; use
+  `import_organized_recordings_analysis` for import-only work.
 - Registry helper `fisheye.utils.resolve_detect_model` exists to rank/select candidate detect models by recording metadata similarity.
 - Multi-camera recordings are currently fail-closed in this flow (intentional for now).
 
@@ -54,7 +63,14 @@ Purpose: track the implementation steps to split analysis archive creation/prove
 
 ## Phase C: Integrate orchestrator
 
-- [ ] Update `import_recordings_analysis` to call `create_analysis_zarr` first.
+- [x] Add an import-only organized-recording wrapper.
+  - File: `src/fisheye/utils/import_organized_recordings_analysis.py`
+  - Behavior: consumes an organize log, resolves recording directories, and runs
+    the import step only.
+- [ ] Update or rename `import_recordings_analysis` so its pipeline behavior is
+      explicit rather than implied to be import-only.
+- [ ] Update `import_recordings_analysis` to call the shared creation/import
+      step first when it remains the full-pipeline wrapper.
 - [x] Keep detect/refine optional toggles.
 - [x] Ensure per-step failure semantics are explicit and non-destructive.
 
@@ -84,6 +100,9 @@ Purpose: track the implementation steps to split analysis archive creation/prove
   - `docs/detection_refinement_workflow.md`
 - [x] Add explicit stage-orchestration workflow contract.
   - `docs/recording_analysis_pipeline_contract.md`
+- [x] Document the import-only organized-recording path.
+  - `docs/operator_guide/organize_recordings.md`
+  - `docs/recording_analysis_pipeline_contract.md`
 - [ ] Track and resolve spec/runtime drift items listed in:
   - `docs/zarr_spec_runtime_drift_todo.md`
 - [x] Add operator runbook snippet:
@@ -107,6 +126,10 @@ Purpose: track the implementation steps to split analysis archive creation/prove
 - [ ] Regression: existing `detect_yolo` CLI behavior remains supported during migration.
 - [x] Unit: multi-camera/multi-H5 fail-closed behavior for analysis import planner.
 - [x] Local smoke run (operator): `import_recordings_analysis --recursive` completed on `/nvme1/recordings` for current batch.
+- [x] Local GoodCopBadCop import-only smoke exposed and fixed
+  `timestamp_ns_epoch` metadata handling in stimulus interpolation.
+- [ ] Integration: import-only organized-recording wrapper creates the expected
+      analysis archives and stops before detect/refine.
 
 ## Rollout and risk controls
 
@@ -120,4 +143,6 @@ Purpose: track the implementation steps to split analysis archive creation/prove
 - [ ] Operators can create/validate analysis archives independently of inference.
 - [ ] `detect_yolo` reliably appends inference runs to pre-created archives.
 - [x] Batch analysis flow is deterministic and fail-closed (single-camera scope).
+- [x] Import-only organized-recording flow exists for staging-to-analysis-Zarr
+      bootstrap.
 - [ ] Docs and tests reflect the split clearly.
