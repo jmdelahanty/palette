@@ -10,6 +10,15 @@ MEM_GB=4
 WALLTIME="1:00"
 RUN_ID=""
 DRY_RUN=0
+DEST_ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
+JOB_DRY_RUN=0
+REGISTER=0
+REGISTRY=""
+RECORDING_ONLY=0
+ALLOW_PREFLIGHT_FAILURES=0
+RUN_VIDEO_DIAGNOSTICS=0
+RUN_H5_DIAGNOSTICS=0
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'USAGE'
@@ -17,9 +26,9 @@ Usage: submit_citrus_session_import_bsub.sh --session-dir PATH [options]
 
 Submit one LSF job for a completed Citrus transfer session.
 
-The current job payload is intentionally conservative: it only logs
-"would process <session_dir>". Replace the placeholder inside the generated job
-script once the real import command is settled.
+The job payload is intentionally conservative: it organizes one completed
+session into the recordings store, creates/imports analysis Zarrs, and
+optionally rescans those Zarrs into a registry. It does not run detect/refine.
 
 Required:
   --session-dir PATH             Completed Citrus session directory
@@ -33,6 +42,16 @@ Options:
   --mem-gb N                     Memory request in GB (default: 4)
   --walltime H:MM                LSF wall time (default: 1:00)
   --run-id ID                    Stable run id (default: UTC timestamp)
+  --dest-root PATH               Organized recordings root
+                                (default: /groups/johnson/johnsonlab/jeremy/recordings)
+  --job-dry-run                  Submit a cluster job that plans but does not
+                                modify recordings/Zarrs
+  --register                     Rescan imported analysis Zarrs into registry
+  --registry PATH                Registry SQLite path used with --register
+  --recording-only               Import camera-video-only recordings without H5
+  --allow-preflight-failures     Do not block import on manifest preflight fail
+  --run-video-diagnostics        Persist video preflight diagnostics in manifests
+  --run-h5-diagnostics           Persist H5 preflight diagnostics in manifests
   --dry-run                      Print files and submit command; do not submit
   -h, --help                     Show this message
 USAGE
@@ -48,6 +67,14 @@ while [[ $# -gt 0 ]]; do
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
     --run-id) RUN_ID="$2"; shift 2;;
+    --dest-root) DEST_ROOT="$2"; shift 2;;
+    --job-dry-run) JOB_DRY_RUN=1; shift;;
+    --register) REGISTER=1; shift;;
+    --registry) REGISTRY="$2"; shift 2;;
+    --recording-only) RECORDING_ONLY=1; shift;;
+    --allow-preflight-failures) ALLOW_PREFLIGHT_FAILURES=1; shift;;
+    --run-video-diagnostics) RUN_VIDEO_DIAGNOSTICS=1; shift;;
+    --run-h5-diagnostics) RUN_H5_DIAGNOSTICS=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     --*) echo "Unknown arg: $1" >&2; usage; exit 2;;
@@ -67,6 +94,11 @@ done
 if [[ -z "$SESSION_DIR" ]]; then
   echo "Missing required --session-dir PATH" >&2
   usage
+  exit 2
+fi
+
+if [[ "$REGISTER" == "1" && -z "$REGISTRY" ]]; then
+  echo "--register requires --registry PATH" >&2
   exit 2
 fi
 
@@ -109,6 +141,9 @@ JOB_STATUS_TEMPLATE="${RUN_DIR}/${SAFE_SESSION_NAME}.JOBID.status.txt"
 quoted_session_dir="$(printf '%q' "$SESSION_DIR")"
 quoted_session_name="$(printf '%q' "$SESSION_NAME")"
 quoted_run_dir="$(printf '%q' "$RUN_DIR")"
+quoted_dest_root="$(printf '%q' "$DEST_ROOT")"
+quoted_repo_root="$(printf '%q' "$REPO_ROOT")"
+quoted_registry="$(printf '%q' "$REGISTRY")"
 
 cat >"$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
@@ -117,22 +152,82 @@ set -euo pipefail
 SESSION_DIR=${quoted_session_dir}
 SESSION_NAME=${quoted_session_name}
 RUN_DIR=${quoted_run_dir}
+DEST_ROOT=${quoted_dest_root}
+REPO_ROOT=${quoted_repo_root}
+REGISTRY=${quoted_registry}
+JOB_DRY_RUN=${JOB_DRY_RUN}
+REGISTER=${REGISTER}
+RECORDING_ONLY=${RECORDING_ONLY}
+ALLOW_PREFLIGHT_FAILURES=${ALLOW_PREFLIGHT_FAILURES}
+RUN_VIDEO_DIAGNOSTICS=${RUN_VIDEO_DIAGNOSTICS}
+RUN_H5_DIAGNOSTICS=${RUN_H5_DIAGNOSTICS}
 JOB_ID="\${LSB_JOBID:-manual}"
 STATUS_FILE="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.txt"
+STATUS_JSON="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.status.json"
+PAYLOAD_STDOUT="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.payload.out"
+PAYLOAD_STDERR="\${RUN_DIR}/${SAFE_SESSION_NAME}.\${JOB_ID}.payload.err"
 
 mkdir -p "\${RUN_DIR}"
+
+cmd=(
+  "\${REPO_ROOT}/scripts/py"
+  -m
+  fisheye.utils.run_citrus_session_import
+  "\${SESSION_DIR}"
+  --dest-root "\${DEST_ROOT}"
+  --run-dir "\${RUN_DIR}"
+  --status-json "\${STATUS_JSON}"
+)
+if [[ "\${JOB_DRY_RUN}" == "1" ]]; then
+  cmd+=(--dry-run)
+else
+  cmd+=(--apply)
+fi
+if [[ "\${REGISTER}" == "1" ]]; then
+  cmd+=(--register --registry "\${REGISTRY}")
+fi
+if [[ "\${RECORDING_ONLY}" == "1" ]]; then
+  cmd+=(--recording-only)
+fi
+if [[ "\${ALLOW_PREFLIGHT_FAILURES}" == "1" ]]; then
+  cmd+=(--allow-preflight-failures)
+fi
+if [[ "\${RUN_VIDEO_DIAGNOSTICS}" == "1" ]]; then
+  cmd+=(--run-video-diagnostics)
+fi
+if [[ "\${RUN_H5_DIAGNOSTICS}" == "1" ]]; then
+  cmd+=(--run-h5-diagnostics)
+fi
+
+printf 'payload_command='
+printf '%q ' "\${cmd[@]}"
+printf '\n'
+
+set +e
+"\${cmd[@]}" >"\${PAYLOAD_STDOUT}" 2>"\${PAYLOAD_STDERR}"
+payload_rc=\$?
+set -e
+
 {
   printf 'started_at=%s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'host=%s\n' "\$(hostname)"
   printf 'job_id=%s\n' "\${JOB_ID}"
   printf 'session_name=%s\n' "\${SESSION_NAME}"
   printf 'session_dir=%s\n' "\${SESSION_DIR}"
-  printf 'action=%s\n' 'placeholder'
-  printf 'message=%s\n' "would process \${SESSION_DIR}"
+  printf 'dest_root=%s\n' "\${DEST_ROOT}"
+  printf 'action=%s\n' 'citrus_session_import'
+  printf 'payload_returncode=%s\n' "\${payload_rc}"
+  printf 'payload_stdout=%s\n' "\${PAYLOAD_STDOUT}"
+  printf 'payload_stderr=%s\n' "\${PAYLOAD_STDERR}"
+  printf 'status_json=%s\n' "\${STATUS_JSON}"
 } >"\${STATUS_FILE}"
 
-printf 'would process %s\n' "\${SESSION_DIR}"
+printf 'payload_returncode=%s\n' "\${payload_rc}"
+printf 'payload_stdout=%s\n' "\${PAYLOAD_STDOUT}"
+printf 'payload_stderr=%s\n' "\${PAYLOAD_STDERR}"
 printf 'status_file=%s\n' "\${STATUS_FILE}"
+printf 'status_json=%s\n' "\${STATUS_JSON}"
+exit "\${payload_rc}"
 JOBSCRIPT
 chmod +x "$JOB_SCRIPT"
 
@@ -156,6 +251,12 @@ echo "session_name=$SESSION_NAME"
 echo "run_dir=$RUN_DIR"
 echo "job_script=$JOB_SCRIPT"
 echo "expected_status=$JOB_STATUS_TEMPLATE"
+echo "dest_root=$DEST_ROOT"
+echo "job_dry_run=$JOB_DRY_RUN"
+echo "register=$REGISTER"
+if [[ -n "$REGISTRY" ]]; then
+  echo "registry=$REGISTRY"
+fi
 echo "submit_command=$BSUB_CMD"
 
 if [[ "$DRY_RUN" == "1" ]]; then

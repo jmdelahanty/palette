@@ -1,12 +1,16 @@
-# Agent Prompt: Implement Citrus Batch Import Submit Tool
+# Citrus Batch Import Submit Workflow
 
-## Goal
+## Current Status
 
-Implement the real batch import tool used by the Citrus staging marker poller.
-The workstation cron poller already detects completed Citrus transfers and
-submits a placeholder LSF job through `login1-citrus-poller`. Replace that
-placeholder with a conservative import/registry workflow that can run one
-completed session at a time.
+The workstation cron poller detects completed Citrus transfers and submits one
+LSF job through `login1-citrus-poller`. The submitted job now runs a
+conservative import-only workflow for one completed session:
+
+1. organize the session into the recordings store;
+2. create/update analysis Zarrs from the organizer JSONL log;
+3. optionally rescan those Zarrs into a registry when explicitly requested.
+
+The job does **not** run detect, refine, crops, keypoints, or masks.
 
 ## Existing Pieces
 
@@ -67,7 +71,12 @@ Current wrapper behavior:
 - writes LSF stdout/stderr under `.processing_logs/bsub_submissions`
 - prints parseable `job_id=...`, `lsf_stdout=...`, `lsf_stderr=...`,
   and `status_file=...`
-- generated LSF job currently only logs `would process <session_dir>`
+- generated LSF job runs
+  `fisheye.utils.run_citrus_session_import --apply` by default
+- default destination root is
+  `/groups/johnson/johnsonlab/jeremy/recordings` unless `--dest-root`
+  overrides it
+- staging cleanup is intentionally not enabled by this wrapper
 
 ## Required Design
 
@@ -96,90 +105,63 @@ Preserve conservative exactly-once dispatch semantics:
 - Small state/log/job-script files under `.processing_state` and
   `.processing_logs` are acceptable.
 
-## Implementation Target
+## Implemented Job Payload
 
-Update `scripts/submit_citrus_session_import_bsub.sh` so the generated LSF job
-runs the real import flow instead of the current placeholder.
-
-The implementation should likely create or call a repo-managed helper rather
-than embedding a large command directly in `bsub`. Follow existing LSF wrapper
-style in scripts such as:
+The wrapper calls a repo-managed helper:
 
 ```text
-scripts/submit_detect_batches_bsub.sh
-scripts/submit_review_proxy_videos_bsub.sh
-scripts/submit_flat_roi_cache_bsub.sh
-scripts/submit_crop_flat_roi_cache_bsub.sh
+src/fisheye/utils/run_citrus_session_import.py
 ```
 
-## Candidate Existing Import/Organize Surfaces
-
-Inspect these before implementing:
-
-```text
-docs/operator_guide/organize_recordings.md
-docs/organize_recordings_logging_schema.md
-docs/staging_recording_only_review_2026-05-11.md
-docs/analysis_zarr_creation_todo.md
-docs/recording_analysis_pipeline_contract.md
-scripts/organize_staging.sh
-src/fisheye/utils/organize_recordings.py
-src/fisheye/utils/import_recording_analysis.py
-src/fisheye/utils/import_recordings_analysis.py
-src/fisheye/utils/import_organized_recordings_analysis.py
-src/fisheye/utils/run_recording_analysis_pipeline.py
-```
-
-Important repo rule:
-
-```text
-Use scripts/py for Python commands. Do not use bare python or conda activate.
-```
-
-`scripts/organize_staging.sh` currently defaults to `PYTHON=python`, so if that
-wrapper is used from LSF, call it with:
+The helper runs:
 
 ```bash
-PYTHON=/groups/johnson/johnsonlab/jeremy/gitrepos/palette/scripts/py
+scripts/py -m fisheye.utils.organize_recordings \
+  "$SESSION_DIR" \
+  --dest-root "$DEST_ROOT" \
+  --log-dir "$RUN_DIR/organize_recordings" \
+  --recursive \
+  --write-manifest \
+  --apply \
+  --rename-cams
 ```
 
-or update the wrapper carefully.
+then:
 
-## Open Questions To Resolve
+```bash
+scripts/py -m fisheye.utils.import_organized_recordings_analysis \
+  --organize-log "$ORGANIZE_LOG" \
+  --log-dir "$RUN_DIR/import_organized_recordings_analysis" \
+  --apply
+```
 
-1. Does a Citrus marker session directory correspond to one organizer batch
-   root, or can it contain multiple recordings/arenas?
-2. Should the import job organize files into `/nvme1/recordings`,
-   `/groups/johnson/...`, or another canonical recordings root?
-3. Should the job call `organize_recordings` only, or also create/import
-   analysis Zarrs and update the registry?
-4. What registry path should the job use? Current common path appears to be:
+The helper parses the organizer JSONL before running import. If the organizer
+log has no `recording_applied` entries, it skips import/registry rather than
+letting `import_organized_recordings_analysis` fall back to scanning a broad
+recordings root.
 
-   ```text
-   /nvme1/palette_registry.sqlite
-   ```
+Optional registry refresh is explicit:
 
-   Confirm before writing.
+```bash
+scripts/submit_citrus_session_import_bsub.sh \
+  --session-dir "$SESSION_DIR" \
+  --register \
+  --registry /path/to/palette_registry.sqlite
+```
 
-5. Should the LSF job run on `short`, or should import/registry steps be split
-   into dependent CPU/GPU jobs?
-6. Should staging cleanup be enabled? The initial requirement says not to
-   delete/modify transferred session data, so default should be no cleanup until
-   explicitly approved.
+If enabled, the helper reads Zarr paths from the import JSONL log and rescans
+only those paths with `fisheye.utils.registry_rescan --file-list`.
 
-## Suggested First Implementation Slice
+Important policy choices:
 
-Keep the first real slice CPU-only and reversible:
-
-1. Add `--apply` / `--dry-run` behavior to the submit wrapper if needed.
-2. In the generated LSF job:
-   - record environment, host, job id, repo commit, session dir, marker key
-   - run a dry-run organization/import plan first and save it under the run dir
-   - if configured for apply, run the apply command
-   - write a final status JSON/TXT with `ok`, command, outputs, and error info
-3. Do not enable staging cleanup.
-4. Do not run GPU detection/refinement as part of the first import submitter
-   unless the owner explicitly asks for it.
+- `--dry-run` on the submit wrapper does not submit an LSF job.
+- `--job-dry-run` submits an LSF job that runs the organize/import planners
+  without writes.
+- Cleanup flags are not passed to `organize_recordings`; transfer session
+  directories may be left partially empty after files are moved, but the wrapper
+  does not remove staging directories.
+- Registry scanning is skipped unless `--register --registry ...` is passed,
+  because the cluster-visible registry path is deployment-specific.
 
 ## Validation
 
@@ -203,6 +185,16 @@ ssh login1-citrus-poller '
 '
 ```
 
+To submit a cluster planning job instead of a local wrapper dry-run:
+
+```bash
+scripts/submit_citrus_session_import_bsub.sh \
+  --session-dir "$SESSION_DIR" \
+  --marker-key smoke \
+  --log-dir /tmp/citrus-poller-wrapper-smoke \
+  --job-dry-run
+```
+
 For an end-to-end dispatch smoke, create a fake marker under a shared scratch
 path visible to both workstation and login node, not under production staging.
 The previous successful smoke used:
@@ -220,8 +212,19 @@ Queue: short
 Exec host: h07u20
 ```
 
-Do not run production apply until the owner confirms the exact destination root,
-registry path, and cleanup policy.
+Production apply is the default poller behavior now. Before a production
+transfer, confirm:
+
+- the remote checkout at
+  `/groups/johnson/johnsonlab/jeremy/gitrepos/palette` is on the desired
+  branch/commit;
+- the desired destination root is
+  `/groups/johnson/johnsonlab/jeremy/recordings` or is provided via
+  `--dest-root`;
+- registry refresh is either intentionally skipped or explicitly configured via
+  `--register --registry ...`;
+- staging cleanup remains disabled unless a later operator-approved workflow
+  changes that policy.
 
 ## Related Handoff
 
