@@ -646,6 +646,81 @@ def _ensure_utf8_column(values: np.ndarray) -> np.ndarray:
 
 
 COLUMNAR_DATASETS = {"chaser_states", "bounding_boxes"}
+POSITION_COORDINATE_GROUPS = ("tracking_data/chaser_states", "tracking_data/bounding_boxes")
+POSITION_COORDINATE_ATTRS = (
+    "coordinate_frame",
+    "coordinate_origin",
+    "position_fields",
+    "x_axis_direction",
+    "y_axis_direction",
+)
+
+
+def _build_legacy_texture_to_camera_transform(arena_config: Dict[str, Any]) -> Dict[str, Any]:
+    coord_info: Dict[str, Any] = {
+        "texture_dimensions": [358, 358],
+        "camera_dimensions": [4512, 4512],
+        "texture_to_camera_scale": 4512 / 358,
+        "coordinate_note": "Legacy texture-to-camera scale for older texture-space stimulus coordinates.",
+    }
+    try:
+        cam_calib = arena_config.get("camera_calibrations", [{}])[0]
+        width = cam_calib.get("native_width_px")
+        height = cam_calib.get("native_height_px")
+        if width and height:
+            coord_info["camera_dimensions"] = [int(width), int(height)]
+            coord_info["texture_to_camera_scale"] = float(width) / 358.0
+    except Exception:
+        pass
+    return coord_info
+
+
+def _position_coordinate_metadata(run_group: zarr.Group) -> List[Dict[str, Any]]:
+    metadata: List[Dict[str, Any]] = []
+    for relative_path in POSITION_COORDINATE_GROUPS:
+        try:
+            group = run_group[relative_path]
+        except Exception:
+            continue
+        attrs = dict(group.attrs)
+        coordinate_frame = attrs.get("coordinate_frame")
+        if not coordinate_frame:
+            continue
+        entry: Dict[str, Any] = {"path": relative_path}
+        for attr_name in POSITION_COORDINATE_ATTRS:
+            value = attrs.get(attr_name)
+            if value is not None:
+                entry[attr_name] = value
+        metadata.append(entry)
+    return metadata
+
+
+def _write_run_coordinate_metadata(run_group: zarr.Group, arena_config: Dict[str, Any]) -> None:
+    """Write run-level coordinate metadata without overriding child group contracts."""
+
+    coord_info = _build_legacy_texture_to_camera_transform(arena_config)
+    position_groups = _position_coordinate_metadata(run_group)
+    if position_groups:
+        coord_info["scope"] = "legacy_texture_space_fallback"
+        coord_info[
+            "coordinate_note"
+        ] = (
+            "Legacy texture-to-camera scale retained for older texture-space consumers. "
+            "Position-bearing child groups with coordinate_frame attrs define their own "
+            "coordinate contracts and take precedence."
+        )
+        run_group.attrs["legacy_texture_to_camera_transform"] = json.dumps(coord_info, sort_keys=True)
+        run_group.attrs[
+            "coordinate_transform_status"
+        ] = "suppressed_child_group_coordinate_metadata_authoritative"
+        run_group.attrs["position_coordinate_groups"] = json.dumps(position_groups, sort_keys=True)
+        if "coordinate_transform" in run_group.attrs:
+            del run_group.attrs["coordinate_transform"]
+        return
+
+    coord_info["scope"] = "run_level_legacy_texture_space"
+    run_group.attrs["coordinate_transform"] = json.dumps(coord_info, sort_keys=True)
+    run_group.attrs["coordinate_transform_status"] = "legacy_run_level_texture_to_camera"
 
 
 def _copy_h5_dataset(
@@ -1754,22 +1829,7 @@ def import_stimulus_to_zarr(
             except json.JSONDecodeError:
                 arena_config = {}
 
-            coord_info = {
-                "texture_dimensions": [358, 358],
-                "camera_dimensions": [4512, 4512],
-                "texture_to_camera_scale": 4512 / 358,
-                "coordinate_note": "Chaser positions are in texture space (358x358); fish in camera space (4512x4512).",
-            }
-            try:
-                cam_calib = arena_config.get("camera_calibrations", [{}])[0]
-                width = cam_calib.get("native_width_px")
-                height = cam_calib.get("native_height_px")
-                if width and height:
-                    coord_info["camera_dimensions"] = [int(width), int(height)]
-                    coord_info["texture_to_camera_scale"] = width / 358
-            except Exception:
-                pass
-            run_group.attrs["coordinate_transform"] = json.dumps(coord_info)
+            _write_run_coordinate_metadata(run_group, arena_config)
 
         if "/calibration_snapshot" in h5:
             calib_src = h5["/calibration_snapshot"]

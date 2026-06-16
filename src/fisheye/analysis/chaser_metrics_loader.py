@@ -63,9 +63,13 @@ def load_chaser_metrics(
     """Load online and offline chaser metrics in a unified layout."""
 
     root = zarr.open(str(zarr_path), mode="r")
-    analysis_group = root.require_group("analysis")
+    analysis_group = root.get("analysis")
+    if analysis_group is None:
+        raise ValueError("Zarr store does not contain analysis group.")
 
-    stimulus_parent = analysis_group.require_group("stimulus_runs")
+    stimulus_parent = analysis_group.get("stimulus_runs")
+    if stimulus_parent is None:
+        raise ValueError("Zarr store does not contain analysis/stimulus_runs.")
     stim_run = stimulus_run or _resolve_latest(stimulus_parent)
     if stim_run is None:
         raise ValueError("Stimulus run not provided and no 'latest' attribute present.")

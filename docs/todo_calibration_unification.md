@@ -5,6 +5,12 @@ We currently expose chaser calibration in two places:
 1. `analysis/stimulus_runs/<run>.attrs['coordinate_transform']`
    * Texture/camera dimensions and `texture_to_camera_scale`.
    * Legacy summary used by existing tooling.
+   * New imports suppress this attr when position-bearing child groups declare
+     their own `coordinate_frame` attrs. In that case the importer writes
+     `legacy_texture_to_camera_transform` and
+     `coordinate_transform_status="suppressed_child_group_coordinate_metadata_authoritative"`.
+     Consumers must prefer child-group coordinate attrs over any run-level
+     legacy transform.
 
 2. `analysis/stimulus_runs/<run>/calibration/<camera_id>`
    * Full snapshot copied from the stimulus H5 calibration block.

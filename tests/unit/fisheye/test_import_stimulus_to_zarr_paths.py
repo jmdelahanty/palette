@@ -71,6 +71,38 @@ homography_matrix:
         cam.create_dataset("homography_matrix_yml", data=homography_yml.encode("utf-8"))
 
 
+def _write_stimulus_h5_with_arena_relative_chaser_states(path: Path) -> None:
+    _write_stimulus_h5_with_calibration(path)
+    chaser_dtype = np.dtype(
+        [
+            ("stimulus_frame_num", np.uint64),
+            ("chaser_pos_x", np.float32),
+            ("chaser_pos_y", np.float32),
+            ("target_pos_x", np.float32),
+            ("target_pos_y", np.float32),
+            ("target_clamped_pos_x", np.float32),
+            ("target_clamped_pos_y", np.float32),
+        ]
+    )
+    chaser_states = np.array(
+        [
+            (1000, 20.0, 30.0, 350.0, 358.5, 343.0, 344.0),
+            (1001, 21.0, 31.0, 340.0, 330.0, 340.0, 330.0),
+        ],
+        dtype=chaser_dtype,
+    )
+    with h5py.File(path, "a") as h5:
+        tracking = h5.create_group("tracking_data")
+        ds = tracking.create_dataset("chaser_states", data=chaser_states)
+        ds.attrs["coordinate_frame"] = "arena_relative_canvas_px"
+        ds.attrs["coordinate_origin"] = "top_left_of_active_arena"
+        ds.attrs[
+            "position_fields"
+        ] = "chaser_pos_x,chaser_pos_y,target_pos_x,target_pos_y,target_clamped_pos_x,target_clamped_pos_y"
+        ds.attrs["x_axis_direction"] = "right"
+        ds.attrs["y_axis_direction"] = "down"
+
+
 def _write_stimulus_h5_with_protocol_steps(path: Path) -> None:
     _write_stimulus_h5_with_calibration(path)
     events_dtype = np.dtype(
@@ -217,6 +249,80 @@ def test_import_materializes_h5_calibration_to_analysis_calibration(tmp_path: Pa
 
     run_calib = root["analysis"]["stimulus_runs"][run_name]["calibration"]["2010093"]
     np.testing.assert_allclose(run_calib["homography_matrix"][:], calib["homography_matrix"][:])
+
+
+def test_import_keeps_legacy_run_coordinate_transform_without_group_local_positions(tmp_path: Path) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+
+    _write_stimulus_h5_with_calibration(h5_path)
+    zarr.open_group(str(zarr_path), mode="w")
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_legacy_coordinate_transform",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run_group = root["analysis"]["stimulus_runs"][run_name]
+    transform = json.loads(run_group.attrs["coordinate_transform"])
+    assert run_group.attrs["coordinate_transform_status"] == "legacy_run_level_texture_to_camera"
+    assert transform["scope"] == "run_level_legacy_texture_space"
+    assert transform["texture_dimensions"] == [358, 358]
+    assert transform["camera_dimensions"] == [4512, 4512]
+    assert np.isclose(transform["texture_to_camera_scale"], 4512 / 358)
+    assert "legacy_texture_to_camera_transform" not in run_group.attrs
+
+
+def test_import_suppresses_run_coordinate_transform_for_group_local_positions(tmp_path: Path) -> None:
+    h5_path = tmp_path / "session.h5"
+    zarr_path = tmp_path / "sample_analysis.zarr"
+
+    _write_stimulus_h5_with_arena_relative_chaser_states(h5_path)
+    zarr.open_group(str(zarr_path), mode="w")
+
+    run_name = mod.import_stimulus_to_zarr(
+        stimulus_h5=h5_path,
+        zarr_path=zarr_path,
+        run_name="stimulus_group_local_coordinate_transform",
+        overwrite=False,
+        verbose=False,
+        repair_chaser_gaps=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run_group = root["analysis"]["stimulus_runs"][run_name]
+    chaser_group = run_group["tracking_data"]["chaser_states"]
+
+    assert chaser_group.attrs["coordinate_frame"] == "arena_relative_canvas_px"
+    assert chaser_group.attrs["coordinate_origin"] == "top_left_of_active_arena"
+    assert "coordinate_transform" not in run_group.attrs
+    assert (
+        run_group.attrs["coordinate_transform_status"]
+        == "suppressed_child_group_coordinate_metadata_authoritative"
+    )
+
+    legacy = json.loads(run_group.attrs["legacy_texture_to_camera_transform"])
+    assert legacy["scope"] == "legacy_texture_space_fallback"
+    assert legacy["texture_dimensions"] == [358, 358]
+    position_groups = json.loads(run_group.attrs["position_coordinate_groups"])
+    assert position_groups == [
+        {
+            "coordinate_frame": "arena_relative_canvas_px",
+            "coordinate_origin": "top_left_of_active_arena",
+            "path": "tracking_data/chaser_states",
+            "position_fields": (
+                "chaser_pos_x,chaser_pos_y,target_pos_x,target_pos_y,"
+                "target_clamped_pos_x,target_clamped_pos_y"
+            ),
+            "x_axis_direction": "right",
+            "y_axis_direction": "down",
+        }
+    ]
 
 
 def test_import_materializes_canonical_protocol_step_metadata(tmp_path: Path) -> None:

@@ -498,7 +498,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     root = _resolve_zarr(Path(args.zarr_path))
     analysis_root = root.require_group("analysis")
 
-    stim_parent = analysis_root.require_group("stimulus_runs")
+    stim_parent = analysis_root.get("stimulus_runs")
+    if stim_parent is None:
+        raise ValueError("Unable to resolve stimulus run (analysis/stimulus_runs is missing).")
     stimulus_run = args.stimulus_run or _list_latest(stim_parent)
     if stimulus_run is None:
         raise ValueError("Unable to resolve stimulus run (no runs present and --stimulus-run not provided).")
@@ -517,7 +519,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if refined_latest:
             keypoints_path = f"refined_keypoints_runs/{refined_latest}"
         else:
-            kp_parent = root.require_group("keypoints_runs")
+            kp_parent = root.get("keypoints_runs")
+            if kp_parent is None:
+                raise ValueError(
+                    "Unable to resolve keypoints run (keypoints_runs is missing and --keypoints-run not provided)."
+                )
             latest_raw = _list_latest(kp_parent)
             if latest_raw is None:
                 raise ValueError(
