@@ -37,12 +37,18 @@ Citrus completion marker:
 _citrus_transfer_complete.json
 ```
 
-Marker validation already requires:
+Marker validation requires:
 
 ```text
 schema_id = citrus.transfer_completion_marker.v1
 status = transfer_complete
+local_target = true
+verify_mode = quick
+dest_dir = <absolute session directory path>
 ```
+
+The poller normalizes `dest_dir` and requires it to match the marker parent
+directory exactly.
 
 State/log directories:
 
@@ -160,6 +166,8 @@ only those paths with `fisheye.utils.registry_rescan --file-list`.
 Important policy choices:
 
 - `--dry-run` on the submit wrapper does not submit an LSF job.
+- poller `--dry-run` validates and logs but does not create `.claimed`,
+  `.submitted`, `.failed`, or lock files under `.processing_state`.
 - `--job-dry-run` submits an LSF job that runs the organize/import planners
   without writes.
 - Cleanup flags are not passed to `organize_recordings`; transfer session
