@@ -296,7 +296,9 @@ def _write_collection_group(
     group = finalized.require_group(collection_id)
     for key, value in manifest.items():
         group.attrs[key] = value
-    refined_parent = root.require_group("refined_detect_runs")
+    refined_parent = root.get("refined_detect_runs")
+    if refined_parent is None:
+        raise ValueError("Cannot finalize clipped collection: refined_detect_runs is missing.")
     refined_parent.attrs["latest_collection"] = collection_id
     refined_parent.attrs["latest_collection_path"] = _collection_group_path(collection_id)
     return _collection_group_path(collection_id)
