@@ -20,6 +20,8 @@ CONF=""
 IOU=""
 MAX_DET=""
 MASK_THRESHOLD=""
+ROI_CACHE_POLICY=""
+ROI_CACHE_DIR=""
 CPU=0
 OVERWRITE=0
 LOG_DIR=""
@@ -55,6 +57,8 @@ Options:
   --iou FLOAT               IoU threshold override
   --max-det N               Max detections override
   --mask-threshold FLOAT    Compatibility threshold override
+  --roi-cache-policy POLICY ROI cache policy: never|auto|always
+  --roi-cache-dir PATH      Directory containing/publishing flat ROI cache manifests
   --cpu                     Force CPU inference
   --overwrite               Run keypoints even if keypoints run already exists
   --log-dir PATH            Submission logs (default: <root>/logs/run_keypoints_batch/bsub_submissions)
@@ -90,6 +94,8 @@ while [[ $# -gt 0 ]]; do
     --iou) IOU="$2"; shift 2;;
     --max-det) MAX_DET="$2"; shift 2;;
     --mask-threshold) MASK_THRESHOLD="$2"; shift 2;;
+    --roi-cache-policy) ROI_CACHE_POLICY="$2"; shift 2;;
+    --roi-cache-dir) ROI_CACHE_DIR="$2"; shift 2;;
     --cpu) CPU=1; shift;;
     --overwrite) OVERWRITE=1; shift;;
     --log-dir) LOG_DIR="$2"; shift 2;;
@@ -235,6 +241,8 @@ if [[ -n "$CONF" ]]; then EXTRA_ARGS+=(--conf "$CONF"); fi
 if [[ -n "$IOU" ]]; then EXTRA_ARGS+=(--iou "$IOU"); fi
 if [[ -n "$MAX_DET" ]]; then EXTRA_ARGS+=(--max-det "$MAX_DET"); fi
 if [[ -n "$MASK_THRESHOLD" ]]; then EXTRA_ARGS+=(--mask-threshold "$MASK_THRESHOLD"); fi
+if [[ -n "$ROI_CACHE_POLICY" ]]; then EXTRA_ARGS+=(--roi-cache-policy "$ROI_CACHE_POLICY"); fi
+if [[ -n "$ROI_CACHE_DIR" ]]; then EXTRA_ARGS+=(--roi-cache-dir "$ROI_CACHE_DIR"); fi
 if [[ "$CPU" == "1" ]]; then EXTRA_ARGS+=(--cpu); fi
 EXTRA_ARGS+=(--batch-size "$BATCH_SIZE_KP")
 

@@ -22,6 +22,8 @@ CONF=""
 IOU=""
 MAX_DET=""
 MASK_THRESHOLD=""
+ROI_CACHE_POLICY=""
+ROI_CACHE_DIR=""
 ADAPTIVE_SCALE=""
 ADAPTIVE_CAP=""
 NO_RETINA_MASKS=0
@@ -68,6 +70,8 @@ Options:
   --iou FLOAT               YOLO IoU threshold override
   --max-det N               YOLO max detections override
   --mask-threshold FLOAT    YOLO mask threshold override
+  --roi-cache-policy POLICY ROI cache policy: never|auto|always
+  --roi-cache-dir PATH      Directory containing/publishing flat ROI cache manifests
   --adaptive-scale FLOAT    YOLO adaptive scale override
   --adaptive-cap FLOAT      YOLO adaptive cap override
   --no-retina-masks         YOLO: disable retina masks
@@ -114,6 +118,8 @@ while [[ $# -gt 0 ]]; do
     --iou) IOU="$2"; shift 2;;
     --max-det) MAX_DET="$2"; shift 2;;
     --mask-threshold) MASK_THRESHOLD="$2"; shift 2;;
+    --roi-cache-policy) ROI_CACHE_POLICY="$2"; shift 2;;
+    --roi-cache-dir) ROI_CACHE_DIR="$2"; shift 2;;
     --adaptive-scale) ADAPTIVE_SCALE="$2"; shift 2;;
     --adaptive-cap) ADAPTIVE_CAP="$2"; shift 2;;
     --no-retina-masks) NO_RETINA_MASKS=1; shift;;
@@ -270,6 +276,8 @@ if [[ -n "$CONF" ]]; then EXTRA_ARGS+=(--conf "$CONF"); fi
 if [[ -n "$IOU" ]]; then EXTRA_ARGS+=(--iou "$IOU"); fi
 if [[ -n "$MAX_DET" ]]; then EXTRA_ARGS+=(--max-det "$MAX_DET"); fi
 if [[ -n "$MASK_THRESHOLD" ]]; then EXTRA_ARGS+=(--mask-threshold "$MASK_THRESHOLD"); fi
+if [[ -n "$ROI_CACHE_POLICY" ]]; then EXTRA_ARGS+=(--roi-cache-policy "$ROI_CACHE_POLICY"); fi
+if [[ -n "$ROI_CACHE_DIR" ]]; then EXTRA_ARGS+=(--roi-cache-dir "$ROI_CACHE_DIR"); fi
 if [[ -n "$ADAPTIVE_SCALE" ]]; then EXTRA_ARGS+=(--adaptive-scale "$ADAPTIVE_SCALE"); fi
 if [[ -n "$ADAPTIVE_CAP" ]]; then EXTRA_ARGS+=(--adaptive-cap "$ADAPTIVE_CAP"); fi
 if [[ "$NO_RETINA_MASKS" == "1" ]]; then EXTRA_ARGS+=(--no-retina-masks); fi
