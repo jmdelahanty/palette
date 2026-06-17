@@ -1,7 +1,7 @@
 # Cluster Pipeline Migration Checklist
 <!-- contract-meta
 status: working_checklist
-last_verified: 2026-05-18
+last_verified: 2026-06-17
 purpose: Track what remains to migrate Palette detect, pose, segmentation, and refinement workflows to Janelia cluster execution.
 -->
 
@@ -41,6 +41,7 @@ Palette already has the first layer of cluster support:
 | Environment validation | present | `scripts/validate_cluster_palette_env.sh` checks Python, CUDA, PyTorch, Decord, FFmpeg linkage, reports PyNvVideoCodec/NVIDIA video-library availability, and can require PyNv with `--require-pynvvc`. |
 | Detect submitter | present | `scripts/submit_detect_batches_bsub.sh` wraps `fisheye.utils.run_detections_batch`. |
 | Detect-quality-refine submitter | present | `scripts/submit_detect_quality_refine_bsub.sh` chains detect, detect_quality, and refined_detect through LSF `done(<jobid>)` dependencies. |
+| Detect artifact-quality-refine submitter | present | `scripts/submit_detect_artifact_quality_refine_bsub.sh` submits per-recording scratch artifact detect jobs plus dependent import/validate/quality/refine CPU jobs. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
 | Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs. |
 | Clipped collection flat ROI cache submitter | present | `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh` submits finalized clipped collection cache materialization and manifest-last publish. |
@@ -210,6 +211,18 @@ Ready for pilot:
   `scripts/py -m fisheye.utils.import_run_group_artifact --apply`.
 - [x] Post-import validator exists:
   `scripts/py -m fisheye.utils.validate_imported_run_group`.
+- [x] Full-recording artifact-chain submitter exists:
+  `scripts/submit_detect_artifact_quality_refine_bsub.sh`.
+- [x] Artifact-chain submitter can use registry model resolution during dry-run
+  planning (`run_detections_batch --resolve-models`) or an explicit `--model`.
+- [x] Artifact-chain postprocess pins deterministic detect and detect-quality
+  run names before invoking refined detect, avoiding mutable `latest`
+  selection in the safe broad-run path.
+- [x] Cluster detect submitters expose explicit inference resize controls and
+  the chained submitters default to `pynvvc_nv12_rgb` with `640x640` input so
+  broad runs do not silently use full-frame tensor inference.
+- [x] Runtime detection rejects GPU tensor decoder paths without explicit
+  resize dims, covering both PyNvVideoCodec and Decord GPU.
 
 Remaining:
 
@@ -226,6 +239,10 @@ Remaining:
 - [ ] Verify registry `detect` status refresh after cluster run.
 - [x] Decide whether detect should be the first stage converted to scratch
   run-group artifacts.
+- [ ] Run one registry-scoped full-recording batch through
+  `scripts/submit_detect_artifact_quality_refine_bsub.sh` and audit the
+  imported detect, detect-quality, and refined-detect outputs before promoting
+  this as the default broad production path.
 
 ### 2. Detect Quality And Refined Detect
 
@@ -695,6 +712,33 @@ Implementation tasks:
   registry/model-resolution failure, data-validation failure, and writer
   failure.
 
+### B3. Shared Artifact-Orchestration Extraction
+
+Policy:
+
+- Do not build a generic DAG framework before the detect artifact-chain path
+  has completed at least one real full-recording batch and one clipped batch.
+- Extract shared helpers from working submitters only when repeated code has
+  stable semantics: target planning, deterministic run naming, job-script
+  writing, LSF job-id parsing, dependency expression construction,
+  per-target submission manifests, and post-import validation.
+- Keep stage-specific writers and validators explicit. A shared orchestrator
+  should call stage-specific artifact builders/import validators; it should not
+  hide stage contracts behind stringly-typed generic commands.
+
+Implementation tasks:
+
+- [ ] Audit `scripts/submit_detect_artifact_quality_refine_bsub.sh` after a
+  real batch and record which generated logs/operators were useful.
+- [ ] Compare repeated pieces with
+  `src/fisheye/utils/submit_clipped_detect_refine_plan_bsub.py`.
+- [x] Extract only stable shell pieces into `scripts/lib/palette_lsf.sh`
+  (`bsub` job-id parsing, command printing, and dry-run-vs-submit handling).
+- [ ] Extract additional helpers only after a real artifact-chain batch shows
+  the target logs and manifests are sufficient.
+- [ ] Leave direct stage submitters available as pilot/debug paths until the
+  artifact-chain path has enough successful production mileage.
+
 ## Recommended Implementation Order
 
 1. Run a compute-only cluster detect smoke from PRFS on the sickyfish recording
@@ -711,9 +755,14 @@ Implementation tasks:
 8. Add `submit_subject_mask_batches_bsub.sh`.
 9. Add registry discovery/status for refined stages that are missing from the
    first-four-stage DAG.
-10. Generalize run-group artifact packer and validator beyond detection.
-11. Generalize serialized run-group importer beyond detection.
-12. Switch broad production cluster jobs from direct write to artifact/import.
+10. Run a full-recording registry-scoped detect artifact-quality-refine batch.
+11. Audit the generated artifact, import, validation, detect-quality, and
+    refined-detect logs.
+12. Extract stable orchestration helpers from the detect-specific submitter and
+    clipped submitter; do not introduce a broad DAG framework before this audit.
+13. Generalize run-group artifact packer and validator beyond detection.
+14. Generalize serialized run-group importer beyond detection.
+15. Switch broad production cluster jobs from direct write to artifact/import.
 
 For clipped sleepyfish-style recordings, use this narrower order before broad
 parallel runs:

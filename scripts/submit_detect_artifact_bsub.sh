@@ -24,6 +24,7 @@ CONF=""
 IOU=""
 MAX_DET=""
 DETECT_RUN_NAME=""
+LATEST_POLICY="do_not_set_latest"
 RESIZE_DIMS=()
 DRY_RUN=0
 OVERWRITE_ARTIFACT=0
@@ -63,6 +64,8 @@ Options:
   --clip-index N           Optional zero-based clip index
   --camera-serial SERIAL   Optional camera serial for clip-camera provenance
   --detect-run-name NAME   Optional explicit detect run name inside the artifact
+  --latest-policy POLICY   Importer latest policy recorded in manifest
+                            (default: do_not_set_latest)
   --overwrite-artifact     Allow replacement of same scratch artifact path
   --dry-run                Print files and submit command; do not submit
   -h, --help               Show this message
@@ -95,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --clip-index) CLIP_INDEX="$2"; shift 2;;
     --camera-serial) CAMERA_SERIAL="$2"; shift 2;;
     --detect-run-name) DETECT_RUN_NAME="$2"; shift 2;;
+    --latest-policy) LATEST_POLICY="$2"; shift 2;;
     --overwrite-artifact) OVERWRITE_ARTIFACT=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
@@ -107,6 +111,9 @@ if [[ -z "$ZARR" || -z "$VIDEO" || -z "$MODEL" || -z "$OUTPUT_DIR" ]]; then
   usage
   exit 2
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if [[ "$DRY_RUN" != "1" ]]; then
   [[ -d "$ZARR" ]] || { echo "Zarr not found: $ZARR" >&2; exit 2; }
@@ -194,6 +201,7 @@ ARTIFACT_ARGS=(
   --config "$CONFIG"
   --decode-backend "$DECODE_BACKEND"
   --batch-size "$BATCH_SIZE"
+  --latest-policy "$LATEST_POLICY"
 )
 if [[ -n "$CONF" ]]; then ARTIFACT_ARGS+=(--conf "$CONF"); fi
 if [[ -n "$IOU" ]]; then ARTIFACT_ARGS+=(--iou "$IOU"); fi
@@ -212,6 +220,7 @@ printf -v ARTIFACT_ARGS_SHELL '%q ' "${ARTIFACT_ARGS[@]}"
 JOB_SCRIPT="${RUN_DIR}/run_detect_artifact.sh"
 RUN_DIR_Q="$(printf '%q' "$RUN_DIR")"
 SAFE_LABEL_Q="$(printf '%q' "$SAFE_LABEL")"
+REPO_ROOT_Q="$(printf '%q' "$REPO_ROOT")"
 WORKFLOW_ID_Q="$(printf '%q' "$WORKFLOW_ID")"
 RECORDING_ID_Q="$(printf '%q' "$RECORDING_ID")"
 CLIP_ID_Q="$(printf '%q' "$CLIP_ID")"
@@ -222,7 +231,7 @@ cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(pwd)"
+cd ${REPO_ROOT_Q}
 
 RUN_DIR=${RUN_DIR_Q}
 RUN_LABEL=${SAFE_LABEL_Q}
@@ -240,8 +249,10 @@ else
   SCRATCH_ROOT="\${TMPDIR:-/tmp}/palette_detect_artifact_\${JOB_ID}"
 fi
 export PALETTE_JOB_CACHE="\${SCRATCH_ROOT}/palette_cache"
+export YOLO_CONFIG_DIR="\${PALETTE_JOB_CACHE}/ultralytics"
+export MPLCONFIGDIR="\${PALETTE_JOB_CACHE}/matplotlib"
 export MPLBACKEND=Agg
-mkdir -p "\$PALETTE_JOB_CACHE" "\$SCRATCH_ROOT" "\$RUN_DIR"
+mkdir -p "\$PALETTE_JOB_CACHE" "\$YOLO_CONFIG_DIR" "\$MPLCONFIGDIR" "\$SCRATCH_ROOT" "\$RUN_DIR"
 
 ARTIFACT_DIR="\${SCRATCH_ROOT}/palette_run_group_artifact"
 WORK_DIR="\${SCRATCH_ROOT}/work"

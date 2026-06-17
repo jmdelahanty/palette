@@ -801,6 +801,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=Path,
         help="Explicit YOLO detect model path. Bypasses registry model resolution.",
     )
+    parser.add_argument(
+        "--resolve-models",
+        action="store_true",
+        help="Resolve selected model paths during dry-run planning JSON output.",
+    )
 
     parser.add_argument("--config", type=str, default=None, help="Optional detect config path.")
     parser.add_argument("--conf", type=float, default=None, help="Optional detect confidence threshold override.")
@@ -983,9 +988,72 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             print("Dry run: add --apply to run detection.")
 
+        dry_run_resolved_models: dict[str, ResolvedModel] = {}
+        dry_run_resolution_errors: dict[str, str] = {}
+        if args.resolve_models:
+            runnable_dry_run_plans = [plan for plan in plans if plan.status == STATUS_OK]
+            if explicit_model_path is not None:
+                dry_run_resolved_models = _resolve_explicit_models_for_plans(
+                    plans=runnable_dry_run_plans,
+                    model_path=explicit_model_path,
+                    config=args.config,
+                    conf=args.conf,
+                    iou=args.iou,
+                    max_det=args.max_det,
+                    batch_size=args.batch_size,
+                    resize_dims=args.resize_dims,
+                    imgsz=args.imgsz,
+                    decode_backend=args.decode_backend,
+                    cpu=bool(args.cpu),
+                )
+            elif runnable_dry_run_plans:
+                dry_run_resolved_models, dry_run_resolution_errors = _resolve_registry_models_for_plans(
+                    plans=runnable_dry_run_plans,
+                    registry_path=registry_path,
+                    set_id_filter=args.set_id,
+                    require_unique=bool(args.require_unique),
+                    top_k=int(args.top_k),
+                    include_non_success=bool(args.include_non_success),
+                    config=args.config,
+                    conf=args.conf,
+                    iou=args.iou,
+                    max_det=args.max_det,
+                    batch_size=args.batch_size,
+                    resize_dims=args.resize_dims,
+                    imgsz=args.imgsz,
+                    decode_backend=args.decode_backend,
+                    cpu=bool(args.cpu),
+                    on_event=None,
+                )
+
         if args.json:
             for plan in plans:
-                print(json.dumps(_plan_payload(plan), sort_keys=True))
+                payload = _plan_payload(plan)
+                if args.resolve_models and plan.status == STATUS_OK:
+                    plan_key = str(plan.zarr_path.resolve())
+                    resolved_model = dry_run_resolved_models.get(plan_key)
+                    if resolved_model is not None:
+                        selected = resolved_model.payload.get("selected")
+                        selected_payload = selected if isinstance(selected, dict) else {}
+                        payload.update(
+                            {
+                                "model_resolution_status": STATUS_OK,
+                                "selected_model": resolved_model.model_path,
+                                "selected_run_id": selected_payload.get("run_id"),
+                                "selected_set_id": selected_payload.get("set_id"),
+                            }
+                        )
+                    else:
+                        payload.update(
+                            {
+                                "model_resolution_status": STATUS_FAILED,
+                                "model_resolution_error": dry_run_resolution_errors.get(
+                                    plan_key,
+                                    "model not resolved",
+                                ),
+                            }
+                        )
+                print(json.dumps(payload, sort_keys=True))
         else:
             _print_plan(plans)
 

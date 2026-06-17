@@ -1,7 +1,7 @@
 # Cluster Run-Group Artifact Workflow
 <!-- contract-meta
 status: design
-last_verified: 2026-05-16
+last_verified: 2026-06-17
 purpose: Define how Palette cluster jobs should produce Zarr-compatible run-group artifacts on node-local scratch and safely import them into canonical analysis archives.
 -->
 
@@ -1005,6 +1005,55 @@ scripts/submit_detect_artifact_bsub.sh \
   --model <weights/best.pt> \
   --output-dir /groups/johnson/johnsonlab/jeremy/palette_smoke/detect_artifacts
 ```
+
+Full-recording detect/quality/refine wrapper:
+
+```bash
+scripts/submit_detect_artifact_quality_refine_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains <recording-family-filter> \
+  --detect-decode-backend pynvvc_nv12_rgb \
+  --detect-resize-dims 640 640 \
+  --run-id <workflow_id> \
+  --submit
+```
+
+This is the preferred non-clipped production shape for detection outputs. It
+does not run GPU inference against the canonical `detect_runs` writer. Instead
+it submits one artifact job per recording, then one dependent CPU postprocess
+job per recording. The postprocess job imports the artifact through
+`import_run_group_artifact --apply`, validates it with
+`validate_imported_run_group`, runs detect quality, and runs refined detect
+using the deterministic detect run name generated during planning. The
+postprocess job also writes a deterministic quality run name and passes that
+same name to refined detect, so the safe chain does not rely on mutable
+`latest` selection between import, quality, and refinement.
+
+The wrapper defaults to `pynvvc_nv12_rgb` and `640x640` inference input. Those
+defaults are intentional guardrails: a broad cluster array should fail fast if
+PyNvVideoCodec is unavailable rather than silently falling back to a slow path,
+and detection should not accidentally run YOLO on full source frames. The
+detector also rejects GPU tensor decoder paths when no explicit resize dims are
+resolved, including Decord GPU fallback.
+
+If `--model` is omitted, the wrapper resolves a registry detect model for each
+recording during planning by calling `run_detections_batch --dry-run --json
+--resolve-models`. The per-target selected model path is recorded in
+`targets.jsonl`, `targets.tsv`, and `submissions.tsv`, then passed to the
+scratch artifact job. Pass `--model` only to intentionally bypass registry
+model resolution. The wrapper requires the selected model path to be readable
+on the submit host; if registry rows still point at workstation-local
+`/nvme1/models/...` paths, use a `/groups/...` model path or update the registry
+artifact path before submitting to LSF.
+
+The wrapper intentionally remains detect-specific. The reusable workflow
+surface should be extracted only after this path has been exercised on real
+recording batches: planner output schema, deterministic run naming,
+scratch-artifact job creation, dependent import/validate/postprocess job
+creation, and per-target JSON/TSV submission logs are the pieces to promote.
+Do not introduce a generic DAG framework before at least one full-recording
+artifact batch has completed and been audited.
 
 The artifact runner prints a strict JSON summary to stdout. That summary
 includes `artifact_timing` for the detection call, run-group copy, validation,

@@ -264,6 +264,79 @@ def test_main_dry_run_marks_registry_missing(monkeypatch, tmp_path: Path, capsys
     assert "registry_missing" in out
 
 
+def test_main_dry_run_resolve_models_emits_selected_model(monkeypatch, tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+
+    zarr_path = tmp_path / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    recording_dir = zarr_path.parent.parent
+    video_path = recording_dir / "cams" / "cam_1.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"")
+
+    plan = mod.DetectPlan(
+        zarr_path=zarr_path.resolve(),
+        recording_dir=recording_dir.resolve(),
+        video_path=video_path.resolve(),
+        status=mod.STATUS_OK,
+    )
+
+    monkeypatch.setattr(mod, "_resolve_input_paths", lambda *_args, **_kwargs: [tmp_path])
+    monkeypatch.setattr(mod, "_discover_analysis_zarrs", lambda *_args, **_kwargs: [zarr_path.resolve()])
+    monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: [plan])
+    monkeypatch.setattr(
+        mod,
+        "_resolve_registry_models_for_plans",
+        lambda **_kwargs: (
+            {
+                str(zarr_path.resolve()): mod.ResolvedModel(
+                    model_path="/tmp/registry_model.pt",
+                    payload={
+                        "selected": {
+                            "run_id": "run_1",
+                            "set_id": "set_1",
+                            "model_path": "/tmp/registry_model.pt",
+                        }
+                    },
+                )
+            },
+            {},
+        ),
+    )
+
+    rc = mod.main(
+        [
+            "--dry-run",
+            "--json",
+            "--resolve-models",
+            "--no-log",
+            "--registry",
+            str(registry_path),
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert rows == [
+        {
+            "background_present": False,
+            "detect_present": False,
+            "model_resolution_status": "ok",
+            "reason": None,
+            "recording": str(recording_dir.resolve()),
+            "selected_model": "/tmp/registry_model.pt",
+            "selected_run_id": "run_1",
+            "selected_set_id": "set_1",
+            "status": "ok",
+            "tuning_present": False,
+            "video": str(video_path.resolve()),
+            "zarr": str(zarr_path.resolve()),
+        }
+    ]
+
+
 def test_main_dry_run_with_explicit_model_does_not_require_registry(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:

@@ -51,6 +51,24 @@ def test_build_plans_skips_existing_quality_by_default(tmp_path: Path) -> None:
     assert plan.quality_present is True
 
 
+def test_build_plans_skips_specific_quality_run_name(tmp_path: Path) -> None:
+    recordings = tmp_path / "recordings"
+    zarr_path = _make_zarr(recordings, "rec_quality", detect_run="detect_2026_01", with_quality=True)
+    plans = _build_plans(
+        [recordings],
+        recursive=True,
+        detect_run=None,
+        skip_existing=True,
+        quality_run_name="detect_quality_2026-02-09_12-00-00",
+    )
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.zarr_path == zarr_path
+    assert plan.status == "skipped"
+    assert plan.reason == "quality_reports/detect_quality_2026-02-09_12-00-00 present"
+    assert plan.quality_present is True
+
+
 def test_build_plans_allows_existing_quality_with_no_skip(tmp_path: Path) -> None:
     recordings = tmp_path / "recordings"
     zarr_path = _make_zarr(recordings, "rec_quality", detect_run="detect_2026_01", with_quality=True)
@@ -103,6 +121,20 @@ def test_build_cmd_includes_requested_options(tmp_path: Path) -> None:
     assert "--run" in cmd
     assert "detect_2026_01" in cmd
     assert "--save" in cmd
+
+
+def test_build_cmd_includes_explicit_quality_run_name(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        threshold=123.5,
+        threshold_mode="scaled",
+        threshold_reference_width=640.0,
+        quality_run_name="detect_quality_custom",
+        no_save=False,
+    )
+    zarr_path = tmp_path / "rec.zarr"
+    cmd = _build_cmd(args, zarr_path, detect_run="detect_2026_01")
+    assert "--quality-run-name" in cmd
+    assert "detect_quality_custom" in cmd
 
 
 def test_build_cmd_respects_no_save(tmp_path: Path) -> None:

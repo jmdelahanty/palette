@@ -432,7 +432,13 @@ def _actual_input_resize_dims(
     must apply canonical detection.resize_dims explicitly or inference silently
     runs at source-video resolution.
     """
-    if (decord_on_gpu or tensor_input) and requested_resize_dims is not None:
+    if decord_on_gpu or tensor_input:
+        if requested_resize_dims is None:
+            raise RuntimeError(
+                "GPU tensor decode paths require detection.resize_dims or --resize-dims. "
+                "Without an explicit resize, Ultralytics treats tensor inputs as already "
+                "prepared and can run inference at source-video resolution."
+            )
         return [int(requested_resize_dims[0]), int(requested_resize_dims[1])]
     if pre_resize_dims is not None:
         return [int(pre_resize_dims[0]), int(pre_resize_dims[1])]

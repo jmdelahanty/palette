@@ -12,6 +12,7 @@ CONFIG="configs/fisheye/default.yaml"
 REGISTRY="/nvme1/palette_registry.sqlite"
 MODEL=""
 DECODE_BACKEND=""
+RESIZE_DIMS=()
 SCHEDULER="threads"
 NUM_WORKERS=""
 SET_ID=""
@@ -45,6 +46,7 @@ Options:
   --registry PATH           Registry sqlite path (default: /nvme1/palette_registry.sqlite)
   --model PATH              Explicit detect model path; bypass registry model resolution
   --decode-backend NAME     Decode backend passed to run_detections_batch
+  --resize-dims H W         Canonical inference size passed to run_detections_batch
   --scheduler NAME          Legacy pass-through option for batch runner compatibility
   --num-workers N           Legacy pass-through option for batch runner compatibility
   --set-id ID               Optional detect set filter for registry model resolution
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --registry) REGISTRY="$2"; shift 2;;
     --model) MODEL="$2"; shift 2;;
     --decode-backend) DECODE_BACKEND="$2"; shift 2;;
+    --resize-dims) RESIZE_DIMS=("$2" "$3"); shift 3;;
     --scheduler) SCHEDULER="$2"; shift 2;;
     --num-workers) NUM_WORKERS="$2"; shift 2;;
     --set-id) SET_ID="$2"; shift 2;;
@@ -232,6 +235,9 @@ fi
 if [[ -n "$DECODE_BACKEND" ]]; then
   EXTRA_ARGS+=(--decode-backend "$DECODE_BACKEND")
 fi
+if [[ "${#RESIZE_DIMS[@]}" -gt 0 ]]; then
+  EXTRA_ARGS+=(--resize-dims "${RESIZE_DIMS[@]}")
+fi
 if [[ -n "$SCHEDULER" ]]; then
   EXTRA_ARGS+=(--scheduler "$SCHEDULER")
 fi
@@ -300,6 +306,11 @@ echo "Root: $ROOT"
 echo "Registry: $REGISTRY"
 echo "Model: ${MODEL:-<registry resolution>}"
 echo "Decode backend: ${DECODE_BACKEND:-<runner default>}"
+if [[ "${#RESIZE_DIMS[@]}" -gt 0 ]]; then
+  echo "Resize dims: ${RESIZE_DIMS[0]} ${RESIZE_DIMS[1]}"
+else
+  echo "Resize dims: <runner/config default>"
+fi
 echo "Analysis zarrs: $analysis_count"
 echo "Batch size: $BATCH_SIZE"
 echo "Batches: $batch_count"

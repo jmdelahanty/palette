@@ -110,10 +110,12 @@ def _select_detect_run(root: zarr.Group, requested: Optional[str]) -> Optional[s
     return keys[-1] if keys else None
 
 
-def _has_quality_report(detect_group: zarr.Group) -> bool:
+def _has_quality_report(detect_group: zarr.Group, quality_run_name: Optional[str]) -> bool:
     quality_parent = detect_group.get("quality_reports")
     if quality_parent is None:
         return False
+    if quality_run_name:
+        return quality_run_name in quality_parent
     latest = quality_parent.attrs.get("latest")
     if latest and str(latest) in quality_parent:
         return True
@@ -128,6 +130,8 @@ def _build_plans(
     recursive: bool,
     detect_run: Optional[str],
     skip_existing: bool,
+    *,
+    quality_run_name: Optional[str] = None,
 ) -> List[DetectQualityPlan]:
     plans: List[DetectQualityPlan] = []
     for zarr_path in _iter_zarr(roots, recursive):
@@ -157,13 +161,17 @@ def _build_plans(
             continue
 
         detect_group = root[f"detect_runs/{selected}"]
-        quality_present = _has_quality_report(detect_group)
+        quality_present = _has_quality_report(detect_group, quality_run_name)
         if skip_existing and quality_present:
             plans.append(
                 DetectQualityPlan(
                     zarr_path=zarr_path,
                     status="skipped",
-                    reason="quality_reports present",
+                    reason=(
+                        f"quality_reports/{quality_run_name} present"
+                        if quality_run_name
+                        else "quality_reports present"
+                    ),
                     detect_run=selected,
                     quality_present=True,
                 )
@@ -196,6 +204,9 @@ def _build_cmd(args: argparse.Namespace, zarr_path: Path, detect_run: Optional[s
     ]
     if detect_run:
         cmd.extend(["--run", detect_run])
+    quality_run_name = getattr(args, "quality_run_name", None)
+    if quality_run_name:
+        cmd.extend(["--quality-run-name", quality_run_name])
     if args.no_save:
         cmd.append("--no-save")
     else:
@@ -227,6 +238,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-skip-existing", action="store_true", help="Do not skip when quality reports already exist.")
     parser.add_argument("--detect-run", help="Specific detect run name (default: latest).")
     parser.add_argument(
+        "--quality-run-name",
+        help="Optional explicit quality report run name to write under each selected detect run.",
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=100.0,
@@ -252,7 +267,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     roots = _resolve_root(args.paths)
     skip_existing = not args.no_skip_existing
 
-    plans = _build_plans(roots, args.recursive, args.detect_run, skip_existing)
+    plans = _build_plans(
+        roots,
+        args.recursive,
+        args.detect_run,
+        skip_existing,
+        quality_run_name=args.quality_run_name,
+    )
     if not plans:
         print("No zarr files found.")
         return 1
@@ -266,6 +287,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                             "zarr": str(plan.zarr_path),
                             "status": plan.status,
                             "detect_run": plan.detect_run,
+                            "quality_run_name": args.quality_run_name,
                             "reason": plan.reason,
                         }
                     )
@@ -289,6 +311,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         threshold=float(args.threshold),
         threshold_mode=str(args.threshold_mode),
         threshold_reference_width=float(args.threshold_reference_width),
+        quality_run_name=args.quality_run_name,
         skip_existing=bool(skip_existing),
         no_save=bool(args.no_save),
     )
@@ -307,25 +330,70 @@ def main(argv: Optional[List[str]] = None) -> int:
             missing += 1
             logger.log("recording_missing", zarr=str(plan.zarr_path), reason=plan.reason, detect_run=plan.detect_run)
             if args.json:
-                print(json.dumps({"status": "missing", "zarr": str(plan.zarr_path), "reason": plan.reason}))
+                print(
+                    json.dumps(
+                        {
+                            "status": "missing",
+                            "zarr": str(plan.zarr_path),
+                            "reason": plan.reason,
+                            "quality_run_name": args.quality_run_name,
+                        }
+                    )
+                )
         elif plan.status == "skipped":
             skipped += 1
             logger.log("recording_skipped", zarr=str(plan.zarr_path), reason=plan.reason, detect_run=plan.detect_run)
             if args.json:
-                print(json.dumps({"status": "skipped", "zarr": str(plan.zarr_path), "reason": plan.reason}))
+                print(
+                    json.dumps(
+                        {
+                            "status": "skipped",
+                            "zarr": str(plan.zarr_path),
+                            "reason": plan.reason,
+                            "quality_run_name": args.quality_run_name,
+                        }
+                    )
+                )
         else:
             cmd = _build_cmd(args, plan.zarr_path, plan.detect_run)
-            logger.log("quality_start", zarr=str(plan.zarr_path), detect_run=plan.detect_run, cmd=cmd)
+            logger.log(
+                "quality_start",
+                zarr=str(plan.zarr_path),
+                detect_run=plan.detect_run,
+                quality_run_name=args.quality_run_name,
+                cmd=cmd,
+            )
             print(f"Running: {' '.join(cmd)}")
             result = subprocess.run(cmd, check=False)
             if result.returncode == 0:
                 ok += 1
-                logger.log("quality_success", zarr=str(plan.zarr_path), detect_run=plan.detect_run, returncode=result.returncode)
+                logger.log(
+                    "quality_success",
+                    zarr=str(plan.zarr_path),
+                    detect_run=plan.detect_run,
+                    quality_run_name=args.quality_run_name,
+                    returncode=result.returncode,
+                )
                 if args.json:
-                    print(json.dumps({"status": "ok", "zarr": str(plan.zarr_path), "detect_run": plan.detect_run}))
+                    print(
+                        json.dumps(
+                            {
+                                "status": "ok",
+                                "zarr": str(plan.zarr_path),
+                                "detect_run": plan.detect_run,
+                                "quality_run_name": args.quality_run_name,
+                            }
+                        )
+                    )
             else:
                 failed += 1
-                logger.log("quality_failed", zarr=str(plan.zarr_path), detect_run=plan.detect_run, returncode=result.returncode)
+                logger.log(
+                    "quality_failed",
+                    zarr=str(plan.zarr_path),
+                    detect_run=plan.detect_run,
+                    quality_run_name=args.quality_run_name,
+                    returncode=result.returncode,
+                )
                 if args.json:
                     print(
                         json.dumps(
@@ -333,6 +401,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 "status": "failed",
                                 "zarr": str(plan.zarr_path),
                                 "detect_run": plan.detect_run,
+                                "quality_run_name": args.quality_run_name,
                                 "returncode": int(result.returncode),
                             }
                         )

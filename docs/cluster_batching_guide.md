@@ -541,6 +541,57 @@ scripts/submit_detect_artifact_bsub.sh \
   --batch-size 16
 ```
 
+For registry-scoped full-recording runs, prefer the artifact-chain submitter
+over the direct-write detect array. It discovers targets with
+`run_detections_batch --source registry --json`, submits one GPU artifact job
+per recording, then submits one dependent CPU postprocess job per recording.
+The CPU job imports the artifact, validates the imported run, runs
+`detect_quality_batch`, and runs `refine_detect_batch` against the explicit
+detect run name. It also uses a deterministic quality run name and passes that
+name into refinement. This preserves per-recording parallelism while avoiding
+GPU jobs writing `detect_runs` chunks directly to PRFS/NRS:
+
+```bash
+scripts/submit_detect_artifact_quality_refine_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains GoodCopBadCop \
+  --detect-queue gpu_l4 \
+  --detect-decode-backend pynvvc_nv12_rgb \
+  --detect-resize-dims 640 640 \
+  --detect-batch-size 16 \
+  --post-queue short \
+  --run-id goodcopbadcop_detect_artifact_refine_$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+Add `--submit` on an LSF login node after inspecting the dry-run output. Logs,
+target JSONL, generated job scripts, imported-run validation reports, and
+artifact tarballs live under
+`<root>/logs/detect_artifact_quality_refine_bsub/detect_artifact_quality_refine_<run_id>/`.
+By default, the submitter asks `run_detections_batch --dry-run --json
+--resolve-models` to resolve the registry-selected detect model for each
+recording, then writes that selected path into `targets.jsonl` and
+`submissions.tsv`. Pass `--model /path/to/best.pt` only when you want to bypass
+registry model resolution deliberately. `--detect-set-id`,
+`--detect-require-unique`, `--detect-top-k`, and
+`--detect-include-non-success` are forwarded to the registry resolver.
+The selected model path must be readable from the submit environment. If the
+registry points at workstation-local paths such as `/nvme1/models/...`, pass an
+explicit PRFS/NRS-visible model path under `/groups/...` or refresh the registry
+model artifact path before submitting cluster jobs.
+The submitter records `latest_policy=set_latest_explicit` by default so a
+successfully imported artifact leaves the normal `detect_runs/latest` surface
+consistent with direct-write detection. Downstream CPU steps still pass the
+explicit detect and quality run names and do not rely on `latest`.
+
+The cluster submitter defaults to `--detect-decode-backend pynvvc_nv12_rgb` and
+`--detect-resize-dims 640 640`. Keep those settings visible in operator
+commands. If `resize_dims` is omitted and the detector takes a tensor input,
+Ultralytics can receive full `4512x4512` frames, which has been observed to
+drop L4 throughput to roughly `5 fps` instead of the expected near-realtime
+path. Runtime detection now fails fast for GPU tensor decoder paths
+(`pynvvc_*` and Decord GPU) when no explicit resize dims are resolved.
+
 For rolling-clip smoke runs, pass the clip context explicitly and point
 `--video` at the per-clip MP4. The submitter writes
 `submission_context.json`, includes the context in stdout, and passes it to the
@@ -936,9 +987,20 @@ Use `--run-id` for deterministic reruns:
 ### Chained Detect, Quality, And Refine Submission
 
 For registry-discovered recordings that are missing detections completely, use
-the chained submitter. It discovers the zarr target set once, submits detect as
-an LSF array, then submits `detect_quality_batch` and `refine_detect_batch` as
-dependent CPU jobs using `done(<jobid>)`.
+the chained submitter for conservative pilot runs, or use
+`scripts/submit_detect_artifact_quality_refine_bsub.sh` when you want the safer
+scratch-artifact/import path. The direct-write chained submitter discovers the
+zarr target set once, submits detect as an LSF array, then submits
+`detect_quality_batch` and `refine_detect_batch` as dependent CPU jobs using
+`done(<jobid>)`.
+
+The direct-write chained submitter below is a convenience path, not the
+preferred broad production path. It writes detection output directly into the
+canonical Zarr from GPU jobs, then schedules CPU quality/refine jobs that use
+the archive's latest run selection at postprocess time. Use it only for
+low-concurrency pilots or one-off local/cluster runs where no other writer is
+mutating the same archives. For broad registry batches, use
+`submit_detect_artifact_quality_refine_bsub.sh`.
 
 Dry-run first:
 
@@ -947,6 +1009,8 @@ Dry-run first:
   --root /groups/johnson/johnsonlab/jeremy/recordings \
   --registry /nvme1/palette_registry.sqlite \
   --path-contains GoodCopBadCop \
+  --detect-decode-backend pynvvc_nv12_rgb \
+  --detect-resize-dims 640 640 \
   --run-id goodcopbadcop_detect_quality_refine_$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
@@ -959,6 +1023,8 @@ Submit on an LSF login node:
   --path-contains GoodCopBadCop \
   --detect-queue gpu_l4 \
   --detect-gpu 'num=1' \
+  --detect-decode-backend pynvvc_nv12_rgb \
+  --detect-resize-dims 640 640 \
   --detect-batch-size 4 \
   --detect-max-active 2 \
   --quality-queue short \

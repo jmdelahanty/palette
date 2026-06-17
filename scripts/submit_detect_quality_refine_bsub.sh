@@ -14,7 +14,8 @@ DETECT_NCORES=4
 DETECT_MEM_GB=64
 DETECT_BATCH_SIZE=4
 DETECT_MAX_ACTIVE=2
-DETECT_DECODE_BACKEND=""
+DETECT_DECODE_BACKEND="pynvvc_nv12_rgb"
+DETECT_RESIZE_DIMS=("640" "640")
 DETECT_MODEL=""
 DETECT_SET_ID=""
 DETECT_TOP_K=5
@@ -46,6 +47,12 @@ Usage: submit_detect_quality_refine_bsub.sh [options]
 Submit a registry-discovered detect -> detect_quality -> refined_detect LSF chain.
 The script plans by default; pass --submit to call bsub.
 
+WARNING: this direct-write convenience chain runs detect_quality/refine_detect
+against latest detect/quality state at postprocess time. For broad production
+runs or concurrent writers, prefer submit_detect_artifact_quality_refine_bsub.sh,
+which imports one deterministic detect run per recording and pins downstream
+stages to explicit run names.
+
 Discovery options:
   --root PATH                    Recording root (default: /nvme1/recordings)
   --registry PATH                Registry sqlite path (default: /nvme1/palette_registry.sqlite)
@@ -62,6 +69,8 @@ Detect job options:
   --detect-batch-size N          Zarrs per detect array element (default: 4)
   --detect-max-active N          Max concurrent detect array elements (default: 2)
   --detect-decode-backend NAME   Decode backend passed to run_detections_batch
+                                  (default: pynvvc_nv12_rgb)
+  --detect-resize-dims H W       Canonical inference size (default: 640 640)
   --detect-model PATH            Explicit detect model path
   --detect-set-id ID             Optional detect set filter for registry model resolution
   --detect-top-k N               Candidate provenance depth (default: 5)
@@ -106,6 +115,7 @@ while [[ $# -gt 0 ]]; do
     --detect-batch-size) DETECT_BATCH_SIZE="$2"; shift 2;;
     --detect-max-active) DETECT_MAX_ACTIVE="$2"; shift 2;;
     --detect-decode-backend) DETECT_DECODE_BACKEND="$2"; shift 2;;
+    --detect-resize-dims) DETECT_RESIZE_DIMS=("$2" "$3"); shift 3;;
     --detect-model) DETECT_MODEL="$2"; shift 2;;
     --detect-set-id) DETECT_SET_ID="$2"; shift 2;;
     --detect-top-k) DETECT_TOP_K="$2"; shift 2;;
@@ -133,6 +143,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib/palette_lsf.sh"
 
 if [[ -z "$RUN_ID" ]]; then
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -154,29 +165,6 @@ if [[ -e "$RUN_DIR" ]]; then
 fi
 mkdir -p "$RUN_DIR"
 
-extract_jobid() {
-  sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' "$1" | tail -n 1
-}
-
-print_command() {
-  printf '%q ' "$@"
-  printf '\n'
-}
-
-submit_or_print_bsub() {
-  local log_file="$1"
-  shift
-  if [[ "$SUBMIT" == "1" ]]; then
-    if ! command -v bsub >/dev/null 2>&1; then
-      echo "bsub not found in PATH. Run this on an LSF login node." >&2
-      exit 2
-    fi
-    "$@" 2>&1 | tee "$log_file"
-  else
-    print_command "$@" | tee "$log_file"
-  fi
-}
-
 DETECT_CMD=(
   "${SCRIPT_DIR}/submit_detect_batches_bsub.sh"
   --root "$ROOT"
@@ -195,6 +183,7 @@ DETECT_CMD=(
 )
 if [[ -n "$PATH_CONTAINS" ]]; then DETECT_CMD+=(--path-contains "$PATH_CONTAINS"); fi
 if [[ -n "$DETECT_DECODE_BACKEND" ]]; then DETECT_CMD+=(--decode-backend "$DETECT_DECODE_BACKEND"); fi
+if [[ "${#DETECT_RESIZE_DIMS[@]}" -gt 0 ]]; then DETECT_CMD+=(--resize-dims "${DETECT_RESIZE_DIMS[@]}"); fi
 if [[ -n "$DETECT_MODEL" ]]; then DETECT_CMD+=(--model "$DETECT_MODEL"); fi
 if [[ -n "$DETECT_SET_ID" ]]; then DETECT_CMD+=(--set-id "$DETECT_SET_ID"); fi
 if [[ "$DETECT_REQUIRE_UNIQUE" == "1" ]]; then DETECT_CMD+=(--require-unique); fi
@@ -206,6 +195,13 @@ if [[ "$SUBMIT" != "1" ]]; then DETECT_CMD+=(--dry-run); fi
 DETECT_SUBMIT_LOG="${RUN_DIR}/detect_submit.log"
 echo "Planning detect stage..."
 "${DETECT_CMD[@]}" 2>&1 | tee "$DETECT_SUBMIT_LOG"
+
+cat >&2 <<'WARNING'
+Warning: direct detect_quality/refine_detect postprocess uses latest run
+selection. Prefer submit_detect_artifact_quality_refine_bsub.sh for production
+or concurrent writer workflows because it pins explicit detect and quality run
+names after artifact import.
+WARNING
 
 if [[ ! -f "$RECORDINGS_FILE" ]]; then
   echo "Detect planner did not create recordings file: $RECORDINGS_FILE" >&2
@@ -257,7 +253,7 @@ JOBSCRIPT
 chmod +x "$REFINE_SCRIPT"
 
 if [[ "$SUBMIT" == "1" ]]; then
-  detect_jobid="$(extract_jobid "$DETECT_SUBMIT_LOG")"
+  detect_jobid="$(palette_lsf_extract_jobid "$DETECT_SUBMIT_LOG")"
   if [[ -z "$detect_jobid" ]]; then
     echo "Could not parse detect job id from $DETECT_SUBMIT_LOG" >&2
     exit 2
@@ -281,10 +277,10 @@ QUALITY_BSUB_ARGS+=(bash "$QUALITY_SCRIPT")
 
 QUALITY_SUBMIT_LOG="${RUN_DIR}/detect_quality_submit.log"
 echo "Planning detect_quality stage..."
-submit_or_print_bsub "$QUALITY_SUBMIT_LOG" "${QUALITY_BSUB_ARGS[@]}"
+palette_lsf_submit_or_print "$SUBMIT" "$QUALITY_SUBMIT_LOG" "${QUALITY_BSUB_ARGS[@]}"
 
 if [[ "$SUBMIT" == "1" ]]; then
-  quality_jobid="$(extract_jobid "$QUALITY_SUBMIT_LOG")"
+  quality_jobid="$(palette_lsf_extract_jobid "$QUALITY_SUBMIT_LOG")"
   if [[ -z "$quality_jobid" ]]; then
     echo "Could not parse detect_quality job id from $QUALITY_SUBMIT_LOG" >&2
     exit 2
@@ -308,7 +304,7 @@ REFINE_BSUB_ARGS+=(bash "$REFINE_SCRIPT")
 
 REFINE_SUBMIT_LOG="${RUN_DIR}/refine_detect_submit.log"
 echo "Planning refined_detect stage..."
-submit_or_print_bsub "$REFINE_SUBMIT_LOG" "${REFINE_BSUB_ARGS[@]}"
+palette_lsf_submit_or_print "$SUBMIT" "$REFINE_SUBMIT_LOG" "${REFINE_BSUB_ARGS[@]}"
 
 cat > "${RUN_DIR}/submission_summary.txt" <<SUMMARY
 run_id=$RUN_ID
