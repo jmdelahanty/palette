@@ -193,6 +193,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Frame index to use in the tuner (default: tuner chooses mid-frame).",
     )
     parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path passed to mask_tuner for dish_mask status sync on save.",
+    )
+    parser.add_argument(
         "--start",
         type=int,
         default=0,
@@ -256,6 +261,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd.append("--full")
         if args.frame is not None:
             cmd.extend(["--frame", str(args.frame)])
+        if args.registry is not None:
+            cmd.extend(["--registry", str(args.registry)])
         subprocess.run(cmd, check=False)
         if idx < end - 1:
             if not _prompt_continue():

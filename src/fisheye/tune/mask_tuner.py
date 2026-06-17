@@ -19,6 +19,7 @@ rectangle_roi = None
 mask_mode = "circle"
 
 from fisheye.utils.zarr_io import open_zarr_root
+from fisheye.utils.dish_mask_registry_sync import sync_dish_mask_registry_status
 
 
 def _as_positive_int(value: Any) -> Optional[int]:
@@ -452,6 +453,36 @@ def save_mask_to_zarr(zarr_path, mask_definition, array_name, frame_index, param
         print(f"❌ Error saving to Zarr: {e}")
         return False
 
+
+def _sync_registry_after_save(
+    zarr_path,
+    registry_path,
+    *,
+    method,
+    shape,
+    array_name,
+    frame_index,
+):
+    if not registry_path:
+        return None
+    result = sync_dish_mask_registry_status(
+        zarr_path,
+        registry_path,
+        method=method,
+        source="mask_tuner",
+        details={
+            "shape": shape,
+            "array_name": array_name,
+            "frame_index": int(frame_index),
+        },
+    )
+    if result.synced:
+        print(f"   Registry: marked dish_mask ok for dataset {result.dataset_id}")
+    else:
+        print(f"   Registry warning: {result.message}")
+    return result.to_dict()
+
+
 def load_from_zarr(zarr_path):
     """Load previously tuned mask parameters from Zarr if they exist"""
     try:
@@ -481,7 +512,7 @@ def load_from_zarr(zarr_path):
         print(f"Could not load existing mask data: {e}")
         return None
 
-def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="auto"):
+def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="auto", registry_path=None):
     global hough_param1, hough_param2, radius_adjustment, detected_circle, frame_index, max_frames, rectangle_roi, mask_mode
     
     detected_circle = None
@@ -679,6 +710,14 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="
                         image_shape=current_frame.shape[:2],
                     )
                     if success:
+                        _sync_registry_after_save(
+                            zarr_path,
+                            registry_path,
+                            method="hough_circle",
+                            shape="circle",
+                            array_name=array_name,
+                            frame_index=frame_index,
+                        )
                         print("Press 'q' to quit or continue tuning")
                 else:
                     print(" No circle detected - adjust parameters and try again")
@@ -698,6 +737,14 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="
                         image_shape=current_frame.shape[:2],
                     )
                     if success:
+                        _sync_registry_after_save(
+                            zarr_path,
+                            registry_path,
+                            method="manual_rectangle",
+                            shape="rectangle",
+                            array_name=array_name,
+                            frame_index=frame_index,
+                        )
                         print("Press 'q' to quit or continue tuning")
                 else:
                     print(" Draw a rectangle first (press 'r')")
@@ -787,6 +834,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Allow --headless to replace an existing dish mask.",
     )
+    parser.add_argument(
+        "--registry",
+        type=str,
+        help="Optional registry SQLite path; on successful save, mark dish_mask ok for this dataset.",
+    )
     args = parser.parse_args()
 
     if args.headless:
@@ -802,8 +854,17 @@ if __name__ == "__main__":
             use_full_res=args.full,
             overwrite=bool(args.overwrite),
         )
+        if result["status"] == "saved" and args.registry:
+            result["registry_sync"] = _sync_registry_after_save(
+                args.zarr_path,
+                args.registry,
+                method="headless_circle",
+                shape="circle",
+                array_name=result["array_name"],
+                frame_index=result["frame_index"],
+            )
         print(result)
         raise SystemExit(0 if result["status"] in {"saved", "exists"} else 1)
 
     main(args.zarr_path, use_full_res=args.full, frame_idx=args.frame,
-         config_path=args.config, mode=args.mode)
+         config_path=args.config, mode=args.mode, registry_path=args.registry)

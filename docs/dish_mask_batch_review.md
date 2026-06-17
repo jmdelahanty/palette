@@ -21,8 +21,14 @@ This workflow is for propagating a tuned dish mask across many recordings and th
 
 1) **Tune one representative recording**
 ```bash
-scripts/py -m fisheye.tune.mask_tuner /nvme1/recordings/<recording>/zarr/<recording>.zarr
+scripts/py -m fisheye.tune.mask_tuner /nvme1/recordings/<recording>/zarr/<recording>.zarr \
+  --registry /nvme1/palette_registry.sqlite
 ```
+
+The tuner always writes `analysis_metadata.attrs["dish_mask"]`. Passing
+`--registry` also marks `recording_step_status.dish_mask=ok` for the matching
+dataset immediately; otherwise registry maintenance can refresh the status
+later.
 
 2) **Backfill chamber (older recordings only)**
 ```bash
@@ -34,6 +40,7 @@ scripts/py -m fisheye.utils.backfill_experimental_chamber /nvme1/recordings --re
 scripts/py -m fisheye.utils.apply_dish_mask_by_chamber /nvme1/recordings \
   --recursive \
   --source /nvme1/recordings/<recording>/zarr/<recording>.zarr \
+  --registry /nvme1/palette_registry.sqlite \
   --apply
 ```
 
@@ -41,7 +48,8 @@ scripts/py -m fisheye.utils.apply_dish_mask_by_chamber /nvme1/recordings \
 ```bash
 scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
   --recursive \
-  --chamber cedar
+  --chamber cedar \
+  --registry /nvme1/palette_registry.sqlite
 ```
 
 ## Batch apply details
@@ -52,6 +60,7 @@ scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
 - Uses `images_ds` by default for speed (pass `--full` for full-res).
 - Uses a mid-frame by default (pass `--frame` to force a specific index).
 - Skips targets with existing dish masks unless `--overwrite` is used.
+- With `--registry`, successful target saves also upsert `dish_mask=ok`.
 - Logs JSONL by default:
   - `$PALETTE_LOG_ROOT/apply_dish_mask_by_chamber`
   - or `<recordings_root>/logs/apply_dish_mask_by_chamber`
@@ -67,15 +76,18 @@ scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
   - `--only-missing` to find gaps
   - `--chamber <name>` to focus on a dish type
   - `--full` or `--frame` for better fidelity
+  - `--registry <sqlite>` to mark successful interactive saves in the registry
   - `--start`, `--limit` for partial passes
 
 Examples:
 ```bash
 # Only those that already have masks (verification pass)
-scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-present
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-present \
+  --registry /nvme1/palette_registry.sqlite
 
 # Only missing masks (fix pass)
-scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-missing
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-missing \
+  --registry /nvme1/palette_registry.sqlite
 ```
 
 ## Notes / best practices

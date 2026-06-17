@@ -48,7 +48,8 @@ below is how dish masks get created. The acquisition-side contract is tracked in
 
 ```bash
 scripts/py -m fisheye.tune.mask_tuner \
-  /path/to/zarr/..._analysis.zarr
+  /path/to/zarr/..._analysis.zarr \
+  --registry /nvme1/palette_registry.sqlite
 ```
 
 This opens an interactive GUI with OpenCV trackbars. Adjust the circle until
@@ -61,7 +62,10 @@ Options:
 
 The tuning is saved to `analysis_metadata.attrs["dish_mask"]` — metadata only,
 no arrays. It stores the circle center/radius and the Hough parameters used to
-find it.
+find it. When `--registry` is provided, a successful save also upserts
+`recording_step_status.step_name="dish_mask"` as `ok` for the matching registry
+dataset row. Without `--registry`, the Zarr write is still complete and the
+registry can be refreshed later by maintenance/backfill.
 
 For production Zarrs that keep only `raw_video` metadata, the tuner falls back
 to the recorded `source_video_path` and tunes in the analysis/inference
@@ -78,12 +82,14 @@ your tuned source:
 # Dry-run
 scripts/py -m fisheye.utils.apply_dish_mask_by_chamber /nvme1/recordings \
   --recursive \
-  --source /path/to/tuned/zarr/..._analysis.zarr
+  --source /path/to/tuned/zarr/..._analysis.zarr \
+  --registry /nvme1/palette_registry.sqlite
 
 # Apply
 scripts/py -m fisheye.utils.apply_dish_mask_by_chamber /nvme1/recordings \
   --recursive \
   --source /path/to/tuned/zarr/..._analysis.zarr \
+  --registry /nvme1/palette_registry.sqlite \
   --apply
 ```
 
@@ -95,7 +101,8 @@ sessions. Always review:
 ```bash
 scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
   --recursive \
-  --chamber cedar
+  --chamber cedar \
+  --registry /nvme1/palette_registry.sqlite
 ```
 
 This steps through each recording one at a time, launching the tuner for each.

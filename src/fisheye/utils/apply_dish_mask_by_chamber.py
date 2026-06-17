@@ -23,6 +23,7 @@ from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.batch_logging import utc_now
 from fisheye.tune.mask_tuner import save_mask_to_zarr
+from fisheye.utils.dish_mask_registry_sync import sync_dish_mask_registry_status
 
 
 _utc_now = utc_now
@@ -96,6 +97,35 @@ def _detect_circle(frame: np.ndarray, param1: int, param2: int, radius_adjustmen
     x, y, r = circles[0, 0]
     r = int(r) + int(radius_adjustment)
     return {"center": [int(x), int(y)], "radius": int(r)}
+
+
+def _sync_registry_after_apply(
+    zarr_path: Path,
+    registry_path: Optional[Path],
+    *,
+    method: str,
+    shape: str,
+    array_name: str,
+    frame_idx: int,
+) -> Optional[dict]:
+    if registry_path is None:
+        return None
+    result = sync_dish_mask_registry_status(
+        zarr_path,
+        registry_path,
+        method=method,
+        source="apply_dish_mask_by_chamber",
+        details={
+            "shape": shape,
+            "array_name": array_name,
+            "frame_index": int(frame_idx),
+        },
+    )
+    if result.synced:
+        print(f"  Registry: marked dish_mask ok for dataset {result.dataset_id}")
+    else:
+        print(f"  Registry warning: {result.message}")
+    return result.to_dict()
 
 
 @dataclass
@@ -175,6 +205,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/apply_dish_mask_by_chamber or <recordings_root>/logs/apply_dish_mask_by_chamber).",
     )
     parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path; on each successful save, mark dish_mask ok for that dataset.",
+    )
+    parser.add_argument(
         "--no-log",
         action="store_true",
         help="Disable JSONL logging.",
@@ -221,6 +256,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             overwrite=bool(args.overwrite),
             full=bool(args.full),
             frame=args.frame,
+            registry=str(args.registry) if args.registry else None,
             source=str(source),
             chamber=chamber,
         )
@@ -266,6 +302,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     updated = 0
     skipped = 0
     failed = 0
+    registry_synced = 0
+    registry_failed = 0
     for plan in plans:
         try:
             root = zarr.open(str(plan.zarr_path), mode="r")
@@ -332,7 +370,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             if shape == "rectangle":
                 # No parameters to re-detect; copy ROI directly.
-                save_mask_to_zarr(
+                saved = save_mask_to_zarr(
                     str(plan.zarr_path),
                     dish_mask,
                     array_name,
@@ -340,6 +378,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                     params=None,
                     image_shape=frame.shape[:2],
                 )
+                if not saved:
+                    failed += 1
+                    if logger is not None:
+                        logger.log(
+                            "dish_mask_apply",
+                            zarr=str(plan.zarr_path),
+                            status="failed",
+                            reason="save_mask_to_zarr returned false",
+                        )
+                    continue
+                registry_sync = _sync_registry_after_apply(
+                    plan.zarr_path,
+                    args.registry,
+                    method=str(dish_mask.get("method") or "manual_rectangle"),
+                    shape="rectangle",
+                    array_name=array_name,
+                    frame_idx=frame_idx,
+                )
+                if registry_sync is not None:
+                    if registry_sync.get("synced"):
+                        registry_synced += 1
+                    else:
+                        registry_failed += 1
                 updated += 1
                 print(f"Applied rectangle dish_mask to {plan.zarr_path}")
                 if logger is not None:
@@ -350,6 +411,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         shape="rectangle",
                         array_name=array_name,
                         frame_idx=frame_idx,
+                        registry_sync=registry_sync,
                     )
                 continue
 
@@ -382,7 +444,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "param2": param2,
                 "radius_adjustment": radius_adjustment,
             }
-            save_mask_to_zarr(
+            saved = save_mask_to_zarr(
                 str(plan.zarr_path),
                 payload,
                 array_name,
@@ -390,6 +452,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                 params=params,
                 image_shape=frame.shape[:2],
             )
+            if not saved:
+                failed += 1
+                if logger is not None:
+                    logger.log(
+                        "dish_mask_apply",
+                        zarr=str(plan.zarr_path),
+                        status="failed",
+                        reason="save_mask_to_zarr returned false",
+                    )
+                continue
+            registry_sync = _sync_registry_after_apply(
+                plan.zarr_path,
+                args.registry,
+                method="hough_circle_batch",
+                shape="circle",
+                array_name=array_name,
+                frame_idx=frame_idx,
+            )
+            if registry_sync is not None:
+                if registry_sync.get("synced"):
+                    registry_synced += 1
+                else:
+                    registry_failed += 1
             updated += 1
             print(f"Applied dish_mask to {plan.zarr_path}")
             if logger is not None:
@@ -402,6 +487,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     frame_idx=frame_idx,
                     detected_circle=circle,
                     params=params,
+                    registry_sync=registry_sync,
                 )
         except Exception as exc:
             failed += 1
@@ -419,6 +505,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  updated: {updated}")
     print(f"  skipped: {skipped}")
     print(f"  failed: {failed}")
+    if args.registry:
+        print(f"  registry_synced: {registry_synced}")
+        print(f"  registry_failed: {registry_failed}")
     if logger is not None:
         logger.log(
             "run_end",
@@ -426,6 +515,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             updated=updated,
             skipped=skipped,
             failed=failed,
+            registry_synced=registry_synced,
+            registry_failed=registry_failed,
             targets=len(plans),
         )
         logger.close()

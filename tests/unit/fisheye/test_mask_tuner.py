@@ -152,3 +152,46 @@ def test_save_headless_circle_mask_writes_reviewed_circle(
         "method": "headless_circle",
         "detected_circle": {"center": [30, 31], "radius": 32},
     }
+
+
+def test_sync_registry_after_save_records_expected_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        synced = True
+        dataset_id = "dataset_1"
+        message = "ok"
+
+        def to_dict(self) -> dict[str, object]:
+            return {"synced": True, "dataset_id": self.dataset_id}
+
+    def fake_sync(zarr_path, registry_path, *, method, source, details):
+        captured["zarr_path"] = zarr_path
+        captured["registry_path"] = registry_path
+        captured["method"] = method
+        captured["source"] = source
+        captured["details"] = details
+        return Result()
+
+    monkeypatch.setattr(mod, "sync_dish_mask_registry_status", fake_sync)
+
+    result = mod._sync_registry_after_save(
+        tmp_path / "example.zarr",
+        tmp_path / "registry.sqlite",
+        method="headless_circle",
+        shape="circle",
+        array_name="images_ds",
+        frame_index=5,
+    )
+
+    assert result == {"synced": True, "dataset_id": "dataset_1"}
+    assert captured["method"] == "headless_circle"
+    assert captured["source"] == "mask_tuner"
+    assert captured["details"] == {
+        "shape": "circle",
+        "array_name": "images_ds",
+        "frame_index": 5,
+    }

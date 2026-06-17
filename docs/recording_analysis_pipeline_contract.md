@@ -30,26 +30,39 @@ Related detect batch contract:
   - Responsibility: ensure `*_analysis.zarr`, import video metadata, import
     stimulus metadata when an H5/protocol source is available.
   - Explicit non-goal: no detect or refine orchestration.
-- Stage 2 detect tool:
+- Stage 2 dish-mask tuning/import:
+  - Module: `fisheye.tune.mask_tuner` for operator tuning; acquisition-provided
+    masks should be imported into the same Zarr attr surface.
+  - Responsibility: populate or verify
+    `analysis_metadata.attrs["dish_mask"]` before production detect/refine.
+  - Current behavior note:
+    - raw detect can run without a dish mask, but `refine_detect` applies the
+      dish-mask bbox-center gate only when this metadata exists.
+    - adding/changing the dish mask after refinement means detect-quality and
+      refined-detect outputs for that run should be regenerated.
+- Stage 3 detect tool:
   - Modules:
     - `fisheye.detection.detect_yolo` (explicit model path/config)
     - `fisheye.utils.run_detect_with_registry_model` (registry model resolution + detect run provenance)
   - Responsibility: append one detect run to analysis Zarr.
-- Stage 3 detect-quality tool (required before refine for production):
+- Stage 4 detect-quality tool (required before refine for production):
   - Module: `fisheye.refinement.detect_quality`
   - Responsibility: append one raw-detect quality report under the selected
     detect run with `quality_flags` and `detection_quality_labels`.
   - Current behavior note:
     - blob/traditional detect path writes quality as part of detect.
     - YOLO detect path requires explicit `detect_quality` stage invocation.
-- Stage 4 refine tool:
+- Stage 5 refine tool:
   - Module: `fisheye.refinement.refine_detect`
   - Responsibility: consume raw-detect quality labels, filter raw detections,
     and append sparse curated refined detect outputs; keep raw detect
     immutable.
   - Current behavior note:
+    - when `analysis_metadata.attrs["dish_mask"]` exists, outside-dish
+      candidates are filtered from curated instances but retained in
+      `source_detections` with reason `outside_dish_mask`.
     - interpolation is disabled in the normal sparse-first refined-detect path.
-- Stage 5 registry tool:
+- Stage 6 registry tool:
   - Module: `fisheye.registry.db.Registry.scan_zarr`
   - Responsibility: rescan/update registry metadata for the resulting analysis Zarr.
 
@@ -65,10 +78,11 @@ Related detect batch contract:
   - Module: `fisheye.utils.run_recording_analysis_pipeline`
   - Required execution order:
     1. import (`process_recording_import`)
-    2. detect (`run_detect_yolo` or `run_detect_registry_model`)
-    3. detect quality (`fisheye.refinement.detect_quality`)
-    4. refine (`run_refine_detect`, optional)
-    5. register (optional)
+    2. dish-mask tune/import/verify before production detect/refine
+    3. detect (`run_detect_yolo` or `run_detect_registry_model`)
+    4. detect quality (`fisheye.refinement.detect_quality`)
+    5. refine (`run_refine_detect`, optional)
+    6. register (optional)
 - Batch orchestrator:
   - Module: `fisheye.utils.import_recordings_analysis`
   - Behavior: resolve many recording plans, then run the full
@@ -83,14 +97,16 @@ Related detect batch contract:
 The required order is:
 
 1. `import_recording_analysis`
-2. detect
-3. `detect_quality`
-4. refine (optional)
-5. register (optional)
+2. dish-mask tune/import/verify
+3. detect
+4. `detect_quality`
+5. refine (optional)
+6. register (optional)
 
 Rationale: refine should consume explicit quality labels, not inferred "all clean"
 fallbacks. Detect/refine should also run against an archive that already has
-analysis purpose and imported metadata context.
+analysis purpose, imported metadata context, and the dish-mask geometry needed
+for outside-dish gating.
 
 ## Recording-Only Mode
 
@@ -249,6 +265,12 @@ provenance.
 
 - Single recording dry-run:
   - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --dry-run`
+- Dish-mask tune/verify after import and before production detect/refine:
+  - `scripts/py -m fisheye.tune.mask_tuner "$ANALYSIS_ZARR" --registry /nvme1/palette_registry.sqlite`
+  - The save always writes `analysis_metadata.attrs["dish_mask"]`; `--registry`
+    additionally upserts `recording_step_status.dish_mask=ok` for the matching
+    dataset. Without `--registry`, the next registry maintenance/backfill pass
+    can discover the Zarr attr.
 - Single recording apply with registry model + register:
   - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --model-source registry --registry /nvme1/palette_registry.sqlite --register --apply`
   - If detect path is YOLO and pipeline wrapper does not auto-run quality:

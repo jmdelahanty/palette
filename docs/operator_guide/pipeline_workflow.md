@@ -13,7 +13,7 @@ For cluster migration status and implementation gaps across detect, pose,
 segmentation, and refinement stages, see
 [cluster_pipeline_migration_checklist.md](../cluster_pipeline_migration_checklist.md).
 
-Recommended pre-import order:
+Recommended acquisition-to-analysis order:
 
 1. organize recordings into the standard recording directory layout
 2. run the [video diagnostics preflight](video_diagnostics.md) against the
@@ -22,7 +22,8 @@ Recommended pre-import order:
 3. run the [H5 diagnostics preflight](h5_diagnostics.md) against the organized
    recording to verify raw Citrus H5 importability and optional section health
 4. if both preflights pass, import the recording into its analysis Zarr
-5. continue with detection and downstream analysis stages
+5. create or verify the dish mask on the imported analysis Zarr
+6. continue with detection and downstream analysis stages
 
 If you run diagnostics through `organize_recordings --run-video-diagnostics`
 and/or `--run-h5-diagnostics`, the organizer writes a `preflight` summary into
@@ -51,38 +52,44 @@ recommended H5 diagnostics preflight
   1. import (create analysis zarr, import metadata + stimulus)
        |
        v
-  2. detect (YOLO object detection on camera video)
+  2. dish mask (create/verify arena geometry)
        |
        v
-  3. detect quality (grade detection run, flag artifacts)
+  3. detect (YOLO object detection on camera video)
        |
        v
-  4. refine detect (filter artifacts, write sparse curated instances)
+  4. detect quality (grade detection run, flag artifacts)
        |
        v
-  5. crop (extract ROI patches from detections)
+  5. refine detect (filter artifacts, dish-mask gate, write sparse curated instances)
        |
        v
-  6. keypoints (anatomical landmark detection on crops)
+  6. crop (extract ROI patches from detections)
        |
        v
-  7. refine keypoints (correct eye swaps, compute geometry)
+  7. keypoints (anatomical landmark detection on crops)
        |
        v
-  8. eye masks (segment eyes from crops)
+  8. refine keypoints (correct eye swaps, compute geometry)
        |
        v
-  9. subject masks (full body segmentation)
+  9. eye masks (segment eyes from crops)
        |
        v
-  10. track kinematics (consolidate into per-track metrics)
+  10. subject masks (full body segmentation)
        |
        v
-  11. analysis (swim bouts, stimulus response, heatmaps)
+  11. track kinematics (consolidate into per-track metrics)
+       |
+       v
+  12. analysis (swim bouts, stimulus response, heatmaps)
 ```
 
-Steps 1-7 can be run together via the batch pipeline command. Steps 8+
-currently run as separate commands.
+Detection through refined keypoints can be run together via the batch pipeline
+command when dish masks already exist or have been imported from acquisition
+metadata. If masks still need manual tuning, run the import-only command first,
+tune/verify masks, then start the detect/refine pipeline. Steps 9+ currently
+run as separate commands.
 
 ---
 
@@ -175,7 +182,34 @@ and the single-recording pipeline — you rarely need to run it standalone.
 - `raw_video` group with video dimensions, fps, codec, frame count
 - `analysis/stimulus_runs/` with stimulus event tables (if H5 has stimulus data)
 
-### 2. Detect
+### 2. Dish mask
+
+Create or verify the arena/dish mask before detection/refinement for production
+runs. Raw detection can technically run without this metadata, but
+`refine_detect` uses `analysis_metadata.attrs["dish_mask"]` to gate bbox centers
+and preserve outside-dish candidates in `source_detections` with reason
+`outside_dish_mask`. If you add the mask after refining detections, regenerate
+detect-quality/refined-detect outputs for that run.
+
+Interactive tuning:
+
+```bash
+scripts/py -m fisheye.tune.mask_tuner \
+  path/to/zarr/..._analysis.zarr \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+For full-resolution tuning, add `--full`. If Orange/Citrus wrote a runtime dish
+mask and Palette imported it into `analysis_metadata.attrs["dish_mask"]`,
+operators should still visually verify it before starting detect/refine. See
+[citrus_dish_mask_handoff.md](citrus_dish_mask_handoff.md).
+
+**What it writes:** `analysis_metadata.attrs["dish_mask"]` plus mask tuning
+metadata. With `--registry`, successful saves also mark `dish_mask` as `ok` in
+`recording_step_status`; without it, registry maintenance can discover the Zarr
+attribute later.
+
+### 3. Detect
 
 Runs YOLO inference on the camera video to find fish in every frame.
 
@@ -193,7 +227,7 @@ scripts/py -m fisheye.detection.detect_yolo \
 **What it writes:** `detect_runs/{run_id}/` with bounding boxes, scores, class
 labels, and coverage statistics.
 
-### 3. Detect quality
+### 4. Detect quality
 
 Labels raw detection artifacts (jumps, blips, multi-detection) on a detect run.
 
@@ -218,7 +252,7 @@ artifact labels, quality summary metadata, and threshold provenance.
 scripts/py -m fisheye.utils.detect_quality_batch /nvme1/recordings --recursive --apply
 ```
 
-### 4. Refine detect
+### 5. Refine detect
 
 Consumes raw detect artifact labels, filters bad candidates, and writes the
 canonical sparse curated detect surface.
@@ -233,6 +267,8 @@ The current sparse-first workflow filters flagged raw detections and writes
 `refined_detect_runs/{run_id}/instances` plus
 `refined_detect_runs/{run_id}/source_detections`. Interpolation metadata is
 retained only for legacy compatibility.
+When a dish mask is present, refinement also marks outside-dish candidates as
+`outside_dish_mask` while preserving them in `source_detections`.
 
 **What it writes:** `refined_detect_runs/{run_id}/instances` for curated bbox
 rows and `refined_detect_runs/{run_id}/source_detections` for candidate/audit
@@ -243,7 +279,7 @@ rows.
 scripts/py -m fisheye.utils.refine_detect_batch /nvme1/recordings --recursive --apply
 ```
 
-### 5. Crop
+### 6. Crop
 
 Extracts ROI image patches around each detection for downstream pose and
 segmentation models.
@@ -309,7 +345,7 @@ scripts/py -m fisheye.segmentation.infer_unet_subject_masks "$ZARR" \
 The manifest is the API boundary. Downstream stages validate it against the
 selected archive and crop run before memory-mapping the payload.
 
-### 6. Keypoints
+### 7. Keypoints
 
 Detects anatomical landmarks (eyes, body points) on each crop.
 
@@ -326,7 +362,7 @@ The default config uses the `traditional` (geometry-based) method. The
 **What it writes:** `keypoints_runs/{run_id}/` with landmark coordinates and
 confidence scores.
 
-### 7. Refine keypoints
+### 8. Refine keypoints
 
 Corrects left/right eye swaps and computes diagnostic geometry metrics.
 
@@ -344,7 +380,7 @@ coordinates and geometry metrics.
 scripts/py -m fisheye.utils.refine_keypoints_batch /nvme1/recordings --recursive --apply
 ```
 
-### 8. Eye masks
+### 9. Eye masks
 
 Segments eye regions from each crop. Three methods are available: U-Net
 (primary), traditional (color-based), and YOLO.
@@ -375,7 +411,7 @@ scripts/py -m fisheye.refinement.refine_eye_masks \
   path/to/zarr/..._analysis.zarr
 ```
 
-### 9. Subject masks
+### 10. Subject masks
 
 Segments subject-mask components. The current recommended full-component path is
 the U-Net subject-mask model, which writes raw probability surfaces for body,
@@ -472,7 +508,7 @@ scripts/py -m fisheye.utils.run_swim_bladder_segmentation_batch \
   --apply
 ```
 
-### 10. Track kinematics
+### 11. Track kinematics
 
 Consolidates detections, keypoints, and arena assignments into unified
 per-track kinematic metrics (position, heading, speed, acceleration).
@@ -487,7 +523,7 @@ scripts/py -m fisheye.analysis.track_kinematics \
 per-track arrays for position (px and mm), heading, angular velocity, speed
 (raw/filtered/smoothed), and acceleration.
 
-### 11. Analysis
+### 12. Analysis
 
 These steps produce final behavioral metrics. Each requires track kinematics
 to exist.
