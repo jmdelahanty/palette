@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-02-27
+last_verified: 2026-06-16
 -->
 
 This document defines the minimum metadata contract for `recording_manifest.json`
@@ -83,6 +83,11 @@ Example shape:
 Semantics:
 
 - `preflight.status` is the combined stored verdict.
+- New manifests start with `preflight.status="not_run"`, `checked_at_utc=null`,
+  and empty video/H5 sections. That means organize wrote the manifest but did
+  not run diagnostics hooks yet.
+- `organize_recordings` updates this object only when run with
+  `--run-video-diagnostics`, `--run-h5-diagnostics`, or both.
 - `video.status` summarizes the unified raw-video preflight.
 - `h5.status` summarizes the unified H5 preflight.
 - `video.media_status` and `h5.core_status` are the strongest import-relevant
@@ -153,11 +158,15 @@ integrity check, so missing H5/CSV sidecars are tolerated.
 
 For `orange_external_ipc_single_clip_v1`, the recording comes from an Orange
 `external_ipc` batch with Citrus H5 context plus an ingest-authoritative
-full-frame external recorder video. Recommended manifest content:
+full-frame external recorder video. Runtime crop videos are first-class
+acquisition-time derived inputs and are described separately from the full-frame
+stream. Recommended manifest content:
 
 - include the normal recording identity fields from the Citrus H5
 - include `recording_backend="external_ipc"`, `orange_session_id`,
   `orange_producer`, and `orange_recording_mode` when known
+- include `video_streams.schema_id="orange_runtime_video_streams_v1"` with
+  separate `full` and `crop` stream entries when Orange wrote both streams
 - include one full-frame camera video entry under `files.cams`
 - include compatibility camera sidecars under `files.cams`:
   `Cam*.mp4`, `Cam*_meta.csv`, and `Cam*_keyframe.json`
@@ -166,10 +175,68 @@ full-frame external recorder video. Recommended manifest content:
   full-frame video
 - preserve cropped video and crop-native sidecars under
   `files.derived` / `derived/external_crop_recorder/`
+- declare crop stream pixels as `video_pixel_coordinate_space="crop_frame_pixels"`
+  and crop metadata geometry as
+  `source_geometry_coordinate_space="full_frame_pixels"`
+- preserve acquisition/session context in `files.raw`: `recording_session.json`,
+  `recording_snapshot_runtime.json`, `ptp_sync_summary.json`,
+  `transfer_complete.json`, `orange_local_control.events.jsonl`, recorder
+  contracts, and recorder supervisor plans
+- preserve Citrus startup diagnostics under
+  `files.derived` / `derived/citrus/`
 - preserve external recorder diagnostics under
   `files.derived` / `derived/external_recorder/`
 - do not include shard intermediates such as `*_shard*_gpu*.mp4`,
   `*_keyframes_shard*.json`, or `*_encode_shard*.csv`
+
+See
+[`docs/orange_runtime_video_artifact_contract.md`](orange_runtime_video_artifact_contract.md)
+for the full stream and artifact retention contract.
+
+Palette organizer metadata sources for this schema:
+
+- H5 root attrs provide recording identity and acquisition context:
+  `session_uuid`, `session_start_iso8601_utc`, `rig_id`, `arena_id`,
+  `camera_id` when present, `canvas_name`, `protocol_name_from_definition`,
+  `loaded_protocol_filepath`, IPC source fields, `hostname`, and optional
+  root-level biology/dish fields when Orange writes them.
+- If H5 root `camera_id` is absent, the organizer derives `camera_id` from
+  `ipc_source_name` patterns such as `/shm_cam_2010093`.
+- `protocol_name` is lifted from `protocol_snapshot.attrs["protocol_name"]`
+  or `protocol_snapshot/protocol_definition_json.protocol_name` when the root
+  attrs do not provide it.
+- `dish_design` is lifted from
+  `calibration_snapshot/arena_config_json.selected_dish_type_name`, falling
+  back to `dish_config.dish_name` when available.
+- `genotype` is lifted from `subject_metadata.attrs["genotype"]`.
+- `dpf_at_acquisition` is lifted from
+  `subject_metadata.attrs["days_post_fertilization"]` or
+  `subject_metadata.attrs["dpf_at_acquisition"]`.
+- `software_version` uses the H5 root attr when populated; otherwise, for
+  Orange external-IPC batches, it falls back to
+  `recording_snapshot.json.source_version.describe`, then
+  `source_version.commit_short`, then `producer_version`.
+- `num_dishes` and `fish_per_dish` are not inferred from
+  `subject_metadata.fish_count` or `subject_count`. Those fields have different
+  possible meanings across recordings, so Orange or an operator metadata layer
+  must write them explicitly before Palette treats them as manifest facts.
+
+Existing manifests can be refreshed without re-organizing the recording:
+
+```bash
+scripts/py -m fisheye.utils.refresh_recording_manifest_metadata \
+  /path/to/recordings/root \
+  --recursive \
+  --refresh-external-ipc-artifacts
+```
+
+The refresh tool is dry-run by default. Add `--apply` after reviewing the field
+diffs. By default it only fills empty fields from H5/runtime metadata and
+preserves non-empty manifest values; `--overwrite-existing` is available for
+deliberate repairs. With `--refresh-external-ipc-artifacts`, it also backfills
+external-IPC `video_streams`, copies small retained session/control artifacts
+from the manifest `source_dir`, and adds their relative paths to `files`. It
+does not copy, move, or delete shard debug outputs.
 
 `orange_external_ipc_single_clip_v1` is an organizer-side compatibility layout
 for single-clip external IPC sessions. It is not the rolling-clip collection

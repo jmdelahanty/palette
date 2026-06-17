@@ -137,6 +137,11 @@ scripts/py -m fisheye.utils.organize_recordings \
   --rename-cams
 ```
 
+This organize step writes `recording_manifest.json` with
+`preflight.status="not_run"` unless the wrapper is extended to pass
+`--run-video-diagnostics` and/or `--run-h5-diagnostics`; the downstream import
+gate only blocks stored `preflight.status="fail"`.
+
 then:
 
 ```bash

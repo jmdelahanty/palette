@@ -47,6 +47,7 @@ except ModuleNotFoundError:
 
 _utc_now = utc_now
 JsonLogger = SharedJsonLogger
+_PLACEHOLDER_METADATA_VALUES = {"unknown", "none", "null", "n/a", "na"}
 
 
 @dataclass(frozen=True)
@@ -113,8 +114,95 @@ def _sanitize_for_filename(value: str) -> str:
     return "".join(cleaned)
 
 
-def _read_camera_context(h5_path: Path) -> Tuple[Optional[str], Dict[str, str]]:
-    meta: Dict[str, str] = {}
+def _set_meta_if_present(meta: Dict[str, Any], key: str, value: object) -> None:
+    if meta.get(key):
+        return
+    normalized = _normalize_attr(value)
+    if normalized and normalized.lower() in _PLACEHOLDER_METADATA_VALUES:
+        return
+    if normalized:
+        meta[key] = normalized
+
+
+def _read_h5_json_object(h5: h5py.File, path: str) -> Optional[Dict[str, Any]]:
+    node = h5.get(path)
+    if not isinstance(node, h5py.Dataset):
+        return None
+    try:
+        raw_value = node[()]
+    except Exception:
+        return None
+    if hasattr(raw_value, "item"):
+        try:
+            raw_value = raw_value.item()
+        except Exception:
+            pass
+    text = _normalize_attr(raw_value)
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _dish_design_from_arena_config(payload: Dict[str, Any]) -> Optional[str]:
+    for key in ("selected_dish_type_name", "dish_name"):
+        value = _normalize_attr(payload.get(key))
+        if value:
+            return value
+    dish_config = payload.get("dish_config")
+    if isinstance(dish_config, dict):
+        for key in ("dish_name", "name"):
+            value = _normalize_attr(dish_config.get(key))
+            if value:
+                return value
+    return None
+
+
+def _augment_h5_manifest_context(h5: h5py.File, meta: Dict[str, Any]) -> None:
+    protocol_snapshot = h5.get("protocol_snapshot")
+    if isinstance(protocol_snapshot, h5py.Group):
+        _set_meta_if_present(
+            meta,
+            "protocol_name",
+            protocol_snapshot.attrs.get("protocol_name"),
+        )
+        protocol_definition = _read_h5_json_object(h5, "protocol_snapshot/protocol_definition_json")
+        if protocol_definition:
+            _set_meta_if_present(
+                meta,
+                "protocol_name",
+                protocol_definition.get("protocol_name"),
+            )
+            _set_meta_if_present(
+                meta,
+                "protocol_name_from_definition",
+                protocol_definition.get("protocol_name"),
+            )
+
+    subject_metadata = h5.get("subject_metadata")
+    if isinstance(subject_metadata, h5py.Group):
+        _set_meta_if_present(meta, "genotype", subject_metadata.attrs.get("genotype"))
+        _set_meta_if_present(
+            meta,
+            "dpf_at_acquisition",
+            subject_metadata.attrs.get("days_post_fertilization"),
+        )
+        _set_meta_if_present(
+            meta,
+            "dpf_at_acquisition",
+            subject_metadata.attrs.get("dpf_at_acquisition"),
+        )
+
+    arena_config = _read_h5_json_object(h5, "calibration_snapshot/arena_config_json")
+    if arena_config:
+        _set_meta_if_present(meta, "dish_design", _dish_design_from_arena_config(arena_config))
+
+
+def _read_camera_context(h5_path: Path) -> Tuple[Optional[str], Dict[str, Any]]:
+    meta: Dict[str, Any] = {}
     try:
         with h5py.File(h5_path, "r") as h5:
             root = h5.attrs
@@ -133,12 +221,17 @@ def _read_camera_context(h5_path: Path) -> Tuple[Optional[str], Dict[str, str]]:
                 "active_ipc_source",
                 "hostname",
                 "software_version",
+                "protocol_name",
+                "dish_design",
+                "genotype",
+                "dpf_at_acquisition",
+                "num_dishes",
+                "fish_per_dish",
             )
             for key in keys:
                 if key in root:
-                    value = _normalize_attr(root.get(key))
-                    if value:
-                        meta[key] = value
+                    _set_meta_if_present(meta, key, root.get(key))
+            _augment_h5_manifest_context(h5, meta)
             camera_id = meta.get("camera_id")
             if not camera_id:
                 derived = _derive_camera_id(meta.get("ipc_source_name"))
@@ -407,6 +500,25 @@ def _load_json_object(path: Path) -> Dict[str, Any]:
     return payload
 
 
+def _runtime_snapshot_software_version(path: Path) -> Optional[str]:
+    if not path.exists():
+        return None
+    try:
+        payload = _load_json_object(path)
+    except Exception:
+        return None
+    source_version = payload.get("source_version")
+    if isinstance(source_version, dict):
+        for key in ("describe", "commit_short", "commit"):
+            value = _normalize_attr(source_version.get(key))
+            if value and value.lower() not in _PLACEHOLDER_METADATA_VALUES:
+                return value
+    value = _normalize_attr(payload.get("producer_version"))
+    if value and value.lower() not in _PLACEHOLDER_METADATA_VALUES:
+        return value
+    return None
+
+
 def _looks_like_external_ipc_batch(source: Path) -> bool:
     session_path = source / "recording_session.json"
     if not session_path.exists():
@@ -488,6 +600,120 @@ def _external_ipc_output_for_camera(
     return payload if isinstance(payload, dict) else {}
 
 
+def _dict_or_empty(value: object) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _pick_stream_value(output: Dict[str, Any], key: str) -> object:
+    details = _dict_or_empty(output.get("details"))
+    if key in output:
+        return output.get(key)
+    return details.get(key)
+
+
+def _drop_none_values(payload: Dict[str, object]) -> Dict[str, object]:
+    cleaned: Dict[str, object] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            nested = _drop_none_values(value)
+            if nested:
+                cleaned[key] = nested
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def _external_ipc_video_streams_payload(
+    *,
+    camera_id: str,
+    cam_base: str,
+    full_output: Dict[str, Any],
+    crop_output: Dict[str, Any],
+) -> Dict[str, object]:
+    full_stream = _drop_none_values(
+        {
+            "role": "ingest_authoritative_full_frame",
+            "output_kind": "full",
+            "source": "orange_external_ipc",
+            "camera_id": camera_id,
+            "stream_id": _pick_stream_value(full_output, "stream_id"),
+            "orange_declared_role": _pick_stream_value(full_output, "role"),
+            "video": f"cams/{cam_base}.mp4",
+            "frame_clock_metadata": f"cams/{cam_base}_meta.csv",
+            "keyframes": f"cams/{cam_base}_keyframe.json",
+            "summary": f"cams/{cam_base}_external_summary.json",
+            "frame_clock": "recording_frame_id",
+            "coordinate_space": _pick_stream_value(full_output, "coordinate_space"),
+            "width": _pick_stream_value(full_output, "width"),
+            "height": _pick_stream_value(full_output, "height"),
+            "frame_count": _pick_stream_value(full_output, "frame_count"),
+            "frame_rate": _pick_stream_value(full_output, "frame_rate"),
+            "codec": _pick_stream_value(full_output, "codec"),
+            "container": _pick_stream_value(full_output, "container"),
+            "encoded_format": _pick_stream_value(full_output, "encoded_format"),
+            "pixel_source_format": _pick_stream_value(full_output, "pixel_source_format"),
+        }
+    )
+    streams: Dict[str, object] = {"full": full_stream}
+
+    if crop_output:
+        crop_stream = _drop_none_values(
+            {
+                "role": "runtime_derived_acquisition_input",
+                "output_kind": "crop",
+                "source": "orange_external_ipc",
+                "camera_id": camera_id,
+                "stream_id": _pick_stream_value(crop_output, "stream_id"),
+                "orange_declared_role": _pick_stream_value(crop_output, "role"),
+                "video": f"derived/external_crop_recorder/{cam_base}_crop_external.mp4",
+                "metadata": f"derived/external_crop_recorder/{cam_base}_crop_meta.csv",
+                "keyframes": (
+                    f"derived/external_crop_recorder/"
+                    f"{cam_base}_crop_external_keyframe.json"
+                ),
+                "summary": (
+                    f"derived/external_crop_recorder/"
+                    f"{cam_base}_crop_external_summary.json"
+                ),
+                "frame_clock": "recording_frame_id",
+                "video_pixel_coordinate_space": "crop_frame_pixels",
+                "source_geometry_coordinate_space": (
+                    _pick_stream_value(crop_output, "coordinate_space")
+                    or "full_frame_pixels"
+                ),
+                "geometry_columns": [
+                    "crop_x",
+                    "crop_y",
+                    "crop_w",
+                    "crop_h",
+                    "detection_x",
+                    "detection_y",
+                    "detection_w",
+                    "detection_h",
+                ],
+                "blank_frame_policy": _pick_stream_value(crop_output, "blank_frame_policy"),
+                "selection_policy": _pick_stream_value(crop_output, "selection_policy"),
+                "width": _pick_stream_value(crop_output, "width"),
+                "height": _pick_stream_value(crop_output, "height"),
+                "frame_count": _pick_stream_value(crop_output, "frame_count"),
+                "frame_rate": _pick_stream_value(crop_output, "frame_rate"),
+                "codec": _pick_stream_value(crop_output, "codec"),
+                "container": _pick_stream_value(crop_output, "container"),
+                "encoded_format": _pick_stream_value(crop_output, "encoded_format"),
+                "pixel_source_format": _pick_stream_value(crop_output, "pixel_source_format"),
+            }
+        )
+        streams["crop"] = crop_stream
+
+    return {
+        "schema_id": "orange_runtime_video_streams_v1",
+        "frame_clock": "recording_frame_id",
+        "streams": streams,
+    }
+
+
 def _append_planned_if_present(
     files: List[PlannedFile],
     source: Optional[Path],
@@ -535,6 +761,8 @@ def _build_external_ipc_plan(
         ("recording_session.json", "recording_session.json"),
         ("recording_snapshot.json", "recording_snapshot_runtime.json"),
         ("ptp_sync_summary.json", "ptp_sync_summary.json"),
+        ("_citrus_transfer_complete.json", "transfer_complete.json"),
+        ("orange_local_control.events.jsonl", "orange_local_control.events.jsonl"),
         ("external_recorder_contract.json", "external_recorder_contract.json"),
         ("external_crop_recorder_contract.json", "external_crop_recorder_contract.json"),
         ("external_recorder_supervisor_plan.json", "external_recorder_supervisor_plan.json"),
@@ -543,6 +771,19 @@ def _build_external_ipc_plan(
         shared_path = batch_root / shared_name
         if shared_path.exists():
             raw_files.append(PlannedFile(shared_path, dest_name, action="copy"))
+
+    threading_candidates = list(batch_root.glob("*threading_startup*.json"))
+    citrus_dir = batch_root / "citrus"
+    if citrus_dir.exists():
+        threading_candidates.extend(citrus_dir.glob("*threading_startup*.json"))
+    for threading_path in sorted(threading_candidates):
+        derived_files.append(
+            PlannedFile(
+                threading_path,
+                f"citrus/{threading_path.name}",
+                action="copy",
+            )
+        )
 
     session_id = str(session.get("session_id") or batch_root.name)
     meta.setdefault("session_uuid", _choose_session_tag(meta, h5_path))
@@ -556,6 +797,11 @@ def _build_external_ipc_plan(
     meta["orange_session_id"] = session_id
     meta["orange_producer"] = str(session.get("producer") or "")
     meta["orange_recording_mode"] = str(session.get("mode") or "")
+    _set_meta_if_present(
+        meta,
+        "software_version",
+        _runtime_snapshot_software_version(batch_root / "recording_snapshot.json"),
+    )
 
     if not camera_id:
         missing.append("camera_id (missing in H5 attrs)")
@@ -578,6 +824,12 @@ def _build_external_ipc_plan(
     crop_dir = batch_root / "external_crop_recorder"
     session_tag = _sanitize_for_filename(_choose_session_tag(meta, h5_path))
     cam_base = f"Cam{camera_id}_{session_tag}" if rename_cams else f"Cam{camera_id}"
+    meta["video_streams"] = _external_ipc_video_streams_payload(
+        camera_id=camera_id,
+        cam_base=cam_base,
+        full_output=full_output,
+        crop_output=crop_output,
+    )
 
     if not full_output:
         missing.append(f"recording_outputs/{camera_id}/full")
@@ -1019,6 +1271,7 @@ def _write_manifest(
         "orange_session_id": plan.meta.get("orange_session_id"),
         "orange_producer": plan.meta.get("orange_producer"),
         "orange_recording_mode": plan.meta.get("orange_recording_mode"),
+        "video_streams": plan.meta.get("video_streams"),
         "source_dir": str(plan.source_dir),
         "files": files,
         "hevc_keyframe_flags": plan.keyframe_checks if plan.keyframe_checks else None,

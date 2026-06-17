@@ -36,6 +36,9 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
     _touch(batch / "recording_snapshot.json", "{}")
     _touch(batch / "recording_session.json", "{}")
     _touch(batch / "ptp_sync_summary.json", "{}")
+    _touch(batch / "_citrus_transfer_complete.json", "{}")
+    _touch(batch / "orange_local_control.events.jsonl", "{}\n")
+    _touch(batch / "citrus" / "2026-05-29T18-11-16Z_threading_startup.json", "{}")
 
     full_dir = batch / "external_recorder"
     crop_dir = batch / "external_crop_recorder"
@@ -78,6 +81,7 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
                     "metadata": str(stale_root / "external_recorder" / f"Cam{camera}_external_summary.json"),
                     "keyframes": str(stale_root / "external_recorder" / f"Cam{camera}_external_keyframes.json"),
                     "frame_count": 1,
+                    "coordinate_space": "full_frame_pixels",
                 },
                 "crop": {
                     "backend": "external_ipc",
@@ -90,6 +94,15 @@ def _make_external_ipc_batch(tmp_path: Path) -> Path:
                     "perf": f"Cam{camera}_crop_perf.csv",
                     "sidecar_perf": f"Cam{camera}_crop_sidecar_perf.csv",
                     "frame_count": 1,
+                    "width": 256,
+                    "height": 256,
+                    "encoded_format": "nv12",
+                    "pixel_source_format": "mono8",
+                    "details": {
+                        "stream_id": f"{camera}_crop",
+                        "blank_frame_policy": "encode_black_frame_when_no_detection",
+                        "selection_policy": "largest_detection_by_confidence",
+                    },
                 },
             }
         },
@@ -113,6 +126,10 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: P
     assert plan.meta["artifact_schema_id"] == "orange_external_ipc_single_clip_v1"
     assert plan.meta["recording_backend"] == "external_ipc"
 
+    raw_names = [item.dest_name for item in plan.raw_files]
+    assert "transfer_complete.json" in raw_names
+    assert "orange_local_control.events.jsonl" in raw_names
+
     cam_names = [item.dest_name for item in plan.cam_files]
     assert cam_names == [
         "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4",
@@ -125,8 +142,22 @@ def test_external_ipc_plan_maps_full_and_crop_outputs_without_shards(tmp_path: P
     assert "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_external.mp4" in derived_names
     assert "external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_meta.csv" in derived_names
     assert "external_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_external_detach.csv" in derived_names
+    assert "citrus/2026-05-29T18-11-16Z_threading_startup.json" in derived_names
     assert all("shard" not in item.source.name for item in plan.cam_files + plan.derived_files)
     assert all("shard" not in item.dest_name for item in plan.cam_files + plan.derived_files)
+
+    video_streams = plan.meta["video_streams"]
+    assert video_streams["schema_id"] == "orange_runtime_video_streams_v1"
+    assert video_streams["streams"]["full"]["role"] == "ingest_authoritative_full_frame"
+    assert video_streams["streams"]["full"]["video"] == (
+        "cams/Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4"
+    )
+    assert video_streams["streams"]["crop"]["role"] == "runtime_derived_acquisition_input"
+    assert video_streams["streams"]["crop"]["video_pixel_coordinate_space"] == "crop_frame_pixels"
+    assert (
+        video_streams["streams"]["crop"]["blank_frame_policy"]
+        == "encode_black_frame_when_no_detection"
+    )
 
 
 def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, monkeypatch) -> None:
@@ -162,11 +193,16 @@ def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, 
     dest = tmp_path / "recordings" / "2026-05-29T18-11-16Z_arena_1_GoodCopBadCop"
     assert (dest / "cams" / "Cam2010093_2026-05-29T18-11-16Z_arena_1.mp4").exists()
     assert (dest / "cams" / "Cam2010093_2026-05-29T18-11-16Z_arena_1_meta.csv").exists()
+    assert (dest / "raw" / "transfer_complete.json").exists()
+    assert (dest / "raw" / "orange_local_control.events.jsonl").exists()
     assert (
         dest
         / "derived"
         / "external_crop_recorder"
         / "Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_meta.csv"
+    ).exists()
+    assert (
+        dest / "derived" / "citrus" / "2026-05-29T18-11-16Z_threading_startup.json"
     ).exists()
 
     manifest = json.loads((dest / "recording_manifest.json").read_text(encoding="utf-8"))
@@ -178,3 +214,81 @@ def test_external_ipc_apply_writes_nested_sidecars_and_manifest(tmp_path: Path, 
         "derived/external_crop_recorder/Cam2010093_2026-05-29T18-11-16Z_arena_1_crop_external.mp4"
         in manifest["files"]["derived"]
     )
+    assert manifest["video_streams"]["streams"]["crop"]["stream_id"] == "2010093_crop"
+
+
+def test_external_ipc_plan_lifts_manifest_context_from_h5_and_runtime_snapshot(tmp_path: Path) -> None:
+    batch_root = tmp_path / "staging" / "2026_06_14_17_11_56"
+    citrus_root = batch_root / "citrus"
+    citrus_root.mkdir(parents=True)
+
+    h5_path = citrus_root / "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop.h5"
+    with h5py.File(h5_path, "w") as h5:
+        h5.attrs["session_uuid"] = "2026-06-14T21-12-08Z_arena_1"
+        h5.attrs["session_start_iso8601_utc"] = "2026-06-14T21-12-08Z"
+        h5.attrs["rig_id"] = "omnifin0"
+        h5.attrs["arena_id"] = "arena_1"
+        h5.attrs["canvas_name"] = "shadow"
+        h5.attrs["ipc_source_name"] = "/shm_cam_2010093"
+        h5.attrs["software_version"] = ""
+
+        protocol = h5.create_group("protocol_snapshot")
+        protocol.attrs["protocol_name"] = "GoodCopBadCop"
+        protocol.create_dataset(
+            "protocol_definition_json",
+            data=json.dumps({"protocol_name": "GoodCopBadCop"}).encode("utf-8"),
+        )
+
+        subjects = h5.create_group("subject_metadata")
+        subjects.attrs["genotype"] = "EXPERIMENTAL"
+        subjects.attrs["days_post_fertilization"] = 9
+        subjects.attrs["fish_count"] = 8
+        subjects.attrs["subject_count"] = 1
+
+        calibration = h5.create_group("calibration_snapshot")
+        calibration.create_dataset(
+            "arena_config_json",
+            data=json.dumps(
+                {
+                    "selected_dish_type_name": "palm1",
+                    "dish_config": {"dish_name": "palm1"},
+                }
+            ).encode("utf-8"),
+        )
+
+    (batch_root / "recording_snapshot.json").write_text(
+        json.dumps(
+            {
+                "producer_version": "951196b",
+                "source_version": {
+                    "describe": "v1.2.1-1444-g951196b-dirty",
+                    "commit_short": "951196b",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = {
+        "session_id": "2026_06_14_17_11_56",
+        "producer": "orange_gui_external_ipc",
+        "mode": "single_clip",
+        "recording_outputs": {},
+    }
+
+    plan = organize_recordings._build_external_ipc_plan(
+        h5_path,
+        batch_root=batch_root,
+        session=session,
+        dest_root=tmp_path / "recordings",
+        rename_cams=True,
+    )
+
+    assert plan.camera_id == "2010093"
+    assert plan.meta["protocol_name"] == "GoodCopBadCop"
+    assert plan.meta["protocol_name_from_definition"] == "GoodCopBadCop"
+    assert plan.meta["dish_design"] == "palm1"
+    assert plan.meta["genotype"] == "EXPERIMENTAL"
+    assert plan.meta["dpf_at_acquisition"] == "9"
+    assert plan.meta["software_version"] == "v1.2.1-1444-g951196b-dirty"
+    assert "fish_per_dish" not in plan.meta
+    assert "num_dishes" not in plan.meta

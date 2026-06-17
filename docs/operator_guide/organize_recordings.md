@@ -262,9 +262,11 @@ moves per-camera diagnostic sidecars to `derived/`, and patches
 Newer Orange sessions may write a batch root with `recording_session.json`,
 `external_recorder/`, `external_crop_recorder/`, and Citrus H5 files under
 `citrus/`. In this layout, the merged full-frame external recorder MP4 is the
-ingest-authoritative camera video, while the cropped MP4 is a sidecar useful for
-review/debugging. Shard intermediates are implementation details and should not
-be copied into canonical recording folders.
+ingest-authoritative camera video, while the cropped MP4 is a first-class
+runtime-derived acquisition input. Shard intermediates are Orange
+implementation/debug details and should not be copied into canonical recording
+folders. See
+[`docs/orange_runtime_video_artifact_contract.md`](../orange_runtime_video_artifact_contract.md).
 
 `organize_recordings` auto-detects this layout when `recording_session.json`
 contains `recording_outputs` from `external_ipc`; `--external-ipc` can be passed
@@ -284,6 +286,20 @@ Expected planning behavior:
 
 - each Citrus H5 becomes one recording folder, as in legacy multi-arena Citrus
   batches
+- `recording_manifest.json` metadata is assembled from H5 root attrs plus
+  nested H5 context where available: `protocol_snapshot` for `protocol_name`,
+  `calibration_snapshot/arena_config_json` for `dish_design`, and
+  `subject_metadata` for `genotype` / `dpf_at_acquisition`
+- Orange `recording_snapshot.json` is copied as
+  `raw/recording_snapshot_runtime.json` and is also used as a fallback source
+  for `software_version` when the H5 root attr is empty
+- transfer and runtime-control context is copied into `raw/`:
+  `transfer_complete.json`, `orange_local_control.events.jsonl`,
+  `ptp_sync_summary.json`, recorder contracts, and recorder supervisor plans
+- Citrus threading startup JSONs are copied under `derived/citrus/`
+- `num_dishes` and `fish_per_dish` are not inferred from subject counts; they
+  must be written explicitly by acquisition or supplied by an operator metadata
+  layer before Palette treats them as manifest facts
 - `cams/` receives the merged full-frame `external_recorder/Cam*_external.mp4`
   renamed to the normal `Cam<id>_<session>.mp4` convention
 - `cams/` also receives a compatibility `Cam<id>_<session>_meta.csv` copied
@@ -293,6 +309,9 @@ Expected planning behavior:
   external recorder keyframe summary
 - crop outputs and crop-specific metadata are preserved under
   `derived/external_crop_recorder/`
+- `recording_manifest.json` includes `video_streams` with separate `full` and
+  `crop` entries. The crop entry declares `video_pixel_coordinate_space` as
+  `crop_frame_pixels` and its source geometry columns as full-frame pixels.
 - full external recorder diagnostics that are not part of the compatibility
   camera bundle are preserved under `derived/external_recorder/`
 - files with shard names such as `*_shard*_gpu*.mp4`,
@@ -313,6 +332,24 @@ The organizer preserves Orange acquisition-host absolute paths by remapping
 paths below the transferred batch directory name back under the local staging
 batch root. This allows `recording_session.json` written on the rig to remain
 the source of truth after transfer.
+
+If external-IPC recordings were organized before Palette learned to lift the
+nested protocol/dish/subject metadata, refresh their manifests in place:
+
+```bash
+scripts/py -m fisheye.utils.refresh_recording_manifest_metadata \
+  "$PALETTE_RECORDINGS_ROOT" \
+  --recursive \
+  --refresh-external-ipc-artifacts
+```
+
+This is a dry-run. Re-run with `--apply` after reviewing the field list. The
+tool fills empty `protocol_name`, `dish_design`, `genotype`,
+`dpf_at_acquisition`, and `software_version` fields from the organized H5 and
+runtime snapshot, leaves `num_dishes` / `fish_per_dish` untouched unless they
+were explicitly present already, and for external-IPC recordings can copy the
+small retained session/control artifacts plus add `video_streams` to existing
+manifests. It does not copy, move, or delete full-frame shard debug outputs.
 
 ## Step 3: Apply the organization
 
@@ -349,7 +386,8 @@ For each recording discovered via its H5 file, the organizer:
    the session ID (e.g. `Cam2010093_2026-01-28T19-36-18Z_arena_1.mp4`).
 4. Moves derived images and snapshots into `derived/`.
 5. Creates an empty `zarr/` directory (used by later pipeline stages).
-6. Writes `recording_manifest.json` with all metadata extracted from the H5.
+6. Writes `recording_manifest.json` with metadata extracted from the H5 and,
+   for Orange external-IPC batches, selected runtime sidecars.
 7. Validates HEVC keyframe flags on the camera video.
 8. If diagnostics hooks are enabled, records a `preflight` summary in the manifest.
 
@@ -419,6 +457,10 @@ When these hooks run, the organizer persists a `preflight` block into
 separate video and H5 summaries. Downstream import entry points now refuse
 `preflight.status=fail` by default:
 
+If the hooks do not run, the manifest keeps the default
+`preflight.status="not_run"` with `checked_at_utc=null`; that is an unchecked
+state, not a media/H5 failure.
+
 - `scripts/py -m fisheye.analysis.create_analysis_zarr ...`
 - `scripts/py -m fisheye.utils.import_recording_analysis ...`
 - `scripts/py -m fisheye.utils.import_organized_recordings_analysis ...`
@@ -466,6 +508,12 @@ detection, refinement, keypoints, or registry scans. The older
 `fisheye.utils.import_recordings_analysis --apply` command is a full pipeline
 wrapper despite its name, so use it only when you intentionally want inference
 stages after import.
+
+After import and before production detect/refine, create or verify the dish mask
+on each analysis Zarr with `fisheye.tune.mask_tuner` unless a trusted
+acquisition-time mask was already imported into
+`analysis_metadata.attrs["dish_mask"]`. Refined detection uses this mask for
+outside-dish gating.
 
 ## Logs
 
