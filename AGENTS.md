@@ -9,6 +9,13 @@
 - Do not run install or dependency mutation commands unless the user explicitly approves in chat first.
 - Blocked without approval: `pip install`, `conda install`, `mamba install`, `poetry add`, `uv pip install`.
 
+## Git Push Rule
+
+- Pushes from this repository require the Palette workstation SSH key and should run outside the Codex sandbox because sandbox DNS/network access can fail.
+- Use:
+  `GIT_SSH_COMMAND='ssh -i /home/delahantyj@hhmi.org/.ssh/delahantyj-ws1-git-id_ed25519 -o IdentitiesOnly=yes' git -C /home/delahantyj@hhmi.org/gitrepos/palette push`
+- Do not rely on plain `git push` for Palette; it may fail with `Permission denied (publickey)` or sandbox DNS errors.
+
 ## Sandbox Zarr Fallback Rule
 
 - If sync `zarr.open_group(...)` hangs in Codex sandbox, use metadata-file checks from `docs/sandbox_zarr_fallback.md`.
