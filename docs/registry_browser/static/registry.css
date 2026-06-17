@@ -127,3 +127,19 @@ span.s-muted   { color: #9aa0a6; font-weight: 400; }
 }
 .home-views a { margin: 0 0.15rem; }
 .home-views .sep { color: #9aa0a6; margin: 0 0.3rem; }
+
+/* Download bundle buttons on /models */
+.dl-cell { white-space: nowrap; }
+a.dl-btn {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  background: #11703a;
+  color: #fff;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+a.dl-btn:hover { background: #0d5c2f; }
+a.dl-eng { font-size: 0.74rem; color: #8a5a08; text-decoration: none; }
+a.dl-eng:hover { text-decoration: underline; }

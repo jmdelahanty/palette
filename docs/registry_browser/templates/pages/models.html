@@ -69,7 +69,29 @@ function rowLink(kind, value) {
   return a;
 }
 
-function buildTable(rows) {
+function downloadCell(runId, hasEngine) {
+  const td = document.createElement("td");
+  td.className = "dl-cell";
+  if (!runId) { td.textContent = "—"; return td; }
+  const a = document.createElement("a");
+  a.className = "dl-btn";
+  a.href = "/download/model/" + encodeURIComponent(runId);
+  a.textContent = "Bundle";
+  a.title = "Download .pt + .onnx + manifest.json (zip)";
+  td.appendChild(a);
+  if (hasEngine) {
+    td.appendChild(document.createTextNode(" "));
+    const e = document.createElement("a");
+    e.className = "dl-eng";
+    e.href = "/download/model/" + encodeURIComponent(runId) + "?include_engine=1";
+    e.textContent = "+engine";
+    e.title = "Also include the TensorRT engine (hardware-specific — may not be optimal elsewhere)";
+    td.appendChild(e);
+  }
+  return td;
+}
+
+function buildTable(rows, engineRuns) {
   const wrap = document.createElement("div");
   wrap.className = "model-table-wrap";
   const table = document.createElement("table");
@@ -80,9 +102,13 @@ function buildTable(rows) {
     th.textContent = c[1];
     htr.appendChild(th);
   });
+  const dh = document.createElement("th");
+  dh.textContent = "Download";
+  htr.appendChild(dh);
   thead.appendChild(htr);
   table.appendChild(thead);
   const tbody = document.createElement("tbody");
+  const seen = new Set();  // one Download button per run_id
   rows.forEach(function (r) {
     const tr = document.createElement("tr");
     COLS.forEach(function (c) {
@@ -97,6 +123,15 @@ function buildTable(rows) {
       }
       tr.appendChild(td);
     });
+    const rid = r.run_id;
+    if (rid && !seen.has(rid)) {
+      seen.add(rid);
+      tr.appendChild(downloadCell(rid, engineRuns.has(rid)));
+    } else {
+      const blank = document.createElement("td");
+      blank.className = "dl-cell";
+      tr.appendChild(blank);
+    }
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
@@ -105,6 +140,11 @@ function buildTable(rows) {
 }
 
 function render(rows) {
+  // Runs that have a TensorRT engine — used to show the optional "+engine" link.
+  const engineRuns = new Set(
+    rows.filter(function (r) { return r.artifact_kind === "tensorrt"; })
+        .map(function (r) { return r.run_id; })
+  );
   const groups = {};
   rows.forEach(function (r) {
     const f = r.family || "other";
@@ -138,7 +178,7 @@ function render(rows) {
     c.textContent = "(" + count + ")";
     h2.appendChild(c);
     section.appendChild(h2);
-    section.appendChild(buildTable(groups[fam]));
+    section.appendChild(buildTable(groups[fam], engineRuns));
     root.appendChild(section);
   });
 

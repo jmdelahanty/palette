@@ -80,9 +80,12 @@ docs/registry_browser/
 ├── README.md                     # this file
 ├── datasette-metadata.yaml       # titles, sort orders, facets, canned queries, extra_css_urls
 ├── plugins/
-│   └── render_status_cells.py    # render_cell hook (status colors) + legend
+│   ├── render_status_cells.py    # render_cell hook (status colors) + legend
+│   └── download_bundle.py        # /download/model/<run_id> -> model zip bundle
+├── tests/
+│   └── test_download_bundle.py   # security + integrity unit tests for the bundle
 ├── static/
-│   └── registry.css              # cell tints, legend, /models page styling
+│   └── registry.css              # cell tints, legend, /models + download styling
 └── templates/
     ├── index.html                # home-page override: adds a nav to /models + /group
     └── pages/
@@ -126,6 +129,41 @@ Datasette renders custom pages through Jinja and would otherwise choke on the
 JS template literals and braces. Adding a new grouped page is a copy-paste of
 this file with a different SQL/grouping column. Editing the template needs only
 a browser refresh (templates are not cached like plugins).
+
+### Model download bundles
+
+`plugins/download_bundle.py` adds **`GET /download/model/<run_id>`**, which streams
+a zip of one model's portable artifacts plus a generated `manifest.json`:
+
+```
+<set_id>__<run_id>.zip
+├── manifest.json     # inference contract, sha256s, NMS/plugin reqs, skeleton, training, engine descriptor
+├── weights/best.pt   # always
+└── onnx/<name>.onnx  # when the run has an onnx export
+```
+
+The `/models` page shows a **Bundle** button per model (and a **+engine** link for
+runs that have one). The hardware-specific TensorRT `.engine` is **excluded by
+default** — add `?include_engine=1` to include it. Either way the engine is
+described in the manifest with its build env and a note that it may not load (or
+may run sub-optimally) on different hardware; rebuild from the `.onnx` for best
+results.
+
+**Safety model (read this before exposing it anywhere):**
+- The `run_id` from the URL is only ever a parameterized DB lookup key — it never
+  becomes a filesystem path.
+- Every artifact path comes from the registry and must resolve (via `realpath`,
+  so symlink escapes are caught) under an allowlisted root. Override the roots
+  with `PALETTE_MODEL_ROOTS` (os.pathsep-separated). Default roots are the two
+  observed model trees.
+- Files are sha256-checked against the registry before shipping; a mismatch omits
+  the file and records a warning in the manifest rather than shipping bad bytes.
+- **Tunnel-only.** This serves files from disk, so keep the server bound to
+  `127.0.0.1` and reach it over SSH. Binding to the network would require auth and
+  is explicitly out of scope for now.
+
+Tests: `scripts/py -m pytest docs/registry_browser/tests/test_download_bundle.py -q`
+(allowlist/symlink-escape rejection, sha-mismatch omission, engine flag, 404).
 
 ### Canned queries
 
