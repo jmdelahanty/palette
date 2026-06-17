@@ -91,6 +91,116 @@ def test_main_apply_uses_import_only_process(monkeypatch, tmp_path: Path) -> Non
     assert calls == [(rec.resolve(), True)]
 
 
+def test_main_apply_syncs_successful_import_when_registry_is_provided(monkeypatch, tmp_path: Path) -> None:
+    rec = _recording(tmp_path)
+    registry_path = tmp_path / "registry.sqlite"
+    process_calls: list[Path] = []
+    registry_calls: list[tuple[Path, Path]] = []
+
+    def _fake_process(plan, _opts, **_kwargs):
+        process_calls.append(plan.recording_dir)
+        return SimpleNamespace(ok=True, failed_step=None, error=None, returncode=None)
+
+    class _Registry:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def scan_zarr(self, zarr_path: Path) -> str:
+            registry_calls.append((self.path, zarr_path))
+            return "dataset-1"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mod, "process_recording_import", _fake_process)
+    monkeypatch.setattr(mod, "Registry", _Registry)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--apply",
+            "--registry",
+            str(registry_path),
+            "--no-log",
+        ]
+    )
+
+    expected_zarr = rec.resolve() / "zarr" / f"{rec.name}_analysis.zarr"
+    assert rc == 0
+    assert process_calls == [rec.resolve()]
+    assert registry_calls == [(registry_path.resolve(), expected_zarr)]
+
+
+def test_main_syncs_skipped_existing_zarr_when_registry_is_provided(monkeypatch, tmp_path: Path) -> None:
+    rec = _recording(tmp_path)
+    zarr_path = rec / "zarr" / f"{rec.name}_analysis.zarr"
+    zarr_path.mkdir(parents=True)
+    registry_path = tmp_path / "registry.sqlite"
+    registry_calls: list[Path] = []
+
+    def _unexpected_process(*_args, **_kwargs):
+        raise AssertionError("existing zarr should be skipped, not imported")
+
+    class _Registry:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def scan_zarr(self, path: Path) -> str:
+            registry_calls.append(path)
+            return "dataset-existing"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mod, "process_recording_import", _unexpected_process)
+    monkeypatch.setattr(mod, "Registry", _Registry)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--apply",
+            "--registry",
+            str(registry_path),
+            "--no-log",
+        ]
+    )
+
+    assert rc == 0
+    assert registry_calls == [zarr_path.resolve()]
+
+
+def test_main_registry_sync_failure_marks_run_failed(monkeypatch, tmp_path: Path) -> None:
+    _recording(tmp_path)
+
+    def _fake_process(_plan, _opts, **_kwargs):
+        return SimpleNamespace(ok=True, failed_step=None, error=None, returncode=None)
+
+    class _Registry:
+        def __init__(self, _path: Path) -> None:
+            pass
+
+        def scan_zarr(self, _path: Path) -> str:
+            raise RuntimeError("registry unavailable")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mod, "process_recording_import", _fake_process)
+    monkeypatch.setattr(mod, "Registry", _Registry)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--apply",
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--no-log",
+        ]
+    )
+
+    assert rc == 1
+
+
 def test_main_recording_only_discovers_video_recording(monkeypatch, tmp_path: Path) -> None:
     rec = tmp_path / "video_only"
     (rec / "cams").mkdir(parents=True)

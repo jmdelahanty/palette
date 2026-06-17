@@ -5,7 +5,7 @@ This helper is intentionally import-only:
 
 1. organize one completed Citrus session into the recordings store;
 2. create/update analysis Zarrs from the organizer JSONL log;
-3. optionally rescan those Zarrs into a registry.
+3. optionally scan imported/skipped-existing Zarrs into a registry.
 
 It does not run detect, refine, crops, keypoints, or masks.
 """
@@ -19,7 +19,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 
 DEFAULT_DEST_ROOT = Path("/groups/johnson/johnsonlab/jeremy/recordings")
@@ -78,6 +78,7 @@ def build_import_command(
     apply: bool,
     recording_only: bool,
     allow_preflight_failures: bool,
+    registry: Optional[Path],
 ) -> list[str]:
     command = [
         sys.executable,
@@ -93,19 +94,9 @@ def build_import_command(
         command.append("--recording-only")
     if allow_preflight_failures:
         command.append("--allow-preflight-failures")
+    if registry is not None:
+        command.extend(["--registry", str(registry)])
     return command
-
-
-def build_registry_command(*, registry: Path, file_list: Path) -> list[str]:
-    return [
-        sys.executable,
-        "-m",
-        "fisheye.utils.registry_rescan",
-        "--registry",
-        str(registry),
-        "--file-list",
-        str(file_list),
-    ]
 
 
 def _run_command(command: Sequence[str], *, name: str, run_dir: Path) -> CommandRecord:
@@ -182,12 +173,6 @@ def _read_recording_dirs_from_organize_log(log_path: Optional[Path]) -> list[Pat
     return paths
 
 
-def _write_file_list(path: Path, values: Iterable[Path]) -> int:
-    items = [str(value) for value in values]
-    path.write_text("\n".join(items) + ("\n" if items else ""), encoding="utf-8")
-    return len(items)
-
-
 def _status_payload(
     *,
     args: argparse.Namespace,
@@ -240,7 +225,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--allow-preflight-failures", action="store_true", help="Do not block import on manifest preflight failures.")
     parser.add_argument("--run-video-diagnostics", action="store_true", help="Run video diagnostics during organize apply.")
     parser.add_argument("--run-h5-diagnostics", action="store_true", help="Run H5 diagnostics during organize apply.")
-    parser.add_argument("--register", action="store_true", help="Rescan imported analysis Zarrs into the registry.")
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="Scan imported/skipped-existing analysis Zarrs into the registry during import.",
+    )
     parser.add_argument("--registry", type=Path, help="Palette registry SQLite path used with --register.")
     parser.add_argument("--status-json", type=Path, help="Optional path for final status JSON.")
 
@@ -306,6 +295,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 apply=bool(args.apply),
                 recording_only=bool(args.recording_only),
                 allow_preflight_failures=bool(args.allow_preflight_failures),
+                registry=args.registry if args.register else None,
             )
             print("Running import command:")
             print(" ".join(import_command))
@@ -318,20 +308,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             zarr_paths = _read_zarr_paths_from_import_log(import_log)
             if import_result.returncode != 0:
-                status = "failed"
-
-    if status == "ok" and args.apply and args.register:
-        registry_file_list = run_dir / "registry_rescan_zarrs.txt"
-        count = _write_file_list(registry_file_list, zarr_paths)
-        if count == 0:
-            print("Skipping registry rescan: no zarr paths found in import log.")
-        else:
-            registry_command = build_registry_command(registry=args.registry, file_list=registry_file_list)
-            print("Running registry command:")
-            print(" ".join(registry_command))
-            registry_result = _run_command(registry_command, name="03_registry_rescan", run_dir=run_dir)
-            commands.append(registry_result)
-            if registry_result.returncode != 0:
                 status = "failed"
 
     status_json = args.status_json or (run_dir / "citrus_session_import.status.json")

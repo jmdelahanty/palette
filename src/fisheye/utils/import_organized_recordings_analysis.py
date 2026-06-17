@@ -3,7 +3,8 @@
 
 This is intentionally import-only. It creates/updates analysis archives with
 recording metadata, source-video metadata, and optional H5 stimulus metadata.
-It does not run detect, refine, keypoints, or registry scans.
+It does not run detect, refine, or keypoints. When --registry is provided,
+successful imports and skipped existing archives are scanned into that registry.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import JsonLogger, make_run_id, utc_now
 from fisheye.utils.import_recording_analysis import (
     RecordingAnalysisPlan,
@@ -38,6 +40,15 @@ class OrganizedImportPlan:
     status: str
     reason: Optional[str] = None
     stimulus_present: Optional[bool] = None
+
+
+@dataclass(frozen=True)
+class RegistrySyncResult:
+    ok: bool
+    registry_path: Path
+    zarr_path: Path
+    dataset_id: Optional[str] = None
+    error: Optional[str] = None
 
 
 def _resolve_root(arg_root: Optional[Path], *, organize_logs: list[Path]) -> Path:
@@ -228,6 +239,47 @@ def _log_plan(logger: Optional[JsonLogger], plan: OrganizedImportPlan) -> None:
     )
 
 
+def _sync_registry(registry_path: Path, zarr_path: Path) -> RegistrySyncResult:
+    resolved_registry = registry_path.expanduser().resolve()
+    registry = Registry(resolved_registry)
+    try:
+        dataset_id = registry.scan_zarr(zarr_path)
+    except Exception as exc:
+        return RegistrySyncResult(
+            ok=False,
+            registry_path=resolved_registry,
+            zarr_path=zarr_path,
+            error=str(exc),
+        )
+    finally:
+        registry.close()
+    return RegistrySyncResult(
+        ok=True,
+        registry_path=resolved_registry,
+        zarr_path=zarr_path,
+        dataset_id=dataset_id,
+    )
+
+
+def _log_registry_sync(
+    logger: Optional[JsonLogger],
+    *,
+    event: str,
+    recording_dir: Path,
+    result: RegistrySyncResult,
+) -> None:
+    if logger is None:
+        return
+    logger.log(
+        event,
+        recording_dir=str(recording_dir),
+        zarr_path=str(result.zarr_path),
+        registry_path=str(result.registry_path),
+        dataset_id=result.dataset_id,
+        error=result.error,
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -306,6 +358,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         type=Path,
         help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/import_organized_recordings_analysis or <root>/logs/import_organized_recordings_analysis).",
     )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "Registry SQLite path to scan after successful imports. Existing "
+            "analysis zarrs skipped by --skip-existing are also scanned so "
+            "registry-backed tools can discover them."
+        ),
+    )
     parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging.")
 
     args = parser.parse_args(argv)
@@ -340,6 +401,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             import_video_metadata=bool(args.import_video_metadata),
             import_stimulus=bool(args.import_stimulus),
             allow_preflight_failures=bool(args.allow_preflight_failures),
+            registry=str(args.registry.expanduser()) if args.registry is not None else None,
             created_at_utc=utc_now(),
         )
 
@@ -372,6 +434,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     failed = 0
     skipped = 0
     missing = 0
+    registry_synced = 0
+    registry_failed = 0
     for plan in plans:
         _log_plan(logger, plan)
         if plan.status == "missing":
@@ -387,6 +451,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             continue
         if plan.status == "skipped":
+            if args.registry is not None:
+                sync_result = _sync_registry(args.registry, plan.zarr_path)
+                if sync_result.ok:
+                    registry_synced += 1
+                    print(
+                        "Registry synced existing analysis zarr: "
+                        f"{plan.zarr_path} ({sync_result.dataset_id})"
+                    )
+                    _log_registry_sync(
+                        logger,
+                        event="registry_sync_ok",
+                        recording_dir=plan.recording_dir,
+                        result=sync_result,
+                    )
+                else:
+                    registry_failed += 1
+                    failed += 1
+                    print(
+                        "Registry sync failed for existing analysis zarr: "
+                        f"{plan.zarr_path} error={sync_result.error}"
+                    )
+                    _log_registry_sync(
+                        logger,
+                        event="registry_sync_failed",
+                        recording_dir=plan.recording_dir,
+                        result=sync_result,
+                    )
+                    continue
             skipped += 1
             print(f"Skipping existing analysis zarr: {plan.zarr_path}")
             if logger is not None:
@@ -432,6 +524,40 @@ def main(argv: Optional[list[str]] = None) -> int:
                     error=result.error,
                 )
             continue
+        if args.registry is not None:
+            sync_result = _sync_registry(args.registry, plan.zarr_path)
+            if not sync_result.ok:
+                registry_failed += 1
+                failed += 1
+                print(
+                    "Import succeeded but registry sync failed for "
+                    f"{plan.recording_dir}: error={sync_result.error}"
+                )
+                _log_registry_sync(
+                    logger,
+                    event="registry_sync_failed",
+                    recording_dir=plan.recording_dir,
+                    result=sync_result,
+                )
+                if logger is not None:
+                    logger.log(
+                        "recording_failed",
+                        recording_dir=str(plan.recording_dir),
+                        zarr_path=str(plan.zarr_path),
+                        step="registry_sync",
+                        returncode=None,
+                        error=sync_result.error,
+                    )
+                continue
+            registry_synced += 1
+            print(f"Registry synced analysis zarr: {plan.zarr_path} ({sync_result.dataset_id})")
+            _log_registry_sync(
+                logger,
+                event="registry_sync_ok",
+                recording_dir=plan.recording_dir,
+                result=sync_result,
+            )
+
         ok += 1
         print(f"Imported analysis zarr: {plan.zarr_path}")
         if logger is not None:
@@ -446,8 +572,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"  failed: {failed}")
     print(f"  skipped: {skipped}")
     print(f"  missing: {missing}")
+    if args.registry is not None:
+        print(f"  registry_synced: {registry_synced}")
+        print(f"  registry_failed: {registry_failed}")
     if logger is not None:
-        logger.log("run_end", ok=ok, failed=failed, skipped=skipped, missing=missing, dry_run=False)
+        logger.log(
+            "run_end",
+            ok=ok,
+            failed=failed,
+            skipped=skipped,
+            missing=missing,
+            registry_synced=registry_synced,
+            registry_failed=registry_failed,
+            dry_run=False,
+        )
         logger.close()
     return 0 if failed == 0 else 1
 

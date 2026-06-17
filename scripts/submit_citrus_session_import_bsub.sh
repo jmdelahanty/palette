@@ -28,7 +28,8 @@ Submit one LSF job for a completed Citrus transfer session.
 
 The job payload is intentionally conservative: it organizes one completed
 session into the recordings store, creates/imports analysis Zarrs, and
-optionally rescans those Zarrs into a registry. It does not run detect/refine.
+optionally scans those Zarrs into a registry during import. It does not run
+detect/refine.
 
 Required:
   --session-dir PATH             Completed Citrus session directory
@@ -46,7 +47,7 @@ Options:
                                 (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --job-dry-run                  Submit a cluster job that plans but does not
                                 modify recordings/Zarrs
-  --register                     Rescan imported analysis Zarrs into registry
+  --register                     Scan imported/skipped analysis Zarrs into registry
   --registry PATH                Registry SQLite path used with --register
   --recording-only               Import camera-video-only recordings without H5
   --allow-preflight-failures     Do not block import on manifest preflight fail

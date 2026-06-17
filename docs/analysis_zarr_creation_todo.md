@@ -18,7 +18,9 @@ Purpose: track the implementation steps to split analysis archive creation/prove
     analysis archive.
   - `fisheye.utils.import_organized_recordings_analysis` consumes an
     `organize_recordings` JSONL log and imports the selected organized
-    recording directories without running detect/refine.
+    recording directories without running detect/refine. When `--registry` is
+    supplied, it scans successful imports and skipped existing analysis zarrs
+    before reporting a recording complete.
 - The older batch flow `import_recordings_analysis` still orchestrates the
   broader analysis pipeline:
   - YOLO detect
@@ -67,6 +69,9 @@ Purpose: track the implementation steps to split analysis archive creation/prove
   - File: `src/fisheye/utils/import_organized_recordings_analysis.py`
   - Behavior: consumes an organize log, resolves recording directories, and runs
     the import step only.
+- [x] Add immediate registry sync to the import-only wrapper.
+  - `--registry` scans newly imported and skipped existing analysis zarrs.
+  - Registry sync failures are counted as recording failures.
 - [ ] Update or rename `import_recordings_analysis` so its pipeline behavior is
       explicit rather than implied to be import-only.
 - [ ] Update `import_recordings_analysis` to call the shared creation/import

@@ -72,8 +72,11 @@ Related detect batch contract:
   - Module: `fisheye.utils.import_organized_recordings_analysis`
   - Behavior: resolve already organized recording directories, then run
     `process_recording_import` per recording.
-  - Explicit non-goal: no detect, refine, keypoints, or registry scan
-    orchestration.
+  - Registry behavior: if `--registry` is provided, scan successful imports
+    and skipped existing analysis zarrs into that registry before reporting the
+    item as complete. Registry-sync failure is a batch failure, not plain
+    success.
+  - Explicit non-goal: no detect, refine, or keypoints orchestration.
 - Single recording orchestrator:
   - Module: `fisheye.utils.run_recording_analysis_pipeline`
   - Required execution order:
@@ -243,6 +246,8 @@ provenance.
   - append-only refined runs/manual groups; source detect runs remain immutable
 - Registry stage:
   - rescan updates registry view of the archive path/metadata; does not require destructive rewrites
+  - import-only organized workflows treat `--registry` sync failure as a
+    recording failure, not a successful import with stale registry state
 
 ## Model Resolution Contract
 
@@ -258,7 +263,9 @@ provenance.
 - Batch pipeline writes JSONL logs unless `--no-log`.
 - Expected high-level events:
   - `run_start`, `recording_plan`, `recording_start`
-  - stage events (`video_metadata_imported`, `stimulus_result`, `detect_result`, `refine_result`)
+  - stage events (`video_metadata_imported`, `stimulus_result`,
+    `registry_sync_ok`, `registry_sync_failed`, `detect_result`,
+    `refine_result`)
   - terminal events (`recording_ok`, `recording_failed`, `recording_skipped`, `run_end`)
 
 ## Operator Runbook (Current)
@@ -271,6 +278,10 @@ provenance.
     additionally upserts `recording_step_status.dish_mask=ok` for the matching
     dataset. Without `--registry`, the next registry maintenance/backfill pass
     can discover the Zarr attr.
+- Batch import-only apply for newly organized recordings:
+  - `scripts/py -m fisheye.utils.import_organized_recordings_analysis --organize-log "$ORGANIZE_LOG" --registry /nvme1/palette_registry.sqlite --apply`
+  - This creates/updates analysis zarrs and keeps registry-backed review lists
+    current without running inference.
 - Single recording apply with registry model + register:
   - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --model-source registry --registry /nvme1/palette_registry.sqlite --register --apply`
   - If detect path is YOLO and pipeline wrapper does not auto-run quality:

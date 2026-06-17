@@ -7,7 +7,6 @@ from pathlib import Path
 from fisheye.utils.run_citrus_session_import import (
     build_import_command,
     build_organize_command,
-    build_registry_command,
     _read_recording_dirs_from_organize_log,
     _read_zarr_paths_from_import_log,
 )
@@ -41,6 +40,7 @@ def test_build_import_command_uses_organize_log_without_detect_or_refine(tmp_pat
         apply=False,
         recording_only=True,
         allow_preflight_failures=True,
+        registry=tmp_path / "registry.sqlite",
     )
 
     assert command[:3] == [sys.executable, "-m", "fisheye.utils.import_organized_recordings_analysis"]
@@ -49,20 +49,10 @@ def test_build_import_command_uses_organize_log_without_detect_or_refine(tmp_pat
     assert "--dry-run" in command
     assert "--recording-only" in command
     assert "--allow-preflight-failures" in command
+    assert "--registry" in command
+    assert str(tmp_path / "registry.sqlite") in command
     assert "detect" not in " ".join(command)
     assert "refine" not in " ".join(command)
-
-
-def test_build_registry_command_scans_file_list_only(tmp_path: Path) -> None:
-    command = build_registry_command(
-        registry=tmp_path / "registry.sqlite",
-        file_list=tmp_path / "zarrs.txt",
-    )
-
-    assert command[:3] == [sys.executable, "-m", "fisheye.utils.registry_rescan"]
-    assert "--file-list" in command
-    assert str(tmp_path / "zarrs.txt") in command
-    assert "--recursive" not in command
 
 
 def test_read_zarr_paths_from_import_log_deduplicates_and_skips_missing(tmp_path: Path) -> None:

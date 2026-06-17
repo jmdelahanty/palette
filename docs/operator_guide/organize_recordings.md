@@ -490,6 +490,7 @@ scripts/py -m fisheye.utils.import_organized_recordings_analysis \
 
 scripts/py -m fisheye.utils.import_organized_recordings_analysis \
   "$PALETTE_RECORDINGS_ROOT" \
+  --registry /nvme1/palette_registry.sqlite \
   --apply
 ```
 
@@ -499,15 +500,69 @@ that run are imported:
 ```bash
 scripts/py -m fisheye.utils.import_organized_recordings_analysis \
   --organize-log "$PALETTE_RECORDINGS_ROOT/logs/organize_recordings/<run>.jsonl" \
+  --registry /nvme1/palette_registry.sqlite \
   --dry-run
+
+scripts/py -m fisheye.utils.import_organized_recordings_analysis \
+  --organize-log "$PALETTE_RECORDINGS_ROOT/logs/organize_recordings/<run>.jsonl" \
+  --registry /nvme1/palette_registry.sqlite \
+  --apply
 ```
 
 This command only creates/updates `zarr/<recording>_analysis.zarr`, imports
-source-video metadata, and imports H5 stimulus metadata. It does not run
-detection, refinement, keypoints, or registry scans. The older
+source-video metadata, and imports H5 stimulus metadata. When `--registry` is
+provided, each successful import is scanned into that registry before the
+recording is reported as `ok`; existing analysis zarrs skipped by the default
+skip-existing behavior are also scanned so registry-backed review tools can
+discover them. If registry sync fails, the import batch exits non-zero instead
+of reporting a plain success. The command does not run detection, refinement,
+or keypoints. The older
 `fisheye.utils.import_recordings_analysis --apply` command is a full pipeline
 wrapper despite its name, so use it only when you intentionally want inference
 stages after import.
+
+## Finalize Completed Staging Batches
+
+After organize and import have succeeded, finalize the staging batch so old
+transfer artifacts do not keep looking like active work. Finalization is a
+separate safety gate, not part of import. It verifies that each organized
+recording is self-contained before moving or deleting the source staging batch.
+
+Dry-run first:
+
+```bash
+scripts/py -m fisheye.utils.finalize_organized_staging \
+  "$PALETTE_STAGING_ROOT/<batch>" \
+  --recordings-root "$PALETTE_RECORDINGS_ROOT" \
+  --organize-log "$PALETTE_RECORDINGS_ROOT/logs/organize_recordings/<organize-run>.jsonl" \
+  --import-log "$PALETTE_RECORDINGS_ROOT/logs/import_organized_recordings_analysis/<import-run>.jsonl"
+```
+
+If the report is `ready`, apply it:
+
+```bash
+scripts/py -m fisheye.utils.finalize_organized_staging \
+  "$PALETTE_STAGING_ROOT/<batch>" \
+  --recordings-root "$PALETTE_RECORDINGS_ROOT" \
+  --organize-log "$PALETTE_RECORDINGS_ROOT/logs/organize_recordings/<organize-run>.jsonl" \
+  --import-log "$PALETTE_RECORDINGS_ROOT/logs/import_organized_recordings_analysis/<import-run>.jsonl" \
+  --apply
+```
+
+Default apply behavior moves the verified batch to
+`$PALETTE_STAGING_ROOT/.processed/<batch>`. Use `--delete --apply` only when you
+intentionally want immediate deletion.
+
+The finalizer blocks when:
+
+- no organized recordings can be matched to the staging batch
+- any `recording_manifest.json` is missing or invalid
+- any manifest-listed `raw/`, `cams/`, or `derived/` file is missing
+- any expected `zarr/<recording>_analysis.zarr` is missing
+- a supplied import log has `recording_failed` or `recording_skipped` for a
+  matched recording
+- a supplied organize log contains warnings for the batch, unless
+  `--allow-organize-warnings` is passed
 
 After import and before production detect/refine, create or verify the dish mask
 on each analysis Zarr with `fisheye.tune.mask_tuner` unless a trusted

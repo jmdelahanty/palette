@@ -8,7 +8,8 @@ conservative import-only workflow for one completed session:
 
 1. organize the session into the recordings store;
 2. create/update analysis Zarrs from the organizer JSONL log;
-3. optionally rescan those Zarrs into a registry when explicitly requested.
+3. scan imported or skipped-existing analysis Zarrs into a registry when
+   explicitly requested.
 
 The job does **not** run detect, refine, crops, keypoints, or masks.
 
@@ -165,8 +166,10 @@ scripts/submit_citrus_session_import_bsub.sh \
   --registry /path/to/palette_registry.sqlite
 ```
 
-If enabled, the helper reads Zarr paths from the import JSONL log and rescans
-only those paths with `fisheye.utils.registry_rescan --file-list`.
+If enabled, the submitted job passes `--registry` to
+`fisheye.utils.import_organized_recordings_analysis`. The import wrapper scans
+successful imports and skipped existing analysis Zarrs before reporting each
+recording complete.
 
 Important policy choices:
 

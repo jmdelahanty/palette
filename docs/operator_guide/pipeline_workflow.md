@@ -159,6 +159,7 @@ path as shown above.
 scripts/py -m fisheye.utils.import_recordings_analysis \
   --recursive \
   --model-source registry \
+  --registry /nvme1/palette_registry.sqlite \
   --refine-detect \
   --keypoints \
   --refine-keypoints \
@@ -177,6 +178,15 @@ Use these when you need to run or re-run an individual stage.
 Creates the analysis Zarr archive and imports video metadata and stimulus
 events from the H5 file. This is handled automatically by the batch pipeline
 and the single-recording pipeline — you rarely need to run it standalone.
+When you do run import as its own step, pass `--registry` so registry-backed
+review tools can see the new analysis zarrs immediately:
+
+```bash
+scripts/py -m fisheye.utils.import_organized_recordings_analysis \
+  --organize-log "$ORGANIZE_LOG" \
+  --registry /nvme1/palette_registry.sqlite \
+  --apply
+```
 
 **What it writes to the Zarr:**
 - `raw_video` group with video dimensions, fps, codec, frame count
@@ -208,6 +218,15 @@ operators should still visually verify it before starting detect/refine. See
 metadata. With `--registry`, successful saves also mark `dish_mask` as `ok` in
 `recording_step_status`; without it, registry maintenance can discover the Zarr
 attribute later.
+
+To iterate masks missing according to the registry:
+
+```bash
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
+  --source registry \
+  --only-missing \
+  --registry /nvme1/palette_registry.sqlite
+```
 
 ### 3. Detect
 
