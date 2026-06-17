@@ -1,5 +1,10 @@
 # Login-Node Palette Branch Divergence - 2026-06-16
 
+Archive note, 2026-06-16: this diagnostic is retained for historical context.
+The login-node checkout was later reconciled with `origin/sun`; a read-only
+verification showed `origin/sun...HEAD` divergence `0 0` and a clean
+`sun...origin/sun` status on `login1-citrus-poller`.
+
 ## Purpose
 
 Document the observed divergence between the workstation Palette checkout and

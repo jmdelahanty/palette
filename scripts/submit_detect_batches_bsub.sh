@@ -5,6 +5,7 @@ ROOT="/nvme1/recordings"
 BATCH_SIZE=10
 MAX_ACTIVE=2
 QUEUE=""
+GPU_SPEC=""
 NCORES=4
 MEM_GB=16
 CONFIG="configs/fisheye/default.yaml"
@@ -37,6 +38,7 @@ Options:
   --batch-size N            Analysis zarrs per batch job (default: 10)
   --max-active N            Max concurrent jobs in array (default: 2)
   --queue NAME              LSF queue name
+  --gpu SPEC                Optional LSF GPU resource spec, e.g. 'num=1'
   --ncores N                Cores per job (default: 4)
   --mem-gb N                Memory per job in GB (default: 16)
   --config PATH             Detect config path (default: configs/fisheye/default.yaml)
@@ -69,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --batch-size) BATCH_SIZE="$2"; shift 2;;
     --max-active) MAX_ACTIVE="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
+    --gpu) GPU_SPEC="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
@@ -151,8 +154,16 @@ batch_size = int(sys.argv[2])
 run_dir = Path(sys.argv[3])
 source = sys.argv[4]
 
-zarr_paths = [line.strip() for line in paths_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+raw_lines = [line.strip() for line in paths_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+zarr_paths = [line for line in raw_lines if line.endswith(".zarr")]
+ignored_lines = [line for line in raw_lines if not line.endswith(".zarr")]
 run_dir.mkdir(parents=True, exist_ok=True)
+
+if ignored_lines:
+    (run_dir / "discovery_ignored_lines.txt").write_text(
+        "\n".join(ignored_lines) + "\n",
+        encoding="utf-8",
+    )
 
 recordings_file = run_dir / "recordings.txt"
 recordings_file.write_text("\n".join(zarr_paths) + ("\n" if zarr_paths else ""), encoding="utf-8")
@@ -272,6 +283,9 @@ BSUB_ARGS=(-J "detect_batch[1-${batch_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "ru
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
+if [[ -n "$GPU_SPEC" ]]; then
+  BSUB_ARGS+=(-gpu "$GPU_SPEC")
+fi
 
 printf -v BSUB_ARGS_SHELL '%q ' "${BSUB_ARGS[@]}"
 BSUB_CMD="bsub ${BSUB_ARGS_SHELL}bash "
@@ -291,6 +305,7 @@ echo "Batch size: $BATCH_SIZE"
 echo "Batches: $batch_count"
 echo "Max active: $MAX_ACTIVE"
 echo "Queue: ${QUEUE:-<default>}"
+echo "GPU: ${GPU_SPEC:-<none>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB"
 echo "Manifest file: $RUN_DIR/recordings.txt"
 echo "Batch files: $RUN_DIR/batch_*.txt"

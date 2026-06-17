@@ -933,6 +933,45 @@ Use `--run-id` for deterministic reruns:
 ./scripts/submit_detect_batches_bsub.sh --run-id my_rerun_001 --dry-run
 ```
 
+### Chained Detect, Quality, And Refine Submission
+
+For registry-discovered recordings that are missing detections completely, use
+the chained submitter. It discovers the zarr target set once, submits detect as
+an LSF array, then submits `detect_quality_batch` and `refine_detect_batch` as
+dependent CPU jobs using `done(<jobid>)`.
+
+Dry-run first:
+
+```bash
+./scripts/submit_detect_quality_refine_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains GoodCopBadCop \
+  --run-id goodcopbadcop_detect_quality_refine_$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+Submit on an LSF login node:
+
+```bash
+./scripts/submit_detect_quality_refine_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --registry /nvme1/palette_registry.sqlite \
+  --path-contains GoodCopBadCop \
+  --detect-queue gpu_l4 \
+  --detect-gpu 'num=1' \
+  --detect-batch-size 4 \
+  --detect-max-active 2 \
+  --quality-queue short \
+  --refine-queue short \
+  --run-id goodcopbadcop_detect_quality_refine_$(date -u +%Y%m%dT%H%M%SZ) \
+  --submit
+```
+
+The dependency chain is fail-closed: if the detect array does not finish with
+`DONE`, the quality job remains pending; if quality fails, refine remains
+pending. Logs and the exact discovered `recordings.txt` live under
+`<root>/logs/detect_quality_refine_bsub/detect_quality_refine_<run_id>/`.
+
 ---
 
 ## How to check which scheduler you have

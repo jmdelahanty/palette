@@ -40,6 +40,7 @@ Palette already has the first layer of cluster support:
 |------|--------|-------|
 | Environment validation | present | `scripts/validate_cluster_palette_env.sh` checks Python, CUDA, PyTorch, Decord, FFmpeg linkage, reports PyNvVideoCodec/NVIDIA video-library availability, and can require PyNv with `--require-pynvvc`. |
 | Detect submitter | present | `scripts/submit_detect_batches_bsub.sh` wraps `fisheye.utils.run_detections_batch`. |
+| Detect-quality-refine submitter | present | `scripts/submit_detect_quality_refine_bsub.sh` chains detect, detect_quality, and refined_detect through LSF `done(<jobid>)` dependencies. |
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
 | Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs. |
 | Clipped collection flat ROI cache submitter | present | `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh` submits finalized clipped collection cache materialization and manifest-last publish. |
@@ -56,7 +57,7 @@ Palette also has batch utilities for additional stages:
 
 | Utility | Status | Cluster gap |
 |---------|--------|-------------|
-| `fisheye.utils.refine_detect_batch` | present | No dedicated LSF submitter yet. |
+| `fisheye.utils.refine_detect_batch` | present | Covered by the chained detect-quality-refine submitter for registry-discovered targets. |
 | `fisheye.utils.refine_keypoints_batch` | present | No dedicated LSF submitter yet. |
 | `fisheye.utils.run_subject_mask_batch_pipeline` | present | No dedicated LSF submitter yet; artifact/import policy not implemented. |
 | subject-mask review/finalization utilities | present | Some tools are operator-driven and need cluster-safe boundaries. |
@@ -264,9 +265,8 @@ Execution model note:
 
 Remaining:
 
-- [ ] Add `scripts/submit_detect_quality_batches_bsub.sh`, or document that
-  detect quality remains workstation/local for now.
-- [ ] Add `scripts/submit_refine_detect_batches_bsub.sh`.
+- [x] Add a chained detect-quality/refine submitter for registry-discovered
+  targets: `scripts/submit_detect_quality_refine_bsub.sh`.
 - [x] Add clip-aware validation/reporting utilities for imported detect and
   refined-detect paths so operators do not need to inspect nested `zarr.json`
   metadata manually.
