@@ -61,6 +61,7 @@ command at whatever copy you want to browse (e.g. `$PALETTE_REGISTRY_PATH`).
 | What | Path |
 |------|------|
 | Home (all tables/views) | `/` |
+| **Group any view by a column** | `/group` |
 | **Models by type** (grouped scrollable tables) | `/models` |
 | Datasets, faceted | `/palette_registry/datasets` |
 | Pipeline status (wide, color-coded) | `/palette_registry/recording_step_status_wide` |
@@ -84,10 +85,27 @@ docs/registry_browser/
 │   └── registry.css              # cell tints, legend, /models page styling
 └── templates/
     └── pages/
-        └── models.html           # custom page served at /models
+        ├── group.html            # custom page served at /group (generic grouper)
+        └── models.html           # custom page served at /models (model families)
 ```
 
 ### Custom pages
+
+`templates/pages/group.html` is served at **`/group`** — a generic grouper. Pick
+any table/view and a column (via the form or query params) and each distinct
+value gets its own scrollable table:
+
+```
+/group?table=model_input_shapes&by=task_type
+/group?table=recordings&by=recording_type&cols=recording_name,camera_id
+```
+
+Params: `table` and `by` (required), `cols` (optional comma-separated display
+columns; default all-except-`by`), `limit` (default 2000), `db` (default
+`palette_registry`). The table is validated against `sqlite_master` and the
+columns against `pragma_table_info` before any identifier is interpolated into
+SQL, so params can't inject. Grouping on a high-cardinality column is capped at
+200 groups with an on-page notice rather than rendering thousands of tables.
 
 `templates/pages/models.html` is a Datasette **custom page** served at `/models`
 (enabled by `--template-dir`). It fetches `model_input_shapes` via the JSON SQL

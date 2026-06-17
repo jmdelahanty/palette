@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+
+{% block title %}Group by column{% endblock %}
+
+{% block content %}
+<h1>Group by column</h1>
+<p class="models-intro">
+  Pick any table or view and a column to group on — each distinct value gets its
+  own independently-scrollable table. Read-only.
+  Example: <code>/group?table=model_input_shapes&amp;by=task_type</code>.
+</p>
+
+<form id="group-form" class="group-form">
+  <label>Table/view
+    <select id="f-table"><option value="">— choose —</option></select>
+  </label>
+  <label>Group by
+    <select id="f-by" disabled><option value="">—</option></select>
+  </label>
+  <label>Columns (optional, comma-separated)
+    <input id="f-cols" type="text" placeholder="all columns" size="32">
+  </label>
+  <label>Row limit
+    <input id="f-limit" type="number" min="1" max="50000" value="2000">
+  </label>
+  <button type="submit">Apply</button>
+</form>
+
+<nav id="group-nav"></nav>
+<div id="group-root"></div>
+
+{% raw %}
+<script>
+"use strict";
+
+const DB = new URLSearchParams(location.search).get("db") || "palette_registry";
+const MAX_GROUPS = 200;        // guard against grouping on a high-cardinality column
+const DEFAULT_LIMIT = 2000;
+
+function qIdent(name) { return '"' + String(name).replace(/"/g, '""') + '"'; }
+function sqlStr(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
+
+function api(sql) {
+  return fetch("/" + DB + ".json?_shape=array&sql=" + encodeURIComponent(sql))
+    .then(function (r) {
+      if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+      return r.json();
+    });
+}
+
+function listObjects() {
+  return api("SELECT name FROM sqlite_master WHERE type IN ('table','view') " +
+             "AND name NOT LIKE 'sqlite_%' ORDER BY name")
+    .then(function (rows) { return rows.map(function (r) { return r.name; }); });
+}
+
+function listColumns(table) {
+  return api("SELECT name FROM pragma_table_info(" + sqlStr(table) + ")")
+    .then(function (rows) { return rows.map(function (r) { return r.name; }); });
+}
+
+function setOptions(sel, values, selected) {
+  sel.textContent = "";
+  values.forEach(function (v) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v;
+    if (v === selected) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+function buildTable(rows, cols) {
+  const wrap = document.createElement("div");
+  wrap.className = "model-table-wrap";
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const htr = document.createElement("tr");
+  cols.forEach(function (c) {
+    const th = document.createElement("th");
+    th.textContent = c;
+    htr.appendChild(th);
+  });
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  rows.forEach(function (r) {
+    const tr = document.createElement("tr");
+    cols.forEach(function (c) {
+      const td = document.createElement("td");
+      const v = r[c];
+      td.textContent = (v == null || v === "") ? "—" : String(v);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function render(rows, by, displayCols, limit) {
+  const root = document.getElementById("group-root");
+  const nav = document.getElementById("group-nav");
+  root.textContent = ""; nav.textContent = "";
+
+  const groups = new Map();
+  rows.forEach(function (r) {
+    const raw = r.__g;
+    const key = (raw == null || raw === "") ? "(none)" : String(raw);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+
+  // Stable order: "(none)" last, otherwise alpha.
+  const keys = Array.from(groups.keys()).sort(function (a, b) {
+    if (a === "(none)") return 1;
+    if (b === "(none)") return -1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+
+  if (rows.length >= limit) {
+    const note = document.createElement("p");
+    note.className = "group-note";
+    note.textContent = "Showing first " + limit + " rows (row limit hit) — raise the limit to see more.";
+    root.appendChild(note);
+  }
+  if (keys.length > MAX_GROUPS) {
+    const note = document.createElement("p");
+    note.className = "group-note";
+    note.textContent = keys.length + " distinct values; showing first " + MAX_GROUPS +
+      ". Group by a lower-cardinality column to see all.";
+    root.appendChild(note);
+  }
+
+  keys.slice(0, MAX_GROUPS).forEach(function (key) {
+    const groupRows = groups.get(key);
+    const anchor = "g-" + encodeURIComponent(key).replace(/%/g, "_");
+
+    const navLink = document.createElement("a");
+    navLink.href = "#" + anchor;
+    navLink.textContent = key + " (" + groupRows.length + ")";
+    nav.appendChild(navLink);
+
+    const section = document.createElement("section");
+    section.className = "model-section";
+    section.id = anchor;
+    const h2 = document.createElement("h2");
+    h2.textContent = by + " = " + key + " ";
+    const c = document.createElement("span");
+    c.className = "fam-count";
+    c.textContent = "(" + groupRows.length + ")";
+    h2.appendChild(c);
+    section.appendChild(h2);
+    section.appendChild(buildTable(groupRows, displayCols));
+    root.appendChild(section);
+  });
+}
+
+function loadData(table, by, colsParam, limit, allColumns) {
+  let displayCols = allColumns.filter(function (c) { return c !== by; });
+  if (colsParam) {
+    const requested = colsParam.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    const bad = requested.filter(function (c) { return allColumns.indexOf(c) === -1; });
+    if (bad.length) {
+      document.getElementById("group-root").textContent =
+        "Unknown column(s): " + bad.join(", ") + ". Available: " + allColumns.join(", ");
+      return;
+    }
+    displayCols = requested;
+  }
+  const selectList = [qIdent(by) + " AS __g"].concat(displayCols.map(qIdent)).join(", ");
+  const sql = "SELECT " + selectList + " FROM " + qIdent(table) +
+              " ORDER BY " + qIdent(by) + " LIMIT " + limit;
+  api(sql)
+    .then(function (rows) { render(rows, by, displayCols, limit); })
+    .catch(function (err) {
+      document.getElementById("group-root").textContent = "Query failed: " + err.message;
+    });
+}
+
+// ---- wire up form + initial render from URL params ----
+const params = new URLSearchParams(location.search);
+const pTable = params.get("table") || "";
+const pBy = params.get("by") || "";
+const pCols = params.get("cols") || "";
+const pLimit = parseInt(params.get("limit") || DEFAULT_LIMIT, 10) || DEFAULT_LIMIT;
+
+const fTable = document.getElementById("f-table");
+const fBy = document.getElementById("f-by");
+const fCols = document.getElementById("f-cols");
+const fLimit = document.getElementById("f-limit");
+fCols.value = pCols;
+fLimit.value = pLimit;
+
+document.getElementById("group-form").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  const qs = new URLSearchParams();
+  if (fTable.value) qs.set("table", fTable.value);
+  if (fBy.value) qs.set("by", fBy.value);
+  if (fCols.value.trim()) qs.set("cols", fCols.value.trim());
+  if (fLimit.value) qs.set("limit", fLimit.value);
+  if (DB !== "palette_registry") qs.set("db", DB);
+  location.search = qs.toString();
+});
+
+fTable.addEventListener("change", function () {
+  fBy.disabled = true;
+  fBy.innerHTML = "<option value=''>loading…</option>";
+  if (!fTable.value) { fBy.innerHTML = "<option value=''>—</option>"; return; }
+  listColumns(fTable.value).then(function (cols) {
+    setOptions(fBy, cols, "");
+    fBy.disabled = false;
+  });
+});
+
+listObjects().then(function (objects) {
+  setOptions(fTable, [""].concat(objects), pTable);
+  if (!pTable) return;
+  if (objects.indexOf(pTable) === -1) {
+    document.getElementById("group-root").textContent = "Unknown table/view: " + pTable;
+    return;
+  }
+  return listColumns(pTable).then(function (cols) {
+    setOptions(fBy, cols, pBy);
+    fBy.disabled = false;
+    if (!pBy) { document.getElementById("group-root").textContent = "Choose a column to group by."; return; }
+    if (cols.indexOf(pBy) === -1) {
+      document.getElementById("group-root").textContent = "Unknown column: " + pBy;
+      return;
+    }
+    loadData(pTable, pBy, pCols, pLimit, cols);
+  });
+}).catch(function (err) {
+  document.getElementById("group-root").textContent = "Failed to load: " + err.message;
+});
+</script>
+{% endraw %}
+{% endblock %}
