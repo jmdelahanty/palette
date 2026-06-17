@@ -51,6 +51,13 @@ This guide documents the current batch runners. They remain appropriate for
 local workstation processing, small pilots, conservative archive-level runs,
 and smoke testing.
 
+Path scope: examples that call `scripts/py -m ...` directly may use workstation
+paths such as `/nvme1/recordings` and `/nvme1/palette_registry.sqlite`.
+Examples that submit LSF jobs with `./scripts/submit_*_bsub.sh` should use
+login/compute-node-visible paths, normally
+`/groups/johnson/johnsonlab/jeremy/recordings` and a PRFS-visible registry
+snapshot under `/groups/johnson/johnsonlab/jeremy/registries/`.
+
 For production cluster workflows, treat batching as a planning and submission
 concern rather than as one long-lived Python process that owns many stages. The
 preferred structure is:
@@ -351,14 +358,14 @@ already have `detect_runs/latest` unless `--overwrite` is set.
 
 ```bash
 ./scripts/submit_detect_batches_bsub.sh \
-  --root /nvme1/recordings \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
   --batch-size 15 \
   --max-active 2 \
   --queue short \
   --ncores 4 \
   --mem-gb 16 \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --require-tuning \
   --dry-run
 ```
@@ -554,7 +561,7 @@ GPU jobs writing `detect_runs` chunks directly to PRFS/NRS:
 ```bash
 scripts/submit_detect_artifact_quality_refine_bsub.sh \
   --root /groups/johnson/johnsonlab/jeremy/recordings \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --path-contains GoodCopBadCop \
   --detect-queue gpu_l4 \
   --detect-decode-backend pynvvc_nv12_rgb \
@@ -575,10 +582,14 @@ recording, then writes that selected path into `targets.jsonl` and
 registry model resolution deliberately. `--detect-set-id`,
 `--detect-require-unique`, `--detect-top-k`, and
 `--detect-include-non-success` are forwarded to the registry resolver.
-The selected model path must be readable from the submit environment. If the
-registry points at workstation-local paths such as `/nvme1/models/...`, pass an
-explicit PRFS/NRS-visible model path under `/groups/...` or refresh the registry
-model artifact path before submitting cluster jobs.
+Both the registry file and the selected model path must be readable from the
+LSF submit host. On Janelia login/compute nodes, do not pass a workstation-local
+registry such as `/nvme1/palette_registry.sqlite` unless that path is actually
+mounted there. Copy or refresh a PRFS-visible registry snapshot under
+`/groups/johnson/johnsonlab/jeremy/registries/` before submission. If registry
+model rows still point at workstation-local paths such as `/nvme1/models/...`,
+pass an explicit PRFS/NRS-visible model path under `/groups/...` or refresh the
+registry model artifact paths before submitting cluster jobs.
 The submitter records `latest_policy=set_latest_explicit` by default so a
 successfully imported artifact leaves the normal `detect_runs/latest` surface
 consistent with direct-write detection. Downstream CPU steps still pass the
@@ -686,13 +697,13 @@ Notes:
 
 ```bash
 ./scripts/submit_crop_batches_bsub.sh \
-  --root /nvme1/recordings \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
   --batch-size 10 \
   --max-active 2 \
   --queue short \
   --mem-gb 32 \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --dry-run
 ```
 
@@ -739,13 +750,13 @@ scripts/py -m fisheye.utils.run_keypoints_batch /nvme1/recordings \
 
 ```bash
 ./scripts/submit_keypoints_batches_bsub.sh \
-  --root /nvme1/recordings \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
   --batch-size 10 \
   --max-active 2 \
   --queue short \
   --mem-gb 32 \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --dry-run
 ```
 
@@ -832,13 +843,13 @@ scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
 
 ```bash
 ./scripts/submit_eye_masks_batches_bsub.sh \
-  --root /nvme1/recordings \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
   --batch-size 10 \
   --max-active 2 \
   --queue short \
   --mem-gb 32 \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --dry-run
 ```
 
@@ -899,22 +910,22 @@ To process all four stages sequentially using registry-backed discovery:
 ```bash
 # 1. Detection — no prerequisites
 ./scripts/submit_detect_batches_bsub.sh \
-  --source registry --registry /nvme1/palette_registry.sqlite \
+  --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --batch-size 15 --max-active 2
 
 # 2. Crop — requires detect='ok'
 ./scripts/submit_crop_batches_bsub.sh \
-  --source registry --registry /nvme1/palette_registry.sqlite \
+  --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --batch-size 10 --max-active 2
 
 # 3. Keypoints — requires detect='ok' and crop='ok'
 ./scripts/submit_keypoints_batches_bsub.sh \
-  --source registry --registry /nvme1/palette_registry.sqlite \
+  --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --batch-size 10 --max-active 2
 
 # 4. Eye masks — requires crop='ok' and keypoints='ok'
 ./scripts/submit_eye_masks_batches_bsub.sh \
-  --source registry --registry /nvme1/palette_registry.sqlite \
+  --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --batch-size 10 --max-active 2
 ```
 
@@ -1007,7 +1018,7 @@ Dry-run first:
 ```bash
 ./scripts/submit_detect_quality_refine_bsub.sh \
   --root /groups/johnson/johnsonlab/jeremy/recordings \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --path-contains GoodCopBadCop \
   --detect-decode-backend pynvvc_nv12_rgb \
   --detect-resize-dims 640 640 \
@@ -1019,7 +1030,7 @@ Submit on an LSF login node:
 ```bash
 ./scripts/submit_detect_quality_refine_bsub.sh \
   --root /groups/johnson/johnsonlab/jeremy/recordings \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --path-contains GoodCopBadCop \
   --detect-queue gpu_l4 \
   --detect-gpu 'num=1' \

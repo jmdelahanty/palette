@@ -243,6 +243,11 @@ Remaining:
   `scripts/submit_detect_artifact_quality_refine_bsub.sh` and audit the
   imported detect, detect-quality, and refined-detect outputs before promoting
   this as the default broad production path.
+  - Started 2026-06-17 against GoodCopBadCop PRFS recordings with a PRFS-visible
+    registry snapshot and explicit `pynvvc_nv12_rgb`/`640x640` detection
+    settings. Initial live logs confirmed scratch artifact jobs are running on
+    L4 GPUs at near-realtime throughput. Final import/quality/refine audit is
+    still pending.
 
 ### 2. Detect Quality And Refined Detect
 
@@ -730,6 +735,7 @@ Implementation tasks:
 
 - [ ] Audit `scripts/submit_detect_artifact_quality_refine_bsub.sh` after a
   real batch and record which generated logs/operators were useful.
+  - Pending final audit of the 2026-06-17 GoodCopBadCop artifact-chain run.
 - [ ] Compare repeated pieces with
   `src/fisheye/utils/submit_clipped_detect_refine_plan_bsub.py`.
 - [x] Extract only stable shell pieces into `scripts/lib/palette_lsf.sh`

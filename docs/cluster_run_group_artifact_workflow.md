@@ -1011,7 +1011,7 @@ Full-recording detect/quality/refine wrapper:
 ```bash
 scripts/submit_detect_artifact_quality_refine_bsub.sh \
   --root /groups/johnson/johnsonlab/jeremy/recordings \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --path-contains <recording-family-filter> \
   --detect-decode-backend pynvvc_nv12_rgb \
   --detect-resize-dims 640 640 \
@@ -1043,7 +1043,11 @@ recording during planning by calling `run_detections_batch --dry-run --json
 `targets.jsonl`, `targets.tsv`, and `submissions.tsv`, then passed to the
 scratch artifact job. Pass `--model` only to intentionally bypass registry
 model resolution. The wrapper requires the selected model path to be readable
-on the submit host; if registry rows still point at workstation-local
+on the submit host. The registry file itself must also be readable from the LSF
+login node. Use a PRFS-visible registry snapshot under
+`/groups/johnson/johnsonlab/jeremy/registries/`, not
+`/nvme1/palette_registry.sqlite`, when submitting from login/compute nodes that
+cannot see workstation NVMe. If registry rows still point at workstation-local
 `/nvme1/models/...` paths, use a `/groups/...` model path or update the registry
 artifact path before submitting to LSF.
 
