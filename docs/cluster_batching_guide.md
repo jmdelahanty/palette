@@ -962,7 +962,9 @@ Submit on an LSF login node:
   --detect-batch-size 4 \
   --detect-max-active 2 \
   --quality-queue short \
+  --quality-walltime 1:00 \
   --refine-queue short \
+  --refine-walltime 1:00 \
   --run-id goodcopbadcop_detect_quality_refine_$(date -u +%Y%m%dT%H%M%SZ) \
   --submit
 ```
@@ -971,6 +973,9 @@ The dependency chain is fail-closed: if the detect array does not finish with
 `DONE`, the quality job remains pending; if quality fails, refine remains
 pending. Logs and the exact discovered `recordings.txt` live under
 `<root>/logs/detect_quality_refine_bsub/detect_quality_refine_<run_id>/`.
+On the Janelia `short` queue, keep CPU postprocess walltimes at or below
+`1:00`; longer requests can be rejected by LSF before the dependency chain is
+fully submitted.
 
 ---
 

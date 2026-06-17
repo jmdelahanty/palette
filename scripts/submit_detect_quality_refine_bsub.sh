@@ -26,7 +26,7 @@ DETECT_OVERWRITE=0
 QUALITY_QUEUE="short"
 QUALITY_NCORES=4
 QUALITY_MEM_GB=16
-QUALITY_WALLTIME="2:00"
+QUALITY_WALLTIME="1:00"
 QUALITY_THRESHOLD=100.0
 QUALITY_THRESHOLD_MODE="scaled"
 QUALITY_THRESHOLD_REFERENCE_WIDTH=640.0
@@ -34,7 +34,7 @@ QUALITY_THRESHOLD_REFERENCE_WIDTH=640.0
 REFINE_QUEUE="short"
 REFINE_NCORES=4
 REFINE_MEM_GB=16
-REFINE_WALLTIME="2:00"
+REFINE_WALLTIME="1:00"
 REFINE_SAVE_VISUALS=0
 
 SUBMIT=0
@@ -74,7 +74,7 @@ Quality/refine job options:
   --quality-queue NAME           LSF queue for detect_quality (default: short)
   --quality-ncores N             Cores for detect_quality (default: 4)
   --quality-mem-gb N             Memory for detect_quality (default: 16)
-  --quality-walltime HH:MM       Walltime for detect_quality (default: 2:00)
+  --quality-walltime HH:MM       Walltime for detect_quality (default: 1:00)
   --quality-threshold VALUE      Jump threshold (default: 100.0)
   --quality-threshold-mode MODE  scaled, pixels, or normalized (default: scaled)
   --quality-threshold-reference-width VALUE
@@ -82,7 +82,7 @@ Quality/refine job options:
   --refine-queue NAME            LSF queue for refine_detect (default: short)
   --refine-ncores N              Cores for refine_detect (default: 4)
   --refine-mem-gb N              Memory for refine_detect (default: 16)
-  --refine-walltime HH:MM        Walltime for refine_detect (default: 2:00)
+  --refine-walltime HH:MM        Walltime for refine_detect (default: 1:00)
   --refine-save-visuals          Ask refine_detect_batch to save visuals
 
 Execution:
