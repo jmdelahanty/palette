@@ -111,6 +111,28 @@ Useful flags:
 - `--only-missing` — find recordings without masks
 - `--start N` / `--limit N` — partial review passes
 
+To drive the review list from the registry rather than from Zarr attrs on disk,
+use `--source registry`. This is the preferred mode after recordings have been
+registered because every save marks `recording_step_status.dish_mask=ok`:
+
+```bash
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
+  --source registry \
+  --only-missing \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+If registry mode shows fewer recordings than expected, first confirm the
+analysis zarrs have dataset rows in that registry. Managed imports should be
+run with `--registry`; for already-created zarrs, repair registry visibility
+with:
+
+```bash
+scripts/py -m fisheye.utils.registry_rescan /path/to/recordings \
+  --recursive \
+  --registry /nvme1/palette_registry.sqlite
+```
+
 ---
 
 ## Tuning is camera-specific

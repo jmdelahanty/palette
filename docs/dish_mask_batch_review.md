@@ -13,9 +13,18 @@ This workflow is for propagating a tuned dish mask across many recordings and th
 - Dish mask is stored on each Zarr in:
   - `analysis_metadata/attrs['dish_mask']`
 - Batch apply groups by `experimental_chamber` (dish type).
-  - This comes from H5 root attr `experimental_chamber` (new recordings)
-  - For older recordings it is backfilled from:
-    - `/calibration_snapshot/arena_config_json.selected_dish_type_name`
+  - Current imports set this from H5/root metadata or organized recording
+    manifest context.
+  - For older recordings with incomplete manifests, refresh derivable context
+    fields before batch apply:
+
+```bash
+scripts/py -m fisheye.utils.refresh_recording_manifest_metadata \
+  /nvme1/recordings \
+  --recursive
+```
+
+Review the dry-run, then rerun with `--apply` if the field changes are correct.
 
 ## Quick workflow
 
@@ -30,12 +39,7 @@ The tuner always writes `analysis_metadata.attrs["dish_mask"]`. Passing
 dataset immediately; otherwise registry maintenance can refresh the status
 later.
 
-2) **Backfill chamber (older recordings only)**
-```bash
-scripts/py -m fisheye.utils.backfill_experimental_chamber /nvme1/recordings --recursive --apply
-```
-
-3) **Batch apply dish mask by chamber**
+2) **Batch apply dish mask by chamber**
 ```bash
 scripts/py -m fisheye.utils.apply_dish_mask_by_chamber /nvme1/recordings \
   --recursive \
@@ -44,10 +48,10 @@ scripts/py -m fisheye.utils.apply_dish_mask_by_chamber /nvme1/recordings \
   --apply
 ```
 
-4) **Manual review / correction**
+3) **Manual review / correction**
 ```bash
 scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
-  --recursive \
+  --source registry \
   --chamber cedar \
   --registry /nvme1/palette_registry.sqlite
 ```
@@ -71,6 +75,10 @@ scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
 
 - Lists candidates, then launches the tuner for each Zarr one at a time.
 - After you close the tuner, it prompts to continue or quit.
+- `--source registry` queries `recording_step_status` and is preferred after
+  imports were run with `--registry` or after a registry rescan.
+- Filesystem mode remains available with `--recursive`; it scans Zarr attrs
+  directly and does not require the registry to be current.
 - Helpful flags:
   - `--only-present` to check the batch-applied ones
   - `--only-missing` to find gaps
@@ -82,16 +90,25 @@ scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
 Examples:
 ```bash
 # Only those that already have masks (verification pass)
-scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-present \
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
+  --source registry --only-present \
   --registry /nvme1/palette_registry.sqlite
 
 # Only missing masks (fix pass)
-scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings --recursive --only-missing \
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
+  --source registry --only-missing \
+  --registry /nvme1/palette_registry.sqlite
+
+# Filesystem fallback when the registry is intentionally unavailable or stale
+scripts/py -m fisheye.utils.review_dish_masks /nvme1/recordings \
+  --recursive --only-missing \
   --registry /nvme1/palette_registry.sqlite
 ```
 
 ## Notes / best practices
 
+- Run `import_organized_recordings_analysis --registry ...` after importing
+  new recordings so registry-backed review lists are complete immediately.
 - **Always review** after batch apply—small offsets matter for downstream detection.
 - For consistent results, review all recordings from a single `experimental_chamber` in one pass.
 - If you re-run batch apply after manual fixes, use `--overwrite` cautiously or you’ll overwrite manual corrections.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -142,6 +143,104 @@ def _build_plans(
     return sorted(plans, key=lambda p: str(p.zarr_path))
 
 
+def _path_in_scope(zarr_path: Path, roots: List[Path]) -> bool:
+    if not roots:
+        return True
+    try:
+        resolved = zarr_path.expanduser().resolve(strict=False)
+    except OSError:
+        resolved = zarr_path.expanduser().absolute()
+    for root in roots:
+        expanded = root.expanduser()
+        try:
+            root_resolved = expanded.resolve(strict=False)
+        except OSError:
+            root_resolved = expanded.absolute()
+        if resolved == root_resolved:
+            return True
+        try:
+            resolved.relative_to(root_resolved)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _build_plans_from_registry(
+    registry_path: Path,
+    *,
+    roots: List[Path],
+    chamber_filter: Optional[str],
+    camera_filter: Optional[str],
+    only_missing: bool,
+    only_present: bool,
+    zarr_use: str = "analysis",
+) -> List[ReviewPlan]:
+    conn = sqlite3.connect(str(registry_path.expanduser()))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                d.zarr_path AS zarr_path,
+                d.zarr_use AS zarr_use,
+                d.status AS dataset_status,
+                r.dish_design AS chamber,
+                r.camera_id AS camera_id,
+                rss.status AS dish_mask_status
+            FROM datasets d
+            LEFT JOIN recordings r ON r.recording_id = d.recording_id
+            LEFT JOIN recording_step_status rss
+              ON rss.dataset_id = d.dataset_id
+             AND rss.step_name = 'dish_mask'
+            WHERE d.zarr_path IS NOT NULL
+              AND TRIM(d.zarr_path) != ''
+              AND COALESCE(d.status, '') NOT IN ('missing', 'deleted')
+              AND COALESCE(d.zarr_use, 'analysis') = ?
+            ORDER BY d.zarr_path;
+            """,
+            (zarr_use,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    plans_by_path: dict[Path, ReviewPlan] = {}
+    for row in rows:
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        if not _path_in_scope(zarr_path, roots):
+            continue
+
+        chamber = _normalize_attr(row["chamber"])
+        if chamber_filter and chamber != chamber_filter:
+            continue
+
+        camera_id = _normalize_attr(row["camera_id"])
+        if camera_filter and camera_id != camera_filter:
+            continue
+
+        has_mask = str(row["dish_mask_status"] or "").lower() == "ok"
+        if only_missing and has_mask:
+            continue
+        if only_present and not has_mask:
+            continue
+
+        try:
+            dedupe_key = zarr_path.resolve(strict=False)
+        except OSError:
+            dedupe_key = zarr_path.absolute()
+        plans_by_path.setdefault(
+            dedupe_key,
+            ReviewPlan(
+                zarr_path=zarr_path,
+                chamber=chamber,
+                camera_id=camera_id,
+                has_mask=has_mask,
+                status="ok",
+            ),
+        )
+    return sorted(plans_by_path.values(), key=lambda p: str(p.zarr_path))
+
+
 def _prompt_continue() -> bool:
     resp = input("Press Enter for next, or type 'q' to quit: ").strip().lower()
     return resp != "q"
@@ -198,6 +297,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Optional registry SQLite path passed to mask_tuner for dish_mask status sync on save.",
     )
     parser.add_argument(
+        "--source",
+        choices=["filesystem", "registry"],
+        default="filesystem",
+        help="Candidate source. filesystem scans Zarr attrs; registry queries recording_step_status.",
+    )
+    parser.add_argument(
+        "--registry-only",
+        action="store_true",
+        help="Alias for --source registry.",
+    )
+    parser.add_argument(
+        "--zarr-use",
+        default="analysis",
+        help="Registry dataset zarr_use filter when --source registry is used (default: analysis).",
+    )
+    parser.add_argument(
         "--start",
         type=int,
         default=0,
@@ -214,20 +329,35 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="List candidates and exit without opening the tuner.",
     )
     args = parser.parse_args(argv)
+    source = "registry" if args.registry_only else args.source
+    if source == "registry" and args.registry is None:
+        parser.error("--source registry/--registry-only requires --registry")
 
     if args.paths:
         roots = args.paths
     else:
         env_root = os.environ.get("PALETTE_RECORDINGS_ROOT")
         roots = [Path(env_root)] if env_root else [Path("/nvme1/recordings")]
-    plans = _build_plans(
-        roots,
-        args.recursive,
-        args.chamber,
-        args.camera_id,
-        args.only_missing,
-        args.only_present,
-    )
+    if source == "registry":
+        assert args.registry is not None
+        plans = _build_plans_from_registry(
+            args.registry,
+            roots=roots,
+            chamber_filter=args.chamber,
+            camera_filter=args.camera_id,
+            only_missing=args.only_missing,
+            only_present=args.only_present,
+            zarr_use=args.zarr_use,
+        )
+    else:
+        plans = _build_plans(
+            roots,
+            args.recursive,
+            args.chamber,
+            args.camera_id,
+            args.only_missing,
+            args.only_present,
+        )
 
     if not plans:
         print("No recordings found to review.")
