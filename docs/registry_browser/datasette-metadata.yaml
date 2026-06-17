@@ -1,0 +1,186 @@
+# Datasette metadata for the Palette registry (read-only browser).
+#
+# Run:
+#   datasette --immutable /nvme1/palette_registry.sqlite \
+#     --metadata docs/registry_browser/datasette-metadata.yaml \
+#     --plugins-dir docs/registry_browser/plugins \
+#     --static registry-static:docs/registry_browser/static \
+#     --setting sql_time_limit_ms 8000 \
+#     --setting max_returned_rows 2000 \
+#     --setting suggest_facets off \
+#     --setting default_page_size 100 \
+#     --host 127.0.0.1 --port 8011
+#
+# Notes:
+#   * Pass the DB file ONCE (here via --immutable). Passing it both as a
+#     positional arg and --immutable mounts it twice (palette_registry_2).
+#   * --immutable opens the file with no write locks and lets Datasette cache
+#     table counts — correct here because the registry is written by the
+#     pipeline, not by this viewer.
+#   * --plugins-dir loads render_status_cells.py, which color-codes status
+#     tokens (OK / MISS / STALE / approved / pending ...) in the wide and
+#     overview views. --static + extra_css_urls below supply the cell tints.
+#   * The database is referenced below by its file stem: "palette_registry".
+#     If you serve a copy with a different filename, rename the key to match.
+#   * Tables/views not listed below still appear in Datasette automatically;
+#     this file only adds titles, sort orders, facets, and canned queries to
+#     the ones worth curating (mirrors registry_tui.py CURATED_VIEWS).
+
+title: Palette Registry
+description_html: |-
+  Read-only browser for the Palette fish-behavior pipeline registry
+  (datasets, provenance, per-stage quality/performance, training lineage,
+  and the recording step-status ledger).
+license: Internal — HHMI
+source: palette_registry.sqlite
+
+# Loaded via --static registry-static:docs/registry_browser/static
+extra_css_urls:
+  - /registry-static/registry.css
+
+databases:
+  palette_registry:
+
+    # ----- Canned queries: the TUI "relationships" pane, as web forms -----
+    queries:
+
+      dataset_lineage:
+        title: Lineage for a dataset (parents + children)
+        sql: |-
+          SELECT 'parent' AS direction, parent_dataset_id AS related_dataset_id,
+                 relationship_type, source_set_id
+          FROM dataset_lineage_current
+          WHERE child_dataset_id = :dataset_id
+          UNION ALL
+          SELECT 'child' AS direction, child_dataset_id AS related_dataset_id,
+                 relationship_type, source_set_id
+          FROM dataset_lineage_current
+          WHERE parent_dataset_id = :dataset_id
+          ORDER BY direction, relationship_type, related_dataset_id;
+
+      dataset_quality:
+        title: Quality (detect + keypoint) for a dataset
+        sql: |-
+          SELECT 'keypoint' AS kind, refined_run AS run, keypoint_method AS method,
+                 review_state, usable_keypoints_rate AS rate
+          FROM keypoint_quality_current
+          WHERE dataset_id = :dataset_id
+          UNION ALL
+          SELECT 'detect' AS kind, refined_run AS run, detect_method AS method,
+                 review_state, interpolated_detections_rate AS rate
+          FROM detect_quality_current
+          WHERE dataset_id = :dataset_id;
+
+      training_sets_for_dataset:
+        title: Training sets that include a dataset
+        sql: |-
+          SELECT set_id, name, task_type, created_utc
+          FROM training_sets
+          WHERE dataset_ids_json LIKE '%' || :dataset_id || '%'
+          ORDER BY created_utc DESC;
+
+      training_lineage_for_set:
+        title: Runs + exported models for a training set
+        sql: |-
+          SELECT r.run_id, r.status, r.task_type, r.created_utc,
+                 o.path AS onnx_path, t.path AS tensorrt_path, t.precision
+          FROM training_runs r
+          LEFT JOIN onnx_models o ON o.run_id = r.run_id
+          LEFT JOIN tensorrt_models t ON t.run_id = r.run_id
+          WHERE r.set_id = :set_id
+          ORDER BY r.created_utc DESC;
+
+    # ----- Curated tables/views: titles, sort, facets -----
+    tables:
+
+      datasets:
+        title: Datasets (one row per registered zarr artifact)
+        sort_desc: created_utc
+        facets: [zarr_use, zarr_origin, status, source_layout, artifact_kind]
+        label_column: dataset_id
+
+      recordings:
+        title: Recordings
+        facets: [recording_type, recording_subtype, behavior_mode, rig_id, arena_id, camera_id]
+        label_column: recording_name
+
+      recording_overview:
+        title: Recording overview (joined recording + subject + genetics)
+
+      recording_step_status_wide:
+        title: Step status — wide (pipeline dashboard, one column per stage)
+
+      recording_step_status_latest:
+        title: Step status — latest (one row per dataset/stage)
+        facets: [step_name, status, source]
+        sort: step_name
+
+      recording_step_status_history:
+        title: Step status — history (append-only audit trail)
+        sort_desc: recorded_utc
+        facets: [step_name, status]
+
+      provenance:
+        title: Provenance (fish/dish/cross/genetics + capture metadata)
+        facets: [line_strain, species, snapshot_status]
+        sort: dataset_id
+
+      dataset_lineage_current:
+        title: Dataset lineage (parent → child edges)
+        facets: [relationship_type]
+
+      training_sets:
+        title: Training sets
+        sort_desc: created_utc
+        facets: [task_type]
+        label_column: set_id
+
+      training_runs:
+        title: Training runs
+        sort_desc: created_utc
+        facets: [task_type, status]
+        label_column: run_id
+
+      training_models:
+        title: Training models
+        sort_desc: created_utc
+        facets: [task_type, coverage_class]
+
+      onnx_models:
+        title: ONNX exports
+        sort_desc: created_utc
+
+      tensorrt_models:
+        title: TensorRT exports
+        sort_desc: created_utc
+        facets: [precision]
+
+      detect_performance_latest:
+        title: Detection performance (latest per dataset/run)
+
+      keypoint_performance_latest:
+        title: Keypoint performance (latest per dataset/run)
+
+      eye_mask_performance_latest:
+        title: Eye-mask performance (latest per dataset/run)
+
+      subject_mask_performance_latest:
+        title: Subject-mask performance (latest per dataset/run)
+
+      keypoint_quality_current:
+        title: Keypoint quality / review (current)
+        facets: [keypoint_method, review_state]
+        sort_desc: quality_updated_utc
+
+      detect_quality_current:
+        title: Detection quality / review (current)
+        facets: [detect_method, review_state]
+        sort_desc: quality_updated_utc
+
+      eye_mask_quality_current:
+        title: Eye-mask quality / review (current)
+        facets: [eye_mask_method, review_state]
+
+      pose_skeleton_specs:
+        title: Pose skeleton specs
+        sort_desc: created_utc

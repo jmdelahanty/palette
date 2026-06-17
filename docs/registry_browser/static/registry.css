@@ -1,0 +1,23 @@
+/* Status-cell coloring for the Palette registry browser (Datasette light theme).
+ *
+ * The render_status_cells plugin wraps status tokens in <span class="s s-*">.
+ * We tint the whole <td> via :has() and color the text for emphasis.
+ * Text color works on every browser; the full-cell tint needs :has()
+ * (Chrome/Edge/Firefox/Safari 2023+). Without :has(), you still get colored
+ * text — only the background fill is skipped.
+ */
+
+td:has(> span.s-ok)    { background: #e6f6ea; }
+td:has(> span.s-miss)  { background: #fde3e1; }
+td:has(> span.s-err)   { background: #fbd0d0; }
+td:has(> span.s-stale) { background: #fdeecd; }
+td:has(> span.s-warn)  { background: #fdf3d3; }
+td:has(> span.s-muted) { background: transparent; }
+
+span.s         { font-weight: 600; }
+span.s-ok      { color: #11703a; }
+span.s-miss    { color: #b42318; }
+span.s-err     { color: #8a1410; }
+span.s-stale   { color: #8a5a08; }
+span.s-warn    { color: #8a5a08; }
+span.s-muted   { color: #9aa0a6; font-weight: 400; }
