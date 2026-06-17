@@ -115,3 +115,15 @@ span.s-muted   { color: #9aa0a6; font-weight: 400; }
 .group-form input { font-size: 0.85rem; padding: 0.25rem 0.35rem; }
 .group-form button { padding: 0.35rem 0.9rem; font-size: 0.85rem; }
 .group-note { color: #8a5a08; font-size: 0.85rem; margin: 0.3rem 0; }
+
+/* Home-page nav to the custom pages */
+.home-views {
+  margin: 0.6rem 0 1.4rem;
+  padding: 0.55rem 0.8rem;
+  background: #eef3fb;
+  border: 1px solid #d3deef;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.home-views a { margin: 0 0.15rem; }
+.home-views .sep { color: #9aa0a6; margin: 0 0.3rem; }

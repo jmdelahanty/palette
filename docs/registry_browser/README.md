@@ -84,10 +84,15 @@ docs/registry_browser/
 ├── static/
 │   └── registry.css              # cell tints, legend, /models page styling
 └── templates/
+    ├── index.html                # home-page override: adds a nav to /models + /group
     └── pages/
         ├── group.html            # custom page served at /group (generic grouper)
         └── models.html           # custom page served at /models (model families)
 ```
+
+`templates/index.html` mirrors Datasette 0.65's default home page and only adds
+the `.home-views` nav under the title. If you bump Datasette and its `index.html`
+changes, re-sync the database-listing loop (the nav block itself is independent).
 
 ### Custom pages
 
