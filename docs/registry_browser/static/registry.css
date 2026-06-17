@@ -1,17 +1,28 @@
-/* Status-cell coloring for the Palette registry browser (Datasette light theme).
+/* Status-cell coloring + legend for the Palette registry browser (light theme).
  *
- * The render_status_cells plugin wraps status tokens in <span class="s s-*">.
- * We tint the whole <td> via :has() and color the text for emphasis.
- * Text color works on every browser; the full-cell tint needs :has()
- * (Chrome/Edge/Firefox/Safari 2023+). Without :has(), you still get colored
- * text — only the background fill is skipped.
+ * The render_status_cells plugin wraps status tokens in <span class="s s-*">
+ * and injects a .status-legend on the colored views. Cell tints and legend
+ * swatches share the --st-* variables below, so they can never drift apart.
+ *
+ * Full-cell tint needs :has() (Chrome/Edge/Firefox/Safari 2023+). Without it
+ * you still get colored text and a working legend — only the cell background
+ * fill is skipped.
  */
 
-td:has(> span.s-ok)    { background: #e6f6ea; }
-td:has(> span.s-miss)  { background: #fde3e1; }
-td:has(> span.s-err)   { background: #fbd0d0; }
-td:has(> span.s-stale) { background: #fdeecd; }
-td:has(> span.s-warn)  { background: #fdf3d3; }
+:root {
+  --st-ok:    #e6f6ea;
+  --st-miss:  #fde3e1;
+  --st-err:   #fbd0d0;
+  --st-stale: #fdeecd;
+  --st-warn:  #fdf3d3;
+  --st-muted: #f0f1f2;
+}
+
+td:has(> span.s-ok)    { background: var(--st-ok); }
+td:has(> span.s-miss)  { background: var(--st-miss); }
+td:has(> span.s-err)   { background: var(--st-err); }
+td:has(> span.s-stale) { background: var(--st-stale); }
+td:has(> span.s-warn)  { background: var(--st-warn); }
 td:has(> span.s-muted) { background: transparent; }
 
 span.s         { font-weight: 600; }
@@ -21,3 +32,29 @@ span.s-err     { color: #8a1410; }
 span.s-stale   { color: #8a5a08; }
 span.s-warn    { color: #8a5a08; }
 span.s-muted   { color: #9aa0a6; font-weight: 400; }
+
+/* Legend (injected by the plugin on the colored status views) */
+.status-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.9rem;
+  margin: 0.5rem 0 1rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+.status-legend-title { font-weight: 700; margin-right: 0.2rem; }
+.status-legend-item  { display: inline-flex; align-items: center; gap: 0.35rem; }
+.status-legend-swatch {
+  display: inline-block;
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+}
+.status-legend-swatch.sw-ok    { background: var(--st-ok); }
+.status-legend-swatch.sw-miss  { background: var(--st-miss); }
+.status-legend-swatch.sw-err   { background: var(--st-err); }
+.status-legend-swatch.sw-stale { background: var(--st-stale); }
+.status-legend-swatch.sw-warn  { background: var(--st-warn); }
+.status-legend-swatch.sw-muted { background: var(--st-muted); }

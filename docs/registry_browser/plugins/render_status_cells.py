@@ -15,6 +15,8 @@ Load with:  datasette ... --plugins-dir docs/registry_browser/plugins
 
 from __future__ import annotations
 
+import json
+
 from datasette import hookimpl
 from markupsafe import Markup, escape
 
@@ -61,3 +63,47 @@ def render_cell(row, value, column, table, database, datasette):
         return None
     # escape() neutralizes any HTML in the value before we wrap it.
     return Markup('<span class="s s-{}">{}</span>').format(suffix, escape(text))
+
+
+# Legend: (swatch CSS class, label). Swatch colors come from registry.css
+# variables, so the legend always matches the cell tints. Labels mirror the
+# classify() rules above.
+LEGEND_ITEMS = [
+    ("sw-ok", "OK · approved · coverage%"),
+    ("sw-miss", "missing"),
+    ("sw-stale", "stale"),
+    ("sw-warn", "unverified · pending · warn"),
+    ("sw-err", "error · failed"),
+    ("sw-muted", "N/A · absent"),
+]
+
+
+def _legend_script() -> str:
+    """Client-side legend, injected above the table. Done in JS rather than a
+    template override so it survives Datasette version bumps."""
+    items_js = json.dumps(LEGEND_ITEMS)
+    return (
+        "(function(){"
+        "if(document.querySelector('.status-legend'))return;"
+        "var items=" + items_js + ";"
+        "var L=document.createElement('div');L.className='status-legend';"
+        "var t=document.createElement('span');t.className='status-legend-title';"
+        "t.textContent='Status';L.appendChild(t);"
+        "items.forEach(function(it){"
+        "var i=document.createElement('span');i.className='status-legend-item';"
+        "var s=document.createElement('span');s.className='status-legend-swatch '+it[0];"
+        "i.appendChild(s);i.appendChild(document.createTextNode(it[1]));"
+        "L.appendChild(i);});"
+        "var tbl=document.querySelector('table.rows-and-columns');"
+        "if(tbl&&tbl.parentNode){tbl.parentNode.insertBefore(L,tbl);}"
+        "else{document.body.insertBefore(L,document.body.firstChild);}"
+        "})();"
+    )
+
+
+@hookimpl
+def extra_body_script(table, view_name):
+    # Only on the colored status views (table is None on query/db pages).
+    if table not in STATUS_VIEWS:
+        return None
+    return _legend_script()
