@@ -58,3 +58,42 @@ span.s-muted   { color: #9aa0a6; font-weight: 400; }
 .status-legend-swatch.sw-stale { background: var(--st-stale); }
 .status-legend-swatch.sw-warn  { background: var(--st-warn); }
 .status-legend-swatch.sw-muted { background: var(--st-muted); }
+
+/* "Models by type" custom page (/models): grouped scrollable tables */
+.models-intro { color: #4b5563; max-width: 60rem; }
+#models-nav { display: flex; flex-wrap: wrap; gap: 0.5rem 0.8rem; margin: 0.4rem 0 1.2rem; font-size: 0.88rem; }
+.model-section { margin: 0 0 1.6rem; }
+.model-section h2 { margin: 0.3rem 0 0.45rem; font-size: 1.05rem; }
+.model-section .fam-count { color: #6b7280; font-weight: 400; font-size: 0.9rem; }
+.model-table-wrap {
+  max-height: 22rem;
+  overflow: auto;
+  border: 1px solid #e2e4e8;
+  border-radius: 6px;
+}
+.model-table-wrap table { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
+.model-table-wrap th,
+.model-table-wrap td {
+  padding: 0.3rem 0.55rem;
+  border-bottom: 1px solid #eef0f2;
+  white-space: nowrap;
+  text-align: left;
+  vertical-align: top;
+}
+.model-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  background: #f6f7f9;
+  z-index: 1;
+  box-shadow: inset 0 -1px 0 #dfe2e6;
+}
+.model-table-wrap td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.model-table-wrap td.num { text-align: right; }
+.model-table-wrap td.link-run a.run-link {
+  display: inline-block;
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}

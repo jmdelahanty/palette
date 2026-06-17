@@ -5,6 +5,7 @@
 #     --metadata docs/registry_browser/datasette-metadata.yaml \
 #     --plugins-dir docs/registry_browser/plugins \
 #     --static registry-static:docs/registry_browser/static \
+#     --template-dir docs/registry_browser/templates \
 #     --setting sql_time_limit_ms 8000 \
 #     --setting max_returned_rows 2000 \
 #     --setting suggest_facets off \

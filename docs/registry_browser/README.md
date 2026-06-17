@@ -37,6 +37,7 @@ datasette --immutable /nvme1/palette_registry.sqlite \
   --metadata docs/registry_browser/datasette-metadata.yaml \
   --plugins-dir docs/registry_browser/plugins \
   --static registry-static:docs/registry_browser/static \
+  --template-dir docs/registry_browser/templates \
   --setting sql_time_limit_ms 8000 --setting default_page_size 100 \
   --host 127.0.0.1 --port 8011
 ```
@@ -60,6 +61,7 @@ command at whatever copy you want to browse (e.g. `$PALETTE_REGISTRY_PATH`).
 | What | Path |
 |------|------|
 | Home (all tables/views) | `/` |
+| **Models by type** (grouped scrollable tables) | `/models` |
 | Datasets, faceted | `/palette_registry/datasets` |
 | Pipeline status (wide, color-coded) | `/palette_registry/recording_step_status_wide` |
 | Lineage for a dataset | `/palette_registry/dataset_lineage` |
@@ -77,10 +79,30 @@ docs/registry_browser/
 ├── README.md                     # this file
 ├── datasette-metadata.yaml       # titles, sort orders, facets, canned queries, extra_css_urls
 ├── plugins/
-│   └── render_status_cells.py    # render_cell hook: colors status tokens
-└── static/
-    └── registry.css              # cell tints + text colors (light theme)
+│   └── render_status_cells.py    # render_cell hook (status colors) + legend
+├── static/
+│   └── registry.css              # cell tints, legend, /models page styling
+└── templates/
+    └── pages/
+        └── models.html           # custom page served at /models
 ```
+
+### Custom pages
+
+`templates/pages/models.html` is a Datasette **custom page** served at `/models`
+(enabled by `--template-dir`). It fetches `model_input_shapes` via the JSON SQL
+API and renders one independently-scrollable, sticky-header table per model
+family (pose / detect / subject_masks / eye_masks / ...). Family is `task_type`
+when present, else inferred from the `set_id`/`run_id` text, so models with a
+NULL `task_type` (e.g. eye masks) still group correctly instead of falling into
+an "other" pile. `set_id`/`run_id` cells link to their `training_sets` /
+`training_runs` rows.
+
+The page's JavaScript lives inside a Jinja `{% raw %}` block — required, since
+Datasette renders custom pages through Jinja and would otherwise choke on the
+JS template literals and braces. Adding a new grouped page is a copy-paste of
+this file with a different SQL/grouping column. Editing the template needs only
+a browser refresh (templates are not cached like plugins).
 
 ### Canned queries
 

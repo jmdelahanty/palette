@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}Models by type{% endblock %}
+
+{% block content %}
+<h1>Models by type</h1>
+<p class="models-intro">
+  Rows from <code>model_input_shapes</code>, grouped by model family. Family is
+  <code>task_type</code> when set, otherwise inferred from the set/run name.
+  Each table scrolls independently.
+</p>
+<nav id="models-nav"></nav>
+<div id="models-root">Loading…</div>
+
+{% raw %}
+<script>
+"use strict";
+
+// Family is task_type when present, else inferred from set_id/run_id text.
+const SQL = `
+SELECT artifact_kind, set_id, run_id, artifact_precision, input_shape,
+       input_layout, img_h, img_w, max_batch, input_dtype, input_color_space,
+       input_shape_status, created_utc,
+  CASE
+    WHEN task_type IS NOT NULL AND trim(task_type) <> '' THEN lower(task_type)
+    WHEN lower(coalesce(set_id,'')||' '||coalesce(run_id,'')) LIKE '%subject_mask%' THEN 'subject_masks'
+    WHEN lower(coalesce(set_id,'')||' '||coalesce(run_id,'')) LIKE '%eye_mask%'     THEN 'eye_masks'
+    WHEN lower(coalesce(set_id,'')||' '||coalesce(run_id,'')) LIKE '%subdish%'      THEN 'subdish_masks'
+    WHEN lower(coalesce(set_id,'')||' '||coalesce(run_id,'')) LIKE '%dish_mask%'    THEN 'dish_masks'
+    WHEN lower(coalesce(set_id,'')||' '||coalesce(run_id,'')) LIKE '%pose%'
+      OR lower(coalesce(set_id,'')||' '||coalesce(run_id,'')) LIKE '%keypoint%'     THEN 'pose'
+    WHEN lower(coalesce(set_id,'')||' '||coalesce(run_id,'')) LIKE '%detect%'       THEN 'detect'
+    ELSE 'other'
+  END AS family
+FROM model_input_shapes
+ORDER BY family, artifact_kind, created_utc DESC;
+`;
+
+// Preferred section order; anything else is appended alphabetically.
+const FAMILY_ORDER = ["pose", "detect", "subject_masks", "eye_masks", "subdish_masks", "dish_masks", "other"];
+const FAMILY_LABEL = {
+  pose: "Pose", detect: "Detect", subject_masks: "Subject masks",
+  eye_masks: "Eye masks", subdish_masks: "Sub-dish masks", dish_masks: "Dish masks", other: "Other",
+};
+
+const COLS = [
+  ["artifact_kind", "Kind", ""],
+  ["set_id", "Set", "link-set"],
+  ["run_id", "Run", "link-run"],
+  ["artifact_precision", "Precision", ""],
+  ["input_shape", "Shape", "mono"],
+  ["input_layout", "Layout", ""],
+  ["img_h", "H", "num"],
+  ["img_w", "W", "num"],
+  ["max_batch", "Batch", "num"],
+  ["input_dtype", "Dtype", ""],
+  ["input_color_space", "Color", ""],
+  ["input_shape_status", "Shape status", ""],
+  ["created_utc", "Created", "mono"],
+];
+
+function rowLink(kind, value) {
+  const a = document.createElement("a");
+  const table = kind === "link-set" ? "training_sets" : "training_runs";
+  a.href = "/palette_registry/" + table + "/" + encodeURIComponent(value);
+  a.textContent = value;
+  a.className = kind === "link-run" ? "run-link" : "set-link";
+  a.title = value;
+  return a;
+}
+
+function buildTable(rows) {
+  const wrap = document.createElement("div");
+  wrap.className = "model-table-wrap";
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const htr = document.createElement("tr");
+  COLS.forEach(function (c) {
+    const th = document.createElement("th");
+    th.textContent = c[1];
+    htr.appendChild(th);
+  });
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  rows.forEach(function (r) {
+    const tr = document.createElement("tr");
+    COLS.forEach(function (c) {
+      const td = document.createElement("td");
+      const cls = c[2];
+      const val = r[c[0]];
+      if (cls) td.className = cls;
+      if ((cls === "link-set" || cls === "link-run") && val != null && val !== "") {
+        td.appendChild(rowLink(cls, String(val)));
+      } else {
+        td.textContent = (val == null || val === "") ? "—" : String(val);
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function render(rows) {
+  const groups = {};
+  rows.forEach(function (r) {
+    const f = r.family || "other";
+    (groups[f] = groups[f] || []).push(r);
+  });
+  const present = Object.keys(groups);
+  const ordered = FAMILY_ORDER.filter(function (f) { return present.includes(f); })
+    .concat(present.filter(function (f) { return !FAMILY_ORDER.includes(f); }).sort());
+
+  const root = document.getElementById("models-root");
+  const nav = document.getElementById("models-nav");
+  root.textContent = "";
+  nav.textContent = "";
+
+  ordered.forEach(function (fam) {
+    const label = FAMILY_LABEL[fam] || fam;
+    const count = groups[fam].length;
+
+    const navLink = document.createElement("a");
+    navLink.href = "#fam-" + fam;
+    navLink.textContent = label + " (" + count + ")";
+    nav.appendChild(navLink);
+
+    const section = document.createElement("section");
+    section.className = "model-section";
+    section.id = "fam-" + fam;
+    const h2 = document.createElement("h2");
+    h2.textContent = label + " ";
+    const c = document.createElement("span");
+    c.className = "fam-count";
+    c.textContent = "(" + count + ")";
+    h2.appendChild(c);
+    section.appendChild(h2);
+    section.appendChild(buildTable(groups[fam]));
+    root.appendChild(section);
+  });
+
+  if (!ordered.length) root.textContent = "No models found.";
+}
+
+fetch("/palette_registry.json?_shape=array&sql=" + encodeURIComponent(SQL))
+  .then(function (resp) {
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return resp.json();
+  })
+  .then(render)
+  .catch(function (err) {
+    document.getElementById("models-root").textContent = "Failed to load models: " + err;
+  });
+</script>
+{% endraw %}
+{% endblock %}
