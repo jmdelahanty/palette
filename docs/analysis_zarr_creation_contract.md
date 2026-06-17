@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-02-27
+last_verified: 2026-06-17
 -->
 
 Purpose: define a migration-safe, operator-first contract for creating analysis archives independently from `detect_yolo` inference.
@@ -80,12 +80,81 @@ Defaults:
 2. Root attrs include canonical analysis-purpose metadata:
    - `zarr_purpose = "analysis"`
    - source video path/name and basic video fields when resolvable
-3. If `--import-stimulus` succeeds:
+3. If `recording_manifest.json` declares `video_streams`, the import mirrors a
+   recording-level acquisition media inventory into
+   `analysis/acquisition_video_streams`.
+4. If `--import-stimulus` succeeds:
    - `analysis/stimulus_runs/<run>` exists
    - `analysis/stimulus_runs.attrs["latest"]` updated
-4. If `--register`:
+5. If `--register`:
    - archive is scanned into registry
    - dataset row is active and path is current
+
+### Acquisition Video Stream Inventory
+
+`analysis/acquisition_video_streams` is a recording-level inventory copied from
+`recording_manifest.json.video_streams`. It declares acquisition-time media
+artifacts that are available to Palette without treating them as derived Palette
+stage outputs.
+
+Structure:
+
+```text
+analysis/acquisition_video_streams/
+  attrs:
+    schema_id = "palette.acquisition_video_streams.v1"
+    source_schema_id = "orange_runtime_video_streams_v1"
+    source_frame_clock = "recording_frame_id"
+    stream_count
+    stream_keys
+    crop_stream_available
+    inventory_status
+    streams = {...}
+  streams/
+    full/attrs
+    crop/attrs
+```
+
+The `crop` stream, when present, describes Orange/acquisition-generated crop
+video and metadata:
+
+- `video_pixel_coordinate_space = "crop_frame_pixels"`
+- `source_geometry_coordinate_space = "full_frame_pixels"`
+- `frame_clock = "recording_frame_id"`
+- geometry columns such as `crop_x`, `crop_y`, `crop_w`, `crop_h`,
+  `detection_x`, `detection_y`, `detection_w`, `detection_h`
+- `blank_frame_policy`, `selection_policy`, dimensions, frame rate, codec, and
+  pixel-source metadata when known
+
+Import performs only cheap validation: file existence, sidecar JSON readability,
+CSV data row counts, and row-count mismatch warnings. It does not decode video.
+
+This surface is not a replacement for:
+
+- `crop_runs/<run>`: Palette-generated crop geometry/pixel outputs
+- `detect_runs/<run>`: detector-style bounding-box outputs
+- `refined_detect_runs/<run>/instances`: consumer-facing refined detection rows
+
+Acquisition boxes may be imported later into a normal `detect_runs/<run>`, but
+the media inventory itself is intentionally stage-neutral.
+
+Existing archives can be refreshed with:
+
+```bash
+scripts/py -m fisheye.utils.backfill_acquisition_video_stream_inventory \
+  /groups/johnson/johnsonlab/jeremy/recordings \
+  --recursive \
+  --path-contains GoodCopBadCop \
+  --apply
+```
+
+Omit `--apply` for the default dry-run plan.
+
+Registry scans extract this surface into `acquisition_video_streams` and expose
+`recording_crop_video_available_current` for filesystem-free discovery of
+recordings with acquisition crop video. See
+[`docs/diagnostics/acquisition_crop_video_integration_2026-06-17.md`](diagnostics/acquisition_crop_video_integration_2026-06-17.md)
+for the current integration state and next-step recommendations.
 
 ### Failure semantics
 

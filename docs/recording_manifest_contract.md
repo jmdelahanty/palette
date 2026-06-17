@@ -167,6 +167,9 @@ stream. Recommended manifest content:
   `orange_producer`, and `orange_recording_mode` when known
 - include `video_streams.schema_id="orange_runtime_video_streams_v1"` with
   separate `full` and `crop` stream entries when Orange wrote both streams
+- analysis-zarr import mirrors this `video_streams` payload into
+  `analysis/acquisition_video_streams` as a recording-level acquisition media
+  inventory; this does not make crop videos Palette `crop_runs`
 - include one full-frame camera video entry under `files.cams`
 - include compatibility camera sidecars under `files.cams`:
   `Cam*.mp4`, `Cam*_meta.csv`, and `Cam*_keyframe.json`

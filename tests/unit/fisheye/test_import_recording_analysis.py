@@ -179,6 +179,116 @@ def test_ensure_analysis_archive_copies_recording_manifest_context(monkeypatch, 
     assert fake_root.attrs.get("session_start_iso8601_utc") == "2026-02-23T21:23:35Z"
 
 
+def test_ensure_analysis_archive_imports_acquisition_video_stream_inventory(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeAttrs(dict):
+        def put(self, payload):
+            self.clear()
+            self.update(payload)
+
+    class _FakeGroup:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs()
+            self.groups: dict[str, _FakeGroup] = {}
+
+        def require_group(self, name: str):
+            group = self
+            for part in name.split("/"):
+                group = group.groups.setdefault(part, _FakeGroup())
+            return group
+
+    recording_dir = tmp_path / "2026-06-14T21-12-08Z_arena_1_GoodCopBadCop"
+    (recording_dir / "cams").mkdir(parents=True)
+    crop_dir = recording_dir / "derived" / "external_crop_recorder"
+    crop_dir.mkdir(parents=True)
+    (recording_dir / "cams" / "Cam2010093_sample.mp4").write_bytes(b"full")
+    (crop_dir / "Cam2010093_sample_crop_external.mp4").write_bytes(b"crop")
+    (crop_dir / "Cam2010093_sample_crop_meta.csv").write_text(
+        "recording_frame_id,crop_x,crop_y,crop_w,crop_h,has_detection,blank_frame\n"
+        "1,10,20,256,256,true,false\n"
+        "2,10,20,256,256,false,true\n",
+        encoding="utf-8",
+    )
+    (crop_dir / "Cam2010093_sample_crop_external_summary.json").write_text(
+        json.dumps({"status": "completed", "frames_encoded": 2, "frames_dropped": 0}),
+        encoding="utf-8",
+    )
+    (crop_dir / "Cam2010093_sample_crop_external_status.json").write_text(
+        json.dumps({"status": "completed"}),
+        encoding="utf-8",
+    )
+    (recording_dir / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "video_streams": {
+                    "schema_id": "orange_runtime_video_streams_v1",
+                    "frame_clock": "recording_frame_id",
+                    "streams": {
+                        "full": {
+                            "role": "ingest_authoritative_full_frame",
+                            "output_kind": "full",
+                            "video": "cams/Cam2010093_sample.mp4",
+                            "frame_clock": "recording_frame_id",
+                            "frame_count": 2,
+                        },
+                        "crop": {
+                            "role": "runtime_derived_acquisition_input",
+                            "output_kind": "crop",
+                            "video": (
+                                "derived/external_crop_recorder/"
+                                "Cam2010093_sample_crop_external.mp4"
+                            ),
+                            "metadata": (
+                                "derived/external_crop_recorder/"
+                                "Cam2010093_sample_crop_meta.csv"
+                            ),
+                            "summary": (
+                                "derived/external_crop_recorder/"
+                                "Cam2010093_sample_crop_external_summary.json"
+                            ),
+                            "frame_clock": "recording_frame_id",
+                            "video_pixel_coordinate_space": "crop_frame_pixels",
+                            "source_geometry_coordinate_space": "full_frame_pixels",
+                            "geometry_columns": ["crop_x", "crop_y", "crop_w", "crop_h"],
+                            "blank_frame_policy": "encode_black_frame_when_no_detection",
+                            "selection_policy": "largest_detection_by_confidence",
+                            "width": 256,
+                            "height": 256,
+                            "frame_count": 2,
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_root = _FakeGroup()
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+
+    plan = mod.RecordingAnalysisPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        cam_video=recording_dir / "cams" / "Cam2010093_sample.mp4",
+        zarr_path=recording_dir / "zarr" / "rec_analysis.zarr",
+    )
+
+    result = mod.ensure_analysis_archive(plan)
+
+    assert result is not None
+    assert result["schema_id"] == "palette.acquisition_video_streams.v1"
+    assert result["stream_count"] == 2
+    assert result["crop_stream_available"] is True
+    assert fake_root.attrs["acquisition_crop_video_available"] is True
+    inventory = fake_root.groups["analysis"].groups["acquisition_video_streams"]
+    crop = inventory.groups["streams"].groups["crop"]
+    assert crop.attrs["availability_status"] == "ok"
+    assert crop.attrs["files"]["metadata"]["data_row_count"] == 2
+    assert crop.attrs["contract"]["video_pixel_coordinate_space"] == "crop_frame_pixels"
+    assert crop.attrs["summary"]["frames_encoded"] == 2
+
+
 def test_resolve_single_recording_plan_uses_default_paths(tmp_path: Path) -> None:
     rec = tmp_path / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
     (rec / "cams").mkdir(parents=True, exist_ok=True)

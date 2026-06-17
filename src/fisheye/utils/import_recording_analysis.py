@@ -17,6 +17,7 @@ from typing import Callable, List, Optional
 
 import zarr
 
+from fisheye.shared.acquisition_video_streams import write_acquisition_video_stream_inventory
 from fisheye.utils.import_video_metadata import probe_video_metadata, write_video_metadata
 from fisheye.utils.recording_preflight import preflight_gate_reason
 
@@ -103,7 +104,7 @@ def stimulus_runs_present(zarr_path: Path) -> bool:
         return False
 
 
-def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> None:
+def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> Optional[dict[str, object]]:
     plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if plan.zarr_path.exists() else "w"
     root = zarr.open_group(str(plan.zarr_path), mode=mode)
@@ -158,6 +159,7 @@ def ensure_analysis_archive(plan: RecordingAnalysisPlan) -> None:
         attrs["source_h5_path"] = str(plan.h5_path)
         attrs.pop("experiment_context_status_detail", None)
     root.attrs.put(attrs)
+    return write_acquisition_video_stream_inventory(root, plan.recording_dir, manifest)
 
 
 def apply_video_metadata(plan: RecordingAnalysisPlan, *, overwrite: bool) -> dict[str, int]:
@@ -216,9 +218,20 @@ def process_recording_import(
         return RecordingImportResult(ok=False, failed_step="preflight_gate", error=gate_reason)
 
     try:
-        ensure_analysis_archive(plan)
+        stream_inventory = ensure_analysis_archive(plan)
     except Exception as exc:
         return RecordingImportResult(ok=False, failed_step="ensure_analysis_archive", error=str(exc))
+    if isinstance(stream_inventory, dict):
+        _log(
+            logger,
+            "acquisition_video_streams_imported",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            stream_count=stream_inventory.get("stream_count"),
+            stream_keys=stream_inventory.get("stream_keys"),
+            crop_stream_available=stream_inventory.get("crop_stream_available"),
+            inventory_status=stream_inventory.get("inventory_status"),
+        )
 
     if opts.import_video_metadata:
         try:

@@ -2175,6 +2175,236 @@ class RegistryMigrationMixin:
 
         self._migration_018_keypoint_performance_registry()
 
+    def _migration_056_acquisition_video_streams_registry(self) -> None:
+        """Expose recording-level acquisition video stream availability."""
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS acquisition_video_streams (
+                dataset_id TEXT NOT NULL,
+                stream_key TEXT NOT NULL,
+                recording_id TEXT,
+                zarr_use TEXT,
+                stream_id TEXT,
+                role TEXT,
+                output_kind TEXT,
+                source TEXT,
+                camera_id TEXT,
+                frame_clock TEXT,
+                video_path TEXT,
+                metadata_path TEXT,
+                frame_clock_metadata_path TEXT,
+                keyframes_path TEXT,
+                summary_path TEXT,
+                status_path TEXT,
+                width INTEGER,
+                height INTEGER,
+                frame_count INTEGER,
+                frame_rate REAL,
+                codec TEXT,
+                container TEXT,
+                encoded_format TEXT,
+                pixel_source_format TEXT,
+                video_pixel_coordinate_space TEXT,
+                source_geometry_coordinate_space TEXT,
+                blank_frame_policy TEXT,
+                selection_policy TEXT,
+                availability_status TEXT,
+                inventory_status TEXT,
+                video_exists INTEGER,
+                metadata_exists INTEGER,
+                frame_clock_metadata_exists INTEGER,
+                keyframes_exists INTEGER,
+                summary_exists INTEGER,
+                status_exists INTEGER,
+                metadata_row_count INTEGER,
+                frame_clock_metadata_row_count INTEGER,
+                frames_encoded INTEGER,
+                frames_dropped INTEGER,
+                contract_json TEXT,
+                files_json TEXT,
+                summary_json TEXT,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, stream_key),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acquisition_video_streams_recording "
+            "ON acquisition_video_streams(recording_id, stream_key);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_acquisition_video_streams_availability "
+            "ON acquisition_video_streams(output_kind, availability_status, video_exists);"
+        )
+
+        cur.execute("DROP VIEW IF EXISTS dataset_acquisition_video_streams_current;")
+        cur.execute(
+            """
+            CREATE VIEW dataset_acquisition_video_streams_current AS
+            SELECT
+                avs.dataset_id,
+                dcc.zarr_path AS zarr_path,
+                COALESCE(dcc.recording_id, avs.recording_id) AS recording_id,
+                COALESCE(dcc.zarr_use, avs.zarr_use) AS zarr_use,
+                avs.stream_key,
+                avs.stream_id,
+                avs.role,
+                avs.output_kind,
+                avs.source,
+                COALESCE(dcc.camera_id, avs.camera_id) AS camera_id,
+                avs.frame_clock,
+                avs.video_path,
+                avs.metadata_path,
+                avs.frame_clock_metadata_path,
+                avs.keyframes_path,
+                avs.summary_path,
+                avs.status_path,
+                avs.width,
+                avs.height,
+                avs.frame_count,
+                avs.frame_rate,
+                avs.codec,
+                avs.container,
+                avs.encoded_format,
+                avs.pixel_source_format,
+                avs.video_pixel_coordinate_space,
+                avs.source_geometry_coordinate_space,
+                avs.blank_frame_policy,
+                avs.selection_policy,
+                avs.availability_status,
+                avs.inventory_status,
+                avs.video_exists,
+                avs.metadata_exists,
+                avs.frame_clock_metadata_exists,
+                avs.keyframes_exists,
+                avs.summary_exists,
+                avs.status_exists,
+                avs.metadata_row_count,
+                avs.frame_clock_metadata_row_count,
+                avs.frames_encoded,
+                avs.frames_dropped,
+                avs.contract_json,
+                avs.files_json,
+                avs.summary_json,
+                avs.updated_utc
+            FROM acquisition_video_streams avs
+            LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = avs.dataset_id;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_acquisition_video_streams_current;")
+        cur.execute(
+            """
+            CREATE VIEW recording_acquisition_video_streams_current AS
+            WITH ranked AS (
+                SELECT
+                    davs.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY davs.recording_id, davs.stream_key, COALESCE(davs.camera_id, '')
+                        ORDER BY
+                            CASE WHEN davs.zarr_use = 'analysis' THEN 0 ELSE 1 END,
+                            COALESCE(davs.updated_utc, '') DESC,
+                            davs.dataset_id DESC
+                    ) AS _rn
+                FROM dataset_acquisition_video_streams_current davs
+                WHERE davs.recording_id IS NOT NULL
+            )
+            SELECT
+                dataset_id,
+                zarr_path,
+                recording_id,
+                zarr_use,
+                stream_key,
+                stream_id,
+                role,
+                output_kind,
+                source,
+                camera_id,
+                frame_clock,
+                video_path,
+                metadata_path,
+                frame_clock_metadata_path,
+                keyframes_path,
+                summary_path,
+                status_path,
+                width,
+                height,
+                frame_count,
+                frame_rate,
+                codec,
+                container,
+                encoded_format,
+                pixel_source_format,
+                video_pixel_coordinate_space,
+                source_geometry_coordinate_space,
+                blank_frame_policy,
+                selection_policy,
+                availability_status,
+                inventory_status,
+                video_exists,
+                metadata_exists,
+                frame_clock_metadata_exists,
+                keyframes_exists,
+                summary_exists,
+                status_exists,
+                metadata_row_count,
+                frame_clock_metadata_row_count,
+                frames_encoded,
+                frames_dropped,
+                contract_json,
+                files_json,
+                summary_json,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_crop_video_available_current;")
+        cur.execute(
+            """
+            CREATE VIEW recording_crop_video_available_current AS
+            SELECT
+                recording_id,
+                dataset_id,
+                zarr_path,
+                stream_key,
+                stream_id,
+                camera_id,
+                CASE
+                    WHEN output_kind = 'crop'
+                     AND availability_status = 'ok'
+                     AND COALESCE(video_exists, 0) = 1
+                    THEN 1
+                    ELSE 0
+                END AS crop_stream_available,
+                availability_status,
+                inventory_status,
+                video_path,
+                metadata_path,
+                width,
+                height,
+                frame_count,
+                frame_rate,
+                codec,
+                encoded_format,
+                pixel_source_format,
+                video_pixel_coordinate_space,
+                source_geometry_coordinate_space,
+                blank_frame_policy,
+                selection_policy,
+                metadata_row_count,
+                frames_encoded,
+                frames_dropped,
+                updated_utc
+            FROM recording_acquisition_video_streams_current
+            WHERE output_kind = 'crop';
+            """
+        )
+
     def _migration_015_eye_mask_performance_registry(self) -> None:
         cur = self.conn.cursor()
         cur.execute(

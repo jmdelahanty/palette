@@ -16,6 +16,7 @@ import yaml
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
+from .extractors.acquisition_video_streams import _extract_acquisition_video_stream_rows
 from .extractors.crop import _extract_crop_quality_rows
 from .extractors.detect_performance import _extract_detect_performance_rows
 from .extractors.keypoint_performance import (
@@ -5549,6 +5550,56 @@ class Registry(RegistryMigrationMixin):
                     payload,
                 )
 
+    def replace_acquisition_video_streams(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        if not self._sqlite_object_exists("acquisition_video_streams", object_types=("table",)):
+            self._migration_056_acquisition_video_streams_registry()
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM acquisition_video_streams WHERE dataset_id = ?;",
+                (str(dataset_id),),
+            )
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO acquisition_video_streams (
+                        dataset_id, stream_key, recording_id, zarr_use, stream_id, role,
+                        output_kind, source, camera_id, frame_clock,
+                        video_path, metadata_path, frame_clock_metadata_path,
+                        keyframes_path, summary_path, status_path,
+                        width, height, frame_count, frame_rate, codec, container,
+                        encoded_format, pixel_source_format,
+                        video_pixel_coordinate_space, source_geometry_coordinate_space,
+                        blank_frame_policy, selection_policy,
+                        availability_status, inventory_status,
+                        video_exists, metadata_exists, frame_clock_metadata_exists,
+                        keyframes_exists, summary_exists, status_exists,
+                        metadata_row_count, frame_clock_metadata_row_count,
+                        frames_encoded, frames_dropped,
+                        contract_json, files_json, summary_json, updated_utc
+                    )
+                    VALUES (
+                        :dataset_id, :stream_key, :recording_id, :zarr_use, :stream_id, :role,
+                        :output_kind, :source, :camera_id, :frame_clock,
+                        :video_path, :metadata_path, :frame_clock_metadata_path,
+                        :keyframes_path, :summary_path, :status_path,
+                        :width, :height, :frame_count, :frame_rate, :codec, :container,
+                        :encoded_format, :pixel_source_format,
+                        :video_pixel_coordinate_space, :source_geometry_coordinate_space,
+                        :blank_frame_policy, :selection_policy,
+                        :availability_status, :inventory_status,
+                        :video_exists, :metadata_exists, :frame_clock_metadata_exists,
+                        :keyframes_exists, :summary_exists, :status_exists,
+                        :metadata_row_count, :frame_clock_metadata_row_count,
+                        :frames_encoded, :frames_dropped,
+                        :contract_json, :files_json, :summary_json, :updated_utc
+                    );
+                    """,
+                    payload,
+                )
+
     def refresh_crop_quality_from_root(self, root: zarr.Group, zarr_path: Path) -> Tuple[str, int]:
         """Refresh only the crop-quality registry surface for one Zarr root."""
 
@@ -6155,6 +6206,13 @@ class Registry(RegistryMigrationMixin):
         )
         detection_records = _build_detection_source_records(root)
         self.replace_detection_sources(dataset_id, detection_records)
+        acquisition_video_stream_rows = _extract_acquisition_video_stream_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_acquisition_video_streams(dataset_id, acquisition_video_stream_rows)
         detect_quality_rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
         self.replace_detect_quality(dataset_id, detect_quality_rows)
         detect_performance_rows = _extract_detect_performance_rows(

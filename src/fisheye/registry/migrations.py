@@ -70,6 +70,7 @@ MIGRATION_METHODS: tuple[tuple[int, str, str], ...] = (
     (53, "model_deployment_artifacts", "_migration_053_model_deployment_artifacts"),
     (54, "crop_quality_pixel_contract_columns", "_migration_054_crop_quality_pixel_contract_columns"),
     (55, "keypoint_performance_pixel_contract_columns", "_migration_055_keypoint_performance_pixel_contract_columns"),
+    (56, "acquisition_video_streams_registry", "_migration_056_acquisition_video_streams_registry"),
 )
 
 

@@ -11,6 +11,7 @@ Numeric arrays are the source of truth; the PNG is a QC snapshot.
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -45,6 +46,15 @@ PNG_ARTIFACT_NAME = "realtime_offline_detection_comparison_png"
 DEFAULT_PARENT_PATH = "analysis/detection_comparison_runs"
 DEFAULT_SCATTER_LIMIT = 50_000
 DEFAULT_BAD_EXAMPLE_LIMIT = 25
+CROP_REASON_LABELS = {
+    0: "unassigned",
+    1: "offline_absent",
+    2: "inside_crop",
+    3: "missing_crop_row",
+    4: "blank_frame",
+    5: "no_realtime_detection",
+    6: "crop_elsewhere",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,16 @@ class DetectionRows:
     bbox_img_xyxy: np.ndarray
     centers_xy: np.ndarray
     confidence: np.ndarray
+    row_indices: np.ndarray
+
+
+@dataclass(frozen=True)
+class CropMetaRows:
+    source_path: str
+    frame_indices: np.ndarray
+    crop_xywh: np.ndarray
+    has_detection: np.ndarray
+    blank_frame: np.ndarray
     row_indices: np.ndarray
 
 
@@ -75,6 +95,13 @@ class ComparisonArrays:
     centroid_delta_px: np.ndarray
     bbox_iou: np.ndarray
     epoch_label_code: np.ndarray
+    realtime_crop_xywh: Optional[np.ndarray] = None
+    realtime_crop_has_detection: Optional[np.ndarray] = None
+    realtime_crop_blank_frame: Optional[np.ndarray] = None
+    offline_center_inside_realtime_crop: Optional[np.ndarray] = None
+    offline_bbox_inside_realtime_crop: Optional[np.ndarray] = None
+    offline_crop_edge_margins: Optional[np.ndarray] = None
+    crop_sufficiency_reason_code: Optional[np.ndarray] = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +112,7 @@ class ComparisonResult:
     offline_source_kind: str
     offline_run_name: Optional[str]
     realtime_source_path: str
+    realtime_source_kind: str
     stimulus_run_name: str
     run_name: str
     width: int
@@ -104,6 +132,72 @@ def utc_run_name(prefix: str = "detection_comparison") -> str:
 
 def _open_root(zarr_path: Path, *, mode: str = "r") -> zarr.Group:
     return zarr.open_group(str(zarr_path), mode=mode, use_consolidated=False)
+
+
+def infer_recording_dir_from_zarr(zarr_path: Path) -> Path:
+    zarr_path = Path(zarr_path)
+    if zarr_path.parent.name == "zarr":
+        return zarr_path.parent.parent
+    for parent in zarr_path.parents:
+        if (parent / "recording_manifest.json").exists():
+            return parent
+    return zarr_path.parent
+
+
+def _manifest_crop_meta_path(recording_dir: Path) -> Optional[Path]:
+    manifest_path = recording_dir / "recording_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    streams = manifest.get("video_streams")
+    if not isinstance(streams, dict):
+        return None
+    stream_entries = streams.get("streams")
+    if not isinstance(stream_entries, dict):
+        return None
+    crop_stream = stream_entries.get("crop")
+    if not isinstance(crop_stream, dict):
+        return None
+    metadata = crop_stream.get("metadata")
+    if not metadata:
+        return None
+    path = Path(str(metadata))
+    if not path.is_absolute():
+        path = recording_dir / path
+    return path
+
+
+def resolve_crop_meta_path(
+    zarr_path: Path,
+    *,
+    recording_dir: Optional[Path] = None,
+    crop_meta_path: Optional[Path] = None,
+    required: bool = False,
+) -> Optional[Path]:
+    if crop_meta_path is not None:
+        path = Path(crop_meta_path)
+        if not path.exists():
+            raise ValueError(f"Explicit crop metadata path does not exist: {path}")
+        return path
+
+    root_dir = Path(recording_dir) if recording_dir is not None else infer_recording_dir_from_zarr(zarr_path)
+    manifest_path = _manifest_crop_meta_path(root_dir)
+    if manifest_path is not None and manifest_path.exists():
+        return manifest_path
+
+    candidates = sorted((root_dir / "derived" / "external_crop_recorder").glob("*_crop_meta.csv"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        raise ValueError(
+            f"Multiple crop metadata files found under {root_dir}; pass --crop-meta explicitly."
+        )
+    if required:
+        raise ValueError(f"No external crop recorder metadata found for recording dir: {root_dir}")
+    return None
 
 
 def _attr_text(attrs: Any, *keys: str) -> Optional[str]:
@@ -335,6 +429,19 @@ def load_realtime_detection_rows(
     stimulus_run: Optional[str],
     frame_offset: int,
 ) -> DetectionRows:
+    return load_stimulus_h5_realtime_detection_rows(
+        root,
+        stimulus_run=stimulus_run,
+        frame_offset=frame_offset,
+    )
+
+
+def load_stimulus_h5_realtime_detection_rows(
+    root: zarr.Group,
+    *,
+    stimulus_run: Optional[str],
+    frame_offset: int,
+) -> DetectionRows:
     stim_group, stim_path, resolved = resolve_stimulus_run(root, stimulus_run)
     bbox_group = stim_group.get("tracking_data/bounding_boxes")
     if bbox_group is None:
@@ -385,6 +492,158 @@ def load_realtime_detection_rows(
     )
 
 
+def _csv_float(row: dict[str, str], name: str) -> float:
+    value = row.get(name)
+    if value is None or str(value).strip() == "":
+        return float("nan")
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
+def _csv_int(row: dict[str, str], name: str, *, default: int = 0) -> int:
+    value = row.get(name)
+    if value is None or str(value).strip() == "":
+        return int(default)
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _dedupe_first_by_frame(
+    frames: np.ndarray,
+    *arrays: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    frames = np.asarray(frames, dtype=np.int64).reshape(-1)
+    if frames.size == 0:
+        return (frames, *arrays)
+    order = np.argsort(frames, kind="stable")
+    sorted_frames = frames[order]
+    keep = np.r_[True, sorted_frames[1:] != sorted_frames[:-1]]
+    selected = order[keep]
+    return (frames[selected], *(np.asarray(array)[selected] for array in arrays))
+
+
+def load_crop_meta_realtime_detection_rows(
+    crop_meta_path: Path,
+    *,
+    frame_offset: int = 0,
+) -> tuple[DetectionRows, CropMetaRows]:
+    frames_all: list[int] = []
+    crop_xywh_all: list[tuple[float, float, float, float]] = []
+    has_detection_all: list[bool] = []
+    blank_frame_all: list[bool] = []
+    row_indices_all: list[int] = []
+
+    frames_det: list[int] = []
+    bbox_det: list[tuple[float, float, float, float]] = []
+    centers_det: list[tuple[float, float]] = []
+    confidence_det: list[float] = []
+    row_indices_det: list[int] = []
+
+    with Path(crop_meta_path).open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {
+            "recording_frame_id",
+            "has_detection",
+            "blank_frame",
+            "detection_confidence",
+            "crop_x",
+            "crop_y",
+            "crop_w",
+            "crop_h",
+            "detection_x",
+            "detection_y",
+            "detection_w",
+            "detection_h",
+        }
+        missing = sorted(required - set(reader.fieldnames or ()))
+        if missing:
+            raise ValueError(f"Crop metadata missing required columns: {missing}")
+        for row_index, row in enumerate(reader):
+            frame = _csv_int(row, "recording_frame_id", default=0) - 1 + int(frame_offset)
+            has_detection = bool(_csv_int(row, "has_detection", default=0))
+            blank_frame = bool(_csv_int(row, "blank_frame", default=0))
+            crop_x = _csv_float(row, "crop_x")
+            crop_y = _csv_float(row, "crop_y")
+            crop_w = _csv_float(row, "crop_w")
+            crop_h = _csv_float(row, "crop_h")
+
+            frames_all.append(frame)
+            crop_xywh_all.append((crop_x, crop_y, crop_w, crop_h))
+            has_detection_all.append(has_detection)
+            blank_frame_all.append(blank_frame)
+            row_indices_all.append(row_index)
+
+            det_x = _csv_float(row, "detection_x")
+            det_y = _csv_float(row, "detection_y")
+            det_w = _csv_float(row, "detection_w")
+            det_h = _csv_float(row, "detection_h")
+            if (
+                frame >= 0
+                and has_detection
+                and not blank_frame
+                and np.isfinite([det_x, det_y, det_w, det_h]).all()
+                and det_w >= 0.0
+                and det_h >= 0.0
+            ):
+                frames_det.append(frame)
+                bbox_det.append((det_x, det_y, det_x + det_w, det_y + det_h))
+                centers_det.append((det_x + det_w * 0.5, det_y + det_h * 0.5))
+                confidence_det.append(_csv_float(row, "detection_confidence"))
+                row_indices_det.append(row_index)
+
+    frames_all_arr = np.asarray(frames_all, dtype=np.int64)
+    crop_xywh_arr = np.asarray(crop_xywh_all, dtype=np.float64).reshape(-1, 4)
+    has_detection_arr = np.asarray(has_detection_all, dtype=bool)
+    blank_frame_arr = np.asarray(blank_frame_all, dtype=bool)
+    row_indices_all_arr = np.asarray(row_indices_all, dtype=np.int64)
+    (
+        frames_all_arr,
+        crop_xywh_arr,
+        has_detection_arr,
+        blank_frame_arr,
+        row_indices_all_arr,
+    ) = _dedupe_first_by_frame(
+        frames_all_arr,
+        crop_xywh_arr,
+        has_detection_arr,
+        blank_frame_arr,
+        row_indices_all_arr,
+    )
+
+    frames_det_arr = np.asarray(frames_det, dtype=np.int64)
+    bbox_det_arr = np.asarray(bbox_det, dtype=np.float64).reshape(-1, 4)
+    centers_det_arr = np.asarray(centers_det, dtype=np.float64).reshape(-1, 2)
+    confidence_det_arr = np.asarray(confidence_det, dtype=np.float64)
+    row_indices_det_arr = np.asarray(row_indices_det, dtype=np.int64)
+    selected = _select_top_one_per_frame(frames_det_arr, confidence=confidence_det_arr)
+
+    source_path = str(Path(crop_meta_path))
+    return (
+        DetectionRows(
+            source_path=source_path,
+            source_kind="external_crop_recorder_crop_meta",
+            run_name=None,
+            frame_indices=frames_det_arr[selected],
+            bbox_img_xyxy=bbox_det_arr[selected],
+            centers_xy=centers_det_arr[selected],
+            confidence=confidence_det_arr[selected],
+            row_indices=row_indices_det_arr[selected],
+        ),
+        CropMetaRows(
+            source_path=source_path,
+            frame_indices=frames_all_arr,
+            crop_xywh=crop_xywh_arr,
+            has_detection=has_detection_arr,
+            blank_frame=blank_frame_arr,
+            row_indices=row_indices_all_arr,
+        ),
+    )
+
+
 def compute_bbox_iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a = np.asarray(a, dtype=np.float64)
     b = np.asarray(b, dtype=np.float64)
@@ -417,6 +676,7 @@ def compare_detection_rows(
     realtime: DetectionRows,
     *,
     epoch_windows: Sequence[EpochWindow] = (),
+    crop_meta: Optional[CropMetaRows] = None,
 ) -> ComparisonArrays:
     frames = np.union1d(offline.frame_indices, realtime.frame_indices).astype(np.int64, copy=False)
     n = int(frames.shape[0])
@@ -460,6 +720,78 @@ def compare_detection_rows(
         mask = (frames >= int(window.start_frame)) & (frames <= int(window.end_frame))
         epoch_codes[mask] = code
 
+    realtime_crop_xywh = None
+    realtime_crop_has_detection = None
+    realtime_crop_blank_frame = None
+    offline_center_inside_realtime_crop = None
+    offline_bbox_inside_realtime_crop = None
+    offline_crop_edge_margins = None
+    crop_sufficiency_reason_code = None
+    if crop_meta is not None:
+        crop_pos = np.searchsorted(crop_meta.frame_indices, frames)
+        crop_match = np.zeros(n, dtype=bool)
+        crop_in_bounds = crop_pos < crop_meta.frame_indices.shape[0]
+        crop_match[crop_in_bounds] = crop_meta.frame_indices[crop_pos[crop_in_bounds]] == frames[crop_in_bounds]
+
+        realtime_crop_xywh = np.full((n, 4), np.nan, dtype=np.float32)
+        realtime_crop_has_detection = np.zeros((n,), dtype=bool)
+        realtime_crop_blank_frame = np.zeros((n,), dtype=bool)
+        offline_center_inside_realtime_crop = np.zeros((n,), dtype=bool)
+        offline_bbox_inside_realtime_crop = np.zeros((n,), dtype=bool)
+        offline_crop_edge_margins = np.full((n, 4), np.nan, dtype=np.float32)
+        crop_sufficiency_reason_code = np.zeros((n,), dtype=np.int8)
+        crop_sufficiency_reason_code[~offline_present] = 1
+
+        if np.any(crop_match):
+            matched_crop_pos = crop_pos[crop_match]
+            realtime_crop_xywh[crop_match] = crop_meta.crop_xywh[matched_crop_pos].astype(np.float32, copy=False)
+            realtime_crop_has_detection[crop_match] = crop_meta.has_detection[matched_crop_pos]
+            realtime_crop_blank_frame[crop_match] = crop_meta.blank_frame[matched_crop_pos]
+
+        offline_crop = offline_present & crop_match
+        missing_crop = offline_present & ~crop_match
+        blank_crop = offline_crop & realtime_crop_blank_frame
+        no_detection_crop = offline_crop & ~realtime_crop_blank_frame & ~realtime_crop_has_detection
+        crop_sufficiency_reason_code[missing_crop] = 3
+        crop_sufficiency_reason_code[blank_crop] = 4
+        crop_sufficiency_reason_code[no_detection_crop] = 5
+
+        crop_valid = offline_crop & np.isfinite(realtime_crop_xywh).all(axis=1)
+        if np.any(crop_valid):
+            crop_x = realtime_crop_xywh[:, 0].astype(np.float64, copy=False)
+            crop_y = realtime_crop_xywh[:, 1].astype(np.float64, copy=False)
+            crop_w = realtime_crop_xywh[:, 2].astype(np.float64, copy=False)
+            crop_h = realtime_crop_xywh[:, 3].astype(np.float64, copy=False)
+            crop_x2 = crop_x + crop_w
+            crop_y2 = crop_y + crop_h
+            offline_x1 = offline_bbox[:, 0].astype(np.float64, copy=False)
+            offline_y1 = offline_bbox[:, 1].astype(np.float64, copy=False)
+            offline_x2 = offline_bbox[:, 2].astype(np.float64, copy=False)
+            offline_y2 = offline_bbox[:, 3].astype(np.float64, copy=False)
+            margins = np.column_stack(
+                [
+                    offline_x1 - crop_x,
+                    offline_y1 - crop_y,
+                    crop_x2 - offline_x2,
+                    crop_y2 - offline_y2,
+                ]
+            )
+            offline_crop_edge_margins[crop_valid] = margins[crop_valid].astype(np.float32, copy=False)
+            usable_crop = crop_valid & realtime_crop_has_detection & ~realtime_crop_blank_frame
+            center_x = offline_centers[:, 0].astype(np.float64, copy=False)
+            center_y = offline_centers[:, 1].astype(np.float64, copy=False)
+            offline_center_inside_realtime_crop[usable_crop] = (
+                (center_x[usable_crop] >= crop_x[usable_crop])
+                & (center_x[usable_crop] <= crop_x2[usable_crop])
+                & (center_y[usable_crop] >= crop_y[usable_crop])
+                & (center_y[usable_crop] <= crop_y2[usable_crop])
+            )
+            offline_bbox_inside_realtime_crop[usable_crop] = np.all(margins[usable_crop] >= 0.0, axis=1)
+
+        eligible = offline_crop & ~realtime_crop_blank_frame & realtime_crop_has_detection
+        crop_sufficiency_reason_code[eligible & offline_bbox_inside_realtime_crop] = 2
+        crop_sufficiency_reason_code[eligible & ~offline_bbox_inside_realtime_crop] = 6
+
     return ComparisonArrays(
         frame_indices=frames,
         offline_present=offline_present.astype(bool, copy=False),
@@ -475,6 +807,13 @@ def compare_detection_rows(
         centroid_delta_px=delta,
         bbox_iou=iou,
         epoch_label_code=epoch_codes,
+        realtime_crop_xywh=realtime_crop_xywh,
+        realtime_crop_has_detection=realtime_crop_has_detection,
+        realtime_crop_blank_frame=realtime_crop_blank_frame,
+        offline_center_inside_realtime_crop=offline_center_inside_realtime_crop,
+        offline_bbox_inside_realtime_crop=offline_bbox_inside_realtime_crop,
+        offline_crop_edge_margins=offline_crop_edge_margins,
+        crop_sufficiency_reason_code=crop_sufficiency_reason_code,
     )
 
 
@@ -492,6 +831,7 @@ def summarize_comparison(
     *,
     total_frames: int,
     epoch_windows: Sequence[EpochWindow],
+    crop_meta: Optional[CropMetaRows] = None,
 ) -> dict[str, Any]:
     both = arrays.offline_present & arrays.realtime_present
     offline_only = arrays.offline_present & ~arrays.realtime_present
@@ -518,6 +858,57 @@ def summarize_comparison(
         summary["realtime_coverage_pct"] = float(np.count_nonzero(arrays.realtime_present) / total_frames * 100.0)
         summary["both_coverage_pct"] = float(np.count_nonzero(both) / total_frames * 100.0)
 
+    if arrays.crop_sufficiency_reason_code is not None:
+        offline_count = int(np.count_nonzero(arrays.offline_present))
+        center_inside_mask = np.asarray(arrays.offline_center_inside_realtime_crop, dtype=bool)
+        bbox_inside_mask = np.asarray(arrays.offline_bbox_inside_realtime_crop, dtype=bool)
+        center_inside = int(np.count_nonzero(arrays.offline_present & center_inside_mask))
+        bbox_inside = int(np.count_nonzero(arrays.offline_present & bbox_inside_mask))
+        reason_counts = {
+            CROP_REASON_LABELS[int(code)]: int(count)
+            for code, count in zip(
+                *np.unique(arrays.crop_sufficiency_reason_code.astype(np.int16, copy=False), return_counts=True)
+            )
+        }
+        summary.update(
+            {
+                "crop_sufficiency_available": True,
+                "crop_sufficiency_reason_labels": CROP_REASON_LABELS,
+                "crop_sufficiency_reason_counts": reason_counts,
+                "offline_center_inside_crop_count": center_inside,
+                "offline_center_inside_crop_pct": (
+                    float(center_inside / offline_count * 100.0) if offline_count else None
+                ),
+                "offline_full_bbox_inside_crop_count": bbox_inside,
+                "offline_full_bbox_inside_crop_pct": (
+                    float(bbox_inside / offline_count * 100.0) if offline_count else None
+                ),
+                "blank_crop_rows_for_offline_count": int(
+                    np.count_nonzero(arrays.crop_sufficiency_reason_code == 4)
+                ),
+                "no_detection_crop_rows_for_offline_count": int(
+                    np.count_nonzero(arrays.crop_sufficiency_reason_code == 5)
+                ),
+                "missing_crop_rows_for_offline_count": int(
+                    np.count_nonzero(arrays.crop_sufficiency_reason_code == 3)
+                ),
+                "crop_elsewhere_rows_for_offline_count": int(
+                    np.count_nonzero(arrays.crop_sufficiency_reason_code == 6)
+                ),
+            }
+        )
+        if crop_meta is not None:
+            summary.update(
+                {
+                    "crop_meta_source_path": crop_meta.source_path,
+                    "crop_meta_row_count": int(crop_meta.frame_indices.shape[0]),
+                    "crop_meta_detection_row_count": int(np.count_nonzero(crop_meta.has_detection)),
+                    "crop_meta_blank_row_count": int(np.count_nonzero(crop_meta.blank_frame)),
+                }
+            )
+    else:
+        summary["crop_sufficiency_available"] = False
+
     epoch_summaries: dict[str, Any] = {}
     for code, window in enumerate(epoch_windows, start=1):
         mask = arrays.epoch_label_code == code
@@ -542,6 +933,39 @@ def summarize_comparison(
     return summary
 
 
+def load_realtime_source(
+    root: zarr.Group,
+    zarr_path: Path,
+    *,
+    realtime_source: str,
+    stimulus_run: Optional[str],
+    frame_offset: int,
+    recording_dir: Optional[Path],
+    crop_meta_path: Optional[Path],
+) -> tuple[DetectionRows, Optional[CropMetaRows]]:
+    if realtime_source not in {"auto", "crop-meta", "stimulus-h5"}:
+        raise ValueError(f"Unsupported realtime source: {realtime_source}")
+
+    if realtime_source in {"auto", "crop-meta"}:
+        resolved_crop_meta = resolve_crop_meta_path(
+            zarr_path,
+            recording_dir=recording_dir,
+            crop_meta_path=crop_meta_path,
+            required=realtime_source == "crop-meta",
+        )
+        if resolved_crop_meta is not None:
+            return load_crop_meta_realtime_detection_rows(resolved_crop_meta, frame_offset=frame_offset)
+        if realtime_source == "crop-meta":
+            raise ValueError("No crop metadata resolved for --realtime-source crop-meta.")
+
+    realtime = load_stimulus_h5_realtime_detection_rows(
+        root,
+        stimulus_run=stimulus_run,
+        frame_offset=frame_offset,
+    )
+    return realtime, None
+
+
 def build_comparison_result(
     zarr_path: Path,
     *,
@@ -549,8 +973,11 @@ def build_comparison_result(
     detection_path: Optional[str],
     detect_run: Optional[str],
     refined_run: Optional[str],
+    realtime_source: str,
     stimulus_run: Optional[str],
     realtime_frame_offset: int,
+    recording_dir: Optional[Path],
+    crop_meta_path: Optional[Path],
     run_name: Optional[str],
 ) -> ComparisonResult:
     root = _open_root(zarr_path, mode="r")
@@ -561,7 +988,15 @@ def build_comparison_result(
         detect_run=detect_run,
         refined_run=refined_run,
     )
-    realtime = load_realtime_detection_rows(root, stimulus_run=stimulus_run, frame_offset=realtime_frame_offset)
+    realtime, crop_meta = load_realtime_source(
+        root,
+        zarr_path,
+        realtime_source=realtime_source,
+        stimulus_run=stimulus_run,
+        frame_offset=realtime_frame_offset,
+        recording_dir=recording_dir,
+        crop_meta_path=crop_meta_path,
+    )
     width, height, fps, total_frames = _resolve_dimensions(root, [])
     try:
         epoch_windows = tuple(
@@ -569,8 +1004,8 @@ def build_comparison_result(
         )
     except Exception:
         epoch_windows = ()
-    arrays = compare_detection_rows(offline, realtime, epoch_windows=epoch_windows)
-    summary = summarize_comparison(arrays, total_frames=total_frames, epoch_windows=epoch_windows)
+    arrays = compare_detection_rows(offline, realtime, epoch_windows=epoch_windows, crop_meta=crop_meta)
+    summary = summarize_comparison(arrays, total_frames=total_frames, epoch_windows=epoch_windows, crop_meta=crop_meta)
     recording_id = _attr_text(root.attrs, "recording_id", "recording_name") or zarr_path.stem
     resolved_run_name = run_name or utc_run_name()
     return ComparisonResult(
@@ -580,6 +1015,7 @@ def build_comparison_result(
         offline_source_kind=offline.source_kind,
         offline_run_name=offline.run_name,
         realtime_source_path=realtime.source_path,
+        realtime_source_kind=realtime.source_kind,
         stimulus_run_name=str(realtime.run_name or ""),
         run_name=resolved_run_name,
         width=width,
@@ -667,6 +1103,16 @@ def render_comparison_png(
     ax2.set_ylabel("IoU count")
 
     summary = result.summary
+    crop_suffix = ""
+    if summary.get("crop_sufficiency_available"):
+        crop_pct = summary.get("offline_full_bbox_inside_crop_pct")
+        crop_suffix = (
+            f"\ncrop full-bbox inside={crop_pct:.2f}% "
+            f"blank_offline={summary.get('blank_crop_rows_for_offline_count'):,} "
+            f"elsewhere={summary.get('crop_elsewhere_rows_for_offline_count'):,}"
+            if crop_pct is not None
+            else ""
+        )
     text = (
         f"{result.recording_id}\n"
         f"offline: {result.offline_source_path}\n"
@@ -676,6 +1122,7 @@ def render_comparison_png(
         f"realtime_only={summary['realtime_only_count']:,}\n"
         f"delta p50={summary['centroid_delta_px'].get('p50'):.2f}px "
         f"p99={summary['centroid_delta_px'].get('p99'):.2f}px"
+        f"{crop_suffix}"
     )
     fig.suptitle("Realtime vs offline detection comparison", fontsize=14)
     fig.text(0.01, 0.01, text, ha="left", va="bottom", fontsize=8, family="monospace")
@@ -721,7 +1168,7 @@ def write_comparison_run(
     mark_run_started(run, run_name=run_name, stage="detection_comparison")
     try:
         arrays = result.arrays
-        for name, data in {
+        arrays_to_write = {
             "frame_indices": arrays.frame_indices.astype(np.int64, copy=False),
             "offline_present": arrays.offline_present.astype(bool, copy=False),
             "realtime_present": arrays.realtime_present.astype(bool, copy=False),
@@ -736,7 +1183,26 @@ def write_comparison_run(
             "centroid_delta_px": arrays.centroid_delta_px.astype(np.float32, copy=False),
             "bbox_iou": arrays.bbox_iou.astype(np.float32, copy=False),
             "epoch_label_code": arrays.epoch_label_code.astype(np.int16, copy=False),
-        }.items():
+        }
+        if arrays.realtime_crop_xywh is not None:
+            arrays_to_write.update(
+                {
+                    "realtime_crop_xywh": arrays.realtime_crop_xywh.astype(np.float32, copy=False),
+                    "realtime_crop_has_detection": arrays.realtime_crop_has_detection.astype(bool, copy=False),
+                    "realtime_crop_blank_frame": arrays.realtime_crop_blank_frame.astype(bool, copy=False),
+                    "offline_center_inside_realtime_crop": (
+                        arrays.offline_center_inside_realtime_crop.astype(bool, copy=False)
+                    ),
+                    "offline_bbox_inside_realtime_crop": (
+                        arrays.offline_bbox_inside_realtime_crop.astype(bool, copy=False)
+                    ),
+                    "offline_crop_edge_margins": arrays.offline_crop_edge_margins.astype(np.float32, copy=False),
+                    "crop_sufficiency_reason_code": (
+                        arrays.crop_sufficiency_reason_code.astype(np.int8, copy=False)
+                    ),
+                }
+            )
+        for name, data in arrays_to_write.items():
             _write_array(run, name, np.asarray(data))
 
         epoch_labels = {0: "unassigned"}
@@ -750,6 +1216,7 @@ def write_comparison_run(
             "offline_source_kind": result.offline_source_kind,
             "offline_run_name": result.offline_run_name,
             "realtime_source_path": result.realtime_source_path,
+            "realtime_source_kind": result.realtime_source_kind,
             "stimulus_run_name": result.stimulus_run_name,
             "realtime_frame_offset": int(result.realtime_frame_offset),
             "coordinate_space": "source_image_pixels_xyxy",
@@ -760,6 +1227,7 @@ def write_comparison_run(
             "summary": json_attr_safe(result.summary),
             "epoch_label_codes": json_attr_safe(epoch_labels),
             "epoch_windows": json_attr_safe([asdict(window) for window in result.epoch_windows]),
+            "crop_sufficiency_reason_codes": json_attr_safe(CROP_REASON_LABELS),
         }
         run.attrs.update(attrs)
         if png_bytes:
@@ -805,6 +1273,7 @@ def write_summary_json(result: ComparisonResult, path: Path) -> None:
         "offline_source_kind": result.offline_source_kind,
         "offline_run_name": result.offline_run_name,
         "realtime_source_path": result.realtime_source_path,
+        "realtime_source_kind": result.realtime_source_kind,
         "stimulus_run_name": result.stimulus_run_name,
         "summary": result.summary,
     }
@@ -816,7 +1285,7 @@ def print_report(result: ComparisonResult) -> None:
     summary = result.summary
     print(f"recording_id: {result.recording_id}")
     print(f"offline: {result.offline_source_path}")
-    print(f"realtime: {result.realtime_source_path}")
+    print(f"realtime: {result.realtime_source_path} ({result.realtime_source_kind})")
     print(f"run_name: {result.run_name}")
     print(f"frame_count: {summary['comparison_frame_count']}")
     print(
@@ -834,6 +1303,17 @@ def print_report(result: ComparisonResult) -> None:
         f"p50={delta.get('p50')} p90={delta.get('p90')} p99={delta.get('p99')} max={delta.get('p100')}"
     )
     print(f"bbox_iou: p50={iou.get('p50')} p10={iou.get('p10')} min={iou.get('p0')}")
+    if summary.get("crop_sufficiency_available"):
+        print(
+            "crop_sufficiency: "
+            f"bbox_inside={summary.get('offline_full_bbox_inside_crop_count')}/"
+            f"{summary.get('offline_present_count')} "
+            f"({summary.get('offline_full_bbox_inside_crop_pct')}%) "
+            f"blank={summary.get('blank_crop_rows_for_offline_count')} "
+            f"no_detection={summary.get('no_detection_crop_rows_for_offline_count')} "
+            f"missing={summary.get('missing_crop_rows_for_offline_count')} "
+            f"elsewhere={summary.get('crop_elsewhere_rows_for_offline_count')}"
+        )
     if summary.get("epochs"):
         print("epochs:")
         for label, payload in summary["epochs"].items():
@@ -857,6 +1337,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--detection-path", help="Explicit offline detection group path.")
     parser.add_argument("--detect-run", help="Raw detect run when --offline-source raw is used.")
     parser.add_argument("--refined-run", help="Refined detect run when --offline-source refined is used.")
+    parser.add_argument(
+        "--realtime-source",
+        choices=("auto", "crop-meta", "stimulus-h5"),
+        default="auto",
+        help="Realtime source. auto prefers external crop-recorder metadata when available, then H5.",
+    )
+    parser.add_argument("--crop-meta", type=Path, help="Explicit external crop-recorder *_crop_meta.csv path.")
+    parser.add_argument("--recording-dir", type=Path, help="Recording root used to resolve recording_manifest.json.")
     parser.add_argument("--stimulus-run", help="Realtime stimulus run (default: latest).")
     parser.add_argument("--realtime-frame-offset", type=int, default=0)
     parser.add_argument("--output", type=Path, help="Optional external PNG output.")
@@ -876,8 +1364,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         detection_path=args.detection_path,
         detect_run=args.detect_run,
         refined_run=args.refined_run,
+        realtime_source=str(args.realtime_source),
         stimulus_run=args.stimulus_run,
         realtime_frame_offset=int(args.realtime_frame_offset),
+        recording_dir=args.recording_dir,
+        crop_meta_path=args.crop_meta,
         run_name=args.run_name,
     )
     png_bytes = render_comparison_png(result, dpi=int(args.dpi), scatter_limit=int(args.scatter_limit))
@@ -901,6 +1392,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "recording_id": result.recording_id,
             "run_name": result.run_name,
             "zarr_run_path": zarr_run_path,
+            "realtime_source_kind": result.realtime_source_kind,
             "summary": result.summary,
             "output": str(args.output) if args.output else None,
             "summary_json": str(args.summary_json) if args.summary_json else None,
