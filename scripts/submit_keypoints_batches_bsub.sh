@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/nvme1/recordings"
+ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 BATCH_SIZE=10
 MAX_ACTIVE=2
 QUEUE=""
 NCORES=4
 MEM_GB=32
 GPUS=0
-REGISTRY="/nvme1/palette_registry.sqlite"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 SET_ID=""
 TOP_K=5
 REQUIRE_UNIQUE=0
@@ -43,14 +43,14 @@ usage() {
 Usage: submit_keypoints_batches_bsub.sh [options]
 
 Options:
-  --root PATH               Root recordings directory (default: /nvme1/recordings)
+  --root PATH               Root recordings directory (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --batch-size N            Analysis zarrs per batch job (default: 10)
   --max-active N            Max concurrent jobs in array (default: 2)
   --queue NAME              LSF queue name
   --ncores N                Cores per job (default: 4)
   --mem-gb N                Memory per job in GB (default: 32)
   --gpus N                  GPUs per job; when >0 requests LSF GPUs and defaults --device 0
-  --registry PATH           Registry sqlite path (default: /nvme1/palette_registry.sqlite)
+  --registry PATH           Registry sqlite path (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --set-id ID               Optional pose model set filter for registry model resolution
   --top-k N                 Candidate provenance depth (default: 5)
   --require-unique          Fail if top model scores tie

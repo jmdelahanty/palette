@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/nvme1/recordings"
-REGISTRY="/nvme1/palette_registry.sqlite"
+ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 CONFIG="configs/fisheye/yolo_detect_config.yaml"
 PATH_CONTAINS=""
 LOG_DIR=""
@@ -51,8 +51,8 @@ Submit a registry-discovered per-recording artifact workflow:
 The script plans by default. Pass --submit to call bsub.
 
 Discovery options:
-  --root PATH                    Recording root (default: /nvme1/recordings)
-  --registry PATH                Registry sqlite path (default: /nvme1/palette_registry.sqlite)
+  --root PATH                    Recording root (default: /groups/johnson/johnsonlab/jeremy/recordings)
+  --registry PATH                Registry sqlite path (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --path-contains STR            Registry zarr_path substring filter
   --config PATH                  Detect/refine config path
   --log-dir PATH                 Submission run root (default: <root>/logs/detect_artifact_quality_refine_bsub)

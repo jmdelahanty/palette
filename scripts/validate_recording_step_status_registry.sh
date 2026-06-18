@@ -14,7 +14,7 @@ Validates recording step status registry parity for one recording end-to-end:
 Options:
   --recording-dir DIR        Recording directory (required)
   --registry PATH            Registry SQLite path
-                             (default: /nvme1/palette_registry.sqlite)
+                             (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --zarr-use USE             Zarr use to validate: training|analysis
                              (default: training)
   --recording-id ID          Recording ID override (default: auto-derived)
@@ -25,7 +25,7 @@ EOF
 }
 
 RECORDING_DIR=""
-REGISTRY="/nvme1/palette_registry.sqlite"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 ZARR_USE="training"
 RECORDING_ID=""
 SKIP_BACKFILL="0"

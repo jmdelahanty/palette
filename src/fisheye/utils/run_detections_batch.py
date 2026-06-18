@@ -16,7 +16,7 @@ from fisheye.cli.shared_args import add_log_args
 from fisheye.cli.shared_args import add_registry_discovery_args
 from fisheye.detection.detect_yolo import DECODE_BACKEND_CHOICES
 from fisheye.detection.detect_yolo import detect_yolo
-from fisheye.registry.db import Registry
+from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir
@@ -871,7 +871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     inputs = _resolve_input_paths(args.paths, args.file_list or [])
-    registry_path = (args.registry or Path("/nvme1/palette_registry.sqlite")).expanduser().resolve()
+    registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     explicit_model_path: Optional[Path] = None
     if args.model is not None:
         explicit_model_path = args.model.expanduser()

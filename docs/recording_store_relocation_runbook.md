@@ -1,7 +1,7 @@
 # Recording Store Relocation Runbook
 <!-- runbook-meta
 status: active
-last_verified: 2026-05-28
+last_verified: 2026-06-18
 purpose: Operator checklist for moving Palette recordings between storage roots while preserving registry, Zarr, sidecar, and review-proxy consistency.
 -->
 
@@ -24,13 +24,17 @@ sequence.
 - You have enough storage quota at the destination.
 - For clipped recordings, the source root has `recording_frame_index.parquet`
   and clip sidecars.
+- The durable registry authority is
+  `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`.
+  Treat `/nvme1/palette_registry.sqlite` as a legacy/local snapshot unless an
+  old repair explicitly targets it.
 
 Recommended shell variables:
 
 ```bash
 SRC=/nvme1/recordings/<recording_id>
 DST=/groups/johnson/johnsonlab/jeremy/recordings/<recording_id>
-REG=/nvme1/palette_registry.sqlite
+REG=/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
 ```
 
 ## 1. Inspect Before Copying
@@ -63,7 +67,8 @@ WHERE zarr_path LIKE '$SRC/%' OR zarr_path LIKE '$SRC';
 Always make an SQLite backup before registry edits:
 
 ```bash
-BACKUP=/groups/ahrens/ahrenslab/jeremy/zebrobot/backups/palette_registry_$(date +%Y%m%d_%H%M%S).sqlite
+BACKUP=/groups/johnson/johnsonlab/jeremy/registries/backups/palette_registry_$(date +%Y%m%d_%H%M%S).sqlite
+mkdir -p "$(dirname "$BACKUP")"
 sqlite3 "$REG" ".backup '$BACKUP'"
 sqlite3 "$BACKUP" "PRAGMA quick_check;"
 ```
@@ -166,16 +171,17 @@ Run dedupe in read-only mode first:
 scripts/py -m fisheye.registry.dedupe --registry "$REG"
 ```
 
-Before deleting a duplicate `dataset_id`, search every registry table for that
-id. Safe duplicate cleanup requires:
+If the dry run chooses the expected canonical ids and the registry has been
+backed up, apply the generic merge:
 
-- no training-set membership under the duplicate id, or an intentional migration
-  of that membership;
-- no unique quality/profile data only attached to the duplicate id;
-- current status rows either duplicated under the canonical id or explicitly
-  stale;
-- history rows preserved by moving them to the canonical id before deleting the
-  duplicate.
+```bash
+scripts/py -m fisheye.registry.dedupe --registry "$REG" --apply
+```
+
+Apply mode keeps the chosen canonical `datasets` row, repoints non-conflicting
+dependent rows, drops duplicate dependent rows that would collide with an
+existing canonical primary key, deletes lineage self-edges, and then deletes
+the duplicate `datasets` row.
 
 Keep foreign keys enabled during cleanup. Re-run `foreign_key_check` and
 `quick_check` after deletion.
@@ -248,4 +254,3 @@ If validation fails before new jobs depend on the migrated root:
 If downstream jobs already used the migrated root, do not blindly restore the
 registry. First identify generated artifacts and whether they should be retained
 or invalidated.
-

@@ -4,6 +4,14 @@ This playbook covers recovery after source recording Zarr path/name changes
 (for example, renaming to `*_training.zarr`) when lineage or set membership
 breaks.
 
+For current production work, prefer:
+
+```bash
+REG=/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
+```
+
+Use `/nvme1/palette_registry.sqlite` only for legacy/local snapshot repairs.
+
 ## 1) Backup First
 
 ```bash
@@ -24,7 +32,7 @@ scripts/py -m fisheye.utils.rename_recording_zarrs_to_training \
 
 ```bash
 scripts/py -m fisheye.utils.registry_rescan \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   /nvme1/recordings \
   --recursive
 ```
@@ -36,7 +44,7 @@ remap `training_sets.dataset_ids_json` by session UUID:
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --remap-training-set-dataset-ids \
   --dry-run
 ```
@@ -45,7 +53,7 @@ Then apply:
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --remap-training-set-dataset-ids
 ```
 
@@ -53,7 +61,7 @@ scripts/py -m fisheye.registry.maintenance \
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --backfill-dataset-lineage
 ```
 
@@ -61,7 +69,7 @@ scripts/py -m fisheye.registry.maintenance \
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --check-integrity \
   --list-limit 100
 ```
@@ -82,25 +90,34 @@ paths, Zarr attrs, Parquet sidecars, or manifest fields.
 
 ```bash
 scripts/py -m fisheye.registry.dedupe \
-  --registry /nvme1/palette_registry.sqlite
+  --registry "$REG"
 ```
 
 For the clipped training slice:
 
 ```bash
 scripts/py -m fisheye.registry.dedupe \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --zarr-use training \
   --path-contains clipped_training.zarr \
   --json
 ```
 
-The report is read-only. It groups duplicate rows by exact `zarr_path` and
-`path_hash`, proposes a canonical `dataset_id`, and lists every dependent row
-that would need to be moved. `conflicting_rows > 0` means a direct update would
-collide with an existing primary-key or unique-index row, most commonly
-`recording_step_status(dataset_id, step_name)`. Those conflicts need an
-explicit merge policy before any apply-mode cleanup is safe.
+The default report is read-only. It groups duplicate rows by exact `zarr_path`
+and `path_hash`, proposes a canonical `dataset_id`, and lists every dependent
+row that would need to be moved. `conflicting_rows > 0` means a direct update
+would collide with an existing primary-key or unique-index row, most commonly
+`recording_step_status(dataset_id, step_name)`.
+
+After backup and review, apply the generic merge:
+
+```bash
+scripts/py -m fisheye.registry.dedupe --registry "$REG" --apply
+```
+
+Apply mode repoints non-conflicting dependent rows, drops duplicate dependent
+rows that would collide with already-present canonical rows, deletes lineage
+self-edges, and then removes the duplicate `datasets` rows.
 
 ## 8) Phase 2 Subject/Dish/Cross Backfill (Optional)
 
@@ -108,7 +125,7 @@ Preview without writes:
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --backfill-subject-dish-cross \
   --dry-run
 ```
@@ -117,7 +134,7 @@ Then apply:
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --backfill-subject-dish-cross
 ```
 
@@ -127,7 +144,7 @@ Preview without writes:
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --backfill-subjects \
   --dry-run
 ```
@@ -136,14 +153,14 @@ Then apply:
 
 ```bash
 scripts/py -m fisheye.registry.maintenance \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry "$REG" \
   --backfill-subjects
 ```
 
 Verify normalized query view (cross/genotype + DPF filters):
 
 ```bash
-sqlite3 -header -column /nvme1/palette_registry.sqlite "
+sqlite3 -header -column "$REG" "
   SELECT DISTINCT recording_id
   FROM recording_subject_overview
   WHERE cross_id = :cross_id;
@@ -151,7 +168,7 @@ sqlite3 -header -column /nvme1/palette_registry.sqlite "
 ```
 
 ```bash
-sqlite3 -header -column /nvme1/palette_registry.sqlite "
+sqlite3 -header -column "$REG" "
   SELECT DISTINCT recording_id
   FROM recording_subject_overview
   WHERE dpf_at_acquisition = :dpf
@@ -162,17 +179,17 @@ sqlite3 -header -column /nvme1/palette_registry.sqlite "
 ## Useful Diagnostics
 
 ```bash
-sqlite3 -header -column /nvme1/palette_registry.sqlite \
+sqlite3 -header -column "$REG" \
   "SELECT COUNT(*) AS lineage_edges FROM dataset_lineage_current;"
 ```
 
 ```bash
-sqlite3 -header -column /nvme1/palette_registry.sqlite \
+sqlite3 -header -column "$REG" \
   "SELECT set_id, dataset_ids_json FROM training_sets ORDER BY set_id;"
 ```
 
 ```bash
-sqlite3 -header -column /nvme1/palette_registry.sqlite \
+sqlite3 -header -column "$REG" \
   "SELECT dataset_id, session_uuid, artifact_kind, zarr_path
    FROM datasets
    WHERE artifact_kind='source_recording'
@@ -188,7 +205,7 @@ Use this when `dataset_id` values must be decoupled from `session_uuid`
 Set your registry path once:
 
 ```bash
-REG=/nvme1/palette_registry.sqlite
+REG=/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
 ```
 
 ### Dry-run checklist (no writes)
@@ -533,7 +550,7 @@ baseline (`v1` initial schema, `v2` reserved noop).
 ### Preflight (required)
 
 ```bash
-REG=/nvme1/palette_registry.sqlite
+REG=/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
 ```
 
 ```bash

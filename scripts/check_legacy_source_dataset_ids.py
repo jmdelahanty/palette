@@ -14,7 +14,7 @@ def main() -> int:
     parser.add_argument(
         "--registry",
         type=Path,
-        default=Path("/nvme1/palette_registry.sqlite"),
+        default=Path("/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"),
         help="Path to registry sqlite file.",
     )
     parser.add_argument(

@@ -131,6 +131,7 @@ def main() -> None:
     if registry_path is None:
         # Try common locations
         candidates = [
+            Path("/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite"),
             Path("/nvme1/palette_registry.sqlite"),
             Path("runs/registry/palette_registry.sqlite"),
         ]

@@ -12,8 +12,8 @@ Purpose:
   3) Launch Crimson (redgui) through each archive interactively
 
 Options:
-  --recordings-root DIR   Recordings root (default: /nvme1/recordings).
-  --registry PATH         Registry sqlite path (default: /nvme1/palette_registry.sqlite).
+  --recordings-root DIR   Recordings root (default: /groups/johnson/johnsonlab/jeremy/recordings).
+  --registry PATH         Registry sqlite path (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite).
   --crimson-repo DIR      Crimson repo root (default: $HOME/gitrepos/crimson).
   --mode MODE             all|unapproved (default: all).
   --list FILE             Output list path (default: /tmp/analysis_review_list.txt).
@@ -37,8 +37,8 @@ Examples:
 EOF
 }
 
-RECORDINGS_ROOT="/nvme1/recordings"
-REGISTRY="/nvme1/palette_registry.sqlite"
+RECORDINGS_ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 CRIMSON_REPO="${HOME}/gitrepos/crimson"
 MODE="all"
 LIST_FILE="/tmp/analysis_review_list.txt"

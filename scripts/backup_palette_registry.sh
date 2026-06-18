@@ -10,7 +10,7 @@ Create a verified SQLite backup of the Palette registry.
 
 Options:
   --registry PATH       Registry SQLite path
-                        (default: $PALETTE_REGISTRY_PATH or /nvme1/palette_registry.sqlite)
+                        (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --backup-dir DIR      Directory for backup files
                         (default: $PALETTE_REGISTRY_BACKUP_DIR or
                          /groups/ahrens/ahrenslab/jeremy/zebrobot/backups)
@@ -33,7 +33,7 @@ fail() {
   exit 1
 }
 
-REGISTRY="${PALETTE_REGISTRY_PATH:-/nvme1/palette_registry.sqlite}"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 BACKUP_DIR="${PALETTE_REGISTRY_BACKUP_DIR:-/groups/ahrens/ahrenslab/jeremy/zebrobot/backups}"
 DAYS_TO_KEEP="${PALETTE_REGISTRY_BACKUP_DAYS_TO_KEEP:-7}"
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
-REGISTRY=""
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 FILE_LIST=""
 PATH_CONTAINS=""
 LIMIT=0
@@ -45,7 +45,7 @@ Submit one crop-geometry + flat-ROI-cache LSF workflow per analysis zarr. This
 is a thin fan-out wrapper around scripts/submit_crop_flat_roi_cache_bsub.sh.
 
 Discovery:
-  --registry PATH             Registry sqlite path for discovery
+  --registry PATH             Registry sqlite path for discovery (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --root PATH                 Recording root/path prefix (default: /groups/.../recordings)
   --file-list PATH            Text file with analysis zarr paths; bypasses registry discovery
   --path-contains STR         Registry zarr_path substring filter
@@ -87,7 +87,7 @@ General:
 
 Example:
   scripts/submit_crop_flat_roi_cache_batches_bsub.sh \
-    --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry_model_paths_groups_20260617T024552Z.sqlite \
+    --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
     --path-contains GoodCopBadCop \
     --limit 12 \
     --workflow-id goodcopbadcop_crop_cache_20260617 \

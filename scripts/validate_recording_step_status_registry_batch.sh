@@ -12,10 +12,10 @@ Runs one-recording validation in parallel via:
 
 Options:
   --recordings-root DIR      Root containing recording directories
-                             (default: /nvme1/recordings)
+                             (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --recording-dir DIR        Specific recording directory to include (repeatable)
   --registry PATH            Registry SQLite path
-                             (default: /nvme1/palette_registry.sqlite)
+                             (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --zarr-use USE             Zarr use to validate: training|analysis
                              (default: training)
   --jobs N                   Parallel workers (default: 4)
@@ -26,9 +26,9 @@ Options:
 EOF
 }
 
-RECORDINGS_ROOT="/nvme1/recordings"
+RECORDINGS_ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 declare -a RECORDING_DIRS=()
-REGISTRY="/nvme1/palette_registry.sqlite"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 ZARR_USE="training"
 JOBS="4"
 SKIP_BACKFILL="0"

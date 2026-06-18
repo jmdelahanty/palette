@@ -16,7 +16,7 @@ Options:
   --recording-dir DIR          Recording directory containing zarr/<name>_analysis.zarr
                                (required)
   --registry PATH              Registry SQLite path
-                               (default: /nvme1/palette_registry.sqlite)
+                               (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --output-zarr PATH           Explicit analysis zarr path (default derived from recording dir)
   --keypoint-method NAME       Expected keypoint method in registry_query checks
                                (default: yolo_pose)
@@ -31,7 +31,7 @@ EOF
 }
 
 RECORDING_DIR=""
-REGISTRY="/nvme1/palette_registry.sqlite"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 OUTPUT_ZARR=""
 KEYPOINT_METHOD="yolo_pose"
 RUN_NAME=""

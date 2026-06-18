@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/nvme1/recordings"
+ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 BATCH_SIZE=10
 MAX_ACTIVE=2
 QUEUE=""
@@ -9,7 +9,7 @@ GPU_SPEC=""
 NCORES=4
 MEM_GB=16
 CONFIG="configs/fisheye/default.yaml"
-REGISTRY="/nvme1/palette_registry.sqlite"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 MODEL=""
 DECODE_BACKEND=""
 RESIZE_DIMS=()
@@ -35,7 +35,7 @@ usage() {
 Usage: submit_detect_batches_bsub.sh [options]
 
 Options:
-  --root PATH               Root recordings directory (default: /nvme1/recordings)
+  --root PATH               Root recordings directory (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --batch-size N            Analysis zarrs per batch job (default: 10)
   --max-active N            Max concurrent jobs in array (default: 2)
   --queue NAME              LSF queue name
@@ -43,7 +43,7 @@ Options:
   --ncores N                Cores per job (default: 4)
   --mem-gb N                Memory per job in GB (default: 16)
   --config PATH             Detect config path (default: configs/fisheye/default.yaml)
-  --registry PATH           Registry sqlite path (default: /nvme1/palette_registry.sqlite)
+  --registry PATH           Registry sqlite path (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --model PATH              Explicit detect model path; bypass registry model resolution
   --decode-backend NAME     Decode backend passed to run_detections_batch
   --resize-dims H W         Canonical inference size passed to run_detections_batch

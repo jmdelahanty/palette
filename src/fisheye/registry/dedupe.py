@@ -1,14 +1,16 @@
-"""Dry-run duplicate dataset-row analysis for the Palette registry.
+"""Duplicate dataset-row analysis and repair for the Palette registry.
 
-This utility does not mutate the registry. It identifies active dataset rows
-that point at the same physical Zarr path, chooses a proposed canonical row,
-and reports what would need to move before duplicate rows can be removed.
+By default this utility does not mutate the registry. It identifies active
+dataset rows that point at the same physical Zarr path, chooses a proposed
+canonical row, and reports what would need to move before duplicate rows can be
+removed. With ``--apply`` it merges duplicate rows into the chosen canonical
+rows.
 
 The intended workflow is:
 
 1. run this dry-run report;
 2. inspect dependent row counts and conflicts;
-3. only then implement/apply a scoped repair.
+3. run ``--apply`` against a backed-up registry.
 """
 
 from __future__ import annotations
@@ -326,6 +328,92 @@ def _self_edge_count(
     return int(row["count"] if row is not None else 0)
 
 
+def _delete_constraint_conflicts(
+    conn: sqlite3.Connection,
+    ref: DatasetRef,
+    *,
+    duplicate_id: str,
+    canonical_id: str,
+    constraint_columns: Sequence[str],
+) -> int:
+    other_columns = [column for column in constraint_columns if column != ref.column]
+    table = _quote_ident(ref.table)
+    ref_column = _quote_ident(ref.column)
+    if not other_columns:
+        canonical_exists = conn.execute(
+            f"SELECT 1 FROM {table} WHERE {ref_column} = ? LIMIT 1;",
+            (str(canonical_id),),
+        ).fetchone()
+        if canonical_exists is None:
+            return 0
+        cursor = conn.execute(
+            f"DELETE FROM {table} WHERE {ref_column} = ?;",
+            (str(duplicate_id),),
+        )
+        return int(cursor.rowcount if cursor.rowcount is not None else 0)
+
+    join_terms = " AND ".join(
+        f"d.{_quote_ident(column)} IS c.{_quote_ident(column)}"
+        for column in other_columns
+    )
+    cursor = conn.execute(
+        f"""
+        DELETE FROM {table}
+        WHERE rowid IN (
+            SELECT d.rowid
+            FROM {table} d
+            JOIN {table} c
+              ON {join_terms}
+            WHERE d.{ref_column} = ?
+              AND c.{ref_column} = ?
+        );
+        """,
+        (str(duplicate_id), str(canonical_id)),
+    )
+    return int(cursor.rowcount if cursor.rowcount is not None else 0)
+
+
+def _delete_dataset_lineage_self_edges(
+    conn: sqlite3.Connection,
+    *,
+    duplicate_id: str,
+    canonical_id: str,
+) -> int:
+    cursor = conn.execute(
+        """
+        DELETE FROM dataset_lineage
+        WHERE (child_dataset_id = ? OR parent_dataset_id = ?)
+          AND child_dataset_id IN (?, ?)
+          AND parent_dataset_id IN (?, ?);
+        """,
+        (
+            str(duplicate_id),
+            str(duplicate_id),
+            str(duplicate_id),
+            str(canonical_id),
+            str(duplicate_id),
+            str(canonical_id),
+        ),
+    )
+    return int(cursor.rowcount if cursor.rowcount is not None else 0)
+
+
+def _update_ref_to_canonical(
+    conn: sqlite3.Connection,
+    ref: DatasetRef,
+    *,
+    duplicate_id: str,
+    canonical_id: str,
+) -> int:
+    table = _quote_ident(ref.table)
+    column = _quote_ident(ref.column)
+    cursor = conn.execute(
+        f"UPDATE {table} SET {column} = ? WHERE {column} = ?;",
+        (str(canonical_id), str(duplicate_id)),
+    )
+    return int(cursor.rowcount if cursor.rowcount is not None else 0)
+
+
 def _ref_report(
     conn: sqlite3.Connection,
     ref: DatasetRef,
@@ -494,6 +582,104 @@ def plan_registry_dataset_dedupe(
         conn.close()
 
 
+def apply_registry_dataset_dedupe(
+    registry_path: str | Path,
+    *,
+    active_only: bool = True,
+    zarr_use: str | None = None,
+    path_contains: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    registry = Path(registry_path).expanduser().resolve()
+    plan = plan_registry_dataset_dedupe(
+        registry,
+        active_only=active_only,
+        zarr_use=zarr_use,
+        path_contains=path_contains,
+        limit=limit,
+    )
+    conn = _connect(registry)
+    try:
+        refs = discover_dataset_refs(conn)
+        ref_by_key = {(ref.table, ref.column): ref for ref in refs}
+        rows_repointed = 0
+        conflict_rows_deleted = 0
+        self_edge_rows_deleted = 0
+        dataset_rows_deleted = 0
+
+        with conn:
+            for group in plan["groups"]:
+                canonical_id = str(group["canonical_dataset_id"])
+                for duplicate_report in group["duplicates"]:
+                    duplicate_id = str(duplicate_report["dataset"]["dataset_id"])
+                    if duplicate_id == canonical_id:
+                        continue
+                    if any(
+                        key in ref_by_key
+                        for key in (
+                            ("dataset_lineage", "child_dataset_id"),
+                            ("dataset_lineage", "parent_dataset_id"),
+                        )
+                    ):
+                        self_edge_rows_deleted += _delete_dataset_lineage_self_edges(
+                            conn,
+                            duplicate_id=duplicate_id,
+                            canonical_id=canonical_id,
+                        )
+                    for ref_report in duplicate_report["reference_updates"]:
+                        ref = ref_by_key.get((str(ref_report["table"]), str(ref_report["column"])))
+                        if ref is None:
+                            continue
+                        for _constraint_kind, columns in _constraint_sets_for_ref(ref):
+                            conflict_rows_deleted += _delete_constraint_conflicts(
+                                conn,
+                                ref,
+                                duplicate_id=duplicate_id,
+                                canonical_id=canonical_id,
+                                constraint_columns=columns,
+                            )
+                        rows_repointed += _update_ref_to_canonical(
+                            conn,
+                            ref,
+                            duplicate_id=duplicate_id,
+                            canonical_id=canonical_id,
+                        )
+                    cursor = conn.execute(
+                        "DELETE FROM datasets WHERE dataset_id = ?;",
+                        (duplicate_id,),
+                    )
+                    dataset_rows_deleted += int(cursor.rowcount if cursor.rowcount is not None else 0)
+
+        remaining_groups = _candidate_duplicate_groups(
+            conn,
+            active_only=active_only,
+            zarr_use=zarr_use,
+            path_contains=path_contains,
+            limit=limit,
+        )
+        return {
+            "schema_version": "palette.registry_dataset_dedupe_apply.v1",
+            "status": "ok" if not remaining_groups else "remaining_duplicates",
+            "dry_run": False,
+            "registry_path": str(registry),
+            "active_only": bool(active_only),
+            "zarr_use": zarr_use,
+            "path_contains": path_contains,
+            "limit": limit,
+            "planned_duplicate_group_count": int(plan["duplicate_group_count"]),
+            "planned_duplicate_dataset_count": int(plan["duplicate_dataset_count"]),
+            "planned_rows_to_repoint": int(plan["rows_to_repoint"]),
+            "planned_conflicting_rows": int(plan["conflicting_rows"]),
+            "rows_repointed": int(rows_repointed),
+            "conflict_rows_deleted": int(conflict_rows_deleted),
+            "self_edge_rows_deleted": int(self_edge_rows_deleted),
+            "dataset_rows_deleted": int(dataset_rows_deleted),
+            "remaining_duplicate_group_count": int(len(remaining_groups)),
+        }
+    finally:
+        conn.close()
+
+
 def _default_registry_path() -> Path:
     return RegistryPaths.from_env(Path.cwd()).path
 
@@ -516,12 +702,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--json", action="store_true", help="Print full JSON report.")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Merge duplicate active dataset rows into the chosen canonical rows. "
+            "Back up the registry before using this."
+        ),
+    )
     return parser
 
 
 def _print_summary(report: Mapping[str, Any]) -> None:
     print(f"status: {report['status']}")
     print(f"registry_path: {report['registry_path']}")
+    if not report.get("dry_run", True):
+        print(f"planned_duplicate_group_count: {report['planned_duplicate_group_count']}")
+        print(f"planned_duplicate_dataset_count: {report['planned_duplicate_dataset_count']}")
+        print(f"planned_rows_to_repoint: {report['planned_rows_to_repoint']}")
+        print(f"planned_conflicting_rows: {report['planned_conflicting_rows']}")
+        print(f"rows_repointed: {report['rows_repointed']}")
+        print(f"conflict_rows_deleted: {report['conflict_rows_deleted']}")
+        print(f"self_edge_rows_deleted: {report['self_edge_rows_deleted']}")
+        print(f"dataset_rows_deleted: {report['dataset_rows_deleted']}")
+        print(f"remaining_duplicate_group_count: {report['remaining_duplicate_group_count']}")
+        return
     print(f"duplicate_group_count: {report['duplicate_group_count']}")
     print(f"duplicate_dataset_count: {report['duplicate_dataset_count']}")
     print(f"rows_to_repoint: {report['rows_to_repoint']}")
@@ -538,13 +743,16 @@ def _print_summary(report: Mapping[str, Any]) -> None:
 def main(argv: Iterable[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     registry = args.registry.expanduser() if args.registry is not None else _default_registry_path()
-    report = plan_registry_dataset_dedupe(
-        registry,
-        active_only=not bool(args.include_inactive),
-        zarr_use=args.zarr_use,
-        path_contains=args.path_contains,
-        limit=args.limit,
-    )
+    kwargs = {
+        "active_only": not bool(args.include_inactive),
+        "zarr_use": args.zarr_use,
+        "path_contains": args.path_contains,
+        "limit": args.limit,
+    }
+    if args.apply:
+        report = apply_registry_dataset_dedupe(registry, **kwargs)
+    else:
+        report = plan_registry_dataset_dedupe(registry, **kwargs)
     text = json.dumps(_json_safe(report), indent=2, sort_keys=True)
     if args.output_json is not None:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)

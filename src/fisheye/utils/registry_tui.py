@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from rich.text import Text as RichText
 
+from fisheye.registry.db import RegistryPaths
+
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
@@ -726,8 +728,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--registry",
         type=Path,
-        default=Path("/nvme1/palette_registry.sqlite"),
-        help="Registry SQLite path.",
+        default=None,
+        help="Registry SQLite path. Defaults to PALETTE_REGISTRY_PATH/config.",
     )
     parser.add_argument("--view", type=str, help="Start view name (e.g., training_runs or table:datasets).")
     parser.add_argument("--limit", type=int, default=500, help="Max rows to load per view.")
@@ -737,7 +739,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = _parse_args(argv)
-    db_path = Path(args.registry).expanduser().resolve()
+    db_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     if not db_path.exists():
         raise SystemExit(f"Registry not found: {db_path}")
     app = RegistryTUI(

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REG="${1:-/nvme1/palette_registry.sqlite}"
+REG="${1:-${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}}"
 MANIFEST="${2:-/nvme1/training/datasets/eye_mask_cedar_shadow_omnifin0_auto_gray_lr_b9164009_v002/eye_mask_cedar_shadow_omnifin0_auto_gray_lr_b9164009_v002.manifest.json}"
 MAP="${3:-/tmp/eye_mask_review_fix_rows.tsv}"
 

@@ -16,7 +16,7 @@ By default this script:
 
 Options:
   --registry PATH         Registry sqlite path
-                          (default: /nvme1/palette_registry.sqlite)
+                          (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --datasets-root DIR     Root containing dataset bundles
                           (default: /nvme1/training/datasets)
   --include-legacy-merged-detect
@@ -34,7 +34,7 @@ Options:
 EOF
 }
 
-REGISTRY="/nvme1/palette_registry.sqlite"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 DATASETS_ROOT="/nvme1/training/datasets"
 SKIP_REFRESH=0
 RELAXED=0

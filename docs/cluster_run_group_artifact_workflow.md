@@ -1044,8 +1044,8 @@ recording during planning by calling `run_detections_batch --dry-run --json
 scratch artifact job. Pass `--model` only to intentionally bypass registry
 model resolution. The wrapper requires the selected model path to be readable
 on the submit host. The registry file itself must also be readable from the LSF
-login node. Use a PRFS-visible registry snapshot under
-`/groups/johnson/johnsonlab/jeremy/registries/`, not
+login node. Use the canonical PRFS registry
+`/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`, not
 `/nvme1/palette_registry.sqlite`, when submitting from login/compute nodes that
 cannot see workstation NVMe. If registry rows still point at workstation-local
 `/nvme1/models/...` paths, use a `/groups/...` model path or update the registry

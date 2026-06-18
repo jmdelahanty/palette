@@ -14,6 +14,7 @@ from fisheye.analysis.chaser_distance_runs import (
     build_chaser_distance_result,
     write_chaser_distance_run,
 )
+from fisheye.registry.db import RegistryPaths
 from fisheye.shared.json_safety import json_attr_safe
 
 
@@ -118,7 +119,7 @@ def run_for_targets(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--registry", type=Path, default=Path("/nvme1/palette_registry.sqlite"))
+    parser.add_argument("--registry", type=Path, default=None, help="Registry SQLite path. Defaults to PALETTE_REGISTRY_PATH/config.")
     parser.add_argument(
         "--recording-like",
         default="2026-06-14%GoodCopBadCop%",
@@ -138,8 +139,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    registry = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     targets = _query_targets(
-        Path(args.registry),
+        registry,
         recording_like=str(args.recording_like),
         coverage_min=float(args.coverage_min),
         limit=args.limit,
@@ -155,7 +157,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     payload = {
         "apply": bool(args.apply),
-        "registry": str(args.registry),
+        "registry": str(registry),
         "recording_like": str(args.recording_like),
         "coverage_min": float(args.coverage_min),
         "limit": args.limit,

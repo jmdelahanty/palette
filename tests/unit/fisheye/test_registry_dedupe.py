@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from fisheye.registry.dedupe import plan_registry_dataset_dedupe
+from fisheye.registry.dedupe import apply_registry_dataset_dedupe, plan_registry_dataset_dedupe
 
 
 def _init_test_registry(path: Path) -> sqlite3.Connection:
@@ -226,3 +226,113 @@ def test_plan_registry_dataset_dedupe_flags_dataset_lineage_self_edge(tmp_path: 
     assert lineage_update["column"] == "child_dataset_id"
     constraints = {item["constraint"] for item in lineage_update["conflicts"]}
     assert "dataset_lineage_no_self_edge" in constraints
+
+
+def test_apply_registry_dataset_dedupe_merges_duplicate_rows(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.sqlite"
+    conn = _init_test_registry(registry)
+    try:
+        _insert_dataset(
+            conn,
+            "rec_a",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _insert_dataset(
+            conn,
+            "rec_a:zhash",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        conn.execute("INSERT INTO provenance (dataset_id, camera_id) VALUES ('rec_a', '2010093');")
+        conn.execute(
+            "INSERT INTO recording_step_status (dataset_id, step_name, status, updated_utc) "
+            "VALUES ('rec_a', 'detect', 'ok', '2026-01-02T00:00:00Z');"
+        )
+        conn.execute(
+            "INSERT INTO recording_step_status (dataset_id, step_name, status, updated_utc) "
+            "VALUES ('rec_a:zhash', 'detect', 'missing', '2026-01-02T00:00:00Z');"
+        )
+        conn.execute(
+            "INSERT INTO recording_step_status_history (dataset_id, step_name, status, recorded_utc) "
+            "VALUES ('rec_a:zhash', 'detect', 'missing', '2026-01-02T00:00:00Z');"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = apply_registry_dataset_dedupe(registry)
+
+    assert report["status"] == "ok"
+    assert report["dataset_rows_deleted"] == 1
+    assert report["conflict_rows_deleted"] == 1
+    assert report["rows_repointed"] == 1
+
+    conn = sqlite3.connect(str(registry))
+    try:
+        assert conn.execute("SELECT dataset_id FROM datasets;").fetchall() == [("rec_a",)]
+        assert conn.execute(
+            "SELECT dataset_id, step_name, status FROM recording_step_status;"
+        ).fetchall() == [("rec_a", "detect", "ok")]
+        assert conn.execute(
+            "SELECT dataset_id, step_name, status FROM recording_step_status_history;"
+        ).fetchall() == [("rec_a", "detect", "missing")]
+        assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
+    finally:
+        conn.close()
+
+
+def test_apply_registry_dataset_dedupe_removes_lineage_self_edges(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.sqlite"
+    conn = _init_test_registry(registry)
+    try:
+        _insert_dataset(
+            conn,
+            "rec_a",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _insert_dataset(
+            conn,
+            "rec_a:zhash",
+            session_uuid="rec_a",
+            zarr_path="/data/rec_a_training.zarr",
+            path_hash="hash-a",
+        )
+        _insert_dataset(
+            conn,
+            "parent",
+            session_uuid="parent",
+            zarr_path="/data/parent_training.zarr",
+            path_hash="hash-parent",
+        )
+        conn.execute(
+            "INSERT INTO dataset_lineage (child_dataset_id, parent_dataset_id, relationship_type) "
+            "VALUES ('rec_a:zhash', 'rec_a', 'duplicate_of');"
+        )
+        conn.execute(
+            "INSERT INTO dataset_lineage (child_dataset_id, parent_dataset_id, relationship_type) "
+            "VALUES ('rec_a:zhash', 'parent', 'source');"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = apply_registry_dataset_dedupe(registry)
+
+    assert report["status"] == "ok"
+    assert report["self_edge_rows_deleted"] == 1
+    assert report["rows_repointed"] == 1
+
+    conn = sqlite3.connect(str(registry))
+    try:
+        assert conn.execute(
+            "SELECT child_dataset_id, parent_dataset_id, relationship_type "
+            "FROM dataset_lineage ORDER BY relationship_type;"
+        ).fetchall() == [("rec_a", "parent", "source")]
+        assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
+    finally:
+        conn.close()

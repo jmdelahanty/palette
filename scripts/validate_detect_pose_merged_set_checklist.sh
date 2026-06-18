@@ -13,7 +13,7 @@ Runs operator validation for detect-vs-pose merged-set checklist items:
 
 Options:
   --registry PATH              Registry SQLite path
-                               (default: /nvme1/palette_registry.sqlite)
+                               (default: $PALETTE_REGISTRY_PATH or /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite)
   --target-contains TEXT       Substring used for preflight dataset selection
                                (default: 2026-01-28T21-47-47Z_arena_1_DefaultScreen_training.zarr)
   --split SPEC                 Split spec for merged exports (default: 0.8/0.2)
@@ -23,7 +23,7 @@ Options:
 EOF
 }
 
-REGISTRY="/nvme1/palette_registry.sqlite"
+REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 TARGET_CONTAINS="2026-01-28T21-47-47Z_arena_1_DefaultScreen_training.zarr"
 SPLIT_SPEC="0.8/0.2"
 SEED="123"
