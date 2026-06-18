@@ -161,6 +161,7 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
         mask_probs_dtype="uint8",
         mask_probs_chunk_rois=32,
         output_queue_size=2,
+        profile_timings=False,
         roi_cache_policy="never",
         roi_live_acceleration="auto",
         roi_live_gpu_chunk_frames=32,
@@ -186,6 +187,7 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
     assert "--roi-cache-manifest" in cmd
     assert cmd[cmd.index("--roi-cache-manifest") + 1] == str(manifest)
     assert "--roi-cache-expected-archive-path" not in cmd
+    assert "--profile-timings" not in cmd
     assert "--model-require-unique" in cmd
     assert "--model-include-non-success" in cmd
     assert cmd[cmd.index("--model-top-k") + 1] == "7"
@@ -208,6 +210,7 @@ def test_inference_command_can_validate_cache_against_canonical_archive(tmp_path
         mask_probs_dtype="uint8",
         mask_probs_chunk_rois=32,
         output_queue_size=2,
+        profile_timings=True,
         roi_cache_policy="never",
         roi_live_acceleration="auto",
         roi_live_gpu_chunk_frames=32,
@@ -238,6 +241,7 @@ def test_inference_command_can_validate_cache_against_canonical_archive(tmp_path
     assert str(staged_zarr) in cmd
     assert cmd[cmd.index("--roi-cache-manifest") + 1] == str(manifest)
     assert cmd[cmd.index("--roi-cache-expected-archive-path") + 1] == str(canonical_zarr)
+    assert "--profile-timings" in cmd
     assert "--defer-registry-status" in cmd
 
 

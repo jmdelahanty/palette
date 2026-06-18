@@ -364,6 +364,8 @@ def _inference_command(
         cmd.extend(["--roi-cache-manifest", str(args.roi_cache_manifest)])
     if roi_cache_expected_archive_path is not None:
         cmd.extend(["--roi-cache-expected-archive-path", str(roi_cache_expected_archive_path)])
+    if args.profile_timings:
+        cmd.append("--profile-timings")
     if defer_registry_status:
         cmd.append("--defer-registry-status")
     if args.overwrite:
@@ -828,6 +830,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-probs-dtype", choices=("uint8", "float16"), default="uint8")
     parser.add_argument("--mask-probs-chunk-rois", type=int, default=32)
     parser.add_argument("--output-queue-size", type=int, default=2)
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Pass --profile-timings to subject-mask inference and persist timing_profile attrs.",
+    )
     parser.add_argument("--model-coverage-class", default="dense_all_components")
     parser.add_argument("--model-component-coverage-key", default="body+eyes+swim_bladder")
     parser.add_argument("--model-label-schema-id", default="subject_v1_union")

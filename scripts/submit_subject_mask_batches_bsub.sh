@@ -27,6 +27,7 @@ BATCH_SIZE_SM=128
 MASK_PROBS_DTYPE="uint8"
 MASK_PROBS_CHUNK_ROIS=32
 OUTPUT_QUEUE_SIZE=2
+PROFILE_TIMINGS=0
 MODEL_COVERAGE_CLASS="dense_all_components"
 MODEL_COMPONENT_COVERAGE_KEY="body+eyes+swim_bladder"
 MODEL_LABEL_SCHEMA_ID="subject_v1_union"
@@ -107,6 +108,7 @@ Options:
   --mask-probs-dtype DTYPE  uint8|float16 (default: uint8)
   --mask-probs-chunk-rois N Chunk length for mask_probs_roi (default: 32)
   --output-queue-size N     Async output queue size (default: 2)
+  --profile-timings         Persist per-stage subject-mask inference timing diagnostics
   --model-coverage-class X  Registry model coverage_class (default: dense_all_components)
   --model-component-coverage-key X
                             Registry model component key (default: body+eyes+swim_bladder)
@@ -169,6 +171,7 @@ while [[ $# -gt 0 ]]; do
     --mask-probs-dtype) MASK_PROBS_DTYPE="$2"; shift 2;;
     --mask-probs-chunk-rois) MASK_PROBS_CHUNK_ROIS="$2"; shift 2;;
     --output-queue-size) OUTPUT_QUEUE_SIZE="$2"; shift 2;;
+    --profile-timings) PROFILE_TIMINGS=1; shift;;
     --model-coverage-class) MODEL_COVERAGE_CLASS="$2"; shift 2;;
     --model-component-coverage-key) MODEL_COMPONENT_COVERAGE_KEY="$2"; shift 2;;
     --model-label-schema-id) MODEL_LABEL_SCHEMA_ID="$2"; shift 2;;
@@ -438,6 +441,7 @@ SUBJECT_ARGS=(
 )
 if [[ "$MODEL_REQUIRE_UNIQUE" == "1" ]]; then SUBJECT_ARGS+=(--model-require-unique); fi
 if [[ "$MODEL_INCLUDE_NON_SUCCESS" == "1" ]]; then SUBJECT_ARGS+=(--model-include-non-success); fi
+if [[ "$PROFILE_TIMINGS" == "1" ]]; then SUBJECT_ARGS+=(--profile-timings); fi
 if [[ "$WRITE_EYE_GEOMETRY" == "1" ]]; then SUBJECT_ARGS+=(--write-eye-geometry); else SUBJECT_ARGS+=(--no-write-eye-geometry); fi
 if [[ "$WRITE_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-component-contours); else SUBJECT_ARGS+=(--no-write-component-contours); fi
 if [[ "$STAGE_OUTPUT_TO_SCRATCH" == "1" ]]; then SUBJECT_ARGS+=(--stage-output-to-scratch); fi
