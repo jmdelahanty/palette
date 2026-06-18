@@ -242,6 +242,7 @@ PY
 REFINED_RUN="refined_subject_masks_benchmark_${VARIANT_ID}"
 JSON_OUT="${RUN_DIR}/reports/${VARIANT_ID}.json"
 STDOUT_LOG="${RUN_DIR}/reports/${VARIANT_ID}.stdout"
+PROGRESS_LOG="${RUN_DIR}/reports/${VARIANT_ID}.progress.jsonl"
 
 cmd=(scripts/py -m fisheye.refinement.finalize_subject_masks "$STAGED_ZARR"
   --subject-run "$SUBJECT_RUN"
@@ -254,6 +255,7 @@ cmd=(scripts/py -m fisheye.refinement.finalize_subject_masks "$STAGED_ZARR"
   --assignment-keypoint-group "$ASSIGNMENT_KEYPOINT_GROUP"
   --assignment-keypoints-run "$ASSIGNMENT_KEYPOINT_RUN"
   --json
+  --progress-jsonl "$PROGRESS_LOG"
   --num-workers "$WORKERS"
   --defer-registry-status
   --overwrite)

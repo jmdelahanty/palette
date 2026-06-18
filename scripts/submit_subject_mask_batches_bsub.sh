@@ -438,6 +438,7 @@ SUBJECT_ARGS=(
   --roi-cache-policy "$ROI_CACHE_POLICY"
   --roi-live-acceleration "$ROI_LIVE_ACCELERATION"
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
+  --progress-dir "$RUN_DIR/progress"
 )
 if [[ "$MODEL_REQUIRE_UNIQUE" == "1" ]]; then SUBJECT_ARGS+=(--model-require-unique); fi
 if [[ "$MODEL_INCLUDE_NON_SUCCESS" == "1" ]]; then SUBJECT_ARGS+=(--model-include-non-success); fi

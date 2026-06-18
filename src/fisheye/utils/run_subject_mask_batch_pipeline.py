@@ -413,6 +413,11 @@ def _finalization_command(
         cmd.append("--write-eye-geometry")
     if args.write_component_contours:
         cmd.append("--write-component-contours")
+    if args.progress_dir is not None:
+        archive_component = _safe_path_component(Path(plan.zarr_path).stem)
+        run_component = _safe_path_component(plan.refined_run)
+        progress_path = args.progress_dir.expanduser().resolve() / f"{archive_component}__{run_component}.finalization.progress.jsonl"
+        cmd.extend(["--progress-jsonl", str(progress_path)])
     if defer_registry_status:
         cmd.append("--defer-registry-status")
     if args.overwrite:
@@ -895,6 +900,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--continue-on-error", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--json-report", type=Path)
     parser.add_argument("--markdown-report", type=Path)
+    parser.add_argument(
+        "--progress-dir",
+        type=Path,
+        help="Directory for append-only stage progress JSONL files.",
+    )
     parser.add_argument("--consolidate-metadata", action=argparse.BooleanOptionalAction, default=True)
     return parser
 

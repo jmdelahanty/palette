@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
 import sys
@@ -295,6 +295,46 @@ class _TimingRecorder:
                 reverse=True,
             )[:5],
         }
+
+
+@dataclass
+class _ProgressJsonlReporter:
+    path: Optional[Path] = None
+    start_time: float = field(default_factory=time.perf_counter)
+
+    def emit(self, event: str, **payload: object) -> None:
+        if self.path is None:
+            return
+        record = {
+            "event": str(event),
+            "ts_utc": _utc_now(),
+            "elapsed_seconds": float(time.perf_counter() - self.start_time),
+            **payload,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_json_safe(record), sort_keys=True, separators=(",", ":")) + "\n")
+
+    @contextmanager
+    def phase(self, phase: str, **payload: object) -> Iterator[None]:
+        start = time.perf_counter()
+        self.emit(f"{phase}_start", **payload)
+        try:
+            yield
+        except Exception as exc:
+            self.emit(
+                f"{phase}_error",
+                duration_seconds=float(time.perf_counter() - start),
+                error=repr(exc),
+                **payload,
+            )
+            raise
+        else:
+            self.emit(
+                f"{phase}_end",
+                duration_seconds=float(time.perf_counter() - start),
+                **payload,
+            )
 
 
 def _decode_probabilities(values: np.ndarray, *, encoding: Optional[str]) -> np.ndarray:
@@ -2170,15 +2210,26 @@ def _compute_finalizer_process_shards(
     assignment_keypoint_group: Optional[str],
     assignment_keypoints_run: Optional[str],
     num_workers: Optional[int],
+    progress: Optional[_ProgressJsonlReporter] = None,
 ) -> list[dict[str, object]]:
     shards = _row_chunk_shards(chunk_ranges, num_workers=num_workers)
     if not shards:
         return []
     worker_count = len(shards)
+    progress = progress or _ProgressJsonlReporter()
+    progress.emit(
+        "process_shards_submitted",
+        worker_count=int(worker_count),
+        shard_count=int(len(shards)),
+        chunk_count=int(len(chunk_ranges)),
+    )
     results: list[dict[str, object]] = []
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(
+        future_to_shard = {}
+        for shard_index, shard in enumerate(shards):
+            first_chunk = shard[0]
+            last_chunk = shard[-1]
+            future = executor.submit(
                 _process_and_write_finalizer_shard,
                 str(zarr_path),
                 subject_run=subject_run,
@@ -2190,10 +2241,33 @@ def _compute_finalizer_process_shards(
                 assignment_keypoint_group=assignment_keypoint_group,
                 assignment_keypoints_run=assignment_keypoints_run,
             )
-            for shard in shards
-        ]
-        for future in futures:
-            results.extend(future.result())
+            future_to_shard[future] = {
+                "shard_index": int(shard_index),
+                "chunk_count": int(len(shard)),
+                "start_row": int(first_chunk[1]),
+                "stop_row": int(last_chunk[2]),
+            }
+        completed = 0
+        rows_completed = 0
+        total_rows = int(sum(int(stop) - int(start) for start, stop in chunk_ranges))
+        for future in as_completed(future_to_shard):
+            shard_payload = dict(future_to_shard[future])
+            try:
+                shard_results = list(future.result())
+            except Exception as exc:
+                progress.emit("process_shard_failed", error=repr(exc), **shard_payload)
+                raise
+            results.extend(shard_results)
+            completed += 1
+            rows_completed += int(shard_payload["stop_row"]) - int(shard_payload["start_row"])
+            progress.emit(
+                "process_shard_completed",
+                completed_shards=int(completed),
+                total_shards=int(len(shards)),
+                rows_completed=int(rows_completed),
+                rows_total=int(total_rows),
+                **shard_payload,
+            )
     return results
 
 
@@ -2215,6 +2289,7 @@ def finalize_subject_mask_run(
     dry_run: bool = False,
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
+    progress_jsonl: str | Path | None = None,
 ) -> dict[str, object]:
     """Finalize one subject-mask run into a canonical refined-subject run."""
 
@@ -2289,6 +2364,23 @@ def finalize_subject_mask_run(
     }
     if dry_run:
         return summary
+
+    progress = _ProgressJsonlReporter(Path(progress_jsonl).expanduser().resolve() if progress_jsonl else None)
+    progress.emit(
+        "start",
+        zarr_path=str(zarr_path or ""),
+        subject_run=str(source.run_name),
+        refined_run=str(target_run),
+        total_rows=int(total_rows),
+        requested_chunk_size=int(requested_chunk_size),
+        worker_chunk_size=int(worker_chunk_size),
+        chunk_count=int(len(chunk_ranges)),
+        execution_backend=str(execution_backend),
+        scheduler=str(scheduler_key),
+        num_workers=normalized_num_workers,
+        write_eye_geometry=bool(write_eye_geometry),
+        write_component_contours=bool(write_component_contours),
+    )
 
     refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
     if target_run in refined_parent:
@@ -2369,41 +2461,43 @@ def finalize_subject_mask_run(
     if eye_assignment_context is not None:
         provenance_inputs.update(assignment_keypoint_attrs)
 
-    with timing.phase("target_init"):
-        run_group = _create_refined_run_shell(
-            refined_parent=refined_parent,
-            target_run=target_run,
-            source=source,
-            component_names=component_names,
-            extra_attrs=extra_attrs,
-            provenance_inputs=provenance_inputs,
-            stage_command=" ".join(sys.argv) if sys.argv else "unknown",
-        )
+    with progress.phase("target_init"):
+        with timing.phase("target_init"):
+            run_group = _create_refined_run_shell(
+                refined_parent=refined_parent,
+                target_run=target_run,
+                source=source,
+                component_names=component_names,
+                extra_attrs=extra_attrs,
+                provenance_inputs=provenance_inputs,
+                stage_command=" ".join(sys.argv) if sys.argv else "unknown",
+            )
 
     if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
         assert zarr_path is not None
-        with timing.phase("parallel_prepare_shells"):
-            for raw_component in required_raw_components:
-                sample_batch = _finalize_source_component_rows(
-                    source,
-                    raw_component,
-                    start_row=0,
-                    stop_row=min(1, total_rows),
-                )
-                first_batches.setdefault(raw_component, sample_batch)
-                if raw_component == _RAW_EYE_UNION_COMPONENT:
-                    continue
-                component_group = run_group["components"][raw_component]
-                _create_finalization_metric_shell(
-                    component_group,
-                    batch=sample_batch,
-                    metric_names=_FINALIZATION_METRIC_NAMES,
-                    total_rows=total_rows,
-                )
-                source_payloads.setdefault(
-                    raw_component,
-                    _source_payload_for_finalized_component(source, sample_batch),
-                )
+        with progress.phase("parallel_prepare_shells"):
+            with timing.phase("parallel_prepare_shells"):
+                for raw_component in required_raw_components:
+                    sample_batch = _finalize_source_component_rows(
+                        source,
+                        raw_component,
+                        start_row=0,
+                        stop_row=min(1, total_rows),
+                    )
+                    first_batches.setdefault(raw_component, sample_batch)
+                    if raw_component == _RAW_EYE_UNION_COMPONENT:
+                        continue
+                    component_group = run_group["components"][raw_component]
+                    _create_finalization_metric_shell(
+                        component_group,
+                        batch=sample_batch,
+                        metric_names=_FINALIZATION_METRIC_NAMES,
+                        total_rows=total_rows,
+                    )
+                    source_payloads.setdefault(
+                        raw_component,
+                        _source_payload_for_finalized_component(source, sample_batch),
+                    )
 
         if execution_backend == _DASK_WORKER_EXECUTION_BACKEND:
             tasks = [
@@ -2423,26 +2517,29 @@ def finalize_subject_mask_run(
                 )
                 for chunk_index, (start_row, stop_row) in enumerate(chunk_ranges)
             ]
-            with timing.phase("dask_compute"):
-                parallel_results = _compute_finalizer_dask_tasks(
-                    tasks,
-                    scheduler_key=scheduler_key,
-                    num_workers=normalized_num_workers,
-                )
+            with progress.phase("dask_compute", task_count=int(len(tasks))):
+                with timing.phase("dask_compute"):
+                    parallel_results = _compute_finalizer_dask_tasks(
+                        tasks,
+                        scheduler_key=scheduler_key,
+                        num_workers=normalized_num_workers,
+                    )
         else:
-            with timing.phase("process_shard_compute"):
-                parallel_results = _compute_finalizer_process_shards(
-                    str(zarr_path),
-                    subject_run=source.run_name,
-                    refined_run=target_run,
-                    component_names=component_names,
-                    required_raw_components=tuple(required_raw_components),
-                    chunk_ranges=chunk_ranges,
-                    metric_level=metric_level,
-                    assignment_keypoint_group=assignment_keypoint_group,
-                    assignment_keypoints_run=assignment_keypoints_run,
-                    num_workers=normalized_num_workers,
-                )
+            with progress.phase("process_shard_compute"):
+                with timing.phase("process_shard_compute"):
+                    parallel_results = _compute_finalizer_process_shards(
+                        str(zarr_path),
+                        subject_run=source.run_name,
+                        refined_run=target_run,
+                        component_names=component_names,
+                        required_raw_components=tuple(required_raw_components),
+                        chunk_ranges=chunk_ranges,
+                        metric_level=metric_level,
+                        assignment_keypoint_group=assignment_keypoint_group,
+                        assignment_keypoints_run=assignment_keypoints_run,
+                        num_workers=normalized_num_workers,
+                        progress=progress,
+                    )
 
         for result in sorted(parallel_results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
             chunk_timing = dict(result["chunk_timing"])
@@ -2467,6 +2564,12 @@ def finalize_subject_mask_run(
     else:
         for chunk_index, (start_row, stop_row) in enumerate(chunk_ranges):
             chunk_start = time.perf_counter()
+            progress.emit(
+                "serial_chunk_start",
+                chunk_index=int(chunk_index),
+                start_row=int(start_row),
+                stop_row=int(stop_row),
+            )
             chunk_timing: dict[str, object] = {
                 "chunk_index": int(chunk_index),
                 "start_row": int(start_row),
@@ -2556,6 +2659,16 @@ def finalize_subject_mask_run(
             rows_with_nonempty_masks += int(np.count_nonzero(chunk_any))
             chunk_timing["total_seconds"] = float(time.perf_counter() - chunk_start)
             timing.chunk_timings.append(chunk_timing)
+            progress.emit(
+                "serial_chunk_completed",
+                chunk_index=int(chunk_index),
+                start_row=int(start_row),
+                stop_row=int(stop_row),
+                row_count=int(stop_row) - int(start_row),
+                rows_completed=int(stop_row),
+                rows_total=int(total_rows),
+                total_seconds=float(chunk_timing["total_seconds"]),
+            )
 
     if eye_assignment_context is not None:
         usable_rows = int(eyes_union_assignment_summary.get("assigned_rows") or 0) + int(
@@ -2588,25 +2701,30 @@ def finalize_subject_mask_run(
     created = str(run_group.attrs.get("created_at_utc") or _utc_now())
     for component_name in component_names:
         component_group = run_group["components"][component_name]
-        with timing.phase(f"write_reason_columns_{component_name}"):
-            write_reason_columns(
-                component_group,
-                reason_labels_by_component[component_name],
-                chunk_size=max(1, min(256, total_rows)),
-                include_reason_text=True,
-                overwrite=True,
-            )
-        with timing.phase(f"write_component_provenance_{component_name}"):
-            _ensure_refined_component_provenance_payload(
-                run_group,
-                component_name=component_name,
-                source_payload=source_payloads[component_name],
-                created_at_utc=created,
-            )
+        phase_name = f"write_reason_columns_{component_name}"
+        with progress.phase(phase_name, component=component_name):
+            with timing.phase(phase_name):
+                write_reason_columns(
+                    component_group,
+                    reason_labels_by_component[component_name],
+                    chunk_size=max(1, min(256, total_rows)),
+                    include_reason_text=True,
+                    overwrite=True,
+                )
+        phase_name = f"write_component_provenance_{component_name}"
+        with progress.phase(phase_name, component=component_name):
+            with timing.phase(phase_name):
+                _ensure_refined_component_provenance_payload(
+                    run_group,
+                    component_name=component_name,
+                    source_payload=source_payloads[component_name],
+                    created_at_utc=created,
+                )
 
     if write_eye_geometry and set(_EYE_COMPONENTS).issubset(component_names):
-        with timing.phase("write_eye_geometry"):
-            write_refined_subject_eye_geometry(run_group)
+        with progress.phase("write_eye_geometry"):
+            with timing.phase("write_eye_geometry"):
+                write_refined_subject_eye_geometry(run_group)
         run_group.attrs["eye_geometry_status"] = "computed"
     elif set(_EYE_COMPONENTS).issubset(component_names):
         run_group.attrs["eye_geometry_status"] = "deferred"
@@ -2616,16 +2734,17 @@ def finalize_subject_mask_run(
     if write_component_contours:
         contour_components = _component_contour_targets(component_names)
         if contour_components:
-            with timing.phase("write_component_contours"):
-                contour_summaries = _summaries_to_json_safe(
-                    write_refined_subject_component_contours(
-                        run_group,
-                        components=contour_components,
-                        source_mask_run=target_run,
-                        chunk_rois=max(1, min(256, total_rows)),
-                        overwrite=True,
+            with progress.phase("write_component_contours", components=list(contour_components)):
+                with timing.phase("write_component_contours"):
+                    contour_summaries = _summaries_to_json_safe(
+                        write_refined_subject_component_contours(
+                            run_group,
+                            components=contour_components,
+                            source_mask_run=target_run,
+                            chunk_rois=max(1, min(256, total_rows)),
+                            overwrite=True,
+                        )
                     )
-                )
             run_group.attrs["component_contours_status"] = "computed"
             run_group.attrs["component_contours_components"] = list(contour_components)
             run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
@@ -2682,6 +2801,13 @@ def finalize_subject_mask_run(
             ),
         }
     )
+    progress.emit(
+        "complete",
+        duration_seconds=float(duration_seconds),
+        rows_total=int(total_rows),
+        rows_per_second=float(timing_summary["rows_per_second"]),
+        refined_run=str(target_run),
+    )
     return summary
 
 
@@ -2703,6 +2829,7 @@ def finalize_subject_masks(
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
     defer_registry_status: bool = False,
+    progress_jsonl: str | Path | None = None,
     console: Any = None,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="r" if dry_run else "a")
@@ -2723,6 +2850,7 @@ def finalize_subject_masks(
         dry_run=dry_run,
         assignment_keypoint_group=assignment_keypoint_group,
         assignment_keypoints_run=assignment_keypoints_run,
+        progress_jsonl=progress_jsonl,
     )
     if not dry_run and not defer_registry_status:
         run_name = str(summary["refined_run"])
@@ -2829,6 +2957,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="Emit the summary as JSON.")
     parser.add_argument(
+        "--progress-jsonl",
+        help="Append live finalization progress events as JSONL. Useful for tailing long cluster jobs.",
+    )
+    parser.add_argument(
         "--defer-registry-status",
         action="store_true",
         help=(
@@ -2861,6 +2993,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         assignment_keypoint_group=args.assignment_keypoint_group,
         assignment_keypoints_run=args.assignment_keypoints_run,
         defer_registry_status=bool(args.defer_registry_status),
+        progress_jsonl=args.progress_jsonl,
     )
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0
