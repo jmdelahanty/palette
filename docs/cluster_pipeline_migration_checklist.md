@@ -59,7 +59,7 @@ Palette also has batch utilities for additional stages:
 | Utility | Status | Cluster gap |
 |---------|--------|-------------|
 | `fisheye.utils.refine_detect_batch` | present | Covered by the chained detect-quality-refine submitter for registry-discovered targets. |
-| `fisheye.utils.refine_keypoints_batch` | present | No dedicated LSF submitter yet. |
+| `fisheye.utils.refine_keypoints_batch` | present | Covered by `scripts/submit_refine_keypoints_batches_bsub.sh` for file-list or root-discovered analysis zarrs. |
 | `fisheye.utils.run_subject_mask_batch_pipeline` | present | No dedicated LSF submitter yet; artifact/import policy not implemented. |
 | subject-mask review/finalization utilities | present | Some tools are operator-driven and need cluster-safe boundaries. |
 | eye-mask refinement | present inside `run_eye_masks_batch --refine` and standalone code | Cluster docs focus on raw eye-mask inference more than refined surfaces. |
@@ -486,9 +486,9 @@ Ready for pilot:
 Remaining:
 
 - [x] Run one cluster keypoint smoke after crop is available.
-- [ ] Decide whether keypoint refinement is always part of cluster keypoint
+- [x] Decide whether keypoint refinement is always part of cluster keypoint
   jobs or a separate job family.
-- [ ] Add `scripts/submit_refine_keypoints_batches_bsub.sh` if refinement is
+- [x] Add `scripts/submit_refine_keypoints_batches_bsub.sh` if refinement is
   split.
 - [ ] Verify registry refresh covers raw keypoint performance and refined
   keypoint quality.
@@ -781,7 +781,7 @@ Implementation tasks:
    viewer/notebook readiness.
 5. Add the shared LSF provenance helper.
 6. Add `submit_refine_detect_batches_bsub.sh`.
-7. Add `submit_refine_keypoints_batches_bsub.sh`.
+7. Use `submit_refine_keypoints_batches_bsub.sh` for refined-keypoint batches.
 8. Add `submit_subject_mask_batches_bsub.sh`.
 9. Add registry discovery/status for refined stages that are missing from the
    first-four-stage DAG.
