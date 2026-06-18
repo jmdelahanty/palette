@@ -308,6 +308,7 @@ def _inference_command(
     plan: ArchivePlan,
     *,
     defer_registry_status: bool = False,
+    roi_cache_expected_archive_path: str | Path | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -361,6 +362,8 @@ def _inference_command(
         cmd.extend(["--roi-cache-dir", str(args.roi_cache_dir)])
     if args.roi_cache_manifest is not None:
         cmd.extend(["--roi-cache-manifest", str(args.roi_cache_manifest)])
+    if roi_cache_expected_archive_path is not None:
+        cmd.extend(["--roi-cache-expected-archive-path", str(roi_cache_expected_archive_path)])
     if defer_registry_status:
         cmd.append("--defer-registry-status")
     if args.overwrite:
@@ -992,6 +995,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         args,
                         effective_plan,
                         defer_registry_status=staged_ctx is not None,
+                        roi_cache_expected_archive_path=plan.zarr_path if staged_ctx is not None else None,
                     ),
                     dry_run=dry_run,
                 )

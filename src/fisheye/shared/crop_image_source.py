@@ -569,6 +569,7 @@ class CropImageSource:
         roi_live_gpu_chunk_frames: int = _ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT,
         roi_cache_dir: str | Path | None = None,
         roi_cache_manifest: str | Path | None = None,
+        roi_cache_expected_archive_path: str | Path | None = None,
         console: Any | None = None,
     ) -> "CropImageSource":
         normalized_cache_policy = _normalize_roi_cache_policy(roi_cache_policy)
@@ -711,7 +712,11 @@ class CropImageSource:
         if manifest_path is not None:
             source._activate_flat_bin_cache(
                 manifest_path=manifest_path,
-                zarr_path=zarr_path,
+                zarr_path=(
+                    roi_cache_expected_archive_path
+                    if roi_cache_expected_archive_path is not None
+                    else zarr_path
+                ),
             )
         elif source.storage_mode == "geometry_only" and source._should_use_roi_cache():
             source._activate_temporary_cache(

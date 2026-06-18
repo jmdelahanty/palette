@@ -798,6 +798,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
     )
     parser.add_argument(
+        "--roi-cache-expected-archive-path",
+        type=Path,
+        default=None,
+        help=(
+            "Canonical analysis zarr path expected by --roi-cache-manifest. "
+            "Use when writing into a staged zarr overlay whose logical source "
+            "archive is the original recording zarr."
+        ),
+    )
+    parser.add_argument(
         "--roi-live-acceleration",
         choices=("auto", "cpu", "gpu"),
         default="auto",
@@ -948,6 +958,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
+        roi_cache_expected_archive_path=args.roi_cache_expected_archive_path,
         console=console,
     )
     crop_group = crop_source.crop_group
@@ -1024,6 +1035,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
             "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
+            "source_roi_cache_expected_archive_path": (
+                str(args.roi_cache_expected_archive_path)
+                if args.roi_cache_expected_archive_path is not None
+                else None
+            ),
             "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,

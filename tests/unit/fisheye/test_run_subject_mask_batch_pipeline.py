@@ -185,9 +185,60 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
 
     assert "--roi-cache-manifest" in cmd
     assert cmd[cmd.index("--roi-cache-manifest") + 1] == str(manifest)
+    assert "--roi-cache-expected-archive-path" not in cmd
     assert "--model-require-unique" in cmd
     assert "--model-include-non-success" in cmd
     assert cmd[cmd.index("--model-top-k") + 1] == "7"
+
+
+def test_inference_command_can_validate_cache_against_canonical_archive(tmp_path: Path) -> None:
+    manifest = tmp_path / "sample.flat_roi_cache.json"
+    canonical_zarr = tmp_path / "recording_analysis.zarr"
+    staged_zarr = tmp_path / "scratch" / "recording_analysis__subject_run.zarr"
+    args = SimpleNamespace(
+        registry=tmp_path / "registry.sqlite",
+        model_coverage_class="dense_all_components",
+        model_component_coverage_key="body+eyes+swim_bladder",
+        model_label_schema_id="subject_v1_union",
+        model_top_k=5,
+        model_require_unique=False,
+        model_include_non_success=False,
+        device="0",
+        batch_size=128,
+        mask_probs_dtype="uint8",
+        mask_probs_chunk_rois=32,
+        output_queue_size=2,
+        roi_cache_policy="never",
+        roi_live_acceleration="auto",
+        roi_live_gpu_chunk_frames=32,
+        roi_cache_dir=None,
+        roi_cache_manifest=manifest,
+        overwrite=False,
+    )
+    plan = mod.ArchivePlan(
+        zarr_path=str(staged_zarr),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="refined_keypoints_runs",
+        assignment_keypoint_run="refined_run",
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=False,
+    )
+
+    cmd = mod._inference_command(
+        args,
+        plan,
+        defer_registry_status=True,
+        roi_cache_expected_archive_path=canonical_zarr,
+    )
+
+    assert str(staged_zarr) in cmd
+    assert cmd[cmd.index("--roi-cache-manifest") + 1] == str(manifest)
+    assert cmd[cmd.index("--roi-cache-expected-archive-path") + 1] == str(canonical_zarr)
+    assert "--defer-registry-status" in cmd
 
 
 def test_staged_output_overlay_keeps_inputs_symlinked_and_outputs_local(tmp_path: Path) -> None:
