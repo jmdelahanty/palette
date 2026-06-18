@@ -164,6 +164,12 @@ uses fish-relative coordinates. See `docs/body_frame_contract.md`.
 Existing analysis outputs already follow this direction:
 
 - `analysis/stimulus_runs/<run>` imports stimulus and alignment metadata.
+- `analysis/stimulus_epoch_runs/<run>` should hold reusable event-aligned
+  window definitions derived from one exact stimulus run. Downstream
+  modality-specific analyses should reference this run when computing
+  pre/training/post, trial, loom, or other event-aligned summaries rather than
+  each owning independent window semantics. See
+  [`stimulus_epoch_run_contract.md`](stimulus_epoch_run_contract.md).
 - `analysis/track_kinematics_runs/<online|offline>/<run>` stores
   identity-resolved movement outputs.
 - `analysis/bout_kinematics_runs/<run>` stores per-bout heading and movement
@@ -206,6 +212,23 @@ Existing analysis outputs already follow this direction:
 - `analysis/stimulus_response_runs/<run>` is the implemented stimulus-aware
   downstream consumer for protocol-step summaries and stimulus-specific
   adapters.
+- `analysis/chaser_distance_runs/<run>` stores framewise offline fish-to-chaser
+  distances and epoch summaries derived from exact refined detections,
+  `analysis/stimulus_runs`, and `analysis/stimulus_epoch_runs` sources. It is a
+  modality-specific stimulus analysis product, not a replacement for imported
+  chaser state. Its `epoch_distributions/` subgroup stores reusable histogram
+  bins/densities so distribution-shape plots do not have to rescan dense
+  framewise arrays. See
+  [`chaser_distance_run_contract.md`](chaser_distance_run_contract.md).
+- Detection-derived per-recording analyses should avoid a generic
+  `detection_summary_runs` family. Use the implemented
+  `analysis/detection_profile_runs/<run>` surface for scalar/profile summaries,
+  `analysis/detection_occupancy_runs/<run>` for epoch-aligned heatmaps and
+  spatial occupancy summaries that consume `analysis/stimulus_epoch_runs`, and
+  the current
+  `analysis/detection_comparison_runs/<run>` compatibility surface for
+  realtime-vs-offline detection/crop-sufficiency diagnostics. See
+  [`detection_analysis_run_surfaces.md`](detection_analysis_run_surfaces.md).
 
 New analysis families should follow the same `analysis/<analysis_type>_runs`
 placement unless there is a clear reason they are an authority rather than a

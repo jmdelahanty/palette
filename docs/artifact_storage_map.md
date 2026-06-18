@@ -27,6 +27,11 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 | Eye-mask training data card JSON | `<dataset_dir>/<set_id>.data_card.json` | no | `fisheye.utils.aggregate_eye_mask_training_data_card` |
 | Eye-mask training data card plots | `<dataset_dir>/<set_id>.data_card.plots/*.png` | no | `fisheye.utils.plot_eye_mask_training_data_card` (or aggregate with plots enabled) |
 | Detection profile summary | `analysis/detection_profile_runs/<run>/attrs["profile_summary"]` | yes | `fisheye.utils.detection_profile` |
+| Detection occupancy overview PNG | `analysis/detection_occupancy_runs/<run>/visualizations/detection_occupancy_overview_png` | yes | `fisheye.analysis.detection_occupancy_runs` |
+| Realtime/offline detection comparison PNG | `analysis/detection_comparison_runs/<run>/visualizations/realtime_offline_detection_comparison_png` | yes | `fisheye.diagnostics.compare_realtime_offline_detections` |
+| Chaser distance time-series PNG | `analysis/chaser_distance_runs/<run>/visualizations/chaser_distance_timeseries_png` | yes | `fisheye.analysis.chaser_distance_runs` |
+| Chaser distance epoch-median PNG | `analysis/chaser_distance_runs/<run>/visualizations/chaser_distance_epoch_median_png` | yes | `fisheye.analysis.chaser_distance_runs` |
+| Chaser distance epoch-distribution PNG | `analysis/chaser_distance_runs/<run>/visualizations/chaser_distance_epoch_distribution_png` | yes | `fisheye.analysis.chaser_distance_runs` |
 | Keypoint profile summary | `analysis/keypoint_profile_runs/<run>/attrs["profile_summary"]` | yes | `fisheye.utils.keypoint_profile` |
 | Eye-mask profile summary | `analysis/eye_mask_profile_runs/<run>/attrs["profile_summary"]` | yes | `fisheye.utils.eye_mask_profile` |
 | Eye-mask profile overview PNG | `analysis/eye_mask_profile_runs/<run>/visualizations/eye_mask_profile_overview_png` | yes | `fisheye.utils.finalize_eye_mask_profile_artifacts` |
@@ -62,6 +67,8 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
   intended-use filters may also exclude a run from artifact generation.
 - Export/view helpers for zarr-stored artifacts:
   - generic visualization artifact viewer: `fisheye.utils.view_zarr_visualization`
+  - combined detection occupancy + chaser distance viewer:
+    `fisheye.utils.view_detection_chaser_overview`
   - detect: `fisheye.utils.export_detect_quality_overview`
   - keypoint: `fisheye.utils.export_keypoint_quality_overview`
   - eye-mask profile: `fisheye.utils.export_eye_mask_quality_overview`
@@ -69,6 +76,10 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 - Rendered PNGs are review snapshots. Interactive plots should be represented by
   lightweight specs pointing back to source arrays, not by full HTML documents
   or decoded RGB image arrays in zarr.
+- Some analysis visualizations have explicit plot-data arrays beside the PNG.
+  For example, `analysis/chaser_distance_runs/<run>/epoch_distributions/*`
+  stores reusable distance histogram bins and densities; consumers should read
+  those arrays when they need an interactive distribution plot.
 - Persisted visualization artifacts are expected for reviewable analysis runs,
   but generation may remain explicit via `--write-zarr-artifacts` or an
   equivalent finalize/apply command so heavy debug plots are not produced
