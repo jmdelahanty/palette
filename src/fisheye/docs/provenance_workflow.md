@@ -34,7 +34,7 @@ Relevant provenance attributes:
 | `detect_runs/<run>` | `bbox_norm_coords` | `detect_timestamp_utc`, `total_detections` |
 | `refined_detect_runs/<run>` | `instances/bbox_norm_coords`, `source_detections/bbox_norm_coords` | `source_detect_run`, `detect_review_status`, `refined_storage_semantics`, `source_detection_decision_code_map` |
 | `crop_runs/<run>` | `roi_images`, `source_refined_row_ids` *(when sourced from canonical refined detect)* | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_selection_policy`, `crop_signature`, `roi_image_representation`, `roi_pixel_contract_name`, `roi_pixel_contract`, `crop_review_status` |
-| `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract` |
+| `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `requested_device`, `normalized_torch_device`, `resolved_model_device`, `scheduler_job_id`, `scheduler_hosts` |
 | `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order`, `pose_schema`, `heading_computation_override`, `derived_metrics_schema` |
 | `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `subject_mask_runs/<run>` | `mask_probs_roi`; optional `masks_roi` convenience threshold | `source_crop_run`, `source_crop_storage_mode`, `source_crop_signature`, `source_crop_revision`, `source_detect_review_status_ref`, `source_roi_image_representation`, `source_roi_pixel_contract_name`, `source_roi_pixel_contract`, `label_schema_id`, `run_semantics`, `masks_roi_materialized` |
@@ -52,6 +52,28 @@ Keypoint-lineage attribute contract for legacy eye-mask stages:
 - Legacy writers should write canonical lineage (and may mirror the legacy alias during migration).
 - Readers/diagnostics resolve canonical first, then legacy alias fallback.
 - `check_eye_masks` reports legacy-only lineage as `legacy` (warning) and missing/empty lineage as `incomplete`.
+
+Keypoint GPU and scheduler provenance:
+
+- GPU cluster keypoint jobs should be submitted with an explicit device, e.g.
+  `--gpus 1` on `scripts/submit_keypoints_batches_bsub.sh`, which requests
+  `-gpu num=1` from LSF and defaults the per-recording command to `--device 0`.
+- Raw YOLO keypoint runs record requested and effective device metadata:
+  `requested_device`, `normalized_torch_device`, `initial_model_device`, and
+  `resolved_model_device`.
+- Cluster placement is recorded both in run attrs/provenance and registry
+  `recording_step_status.details_json`: `execution_hostname`,
+  `scheduler_job_id`, `scheduler_job_name`, `scheduler_job_index`,
+  `scheduler_queue`, `scheduler_hosts`, `scheduler_mcpu_hosts`,
+  `scheduler_gpu_request`, and `scheduler_cuda_visible_devices`.
+- Explicit flat-cache runs record `roi_cache_staging_policy` and the nested
+  `roi_cache_staging` payload. Large PRFS flat caches should use
+  `node_scratch_staged_flat_cache`; direct reads should be represented as
+  `direct_manifest_read` and treated as a deliberate comparison or small-cache
+  path.
+- Use these fields when comparing packed array jobs against one-recording-per-GPU
+  jobs. If many recordings share one L4 node, slower throughput may reflect
+  resource contention rather than model or cache regressions.
 
 Eye-mask lineage arrays (`frame_indices`, `detection_indices`, `frame_counts`,
 `source_refined_row_ids`, `source_detect_row_index`) follow the contract in

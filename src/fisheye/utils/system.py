@@ -207,6 +207,9 @@ def get_platform_info(collect_ip: bool = False, disk_path: Optional[str] = None)
             'queue': os.environ.get('LSB_QUEUE'),
             'num_processors': os.environ.get('LSB_DJOB_NUMPROC'),
             'hosts': os.environ.get('LSB_HOSTS'),
+            'mcpu_hosts': os.environ.get('LSB_MCPU_HOSTS'),
+            'djob_hostfile': os.environ.get('LSB_DJOB_HOSTFILE'),
+            'gpu_request': os.environ.get('LSB_GPU_REQ'),
             'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
             'cuda_visible_devices_orig': os.environ.get('CUDA_VISIBLE_DEVICES_ORIG'),
         }

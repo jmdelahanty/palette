@@ -701,7 +701,8 @@ Notes:
   --source registry \
   --batch-size 10 \
   --max-active 2 \
-  --queue short \
+  --queue gpu_l4 \
+  --gpus 1 \
   --mem-gb 32 \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --dry-run
@@ -769,14 +770,20 @@ scripts/py -m fisheye.utils.run_keypoints_batch /nvme1/recordings \
 | `--batch-size`        | `10`    | Analysis zarrs per batch job                 |
 | `--max-active`        | `2`     | Max concurrent jobs                          |
 | `--mem-gb`            | `32`    | Memory per job in GB                         |
+| `--gpus`              | `0`     | GPUs per job; when >0 the submitter requests LSF GPUs and defaults `--device 0` |
 | `--registry`          | `/nvme1/palette_registry.sqlite` | Registry path     |
 | `--set-id`            | *(none)* | Pose model set filter                       |
+| `--pose-schema`       | *(detector default)* | Pose schema to pair with the selected model, e.g. `traditional_v2` for 5-keypoint models |
 | `--top-k`             | `5`     | Candidate provenance depth                   |
 | `--require-unique`    | off     | Fail if top model scores tie                 |
 | `--include-non-success` | off   | Include non-success runs in model resolution |
 | `--crop-run`          | *(auto)* | Explicit crop run name                      |
 | `--batch-size-kp`     | `256`   | Keypoint inference batch size                |
 | `--device`            | *(auto)* | Torch device override                       |
+| `--roi-cache-dir`     | *(none)* | Scratch directory for temporary Zarr ROI caches |
+| `--roi-cache-manifest` | *(none)* | Explicit `flat_bin_v1` ROI cache manifest; accepted only when exactly one target is selected |
+| `--stage-roi-cache-to-scratch` | off | Copy the explicit flat-cache manifest/payload to node-local scratch before inference |
+| `--roi-cache-staging-dir` | *(auto)* | Override staging directory; default prefers `/scratch/$USER/$LSB_JOBID` |
 | `--cpu`               | off     | Force CPU inference                          |
 | `--overwrite`         | off     | Rerun even if keypoints run exists           |
 | `--camera-id-filter`  | *(none)* | Filter by camera_id (registry source only)  |
@@ -786,6 +793,71 @@ scripts/py -m fisheye.utils.run_keypoints_batch /nvme1/recordings \
 file. For each zarr, it derives the recording directory and calls
 `run_keypoints_with_registry_model --recording-dir <dir>`. Model resolution
 happens per-recording at runtime.
+
+For GPU keypoint jobs, pass `--queue gpu_l4 --gpus 1`. The submitter will request
+`-gpu num=1` from LSF and, unless `--device` is already supplied, will pass
+`--device 0` into the per-recording keypoint command. Keypoint runs record the
+requested device, normalized torch device, resolved model device where available,
+execution hostname/FQDN, LSF job id/name/index/queue, allocated hosts, LSF GPU
+request, and CUDA-visible devices in run attrs/provenance. This is the provenance
+surface to use when comparing single-recording jobs against packed multi-recording
+jobs on the same L4 node.
+
+`--roi-cache-dir` and `--roi-cache-manifest` are intentionally different:
+`--roi-cache-dir` is a scratch root where the reader may build/reuse a
+temporary Zarr cache, while `--roi-cache-manifest` points at a completed flat
+binary cache manifest. Use `--stage-roi-cache-to-scratch` only with an explicit
+manifest. The batch submitter refuses an explicit manifest when more than one
+analysis Zarr is selected, because one manifest cannot safely describe multiple
+recordings.
+
+For large flat-cache manifests, stage before GPU inference:
+
+```bash
+./scripts/submit_keypoints_batches_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --source filesystem \
+  --batch-size 1 \
+  --max-active 1 \
+  --queue gpu_l4 \
+  --gpus 1 \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --roi-cache-manifest /groups/.../<recording>.flat_roi_cache.json \
+  --stage-roi-cache-to-scratch \
+  --pose-schema traditional_v2
+```
+
+The 2026-06-18 GoodCopBadCop benchmark showed a 33.4 GiB flat cache improved
+from 212.2 poses/s direct from PRFS to 275.8 poses/s after staging to node-local
+scratch. Even including the 45.8s cache copy, staged execution was faster
+end-to-end. Use staging as the default policy for large caches; direct PRFS
+reads are mainly for small caches or explicit comparisons.
+
+After jobs finish, use the registry performance view plus step-status details
+to compare throughput against actual cluster placement:
+
+```bash
+sqlite3 /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite <<'SQL'
+.headers on
+.mode column
+SELECT
+  k.recording_id,
+  k.keypoint_run,
+  ROUND(k.keypoints_per_second, 1) AS poses_per_s,
+  json_extract(s.details_json, '$.scheduler_hosts') AS hosts,
+  json_extract(s.details_json, '$.scheduler_gpu_request') AS gpu_request,
+  json_extract(s.details_json, '$.scheduler_cuda_visible_devices') AS cuda_visible,
+  json_extract(s.details_json, '$.roi_cache_source_tier') AS cache_tier,
+  json_extract(s.details_json, '$.roi_cache_staging_policy') AS staging_policy,
+  json_extract(s.details_json, '$.roi_cache_staged_to_node_scratch') AS staged
+FROM recording_keypoint_performance_latest AS k
+LEFT JOIN recording_step_status AS s
+  ON s.dataset_id = k.dataset_id
+ AND s.step_name = 'keypoints'
+ORDER BY k.updated_utc DESC
+LIMIT 20;
+SQL
+```
 
 **Logs:** `<root>/logs/run_keypoints_batch/bsub_submissions/kp_<run_id>/`
 

@@ -7,12 +7,14 @@ MAX_ACTIVE=2
 QUEUE=""
 NCORES=4
 MEM_GB=32
+GPUS=0
 REGISTRY="/nvme1/palette_registry.sqlite"
 SET_ID=""
 TOP_K=5
 REQUIRE_UNIQUE=0
 INCLUDE_NON_SUCCESS=0
 CROP_RUN=""
+POSE_SCHEMA=""
 BATCH_SIZE_KP=256
 DEVICE=""
 IMGSZ=""
@@ -22,6 +24,9 @@ MAX_DET=""
 MASK_THRESHOLD=""
 ROI_CACHE_POLICY=""
 ROI_CACHE_DIR=""
+ROI_CACHE_MANIFEST=""
+STAGE_ROI_CACHE_TO_SCRATCH=0
+ROI_CACHE_STAGING_DIR=""
 CPU=0
 OVERWRITE=0
 LOG_DIR=""
@@ -44,12 +49,14 @@ Options:
   --queue NAME              LSF queue name
   --ncores N                Cores per job (default: 4)
   --mem-gb N                Memory per job in GB (default: 32)
+  --gpus N                  GPUs per job; when >0 requests LSF GPUs and defaults --device 0
   --registry PATH           Registry sqlite path (default: /nvme1/palette_registry.sqlite)
   --set-id ID               Optional pose model set filter for registry model resolution
   --top-k N                 Candidate provenance depth (default: 5)
   --require-unique          Fail if top model scores tie
   --include-non-success     Include non-success runs in model resolution
   --crop-run NAME           Optional explicit crop run name
+  --pose-schema NAME        Optional pose schema (for example: traditional_v2 for 5-keypoint models)
   --batch-size-kp N         Keypoint inference batch size (default: 256)
   --device DEVICE           Torch device override
   --imgsz N                 Pose inference image size override
@@ -58,7 +65,13 @@ Options:
   --max-det N               Max detections override
   --mask-threshold FLOAT    Compatibility threshold override
   --roi-cache-policy POLICY ROI cache policy: never|auto|always
-  --roi-cache-dir PATH      Directory containing/publishing flat ROI cache manifests
+  --roi-cache-dir PATH      Scratch directory for temporary ROI caches
+  --roi-cache-manifest PATH Explicit flat_bin_v1 ROI cache manifest (requires exactly one target)
+  --stage-roi-cache-to-scratch
+                            Copy --roi-cache-manifest/payload to node-local scratch before inference.
+                            Recommended for large flat caches on GPU jobs.
+  --roi-cache-staging-dir PATH
+                            Override staging directory (default: /scratch/$USER/$LSB_JOBID when available)
   --cpu                     Force CPU inference
   --overwrite               Run keypoints even if keypoints run already exists
   --log-dir PATH            Submission logs (default: <root>/logs/run_keypoints_batch/bsub_submissions)
@@ -81,12 +94,14 @@ while [[ $# -gt 0 ]]; do
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
+    --gpus) GPUS="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
     --set-id) SET_ID="$2"; shift 2;;
     --top-k) TOP_K="$2"; shift 2;;
     --require-unique) REQUIRE_UNIQUE=1; shift;;
     --include-non-success) INCLUDE_NON_SUCCESS=1; shift;;
     --crop-run) CROP_RUN="$2"; shift 2;;
+    --pose-schema) POSE_SCHEMA="$2"; shift 2;;
     --batch-size-kp) BATCH_SIZE_KP="$2"; shift 2;;
     --device) DEVICE="$2"; shift 2;;
     --imgsz) IMGSZ="$2"; shift 2;;
@@ -96,6 +111,9 @@ while [[ $# -gt 0 ]]; do
     --mask-threshold) MASK_THRESHOLD="$2"; shift 2;;
     --roi-cache-policy) ROI_CACHE_POLICY="$2"; shift 2;;
     --roi-cache-dir) ROI_CACHE_DIR="$2"; shift 2;;
+    --roi-cache-manifest) ROI_CACHE_MANIFEST="$2"; shift 2;;
+    --stage-roi-cache-to-scratch) STAGE_ROI_CACHE_TO_SCRATCH=1; shift;;
+    --roi-cache-staging-dir) ROI_CACHE_STAGING_DIR="$2"; shift 2;;
     --cpu) CPU=1; shift;;
     --overwrite) OVERWRITE=1; shift;;
     --log-dir) LOG_DIR="$2"; shift 2;;
@@ -228,6 +246,29 @@ if [[ "$batch_count" == "0" ]]; then
 fi
 
 analysis_count=$(wc -l < "$RUN_DIR/recordings.txt" | tr -d ' ')
+if [[ -n "$ROI_CACHE_MANIFEST" && "$analysis_count" != "1" ]]; then
+  echo "--roi-cache-manifest is only safe when exactly one analysis zarr target is selected." >&2
+  echo "Selected targets: $analysis_count" >&2
+  echo "Use a single-recording filter, or add a manifest resolver before running multi-recording batches." >&2
+  exit 2
+fi
+if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && -z "$ROI_CACHE_MANIFEST" ]]; then
+  echo "--stage-roi-cache-to-scratch requires --roi-cache-manifest." >&2
+  exit 2
+fi
+if [[ "$CPU" == "1" && "$GPUS" != "0" ]]; then
+  echo "--cpu cannot be combined with --gpus." >&2
+  exit 2
+fi
+if [[ "$CPU" != "1" && -z "$DEVICE" && "$GPUS" != "0" ]]; then
+  DEVICE="0"
+fi
+if [[ -n "$ROI_CACHE_MANIFEST" && "$GPUS" != "0" && "$STAGE_ROI_CACHE_TO_SCRATCH" != "1" ]]; then
+  {
+    echo "Warning: GPU job will read --roi-cache-manifest directly from its source tier."
+    echo "For large flat ROI caches, benchmarked policy recommends --stage-roi-cache-to-scratch."
+  } >&2
+fi
 
 # Build per-recording args for run_keypoints_with_registry_model.
 EXTRA_ARGS=(--registry "$REGISTRY" --top-k "$TOP_K")
@@ -235,6 +276,7 @@ if [[ -n "$SET_ID" ]]; then EXTRA_ARGS+=(--set-id "$SET_ID"); fi
 if [[ "$REQUIRE_UNIQUE" == "1" ]]; then EXTRA_ARGS+=(--require-unique); fi
 if [[ "$INCLUDE_NON_SUCCESS" == "1" ]]; then EXTRA_ARGS+=(--include-non-success); fi
 if [[ -n "$CROP_RUN" ]]; then EXTRA_ARGS+=(--crop-run "$CROP_RUN"); fi
+if [[ -n "$POSE_SCHEMA" ]]; then EXTRA_ARGS+=(--pose-schema "$POSE_SCHEMA"); fi
 if [[ -n "$DEVICE" ]]; then EXTRA_ARGS+=(--device "$DEVICE"); fi
 if [[ -n "$IMGSZ" ]]; then EXTRA_ARGS+=(--imgsz "$IMGSZ"); fi
 if [[ -n "$CONF" ]]; then EXTRA_ARGS+=(--conf "$CONF"); fi
@@ -243,6 +285,9 @@ if [[ -n "$MAX_DET" ]]; then EXTRA_ARGS+=(--max-det "$MAX_DET"); fi
 if [[ -n "$MASK_THRESHOLD" ]]; then EXTRA_ARGS+=(--mask-threshold "$MASK_THRESHOLD"); fi
 if [[ -n "$ROI_CACHE_POLICY" ]]; then EXTRA_ARGS+=(--roi-cache-policy "$ROI_CACHE_POLICY"); fi
 if [[ -n "$ROI_CACHE_DIR" ]]; then EXTRA_ARGS+=(--roi-cache-dir "$ROI_CACHE_DIR"); fi
+if [[ -n "$ROI_CACHE_MANIFEST" ]]; then EXTRA_ARGS+=(--roi-cache-manifest "$ROI_CACHE_MANIFEST"); fi
+if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" ]]; then EXTRA_ARGS+=(--stage-roi-cache-to-scratch); fi
+if [[ -n "$ROI_CACHE_STAGING_DIR" ]]; then EXTRA_ARGS+=(--roi-cache-staging-dir "$ROI_CACHE_STAGING_DIR"); fi
 if [[ "$CPU" == "1" ]]; then EXTRA_ARGS+=(--cpu); fi
 EXTRA_ARGS+=(--batch-size "$BATCH_SIZE_KP")
 
@@ -289,11 +334,17 @@ BSUB_ARGS=(-J "kp_batch[1-${batch_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
+if [[ "$GPUS" != "0" ]]; then
+  BSUB_ARGS+=(-gpu "num=${GPUS}")
+fi
 
-printf -v BSUB_CMD 'bsub %q ' "${BSUB_ARGS[@]}"
-BSUB_CMD+="bash "
-BSUB_CMD+="$(printf '%q' "$JOB_SCRIPT") "
-BSUB_CMD+="$(printf '%q' "$RUN_DIR")"
+BSUB_CMD="bsub"
+for arg in "${BSUB_ARGS[@]}"; do
+  BSUB_CMD+=" $(printf '%q' "$arg")"
+done
+BSUB_CMD+=" bash"
+BSUB_CMD+=" $(printf '%q' "$JOB_SCRIPT")"
+BSUB_CMD+=" $(printf '%q' "$RUN_DIR")"
 
 printf -v KP_CMD 'scripts/py -m fisheye.utils.run_keypoints_with_registry_model --recording-dir <dir> %s' "$EXTRA_ARGS_SHELL"
 
@@ -306,7 +357,7 @@ echo "Batch size: $BATCH_SIZE"
 echo "Batches: $batch_count"
 echo "Max active: $MAX_ACTIVE"
 echo "Queue: ${QUEUE:-<default>}"
-echo "Resources: ncores=$NCORES mem_gb=$MEM_GB"
+echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS"
 echo "Manifest file: $RUN_DIR/recordings.txt"
 echo "Batch files: $RUN_DIR/batch_*.txt"
 echo "Per-recording command: $KP_CMD"

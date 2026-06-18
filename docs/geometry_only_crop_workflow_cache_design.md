@@ -1,7 +1,7 @@
 # Geometry-Only Crop Workflow Cache Design
 <!-- contract-meta
 status: design
-last_verified: 2026-06-05
+last_verified: 2026-06-18
 purpose: Define the target policy for geometry-only analysis crop runs, shared workflow ROI caches, and optional flat binary crop-cache transport.
 -->
 
@@ -870,6 +870,27 @@ downstream GPU jobs:
 Direct PRFS cache reads are allowed only when a benchmark shows they are not
 the bottleneck for that workload.
 
+Current policy from the 2026-06-18 GoodCopBadCop L4 benchmark:
+
+- large flat-bin caches should be staged to node-local scratch before GPU
+  keypoint/segmentation inference;
+- direct PRFS reads are acceptable for small caches or explicit diagnostic
+  comparisons;
+- use `--stage-roi-cache-to-scratch` when an explicit
+  `--roi-cache-manifest` is known.
+
+Measured result for one 33.4 GiB flat cache:
+
+| Mode | Cache copy | Inference | Throughput | End-to-end |
+| --- | ---: | ---: | ---: | ---: |
+| Direct PRFS flat cache | 0s | 643.9s | 212.2 poses/s | 643.9s |
+| Node-local staged flat cache | 45.8s | 495.5s | 275.8 poses/s | 541.3s |
+
+This was a roughly 30% inference-throughput improvement and remained faster
+after paying the one-time copy cost. Treat 5 GiB as the initial policy threshold
+where staging should be expected unless a workflow-specific benchmark says
+otherwise.
+
 Initial benchmark question: compare direct reads from PRFS workflow cache
 against staging the same cache to node-local scratch. The prior video benchmark
 showed PRFS video reads can be close to local reads for sequential decode, but
@@ -892,7 +913,19 @@ Downstream runs that consume a cache should record:
 - `roi_cache_source_tier` (`node_scratch`, `prfs_workflow_scratch`, or
   `canonical_materialized`)
 - `roi_cache_staged_to_node_scratch`
+- `roi_cache_staging_policy` (`node_scratch_staged_flat_cache` or
+  `direct_manifest_read`)
 - `roi_cache_validation_status`
+- staging recommendation fields for explicit manifests:
+  `staging_recommended`, `staging_recommendation_min_bytes`,
+  `staging_recommendation_reason`, and `staging_recommendation_basis`
+- requested and effective device metadata:
+  `requested_device`, `normalized_torch_device`, `initial_model_device`, and
+  `resolved_model_device`
+- scheduler placement for cluster runs: `execution_hostname`,
+  `scheduler_job_id`, `scheduler_job_index`, `scheduler_queue`,
+  `scheduler_hosts`, `scheduler_mcpu_hosts`, `scheduler_gpu_request`, and
+  `scheduler_cuda_visible_devices`
 
 The cache manifest should record:
 
@@ -932,8 +965,20 @@ Current implementation status:
 - Downstream readers that accept `--roi-cache-manifest` record cache policy,
   backend, key, and manifest path in run attrs/provenance.
 - Per-phase timings for decode/read, ROI extraction, contiguous conversion,
-  serialization, local `.bin` write, PRFS copy, manifest publish, and
-  validation are captured in flat-cache builder and wrapper telemetry.
+  serialization, local `.bin` write, PRFS payload copy, manifest-last publish,
+  and validation are captured in flat-cache builder and wrapper telemetry.
+- The registry-model keypoint wrapper can stage an explicit flat-cache manifest
+  and payload to node-local scratch before inference. The output keypoint run
+  records the requested manifest path, effective manifest path, source tier,
+  staging policy, staging recommendation, copy timing, and validation status.
+  Multi-recording manifest-directory resolution remains a separate
+  workflow-planning task.
+- GPU keypoint jobs can be submitted with `--gpus N`; when a GPU is requested
+  and `--device` is not set, the LSF wrapper passes `--device 0` into the
+  per-recording command. Output keypoint runs mirror device and LSF placement
+  metadata into run attrs, stage provenance, and registry status details, so
+  direct PRFS reads versus staged-cache reads can be compared by actual host/GPU
+  allocation.
 
 ## Cache Lifecycle
 
@@ -973,7 +1018,8 @@ Near-term policy:
 - Design the workflow as cross-node safe.
 - Record every stage as a separate job/report with explicit dependencies.
 - Use shared PRFS workflow cache as the handoff artifact.
-- Add optional node-local staging for downstream hot inference.
+- Use optional node-local staging for downstream hot inference when a completed
+  flat-cache manifest is already known.
 - Revisit same-node placement only after measuring cache staging overhead.
 
 Workflow reporting should make partial failure obvious. A workflow manifest

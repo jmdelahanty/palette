@@ -5,23 +5,257 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import socket
+import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import zarr
 
-from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
+from fisheye.detection.detect_keypoints_yolo import DEFAULT_POSE_SCHEMA_NAME, detect_keypoints_yolo
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.flat_roi_cache import open_flat_roi_cache
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+
+ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES = 5 * 1024**3
+ROI_CACHE_STAGING_BENCHMARK_NOTE = (
+    "GoodCopBadCop L4 benchmark: staging a 33.4 GiB flat cache to node scratch "
+    "improved keypoint inference from ~212 to ~276 poses/s and remained faster "
+    "end-to-end after a ~46s copy."
+)
 
 
 def _resolve_output(recording_dir: Path, explicit_output: Optional[Path]) -> Path:
     if explicit_output is not None:
         return explicit_output.expanduser().resolve()
     return (recording_dir / "zarr" / f"{recording_dir.name}_analysis.zarr").resolve()
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _infer_roi_cache_source_tier(path: Optional[Path]) -> Optional[str]:
+    if path is None:
+        return None
+    resolved = str(path.expanduser().resolve())
+    if resolved.startswith("/scratch/") or resolved.startswith("/tmp/"):
+        return "node_scratch"
+    if resolved.startswith("/groups/") or resolved.startswith("/misc/public/"):
+        return "prfs_workflow_scratch"
+    return "unknown"
+
+
+def _default_roi_cache_staging_dir() -> Path:
+    user = os.environ.get("USER") or "unknown"
+    job_id = os.environ.get("LSB_JOBID")
+    if job_id and Path(f"/scratch/{user}").is_dir():
+        return Path("/scratch") / user / job_id / "palette_roi_cache_stage"
+    return Path(os.environ.get("TMPDIR") or "/tmp") / f"palette_roi_cache_stage_{os.getpid()}"
+
+
+def _resolve_manifest_payload_path(manifest_path: Path, payload_value: object) -> Path:
+    payload_text = str(payload_value or "")
+    if not payload_text:
+        raise ValueError(f"Flat ROI cache manifest is missing array.bin_path: {manifest_path}")
+    payload_path = Path(payload_text).expanduser()
+    if payload_path.is_absolute():
+        return payload_path
+    return manifest_path.parent / payload_path
+
+
+def _flat_roi_cache_payload_info(manifest_path: Path) -> dict[str, Any]:
+    """Return best-effort flat-cache payload metadata for policy provenance."""
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        array = payload.get("array")
+        if not isinstance(array, dict):
+            return {"payload_inspection_status": "missing_array_metadata"}
+        source_bin = _resolve_manifest_payload_path(manifest_path, array.get("bin_path")).resolve()
+        if not source_bin.exists():
+            return {
+                "payload_inspection_status": "payload_missing",
+                "source_bin_path": str(source_bin),
+            }
+        return {
+            "payload_inspection_status": "ok",
+            "source_bin_path": str(source_bin),
+            "payload_size_bytes": int(source_bin.stat().st_size),
+        }
+    except FileNotFoundError:
+        return {"payload_inspection_status": "manifest_missing"}
+    except Exception as exc:
+        return {
+            "payload_inspection_status": "error",
+            "payload_inspection_error": str(exc),
+        }
+
+
+def _staging_recommendation_payload(
+    *,
+    manifest_path: Path,
+    source_tier: Optional[str],
+    payload_size_bytes: Optional[int],
+) -> dict[str, Any]:
+    is_shared_cache = source_tier == "prfs_workflow_scratch"
+    recommended = bool(
+        is_shared_cache
+        and payload_size_bytes is not None
+        and int(payload_size_bytes) >= ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES
+    )
+    return {
+        "staging_recommended": recommended,
+        "staging_recommendation_reason": (
+            "large_prfs_flat_cache"
+            if recommended
+            else "not_required_by_size_or_source_tier"
+        ),
+        "staging_recommendation_min_bytes": ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES,
+        "staging_recommendation_basis": ROI_CACHE_STAGING_BENCHMARK_NOTE,
+        "staging_recommendation_source_tier": source_tier,
+        "staging_recommendation_manifest_path": str(manifest_path),
+    }
+
+
+def _copy_file_with_timing(source: Path, destination: Path) -> dict[str, Any]:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    started_utc = _now_utc()
+    started = time.perf_counter()
+    shutil.copy2(source, destination)
+    seconds = float(time.perf_counter() - started)
+    size_bytes = int(destination.stat().st_size)
+    return {
+        "source_path": str(source),
+        "destination_path": str(destination),
+        "started_at_utc": started_utc,
+        "finished_at_utc": _now_utc(),
+        "duration_seconds": seconds,
+        "size_bytes": size_bytes,
+        "mib_per_second": (size_bytes / (1024 * 1024)) / seconds if seconds > 0 else None,
+    }
+
+
+def _stage_flat_roi_cache_manifest(
+    manifest_path: Path,
+    *,
+    staging_dir: Optional[Path] = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Copy a flat ROI cache manifest and payload to node-local scratch."""
+
+    source_manifest = manifest_path.expanduser().resolve()
+    payload = json.loads(source_manifest.read_text(encoding="utf-8"))
+    array = payload.get("array")
+    if not isinstance(array, dict):
+        raise ValueError(f"Flat ROI cache manifest is missing array metadata: {source_manifest}")
+    source_bin = _resolve_manifest_payload_path(source_manifest, array.get("bin_path")).resolve()
+    if not source_bin.exists():
+        raise FileNotFoundError(f"Flat ROI cache payload not found: {source_bin}")
+    source_tier = _infer_roi_cache_source_tier(source_manifest)
+    payload_size_bytes = int(source_bin.stat().st_size)
+
+    target_dir = (staging_dir.expanduser() if staging_dir is not None else _default_roi_cache_staging_dir()).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    local_manifest = target_dir / source_manifest.name
+    local_bin = target_dir / source_bin.name
+    if local_manifest == source_manifest or local_bin == source_bin:
+        raise ValueError(
+            "ROI cache staging directory resolves to the source cache directory; "
+            "choose a distinct node-local scratch directory."
+        )
+
+    tmp_bin = local_bin.with_name(f"{local_bin.name}.tmp.{os.getpid()}")
+    tmp_manifest = local_manifest.with_name(f"{local_manifest.name}.tmp.{os.getpid()}")
+
+    bin_copy = _copy_file_with_timing(source_bin, tmp_bin)
+    os.replace(tmp_bin, local_bin)
+
+    staged_payload = dict(payload)
+    staged_array = dict(array)
+    staged_payload["manifest_path"] = str(local_manifest)
+    staged_array["bin_path"] = local_bin.name
+    staged_payload["array"] = staged_array
+    staging_details: dict[str, Any] = {
+        "schema": "palette_roi_cache_staging_v1",
+        "policy": "node_scratch_staged_flat_cache",
+        "staged": True,
+        "stage_to_scratch_requested": True,
+        "requested_manifest_path": str(source_manifest),
+        "effective_manifest_path": str(local_manifest),
+        "source_bin_path": str(source_bin),
+        "effective_bin_path": str(local_bin),
+        "source_tier": source_tier,
+        "effective_source_tier": "node_scratch",
+        "payload_size_bytes": payload_size_bytes,
+        "staging_dir": str(target_dir),
+        "host": socket.gethostname(),
+        "lsb_jobid": os.environ.get("LSB_JOBID"),
+        "payload_copy": {
+            **bin_copy,
+            "destination_path": str(local_bin),
+        },
+        "manifest_publish_policy": "payload_first_manifest_last",
+        **_staging_recommendation_payload(
+            manifest_path=source_manifest,
+            source_tier=source_tier,
+            payload_size_bytes=payload_size_bytes,
+        ),
+    }
+    staged_payload["staging"] = staging_details
+    tmp_manifest.write_text(json.dumps(staged_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp_manifest, local_manifest)
+
+    cache = open_flat_roi_cache(local_manifest)
+    try:
+        staging_details["validation_status"] = "ok"
+        staging_details["validated_shape"] = list(cache.shape)
+        staging_details["validated_dtype"] = str(cache.dtype)
+    finally:
+        cache.close()
+    return local_manifest, staging_details
+
+
+def _prepare_roi_cache_manifest(
+    manifest_path: Optional[Path],
+    *,
+    stage_to_scratch: bool,
+    staging_dir: Optional[Path],
+) -> tuple[Optional[Path], dict[str, Any]]:
+    if manifest_path is None:
+        if stage_to_scratch:
+            raise ValueError("--stage-roi-cache-to-scratch requires --roi-cache-manifest.")
+        return None, {}
+    requested = manifest_path.expanduser().resolve()
+    source_tier = _infer_roi_cache_source_tier(requested)
+    if not stage_to_scratch:
+        payload_info = _flat_roi_cache_payload_info(requested)
+        payload_size_bytes = payload_info.get("payload_size_bytes")
+        if payload_size_bytes is not None:
+            payload_size_bytes = int(payload_size_bytes)
+        return requested, {
+            "schema": "palette_roi_cache_staging_v1",
+            "policy": "direct_manifest_read",
+            "staged": False,
+            "stage_to_scratch_requested": False,
+            "requested_manifest_path": str(requested),
+            "effective_manifest_path": str(requested),
+            "source_tier": source_tier,
+            "effective_source_tier": source_tier,
+            "validation_status": "not_revalidated_by_wrapper",
+            **payload_info,
+            **_staging_recommendation_payload(
+                manifest_path=requested,
+                source_tier=source_tier,
+                payload_size_bytes=payload_size_bytes,
+            ),
+        }
+    return _stage_flat_roi_cache_manifest(requested, staging_dir=staging_dir)
 
 
 def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -> Candidate:
@@ -84,6 +318,7 @@ def _resolution_payload(
             "cpu": bool(args.cpu),
             "run_name": args.run_name,
             "crop_run": args.crop_run,
+            "pose_schema": args.pose_schema,
             "batch_size": args.batch_size,
             "device": args.device,
             "imgsz": args.imgsz,
@@ -93,6 +328,9 @@ def _resolution_payload(
             "mask_threshold": args.mask_threshold,
             "roi_cache_policy": args.roi_cache_policy,
             "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
+            "roi_cache_manifest": str(args.roi_cache_manifest) if args.roi_cache_manifest else None,
+            "stage_roi_cache_to_scratch": bool(args.stage_roi_cache_to_scratch),
+            "roi_cache_staging_dir": str(args.roi_cache_staging_dir) if args.roi_cache_staging_dir else None,
             "profile_timings": bool(args.profile_timings),
         },
         inputs={
@@ -156,6 +394,15 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     parser.add_argument("--run-name", type=str, default=None, help="Optional explicit keypoints run name.")
     parser.add_argument("--crop-run", type=str, default=None, help="Optional explicit crop run name.")
+    parser.add_argument(
+        "--pose-schema",
+        type=str,
+        default=DEFAULT_POSE_SCHEMA_NAME,
+        help=(
+            "Pose schema from configs/fisheye/pose_schemas to stamp on the output run. "
+            f"Defaults to detect_keypoints_yolo's default ({DEFAULT_POSE_SCHEMA_NAME}) when omitted."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=256, help="Optional keypoint batch size override.")
     parser.add_argument("--device", type=str, default=None, help="Optional torch device override.")
     parser.add_argument("--imgsz", type=int, default=None, help="Optional pose inference image size override.")
@@ -174,6 +421,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         type=Path,
         default=None,
         help="Optional scratch directory for temporary ROI caches.",
+    )
+    parser.add_argument(
+        "--roi-cache-manifest",
+        type=Path,
+        default=None,
+        help="Optional flat_bin_v1 ROI cache manifest to consume directly.",
+    )
+    parser.add_argument(
+        "--stage-roi-cache-to-scratch",
+        action="store_true",
+        help="Copy --roi-cache-manifest and payload to node-local scratch before inference.",
+    )
+    parser.add_argument(
+        "--roi-cache-staging-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for staged flat ROI cache files; defaults to /scratch/$USER/$LSB_JOBID when available.",
     )
     parser.add_argument(
         "--profile-timings",
@@ -233,11 +497,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     resolved_device = "cpu" if args.cpu else args.device
+    effective_roi_cache_manifest, roi_cache_staging_details = _prepare_roi_cache_manifest(
+        args.roi_cache_manifest,
+        stage_to_scratch=bool(args.stage_roi_cache_to_scratch),
+        staging_dir=args.roi_cache_staging_dir,
+    )
     run_name = detect_keypoints_yolo(
         zarr_path=str(output_path),
         model_path=best.model_path,
         run_name=args.run_name,
         crop_run=args.crop_run,
+        pose_schema=args.pose_schema,
         batch_size=args.batch_size,
         device=resolved_device,
         imgsz=args.imgsz,
@@ -248,6 +518,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         mask_threshold=args.mask_threshold,
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
+        roi_cache_manifest=effective_roi_cache_manifest,
+        roi_cache_source_tier=roi_cache_staging_details.get("effective_source_tier"),
+        roi_cache_staged_to_node_scratch=bool(roi_cache_staging_details.get("staged", False)),
+        roi_cache_staging_details=roi_cache_staging_details or None,
         input_mode=args.input_mode,
         profile_timings=bool(args.profile_timings),
         registry=registry_path,

@@ -426,7 +426,28 @@ Attributes: `source_crop_run`, `source_crop_storage_mode`,
 `parameter_source`, `parameters`, `skeleton_id`, `kpt_shape`, `pose_schema`, `keypoint_labels`,
 `keypoint_confidence_labels`, `triangle_angle_order`,
 `triangle_angle_raw_order`, `heading_computation_override`,
-scheduler configuration, timing, QA summaries.
+requested/resolved device metadata, scheduler placement, timing, QA summaries.
+
+Cluster/device provenance note:
+
+- GPU keypoint runs should prefer explicit device selection. The cluster
+  submitter uses `--gpus N` to request LSF GPUs and defaults to `--device 0`
+  when a GPU is requested and no device override is supplied.
+- Run attrs and `attrs["provenance"]` record `requested_device`,
+  `normalized_torch_device`, `initial_model_device`, and
+  `resolved_model_device`. Some engine formats cannot introspect a final model
+  parameter device; in that case `resolved_model_device` may fall back to the
+  normalized/requested device.
+- Cluster placement attrs include `execution_hostname`, `scheduler`,
+  `scheduler_job_id`, `scheduler_job_name`, `scheduler_job_index`,
+  `scheduler_queue`, `scheduler_hosts`, `scheduler_mcpu_hosts`,
+  `scheduler_cuda_visible_devices`, and `scheduler_gpu_request`.
+- Explicit flat-cache runs include `source_roi_cache_staging_policy` at the
+  run-attr level and `roi_cache_staging_policy` in parameters/provenance/status
+  details. Current policies are `node_scratch_staged_flat_cache` and
+  `direct_manifest_read`.
+- The same compact device/scheduler fields are mirrored into registry status
+  details for performance triage without opening the zarr store.
 
 Keypoint storage note:
 
@@ -1313,8 +1334,10 @@ All fields stored as separate columnar arrays. Key fields include:
 - `camera_frame_id`: Camera frame ID (uint64)
 - `relative_timestamp_ns`: Time since session start (int64)
 - `chaser_index`: Chaser agent index (int32)
-- `pos_x_px`, `pos_y_px`: Chaser position in **texture space** (float32)
-- `target_x_px`, `target_y_px`: Target position in **texture space** (float32)
+- `pos_x_px`, `pos_y_px`: Legacy chaser position fields; interpret using the
+  group-local coordinate attrs below.
+- `target_x_px`, `target_y_px`: Legacy target position fields; interpret using
+  the group-local coordinate attrs below.
 - `target_visible`: Whether target is tracked (bool)
 - `current_radius_px`: Chaser radius (float32)
 - `distance_to_target_px`, `distance_to_target_mm`: Distance to target (float32)
@@ -2386,6 +2409,29 @@ Other analyzers follow the same `analysis/<analysis_type>_runs/<run_name>/` patt
 analyzer-specific arrays and provenance attributes. New derived analysis run
 families should follow `docs/derived_analysis_run_contract.md` for source refs,
 row-axis semantics, and validity/failure state.
+
+`analysis/stimulus_epoch_runs/<run>` is the preferred place for reusable
+event-aligned window definitions derived from `analysis/stimulus_runs/<run>`.
+Detection occupancy, keypoint summaries, mask summaries, tracking summaries,
+and stimulus-response analyses should reference that epoch run when they compute
+per-window behavior summaries instead of redefining event windows independently.
+
+`analysis/detection_occupancy_runs/<run>` is the implemented surface for
+event-aligned detection heatmaps and coverage summaries. It should reference a
+`source_stimulus_epoch_run` and a `source_detection_path` rather than owning
+stimulus-window semantics itself. Core child groups are `windows/`,
+`coverage/`, `heatmaps/`, and `visualizations/`.
+
+`analysis/chaser_distance_runs/<run>` stores framewise offline fish-to-chaser
+distances and epoch summaries for chaser protocols such as GoodCopBadCop. It
+consumes refined detection centroids, `analysis/stimulus_runs/<run>`
+chaser-state/alignment/calibration data, and
+`analysis/stimulus_epoch_runs/<run>` window definitions. Core child groups are
+`frames/`, `chasers/`, `positions/`, `distances/`, `epoch_summary/`,
+`epoch_distributions/`, and `visualizations/`. The `epoch_distributions/`
+group stores fixed-bin distance histograms (`hist_counts`, `hist_density`,
+`bin_edges_mm`, `bin_centers_mm`) for fast distribution-shape viewers. See
+`docs/chaser_distance_run_contract.md`.
 
 ---
 

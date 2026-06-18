@@ -50,6 +50,74 @@ _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 _KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")
 
 
+def _infer_roi_cache_source_tier(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    resolved = str(Path(path).expanduser().resolve())
+    if resolved.startswith("/scratch/") or resolved.startswith("/tmp/"):
+        return "node_scratch"
+    if resolved.startswith("/groups/") or resolved.startswith("/misc/public/"):
+        return "prfs_workflow_scratch"
+    return "unknown"
+
+
+def _current_model_device(model: YOLO, *, fallback: Optional[str]) -> Optional[str]:
+    try:
+        return str(next(model.model.parameters()).device)
+    except (AttributeError, StopIteration):
+        return fallback
+
+
+def _scheduler_payload(env_info: Dict[str, Any]) -> Dict[str, Any]:
+    platform_info = env_info.get("platform", {})
+    gpu_info = env_info.get("gpu", {})
+    scheduler: Dict[str, Any] = {
+        "execution_hostname": platform_info.get("hostname"),
+        "execution_fqdn": platform_info.get("fqdn"),
+    }
+    lsf = platform_info.get("lsf")
+    if isinstance(lsf, dict):
+        scheduler.update(
+            {
+                "scheduler": "lsf",
+                "job_id": lsf.get("job_id"),
+                "job_name": lsf.get("job_name"),
+                "job_index": lsf.get("job_index"),
+                "queue": lsf.get("queue"),
+                "num_processors": lsf.get("num_processors"),
+                "hosts": lsf.get("hosts"),
+                "mcpu_hosts": lsf.get("mcpu_hosts"),
+                "djob_hostfile": lsf.get("djob_hostfile"),
+                "gpu_request": lsf.get("gpu_request"),
+                "cuda_visible_devices": lsf.get("cuda_visible_devices"),
+                "cuda_visible_devices_orig": lsf.get("cuda_visible_devices_orig"),
+            }
+        )
+    elif isinstance(platform_info.get("slurm"), dict):
+        slurm = platform_info["slurm"]
+        scheduler.update(
+            {
+                "scheduler": "slurm",
+                "job_id": slurm.get("job_id"),
+                "job_name": slurm.get("job_name"),
+                "node_list": slurm.get("node_list"),
+                "num_nodes": slurm.get("num_nodes"),
+                "proc_id": slurm.get("proc_id"),
+                "cpus_per_task": slurm.get("cpus_per_task"),
+            }
+        )
+    else:
+        scheduler["scheduler"] = None
+
+    if isinstance(gpu_info, dict):
+        scheduler["gpu_backend"] = gpu_info.get("backend")
+        scheduler["gpu_available"] = gpu_info.get("available")
+        scheduler["gpu_devices"] = gpu_info.get("devices")
+        scheduler["lsf_allocated_gpus"] = gpu_info.get("lsf_allocated_gpus")
+        scheduler["lsf_original_gpus"] = gpu_info.get("lsf_original_gpus")
+    return {key: value for key, value in scheduler.items() if value is not None}
+
+
 def _prepare_run_group(
     root: zarr.Group,
     run_name: Optional[str],
@@ -487,6 +555,9 @@ def detect_keypoints_yolo(
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
     roi_cache_manifest: Optional[Path] = None,
+    roi_cache_source_tier: Optional[str] = None,
+    roi_cache_staged_to_node_scratch: bool = False,
+    roi_cache_staging_details: Optional[Dict[str, Any]] = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
     input_mode: str = "numpy-list",
@@ -814,6 +885,7 @@ def detect_keypoints_yolo(
 
     total_time = time.time() - start_time
     inference_rate = success_total / total_time if total_time > 0 else 0.0
+    resolved_model_device = _current_model_device(model, fallback=model_device)
 
     success_rate = (success_total / total_rois * 100.0) if total_rois > 0 else 0.0
     failure_total = total_rois - success_total
@@ -845,11 +917,19 @@ def detect_keypoints_yolo(
         capture_env_vars=False,
     )
     platform_info = env_info.get("platform", {})
+    scheduler_info = _scheduler_payload(env_info)
     crop_snapshot_attrs = build_source_crop_snapshot_attrs(
         crop_group.attrs,
         source_crop_storage_mode=crop_source.storage_mode,
     )
     crop_pixel_attrs = build_source_roi_pixel_attrs(crop_source)
+    effective_roi_cache_source_tier = roi_cache_source_tier or _infer_roi_cache_source_tier(crop_source.roi_cache_path)
+    roi_cache_staging_payload = dict(roi_cache_staging_details) if isinstance(roi_cache_staging_details, dict) else None
+    roi_cache_staging_policy = (
+        roi_cache_staging_payload.get("policy")
+        if isinstance(roi_cache_staging_payload, dict)
+        else None
+    )
 
     run_group.attrs.update({
         "method": "yolo_pose",
@@ -857,7 +937,21 @@ def detect_keypoints_yolo(
         "model_path": str(model_path_resolved),
         "model_name": model_path.name,
         "ultralytics_version": ultralytics_version,
-        "device": model_device,
+        "device": resolved_model_device,
+        "requested_device": device,
+        "normalized_torch_device": torch_device,
+        "initial_model_device": model_device,
+        "resolved_model_device": resolved_model_device,
+        "execution_hostname": scheduler_info.get("execution_hostname"),
+        "scheduler": scheduler_info.get("scheduler"),
+        "scheduler_job_id": scheduler_info.get("job_id"),
+        "scheduler_job_name": scheduler_info.get("job_name"),
+        "scheduler_job_index": scheduler_info.get("job_index"),
+        "scheduler_queue": scheduler_info.get("queue"),
+        "scheduler_hosts": scheduler_info.get("hosts") or scheduler_info.get("node_list"),
+        "scheduler_mcpu_hosts": scheduler_info.get("mcpu_hosts"),
+        "scheduler_cuda_visible_devices": scheduler_info.get("cuda_visible_devices"),
+        "scheduler_gpu_request": scheduler_info.get("gpu_request"),
         "source_crop_run": latest_crop,
         **crop_snapshot_attrs,
         **crop_pixel_attrs,
@@ -865,6 +959,9 @@ def detect_keypoints_yolo(
         "roi_cache_policy": crop_source.roi_cache_policy,
         "source_roi_cache_used": bool(crop_source.roi_cache_used),
         "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
+        "source_roi_cache_source_tier": effective_roi_cache_source_tier,
+        "source_roi_cache_staged_to_node_scratch": bool(roi_cache_staged_to_node_scratch),
+        "source_roi_cache_staging_policy": roi_cache_staging_policy,
         "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -878,7 +975,11 @@ def detect_keypoints_yolo(
             "max_det": max_det,
             "imgsz": imgsz,
             "batch_size": batch_size,
-            "device": model_device,
+            "device": resolved_model_device,
+            "requested_device": device,
+            "normalized_torch_device": torch_device,
+            "initial_model_device": model_device,
+            "resolved_model_device": resolved_model_device,
             "profile_timings": bool(profile_timings),
             "pose_schema": pose_schema_obj.name,
             "n_keypoints": int(n_keypoints),
@@ -886,6 +987,9 @@ def detect_keypoints_yolo(
             "roi_live_acceleration": str(roi_live_acceleration),
             "roi_live_gpu_chunk_frames": int(roi_live_gpu_chunk_frames),
             "roi_cache_manifest": str(roi_cache_manifest) if roi_cache_manifest is not None else None,
+            "roi_cache_source_tier": effective_roi_cache_source_tier,
+            "roi_cache_staged_to_node_scratch": bool(roi_cache_staged_to_node_scratch),
+            "roi_cache_staging_policy": roi_cache_staging_policy,
             "input_mode_requested": resolved_input_mode,
             "input_mode_effective": effective_input_mode,
             # Maintained for API compatibility with pipeline/batch configs.
@@ -923,6 +1027,8 @@ def detect_keypoints_yolo(
         run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
     if crop_source.roi_cache_path:
         run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
+    if roi_cache_staging_payload is not None:
+        run_group.attrs["source_roi_cache_staging"] = roi_cache_staging_payload
     if source_refined_run:
         run_group.attrs["source_refined_run"] = source_refined_run
     provenance_record = build_stage_provenance(
@@ -940,11 +1046,13 @@ def detect_keypoints_yolo(
         environment=env_info.get("environment"),
         platform={
             "hostname": platform_info.get("hostname"),
+            "fqdn": platform_info.get("fqdn"),
             "system": platform_info.get("system"),
             "release": platform_info.get("release"),
             "python_version": platform_info.get("python_version"),
             "machine": platform_info.get("machine"),
         },
+        scheduler=scheduler_info,
         parameters=dict(run_group.attrs.get("parameters") or {}),
         inputs={
             "source_crop_run": latest_crop,
@@ -956,6 +1064,10 @@ def detect_keypoints_yolo(
             "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
             "roi_cache_key": crop_source.roi_cache_key,
             "roi_cache_path": crop_source.roi_cache_path,
+            "roi_cache_source_tier": effective_roi_cache_source_tier,
+            "roi_cache_staged_to_node_scratch": bool(roi_cache_staged_to_node_scratch),
+            "roi_cache_staging_policy": roi_cache_staging_policy,
+            "roi_cache_staging": roi_cache_staging_payload,
             "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
             "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
             "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -971,7 +1083,11 @@ def detect_keypoints_yolo(
             "model_path": str(model_path_resolved),
             "model_name": model_path.name,
             "ultralytics_version": ultralytics_version,
-            "device": model_device,
+            "device": resolved_model_device,
+            "requested_device": device,
+            "normalized_torch_device": torch_device,
+            "initial_model_device": model_device,
+            "resolved_model_device": resolved_model_device,
             "pose_schema": pose_schema_obj.name,
             "skeleton_id": str(pose_schema_attrs["skeleton_id"]),
             "kpt_shape": list(pose_schema_attrs["kpt_shape"]),
@@ -997,6 +1113,10 @@ def detect_keypoints_yolo(
         "roi_cache_policy": crop_source.roi_cache_policy,
         "roi_cache_used": bool(crop_source.roi_cache_used),
         "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
+        "roi_cache_source_tier": effective_roi_cache_source_tier,
+        "roi_cache_staged_to_node_scratch": bool(roi_cache_staged_to_node_scratch),
+        "roi_cache_staging_policy": roi_cache_staging_policy,
+        "roi_cache_staging": roi_cache_staging_payload,
         "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -1012,6 +1132,20 @@ def detect_keypoints_yolo(
         "model_kpt_shape": list(model_kpt_shape) if model_kpt_shape is not None else None,
         "input_mode_requested": resolved_input_mode,
         "input_mode_effective": effective_input_mode,
+        "requested_device": device,
+        "normalized_torch_device": torch_device,
+        "initial_model_device": model_device,
+        "resolved_model_device": resolved_model_device,
+        "execution_hostname": scheduler_info.get("execution_hostname"),
+        "scheduler": scheduler_info.get("scheduler"),
+        "scheduler_job_id": scheduler_info.get("job_id"),
+        "scheduler_job_name": scheduler_info.get("job_name"),
+        "scheduler_job_index": scheduler_info.get("job_index"),
+        "scheduler_queue": scheduler_info.get("queue"),
+        "scheduler_hosts": scheduler_info.get("hosts") or scheduler_info.get("node_list"),
+        "scheduler_mcpu_hosts": scheduler_info.get("mcpu_hosts"),
+        "scheduler_cuda_visible_devices": scheduler_info.get("cuda_visible_devices"),
+        "scheduler_gpu_request": scheduler_info.get("gpu_request"),
     }
     if source_refined_run:
         status_details["source_refined_run"] = source_refined_run
@@ -1110,6 +1244,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional flat_bin_v1 ROI cache manifest to read instead of materializing/re-decoding ROIs.",
     )
     parser.add_argument(
+        "--roi-cache-source-tier",
+        choices=("node_scratch", "prfs_workflow_scratch", "canonical_materialized", "unknown"),
+        default=None,
+        help="Optional provenance label for where --roi-cache-manifest was read from.",
+    )
+    parser.add_argument(
+        "--roi-cache-staged-to-node-scratch",
+        action="store_true",
+        help="Stamp provenance that the effective ROI cache manifest was staged to node-local scratch before inference.",
+    )
+    parser.add_argument(
         "--profile-timings",
         action="store_true",
         help="Collect per-stage timing diagnostics and store them in the output run attrs.",
@@ -1149,6 +1294,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
         roi_cache_manifest=args.roi_cache_manifest,
+        roi_cache_source_tier=args.roi_cache_source_tier,
+        roi_cache_staged_to_node_scratch=bool(args.roi_cache_staged_to_node_scratch),
         input_mode=args.input_mode,
         profile_timings=args.profile_timings,
         registry=args.registry,

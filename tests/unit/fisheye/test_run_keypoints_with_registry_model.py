@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,78 @@ def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
     assert "model_resolution" in provenance
 
 
+def test_stage_flat_roi_cache_manifest_copies_payload_and_rewrites_manifest(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_bin = source_dir / "sample.flat_roi_cache.bin"
+    source_bin.write_bytes(bytes(range(8)))
+    source_manifest = source_dir / "sample.flat_roi_cache.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "palette_roi_cache_flat_bin_v1",
+                "layout": "flat_bin_v1",
+                "cache_complete": True,
+                "source": {
+                    "archive_path": str(tmp_path / "recording_analysis.zarr"),
+                    "crop_run_name": "crop_test",
+                },
+                "array": {
+                    "bin_path": source_bin.name,
+                    "dtype": "uint8",
+                    "shape": [2, 2, 2],
+                    "order": "C",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    local_manifest, details = mod._stage_flat_roi_cache_manifest(  # noqa: SLF001
+        source_manifest,
+        staging_dir=tmp_path / "scratch",
+    )
+
+    local_bin = local_manifest.with_suffix(".bin")
+    assert local_manifest.exists()
+    assert local_bin.read_bytes() == source_bin.read_bytes()
+    assert details["staged"] is True
+    assert details["policy"] == "node_scratch_staged_flat_cache"
+    assert details["stage_to_scratch_requested"] is True
+    assert details["requested_manifest_path"] == str(source_manifest.resolve())
+    assert details["effective_manifest_path"] == str(local_manifest)
+    assert details["payload_size_bytes"] == 8
+    assert details["payload_copy"]["size_bytes"] == 8
+    assert details["validation_status"] == "ok"
+    assert details["staging_recommendation_min_bytes"] == mod.ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES
+
+    staged_payload = json.loads(local_manifest.read_text(encoding="utf-8"))
+    assert staged_payload["array"]["bin_path"] == local_bin.name
+    assert staged_payload["staging"]["policy"] == "node_scratch_staged_flat_cache"
+    assert staged_payload["staging"]["manifest_publish_policy"] == "payload_first_manifest_last"
+
+
+def test_prepare_roi_cache_manifest_requires_manifest_for_staging() -> None:
+    with pytest.raises(ValueError, match="requires --roi-cache-manifest"):
+        mod._prepare_roi_cache_manifest(  # noqa: SLF001
+            None,
+            stage_to_scratch=True,
+            staging_dir=None,
+        )
+
+
+def test_staging_recommendation_marks_large_prfs_cache() -> None:
+    payload = mod._staging_recommendation_payload(  # noqa: SLF001
+        manifest_path=Path("/groups/johnson/johnsonlab/jeremy/cache/sample.flat_roi_cache.json"),
+        source_tier="prfs_workflow_scratch",
+        payload_size_bytes=mod.ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES,
+    )
+
+    assert payload["staging_recommended"] is True
+    assert payload["staging_recommendation_reason"] == "large_prfs_flat_cache"
+    assert "GoodCopBadCop L4 benchmark" in payload["staging_recommendation_basis"]
+
+
 def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     recording_dir = tmp_path / "recording"
     recording_dir.mkdir(parents=True, exist_ok=True)
@@ -177,12 +250,16 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
             str(registry_path),
             "--set-id",
             "pose_set_123",
+            "--pose-schema",
+            "traditional_v2",
             "--include-non-success",
             "--cpu",
             "--roi-cache-policy",
             "always",
             "--roi-cache-dir",
             str(tmp_path / "roi-cache"),
+            "--roi-cache-manifest",
+            str(tmp_path / "flat-cache" / "sample.flat_roi_cache.json"),
         ]
     )
 
@@ -197,9 +274,19 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert isinstance(detect_kwargs, dict)
     assert detect_kwargs.get("zarr_path") == str(output_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/pose_model.pt"
+    assert detect_kwargs.get("pose_schema") == "traditional_v2"
     assert detect_kwargs.get("device") == "cpu"
     assert detect_kwargs.get("roi_cache_policy") == "always"
     assert detect_kwargs.get("roi_cache_dir") == tmp_path / "roi-cache"
+    assert detect_kwargs.get("roi_cache_manifest") == (tmp_path / "flat-cache" / "sample.flat_roi_cache.json").resolve()
+    assert detect_kwargs.get("roi_cache_staged_to_node_scratch") is False
+    assert detect_kwargs.get("roi_cache_source_tier") == "node_scratch"
+    staging_details = detect_kwargs.get("roi_cache_staging_details")
+    assert isinstance(staging_details, dict)
+    assert staging_details.get("staged") is False
+    assert staging_details.get("policy") == "direct_manifest_read"
+    assert staging_details.get("stage_to_scratch_requested") is False
+    assert staging_details.get("staging_recommendation_min_bytes") == mod.ROI_CACHE_STAGING_RECOMMENDED_MIN_BYTES
     assert Path(str(detect_kwargs.get("registry"))) == registry_path.resolve()
 
     assert calls.get("write_zarr_path") == output_path.resolve()
@@ -209,6 +296,8 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert payload.get("task") == "pose"
     parameters = payload.get("parameters")
     assert isinstance(parameters, dict)
+    assert parameters.get("pose_schema") == "traditional_v2"
     assert parameters.get("roi_cache_policy") == "always"
+    assert parameters.get("roi_cache_manifest") == str((tmp_path / "flat-cache" / "sample.flat_roi_cache.json"))
     for key in ("contract", "command", "git", "environment", "platform", "parameters", "inputs", "artifacts"):
         assert key in payload

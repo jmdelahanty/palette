@@ -1,7 +1,7 @@
 # Cluster Pipeline Migration Checklist
 <!-- contract-meta
 status: working_checklist
-last_verified: 2026-06-17
+last_verified: 2026-06-18
 purpose: Track what remains to migrate Palette detect, pose, segmentation, and refinement workflows to Janelia cluster execution.
 -->
 
@@ -45,7 +45,7 @@ Palette already has the first layer of cluster support:
 | Crop submitter | present | `scripts/submit_crop_batches_bsub.sh` wraps `fisheye.utils.crop_batch`. |
 | Crop + flat ROI cache submitter | present | `scripts/submit_crop_flat_roi_cache_bsub.sh` submits crop geometry and dependent flat-cache publish jobs. |
 | Clipped collection flat ROI cache submitter | present | `scripts/submit_clipped_collection_flat_roi_cache_bsub.sh` submits finalized clipped collection cache materialization and manifest-last publish. |
-| Keypoint submitter | present | `scripts/submit_keypoints_batches_bsub.sh` wraps `fisheye.utils.run_keypoints_batch`. |
+| Keypoint submitter | present | `scripts/submit_keypoints_batches_bsub.sh` wraps registry-resolved keypoint runs, supports `--gpus N`, and defaults GPU jobs to `--device 0` unless the operator overrides `--device`. |
 | Eye-mask submitter | present | `scripts/submit_eye_masks_batches_bsub.sh` wraps `fisheye.utils.run_eye_masks_batch`. |
 | Registry discovery | present for first four stages | Registry mode can prefilter by `recording_step_status` and path/camera/rig filters. |
 | Model registry resolution | present for detect, keypoints, eye masks | Batch runners can resolve registry models and record candidate provenance. |
@@ -352,6 +352,12 @@ Remaining:
 - [x] Add detailed phase telemetry for cache build and publish: video open,
   decode, crop extraction, local write, PRFS copy, manifest publish, and
   validation.
+- [x] Add explicit node-local staging support for keypoint runs that consume a
+  known flat-cache manifest, including staging copy timing in output run
+  provenance.
+- [ ] Add workflow-level manifest resolution for multi-recording keypoint/mask
+  batches so each recording can consume its own prebuilt flat cache without
+  hand-specified per-recording commands.
 - [x] Add explicit crop/cache pixel-contract metadata for future crop runs and
   downstream pose/segmentation runs (`roi_image_representation`,
   `roi_pixel_contract`, `source_roi_image_representation`,
@@ -394,8 +400,11 @@ Remaining:
 - [ ] If `pynvvc_luma` fails strict crop-pixel parity, implement a parity-safe
   sequential PyNv backend and make `--decode-backend auto` prefer that backend
   rather than falling back to slow `read_slice` for long-video workflows.
-- [ ] Benchmark direct PRFS flat-cache reads versus staging the flat cache to
-  node-local scratch before downstream GPU inference.
+- [x] Benchmark direct PRFS flat-cache reads versus staging the flat cache to
+  node-local scratch before downstream GPU inference. The 2026-06-18
+  GoodCopBadCop L4 benchmark favored node-local staging for a 33.4 GiB flat
+  cache: 275.8 poses/s staged versus 212.2 poses/s direct PRFS, still faster
+  end-to-end after a 45.8s copy.
 - [ ] Decide whether materialized crop outputs still need scratch package/import
   when operators explicitly request `crop_storage_mode=materialized`.
 
@@ -462,18 +471,33 @@ Ready for pilot:
 - [x] Registry pose-model resolution exists.
 - [x] LSF keypoint submitter exists.
 - [x] `run_keypoints_batch` can delegate refinement.
+- [x] Keypoint LSF submitter can request GPUs with `--gpus N` and passes
+  `--device 0` by default for GPU jobs.
+- [x] Keypoint registry-model wrapper can stage an explicit flat-cache manifest
+  to node-local scratch and record staging policy, recommendation, copy timing,
+  validation status, and source/effective cache tier.
+- [x] Raw YOLO keypoint runs record requested/normalized/initial/resolved model
+  device metadata.
+- [x] Raw YOLO keypoint runs record cluster placement in attrs, stage
+  provenance, and registry status details: hostname, LSF job id/name/index,
+  queue, host allocation, CPU host layout, GPU request, and CUDA-visible
+  devices.
 
 Remaining:
 
-- [ ] Run one cluster keypoint smoke after crop is available.
+- [x] Run one cluster keypoint smoke after crop is available.
 - [ ] Decide whether keypoint refinement is always part of cluster keypoint
   jobs or a separate job family.
 - [ ] Add `scripts/submit_refine_keypoints_batches_bsub.sh` if refinement is
   split.
 - [ ] Verify registry refresh covers raw keypoint performance and refined
   keypoint quality.
-- [ ] Verify provenance records source crop run, model resolution, run command,
-  LSF job id, host, CUDA device, and git commit.
+- [ ] Add workflow-level per-recording flat-cache manifest resolution so
+  multi-recording keypoint/mask batches can stage each recording's cache by
+  default instead of requiring one manually supplied manifest.
+- [ ] Add an operator query/report that summarizes keypoint throughput by
+  `scheduler_hosts`, `scheduler_gpu_request`, cache source tier, and staged
+  versus direct-cache reads.
 
 ### 5. Eye Masks And Refined Eye Masks
 

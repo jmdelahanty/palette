@@ -278,9 +278,13 @@ if [[ ! -s "\${LOCAL_ROWS}" ]]; then
   exit 1
 fi
 
+PUBLISH_BIN_COPY_STARTED_NS="\$(date +%s%N)"
 cp "\${LOCAL_BIN}" "\${TMP_BIN}"
+PUBLISH_BIN_COPY_FINISHED_NS="\$(date +%s%N)"
 mv -f "\${TMP_BIN}" "\${FINAL_BIN}"
+PUBLISH_ROWS_COPY_STARTED_NS="\$(date +%s%N)"
 cp "\${LOCAL_ROWS}" "\${TMP_ROWS}"
+PUBLISH_ROWS_COPY_FINISHED_NS="\$(date +%s%N)"
 mv -f "\${TMP_ROWS}" "\${FINAL_ROWS}"
 
 scripts/py -c 'import json, os, socket, sys; from datetime import datetime, timezone; from pathlib import Path
@@ -289,12 +293,20 @@ final_manifest = Path(sys.argv[2])
 final_bin = Path(sys.argv[3])
 final_rows = Path(sys.argv[4])
 tmp_manifest = Path(sys.argv[5])
+bin_copy_started_ns = int(sys.argv[6])
+bin_copy_finished_ns = int(sys.argv[7])
+rows_copy_started_ns = int(sys.argv[8])
+rows_copy_finished_ns = int(sys.argv[9])
 payload = json.loads(local_manifest.read_text(encoding="utf-8"))
 payload["manifest_path"] = str(final_manifest)
 array = payload.setdefault("array", {})
 array["bin_path"] = final_bin.name
 row_index = payload.setdefault("row_index", {})
 row_index["path"] = final_rows.name
+published_bin_size = final_bin.stat().st_size
+published_rows_size = final_rows.stat().st_size
+bin_copy_seconds = max(0.0, (bin_copy_finished_ns - bin_copy_started_ns) / 1_000_000_000.0)
+rows_copy_seconds = max(0.0, (rows_copy_finished_ns - rows_copy_started_ns) / 1_000_000_000.0)
 publisher = payload.setdefault("publisher", {})
 publisher.update({
     "published_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -304,12 +316,24 @@ publisher.update({
     "published_manifest_path": str(final_manifest),
     "published_bin_path": str(final_bin),
     "published_row_index_path": str(final_rows),
-    "published_bin_size_bytes": final_bin.stat().st_size,
-    "published_row_index_size_bytes": final_rows.stat().st_size,
+    "published_bin_size_bytes": published_bin_size,
+    "published_row_index_size_bytes": published_rows_size,
+    "payload_copy_started_epoch_ns": bin_copy_started_ns,
+    "payload_copy_finished_epoch_ns": bin_copy_finished_ns,
+    "payload_copy_seconds": bin_copy_seconds,
+    "payload_copy_mib_per_second": (
+        (published_bin_size / (1024 * 1024)) / bin_copy_seconds if bin_copy_seconds > 0 else None
+    ),
+    "row_index_copy_started_epoch_ns": rows_copy_started_ns,
+    "row_index_copy_finished_epoch_ns": rows_copy_finished_ns,
+    "row_index_copy_seconds": rows_copy_seconds,
+    "row_index_copy_mib_per_second": (
+        (published_rows_size / (1024 * 1024)) / rows_copy_seconds if rows_copy_seconds > 0 else None
+    ),
     "publish_policy": "payload_and_row_index_first_manifest_last",
 })
 tmp_manifest.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-' "\${LOCAL_MANIFEST}" "\${FINAL_MANIFEST}" "\${FINAL_BIN}" "\${FINAL_ROWS}" "\${TMP_MANIFEST}"
+' "\${LOCAL_MANIFEST}" "\${FINAL_MANIFEST}" "\${FINAL_BIN}" "\${FINAL_ROWS}" "\${TMP_MANIFEST}" "\${PUBLISH_BIN_COPY_STARTED_NS}" "\${PUBLISH_BIN_COPY_FINISHED_NS}" "\${PUBLISH_ROWS_COPY_STARTED_NS}" "\${PUBLISH_ROWS_COPY_FINISHED_NS}"
 mv -f "\${TMP_MANIFEST}" "\${FINAL_MANIFEST}"
 
 scripts/py -c 'import sys; from pathlib import Path; from fisheye.shared.flat_roi_cache import open_flat_roi_cache
