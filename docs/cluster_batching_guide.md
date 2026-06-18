@@ -1,8 +1,8 @@
 # Cluster Batching Guide
 
 This guide covers running Palette pipeline stages as batch jobs on an HPC
-cluster with LSF. All four stages — **detect**, **crop**, **keypoints**, and
-**eye masks** — support both filesystem discovery and registry-backed SQL
+cluster with LSF. The current primary stages — **detect**, **crop**,
+**keypoints**, and **subject masks** — support both filesystem discovery and registry-backed SQL
 pre-filtering.
 
 Related contract:
@@ -51,12 +51,12 @@ This guide documents the current batch runners. They remain appropriate for
 local workstation processing, small pilots, conservative archive-level runs,
 and smoke testing.
 
-Path scope: examples that call `scripts/py -m ...` directly may use workstation
-paths such as `/nvme1/recordings` and `/nvme1/palette_registry.sqlite`.
-Examples that submit LSF jobs with `./scripts/submit_*_bsub.sh` should use
-login/compute-node-visible paths, normally
-`/groups/johnson/johnsonlab/jeremy/recordings` and a PRFS-visible registry
-snapshot under `/groups/johnson/johnsonlab/jeremy/registries/`.
+Path scope: current production examples should use PRFS-visible paths:
+`/groups/johnson/johnsonlab/jeremy/recordings` and the canonical registry
+`/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`.
+Workstation-local paths such as `/nvme1/recordings` and
+`/nvme1/palette_registry.sqlite` are legacy/local-cache paths and should not be
+used for new cluster submissions.
 
 For production cluster workflows, treat batching as a planning and submission
 concern rather than as one long-lived Python process that owns many stages. The
@@ -231,11 +231,11 @@ Before adding internal Dask to any analysis stage, follow
 
 ## Pipeline stages and prerequisites
 
-The four batch pipelines form a DAG. Each stage requires its predecessors to
+The primary batch pipelines form a DAG. Each stage requires its predecessors to
 have `recording_step_status = 'ok'` before it will process a recording:
 
 ```
-detect  →  crop  →  keypoints  →  eye_masks
+detect  ->  crop  ->  keypoints  ->  subject_masks  ->  refined_subject_masks
 ```
 
 | Stage      | Prerequisite steps          | Step name      | Skip-existing flag |
@@ -243,7 +243,7 @@ detect  →  crop  →  keypoints  →  eye_masks
 | detect     | *(none)*                   | `detect`       | `--overwrite`     |
 | crop       | `detect`                   | `crop`         | `--force-new`     |
 | keypoints  | `detect`, `crop`           | `keypoints`    | `--overwrite`     |
-| eye masks  | `crop`, `keypoints`        | `eye_masks`    | `--overwrite`     |
+| subject masks | `crop`, `keypoints`     | `subject_masks`, `refined_subject_masks` | `--force-inference`, `--force-finalization` |
 
 When using `--source registry`, the batch runner queries the registry's
 `recording_step_status` table with SQL-level pre-filtering:
@@ -258,12 +258,12 @@ When using `--source registry`, the batch runner queries the registry's
 
 ## Discovery modes
 
-All four batch runners support two discovery modes via `--source`:
+The primary batch runners support two discovery modes via `--source`:
 
 ### Filesystem mode (default)
 
 ```bash
-scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings --recursive --dry-run --json
+scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings --recursive --dry-run --json
 ```
 
 Recursively finds `*_analysis.zarr` targets under the given root directory.
@@ -286,9 +286,9 @@ submitting crop/cache jobs.
 ### Registry mode
 
 ```bash
-scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --dry-run --json
 ```
 
@@ -297,7 +297,7 @@ SQL-level prerequisite and skip-existing filters, then builds plans only for
 the resulting paths. This is faster than filesystem discovery on large trees
 and ensures only "ready" recordings are processed.
 
-**Registry filters** (available on all four runners):
+**Registry filters** (available on the primary runners):
 
 | Flag               | Description                                 |
 |--------------------|---------------------------------------------|
@@ -307,7 +307,7 @@ and ensures only "ready" recordings are processed.
 | `--camera-id ID` / `--camera-id-filter ID` | Filter by camera identifier (see note) |
 | `--path-contains STR` | Substring match on zarr_path             |
 
-> **Note:** Detection and crop use `--camera-id`. Keypoints and eye masks use
+> **Note:** Detection and crop use `--camera-id`. Keypoints and subject masks use
 > `--camera-id-filter` to avoid ambiguity with the per-recording camera_id
 > argument those runners also accept.
 
@@ -318,9 +318,9 @@ stdout and exits immediately. The LSF submit scripts use this to build
 batch manifests:
 
 ```bash
-scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry --emit-paths \
-  --registry /nvme1/palette_registry.sqlite
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
 ```
 
 ---
@@ -331,13 +331,13 @@ scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
 
 ```bash
 # Dry run — preview plans
-scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --recursive --dry-run --json
 
 # Apply — run detections with registry-backed model resolution
-scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --recursive --apply \
-  --registry /nvme1/palette_registry.sqlite
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite
 
 # Apply — run detections with an explicit model path, bypassing model registry
 scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/palette_smoke \
@@ -345,9 +345,9 @@ scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jere
   --model /groups/johnson/johnsonlab/jeremy/palette_models/detect/best.pt
 
 # Registry mode — only process recordings not yet detected
-scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+scripts/py -m fisheye.utils.run_detections_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --apply
 ```
 
@@ -374,14 +374,14 @@ already have `detect_runs/latest` unless `--overwrite` is set.
 
 | Flag               | Default | Description                                      |
 |--------------------|---------|--------------------------------------------------|
-| `--root`           | `/nvme1/recordings` | Root recordings directory             |
+| `--root`           | `/groups/johnson/johnsonlab/jeremy/recordings` | Root recordings directory             |
 | `--source`         | `filesystem` | Discovery source (`filesystem` or `registry`) |
 | `--batch-size`     | `10`    | Analysis zarrs per batch job                     |
 | `--max-active`     | `2`     | Max concurrent jobs in array                     |
 | `--queue`          | *(default)* | LSF queue name                               |
 | `--ncores`         | `4`     | Cores per job                                    |
 | `--mem-gb`         | `16`    | Memory per job in GB                             |
-| `--registry`       | `/nvme1/palette_registry.sqlite` | Registry path       |
+| `--registry`       | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path       |
 | `--config`         | `configs/fisheye/default.yaml` | Detection config     |
 | `--model`          | *(none)* | Explicit detect model path; bypasses registry model resolution |
 | `--set-id`         | *(none)* | Detect model set filter                         |
@@ -583,11 +583,11 @@ registry model resolution deliberately. `--detect-set-id`,
 `--detect-require-unique`, `--detect-top-k`, and
 `--detect-include-non-success` are forwarded to the registry resolver.
 Both the registry file and the selected model path must be readable from the
-LSF submit host. On Janelia login/compute nodes, do not pass a workstation-local
-registry such as `/nvme1/palette_registry.sqlite` unless that path is actually
-mounted there. Copy or refresh a PRFS-visible registry snapshot under
-`/groups/johnson/johnsonlab/jeremy/registries/` before submission. If registry
-model rows still point at workstation-local paths such as `/nvme1/models/...`,
+LSF submit host. On Janelia login/compute nodes, use the canonical PRFS
+registry at `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite`.
+Do not pass a workstation-local registry such as `/nvme1/palette_registry.sqlite`
+unless you are deliberately debugging a local-only snapshot. If registry model
+rows still point at workstation-local paths such as `/nvme1/models/...`,
 pass an explicit PRFS/NRS-visible model path under `/groups/...` or refresh the
 registry model artifact paths before submitting cluster jobs.
 The submitter records `latest_policy=set_latest_explicit` by default so a
@@ -674,15 +674,15 @@ disposable Zarr before applying to the canonical archive.
 
 ```bash
 # Dry run
-scripts/py -m fisheye.utils.crop_batch /nvme1/recordings --recursive --dry-run
+scripts/py -m fisheye.utils.crop_batch /groups/johnson/johnsonlab/jeremy/recordings --recursive --dry-run
 
 # Apply
-scripts/py -m fisheye.utils.crop_batch /nvme1/recordings --recursive --apply
+scripts/py -m fisheye.utils.crop_batch /groups/johnson/johnsonlab/jeremy/recordings --recursive --apply
 
 # Registry mode — only crop recordings where detect is 'ok'
-scripts/py -m fisheye.utils.crop_batch /nvme1/recordings \
+scripts/py -m fisheye.utils.crop_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --apply
 ```
 
@@ -712,12 +712,12 @@ Notes:
 
 | Flag                       | Default | Description                               |
 |----------------------------|---------|-------------------------------------------|
-| `--root`                   | `/nvme1/recordings` | Root recordings directory     |
+| `--root`                   | `/groups/johnson/johnsonlab/jeremy/recordings` | Root recordings directory     |
 | `--source`                 | `filesystem` | Discovery source                     |
 | `--batch-size`             | `10`    | Analysis zarrs per batch job              |
 | `--max-active`             | `2`     | Max concurrent jobs                       |
 | `--mem-gb`                 | `32`    | Memory per job in GB                      |
-| `--registry`               | `/nvme1/palette_registry.sqlite` | Registry path  |
+| `--registry`               | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path  |
 | `--config`                 | *(none)* | Crop config YAML                         |
 | `--source-type`            | *(auto)* | Detection source type                    |
 | `--acceleration`           | *(auto)* | `auto`, `gpu`, or `cpu`                  |
@@ -741,9 +741,9 @@ the zarr.
 
 ```bash
 # Registry mode — only run keypoints where detect + crop are 'ok'
-scripts/py -m fisheye.utils.run_keypoints_batch /nvme1/recordings \
+scripts/py -m fisheye.utils.run_keypoints_batch /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
-  --registry /nvme1/palette_registry.sqlite \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --dry-run --json
 ```
 
@@ -765,13 +765,13 @@ scripts/py -m fisheye.utils.run_keypoints_batch /nvme1/recordings \
 
 | Flag                  | Default | Description                                  |
 |-----------------------|---------|----------------------------------------------|
-| `--root`              | `/nvme1/recordings` | Root recordings directory        |
+| `--root`              | `/groups/johnson/johnsonlab/jeremy/recordings` | Root recordings directory        |
 | `--source`            | `filesystem` | Discovery source                        |
 | `--batch-size`        | `10`    | Analysis zarrs per batch job                 |
 | `--max-active`        | `2`     | Max concurrent jobs                          |
 | `--mem-gb`            | `32`    | Memory per job in GB                         |
 | `--gpus`              | `0`     | GPUs per job; when >0 the submitter requests LSF GPUs and defaults `--device 0` |
-| `--registry`          | `/nvme1/palette_registry.sqlite` | Registry path     |
+| `--registry`          | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path     |
 | `--set-id`            | *(none)* | Pose model set filter                       |
 | `--pose-schema`       | *(detector default)* | Pose schema to pair with the selected model, e.g. `traditional_v2` for 5-keypoint models |
 | `--top-k`             | `5`     | Candidate provenance depth                   |
@@ -863,65 +863,44 @@ SQL
 
 ---
 
-## 4. Eye masks batch
+## 4. Subject masks batch
 
 ### Python runner
 
 ```bash
-# Registry mode — only run eye masks where crop + keypoints are 'ok'
-scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
+# Registry mode - only select recordings where crop + keypoints are ok and
+# refined_subject_masks is not already ok.
+scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
+  /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
-  --registry /nvme1/palette_registry.sqlite \
-  --no-log \
-  --dry-run --json
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --emit-paths
 ```
 
 ```bash
-# Registry mode + registry model resolution (U-Net example)
-scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
+# Apply one recording locally/inside an allocated job. Prefer an explicit
+# flat ROI cache manifest so subject-mask inference does not re-decode crops.
+scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
+  /groups/johnson/johnsonlab/jeremy/recordings/<recording>/zarr/<recording>_analysis.zarr \
+  --apply \
   --source registry \
-  --registry /nvme1/palette_registry.sqlite \
-  --model-source registry \
-  --method unet \
-  --model-top-k 5 \
-  --dry-run --json
-```
-
-```bash
-# Apply with registry model resolution (YOLO example)
-scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
-  --source registry \
-  --registry /nvme1/palette_registry.sqlite \
-  --model-source registry \
-  --method yolo \
-  --model-set-id eye_mask_cedar_shadow_omnifin0_auto_gray_union_b9164009_v001 \
-  --overwrite \
-  --apply --json
-```
-
-```bash
-# Recommended (your current workflow): U-Net + registry model resolution
-scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
-  --source registry \
-  --registry /nvme1/palette_registry.sqlite \
-  --model-source registry \
-  --method unet \
-  --model-set-id eye_mask_cedar_shadow_omnifin0_auto_gray_union_b9164009_v001 \
-  --overwrite \
-  --apply --json
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --device 0 \
+  --batch-size 128 \
+  --roi-cache-manifest /groups/.../<recording>.flat_roi_cache.json
 ```
 
 ### LSF submit script
 
 ```bash
-./scripts/submit_eye_masks_batches_bsub.sh \
+./scripts/submit_subject_mask_batches_bsub.sh \
   --root /groups/johnson/johnsonlab/jeremy/recordings \
   --source registry \
-  --batch-size 10 \
-  --max-active 2 \
-  --queue short \
-  --mem-gb 32 \
   --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --roi-cache-root /groups/johnson/johnsonlab/jeremy/cache/<workflow>/roi_cache \
+  --queue gpu_l4 \
+  --gpus 1 \
+  --max-active 4 \
   --dry-run
 ```
 
@@ -929,49 +908,33 @@ scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
 
 | Flag                       | Default | Description                              |
 |----------------------------|---------|------------------------------------------|
-| `--root`                   | `/nvme1/recordings` | Root recordings directory    |
-| `--source`                 | `filesystem` | Discovery source                    |
-| `--batch-size`             | `10`    | Analysis zarrs per batch job             |
-| `--max-active`             | `2`     | Max concurrent jobs                      |
-| `--mem-gb`                 | `32`    | Memory per job in GB                     |
-| `--registry`               | `/nvme1/palette_registry.sqlite` | Registry path |
-| `--set-id`                 | *(none)* | Eye mask model set filter               |
-| `--top-k`                  | `5`     | Candidate provenance depth               |
-| `--require-unique`         | off     | Fail if top model scores tie             |
-| `--include-non-success`    | off     | Include non-success runs in resolution   |
-| `--method`                 | *(auto)* | `yolo` or `unet`                        |
-| `--crop-run`               | *(auto)* | Explicit crop run name                  |
-| `--keypoints-run`          | *(auto)* | Explicit keypoints run name             |
-| `--batch-size-em`          | `128`   | Eye mask inference batch size            |
-| `--device`                 | *(auto)* | Torch device override                   |
-| `--cpu`                    | off     | Force CPU inference                      |
-| `--overwrite`              | off     | Rerun even if eye_masks run exists       |
+| `--root`                   | `/groups/johnson/johnsonlab/jeremy/recordings` | Root recordings directory    |
+| `--source`                 | `registry` | Discovery source                    |
+| `--max-active`             | `4`     | Max concurrent one-recording jobs        |
+| `--mem-gb`                 | `48`    | Memory per job in GB                     |
+| `--gpus`                   | `1`     | GPUs per job                             |
+| `--registry`               | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path |
+| `--roi-cache-root`         | *(none)* | Directory containing per-recording `*.flat_roi_cache.json` manifests |
+| `--roi-cache-manifest`     | *(none)* | Explicit flat ROI cache manifest for exactly one selected recording |
+| `--no-stage-roi-cache-to-scratch` | off | Disable node-local cache staging |
+| `--allow-missing-roi-cache` | off    | Allow fallback when no flat cache manifest is found |
+| `--batch-size-sm`          | `128`   | Subject-mask inference batch size        |
+| `--device`                 | `0` when `--gpus > 0` | Torch device override       |
+| `--overwrite`              | off     | Pass overwrite through to child stages   |
 | `--camera-id-filter`       | *(none)* | Filter by camera_id (registry only)     |
 | `--dry-run`                | off     | Print manifests + commands; do not submit|
 
-**YOLO-specific options:** `--resize-dims` (canonical), `--imgsz` (legacy alias),
-`--conf`, `--iou`, `--max-det`,
-`--mask-threshold`, `--adaptive-scale`, `--adaptive-cap`, `--no-retina-masks`,
-`--proto-upsample-factor`, `--legacy-masks`, `--verbose`
+**Execution model:** one LSF array task per recording. Each task resolves that
+recording's flat ROI cache manifest, stages the manifest and `.bin` payload to
+node-local scratch by default, passes the staged manifest into
+`run_subject_mask_batch_pipeline`, and removes the staged local cache with an
+`EXIT` trap on success or failure.
 
-**U-Net-specific options:** `--label-mode`, `--write-binary-masks`,
-`--no-use-crop`
+**Logs:** `<root>/logs/run_subject_mask_batch/bsub_submissions/sm_<run_id>/`
 
-**Python runner registry-model options:** `--model-source {config,registry}` (default: `config`),
-`--model-set-id`, `--model-top-k`, `--model-require-unique`,
-`--model-include-non-success`
-
-**Option name mapping (LSF submit script → Python runner):**
-`--set-id` → `--model-set-id`, `--top-k` → `--model-top-k`,
-`--require-unique` → `--model-require-unique`,
-`--include-non-success` → `--model-include-non-success`
-
-**Execution model:** Same as keypoints — each batch job iterates over zarr
-paths, derives the recording directory, and calls
-`run_eye_masks_with_registry_model --recording-dir <dir>`. Model resolution
-happens per-recording at runtime.
-
-**Logs:** `<root>/logs/run_eye_masks_batch/bsub_submissions/em_<run_id>/`
+The historical `scripts/submit_eye_masks_batches_bsub.sh` remains available for
+legacy `eye_masks_runs` compatibility, but new full-component mask jobs should
+target `subject_mask_runs` and `refined_subject_masks_runs`.
 
 ---
 
@@ -995,10 +958,11 @@ To process all four stages sequentially using registry-backed discovery:
   --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
   --batch-size 10 --max-active 2
 
-# 4. Eye masks — requires crop='ok' and keypoints='ok'
-./scripts/submit_eye_masks_batches_bsub.sh \
+# 4. Subject masks — requires crop='ok' and keypoints='ok'
+./scripts/submit_subject_mask_batches_bsub.sh \
   --source registry --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
-  --batch-size 10 --max-active 2
+  --roi-cache-root /groups/johnson/johnsonlab/jeremy/cache/<workflow>/roi_cache \
+  --max-active 4
 ```
 
 Each stage automatically filters to only recordings that have completed all
@@ -1022,13 +986,13 @@ All submit scripts accept registry filters:
 
 ## How submit scripts work
 
-All four submit scripts follow the same pattern:
+The submit scripts follow the same broad pattern:
 
 1. **Discovery** — Run the Python batch module with `--emit-paths` to get a
    list of zarr paths (either via filesystem glob or registry SQL query).
-2. **Manifest** — Split the discovered paths into batch files
-   (`batch_0001.txt`, `batch_0002.txt`, ...) and write `recordings.txt` +
-   `manifest_summary.json`.
+2. **Manifest** — Split or enumerate discovered paths into per-job files
+   (`batch_0001.txt` or `target_0001.tsv`, depending on the stage) and write
+   `recordings.txt` plus `manifest_summary.json`.
 3. **Job script** — Generate a `run_batch.sh` script that reads a batch file
    and processes each recording.
 4. **Submit** — Submit an LSF job array with `bsub`.

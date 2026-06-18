@@ -23,6 +23,9 @@ from typing import Any, Iterable, Optional, Sequence
 
 import zarr
 
+from fisheye.registry.db import RegistryPaths
+from fisheye.shared.zarr_discovery import discover_registry_zarr_entries
+
 
 RAW_COMPONENTS = ("subject_body", "eyes_union", "swim_bladder")
 REFINED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
@@ -118,6 +121,31 @@ def _discover_analysis_zarrs(roots: Sequence[Path], *, include_smoke: bool) -> l
             seen.add(key)
             zarrs.append(candidate)
     return sorted(zarrs)
+
+
+def _discover_registry_analysis_zarrs(
+    roots: Sequence[Path],
+    *,
+    registry_path: Path,
+    rig_id: Optional[str],
+    arena_id: Optional[str],
+    camera_id: Optional[str],
+    path_contains: Optional[str],
+    exclude_refined_subject_masks_ok: bool,
+) -> list[Path]:
+    entries = discover_registry_zarr_entries(
+        registry_path=registry_path,
+        scope_paths=roots,
+        zarr_use="analysis",
+        rig_id=rig_id,
+        arena_id=arena_id,
+        camera_id=camera_id,
+        path_contains=path_contains,
+        require_steps_ok=("crop", "keypoints"),
+        exclude_step_ok="refined_subject_masks" if exclude_refined_subject_masks_ok else None,
+        zarr_suffix="_analysis.zarr",
+    )
+    return [entry.zarr_path for entry in entries]
 
 
 def _zarr_paths_from_report(report_path: Path) -> list[Path]:
@@ -242,6 +270,8 @@ def _inference_command(args: argparse.Namespace, plan: ArchivePlan) -> list[str]
         args.model_component_coverage_key,
         "--model-label-schema-id",
         args.model_label_schema_id,
+        "--model-top-k",
+        str(args.model_top_k),
         "--run-name",
         plan.subject_run,
         "--crop-run",
@@ -263,7 +293,21 @@ def _inference_command(args: argparse.Namespace, plan: ArchivePlan) -> list[str]
         "--output-queue-size",
         str(args.output_queue_size),
         "--no-progress",
+        "--roi-cache-policy",
+        args.roi_cache_policy,
+        "--roi-live-acceleration",
+        args.roi_live_acceleration,
+        "--roi-live-gpu-chunk-frames",
+        str(args.roi_live_gpu_chunk_frames),
     ]
+    if args.model_require_unique:
+        cmd.append("--model-require-unique")
+    if args.model_include_non_success:
+        cmd.append("--model-include-non-success")
+    if args.roi_cache_dir is not None:
+        cmd.extend(["--roi-cache-dir", str(args.roi_cache_dir)])
+    if args.roi_cache_manifest is not None:
+        cmd.extend(["--roi-cache-manifest", str(args.roi_cache_manifest)])
     if args.overwrite:
         cmd.append("--overwrite")
     return cmd
@@ -400,7 +444,13 @@ def _write_markdown_report(path: Path, *, plans: Sequence[ArchivePlan], results:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("roots", nargs="*", type=Path, default=[Path("/nvme1/recordings")])
+    parser.add_argument("roots", nargs="*", type=Path, default=[Path("/groups/johnson/johnsonlab/jeremy/recordings")])
+    parser.add_argument("--source", choices=("filesystem", "registry"), default="filesystem")
+    parser.add_argument("--emit-paths", action="store_true", help="Print selected zarr paths and exit.")
+    parser.add_argument("--rig-id", help="Filter by rig_id in registry mode.")
+    parser.add_argument("--arena-id", help="Filter by arena_id in registry mode.")
+    parser.add_argument("--camera-id-filter", help="Filter by camera_id in registry mode.")
+    parser.add_argument("--path-contains", help="Filter zarr_path by substring in registry mode.")
     parser.add_argument(
         "--roots-from-report",
         type=Path,
@@ -410,15 +460,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pilot-size", type=int, default=None, help="Limit to the first N eligible archives.")
     parser.add_argument("--include-smoke", action="store_true", help="Include /smoke/ analysis Zarrs.")
     parser.add_argument("--run-label", default=f"batch_{_utc_now_compact()}")
-    parser.add_argument("--registry", type=Path, default=Path("/nvme1/palette_registry.sqlite"))
+    parser.add_argument("--registry", type=Path, default=None, help="Registry SQLite path. Defaults to PALETTE_REGISTRY_PATH/config.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--roi-cache-policy", choices=("never", "auto", "always"), default="auto")
+    parser.add_argument("--roi-cache-dir", type=Path)
+    parser.add_argument("--roi-cache-manifest", type=Path)
+    parser.add_argument("--roi-live-acceleration", choices=("auto", "cpu", "gpu"), default="auto")
+    parser.add_argument("--roi-live-gpu-chunk-frames", type=int, default=32)
     parser.add_argument("--mask-probs-dtype", choices=("uint8", "float16"), default="uint8")
     parser.add_argument("--mask-probs-chunk-rois", type=int, default=32)
     parser.add_argument("--output-queue-size", type=int, default=2)
     parser.add_argument("--model-coverage-class", default="dense_all_components")
     parser.add_argument("--model-component-coverage-key", default="body+eyes+swim_bladder")
     parser.add_argument("--model-label-schema-id", default="subject_v1_union")
+    parser.add_argument("--model-top-k", type=int, default=5)
+    parser.add_argument("--model-require-unique", action="store_true")
+    parser.add_argument("--model-include-non-success", action="store_true")
     parser.add_argument("--metric-level", choices=("cheap", "full"), default="cheap")
     parser.add_argument("--finalize-chunk-size", type=int, default=64)
     parser.add_argument("--finalize-execution-backend", choices=("serial_driver", "dask_worker_chunks"), default="dask_worker_chunks")
@@ -439,15 +497,27 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    args.registry = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
     dry_run = not bool(args.apply)
 
     subject_run = f"subject_masks_unet_registry_{args.run_label}"
     refined_run = f"refined_subject_masks_smart_finalizer_{args.run_label}"
-    root_inputs = (
-        _zarr_paths_from_report(args.roots_from_report)
-        if args.roots_from_report is not None
-        else args.roots
-    )
+    if args.roots_from_report is not None:
+        root_inputs = _zarr_paths_from_report(args.roots_from_report)
+        discovered_zarrs = _discover_analysis_zarrs(root_inputs, include_smoke=bool(args.include_smoke))
+    elif args.source == "registry":
+        discovered_zarrs = _discover_registry_analysis_zarrs(
+            args.roots,
+            registry_path=args.registry,
+            rig_id=args.rig_id,
+            arena_id=args.arena_id,
+            camera_id=args.camera_id_filter,
+            path_contains=args.path_contains,
+            exclude_refined_subject_masks_ok=not bool(args.force_inference or args.force_finalization),
+        )
+    else:
+        discovered_zarrs = _discover_analysis_zarrs(args.roots, include_smoke=bool(args.include_smoke))
+
     all_plans = [
         build_archive_plan(
             zarr_path,
@@ -456,11 +526,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             force_inference=bool(args.force_inference),
             force_finalization=bool(args.force_finalization),
         )
-        for zarr_path in _discover_analysis_zarrs(root_inputs, include_smoke=bool(args.include_smoke))
+        for zarr_path in discovered_zarrs
     ]
     plans = [plan for plan in all_plans if plan.run_inference or plan.run_finalization]
     if args.pilot_size is not None:
         plans = plans[: max(0, int(args.pilot_size))]
+    if args.roi_cache_manifest is not None and len(plans) > 1:
+        print(
+            "--roi-cache-manifest can only be used when exactly one archive is selected.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.emit_paths:
+        for plan in plans:
+            print(plan.zarr_path)
+        return 0
 
     print(f"analysis_archives_discovered: {len(all_plans)}")
     print(f"archives_selected: {len(plans)}")
