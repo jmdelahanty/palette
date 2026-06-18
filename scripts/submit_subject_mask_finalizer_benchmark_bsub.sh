@@ -8,6 +8,7 @@ ASSIGNMENT_KEYPOINT_RUN=""
 RUN_ID="subject_mask_finalizer_benchmark_$(date +%Y%m%d_%H%M%S)"
 LOG_ROOT="/groups/johnson/johnsonlab/jeremy/recordings/logs/subject_mask_finalizer_benchmarks"
 QUEUE=""
+DEPENDENCY=""
 NCORES=8
 MEM_GB=48
 WALLTIME="2:00"
@@ -37,6 +38,7 @@ Options:
   --run-id ID                      Benchmark run id/log directory name.
   --log-root PATH                  Benchmark log root.
   --queue NAME                     LSF queue name (default: cluster default).
+  --dependency EXPR                LSF dependency expression, e.g. 'ended(12345)'.
   --ncores N                       Cores/slots per variant job (default: 8).
   --mem-gb N                       Memory request in GB (default: 48; effective memory follows cluster slot model).
   --walltime H:MM                  LSF walltime (default: 2:00).
@@ -64,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --run-id) RUN_ID="$2"; shift 2;;
     --log-root) LOG_ROOT="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
+    --dependency) DEPENDENCY="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --walltime) WALLTIME="$2"; shift 2;;
@@ -307,6 +310,9 @@ SETTINGS
 BSUB_ARGS=(-J "sm_fin_bench[1-${idx}]%${MAX_ACTIVE}" -n "$NCORES" -W "$WALLTIME" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
+fi
+if [[ -n "$DEPENDENCY" ]]; then
+  BSUB_ARGS+=(-w "$DEPENDENCY")
 fi
 
 printf 'Run dir: %s\n' "$RUN_DIR"
