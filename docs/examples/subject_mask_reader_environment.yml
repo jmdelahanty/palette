@@ -1,0 +1,7 @@
+name: palette-subject-mask-reader
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - zarr>=3,<4

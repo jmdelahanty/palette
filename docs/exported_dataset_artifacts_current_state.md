@@ -417,6 +417,25 @@ Related contracts and implementation notes:
 - [`subject_shape_landmark_conventions.md`](subject_shape_landmark_conventions.md)
 - [`body_frame_contract.md`](body_frame_contract.md)
 
+Minimal reader example for the transferred example recording:
+
+```bash
+scripts/py docs/examples/read_subject_masks_from_example_recording.py --row 0
+```
+
+Minimal conda environment for collaborators who do not have Palette installed:
+
+```bash
+conda env create -f docs/examples/subject_mask_reader_environment.yml
+conda activate palette-subject-mask-reader
+python docs/examples/read_subject_masks_from_example_recording.py --row 0
+```
+
+That example opens
+`/groups/anibody/anibody/fish/example_recording/zarr/2026-01-28T21-47-47Z_arena_1_DefaultScreen_analysis.zarr`,
+prints raw/refined subject-mask labels and array shapes, and reads one ROI row
+from `refined_subject_masks_runs/<run>/masks_roi`.
+
 ### Clipped Training Zarrs
 
 `*_clipped_training.zarr` archives are sampled from rolling clips. They keep
@@ -642,6 +661,151 @@ For collaborators who want cross-recording movement-bout analytics:
    `stimulus_response_per_fish_step` for protocol/OMR questions.
 4. Keep the collection manifest with any delivered Parquet tables; it freezes
    the 52 source recordings and source selections.
+
+## Copying A Full Recording Folder
+
+For a full recording-directory transfer, keep the final recording layout intact:
+
+```text
+<destination>/<recording_name>/
+  recording_manifest.json
+  raw/
+  cams/
+  derived/
+  zarr/
+    <recording_name>_analysis.zarr
+    <recording_name>_training.zarr
+```
+
+Recommended policy:
+
+1. Copy only from a stable source. No process should be writing to the Zarr
+   stores or sidecars while the copy is running.
+2. Use plain `rsync` for ordinary files and large contiguous files such as MP4,
+   H5, CSV, JSON, and Parquet. Do not pass `-z`; these recordings are already
+   dominated by binary/video data and compression usually wastes CPU.
+3. Treat each `.zarr` directory as a transport bundle when crossing filesystems
+   or hosts. An uncompressed tar stream or tar file converts many small Zarr
+   files into one sequential transfer.
+4. Unpack the tarred Zarr at the destination if the recipient needs a normal
+   readable Palette recording. The tarball is a transport artifact, not the
+   canonical storage format.
+5. Validate after transfer. Use a cheap structure check first, and use a full
+   checksum pass only when the copy needs byte-level assurance.
+
+The recommended command is:
+
+```bash
+scripts/py -m fisheye.utils.copy_recording \
+  /nvme1/recordings/<recording_name> \
+  /new/location
+```
+
+That is a dry run. It plans a destination at
+`/new/location/<recording_name>`, copies ordinary files with `rsync` excluding
+`zarr/*.zarr/`, and transfers each top-level Zarr store with an uncompressed tar
+stream. Add `--apply` after reviewing the plan:
+
+```bash
+scripts/py -m fisheye.utils.copy_recording \
+  /nvme1/recordings/<recording_name> \
+  /new/location \
+  --apply
+```
+
+Useful options:
+
+- `--destination-is-recording-dir`: treat the second argument as the exact
+  recording directory instead of a parent directory.
+- `--resume`: allow copying into a non-empty destination recording directory.
+- `--validate checksum`: after copying, run an expensive `rsync --checksum`
+  dry-run to compare source and destination byte content.
+- `--zarr-mode tarball --archive-dir <dir>`: create `.zarr.tar` files for
+  delivery instead of unpacking readable Zarr stores at the destination.
+- `--json`: emit a machine-readable plan/result.
+
+Example local or mounted-filesystem copy when the destination should be
+directly readable:
+
+```bash
+src=/nvme1/recordings/<recording_name>
+dst=/new/location/<recording_name>
+
+mkdir -p "$dst"
+
+rsync -a --info=progress2 --partial --partial-dir=.rsync-partial \
+  --exclude='zarr/*.zarr/' \
+  "$src"/ "$dst"/
+
+mkdir -p "$dst/zarr"
+for store in "$src"/zarr/*.zarr; do
+  name=$(basename "$store")
+  tar -C "$src/zarr" -cf - "$name" | tar -C "$dst/zarr" -xf -
+done
+```
+
+Example tarball staging for delivery or later unpacking:
+
+```bash
+src=/nvme1/recordings/<recording_name>
+archive_dir=/scratch/<recording_name>_zarr_tar
+
+mkdir -p "$archive_dir"
+for store in "$src"/zarr/*.zarr; do
+  name=$(basename "$store")
+  tar -C "$src/zarr" -cf "$archive_dir/$name.tar" "$name"
+done
+```
+
+Example remote transfer without creating an intermediate tar file:
+
+```bash
+src=/nvme1/recordings/<recording_name>
+remote=<user>@<host>
+dst=/new/location/<recording_name>
+
+ssh "$remote" "mkdir -p '$dst'"
+rsync -a --info=progress2 --partial --partial-dir=.rsync-partial \
+  --exclude='zarr/*.zarr/' \
+  "$src"/ "$remote:$dst"/
+
+for store in "$src"/zarr/*.zarr; do
+  name=$(basename "$store")
+  ssh "$remote" "mkdir -p '$dst/zarr'"
+  tar -C "$src/zarr" -cf - "$name" | ssh "$remote" "tar -C '$dst/zarr' -xf -"
+done
+```
+
+For tarball delivery instead of direct unpacking, create hashes next to the
+archives and verify them after the rsync:
+
+```bash
+sha256sum /path/to/*.zarr.tar > /path/to/SHA256SUMS
+rsync -a --info=progress2 --partial /path/to/*.zarr.tar /path/to/SHA256SUMS <destination>/
+cd <destination>
+sha256sum -c SHA256SUMS
+```
+
+If the recipient needs a normal readable recording after tarball delivery,
+unpack the Zarr archives under the destination `zarr/` directory:
+
+```bash
+mkdir -p "$dst/zarr"
+for archive in "$archive_dir"/*.zarr.tar; do
+  tar -C "$dst/zarr" -xf "$archive"
+done
+```
+
+For a definitive source-vs-destination check after unpacking, run an expensive
+dry-run checksum comparison:
+
+```bash
+rsync -a --dry-run --checksum --delete "$src"/ "$dst"/
+```
+
+Do not run the final checksum pass casually on large recordings; it reads the
+full source and destination. It is useful for one-time handoff validation or
+when a storage migration needs a strong audit trail.
 
 ## Current Gaps And Caveats
 
