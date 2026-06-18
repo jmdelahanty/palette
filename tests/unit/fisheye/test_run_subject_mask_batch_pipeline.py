@@ -280,6 +280,38 @@ def test_staged_output_overlay_keeps_inputs_symlinked_and_outputs_local(tmp_path
     assert staged_root["subject_mask_runs"].attrs["latest"] == "old_subject"
 
 
+def test_staged_output_overlay_is_cleaned_after_inference_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    scratch = tmp_path / "scratch"
+
+    monkeypatch.setattr(mod, "_run_command", lambda *_args, **_kwargs: "failed_exit_99")
+
+    exit_code = mod.main(
+        [
+            str(tmp_path),
+            "--apply",
+            "--workflow-stage",
+            "inference",
+            "--run-label",
+            "cleanup_test",
+            "--stage-output-to-scratch",
+            "--output-staging-dir",
+            str(scratch),
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--roi-cache-policy",
+            "never",
+        ]
+    )
+
+    assert exit_code == 1
+    assert not list(scratch.glob("*.zarr"))
+
+
 def test_staged_output_overlay_can_copy_finalization_input_subject_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")

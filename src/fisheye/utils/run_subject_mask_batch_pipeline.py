@@ -1061,6 +1061,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result.error = str(exc)
             exit_code = 1
             print(f"error: {exc}", file=sys.stderr, flush=True)
+            if staged_ctx is not None and not bool(args.keep_staged_output):
+                try:
+                    _cleanup_output_staging(staged_ctx)
+                    result.output_staging_status = "cleaned_after_error"
+                except Exception as cleanup_exc:
+                    result.output_staging_status = f"cleanup_failed_after_error:{cleanup_exc}"
+                    print(f"warning: staged output cleanup failed after error: {cleanup_exc}", file=sys.stderr)
             if not bool(args.continue_on_error):
                 results.append(result)
                 break
