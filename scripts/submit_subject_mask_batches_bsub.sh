@@ -276,10 +276,13 @@ def resolve_manifest(zarr_path: Path) -> Path | None:
     patterns: list[str] = []
     if crop_run:
         patterns.append(f"{archive}__{safe_component(crop_run)}__*.flat_roi_cache.json")
+    patterns.append(f"{archive}.flat_roi_cache.json")
     patterns.append(f"{archive}__*.flat_roi_cache.json")
     matches: list[Path] = []
     for pattern in patterns:
-        matches = sorted(cache_root.rglob(pattern), key=lambda item: (item.stat().st_mtime_ns, str(item)))
+        # cache_root should point directly at the roi_cache directory. Avoid
+        # recursive PRFS walks here; they can be extremely slow on large trees.
+        matches = sorted(cache_root.glob(pattern), key=lambda item: (item.stat().st_mtime_ns, str(item)))
         if matches:
             break
     return matches[-1] if matches else None
