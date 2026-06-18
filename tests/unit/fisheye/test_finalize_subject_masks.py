@@ -418,6 +418,45 @@ def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypa
     assert "dask_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
 
 
+def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch, tmp_path: Path) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+
+    summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_process_shards_001",
+        chunk_size=1,
+        execution_backend="process_shards",
+        num_workers=2,
+    )
+
+    assert summary["execution_backend"] == "process_shards"
+    assert summary["process_shard_execution_enabled"] is True
+    assert summary["timing_summary"]["process_shard_execution_enabled"] is True
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_masks_smart_process_shards_001"]
+    assert run.attrs["smart_finalizer_execution_backend"] == "process_shards"
+    assert run.attrs["process_shard_execution_enabled"] is True
+    provenance_parameters = run.attrs["provenance"]["parameters"]
+    assert provenance_parameters["execution_backend"] == "process_shards"
+    assert provenance_parameters["process_shard_execution_enabled"] is True
+    assert provenance_parameters["worker_process_count"] == 2
+    assert provenance_parameters["dask_requested_chunk_size"] == 1
+    assert provenance_parameters["dask_chunk_size"] == 2
+    assert provenance_parameters["worker_chunk_size"] == 2
+    assert provenance_parameters["dask_chunk_alignment"] == "refined_subject_mask_metric_row_chunk"
+    assert len(run.attrs["smart_finalizer_chunk_timings"]) == 1
+    labels = list(run.attrs["mask_labels"])
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    assert np.count_nonzero(masks[:, labels.index("subject_body")]) > 0
+    assert np.count_nonzero(masks[:, labels.index("eye_left")]) > 0
+    assert np.count_nonzero(masks[:, labels.index("eye_right")]) > 0
+    assert np.count_nonzero(masks[:, labels.index("swim_bladder")]) > 0
+    assert "process_shard_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+
+
 def test_refresh_refined_subject_mask_metrics_can_refresh_component_contours(monkeypatch, tmp_path: Path) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     zarr_path = tmp_path / "analysis.zarr"

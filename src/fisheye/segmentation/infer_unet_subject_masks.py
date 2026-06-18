@@ -858,6 +858,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Keypoint run to use later when splitting eyes_union into anatomical LR eyes.",
     )
     parser.add_argument("--profile-timings", action="store_true", help="Collect per-stage timing diagnostics.")
+    parser.add_argument(
+        "--defer-registry-status",
+        action="store_true",
+        help=(
+            "Write and complete the zarr run group without emitting registry "
+            "step status. Use for local staged output that will be published to "
+            "the canonical archive before status is emitted."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the requested output run if it exists.")
     return parser
 
@@ -1192,15 +1201,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     write_stage_provenance(run_group, provenance)
     mark_run_complete(run_group, parent_group=root["subject_mask_runs"], run_name=resolved_run_name)
-    emit_subject_mask_stage_completion(
-        root,
-        zarr_path,
-        run_group=run_group,
-        run_name=resolved_run_name,
-        source=_SUBJECT_MASKS_STATUS_SOURCE,
-        console=console,
-        invalidate_on_ok=True,
-    )
+    if not args.defer_registry_status:
+        emit_subject_mask_stage_completion(
+            root,
+            zarr_path,
+            run_group=run_group,
+            run_name=resolved_run_name,
+            source=_SUBJECT_MASKS_STATUS_SOURCE,
+            console=console,
+            invalidate_on_ok=True,
+        )
 
     console.print(
         f"\n[green]✓[/green] U-Net subject masks written to "

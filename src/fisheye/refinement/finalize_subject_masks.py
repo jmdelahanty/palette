@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import json
+import os
 import sys
 import time
 from contextlib import contextmanager
@@ -99,9 +101,10 @@ _COMPONENT_CONTOUR_COMPONENTS = ("subject_body", "swim_bladder")
 _FINALIZABLE_RAW_COMPONENTS = ("subject_body", "swim_bladder", _RAW_EYE_UNION_COMPONENT)
 _METRIC_LEVELS = ("cheap", "full")
 _SUPPORTED_SCHEDULERS = ("single-threaded", "threads", "processes", "distributed")
-_EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks")
+_EXECUTION_BACKENDS = ("serial_driver", "dask_worker_chunks", "process_shards")
 _SERIAL_EXECUTION_BACKEND = "serial_driver"
 _DASK_WORKER_EXECUTION_BACKEND = "dask_worker_chunks"
+_PROCESS_SHARD_EXECUTION_BACKEND = "process_shards"
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
 _COMPONENT_QC_REASON_PREFIX = "needs_review_metric_"
@@ -848,9 +851,39 @@ def _dask_worker_row_chunk_size(total_rows: int, requested_chunk_size: int) -> i
 
 def _worker_chunk_size_for_backend(total_rows: int, requested_chunk_size: int, execution_backend: str) -> int:
     requested = max(1, int(requested_chunk_size))
-    if execution_backend == _DASK_WORKER_EXECUTION_BACKEND:
+    if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
         return _dask_worker_row_chunk_size(total_rows, requested)
     return requested
+
+
+def _row_chunk_shards(
+    chunk_ranges: Sequence[tuple[int, int]],
+    *,
+    num_workers: Optional[int],
+) -> list[list[tuple[int, int, int]]]:
+    """Split row chunks into contiguous worker shards.
+
+    Each shard is processed by one worker process that opens the zarr once and
+    loops over its assigned chunks. Chunks keep their original global index so
+    timing/provenance remains comparable with the Dask backend.
+    """
+
+    indexed = [
+        (int(chunk_index), int(start_row), int(stop_row))
+        for chunk_index, (start_row, stop_row) in enumerate(chunk_ranges)
+    ]
+    if not indexed:
+        return []
+    requested = int(num_workers) if num_workers is not None else (os.cpu_count() or 1)
+    worker_count = max(1, min(int(requested), len(indexed)))
+    shards: list[list[tuple[int, int, int]]] = []
+    for shard_index in range(worker_count):
+        start = (len(indexed) * shard_index) // worker_count
+        stop = (len(indexed) * (shard_index + 1)) // worker_count
+        shard = indexed[start:stop]
+        if shard:
+            shards.append(shard)
+    return shards
 
 
 def _create_filled_array(
@@ -1215,8 +1248,10 @@ def _create_refined_run_shell(
             "write_component_contours": provenance_inputs.get("component_contours_requested"),
             "execution_backend": provenance_inputs.get("execution_backend"),
             "dask_execution_enabled": provenance_inputs.get("dask_execution_enabled"),
+            "process_shard_execution_enabled": provenance_inputs.get("process_shard_execution_enabled"),
             "dask_scheduler": provenance_inputs.get("dask_scheduler"),
             "dask_num_workers": provenance_inputs.get("dask_num_workers"),
+            "worker_process_count": provenance_inputs.get("worker_process_count"),
             "dask_requested_chunk_size": provenance_inputs.get("dask_requested_chunk_size"),
             "dask_chunk_size": provenance_inputs.get("dask_chunk_size"),
             "dask_chunk_alignment": provenance_inputs.get("dask_chunk_alignment"),
@@ -1626,8 +1661,8 @@ def refresh_refined_subject_mask_metrics_run(
     execution_backend = _normalize_execution_backend(execution_backend)
     scheduler_key = _normalize_scheduler(scheduler)
     normalized_num_workers = int(num_workers) if num_workers is not None else None
-    if execution_backend == _DASK_WORKER_EXECUTION_BACKEND and zarr_path is None:
-        raise ValueError("execution_backend='dask_worker_chunks' requires a filesystem zarr_path.")
+    if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND} and zarr_path is None:
+        raise ValueError(f"execution_backend={execution_backend!r} requires a filesystem zarr_path.")
     stage_start = time.perf_counter()
     timing = _TimingRecorder()
     run_name, run_group = _resolve_refined_subject_run_group(root, refined_run)
@@ -1643,13 +1678,15 @@ def refresh_refined_subject_mask_metrics_run(
     dask_metadata: dict[str, object] = {
         "execution_backend": execution_backend,
         "dask_execution_enabled": execution_backend == _DASK_WORKER_EXECUTION_BACKEND,
+        "process_shard_execution_enabled": execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND,
         "dask_scheduler": scheduler_key,
         "dask_num_workers": normalized_num_workers,
+        "worker_process_count": normalized_num_workers,
         "dask_requested_chunk_size": requested_chunk_size,
         "dask_chunk_size": worker_chunk_size,
         "dask_chunk_alignment": (
             REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
-            if execution_backend == _DASK_WORKER_EXECUTION_BACKEND
+            if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}
             else "requested_chunk_size"
         ),
         "dask_version": getattr(dask, "__version__", "unknown"),
@@ -1876,36 +1913,22 @@ def _write_finalization_metrics_chunk(
     metrics_group["quality_score"][row_slice] = np.asarray(batch.quality_score, dtype=np.float32)
 
 
-def _process_and_write_finalizer_chunk(
-    zarr_path: str,
+def _process_and_write_finalizer_chunk_open(
     *,
-    subject_run: str,
-    refined_run: str,
+    source: SourceSubjectMaskRun,
+    run_group: zarr.Group,
     component_names: Sequence[str],
     required_raw_components: Sequence[str],
     start_row: int,
     stop_row: int,
     chunk_index: int,
     metric_level: str,
-    assignment_keypoint_group: Optional[str],
-    assignment_keypoints_run: Optional[str],
-    total_rows: int,
+    eye_assignment_context: _EyeAssignmentContext | None,
+    execution_backend: str = _DASK_WORKER_EXECUTION_BACKEND,
 ) -> dict[str, object]:
-    root = open_zarr_root(zarr_path, mode="a")
-    source = _load_source_subject_mask_run(root, subject_run)
-    run_group = root["refined_subject_masks_runs"][refined_run]
     component_names = tuple(str(name) for name in component_names)
     component_to_index = {name: idx for idx, name in enumerate(component_names)}
     timing = _TimingRecorder()
-
-    eye_assignment_context: _EyeAssignmentContext | None = None
-    if set(_EYE_COMPONENTS).issubset(component_names):
-        eye_assignment_context = _resolve_eye_assignment_context(
-            root,
-            source,
-            assignment_keypoint_group=assignment_keypoint_group,
-            assignment_keypoints_run=assignment_keypoints_run,
-        )
 
     row_slice = slice(int(start_row), int(stop_row))
     chunk_timing: dict[str, object] = {
@@ -1913,7 +1936,7 @@ def _process_and_write_finalizer_chunk(
         "start_row": int(start_row),
         "stop_row": int(stop_row),
         "row_count": int(stop_row) - int(start_row),
-        "execution_backend": _DASK_WORKER_EXECUTION_BACKEND,
+        "execution_backend": execution_backend,
     }
     chunk_start = time.perf_counter()
     chunk_any = np.zeros((int(stop_row) - int(start_row),), dtype=bool)
@@ -1953,7 +1976,7 @@ def _process_and_write_finalizer_chunk(
             component_name=raw_component,
             row_slice=row_slice,
             batch=batch,
-            total_rows=total_rows,
+            total_rows=int(source.masks_roi.shape[0]),
             ensure_shell=False,
         )
         elapsed = timing.add(f"write_{raw_component}", time.perf_counter() - phase_start)
@@ -2012,6 +2035,47 @@ def _process_and_write_finalizer_chunk(
     }
 
 
+def _process_and_write_finalizer_chunk(
+    zarr_path: str,
+    *,
+    subject_run: str,
+    refined_run: str,
+    component_names: Sequence[str],
+    required_raw_components: Sequence[str],
+    start_row: int,
+    stop_row: int,
+    chunk_index: int,
+    metric_level: str,
+    assignment_keypoint_group: Optional[str],
+    assignment_keypoints_run: Optional[str],
+    total_rows: int,
+) -> dict[str, object]:
+    root = open_zarr_root(zarr_path, mode="a")
+    source = _load_source_subject_mask_run(root, subject_run)
+    run_group = root["refined_subject_masks_runs"][refined_run]
+    component_names = tuple(str(name) for name in component_names)
+    eye_assignment_context: _EyeAssignmentContext | None = None
+    if set(_EYE_COMPONENTS).issubset(component_names):
+        eye_assignment_context = _resolve_eye_assignment_context(
+            root,
+            source,
+            assignment_keypoint_group=assignment_keypoint_group,
+            assignment_keypoints_run=assignment_keypoints_run,
+        )
+    return _process_and_write_finalizer_chunk_open(
+        source=source,
+        run_group=run_group,
+        component_names=component_names,
+        required_raw_components=required_raw_components,
+        start_row=start_row,
+        stop_row=stop_row,
+        chunk_index=chunk_index,
+        metric_level=metric_level,
+        eye_assignment_context=eye_assignment_context,
+        execution_backend=_DASK_WORKER_EXECUTION_BACKEND,
+    )
+
+
 def _compute_finalizer_dask_tasks(
     tasks: Sequence[object],
     *,
@@ -2049,6 +2113,90 @@ def _compute_finalizer_dask_tasks(
     return [dict(result) for result in results]
 
 
+def _process_and_write_finalizer_shard(
+    zarr_path: str,
+    *,
+    subject_run: str,
+    refined_run: str,
+    component_names: Sequence[str],
+    required_raw_components: Sequence[str],
+    chunk_specs: Sequence[tuple[int, int, int]],
+    metric_level: str,
+    assignment_keypoint_group: Optional[str],
+    assignment_keypoints_run: Optional[str],
+) -> list[dict[str, object]]:
+    root = open_zarr_root(zarr_path, mode="a")
+    source = _load_source_subject_mask_run(root, subject_run)
+    run_group = root["refined_subject_masks_runs"][refined_run]
+    component_names = tuple(str(name) for name in component_names)
+
+    eye_assignment_context: _EyeAssignmentContext | None = None
+    if set(_EYE_COMPONENTS).issubset(component_names):
+        eye_assignment_context = _resolve_eye_assignment_context(
+            root,
+            source,
+            assignment_keypoint_group=assignment_keypoint_group,
+            assignment_keypoints_run=assignment_keypoints_run,
+        )
+
+    results: list[dict[str, object]] = []
+    for chunk_index, start_row, stop_row in chunk_specs:
+        results.append(
+            _process_and_write_finalizer_chunk_open(
+                source=source,
+                run_group=run_group,
+                component_names=component_names,
+                required_raw_components=required_raw_components,
+                start_row=int(start_row),
+                stop_row=int(stop_row),
+                chunk_index=int(chunk_index),
+                metric_level=metric_level,
+                eye_assignment_context=eye_assignment_context,
+                execution_backend=_PROCESS_SHARD_EXECUTION_BACKEND,
+            )
+        )
+    return results
+
+
+def _compute_finalizer_process_shards(
+    zarr_path: str,
+    *,
+    subject_run: str,
+    refined_run: str,
+    component_names: Sequence[str],
+    required_raw_components: Sequence[str],
+    chunk_ranges: Sequence[tuple[int, int]],
+    metric_level: str,
+    assignment_keypoint_group: Optional[str],
+    assignment_keypoints_run: Optional[str],
+    num_workers: Optional[int],
+) -> list[dict[str, object]]:
+    shards = _row_chunk_shards(chunk_ranges, num_workers=num_workers)
+    if not shards:
+        return []
+    worker_count = len(shards)
+    results: list[dict[str, object]] = []
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _process_and_write_finalizer_shard,
+                str(zarr_path),
+                subject_run=subject_run,
+                refined_run=refined_run,
+                component_names=tuple(component_names),
+                required_raw_components=tuple(required_raw_components),
+                chunk_specs=tuple(shard),
+                metric_level=metric_level,
+                assignment_keypoint_group=assignment_keypoint_group,
+                assignment_keypoints_run=assignment_keypoints_run,
+            )
+            for shard in shards
+        ]
+        for future in futures:
+            results.extend(future.result())
+    return results
+
+
 def finalize_subject_mask_run(
     root: zarr.Group,
     *,
@@ -2078,8 +2226,8 @@ def finalize_subject_mask_run(
     scheduler_key = _normalize_scheduler(scheduler)
     normalized_num_workers = int(num_workers) if num_workers is not None else None
     execution_backend = _normalize_execution_backend(execution_backend)
-    if execution_backend == _DASK_WORKER_EXECUTION_BACKEND and zarr_path is None:
-        raise ValueError("execution_backend='dask_worker_chunks' requires a filesystem zarr_path.")
+    if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND} and zarr_path is None:
+        raise ValueError(f"execution_backend={execution_backend!r} requires a filesystem zarr_path.")
     source = _load_source_subject_mask_run(root, subject_run)
     total_rows = int(source.masks_roi.shape[0])
     requested_chunk_size = max(1, int(chunk_size))
@@ -2088,13 +2236,15 @@ def finalize_subject_mask_run(
     dask_metadata: dict[str, object] = {
         "execution_backend": execution_backend,
         "dask_execution_enabled": execution_backend == _DASK_WORKER_EXECUTION_BACKEND,
+        "process_shard_execution_enabled": execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND,
         "dask_scheduler": scheduler_key,
         "dask_num_workers": normalized_num_workers,
+        "worker_process_count": normalized_num_workers,
         "dask_requested_chunk_size": requested_chunk_size,
         "dask_chunk_size": worker_chunk_size,
         "dask_chunk_alignment": (
             REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
-            if execution_backend == _DASK_WORKER_EXECUTION_BACKEND
+            if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}
             else "requested_chunk_size"
         ),
         "dask_version": getattr(dask, "__version__", "unknown"),
@@ -2230,9 +2380,9 @@ def finalize_subject_mask_run(
             stage_command=" ".join(sys.argv) if sys.argv else "unknown",
         )
 
-    if execution_backend == _DASK_WORKER_EXECUTION_BACKEND:
+    if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
         assert zarr_path is not None
-        with timing.phase("dask_prepare_shells"):
+        with timing.phase("parallel_prepare_shells"):
             for raw_component in required_raw_components:
                 sample_batch = _finalize_source_component_rows(
                     source,
@@ -2255,30 +2405,46 @@ def finalize_subject_mask_run(
                     _source_payload_for_finalized_component(source, sample_batch),
                 )
 
-        tasks = [
-            delayed(_process_and_write_finalizer_chunk)(
-                str(zarr_path),
-                subject_run=source.run_name,
-                refined_run=target_run,
-                component_names=component_names,
-                required_raw_components=tuple(required_raw_components),
-                start_row=start_row,
-                stop_row=stop_row,
-                chunk_index=chunk_index,
-                metric_level=metric_level,
-                assignment_keypoint_group=assignment_keypoint_group,
-                assignment_keypoints_run=assignment_keypoints_run,
-                total_rows=total_rows,
-            )
-            for chunk_index, (start_row, stop_row) in enumerate(chunk_ranges)
-        ]
-        with timing.phase("dask_compute"):
-            dask_results = _compute_finalizer_dask_tasks(
-                tasks,
-                scheduler_key=scheduler_key,
-                num_workers=normalized_num_workers,
-            )
-        for result in sorted(dask_results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
+        if execution_backend == _DASK_WORKER_EXECUTION_BACKEND:
+            tasks = [
+                delayed(_process_and_write_finalizer_chunk)(
+                    str(zarr_path),
+                    subject_run=source.run_name,
+                    refined_run=target_run,
+                    component_names=component_names,
+                    required_raw_components=tuple(required_raw_components),
+                    start_row=start_row,
+                    stop_row=stop_row,
+                    chunk_index=chunk_index,
+                    metric_level=metric_level,
+                    assignment_keypoint_group=assignment_keypoint_group,
+                    assignment_keypoints_run=assignment_keypoints_run,
+                    total_rows=total_rows,
+                )
+                for chunk_index, (start_row, stop_row) in enumerate(chunk_ranges)
+            ]
+            with timing.phase("dask_compute"):
+                parallel_results = _compute_finalizer_dask_tasks(
+                    tasks,
+                    scheduler_key=scheduler_key,
+                    num_workers=normalized_num_workers,
+                )
+        else:
+            with timing.phase("process_shard_compute"):
+                parallel_results = _compute_finalizer_process_shards(
+                    str(zarr_path),
+                    subject_run=source.run_name,
+                    refined_run=target_run,
+                    component_names=component_names,
+                    required_raw_components=tuple(required_raw_components),
+                    chunk_ranges=chunk_ranges,
+                    metric_level=metric_level,
+                    assignment_keypoint_group=assignment_keypoint_group,
+                    assignment_keypoints_run=assignment_keypoints_run,
+                    num_workers=normalized_num_workers,
+                )
+
+        for result in sorted(parallel_results, key=lambda item: int(dict(item["chunk_timing"]).get("chunk_index") or 0)):
             chunk_timing = dict(result["chunk_timing"])
             timing.chunk_timings.append(chunk_timing)
             for phase, seconds in dict(result.get("phase_seconds") or {}).items():
@@ -2488,8 +2654,10 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_write_component_contours"] = bool(write_component_contours)
     run_group.attrs["smart_finalizer_execution_backend"] = execution_backend
     run_group.attrs["dask_execution_enabled"] = execution_backend == _DASK_WORKER_EXECUTION_BACKEND
+    run_group.attrs["process_shard_execution_enabled"] = execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND
     run_group.attrs["dask_scheduler"] = scheduler_key
     run_group.attrs["dask_num_workers"] = normalized_num_workers
+    run_group.attrs["worker_process_count"] = normalized_num_workers
     run_group.attrs["dask_chunk_size"] = int(max(1, int(chunk_size)))
     run_group.attrs["dask_version"] = getattr(dask, "__version__", "unknown")
     refined_parent.attrs["latest"] = target_run
@@ -2534,6 +2702,7 @@ def finalize_subject_masks(
     dry_run: bool = False,
     assignment_keypoint_group: Optional[str] = None,
     assignment_keypoints_run: Optional[str] = None,
+    defer_registry_status: bool = False,
     console: Any = None,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="r" if dry_run else "a")
@@ -2555,7 +2724,7 @@ def finalize_subject_masks(
         assignment_keypoint_group=assignment_keypoint_group,
         assignment_keypoints_run=assignment_keypoints_run,
     )
-    if not dry_run:
+    if not dry_run and not defer_registry_status:
         run_name = str(summary["refined_run"])
         refined_group = root["refined_subject_masks_runs"][run_name]
         emit_refined_subject_mask_stage_completion(
@@ -2627,7 +2796,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--execution-backend",
         choices=_EXECUTION_BACKENDS,
         default=_SERIAL_EXECUTION_BACKEND,
-        help="Execution backend. Use dask_worker_chunks to let Dask workers write disjoint row chunks.",
+        help=(
+            "Execution backend. process_shards uses one local worker process per contiguous row shard; "
+            "dask_worker_chunks keeps the older one-Dask-task-per-row-chunk behavior."
+        ),
     )
     parser.add_argument(
         "--scheduler",
@@ -2635,14 +2807,14 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=_SUPPORTED_SCHEDULERS,
         default="single-threaded",
         help=(
-            "Dask scheduler used when --execution-backend=dask_worker_chunks; recorded as instrumentation "
-            "for serial_driver."
+            "Dask scheduler used only when --execution-backend=dask_worker_chunks; recorded as "
+            "instrumentation for other backends."
         ),
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        help="Worker-count setting to record for future Dask-backed finalization.",
+        help="Worker process count for process_shards or Dask worker count for dask_worker_chunks.",
     )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing target refined run.")
     parser.add_argument("--dry-run", action="store_true", help="Resolve the plan without mutating the archive.")
@@ -2656,6 +2828,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicit keypoint run to use for eyes_union -> eye_left/eye_right assignment.",
     )
     parser.add_argument("--json", action="store_true", help="Emit the summary as JSON.")
+    parser.add_argument(
+        "--defer-registry-status",
+        action="store_true",
+        help=(
+            "Write the refined zarr run group without emitting registry step "
+            "status. Use for local staged output that will be published to the "
+            "canonical archive before status is emitted."
+        ),
+    )
     return parser
 
 
@@ -2679,6 +2860,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         dry_run=bool(args.dry_run),
         assignment_keypoint_group=args.assignment_keypoint_group,
         assignment_keypoints_run=args.assignment_keypoints_run,
+        defer_registry_status=bool(args.defer_registry_status),
     )
     print(json.dumps(summary, indent=None if args.json else 2, sort_keys=True))
     return 0

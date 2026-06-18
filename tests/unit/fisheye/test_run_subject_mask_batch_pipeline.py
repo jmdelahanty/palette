@@ -4,9 +4,11 @@ import json
 from types import SimpleNamespace
 from pathlib import Path
 
+import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils import run_subject_mask_batch_pipeline as mod
 
 
@@ -75,6 +77,75 @@ def test_emit_paths_prints_selected_archives(tmp_path: Path, capsys: pytest.Capt
     assert capsys.readouterr().out.strip() == str(zarr_path)
 
 
+def _seed_subject_mask_batch_prereqs(zarr_path: Path) -> None:
+    root = zarr.open_group(str(zarr_path), mode="w")
+    crop_parent = root.require_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_run"
+    crop_parent.create_group("crop_run")
+    keypoint_parent = root.require_group("refined_keypoints_runs")
+    keypoint_parent.attrs["latest"] = "refined_keypoints"
+    keypoint_parent.create_group("refined_keypoints")
+
+
+def test_build_archive_plan_inference_mode_ignores_unrelated_subject_runs(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root.require_group("subject_mask_runs").create_group("old_subject_run")
+
+    plan = mod.build_archive_plan(
+        zarr_path,
+        subject_run_name="target_subject_run",
+        refined_run_name="target_refined_run",
+        force_inference=False,
+        force_finalization=False,
+        workflow_stage="inference",
+    )
+
+    assert plan.run_inference is True
+    assert plan.run_finalization is False
+
+
+def test_build_archive_plan_finalization_mode_requires_matching_subject_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root.require_group("subject_mask_runs").create_group("old_subject_run")
+
+    plan = mod.build_archive_plan(
+        zarr_path,
+        subject_run_name="target_subject_run",
+        refined_run_name="target_refined_run",
+        force_inference=False,
+        force_finalization=False,
+        workflow_stage="finalization",
+    )
+
+    assert plan.run_inference is False
+    assert plan.run_finalization is False
+    assert "target_subject_mask_run_missing" in plan.skip_reason
+
+
+def test_build_archive_plan_finalization_mode_targets_matching_subject_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    _seed_subject_mask_batch_prereqs(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root.require_group("subject_mask_runs").create_group("target_subject_run")
+
+    plan = mod.build_archive_plan(
+        zarr_path,
+        subject_run_name="target_subject_run",
+        refined_run_name="target_refined_run",
+        force_inference=False,
+        force_finalization=False,
+        workflow_stage="finalization",
+    )
+
+    assert plan.run_inference is False
+    assert plan.run_finalization is True
+    assert mod._selected_subject_run_for_finalization(plan) == "target_subject_run"
+
+
 def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_path: Path) -> None:
     manifest = tmp_path / "sample.flat_roi_cache.json"
     args = SimpleNamespace(
@@ -117,3 +188,217 @@ def test_inference_command_passes_cache_manifest_and_model_resolution_flags(tmp_
     assert "--model-require-unique" in cmd
     assert "--model-include-non-success" in cmd
     assert cmd[cmd.index("--model-top-k") + 1] == "7"
+
+
+def test_staged_output_overlay_keeps_inputs_symlinked_and_outputs_local(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["recording_id"] = "recording_1"
+    crop_parent = root.require_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_run"
+    crop_parent.create_group("crop_run")
+    root.require_group("keypoints_runs").create_group("keypoints_run")
+    root.require_group("subject_mask_runs").attrs["latest"] = "old_subject"
+    root.require_group("refined_subject_masks_runs")
+    plan = mod.ArchivePlan(
+        zarr_path=str(zarr_path),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_run",
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=True,
+    )
+
+    ctx = mod._prepare_output_staging_zarr(
+        zarr_path,
+        plan=plan,
+        staging_root=tmp_path / "scratch",
+        overwrite=False,
+    )
+
+    assert (ctx.staged_zarr_path / "crop_runs").is_symlink()
+    assert (ctx.staged_zarr_path / "keypoints_runs").is_symlink()
+    assert not (ctx.staged_zarr_path / "subject_mask_runs").is_symlink()
+    assert not (ctx.staged_zarr_path / "refined_subject_masks_runs").is_symlink()
+    staged_root = zarr.open_group(str(ctx.staged_zarr_path), mode="r")
+    assert staged_root.attrs["recording_id"] == "recording_1"
+    assert staged_root["subject_mask_runs"].attrs["latest"] == "old_subject"
+
+
+def test_staged_output_overlay_can_copy_finalization_input_subject_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    subject_parent = root.require_group("subject_mask_runs")
+    source_subject = subject_parent.create_group("subject_run")
+    source_subject.attrs["method"] = "unet_subject_mask_segmenter"
+    source_subject.create_array("mask_probs_roi", data=np.zeros((1, 3, 2, 2), dtype=np.uint8))
+    root.require_group("refined_subject_masks_runs")
+    plan = mod.ArchivePlan(
+        zarr_path=str(zarr_path),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_run",
+        has_subject_runs=True,
+        has_refined_subject_runs=False,
+        run_inference=False,
+        run_finalization=True,
+    )
+
+    ctx = mod._prepare_output_staging_zarr(
+        zarr_path,
+        plan=plan,
+        staging_root=tmp_path / "scratch",
+        overwrite=False,
+        stage_finalization_input=True,
+    )
+
+    staged_subject = ctx.staged_zarr_path / "subject_mask_runs" / "subject_run"
+    assert staged_subject.is_dir()
+    assert not staged_subject.is_symlink()
+    staged_root = zarr.open_group(str(ctx.staged_zarr_path), mode="r")
+    assert staged_root["subject_mask_runs/subject_run"].attrs["method"] == "unet_subject_mask_segmenter"
+    assert np.asarray(staged_root["subject_mask_runs/subject_run/mask_probs_roi"]).shape == (1, 3, 2, 2)
+
+
+def test_subject_mask_handoff_package_streams_finalization_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.require_group("subject_mask_runs")
+    root.require_group("refined_subject_masks_runs")
+    inference_plan = mod.ArchivePlan(
+        zarr_path=str(zarr_path),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_run",
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=False,
+    )
+    ctx = mod._prepare_output_staging_zarr(
+        zarr_path,
+        plan=inference_plan,
+        staging_root=tmp_path / "scratch_infer",
+        overwrite=False,
+    )
+    staged = zarr.open_group(str(ctx.staged_zarr_path), mode="a")
+    subject = staged["subject_mask_runs"].create_group("subject_run")
+    subject.attrs["method"] = "unet_subject_mask_segmenter"
+    subject.attrs["mask_labels"] = list(mod.RAW_COMPONENTS)
+    subject.attrs["summary_statistics"] = {"rows_total": 1}
+    subject.create_array("mask_probs_roi", data=np.ones((1, 3, 2, 2), dtype=np.uint8))
+
+    monkeypatch.setattr(mod, "emit_subject_mask_stage_completion", lambda *_args, **_kwargs: True)
+
+    handoff_dir = tmp_path / "nrs_handoff"
+    mod._publish_staged_outputs(ctx, plan=inference_plan, overwrite=False, handoff_package_dir=handoff_dir)
+
+    published = zarr.open_group(str(zarr_path), mode="r")
+    package = published["subject_mask_runs/subject_run"].attrs["cluster_run_package"]
+    package_path = Path(package["artifact_path"])
+    assert package_path.is_file()
+    assert package_path.parent == handoff_dir.resolve()
+
+    finalization_plan = mod.ArchivePlan(
+        zarr_path=str(zarr_path),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_run",
+        has_subject_runs=True,
+        has_refined_subject_runs=False,
+        run_inference=False,
+        run_finalization=True,
+    )
+    finalization_ctx = mod._prepare_output_staging_zarr(
+        zarr_path,
+        plan=finalization_plan,
+        staging_root=tmp_path / "scratch_finalize",
+        overwrite=False,
+        stage_finalization_input=True,
+    )
+
+    staged_subject = finalization_ctx.staged_zarr_path / "subject_mask_runs" / "subject_run"
+    assert staged_subject.is_dir()
+    assert not staged_subject.is_symlink()
+    staged_root = zarr.open_group(str(finalization_ctx.staged_zarr_path), mode="r")
+    assert int(np.asarray(staged_root["subject_mask_runs/subject_run/mask_probs_roi"][:]).sum()) == 12
+
+
+def test_publish_staged_outputs_copies_groups_and_emits_real_path_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.require_group("subject_mask_runs")
+    root.require_group("refined_subject_masks_runs")
+    plan = mod.ArchivePlan(
+        zarr_path=str(zarr_path),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="keypoints_runs",
+        assignment_keypoint_run="keypoints_run",
+        has_subject_runs=False,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=True,
+    )
+    ctx = mod._prepare_output_staging_zarr(
+        zarr_path,
+        plan=plan,
+        staging_root=tmp_path / "scratch",
+        overwrite=False,
+    )
+    staged = zarr.open_group(str(ctx.staged_zarr_path), mode="a")
+    subject = staged["subject_mask_runs"].create_group("subject_run")
+    subject.attrs["mask_labels"] = list(mod.RAW_COMPONENTS)
+    subject.attrs["method"] = "unet_subject_mask_segmenter"
+    subject.attrs["summary_statistics"] = {"rows_total": 1}
+    subject.create_array("mask_probs_roi", data=np.zeros((1, 3, 2, 2), dtype=np.uint8))
+    refined = staged["refined_subject_masks_runs"].create_group("refined_run")
+    refined.attrs["mask_labels"] = list(mod.REFINED_COMPONENTS)
+    refined.attrs["method"] = "smart_finalize_subject_masks_v1"
+    refined.attrs["summary_statistics"] = {"rows_total": 1}
+    refined.create_array("masks_roi", data=np.zeros((1, 4, 2, 2), dtype=np.uint8))
+    components = refined.require_group("components")
+    for component in mod.REFINED_COMPONENTS:
+        components.require_group(component)
+
+    emitted: list[tuple[str, str, Path]] = []
+
+    def _emit_subject(_root, zarr_path_arg, *, run_name, **_kwargs):
+        emitted.append(("subject", run_name, Path(zarr_path_arg)))
+        return True
+
+    def _emit_refined(_root, zarr_path_arg, *, run_name, **_kwargs):
+        emitted.append(("refined", run_name, Path(zarr_path_arg)))
+        return True
+
+    monkeypatch.setattr(mod, "emit_subject_mask_stage_completion", _emit_subject)
+    monkeypatch.setattr(mod, "emit_refined_subject_mask_stage_completion", _emit_refined)
+
+    mod._publish_staged_outputs(ctx, plan=plan, overwrite=False)
+
+    published = zarr.open_group(str(zarr_path), mode="r")
+    assert "subject_run" in published["subject_mask_runs"]
+    assert "refined_run" in published["refined_subject_masks_runs"]
+    assert published["subject_mask_runs"].attrs["latest"] == "subject_run"
+    assert published["refined_subject_masks_runs"].attrs["latest"] == "refined_run"
+    assert published["subject_mask_runs"]["subject_run"].attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
+    assert published["refined_subject_masks_runs"]["refined_run"].attrs[RUN_COMPLETION_STATUS_ATTR] == "complete"
+    assert ("subject", "subject_run", zarr_path) in emitted
+    assert ("refined", "refined_run", zarr_path) in emitted

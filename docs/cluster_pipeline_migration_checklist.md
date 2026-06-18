@@ -542,18 +542,19 @@ Current implementation:
 Ready for pilot:
 
 - [x] Batch pipeline entry point exists.
+- [x] LSF submitter exists: `scripts/submit_subject_mask_batches_bsub.sh`.
 - [x] Writers use shared stage provenance in major subject-mask paths.
 - [x] Review/finalization tooling exists.
+- [x] Flat ROI cache inputs can be staged to node-local scratch.
+- [x] Subject-mask output run groups can be written to a node-local staged zarr
+  overlay and published to PRFS before registry status is emitted.
 
 Remaining:
 
-- [ ] Add `scripts/submit_subject_mask_batches_bsub.sh`.
 - [ ] Decide which subject-mask path is the cluster default:
   U-Net inference, SAM, traditional, or existing smart finalizer inputs.
 - [ ] Separate operator review surfaces from pure cluster compute surfaces.
 - [ ] Ensure finalization writes cluster timing/provenance consistently.
-- [ ] Decide whether subject-mask outputs require run-group artifact import
-  before broad cluster use, because mask stores are large and file-heavy.
 - [ ] Add registry-scoped discovery and skip-existing behavior if missing from
   the subject-mask batch pipeline.
 - [ ] Add validation: component presence, geometry metrics, profile artifacts,

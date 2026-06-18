@@ -4,9 +4,14 @@ set -euo pipefail
 ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 MAX_ACTIVE=4
 QUEUE=""
-NCORES=4
+NCORES=8
 MEM_GB=48
 GPUS=1
+SPLIT_FINALIZATION_JOB=1
+FINALIZE_QUEUE=""
+FINALIZE_NCORES=""
+FINALIZE_MEM_GB=""
+FINALIZE_MAX_ACTIVE=""
 REGISTRY="${PALETTE_REGISTRY_PATH:-/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite}"
 LOG_DIR=""
 RUN_ID_OVERRIDE=""
@@ -28,10 +33,10 @@ MODEL_LABEL_SCHEMA_ID="subject_v1_union"
 MODEL_TOP_K=5
 MODEL_REQUIRE_UNIQUE=0
 MODEL_INCLUDE_NON_SUCCESS=0
-FINALIZE_CHUNK_SIZE=64
-FINALIZE_EXECUTION_BACKEND="dask_worker_chunks"
+FINALIZE_CHUNK_SIZE=256
+FINALIZE_EXECUTION_BACKEND="process_shards"
 FINALIZE_SCHEDULER="processes"
-FINALIZE_NUM_WORKERS=48
+FINALIZE_NUM_WORKERS="auto"
 METRIC_LEVEL="cheap"
 WRITE_EYE_GEOMETRY=1
 WRITE_COMPONENT_CONTOURS=1
@@ -46,23 +51,34 @@ ROI_CACHE_STAGING_DIR=""
 ROI_CACHE_POLICY="never"
 ROI_LIVE_ACCELERATION="auto"
 ROI_LIVE_GPU_CHUNK_FRAMES=32
+STAGE_OUTPUT_TO_SCRATCH=1
+OUTPUT_STAGING_DIR=""
+KEEP_STAGED_OUTPUT=0
+STAGE_FINALIZATION_INPUT_TO_SCRATCH=1
+HANDOFF_PACKAGE_DIR="${PALETTE_SUBJECT_MASK_HANDOFF_DIR:-/nrs/ahrens/palette_staging/subject_mask_run_packages}"
 
 usage() {
   cat <<'USAGE'
 Usage: submit_subject_mask_batches_bsub.sh [options]
 
-Submits one LSF array task per selected recording. Each task may stage that
-recording's flat ROI cache manifest + payload to node-local scratch, run U-Net
-subject-mask inference and refined-subject finalization, then delete the staged
-local cache via an EXIT trap.
+Submits one LSF array task per selected recording. By default, inference runs in
+a GPU array job, publishes subject_mask_runs to the recording zarr, and a
+dependent CPU array job finalizes refined_subject_masks. Each job may stage
+temporary cache/output data to node-local scratch and deletes it via an EXIT
+trap.
 
 Options:
   --root PATH               Root recordings directory (default: /groups/johnson/johnsonlab/jeremy/recordings)
   --max-active N            Max concurrent recording jobs (default: 4)
   --queue NAME              LSF queue name
-  --ncores N                Cores per job (default: 4)
+  --ncores N                Cores per job (default: 8)
   --mem-gb N                Memory per job in GB (default: 48)
   --gpus N                  GPUs per job (default: 1); when >0 defaults --device 0
+  --single-job-finalization Run finalization inside the GPU job instead of a dependent CPU job
+  --finalize-queue NAME     CPU finalization queue (default: cluster default)
+  --finalize-ncores N       CPU finalization cores (default: --ncores)
+  --finalize-mem-gb N       CPU finalization memory in GB (default: --mem-gb)
+  --finalize-max-active N   Max concurrent finalization jobs (default: --max-active)
   --registry PATH           Registry sqlite path (default: $PALETTE_REGISTRY_PATH or PRFS registry)
   --source filesystem|registry
                             Discovery source (default: registry)
@@ -77,6 +93,15 @@ Options:
                             Read cache directly from its source instead of staging to node-local scratch
   --roi-cache-staging-dir PATH
                             Override local staging base (default: /scratch/$USER/$LSB_JOBID/...)
+  --no-stage-output-to-scratch
+                            Write subject-mask outputs directly to PRFS instead of staging locally
+  --output-staging-dir PATH Override output staging base (default: /scratch/$USER/$LSB_JOBID/...)
+  --keep-staged-output      Keep local staged output zarr after successful publish
+  --no-stage-finalization-input-to-scratch
+                            In split mode, symlink the published subject-mask run instead of copying it local
+  --handoff-package-dir PATH
+                            Shared non-backed-up package dir for split finalization handoff
+                            (default: $PALETTE_SUBJECT_MASK_HANDOFF_DIR or /nrs/ahrens/palette_staging/subject_mask_run_packages)
   --device DEVICE           Torch device override (default: 0 when --gpus > 0, else cuda:0)
   --batch-size-sm N         Subject-mask inference batch size (default: 128)
   --mask-probs-dtype DTYPE  uint8|float16 (default: uint8)
@@ -90,8 +115,11 @@ Options:
   --model-require-unique    Fail if model resolution top score ties
   --model-include-non-success
                             Include non-success registry model rows
-  --finalize-chunk-size N   Refined finalizer chunk size (default: 64)
-  --finalize-num-workers N  Refined finalizer worker count (default: 48)
+  --finalize-chunk-size N   Refined finalizer chunk size (default: 256)
+  --finalize-execution-backend NAME
+                            serial_driver|dask_worker_chunks|process_shards (default: process_shards)
+  --finalize-num-workers N|auto
+                            Refined finalizer worker count (default: auto => --ncores)
   --metric-level LEVEL      cheap|full (default: cheap)
   --no-write-eye-geometry   Do not ask finalizer to write eye geometry
   --no-write-component-contours
@@ -115,6 +143,11 @@ while [[ $# -gt 0 ]]; do
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
     --gpus) GPUS="$2"; shift 2;;
+    --single-job-finalization) SPLIT_FINALIZATION_JOB=0; shift;;
+    --finalize-queue) FINALIZE_QUEUE="$2"; shift 2;;
+    --finalize-ncores) FINALIZE_NCORES="$2"; shift 2;;
+    --finalize-mem-gb) FINALIZE_MEM_GB="$2"; shift 2;;
+    --finalize-max-active) FINALIZE_MAX_ACTIVE="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
     --source) SOURCE="$2"; shift 2;;
     --rig-id) RIG_ID="$2"; shift 2;;
@@ -126,6 +159,11 @@ while [[ $# -gt 0 ]]; do
     --allow-missing-roi-cache) REQUIRE_ROI_CACHE=0; shift;;
     --no-stage-roi-cache-to-scratch) STAGE_ROI_CACHE_TO_SCRATCH=0; shift;;
     --roi-cache-staging-dir) ROI_CACHE_STAGING_DIR="$2"; shift 2;;
+    --no-stage-output-to-scratch) STAGE_OUTPUT_TO_SCRATCH=0; shift;;
+    --output-staging-dir) OUTPUT_STAGING_DIR="$2"; shift 2;;
+    --keep-staged-output) KEEP_STAGED_OUTPUT=1; shift;;
+    --no-stage-finalization-input-to-scratch) STAGE_FINALIZATION_INPUT_TO_SCRATCH=0; shift;;
+    --handoff-package-dir) HANDOFF_PACKAGE_DIR="$2"; shift 2;;
     --device) DEVICE="$2"; shift 2;;
     --batch-size-sm) BATCH_SIZE_SM="$2"; shift 2;;
     --mask-probs-dtype) MASK_PROBS_DTYPE="$2"; shift 2;;
@@ -138,6 +176,7 @@ while [[ $# -gt 0 ]]; do
     --model-require-unique) MODEL_REQUIRE_UNIQUE=1; shift;;
     --model-include-non-success) MODEL_INCLUDE_NON_SUCCESS=1; shift;;
     --finalize-chunk-size) FINALIZE_CHUNK_SIZE="$2"; shift 2;;
+    --finalize-execution-backend) FINALIZE_EXECUTION_BACKEND="$2"; shift 2;;
     --finalize-num-workers) FINALIZE_NUM_WORKERS="$2"; shift 2;;
     --metric-level) METRIC_LEVEL="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
@@ -158,6 +197,10 @@ if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
   echo "--source must be filesystem or registry." >&2
   exit 2
 fi
+if [[ "$FINALIZE_EXECUTION_BACKEND" != "serial_driver" && "$FINALIZE_EXECUTION_BACKEND" != "dask_worker_chunks" && "$FINALIZE_EXECUTION_BACKEND" != "process_shards" ]]; then
+  echo "--finalize-execution-backend must be serial_driver, dask_worker_chunks, or process_shards." >&2
+  exit 2
+fi
 if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && "$REQUIRE_ROI_CACHE" != "1" ]]; then
   echo "--no-stage-roi-cache-to-scratch is required when --allow-missing-roi-cache is used." >&2
   exit 2
@@ -172,7 +215,36 @@ fi
 if [[ -z "$DEVICE" ]]; then
   DEVICE="cuda:0"
 fi
-
+if [[ "$FINALIZE_NUM_WORKERS" == "auto" || -z "$FINALIZE_NUM_WORKERS" ]]; then
+  FINALIZE_NUM_WORKERS="$NCORES"
+fi
+if ! [[ "$NCORES" =~ ^[0-9]+$ ]] || [[ "$NCORES" -lt 1 ]]; then
+  echo "--ncores must be a positive integer." >&2
+  exit 2
+fi
+if [[ -z "$FINALIZE_NCORES" ]]; then
+  FINALIZE_NCORES="$NCORES"
+fi
+if [[ -z "$FINALIZE_MEM_GB" ]]; then
+  FINALIZE_MEM_GB="$MEM_GB"
+fi
+if [[ -z "$FINALIZE_MAX_ACTIVE" ]]; then
+  FINALIZE_MAX_ACTIVE="$MAX_ACTIVE"
+fi
+if ! [[ "$FINALIZE_NCORES" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_NCORES" -lt 1 ]]; then
+  echo "--finalize-ncores must be a positive integer." >&2
+  exit 2
+fi
+if ! [[ "$FINALIZE_NUM_WORKERS" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_NUM_WORKERS" -lt 1 ]]; then
+  echo "--finalize-num-workers must be a positive integer or auto." >&2
+  exit 2
+fi
+if [[ "$SPLIT_FINALIZATION_JOB" == "1" && "$FINALIZE_NUM_WORKERS" == "$NCORES" && "$FINALIZE_NCORES" != "$NCORES" ]]; then
+  FINALIZE_NUM_WORKERS="$FINALIZE_NCORES"
+fi
+if [[ "$FINALIZE_NUM_WORKERS" -gt "$FINALIZE_NCORES" ]]; then
+  echo "Warning: --finalize-num-workers (${FINALIZE_NUM_WORKERS}) exceeds finalization cores (${FINALIZE_NCORES}); this can oversubscribe the LSF allocation." >&2
+fi
 if [[ -z "$LOG_DIR" ]]; then
   LOG_DIR="${ROOT}/logs/run_subject_mask_batch/bsub_submissions"
 fi
@@ -210,7 +282,12 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   fi
 fi
 
-DISCOVER_ARGS=(--source "$SOURCE" --emit-paths --registry "$REGISTRY")
+if [[ "$SPLIT_FINALIZATION_JOB" == "1" ]]; then
+  DISCOVER_WORKFLOW_STAGE="inference"
+else
+  DISCOVER_WORKFLOW_STAGE="all"
+fi
+DISCOVER_ARGS=(--source "$SOURCE" --emit-paths --registry "$REGISTRY" --workflow-stage "$DISCOVER_WORKFLOW_STAGE")
 if [[ "$FORCE_INFERENCE" == "1" ]]; then DISCOVER_ARGS+=(--force-inference); fi
 if [[ "$FORCE_FINALIZATION" == "1" ]]; then DISCOVER_ARGS+=(--force-finalization); fi
 if [[ "$OVERWRITE" == "1" ]]; then DISCOVER_ARGS+=(--overwrite); fi
@@ -363,6 +440,11 @@ if [[ "$MODEL_REQUIRE_UNIQUE" == "1" ]]; then SUBJECT_ARGS+=(--model-require-uni
 if [[ "$MODEL_INCLUDE_NON_SUCCESS" == "1" ]]; then SUBJECT_ARGS+=(--model-include-non-success); fi
 if [[ "$WRITE_EYE_GEOMETRY" == "1" ]]; then SUBJECT_ARGS+=(--write-eye-geometry); else SUBJECT_ARGS+=(--no-write-eye-geometry); fi
 if [[ "$WRITE_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-component-contours); else SUBJECT_ARGS+=(--no-write-component-contours); fi
+if [[ "$STAGE_OUTPUT_TO_SCRATCH" == "1" ]]; then SUBJECT_ARGS+=(--stage-output-to-scratch); fi
+if [[ -n "$OUTPUT_STAGING_DIR" ]]; then SUBJECT_ARGS+=(--output-staging-dir "$OUTPUT_STAGING_DIR"); fi
+if [[ "$KEEP_STAGED_OUTPUT" == "1" ]]; then SUBJECT_ARGS+=(--keep-staged-output); fi
+if [[ "$STAGE_FINALIZATION_INPUT_TO_SCRATCH" == "1" ]]; then SUBJECT_ARGS+=(--stage-finalization-input-to-scratch); fi
+if [[ -n "$HANDOFF_PACKAGE_DIR" ]]; then SUBJECT_ARGS+=(--handoff-package-dir "$HANDOFF_PACKAGE_DIR"); fi
 if [[ "$FORCE_INFERENCE" == "1" ]]; then SUBJECT_ARGS+=(--force-inference); fi
 if [[ "$FORCE_FINALIZATION" == "1" ]]; then SUBJECT_ARGS+=(--force-finalization); fi
 if [[ "$OVERWRITE" == "1" ]]; then SUBJECT_ARGS+=(--overwrite); fi
@@ -371,6 +453,7 @@ if [[ "$OVERWRITE" == "1" ]]; then SUBJECT_ARGS+=(--overwrite); fi
   echo "SUBJECT_ARGS=("
   printf '  %q\n' "${SUBJECT_ARGS[@]}"
   echo ")"
+  printf 'RUN_LABEL=%q\n' "$RUN_LABEL"
   printf 'STAGE_ROI_CACHE_TO_SCRATCH=%q\n' "$STAGE_ROI_CACHE_TO_SCRATCH"
   printf 'ROI_CACHE_STAGING_DIR=%q\n' "$ROI_CACHE_STAGING_DIR"
 } > "${RUN_DIR}/subject_args.sh"
@@ -381,12 +464,22 @@ cat > "$JOB_SCRIPT" <<'JOBSCRIPT'
 set -euo pipefail
 
 RUN_DIR="$1"
+WORKFLOW_STAGE="${2:-all}"
 if [[ -z "${LSB_JOBINDEX:-}" ]]; then
   echo "LSB_JOBINDEX not set; are you running under bsub array?" >&2
   exit 2
 fi
 
 source "${RUN_DIR}/subject_args.sh"
+
+THREADS_PER_PROCESS="${THREADS_PER_PROCESS:-1}"
+export OMP_NUM_THREADS="$THREADS_PER_PROCESS"
+export MKL_NUM_THREADS="$THREADS_PER_PROCESS"
+export OPENBLAS_NUM_THREADS="$THREADS_PER_PROCESS"
+export TBB_NUM_THREADS="$THREADS_PER_PROCESS"
+export OPENMP_NUM_THREADS="$THREADS_PER_PROCESS"
+export NUM_MKL_THREADS="$THREADS_PER_PROCESS"
+export NUMEXPR_NUM_THREADS="$THREADS_PER_PROCESS"
 
 TARGET_FILE="${RUN_DIR}/target_$(printf '%04d' "${LSB_JOBINDEX}").tsv"
 if [[ ! -f "$TARGET_FILE" ]]; then
@@ -406,6 +499,21 @@ if [[ -z "$zarr_path" ]]; then
   exit 2
 fi
 
+if [[ "$WORKFLOW_STAGE" == "finalization" ]]; then
+  expected_subject_run="subject_masks_unet_registry_${RUN_LABEL}"
+  expected_subject_marker="${zarr_path}/subject_mask_runs/${expected_subject_run}/zarr.json"
+  for attempt in $(seq 1 60); do
+    if [[ -f "$expected_subject_marker" ]]; then
+      break
+    fi
+    if [[ "$attempt" == "60" ]]; then
+      echo "Subject-mask run is not visible for finalization: $expected_subject_marker" >&2
+      exit 3
+    fi
+    sleep 10
+  done
+fi
+
 LOCAL_CACHE_DIR=""
 cleanup() {
   local status=$?
@@ -419,7 +527,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 effective_manifest=""
-if [[ -n "$manifest_path" ]]; then
+if [[ "$WORKFLOW_STAGE" != "finalization" && -n "$manifest_path" ]]; then
   if [[ "${STAGE_ROI_CACHE_TO_SCRATCH}" == "1" ]]; then
     user_name="${USER:-unknown}"
     job_id="${LSB_JOBID:-manual}"
@@ -518,8 +626,9 @@ fi
 report_stem="$(basename "$zarr_path" .zarr)"
 mkdir -p "${RUN_DIR}/reports"
 cmd=(scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline "$zarr_path" "${SUBJECT_ARGS[@]}"
-  --json-report "${RUN_DIR}/reports/${report_stem}.json"
-  --markdown-report "${RUN_DIR}/reports/${report_stem}.md")
+  --workflow-stage "$WORKFLOW_STAGE"
+  --json-report "${RUN_DIR}/reports/${report_stem}_${WORKFLOW_STAGE}.json"
+  --markdown-report "${RUN_DIR}/reports/${report_stem}_${WORKFLOW_STAGE}.md")
 if [[ -n "$effective_manifest" ]]; then
   cmd+=(--roi-cache-manifest "$effective_manifest")
 fi
@@ -527,6 +636,8 @@ fi
 echo "host=$(hostname)"
 echo "job_id=${LSB_JOBID:-}"
 echo "job_index=${LSB_JOBINDEX:-}"
+echo "workflow_stage=${WORKFLOW_STAGE}"
+echo "threads_per_process=${THREADS_PER_PROCESS}"
 echo "zarr_path=${zarr_path}"
 echo "roi_cache_manifest=${manifest_path}"
 echo "effective_roi_cache_manifest=${effective_manifest}"
@@ -536,19 +647,42 @@ printf '\n'
 JOBSCRIPT
 chmod +x "$JOB_SCRIPT"
 
-BSUB_ARGS=(-J "sm_batch[1-${job_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
+INFERENCE_BSUB_ARGS=(-J "sm_infer[1-${job_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/infer_%J_%I.out" -eo "${RUN_DIR}/infer_%J_%I.err")
 if [[ -n "$QUEUE" ]]; then
-  BSUB_ARGS+=(-q "$QUEUE")
+  INFERENCE_BSUB_ARGS+=(-q "$QUEUE")
 fi
 if [[ "$GPUS" != "0" ]]; then
-  BSUB_ARGS+=(-gpu "num=${GPUS}")
+  INFERENCE_BSUB_ARGS+=(-gpu "num=${GPUS}")
 fi
 
-BSUB_CMD="bsub"
-for arg in "${BSUB_ARGS[@]}"; do
-  BSUB_CMD+=" $(printf '%q' "$arg")"
-done
-BSUB_CMD+=" bash $(printf '%q' "$JOB_SCRIPT") $(printf '%q' "$RUN_DIR")"
+FULL_BSUB_ARGS=(-J "sm_batch[1-${job_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
+if [[ -n "$QUEUE" ]]; then
+  FULL_BSUB_ARGS+=(-q "$QUEUE")
+fi
+if [[ "$GPUS" != "0" ]]; then
+  FULL_BSUB_ARGS+=(-gpu "num=${GPUS}")
+fi
+
+FINALIZE_BSUB_ARGS=(-J "sm_finalize[1-${job_count}]%${FINALIZE_MAX_ACTIVE}" -n "$FINALIZE_NCORES" -R "rusage[mem=${FINALIZE_MEM_GB}G]" -oo "${RUN_DIR}/finalize_%J_%I.out" -eo "${RUN_DIR}/finalize_%J_%I.err")
+if [[ -n "$FINALIZE_QUEUE" ]]; then
+  FINALIZE_BSUB_ARGS+=(-q "$FINALIZE_QUEUE")
+fi
+
+format_bsub_cmd() {
+  local mode="$1"
+  shift
+  local cmd="bsub"
+  local arg
+  for arg in "$@"; do
+    cmd+=" $(printf '%q' "$arg")"
+  done
+  cmd+=" bash $(printf '%q' "$JOB_SCRIPT") $(printf '%q' "$RUN_DIR") $(printf '%q' "$mode")"
+  printf '%s\n' "$cmd"
+}
+
+FULL_BSUB_CMD="$(format_bsub_cmd all "${FULL_BSUB_ARGS[@]}")"
+INFERENCE_BSUB_CMD="$(format_bsub_cmd inference "${INFERENCE_BSUB_ARGS[@]}")"
+FINALIZE_BSUB_CMD_TEMPLATE="$(format_bsub_cmd finalization "${FINALIZE_BSUB_ARGS[@]}" -w "done(<inference_job_id>)")"
 
 echo "Run dir: $RUN_DIR"
 echo "Source: $SOURCE"
@@ -559,10 +693,21 @@ echo "Jobs: $job_count (one recording per job)"
 echo "Max active: $MAX_ACTIVE"
 echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS device=$DEVICE"
+echo "Split finalization job: $SPLIT_FINALIZATION_JOB"
+echo "Finalizer: chunk_size=$FINALIZE_CHUNK_SIZE workers=$FINALIZE_NUM_WORKERS backend=$FINALIZE_EXECUTION_BACKEND scheduler=$FINALIZE_SCHEDULER"
+echo "Finalizer resources: queue=${FINALIZE_QUEUE:-<default>} ncores=$FINALIZE_NCORES mem_gb=$FINALIZE_MEM_GB max_active=$FINALIZE_MAX_ACTIVE"
 echo "ROI cache root: ${ROI_CACHE_ROOT:-<none>}"
 echo "Stage ROI cache to scratch: $STAGE_ROI_CACHE_TO_SCRATCH"
+echo "Stage output to scratch: $STAGE_OUTPUT_TO_SCRATCH"
+echo "Stage finalization input to scratch: $STAGE_FINALIZATION_INPUT_TO_SCRATCH"
+echo "Handoff package dir: ${HANDOFF_PACKAGE_DIR:-<none>}"
 echo "Manifest file: $RUN_DIR/targets.tsv"
-echo "Submit command: $BSUB_CMD"
+if [[ "$SPLIT_FINALIZATION_JOB" == "1" ]]; then
+  echo "Inference submit command: $INFERENCE_BSUB_CMD"
+  echo "Finalization submit command template: $FINALIZE_BSUB_CMD_TEMPLATE"
+else
+  echo "Submit command: $FULL_BSUB_CMD"
+fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "Dry run only; no submission."
@@ -574,4 +719,17 @@ if ! command -v bsub >/dev/null 2>&1; then
   exit 2
 fi
 
-bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT" "$RUN_DIR"
+if [[ "$SPLIT_FINALIZATION_JOB" == "1" ]]; then
+  inference_submit_output="$(bsub "${INFERENCE_BSUB_ARGS[@]}" bash "$JOB_SCRIPT" "$RUN_DIR" inference)"
+  echo "$inference_submit_output"
+  inference_job_id="$(printf '%s\n' "$inference_submit_output" | sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' | head -n 1)"
+  if [[ -z "$inference_job_id" ]]; then
+    echo "Could not parse inference job id from bsub output." >&2
+    exit 2
+  fi
+  finalization_dependency="done(${inference_job_id})"
+  finalization_submit_output="$(bsub "${FINALIZE_BSUB_ARGS[@]}" -w "$finalization_dependency" bash "$JOB_SCRIPT" "$RUN_DIR" finalization)"
+  echo "$finalization_submit_output"
+else
+  bsub "${FULL_BSUB_ARGS[@]}" bash "$JOB_SCRIPT" "$RUN_DIR" all
+fi

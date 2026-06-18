@@ -79,9 +79,27 @@ scripts/submit_subject_mask_batches_bsub.sh
 - optionally accepts `--roi-cache-manifest` for a single selected recording
 - stages the cache manifest and `.bin` payload to node-local scratch by default
 - passes the staged manifest into subject-mask inference
+- requests a moderate default allocation (`--ncores 8`) and defaults refined
+  finalizer workers to the requested slot count, avoiding the earlier
+  4-slot/48-worker oversubscription pattern
+- splits GPU inference and CPU finalization into dependent array jobs by
+  default, so the GPU is released after inference
+- stages subject-mask output run groups to a local zarr overlay by default,
+  publishes completed `subject_mask_runs/<run>` into the PRFS archive, then
+  emits registry status for the PRFS path
+- writes a temporary subject-mask run tar package to the non-backed-up NRS
+  handoff directory by default:
+  `/nrs/ahrens/palette_staging/subject_mask_run_packages`
+- has the dependent CPU finalizer extract that NRS handoff package into its own
+  job-scoped local staged zarr, then publish only
+  `refined_subject_masks_runs/<run>` back to PRFS
 - uses a shell `EXIT` trap to delete the staged local cache on success or
   failure
 - writes per-recording JSON and Markdown reports under the submit run directory
+
+Direct PRFS output writes remain available with
+`--no-stage-output-to-scratch`, but broad cluster runs should keep the default
+local-output publish workflow enabled.
 
 The existing `scripts/submit_eye_masks_batches_bsub.sh` is for the older
 eye-mask stage family. It should not be treated as the modern subject-mask
@@ -114,13 +132,20 @@ should use the PRFS registry:
 2. Submit one recording with `--max-active 1` and verify:
    - staged local cache appears under `/scratch/$USER/$LSB_JOBID/...`
    - subject-mask inference consumes the staged manifest
-   - refined-subject finalization completes
+   - subject-mask output is written to a local staged zarr first
+   - completed output run groups are published into the PRFS archive
+   - subject-mask tar package appears under the NRS handoff directory
+   - dependent CPU finalization extracts the package into local scratch
+   - refined-subject finalization completes and publishes refined output to PRFS
+   - registry step status points at the PRFS archive, not the staged zarr
    - the local staged cache directory is removed after the job exits
 3. If the one-recording run is clean, submit the target set with conservative
    concurrency such as `--max-active 2` or `--max-active 4`.
 4. Consider extracting the flat-cache staging helper into a shared Python module
    so keypoints and subject masks use one implementation rather than parallel
    shell/Python staging snippets.
+5. Consider extracting output run-group publishing into a shared helper usable
+   by other large output stages.
 
 ## Safety Notes
 

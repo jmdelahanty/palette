@@ -900,6 +900,7 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
   --roi-cache-root /groups/johnson/johnsonlab/jeremy/cache/<workflow>/roi_cache \
   --queue gpu_l4 \
   --gpus 1 \
+  --ncores 8 \
   --max-active 4 \
   --dry-run
 ```
@@ -911,24 +912,56 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--root`                   | `/groups/johnson/johnsonlab/jeremy/recordings` | Root recordings directory    |
 | `--source`                 | `registry` | Discovery source                    |
 | `--max-active`             | `4`     | Max concurrent one-recording jobs        |
+| `--ncores`                 | `8`     | LSF slots per recording job              |
 | `--mem-gb`                 | `48`    | Memory per job in GB                     |
 | `--gpus`                   | `1`     | GPUs per job                             |
+| `--single-job-finalization` | off | Run refined finalization inside the GPU job instead of a dependent CPU job |
+| `--finalize-ncores`        | `--ncores` | CPU slots for the dependent finalization job |
+| `--finalize-mem-gb`        | `--mem-gb` | Memory for the dependent finalization job |
+| `--finalize-max-active`    | `--max-active` | Max concurrent finalization array tasks |
 | `--registry`               | `/groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite` | Registry path |
 | `--roi-cache-root`         | *(none)* | Directory containing per-recording `*.flat_roi_cache.json` manifests |
 | `--roi-cache-manifest`     | *(none)* | Explicit flat ROI cache manifest for exactly one selected recording |
 | `--no-stage-roi-cache-to-scratch` | off | Disable node-local cache staging |
+| `--no-stage-output-to-scratch` | off | Disable local output staging and write output run groups directly to PRFS |
+| `--no-stage-finalization-input-to-scratch` | off | In split mode, make finalization read the published subject-mask run from PRFS instead of copying it local |
+| `--handoff-package-dir` | `/nrs/ahrens/palette_staging/subject_mask_run_packages` | Non-backed-up NRS directory for temporary subject-mask run tar packages |
+| `--keep-staged-output`     | off     | Preserve the local staged output zarr after successful publish |
 | `--allow-missing-roi-cache` | off    | Allow fallback when no flat cache manifest is found |
 | `--batch-size-sm`          | `128`   | Subject-mask inference batch size        |
+| `--finalize-num-workers`   | `auto`  | Refined finalizer workers; `auto` resolves to finalization CPU slots |
 | `--device`                 | `0` when `--gpus > 0` | Torch device override       |
 | `--overwrite`              | off     | Pass overwrite through to child stages   |
 | `--camera-id-filter`       | *(none)* | Filter by camera_id (registry only)     |
 | `--dry-run`                | off     | Print manifests + commands; do not submit|
 
-**Execution model:** one LSF array task per recording. Each task resolves that
-recording's flat ROI cache manifest, stages the manifest and `.bin` payload to
-node-local scratch by default, passes the staged manifest into
-`run_subject_mask_batch_pipeline`, and removes the staged local cache with an
-`EXIT` trap on success or failure.
+**Execution model:** one LSF array task per recording, split into two arrays by
+default. The GPU array stages the flat ROI cache manifest and `.bin` payload to
+job-scoped node-local scratch, runs U-Net subject-mask inference, writes
+`subject_mask_runs/<run>` into a local staged zarr overlay, validates it,
+publishes the completed run group into the PRFS archive, emits registry status
+for the PRFS path, and removes the staged cache/output with an `EXIT` trap.
+
+The dependent CPU finalization array starts only after the GPU array succeeds.
+It waits for the published `subject_mask_runs/<run>` marker to become visible,
+copies that subject-mask run into its own job-scoped local staged zarr by
+default, runs `finalize_subject_masks` with the `process_shards` backend,
+publishes only `refined_subject_masks_runs/<run>` into the PRFS archive, emits
+registry status for the PRFS path, and cleans local scratch on exit. When
+`--handoff-package-dir` is set, the GPU job also writes a temporary tar package
+of the published subject-mask run to that non-backed-up shared directory. The
+CPU finalizer extracts that package locally instead of walking the PRFS zarr
+chunk tree. The default handoff directory is
+`/nrs/ahrens/palette_staging/subject_mask_run_packages`.
+
+This uses PRFS as the durable cross-node handoff and node-local scratch only as
+per-job acceleration. Do not rely on one job's `/scratch` contents being visible
+to a dependent job on another node. If shared temporary staging is ever required,
+use an explicit shared location such as NRS and create it in a prior dependency
+job so NFS directory caches have time to converge.
+
+Use `--no-stage-output-to-scratch` only for debugging or small local runs where
+direct PRFS zarr writes are acceptable.
 
 **Logs:** `<root>/logs/run_subject_mask_batch/bsub_submissions/sm_<run_id>/`
 

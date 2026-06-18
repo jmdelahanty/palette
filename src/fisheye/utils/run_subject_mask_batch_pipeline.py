@@ -13,10 +13,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import socket
 import subprocess
 import sys
+import tarfile
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
@@ -24,11 +29,17 @@ from typing import Any, Iterable, Optional, Sequence
 import zarr
 
 from fisheye.registry.db import RegistryPaths
+from fisheye.shared.subject_mask_registry_status import (
+    emit_refined_subject_mask_stage_completion,
+    emit_subject_mask_stage_completion,
+)
+from fisheye.shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries
 
 
 RAW_COMPONENTS = ("subject_body", "eyes_union", "swim_bladder")
 REFINED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
+OUTPUT_RUN_PARENTS = ("subject_mask_runs", "refined_subject_masks_runs")
 
 
 @dataclass(frozen=True)
@@ -56,7 +67,24 @@ class ArchiveResult:
     inference_status: str = "not_requested"
     finalization_status: str = "not_requested"
     validation_status: str = "not_run"
+    output_staging_status: str = "not_requested"
+    staged_zarr_path: str = ""
+    publish_status: str = "not_requested"
     error: str = ""
+
+
+@dataclass(frozen=True)
+class OutputStagingContext:
+    source_zarr_path: Path
+    staged_zarr_path: Path
+    staging_root: Path
+
+
+@dataclass(frozen=True)
+class RunGroupPublishPlan:
+    tmp_path: Path
+    target_path: Path
+    overwrite: bool
 
 
 def _utc_now_compact() -> str:
@@ -201,7 +229,10 @@ def build_archive_plan(
     refined_run_name: str,
     force_inference: bool,
     force_finalization: bool,
+    workflow_stage: str = "all",
 ) -> ArchivePlan:
+    if workflow_stage not in {"all", "inference", "finalization"}:
+        raise ValueError(f"workflow_stage must be all, inference, or finalization; got {workflow_stage!r}.")
     subject_parent = zarr_path / "subject_mask_runs"
     refined_parent = zarr_path / "refined_subject_masks_runs"
     subject_children = _child_groups(subject_parent)
@@ -211,8 +242,17 @@ def build_archive_plan(
 
     has_subject_runs = bool(subject_children)
     has_refined_subject_runs = bool(refined_children)
-    run_inference = bool(force_inference or not has_subject_runs)
-    run_finalization = bool(force_finalization or not has_refined_subject_runs)
+    target_subject_run_exists = subject_run_name in subject_children
+    target_refined_run_exists = refined_run_name in refined_children
+    if workflow_stage == "inference":
+        run_inference = bool(force_inference or not target_subject_run_exists)
+        run_finalization = False
+    elif workflow_stage == "finalization":
+        run_inference = False
+        run_finalization = bool(force_finalization or not target_refined_run_exists)
+    else:
+        run_inference = bool(force_inference or not has_subject_runs)
+        run_finalization = bool(force_finalization or not has_refined_subject_runs)
 
     skip_reasons: list[str] = []
     if crop_run is None:
@@ -221,11 +261,19 @@ def build_archive_plan(
         skip_reasons.append("missing_crop_run")
     if keypoint_group is None or keypoint_run is None:
         run_inference = False
+        run_finalization = False
         skip_reasons.append("missing_keypoint_assignment_source")
-    if has_subject_runs and not force_inference:
+    if workflow_stage == "inference" and target_subject_run_exists and not force_inference:
+        skip_reasons.append("target_subject_mask_run_present")
+    elif workflow_stage == "all" and has_subject_runs and not force_inference:
         skip_reasons.append("subject_mask_runs_present")
-    if has_refined_subject_runs and not force_finalization:
+    if workflow_stage == "finalization" and target_refined_run_exists and not force_finalization:
+        skip_reasons.append("target_refined_subject_masks_run_present")
+    elif workflow_stage == "all" and has_refined_subject_runs and not force_finalization:
         skip_reasons.append("refined_subject_masks_runs_present")
+    if workflow_stage == "finalization" and run_finalization and not target_subject_run_exists:
+        run_finalization = False
+        skip_reasons.append("target_subject_mask_run_missing")
     if run_finalization and not run_inference and not has_subject_runs:
         run_finalization = False
         skip_reasons.append("cannot_finalize_without_subject_mask_run")
@@ -247,7 +295,7 @@ def build_archive_plan(
 
 def _selected_subject_run_for_finalization(plan: ArchivePlan) -> str:
     zarr_path = Path(plan.zarr_path)
-    if plan.run_inference:
+    if plan.run_inference or (zarr_path / "subject_mask_runs" / plan.subject_run).is_dir():
         return plan.subject_run
     latest = _latest_group_name(zarr_path / "subject_mask_runs")
     if latest is None:
@@ -255,7 +303,12 @@ def _selected_subject_run_for_finalization(plan: ArchivePlan) -> str:
     return latest
 
 
-def _inference_command(args: argparse.Namespace, plan: ArchivePlan) -> list[str]:
+def _inference_command(
+    args: argparse.Namespace,
+    plan: ArchivePlan,
+    *,
+    defer_registry_status: bool = False,
+) -> list[str]:
     cmd = [
         sys.executable,
         "-m",
@@ -308,12 +361,19 @@ def _inference_command(args: argparse.Namespace, plan: ArchivePlan) -> list[str]
         cmd.extend(["--roi-cache-dir", str(args.roi_cache_dir)])
     if args.roi_cache_manifest is not None:
         cmd.extend(["--roi-cache-manifest", str(args.roi_cache_manifest)])
+    if defer_registry_status:
+        cmd.append("--defer-registry-status")
     if args.overwrite:
         cmd.append("--overwrite")
     return cmd
 
 
-def _finalization_command(args: argparse.Namespace, plan: ArchivePlan) -> list[str]:
+def _finalization_command(
+    args: argparse.Namespace,
+    plan: ArchivePlan,
+    *,
+    defer_registry_status: bool = False,
+) -> list[str]:
     subject_run = _selected_subject_run_for_finalization(plan)
     cmd = [
         sys.executable,
@@ -348,6 +408,8 @@ def _finalization_command(args: argparse.Namespace, plan: ArchivePlan) -> list[s
         cmd.append("--write-eye-geometry")
     if args.write_component_contours:
         cmd.append("--write-component-contours")
+    if defer_registry_status:
+        cmd.append("--defer-registry-status")
     if args.overwrite:
         cmd.append("--overwrite")
     return cmd
@@ -361,6 +423,279 @@ def _run_command(cmd: Sequence[str], *, dry_run: bool) -> str:
     return "ok" if completed.returncode == 0 else f"failed_exit_{completed.returncode}"
 
 
+def _safe_path_component(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value)) or "item"
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _subject_mask_package_path(base_dir: Path, zarr_path: Path, run_name: str) -> Path:
+    archive_component = _safe_path_component(zarr_path.stem)
+    run_component = _safe_path_component(run_name)
+    return base_dir.expanduser().resolve() / f"{archive_component}__{run_component}.tar"
+
+
+def _create_run_group_tar_package(source_run_path: Path, package_path: Path) -> dict[str, Any]:
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = package_path.with_name(f"{package_path.name}.tmp.{os.getpid()}")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    started = datetime.now(timezone.utc)
+    with tarfile.open(tmp_path, mode="w") as tar:
+        tar.add(source_run_path, arcname=source_run_path.name, recursive=True)
+    os.replace(tmp_path, package_path)
+    stat = package_path.stat()
+    finished = datetime.now(timezone.utc)
+    return {
+        "schema": "palette_subject_mask_run_package_v1",
+        "format": "tar",
+        "temporary_handoff": True,
+        "source_run": source_run_path.name,
+        "artifact_path": str(package_path),
+        "size_bytes": int(stat.st_size),
+        "created_at_utc": finished.isoformat(),
+        "duration_seconds": float((finished - started).total_seconds()),
+    }
+
+
+def _extract_run_group_tar_package(package_path: Path, target_parent: Path, expected_run_name: str) -> Path:
+    target_parent.mkdir(parents=True, exist_ok=True)
+    target_run_path = target_parent / expected_run_name
+    if target_run_path.exists() or target_run_path.is_symlink():
+        _remove_path(target_run_path)
+    with tarfile.open(package_path, mode="r") as tar:
+        for member in tar.getmembers():
+            member_path = Path(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise ValueError(f"Unsafe tar member path in {package_path}: {member.name!r}")
+            if not member_path.parts or member_path.parts[0] != expected_run_name:
+                raise ValueError(
+                    f"Unexpected tar member path in {package_path}: {member.name!r}; "
+                    f"expected top-level {expected_run_name!r}."
+                )
+        tar.extractall(target_parent)
+    if not target_run_path.is_dir():
+        raise FileNotFoundError(f"Package did not extract expected run group: {target_run_path}")
+    return target_run_path
+
+
+def _default_output_staging_root() -> Path:
+    user = os.environ.get("USER") or "unknown"
+    job_id = os.environ.get("LSB_JOBID") or f"manual_{os.getpid()}"
+    job_index = os.environ.get("LSB_JOBINDEX")
+    if Path(f"/scratch/{user}").is_dir():
+        base = Path(f"/scratch/{user}") / str(job_id)
+    else:
+        base = Path(os.environ.get("TMPDIR") or "/tmp") / "palette" / str(user) / str(job_id)
+    if job_index:
+        base = base / f"array_{job_index}"
+    return base / "subject_mask_output_staging"
+
+
+def _open_group_mutable(path: Path) -> zarr.Group:
+    try:
+        return zarr.open_group(str(path), mode="a", use_consolidated=False)
+    except TypeError:
+        return zarr.open_group(str(path), mode="a")
+
+
+def _copy_attrs_from_path(source_group_path: Path, target_group: zarr.Group) -> None:
+    attrs = _attrs(source_group_path)
+    if attrs:
+        target_group.attrs.update(attrs)
+
+
+def _prepare_output_staging_zarr(
+    source_zarr_path: Path,
+    *,
+    plan: ArchivePlan,
+    staging_root: Path,
+    overwrite: bool,
+    stage_finalization_input: bool = False,
+) -> OutputStagingContext:
+    source_zarr_path = source_zarr_path.expanduser().resolve()
+    archive_component = _safe_path_component(source_zarr_path.stem)
+    run_component = _safe_path_component(plan.subject_run)
+    staged_zarr_path = staging_root.expanduser().resolve() / f"{archive_component}__{run_component}.zarr"
+    if staged_zarr_path.exists() or staged_zarr_path.is_symlink():
+        if not overwrite:
+            raise FileExistsError(f"Staged output zarr already exists: {staged_zarr_path}")
+        _remove_path(staged_zarr_path)
+    staged_zarr_path.parent.mkdir(parents=True, exist_ok=True)
+
+    local_root = zarr.open_group(str(staged_zarr_path), mode="w")
+    _copy_attrs_from_path(source_zarr_path, local_root)
+    for parent_name in OUTPUT_RUN_PARENTS:
+        parent = local_root.require_group(parent_name)
+        _copy_attrs_from_path(source_zarr_path / parent_name, parent)
+
+    for child in source_zarr_path.iterdir():
+        if child.name in OUTPUT_RUN_PARENTS or child.name == "zarr.json":
+            continue
+        target = staged_zarr_path / child.name
+        if target.exists() or target.is_symlink():
+            continue
+        os.symlink(child, target, target_is_directory=child.is_dir())
+
+    if plan.run_finalization and not plan.run_inference:
+        subject_run = _selected_subject_run_for_finalization(plan)
+        source_subject = source_zarr_path / "subject_mask_runs" / subject_run
+        staged_subject = staged_zarr_path / "subject_mask_runs" / subject_run
+        if not source_subject.is_dir():
+            raise FileNotFoundError(f"Cannot stage finalization source subject-mask run: {source_subject}")
+        if not staged_subject.exists() and not staged_subject.is_symlink():
+            if stage_finalization_input:
+                package = _attrs(source_subject).get("cluster_run_package")
+                package_path = None
+                if isinstance(package, dict):
+                    raw_package_path = package.get("artifact_path")
+                    if isinstance(raw_package_path, str) and raw_package_path:
+                        package_path = Path(raw_package_path)
+                if package_path is not None and package_path.is_file():
+                    _extract_run_group_tar_package(package_path, staged_zarr_path / "subject_mask_runs", subject_run)
+                else:
+                    shutil.copytree(source_subject, staged_subject, symlinks=True)
+            else:
+                os.symlink(source_subject, staged_subject, target_is_directory=True)
+
+    return OutputStagingContext(
+        source_zarr_path=source_zarr_path,
+        staged_zarr_path=staged_zarr_path,
+        staging_root=staging_root,
+    )
+
+
+def _prepare_run_group_publish(
+    *,
+    staged_parent: Path,
+    target_parent: Path,
+    run_name: str,
+    overwrite: bool,
+) -> RunGroupPublishPlan:
+    source = staged_parent / run_name
+    if not source.is_dir():
+        raise FileNotFoundError(f"Staged run group not found: {source}")
+    target_parent.mkdir(parents=True, exist_ok=True)
+    target = target_parent / run_name
+    if target.exists() or target.is_symlink():
+        if not overwrite:
+            raise FileExistsError(f"Target run group already exists: {target}")
+        _remove_path(target)
+    tmp = target_parent / f".{run_name}.publish_tmp.{os.getpid()}"
+    if tmp.exists() or tmp.is_symlink():
+        _remove_path(tmp)
+    shutil.copytree(source, tmp, symlinks=True)
+    return RunGroupPublishPlan(tmp_path=tmp, target_path=target, overwrite=overwrite)
+
+
+def _commit_run_group_publish(plan: RunGroupPublishPlan) -> None:
+    if plan.target_path.exists() or plan.target_path.is_symlink():
+        if not plan.overwrite:
+            raise FileExistsError(f"Target run group already exists: {plan.target_path}")
+        _remove_path(plan.target_path)
+    os.replace(plan.tmp_path, plan.target_path)
+
+
+def _staging_publish_payload(ctx: OutputStagingContext) -> dict[str, Any]:
+    return {
+        "schema": "palette_subject_mask_output_staging_v1",
+        "policy": "node_local_write_publish_to_prfs",
+        "source_zarr_path": str(ctx.source_zarr_path),
+        "staged_zarr_path": str(ctx.staged_zarr_path),
+        "staging_root": str(ctx.staging_root),
+        "published_at_utc": datetime.now(timezone.utc).isoformat(),
+        "host": socket.gethostname(),
+        "lsb_jobid": os.environ.get("LSB_JOBID"),
+        "lsb_jobindex": os.environ.get("LSB_JOBINDEX"),
+    }
+
+
+def _publish_staged_outputs(
+    ctx: OutputStagingContext,
+    *,
+    plan: ArchivePlan,
+    overwrite: bool,
+    handoff_package_dir: Optional[Path] = None,
+) -> None:
+    root = _open_group_mutable(ctx.source_zarr_path)
+    if plan.run_inference:
+        require_runs_parent(root, "subject_mask_runs")
+    if plan.run_finalization:
+        require_runs_parent(root, "refined_subject_masks_runs")
+
+    publish_plans: list[RunGroupPublishPlan] = []
+    if plan.run_inference:
+        publish_plans.append(_prepare_run_group_publish(
+            staged_parent=ctx.staged_zarr_path / "subject_mask_runs",
+            target_parent=ctx.source_zarr_path / "subject_mask_runs",
+            run_name=plan.subject_run,
+            overwrite=overwrite,
+        ))
+    if plan.run_finalization:
+        publish_plans.append(_prepare_run_group_publish(
+            staged_parent=ctx.staged_zarr_path / "refined_subject_masks_runs",
+            target_parent=ctx.source_zarr_path / "refined_subject_masks_runs",
+            run_name=plan.refined_run,
+            overwrite=overwrite,
+        ))
+    for publish_plan in publish_plans:
+        _commit_run_group_publish(publish_plan)
+
+    root = _open_group_mutable(ctx.source_zarr_path)
+    publish_payload = _staging_publish_payload(ctx)
+    if plan.run_inference:
+        subject_parent = require_runs_parent(root, "subject_mask_runs")
+        subject_group = subject_parent[plan.subject_run]
+        subject_group.attrs["cluster_output_staging"] = dict(publish_payload)
+        mark_run_complete(subject_group, parent_group=subject_parent, run_name=plan.subject_run)
+        if handoff_package_dir is not None:
+            package_payload = _create_run_group_tar_package(
+                ctx.source_zarr_path / "subject_mask_runs" / plan.subject_run,
+                _subject_mask_package_path(handoff_package_dir, ctx.source_zarr_path, plan.subject_run),
+            )
+            subject_group.attrs["cluster_run_package"] = dict(package_payload)
+        if not emit_subject_mask_stage_completion(
+            root,
+            ctx.source_zarr_path,
+            run_group=subject_group,
+            run_name=plan.subject_run,
+            source="runtime_subject_mask_write_local_publish",
+            invalidate_on_ok=True,
+        ):
+            raise RuntimeError(f"Failed to emit registry status for subject_mask_runs/{plan.subject_run}")
+    if plan.run_finalization:
+        refined_parent = require_runs_parent(root, "refined_subject_masks_runs")
+        refined_group = refined_parent[plan.refined_run]
+        refined_group.attrs["cluster_output_staging"] = dict(publish_payload)
+        mark_run_complete(refined_group, parent_group=refined_parent, run_name=plan.refined_run)
+        refined_parent.attrs["refined_subject_mask_review_status_latest"] = plan.refined_run
+        if not emit_refined_subject_mask_stage_completion(
+            root,
+            ctx.source_zarr_path,
+            run_group=refined_group,
+            run_name=plan.refined_run,
+            source="runtime_refined_subject_mask_write_local_publish",
+            invalidate_on_ok=True,
+        ):
+            raise RuntimeError(
+                f"Failed to emit registry status for refined_subject_masks_runs/{plan.refined_run}"
+            )
+
+
+def _cleanup_output_staging(ctx: OutputStagingContext) -> None:
+    if ctx.staged_zarr_path.exists() or ctx.staged_zarr_path.is_symlink():
+        _remove_path(ctx.staged_zarr_path)
+    try:
+        ctx.staged_zarr_path.parent.rmdir()
+    except OSError:
+        pass
+
+
 def _open_group(path: Path) -> zarr.Group:
     try:
         return zarr.open_group(str(path), mode="r", use_consolidated=False)
@@ -368,33 +703,44 @@ def _open_group(path: Path) -> zarr.Group:
         return zarr.open_group(str(path), mode="r")
 
 
-def validate_outputs(zarr_path: Path, *, subject_run: str, refined_run: str) -> tuple[str, str]:
+def validate_outputs(
+    zarr_path: Path,
+    *,
+    subject_run: str,
+    refined_run: str,
+    require_subject: bool = True,
+    require_refined: bool = True,
+) -> tuple[str, str]:
     root = _open_group(zarr_path)
     details: list[str] = []
     subject_parent = root.get("subject_mask_runs")
     if subject_parent is None or subject_run not in subject_parent:
-        return "failed", f"missing subject_mask_runs/{subject_run}"
-    subject = subject_parent[subject_run]
-    raw_labels = tuple(str(label) for label in subject.attrs.get("mask_labels", ()))
-    if any(label not in raw_labels for label in RAW_COMPONENTS):
-        return "failed", f"subject mask labels {raw_labels!r} missing {RAW_COMPONENTS!r}"
-    if "mask_probs_roi" not in subject:
-        return "failed", f"subject_mask_runs/{subject_run} missing mask_probs_roi"
-    details.append(f"subject_mask_labels={raw_labels}")
+        if require_subject:
+            return "failed", f"missing subject_mask_runs/{subject_run}"
+    else:
+        subject = subject_parent[subject_run]
+        raw_labels = tuple(str(label) for label in subject.attrs.get("mask_labels", ()))
+        if any(label not in raw_labels for label in RAW_COMPONENTS):
+            return "failed", f"subject mask labels {raw_labels!r} missing {RAW_COMPONENTS!r}"
+        if "mask_probs_roi" not in subject:
+            return "failed", f"subject_mask_runs/{subject_run} missing mask_probs_roi"
+        details.append(f"subject_mask_labels={raw_labels}")
 
     refined_parent = root.get("refined_subject_masks_runs")
     if refined_parent is None or refined_run not in refined_parent:
-        return "failed", f"missing refined_subject_masks_runs/{refined_run}"
-    refined = refined_parent[refined_run]
-    refined_labels = tuple(str(label) for label in refined.attrs.get("mask_labels", ()))
-    if any(label not in refined_labels for label in REFINED_COMPONENTS):
-        return "failed", f"refined mask labels {refined_labels!r} missing {REFINED_COMPONENTS!r}"
-    if "masks_roi" not in refined:
-        return "failed", f"refined_subject_masks_runs/{refined_run} missing masks_roi"
-    for component in REFINED_COMPONENTS:
-        if f"components/{component}" not in refined:
-            return "failed", f"refined_subject_masks_runs/{refined_run} missing components/{component}"
-    details.append(f"refined_mask_labels={refined_labels}")
+        if require_refined:
+            return "failed", f"missing refined_subject_masks_runs/{refined_run}"
+    else:
+        refined = refined_parent[refined_run]
+        refined_labels = tuple(str(label) for label in refined.attrs.get("mask_labels", ()))
+        if any(label not in refined_labels for label in REFINED_COMPONENTS):
+            return "failed", f"refined mask labels {refined_labels!r} missing {REFINED_COMPONENTS!r}"
+        if "masks_roi" not in refined:
+            return "failed", f"refined_subject_masks_runs/{refined_run} missing masks_roi"
+        for component in REFINED_COMPONENTS:
+            if f"components/{component}" not in refined:
+                return "failed", f"refined_subject_masks_runs/{refined_run} missing components/{component}"
+        details.append(f"refined_mask_labels={refined_labels}")
     return "ok", "; ".join(details)
 
 
@@ -426,16 +772,18 @@ def _write_markdown_report(path: Path, *, plans: Sequence[ArchivePlan], results:
         "",
         "## Results",
         "",
-        "| Zarr | Inference | Finalization | Validation | Error |",
-        "|---|---|---|---|---|",
+        "| Zarr | Inference | Finalization | Validation | Publish | Output Staging | Error |",
+        "|---|---|---|---|---|---|---|",
     ]
     for result in results:
         lines.append(
-            "| `{}` | `{}` | `{}` | `{}` | {} |".format(
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} |".format(
                 Path(result.zarr_path).name,
                 result.inference_status,
                 result.finalization_status,
                 result.validation_status,
+                result.publish_status,
+                result.output_staging_status,
                 (result.error or "").replace("|", "\\|"),
             )
         )
@@ -460,6 +808,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pilot-size", type=int, default=None, help="Limit to the first N eligible archives.")
     parser.add_argument("--include-smoke", action="store_true", help="Include /smoke/ analysis Zarrs.")
     parser.add_argument("--run-label", default=f"batch_{_utc_now_compact()}")
+    parser.add_argument(
+        "--workflow-stage",
+        choices=("all", "inference", "finalization"),
+        default="all",
+        help="Run both stages, only subject-mask inference, or only refined-subject finalization.",
+    )
     parser.add_argument("--registry", type=Path, default=None, help="Registry SQLite path. Defaults to PALETTE_REGISTRY_PATH/config.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
@@ -479,14 +833,55 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-include-non-success", action="store_true")
     parser.add_argument("--metric-level", choices=("cheap", "full"), default="cheap")
     parser.add_argument("--finalize-chunk-size", type=int, default=64)
-    parser.add_argument("--finalize-execution-backend", choices=("serial_driver", "dask_worker_chunks"), default="dask_worker_chunks")
+    parser.add_argument(
+        "--finalize-execution-backend",
+        choices=("serial_driver", "dask_worker_chunks", "process_shards"),
+        default="process_shards",
+    )
     parser.add_argument("--finalize-scheduler", choices=("single-threaded", "threads", "processes", "distributed"), default="processes")
-    parser.add_argument("--finalize-num-workers", type=int, default=48)
+    parser.add_argument("--finalize-num-workers", type=int, default=8)
     parser.add_argument("--write-eye-geometry", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--write-component-contours", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--force-inference", action="store_true", help="Run inference even if subject_mask_runs already exists.")
     parser.add_argument("--force-finalization", action="store_true", help="Run finalization even if refined_subject_masks_runs already exists.")
     parser.add_argument("--overwrite", action="store_true", help="Pass overwrite through to child stages.")
+    parser.add_argument(
+        "--stage-output-to-scratch",
+        action="store_true",
+        help=(
+            "Write subject-mask and refined-subject run groups to a local staged "
+            "zarr, then publish completed run groups to the canonical archive."
+        ),
+    )
+    parser.add_argument(
+        "--stage-finalization-input-to-scratch",
+        action="store_true",
+        help=(
+            "For finalization-only jobs with output staging, copy the source "
+            "subject-mask run into the local staged zarr instead of symlinking it."
+        ),
+    )
+    parser.add_argument(
+        "--handoff-package-dir",
+        type=Path,
+        help=(
+            "Shared non-backed-up directory, typically on NRS, for temporary "
+            "subject-mask run tar packages used by split CPU finalization jobs."
+        ),
+    )
+    parser.add_argument(
+        "--output-staging-dir",
+        type=Path,
+        help=(
+            "Directory for staged output zarr overlays. Defaults to "
+            "/scratch/$USER/$LSB_JOBID/... when available."
+        ),
+    )
+    parser.add_argument(
+        "--keep-staged-output",
+        action="store_true",
+        help="Do not remove the staged local zarr after a successful publish.",
+    )
     parser.add_argument("--continue-on-error", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--json-report", type=Path)
     parser.add_argument("--markdown-report", type=Path)
@@ -525,6 +920,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             refined_run_name=refined_run,
             force_inference=bool(args.force_inference),
             force_finalization=bool(args.force_finalization),
+            workflow_stage=str(args.workflow_stage),
         )
         for zarr_path in discovered_zarrs
     ]
@@ -545,8 +941,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"analysis_archives_discovered: {len(all_plans)}")
     print(f"archives_selected: {len(plans)}")
     print(f"mode: {'apply' if args.apply else 'dry-run'}")
+    print(f"workflow_stage: {args.workflow_stage}")
     print(f"subject_run: {subject_run}")
     print(f"refined_run: {refined_run}")
+    print(f"stage_output_to_scratch: {bool(args.stage_output_to_scratch)}")
+    if args.stage_output_to_scratch:
+        output_staging_root = (
+            args.output_staging_dir.expanduser().resolve()
+            if args.output_staging_dir is not None
+            else _default_output_staging_root()
+        )
+        print(f"output_staging_root: {output_staging_root}")
+    else:
+        output_staging_root = None
 
     results: list[ArchiveResult] = []
     exit_code = 0
@@ -559,27 +966,91 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             planned_inference=plan.run_inference,
             planned_finalization=plan.run_finalization,
         )
+        staged_ctx: OutputStagingContext | None = None
+        effective_plan = plan
         try:
+            if args.stage_output_to_scratch:
+                if dry_run:
+                    result.output_staging_status = "planned"
+                else:
+                    assert output_staging_root is not None
+                    staged_ctx = _prepare_output_staging_zarr(
+                        Path(plan.zarr_path),
+                        plan=plan,
+                        staging_root=output_staging_root,
+                        overwrite=bool(args.overwrite),
+                        stage_finalization_input=bool(args.stage_finalization_input_to_scratch),
+                    )
+                    effective_plan = replace(plan, zarr_path=str(staged_ctx.staged_zarr_path))
+                    result.output_staging_status = "staged"
+                    result.staged_zarr_path = str(staged_ctx.staged_zarr_path)
+                    print(f"staged_output_zarr: {staged_ctx.staged_zarr_path}", flush=True)
+
             if plan.run_inference:
-                result.inference_status = _run_command(_inference_command(args, plan), dry_run=dry_run)
+                result.inference_status = _run_command(
+                    _inference_command(
+                        args,
+                        effective_plan,
+                        defer_registry_status=staged_ctx is not None,
+                    ),
+                    dry_run=dry_run,
+                )
                 if result.inference_status != "ok" and not dry_run:
                     raise RuntimeError(f"inference {result.inference_status}")
             if plan.run_finalization:
-                result.finalization_status = _run_command(_finalization_command(args, plan), dry_run=dry_run)
+                result.finalization_status = _run_command(
+                    _finalization_command(
+                        args,
+                        effective_plan,
+                        defer_registry_status=staged_ctx is not None,
+                    ),
+                    dry_run=dry_run,
+                )
                 if result.finalization_status != "ok" and not dry_run:
                     raise RuntimeError(f"finalization {result.finalization_status}")
             if dry_run:
                 result.validation_status = "planned"
+                result.publish_status = "planned" if args.stage_output_to_scratch else "not_requested"
             else:
                 validation_subject_run = plan.subject_run if plan.run_inference else _selected_subject_run_for_finalization(plan)
+                validation_path = Path(effective_plan.zarr_path)
                 status, detail = validate_outputs(
-                    Path(plan.zarr_path),
+                    validation_path,
                     subject_run=validation_subject_run,
                     refined_run=plan.refined_run,
+                    require_subject=bool(plan.run_inference or plan.run_finalization),
+                    require_refined=bool(plan.run_finalization),
                 )
                 result.validation_status = status
                 if status != "ok":
                     raise RuntimeError(detail)
+                if staged_ctx is not None:
+                    _publish_staged_outputs(
+                        staged_ctx,
+                        plan=plan,
+                        overwrite=bool(args.overwrite),
+                        handoff_package_dir=args.handoff_package_dir,
+                    )
+                    result.publish_status = "ok"
+                    status, detail = validate_outputs(
+                        Path(plan.zarr_path),
+                        subject_run=validation_subject_run,
+                        refined_run=plan.refined_run,
+                        require_subject=bool(plan.run_inference or plan.run_finalization),
+                        require_refined=bool(plan.run_finalization),
+                    )
+                    result.validation_status = status
+                    if status != "ok":
+                        raise RuntimeError(f"published output validation failed: {detail}")
+                    if not bool(args.keep_staged_output):
+                        try:
+                            _cleanup_output_staging(staged_ctx)
+                            result.output_staging_status = "cleaned"
+                        except Exception as cleanup_exc:
+                            result.output_staging_status = f"cleanup_failed:{cleanup_exc}"
+                            print(f"warning: staged output cleanup failed: {cleanup_exc}", file=sys.stderr)
+                else:
+                    result.publish_status = "not_requested"
                 if args.consolidate_metadata:
                     zarr.consolidate_metadata(plan.zarr_path)
         except Exception as exc:
