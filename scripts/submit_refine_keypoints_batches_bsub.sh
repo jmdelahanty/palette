@@ -5,6 +5,7 @@ ROOT="/groups/johnson/johnsonlab/jeremy/recordings"
 FILE_LIST=""
 PATH_CONTAINS=""
 LIMIT=0
+REGISTRY=""
 
 QUEUE="short"
 NCORES=4
@@ -42,6 +43,7 @@ Discovery:
   --file-list PATH          Text file with analysis zarr paths; bypasses discovery
   --path-contains STR       Keep discovered zarr paths containing this substring
   --limit N                 Limit discovered paths after sorting; 0 means no limit
+  --registry PATH           Registry sqlite path exported as PALETTE_REGISTRY_PATH in each task
 
 Refinement:
   --keypoint-run NAME       Explicit keypoints_runs child to refine (default: latest)
@@ -90,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --file-list) FILE_LIST="$2"; shift 2;;
     --path-contains) PATH_CONTAINS="$2"; shift 2;;
     --limit) LIMIT="$2"; shift 2;;
+    --registry) REGISTRY="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
@@ -179,12 +182,15 @@ if [[ "$AUTO_REVIEW_OVERWRITE" == "1" ]]; then REFINE_ARGS+=(--auto-review-overw
 printf -v REFINE_ARGS_SHELL '%q ' "${REFINE_ARGS[@]}"
 
 JOB_SCRIPT="${RUN_DIR}/run_refine_keypoints_task.sh"
+REPO_DIR_Q="$(printf '%q' "$REPO_DIR")"
+REGISTRY_Q="$(printf '%q' "$REGISTRY")"
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 
 RUN_DIR="\$1"
 TARGETS_FILE="\${RUN_DIR}/zarr_paths.txt"
+REGISTRY_PATH=${REGISTRY_Q}
 if [[ -z "\${LSB_JOBINDEX:-}" ]]; then
   echo "LSB_JOBINDEX not set; are you running under bsub array?" >&2
   exit 2
@@ -195,7 +201,11 @@ if [[ -z "\$zarr_path" ]]; then
   exit 2
 fi
 
-cd "$(printf '%q' "$REPO_DIR")"
+cd ${REPO_DIR_Q}
+if [[ -n "\$REGISTRY_PATH" ]]; then
+  export PALETTE_REGISTRY_PATH="\$REGISTRY_PATH"
+  echo "registry_path=\$PALETTE_REGISTRY_PATH"
+fi
 echo "job_id=\${LSB_JOBID:-unknown}"
 echo "job_index=\${LSB_JOBINDEX}"
 echo "host=\$(hostname)"
@@ -210,7 +220,7 @@ chmod +x "$JOB_SCRIPT"
 
 scripts/py - "$RUN_DIR/submission_manifest.json" "$ROOT" "$FILE_LIST" "$PATH_CONTAINS" "$LIMIT" \
   "$target_count" "$QUEUE" "$NCORES" "$MEM_GB" "$WALLTIME" "$MAX_ACTIVE" "$KEYPOINT_RUN" \
-  "$CONFIG" "$AUTO_REVIEW" "$OVERWRITE" "$JOB_SCRIPT" "$TARGETS_FILE" "$REPO_DIR" <<'PY'
+  "$CONFIG" "$AUTO_REVIEW" "$OVERWRITE" "$JOB_SCRIPT" "$TARGETS_FILE" "$REPO_DIR" "$REGISTRY" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -234,6 +244,7 @@ from pathlib import Path
     job_script,
     targets_file,
     repo_dir,
+    registry,
 ) = sys.argv[1:]
 
 payload = {
@@ -254,6 +265,7 @@ payload = {
     "job_script": job_script,
     "targets_file": targets_file,
     "repo_dir": repo_dir,
+    "registry": registry or None,
 }
 Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -282,6 +294,7 @@ echo "Run dir: $RUN_DIR"
 echo "Targets: $target_count"
 echo "Target list: $TARGETS_FILE"
 echo "Repo dir: $REPO_DIR"
+echo "Registry: ${REGISTRY:-<default from environment/repo>}"
 echo "Queue: $QUEUE"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB walltime=$WALLTIME"
 echo "Max active: $MAX_ACTIVE"
