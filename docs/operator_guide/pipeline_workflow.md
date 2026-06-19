@@ -531,7 +531,9 @@ scripts/py -m fisheye.refinement.finalize_subject_masks \
 
 `--postcompute-backend process_shards` affects only eye geometry and body/swim
 contour materialization. Canonical masks and metrics are still produced by the
-main finalizer backend, and `serial` remains the default postcompute path.
+main finalizer backend. The subject-mask batch workflow defaults this expensive
+postcompute step to `process_shards`; the lower-level finalizer CLI keeps
+`serial` available for historical-path debugging.
 
 Generated refined runs are candidates until reviewed. Do not treat a
 smart-finalized run as training-approved solely because all components are

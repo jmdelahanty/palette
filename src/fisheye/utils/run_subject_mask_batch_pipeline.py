@@ -883,10 +883,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--finalize-postcompute-backend",
         choices=("serial", "process_shards"),
-        default="serial",
+        default="process_shards",
         help=(
-            "Backend for expensive finalizer postcompute artifacts. serial preserves existing behavior; "
-            "process_shards parallelizes eye geometry and component contour materialization."
+            "Backend for expensive finalizer postcompute artifacts. process_shards is the batch-workflow "
+            "default for row-sharded eye geometry and component contour materialization; serial preserves "
+            "the historical in-process path."
         ),
     )
     parser.add_argument(

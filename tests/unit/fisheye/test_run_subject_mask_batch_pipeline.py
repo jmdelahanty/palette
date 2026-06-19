@@ -12,6 +12,12 @@ from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils import run_subject_mask_batch_pipeline as mod
 
 
+def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
+    args = mod._build_parser().parse_args(["/recordings"])
+
+    assert args.finalize_postcompute_backend == "process_shards"
+
+
 def test_zarr_paths_from_report_reads_unique_result_paths(tmp_path: Path) -> None:
     report = tmp_path / "report.json"
     report.write_text(

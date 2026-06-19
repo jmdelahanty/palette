@@ -930,7 +930,7 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--allow-missing-roi-cache` | off    | Allow fallback when no flat cache manifest is found |
 | `--batch-size-sm`          | `128`   | Subject-mask inference batch size        |
 | `--finalize-num-workers`   | `auto`  | Refined finalizer workers; `auto` resolves to finalization CPU slots |
-| `--finalize-postcompute-backend` | `serial` | Expensive finalizer postcompute backend for eye geometry/body-swim contours; use `process_shards` for row-sharded postcompute |
+| `--finalize-postcompute-backend` | `process_shards` | Expensive finalizer postcompute backend for eye geometry/body-swim contours; use `serial` only for historical in-process debugging |
 | `--finalize-postcompute-chunk-size` | *(finalizer default)* | Rows per postcompute shard; defaults inside the finalizer to `--finalize-chunk-size` |
 | `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
 | `--retain-source-seeds`   | off     | Retain dense `source_seed_masks_roi` debug arrays in refined runs |
@@ -958,11 +958,19 @@ CPU finalizer extracts that package locally instead of walking the PRFS zarr
 chunk tree. The default handoff directory is
 `/nrs/ahrens/palette_staging/subject_mask_run_packages`.
 
-`--finalize-postcompute-backend process_shards` can be added when the finalizer
-also writes eye geometry and component contours. This keeps canonical mask
-finalization on the main `--finalize-execution-backend` path, but parallelizes
-the expensive derived geometry/contour pass and merges packed contour arrays in
-the parent process.
+A full GoodCopBadCop validation run on `2026-06-19` processed `120,221` ROIs
+with `process_shards` finalization in `468.3s`, including `31.5s` for sharded
+eye-geometry/body-swim-contour postcompute. The total finalization workflow was
+`1175.7s` because publishing the staged refined run back to PRFS took `698.5s`.
+For this workflow, treat PRFS publication as a first-class performance cost and
+keep compute-heavy finalization on node-local scratch.
+
+When the finalizer writes eye geometry and component contours, the batch
+workflow defaults to `--finalize-postcompute-backend process_shards`. This keeps
+canonical mask finalization on the main `--finalize-execution-backend` path, but
+parallelizes the expensive derived geometry/contour pass and merges packed
+contour arrays in the parent process. Use `--finalize-postcompute-backend
+serial` only when debugging the historical in-process path.
 
 By default, refined subject-mask finalization omits dense
 `source_seed_masks_roi` arrays and records `source_seed_masks_status="omitted"`.

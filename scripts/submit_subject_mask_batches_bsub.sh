@@ -38,7 +38,7 @@ FINALIZE_CHUNK_SIZE=256
 FINALIZE_EXECUTION_BACKEND="process_shards"
 FINALIZE_SCHEDULER="processes"
 FINALIZE_NUM_WORKERS="auto"
-FINALIZE_POSTCOMPUTE_BACKEND="serial"
+FINALIZE_POSTCOMPUTE_BACKEND="process_shards"
 FINALIZE_POSTCOMPUTE_CHUNK_SIZE=""
 FINALIZE_POSTCOMPUTE_NUM_WORKERS="auto"
 METRIC_LEVEL="cheap"
@@ -127,7 +127,7 @@ Options:
   --finalize-num-workers N|auto
                             Refined finalizer worker count (default: auto => --ncores)
   --finalize-postcompute-backend NAME
-                            serial|process_shards for eye geometry/contours (default: serial)
+                            serial|process_shards for eye geometry/contours (default: process_shards)
   --finalize-postcompute-chunk-size N
                             Rows per postcompute shard (default: finalizer uses --finalize-chunk-size)
   --finalize-postcompute-num-workers N|auto

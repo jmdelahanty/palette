@@ -81,11 +81,69 @@ Interpretation:
 - Vectorizing the keypoint split in subbatches and delaying `_measure_mask()`'s pixel-centroid scan until ellipse-fit failure reduced `eye_assignment` attribution from `17.96s` to `13.02s`. The finalizer run improved modestly from `14.1s` to `13.5s` because process-shard wall time is now governed by several similarly sized phases. Assignment status counts were unchanged.
 - Optimizing component selection for the common single-component split-mask case reduced `eye_assignment_select_components` from `6.55s` to `1.52s` and total `eye_assignment` attribution from `13.02s` to `7.48s`. The full finalizer run improved from `13.5s` to `12.9s`; status counts remained unchanged.
 
+## Full Recording Validation - 2026-06-19
+
+Validation run:
+
+```text
+recording: 2026-06-14T21-12-08Z_arena_1_GoodCopBadCop
+subject_run: subject_masks_unet_registry_subject_masks_full_validate_20260619_01
+refined_run: refined_subject_masks_smart_finalizer_subject_masks_full_validate_20260619_01
+LSF finalization job: 151434577[1] on h06u29
+rows: 120,221
+```
+
+Finalization settings:
+
+```text
+execution_backend=process_shards
+num_workers=8
+chunk_size=256
+postcompute_backend=process_shards
+postcompute_chunk_size=256
+write_eye_geometry=true
+write_component_contours=true
+retain_source_seeds=false
+stage_finalization_input_to_scratch=true
+publish_to_prfs=true
+```
+
+Observed workflow timings:
+
+| Phase | Duration |
+|---|---:|
+| Prepare local staged input | 4.0s |
+| Finalizer subprocess | 468.3s |
+| Output validation | 0.03s |
+| Publish staged refined run to PRFS | 698.5s |
+| Validate published output | 0.04s |
+| Cleanup local staging | 3.4s |
+| Consolidate metadata | 1.3s |
+| Total finalization workflow | 1175.7s |
+
+Finalizer attrs on the published refined run confirm:
+
+```text
+smart_finalizer_execution_backend=process_shards
+smart_finalizer_postcompute_backend=process_shards
+smart_finalizer_postcompute_chunk_size=256
+smart_finalizer_postcompute_num_workers=8
+source_seed_masks_status=omitted
+cluster_output_staging.policy=node_local_write_publish_to_prfs
+```
+
+The finalizer itself processed the full recording at `260.8 rows/s`.
+Sharded postcompute completed in `31.5s` (`3814.9 rows/s`) and wrote eye
+geometry plus body/swim contours. The long pole for this completed cluster run
+was not postcompute; it was durable publication of the staged refined Zarr back
+to PRFS. This is the evidence used to promote `process_shards` as the
+subject-mask batch workflow's default postcompute backend.
+
 ## Current Optimization Tiers
 
 ### Tier 1: Low Risk
 
-1. Promote sharded postcompute from benchmark-only into production behind an explicit option, then make it the default after one more review. Implemented behind `--postcompute-backend process_shards`; `serial` remains the default. Workers compute fixed eye geometry and local contour packs; the parent process merges variable-length contour arrays and writes them deterministically.
+1. Promote sharded postcompute from benchmark-only into production behind an explicit option, then make it the batch-workflow default after full-run validation. Implemented behind `--postcompute-backend process_shards`; the subject-mask batch workflow now defaults to `process_shards` while the lower-level finalizer CLI keeps `serial` available for historical-path debugging. Workers compute fixed eye geometry and local contour packs; the parent process merges variable-length contour arrays and writes them deterministically.
 2. Reuse cheap topology metrics already computed by `finalize_component_mask()` for raw finalized components instead of recomputing them in `_write_component_metrics_chunk()`. This is now implemented for raw finalized components.
 3. Seed assignment-derived `eye_left/right` `component_count` and `largest_component_fraction` from the eye-assignment contract. Assigned eye masks are either empty or one selected foreground component, so only hole metrics still need a mask pass.
 4. Vectorize mask-present, area, centroid, and bounding-box metrics for one component row chunk. This replaces the finalizer's old per-mask `np.nonzero()` centroid/bbox loop while preserving the existing output arrays.
