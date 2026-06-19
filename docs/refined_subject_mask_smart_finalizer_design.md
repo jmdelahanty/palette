@@ -69,6 +69,9 @@ Target V1 behavior:
 - route suspicious rows/components to `needs_review`
 - by default, write canonical masks, provenance, reason tags, finalization
   metrics, and cheap topology metrics first
+- omit dense per-component `source_seed_masks_roi` intermediates by default;
+  retain them only when `--retain-source-seeds` is requested for debugging or
+  troubleshooting
 - record phase and chunk timings so scheduler/write changes have a measurable
   baseline
 - optionally use Dask worker chunks for disjoint row-range zarr writes
@@ -197,6 +200,13 @@ Component metric groups should advertise their schema explicitly:
 Generated metric-QC reason tags use the `needs_review_metric_*` prefix. This
 lets refresh/backfill tools replace generated metric-QC tags without removing
 manual/operator tags such as `manual_correction`.
+
+`source_seed_masks_roi` is a diagnostic retention surface, not a canonical
+production requirement. The default finalizer records
+`source_seed_masks_status="omitted"` and keeps the raw model probabilities plus
+finalized masks/metrics/reasons as durable evidence. Use
+`--retain-source-seeds` to write `components/<component>/source_seed_masks_roi`
+when a run needs seed-vs-final troubleshooting.
 
 Recommended cleanup metrics are written as finalization metrics in the default
 path where available:
@@ -587,6 +597,13 @@ Implemented:
     relation surfaces during finalization
   - supports `--execution-backend dask_worker_chunks` for Dask worker-written
     disjoint row chunks
+  - supports `--execution-backend process_shards` for row-sharded worker
+    processes that open the zarr once per shard and write disjoint row chunks
+  - supports `--postcompute-backend process_shards` for expensive derived
+    artifacts requested by `--write-eye-geometry` and
+    `--write-component-contours`; workers compute fixed eye geometry and local
+    contour packs, and the parent merges packed variable-length contour arrays
+    deterministically
   - writes `smart_finalizer_timing_summary` and
     `smart_finalizer_chunk_timings` attrs to expose per-phase and per-chunk
     runtime

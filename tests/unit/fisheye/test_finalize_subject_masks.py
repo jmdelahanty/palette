@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.diagnostics.benchmark_subject_mask_full_finalizer import (
+    benchmark_subject_mask_full_finalizer,
+)
 from fisheye.refinement import finalize_subject_masks as mod
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.tune import refined_subject_mask_review as review_mod
@@ -127,6 +130,8 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert summary["chunk_size"] == 1
     assert summary["metric_level"] == "cheap"
     assert summary["write_eye_geometry"] is False
+    assert summary["retain_source_seeds"] is False
+    assert summary["source_seed_masks_status"] == "omitted"
     assert summary["execution_backend"] == "serial_driver"
     assert summary["dask_execution_enabled"] is False
     assert summary["dask_scheduler"] == "threads"
@@ -134,6 +139,13 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert summary["timing_summary"]["chunk_count"] == 2
     assert summary["timing_summary"]["dask_scheduler"] == "threads"
     assert "finalize_subject_body" in summary["timing_summary"]["phase_seconds"]
+    assert "compute_spatial_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
+    assert "write_masks_roi_subject_body" in summary["timing_summary"]["phase_seconds"]
+    assert "write_finalization_metrics_subject_body" in summary["timing_summary"]["phase_seconds"]
+    assert "compute_hole_metrics_eye_left" in summary["timing_summary"]["phase_seconds"]
+    assert "compute_hole_metrics_eye_right" in summary["timing_summary"]["phase_seconds"]
+    assert "compute_topology_metrics_eye_left" not in summary["timing_summary"]["phase_seconds"]
+    assert "compute_topology_metrics_eye_right" not in summary["timing_summary"]["phase_seconds"]
     assert summary["review_counts"]["subject_body"]["needs_review"] >= 1
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_001"]
@@ -142,6 +154,9 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run.attrs["smart_finalizer_chunk_count"] == 2
     assert run.attrs["smart_finalizer_chunk_size"] == 1
     assert run.attrs["smart_finalizer_metric_level"] == "cheap"
+    assert run.attrs["smart_finalizer_retain_source_seeds"] is False
+    assert run.attrs["source_seed_masks_status"] == "omitted"
+    assert run.attrs["source_seed_masks_reason"] == "production_default"
     assert run.attrs["smart_finalizer_execution_backend"] == "serial_driver"
     assert run.attrs["dask_execution_enabled"] is False
     assert run.attrs["dask_scheduler"] == "threads"
@@ -154,6 +169,8 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert provenance_parameters["dask_num_workers"] == 2
     assert provenance_parameters["chunk_size"] == 1
     assert provenance_parameters["metric_level"] == "cheap"
+    assert provenance_parameters["retain_source_seeds"] is False
+    assert provenance_parameters["source_seed_masks_status"] == "omitted"
     assert run.attrs["eye_geometry_status"] == "deferred"
     assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
     assert run.attrs["component_review_statuses"]["subject_body"]["state"] == "pending"
@@ -197,7 +214,86 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert component_metrics.attrs["qc_policy"]["component_name"] == "subject_body"
     assert component_metrics.attrs["metric_level"] == "cheap"
     assert np.isnan(np.asarray(component_metrics["sigma_noise"][:], dtype=np.float32)[0])
+    assert run["components/subject_body"].attrs["source_seed_masks_status"] == "omitted"
+    assert "source_seed_masks_roi" not in run["components/subject_body"]
     assert "relations" not in run
+
+
+def test_finalize_subject_mask_run_can_retain_source_seed_masks(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_retained_seeds_001",
+        chunk_size=1,
+        retain_source_seeds=True,
+    )
+
+    assert summary["retain_source_seeds"] is True
+    assert summary["source_seed_masks_status"] == "retained"
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_retained_seeds_001"]
+    assert run.attrs["smart_finalizer_retain_source_seeds"] is True
+    assert run.attrs["source_seed_masks_status"] == "retained"
+    assert run.attrs["source_seed_masks_reason"] == "retain_source_seeds=true"
+    provenance_parameters = run.attrs["provenance"]["parameters"]
+    assert provenance_parameters["retain_source_seeds"] is True
+    assert provenance_parameters["source_seed_masks_status"] == "retained"
+
+    component = run["components/subject_body"]
+    assert component.attrs["source_seed_masks_status"] == "retained"
+    assert component.attrs["source_seed_masks_reason"] == "retain_source_seeds=true"
+    assert component.attrs["source_seed_masks_schema_id"] == "refined_subject_component_source_seed_masks_v1"
+    assert tuple(component["source_seed_masks_roi"].shape) == (2, 10, 10)
+    assert np.count_nonzero(np.asarray(component["source_seed_masks_roi"][:], dtype=np.uint8)) > 0
+
+
+def test_component_spatial_metrics_match_legacy_review_helpers() -> None:
+    masks = np.zeros((4, 7, 9), dtype=np.uint8)
+    masks[0, 1:4, 2:6] = 1
+    masks[1, 0, 0] = 1
+    masks[1, 6, 8] = 1
+    masks[2, 3:6, 1:3] = 1
+
+    metrics = mod._compute_component_spatial_metrics(masks)
+    legacy_present, legacy_area = review_mod._compute_mask_metrics(masks[:, None, :, :])
+    legacy_geometry = review_mod._compute_geometry_metrics(masks[:, None, :, :])
+
+    np.testing.assert_array_equal(metrics["mask_present"], legacy_present[:, 0])
+    np.testing.assert_allclose(metrics["area_px"], legacy_area[:, 0])
+    np.testing.assert_allclose(metrics["centroid_xy"], legacy_geometry["centroid_xy"][:, 0, :])
+    np.testing.assert_array_equal(metrics["centroid_valid"], legacy_geometry["centroid_valid"][:, 0])
+    np.testing.assert_allclose(metrics["bbox_xyxy"], legacy_geometry["bbox_xyxy"][:, 0, :])
+    np.testing.assert_array_equal(metrics["bbox_valid"], legacy_geometry["bbox_valid"][:, 0])
+
+
+def test_component_hole_metrics_match_legacy_topology_helper() -> None:
+    masks = np.zeros((3, 9, 9), dtype=np.uint8)
+    masks[0, 1:8, 1:8] = 1
+    masks[0, 3:5, 3:5] = 0
+    masks[1, 2:6, 2:6] = 1
+
+    hole_metrics = mod._compute_component_hole_metrics(masks)
+    legacy = review_mod._compute_component_topology_metrics(masks)
+
+    np.testing.assert_array_equal(hole_metrics["hole_count"], legacy["hole_count"])
+    np.testing.assert_allclose(hole_metrics["hole_area_fraction"], legacy["hole_area_fraction"])
+
+
+def test_assigned_eye_component_metric_seed_matches_assignment_contract() -> None:
+    masks = np.zeros((3, 9, 9), dtype=np.uint8)
+    masks[0, 1:4, 1:4] = 1
+    masks[2, 2:7, 2:7] = 1
+    masks[2, 4, 4] = 0
+
+    metrics = mod._component_metrics_from_assigned_eye_masks(masks)
+
+    np.testing.assert_array_equal(metrics["component_count"], np.asarray([1, 0, 1], dtype=np.int32))
+    np.testing.assert_allclose(
+        metrics["largest_component_fraction"],
+        np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+    )
 
 
 def test_finalize_subject_mask_run_can_write_full_metrics_and_eye_geometry(monkeypatch) -> None:
@@ -249,6 +345,199 @@ def test_finalize_subject_mask_run_can_write_body_and_swim_contours(monkeypatch)
         assert tuple(contours["len"].shape) == (2,)
         assert contours["points_xy"].shape[1] == 2
         assert np.all(np.asarray(contours["len"][:], dtype=np.int32) > 0)
+
+
+def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+
+    serial_summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_postcompute_serial",
+        chunk_size=1,
+        write_eye_geometry=True,
+        write_component_contours=True,
+        defer_registry_status=True,
+    )
+    sharded_summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_postcompute_sharded",
+        chunk_size=1,
+        write_eye_geometry=True,
+        write_component_contours=True,
+        postcompute_backend="process_shards",
+        postcompute_chunk_size=1,
+        postcompute_num_workers=1,
+        defer_registry_status=True,
+    )
+
+    assert serial_summary["postcompute_backend"] == "serial"
+    assert sharded_summary["postcompute_backend"] == "process_shards"
+    assert sharded_summary["postcompute_summary"]["status"] == "updated"
+    assert sharded_summary["postcompute_summary"]["shard_count"] == 2
+    assert [item["component"] for item in sharded_summary["component_contours"]] == [
+        "subject_body",
+        "swim_bladder",
+    ]
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    serial = root["refined_subject_masks_runs/refined_subject_masks_postcompute_serial"]
+    sharded = root["refined_subject_masks_runs/refined_subject_masks_postcompute_sharded"]
+
+    assert sharded.attrs["smart_finalizer_postcompute_backend"] == "process_shards"
+    assert sharded.attrs["smart_finalizer_postcompute_chunk_size"] == 1
+    assert sharded.attrs["smart_finalizer_postcompute_num_workers"] == 1
+    assert sharded.attrs["eye_geometry_status"] == "computed"
+    assert sharded.attrs["eye_geometry_postcompute_backend"] == "process_shards"
+    assert sharded.attrs["component_contours_status"] == "computed"
+    assert sharded.attrs["component_contours_postcompute_backend"] == "process_shards"
+    assert "postcompute_process_shards" in sharded.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+
+    for component in ("eye_left", "eye_right"):
+        np.testing.assert_allclose(
+            np.asarray(serial[f"components/{component}/geometry/ellipse_params"][:], dtype=np.float32),
+            np.asarray(sharded[f"components/{component}/geometry/ellipse_params"][:], dtype=np.float32),
+            equal_nan=True,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(serial[f"components/{component}/geometry/ellipse_success"][:], dtype=bool),
+            np.asarray(sharded[f"components/{component}/geometry/ellipse_success"][:], dtype=bool),
+        )
+
+    np.testing.assert_allclose(
+        np.asarray(serial["relations/eye_pair/metrics/separation_px"][:], dtype=np.float32),
+        np.asarray(sharded["relations/eye_pair/metrics/separation_px"][:], dtype=np.float32),
+        equal_nan=True,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(serial["relations/eye_pair/metrics/separation_valid"][:], dtype=bool),
+        np.asarray(sharded["relations/eye_pair/metrics/separation_valid"][:], dtype=bool),
+    )
+
+    for component in ("subject_body", "swim_bladder", "eye_left", "eye_right"):
+        for array_name in ("ptr", "len", "points_xy"):
+            np.testing.assert_array_equal(
+                np.asarray(serial[f"components/{component}/contours/{array_name}"][:]),
+                np.asarray(sharded[f"components/{component}/contours/{array_name}"][:]),
+            )
+
+
+def test_finalize_subject_mask_run_reuses_raw_component_topology_metrics(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    def fail_topology_recompute(_masks: np.ndarray) -> dict[str, np.ndarray]:
+        raise AssertionError("raw component topology metrics should be reused from finalization metrics")
+
+    monkeypatch.setattr(mod, "_compute_component_topology_metrics", fail_topology_recompute)
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_reuse_metrics_001",
+        components=["subject_body"],
+        chunk_size=1,
+    )
+
+    assert summary["status"] == "updated"
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_reuse_metrics_001"]
+    persisted = run["components/subject_body/metrics"]
+    finalization = run["components/subject_body/finalization_metrics"]
+    np.testing.assert_array_equal(
+        np.asarray(persisted["component_count"][:], dtype=np.int32),
+        np.asarray(finalization["component_count_after"][:], dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(persisted["largest_component_fraction"][:], dtype=np.float32),
+        np.asarray(finalization["largest_component_fraction_after"][:], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(persisted["hole_count"][:], dtype=np.int32),
+        np.asarray(finalization["hole_count_after"][:], dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(persisted["hole_area_fraction"][:], dtype=np.float32),
+        np.asarray(finalization["hole_area_fraction_after"][:], dtype=np.float32),
+    )
+
+
+def test_full_finalizer_benchmark_includes_expensive_phases(monkeypatch, tmp_path: Path) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    source_path = tmp_path / "source.zarr"
+    _build_probability_root(source_path)
+
+    payload = benchmark_subject_mask_full_finalizer(
+        source_path,
+        source_run="subject_probs_001",
+        start_row=0,
+        roi_count=2,
+        chunk_size=1,
+        write_eye_geometry=True,
+        write_component_contours=True,
+        temp_dir=tmp_path / "bench",
+        keep_temp=True,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["copy_summary"]["roi_count"] == 2
+    assert Path(str(payload["temp_zarr_path"])).exists()
+    phase_seconds = payload["phase_seconds"]
+    assert "write_eye_geometry" in phase_seconds
+    assert "write_component_contours" in phase_seconds
+    workflow_phase_seconds = payload["workflow_profile"]["phase_seconds"]
+    assert "copy_benchmark_slice" in workflow_phase_seconds
+    assert "finalizer_run" in workflow_phase_seconds
+    assert payload["summary_statistics"]["rows_total"] == 2
+
+
+def test_full_finalizer_benchmark_can_run_sharded_postcompute(monkeypatch, tmp_path: Path) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    source_path = tmp_path / "source.zarr"
+    _build_probability_root(source_path)
+
+    payload = benchmark_subject_mask_full_finalizer(
+        source_path,
+        source_run="subject_probs_001",
+        start_row=0,
+        roi_count=2,
+        chunk_size=1,
+        write_eye_geometry=True,
+        write_component_contours=True,
+        postcompute_mode="sharded",
+        postcompute_chunk_size=1,
+        postcompute_num_workers=1,
+        temp_dir=tmp_path / "bench",
+        keep_temp=True,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["postcompute_mode"] == "sharded"
+    assert payload["finalizer_write_eye_geometry"] is False
+    assert payload["finalizer_write_component_contours"] is False
+    assert payload["requested_write_eye_geometry"] is True
+    assert payload["requested_write_component_contours"] is True
+    sharded = payload["sharded_postcompute_summary"]
+    assert sharded["status"] == "updated"
+    assert sharded["roi_count"] == 2
+    assert sharded["shard_count"] == 2
+    assert sharded["eye_geometry"]["status"] == "updated"
+    assert [item["component"] for item in sharded["component_contours"]] == ["subject_body", "swim_bladder"]
+    workflow_phase_seconds = payload["workflow_profile"]["phase_seconds"]
+    assert "sharded_postcompute" in workflow_phase_seconds
+
+    root = zarr.open_group(str(payload["temp_zarr_path"]), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_masks_full_finalizer_benchmark"]
+    assert run.attrs["eye_geometry_status"] == "computed"
+    assert run.attrs["component_contours_status"] == "computed"
+    assert "relations/eye_pair/metrics/separation_px" in run
+    assert tuple(run["components/subject_body/contours/ptr"].shape) == (2,)
+    assert tuple(run["components/eye_left/geometry/ellipse_params"].shape) == (2, 5)
 
 
 def test_refresh_refined_subject_mask_metrics_updates_metric_qc_reasons(monkeypatch) -> None:

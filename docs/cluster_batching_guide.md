@@ -930,6 +930,10 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--allow-missing-roi-cache` | off    | Allow fallback when no flat cache manifest is found |
 | `--batch-size-sm`          | `128`   | Subject-mask inference batch size        |
 | `--finalize-num-workers`   | `auto`  | Refined finalizer workers; `auto` resolves to finalization CPU slots |
+| `--finalize-postcompute-backend` | `serial` | Expensive finalizer postcompute backend for eye geometry/body-swim contours; use `process_shards` for row-sharded postcompute |
+| `--finalize-postcompute-chunk-size` | *(finalizer default)* | Rows per postcompute shard; defaults inside the finalizer to `--finalize-chunk-size` |
+| `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
+| `--retain-source-seeds`   | off     | Retain dense `source_seed_masks_roi` debug arrays in refined runs |
 | `--device`                 | `0` when `--gpus > 0` | Torch device override       |
 | `--overwrite`              | off     | Pass overwrite through to child stages   |
 | `--camera-id-filter`       | *(none)* | Filter by camera_id (registry only)     |
@@ -953,6 +957,17 @@ of the published subject-mask run to that non-backed-up shared directory. The
 CPU finalizer extracts that package locally instead of walking the PRFS zarr
 chunk tree. The default handoff directory is
 `/nrs/ahrens/palette_staging/subject_mask_run_packages`.
+
+`--finalize-postcompute-backend process_shards` can be added when the finalizer
+also writes eye geometry and component contours. This keeps canonical mask
+finalization on the main `--finalize-execution-backend` path, but parallelizes
+the expensive derived geometry/contour pass and merges packed contour arrays in
+the parent process.
+
+By default, refined subject-mask finalization omits dense
+`source_seed_masks_roi` arrays and records `source_seed_masks_status="omitted"`.
+Use `--retain-source-seeds` only for diagnostic runs where seed-vs-final mask
+comparison is needed.
 
 This uses PRFS as the durable cross-node handoff and node-local scratch only as
 per-job acceleration. Do not rely on one job's `/scratch` contents being visible

@@ -490,9 +490,12 @@ scripts/py -m fisheye.refinement.finalize_subject_masks \
 This writes `refined_subject_masks_runs/<run>` with
 `["subject_body", "eye_left", "eye_right", "swim_bladder"]` when the raw source
 uses `subject_v1_union` and has usable assignment keypoint lineage. The fast
-default writes canonical masks, cleanup metrics, source-seed masks, reasons,
-review triage, and provenance; expensive shape-QC metrics and eye geometry can
-be added explicitly.
+default writes canonical masks, cleanup metrics, reasons, review triage, and
+provenance; expensive shape-QC metrics and eye geometry can be added
+explicitly. Dense per-component `source_seed_masks_roi` arrays are diagnostic
+intermediates and are omitted by default. Add `--retain-source-seeds` for
+troubleshooting runs where comparing seed masks against finalized masks is
+worth the extra write/storage cost.
 
 Add or refresh refined-subject eye geometry after the fast finalizer:
 
@@ -506,6 +509,29 @@ scripts/py -m fisheye.utils.backfill_refined_subject_eye_geometry \
 Use `--metric-level full --write-eye-geometry` on the finalizer only when the
 operator intentionally wants expensive shape-QC and eye-ellipse relation writing
 folded into the same run creation command.
+
+For large subject-mask runs, keep the row finalizer on `--execution-backend
+process_shards` and use sharded postcompute for expensive derived artifacts:
+
+```bash
+scripts/py -m fisheye.refinement.finalize_subject_masks \
+  path/to/zarr/..._analysis.zarr \
+  --source-run <subject_mask_run> \
+  --refined-run <refined_subject_mask_run> \
+  --chunk-size 256 \
+  --metric-level cheap \
+  --execution-backend process_shards \
+  --num-workers 8 \
+  --write-eye-geometry \
+  --write-component-contours \
+  --postcompute-backend process_shards \
+  --postcompute-chunk-size 256 \
+  --postcompute-num-workers 8
+```
+
+`--postcompute-backend process_shards` affects only eye geometry and body/swim
+contour materialization. Canonical masks and metrics are still produced by the
+main finalizer backend, and `serial` remains the default postcompute path.
 
 Generated refined runs are candidates until reviewed. Do not treat a
 smart-finalized run as training-approved solely because all components are

@@ -245,6 +245,48 @@ def test_inference_command_can_validate_cache_against_canonical_archive(tmp_path
     assert "--defer-registry-status" in cmd
 
 
+def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.require_group("subject_mask_runs").create_group("subject_run")
+    args = SimpleNamespace(
+        finalize_chunk_size=256,
+        metric_level="cheap",
+        finalize_execution_backend="process_shards",
+        finalize_scheduler="processes",
+        finalize_num_workers=8,
+        finalize_postcompute_backend="process_shards",
+        finalize_postcompute_chunk_size=512,
+        finalize_postcompute_num_workers=4,
+        write_eye_geometry=True,
+        write_component_contours=True,
+        retain_source_seeds=True,
+        progress_dir=None,
+        overwrite=False,
+    )
+    plan = mod.ArchivePlan(
+        zarr_path=str(zarr_path),
+        subject_run="subject_run",
+        refined_run="refined_run",
+        crop_run="crop_run",
+        assignment_keypoint_group="refined_keypoints_runs",
+        assignment_keypoint_run="refined_keypoints",
+        has_subject_runs=True,
+        has_refined_subject_runs=False,
+        run_inference=False,
+        run_finalization=True,
+    )
+
+    cmd = mod._finalization_command(args, plan)
+
+    assert cmd[cmd.index("--postcompute-backend") + 1] == "process_shards"
+    assert cmd[cmd.index("--postcompute-chunk-size") + 1] == "512"
+    assert cmd[cmd.index("--postcompute-num-workers") + 1] == "4"
+    assert "--write-eye-geometry" in cmd
+    assert "--write-component-contours" in cmd
+    assert "--retain-source-seeds" in cmd
+
+
 def test_staged_output_overlay_keeps_inputs_symlinked_and_outputs_local(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")

@@ -38,9 +38,13 @@ FINALIZE_CHUNK_SIZE=256
 FINALIZE_EXECUTION_BACKEND="process_shards"
 FINALIZE_SCHEDULER="processes"
 FINALIZE_NUM_WORKERS="auto"
+FINALIZE_POSTCOMPUTE_BACKEND="serial"
+FINALIZE_POSTCOMPUTE_CHUNK_SIZE=""
+FINALIZE_POSTCOMPUTE_NUM_WORKERS="auto"
 METRIC_LEVEL="cheap"
 WRITE_EYE_GEOMETRY=1
 WRITE_COMPONENT_CONTOURS=1
+RETAIN_SOURCE_SEEDS=0
 FORCE_INFERENCE=0
 FORCE_FINALIZATION=0
 OVERWRITE=0
@@ -122,10 +126,17 @@ Options:
                             serial_driver|dask_worker_chunks|process_shards (default: process_shards)
   --finalize-num-workers N|auto
                             Refined finalizer worker count (default: auto => --ncores)
+  --finalize-postcompute-backend NAME
+                            serial|process_shards for eye geometry/contours (default: serial)
+  --finalize-postcompute-chunk-size N
+                            Rows per postcompute shard (default: finalizer uses --finalize-chunk-size)
+  --finalize-postcompute-num-workers N|auto
+                            Postcompute worker count (default: finalizer uses --finalize-num-workers)
   --metric-level LEVEL      cheap|full (default: cheap)
   --no-write-eye-geometry   Do not ask finalizer to write eye geometry
   --no-write-component-contours
                             Do not ask finalizer to write component contours
+  --retain-source-seeds     Retain dense source_seed_masks_roi debug arrays during finalization
   --force-inference         Run inference even if subject_mask_runs exists
   --force-finalization      Run finalization even if refined_subject_masks_runs exists
   --overwrite               Pass overwrite through to child stages
@@ -181,9 +192,13 @@ while [[ $# -gt 0 ]]; do
     --finalize-chunk-size) FINALIZE_CHUNK_SIZE="$2"; shift 2;;
     --finalize-execution-backend) FINALIZE_EXECUTION_BACKEND="$2"; shift 2;;
     --finalize-num-workers) FINALIZE_NUM_WORKERS="$2"; shift 2;;
+    --finalize-postcompute-backend) FINALIZE_POSTCOMPUTE_BACKEND="$2"; shift 2;;
+    --finalize-postcompute-chunk-size) FINALIZE_POSTCOMPUTE_CHUNK_SIZE="$2"; shift 2;;
+    --finalize-postcompute-num-workers) FINALIZE_POSTCOMPUTE_NUM_WORKERS="$2"; shift 2;;
     --metric-level) METRIC_LEVEL="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
     --no-write-component-contours) WRITE_COMPONENT_CONTOURS=0; shift;;
+    --retain-source-seeds) RETAIN_SOURCE_SEEDS=1; shift;;
     --force-inference) FORCE_INFERENCE=1; shift;;
     --force-finalization) FORCE_FINALIZATION=1; shift;;
     --overwrite) OVERWRITE=1; shift;;
@@ -202,6 +217,10 @@ if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
 fi
 if [[ "$FINALIZE_EXECUTION_BACKEND" != "serial_driver" && "$FINALIZE_EXECUTION_BACKEND" != "dask_worker_chunks" && "$FINALIZE_EXECUTION_BACKEND" != "process_shards" ]]; then
   echo "--finalize-execution-backend must be serial_driver, dask_worker_chunks, or process_shards." >&2
+  exit 2
+fi
+if [[ "$FINALIZE_POSTCOMPUTE_BACKEND" != "serial" && "$FINALIZE_POSTCOMPUTE_BACKEND" != "process_shards" ]]; then
+  echo "--finalize-postcompute-backend must be serial or process_shards." >&2
   exit 2
 fi
 if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && "$REQUIRE_ROI_CACHE" != "1" ]]; then
@@ -241,6 +260,18 @@ fi
 if ! [[ "$FINALIZE_NUM_WORKERS" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_NUM_WORKERS" -lt 1 ]]; then
   echo "--finalize-num-workers must be a positive integer or auto." >&2
   exit 2
+fi
+if [[ -n "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" ]]; then
+  if ! [[ "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" -lt 1 ]]; then
+    echo "--finalize-postcompute-chunk-size must be a positive integer." >&2
+    exit 2
+  fi
+fi
+if [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" != "auto" && -n "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" ]]; then
+  if ! [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" -lt 1 ]]; then
+    echo "--finalize-postcompute-num-workers must be a positive integer or auto." >&2
+    exit 2
+  fi
 fi
 if [[ "$SPLIT_FINALIZATION_JOB" == "1" && "$FINALIZE_NUM_WORKERS" == "$NCORES" && "$FINALIZE_NCORES" != "$NCORES" ]]; then
   FINALIZE_NUM_WORKERS="$FINALIZE_NCORES"
@@ -435,16 +466,20 @@ SUBJECT_ARGS=(
   --finalize-execution-backend "$FINALIZE_EXECUTION_BACKEND"
   --finalize-scheduler "$FINALIZE_SCHEDULER"
   --finalize-num-workers "$FINALIZE_NUM_WORKERS"
+  --finalize-postcompute-backend "$FINALIZE_POSTCOMPUTE_BACKEND"
   --roi-cache-policy "$ROI_CACHE_POLICY"
   --roi-live-acceleration "$ROI_LIVE_ACCELERATION"
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
   --progress-dir "$RUN_DIR/progress"
 )
+if [[ -n "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-chunk-size "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE"); fi
+if [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" != "auto" && -n "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-num-workers "$FINALIZE_POSTCOMPUTE_NUM_WORKERS"); fi
 if [[ "$MODEL_REQUIRE_UNIQUE" == "1" ]]; then SUBJECT_ARGS+=(--model-require-unique); fi
 if [[ "$MODEL_INCLUDE_NON_SUCCESS" == "1" ]]; then SUBJECT_ARGS+=(--model-include-non-success); fi
 if [[ "$PROFILE_TIMINGS" == "1" ]]; then SUBJECT_ARGS+=(--profile-timings); fi
 if [[ "$WRITE_EYE_GEOMETRY" == "1" ]]; then SUBJECT_ARGS+=(--write-eye-geometry); else SUBJECT_ARGS+=(--no-write-eye-geometry); fi
 if [[ "$WRITE_COMPONENT_CONTOURS" == "1" ]]; then SUBJECT_ARGS+=(--write-component-contours); else SUBJECT_ARGS+=(--no-write-component-contours); fi
+if [[ "$RETAIN_SOURCE_SEEDS" == "1" ]]; then SUBJECT_ARGS+=(--retain-source-seeds); fi
 if [[ "$STAGE_OUTPUT_TO_SCRATCH" == "1" ]]; then SUBJECT_ARGS+=(--stage-output-to-scratch); fi
 if [[ -n "$OUTPUT_STAGING_DIR" ]]; then SUBJECT_ARGS+=(--output-staging-dir "$OUTPUT_STAGING_DIR"); fi
 if [[ "$KEEP_STAGED_OUTPUT" == "1" ]]; then SUBJECT_ARGS+=(--keep-staged-output); fi

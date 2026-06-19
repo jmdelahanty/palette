@@ -19,8 +19,10 @@ import socket
 import subprocess
 import sys
 import tarfile
+import time
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import field
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +35,7 @@ from fisheye.shared.subject_mask_registry_status import (
     emit_refined_subject_mask_stage_completion,
     emit_subject_mask_stage_completion,
 )
+from fisheye.shared.workflow_profile import WorkflowProfiler
 from fisheye.shared.zarr_run_completion import mark_run_complete, require_runs_parent
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries
 
@@ -70,6 +73,8 @@ class ArchiveResult:
     output_staging_status: str = "not_requested"
     staged_zarr_path: str = ""
     publish_status: str = "not_requested"
+    workflow_profile_path: str = ""
+    workflow_profile: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
 
@@ -413,6 +418,13 @@ def _finalization_command(
         cmd.append("--write-eye-geometry")
     if args.write_component_contours:
         cmd.append("--write-component-contours")
+    if args.retain_source_seeds:
+        cmd.append("--retain-source-seeds")
+    cmd.extend(["--postcompute-backend", args.finalize_postcompute_backend])
+    if args.finalize_postcompute_chunk_size is not None:
+        cmd.extend(["--postcompute-chunk-size", str(args.finalize_postcompute_chunk_size)])
+    if args.finalize_postcompute_num_workers is not None:
+        cmd.extend(["--postcompute-num-workers", str(args.finalize_postcompute_num_workers)])
     if args.progress_dir is not None:
         archive_component = _safe_path_component(Path(plan.zarr_path).stem)
         run_component = _safe_path_component(plan.refined_run)
@@ -435,6 +447,19 @@ def _run_command(cmd: Sequence[str], *, dry_run: bool) -> str:
 
 def _safe_path_component(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value)) or "item"
+
+
+def _workflow_profile_path(args: argparse.Namespace, plan: ArchivePlan) -> Path | None:
+    profile_dir = args.workflow_profile_dir or args.progress_dir
+    if profile_dir is None:
+        return None
+    archive_component = _safe_path_component(Path(plan.zarr_path).stem)
+    stage_component = _safe_path_component(str(args.workflow_stage))
+    run_component = _safe_path_component(plan.subject_run if plan.run_inference else plan.refined_run)
+    return (
+        profile_dir.expanduser().resolve()
+        / f"{archive_component}__{stage_component}__{run_component}.workflow.profile.jsonl"
+    )
 
 
 def _remove_path(path: Path) -> None:
@@ -855,8 +880,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--finalize-scheduler", choices=("single-threaded", "threads", "processes", "distributed"), default="processes")
     parser.add_argument("--finalize-num-workers", type=int, default=8)
+    parser.add_argument(
+        "--finalize-postcompute-backend",
+        choices=("serial", "process_shards"),
+        default="serial",
+        help=(
+            "Backend for expensive finalizer postcompute artifacts. serial preserves existing behavior; "
+            "process_shards parallelizes eye geometry and component contour materialization."
+        ),
+    )
+    parser.add_argument(
+        "--finalize-postcompute-chunk-size",
+        type=int,
+        help="Rows per postcompute shard. Defaults to --finalize-chunk-size inside the finalizer.",
+    )
+    parser.add_argument(
+        "--finalize-postcompute-num-workers",
+        type=int,
+        help="Worker count for process-sharded postcompute. Defaults to --finalize-num-workers inside the finalizer.",
+    )
     parser.add_argument("--write-eye-geometry", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--write-component-contours", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--retain-source-seeds",
+        action="store_true",
+        help=(
+            "Ask refined subject-mask finalization to retain dense source_seed_masks_roi debug arrays. "
+            "Defaults off for production storage/write performance."
+        ),
+    )
     parser.add_argument("--force-inference", action="store_true", help="Run inference even if subject_mask_runs already exists.")
     parser.add_argument("--force-finalization", action="store_true", help="Run finalization even if refined_subject_masks_runs already exists.")
     parser.add_argument("--overwrite", action="store_true", help="Pass overwrite through to child stages.")
@@ -904,6 +956,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--progress-dir",
         type=Path,
         help="Directory for append-only stage progress JSONL files.",
+    )
+    parser.add_argument(
+        "--workflow-profile-dir",
+        type=Path,
+        help=(
+            "Directory for append-only workflow profile JSONL files. Defaults to "
+            "--progress-dir when that is provided."
+        ),
     )
     parser.add_argument("--consolidate-metadata", action=argparse.BooleanOptionalAction, default=True)
     return parser
@@ -986,47 +1046,78 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             planned_inference=plan.run_inference,
             planned_finalization=plan.run_finalization,
         )
+        profile_path = _workflow_profile_path(args, plan)
+        profiler = WorkflowProfiler(profile_path, schema_prefix="palette_subject_mask_workflow")
+        if profile_path is not None:
+            result.workflow_profile_path = str(profile_path)
+        profiler.emit(
+            "start",
+            "archive_total",
+            zarr_path=plan.zarr_path,
+            workflow_stage=str(args.workflow_stage),
+            planned_inference=bool(plan.run_inference),
+            planned_finalization=bool(plan.run_finalization),
+            dry_run=bool(dry_run),
+        )
         staged_ctx: OutputStagingContext | None = None
         effective_plan = plan
+        archive_started = time.perf_counter()
         try:
             if args.stage_output_to_scratch:
                 if dry_run:
                     result.output_staging_status = "planned"
                 else:
                     assert output_staging_root is not None
-                    staged_ctx = _prepare_output_staging_zarr(
-                        Path(plan.zarr_path),
-                        plan=plan,
-                        staging_root=output_staging_root,
-                        overwrite=bool(args.overwrite),
+                    with profiler.phase(
+                        "prepare_output_staging",
+                        source_zarr_path=plan.zarr_path,
+                        staging_root=str(output_staging_root),
                         stage_finalization_input=bool(args.stage_finalization_input_to_scratch),
-                    )
+                    ) as phase:
+                        staged_ctx = _prepare_output_staging_zarr(
+                            Path(plan.zarr_path),
+                            plan=plan,
+                            staging_root=output_staging_root,
+                            overwrite=bool(args.overwrite),
+                            stage_finalization_input=bool(args.stage_finalization_input_to_scratch),
+                        )
+                        phase["staged_zarr_path"] = str(staged_ctx.staged_zarr_path)
                     effective_plan = replace(plan, zarr_path=str(staged_ctx.staged_zarr_path))
                     result.output_staging_status = "staged"
                     result.staged_zarr_path = str(staged_ctx.staged_zarr_path)
                     print(f"staged_output_zarr: {staged_ctx.staged_zarr_path}", flush=True)
 
             if plan.run_inference:
-                result.inference_status = _run_command(
-                    _inference_command(
-                        args,
-                        effective_plan,
-                        defer_registry_status=staged_ctx is not None,
-                        roi_cache_expected_archive_path=plan.zarr_path if staged_ctx is not None else None,
-                    ),
-                    dry_run=dry_run,
+                cmd = _inference_command(
+                    args,
+                    effective_plan,
+                    defer_registry_status=staged_ctx is not None,
+                    roi_cache_expected_archive_path=plan.zarr_path if staged_ctx is not None else None,
                 )
+                with profiler.phase(
+                    "inference_subprocess",
+                    command=cmd,
+                    dry_run=bool(dry_run),
+                    staged_output=staged_ctx is not None,
+                ) as phase:
+                    result.inference_status = _run_command(cmd, dry_run=dry_run)
+                    phase["command_status"] = result.inference_status
                 if result.inference_status != "ok" and not dry_run:
                     raise RuntimeError(f"inference {result.inference_status}")
             if plan.run_finalization:
-                result.finalization_status = _run_command(
-                    _finalization_command(
-                        args,
-                        effective_plan,
-                        defer_registry_status=staged_ctx is not None,
-                    ),
-                    dry_run=dry_run,
+                cmd = _finalization_command(
+                    args,
+                    effective_plan,
+                    defer_registry_status=staged_ctx is not None,
                 )
+                with profiler.phase(
+                    "finalization_subprocess",
+                    command=cmd,
+                    dry_run=bool(dry_run),
+                    staged_output=staged_ctx is not None,
+                ) as phase:
+                    result.finalization_status = _run_command(cmd, dry_run=dry_run)
+                    phase["command_status"] = result.finalization_status
                 if result.finalization_status != "ok" and not dry_run:
                     raise RuntimeError(f"finalization {result.finalization_status}")
             if dry_run:
@@ -1035,37 +1126,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 validation_subject_run = plan.subject_run if plan.run_inference else _selected_subject_run_for_finalization(plan)
                 validation_path = Path(effective_plan.zarr_path)
-                status, detail = validate_outputs(
-                    validation_path,
-                    subject_run=validation_subject_run,
-                    refined_run=plan.refined_run,
+                with profiler.phase(
+                    "validate_outputs",
+                    validation_path=str(validation_path),
                     require_subject=bool(plan.run_inference or plan.run_finalization),
                     require_refined=bool(plan.run_finalization),
-                )
-                result.validation_status = status
-                if status != "ok":
-                    raise RuntimeError(detail)
-                if staged_ctx is not None:
-                    _publish_staged_outputs(
-                        staged_ctx,
-                        plan=plan,
-                        overwrite=bool(args.overwrite),
-                        handoff_package_dir=args.handoff_package_dir,
-                    )
-                    result.publish_status = "ok"
+                ) as phase:
                     status, detail = validate_outputs(
-                        Path(plan.zarr_path),
+                        validation_path,
                         subject_run=validation_subject_run,
                         refined_run=plan.refined_run,
                         require_subject=bool(plan.run_inference or plan.run_finalization),
                         require_refined=bool(plan.run_finalization),
                     )
+                    phase["validation_status"] = status
+                    phase["validation_detail"] = detail
+                result.validation_status = status
+                if status != "ok":
+                    raise RuntimeError(detail)
+                if staged_ctx is not None:
+                    with profiler.phase(
+                        "publish_staged_outputs",
+                        staged_zarr_path=str(staged_ctx.staged_zarr_path),
+                        target_zarr_path=plan.zarr_path,
+                        handoff_package_dir=str(args.handoff_package_dir) if args.handoff_package_dir else None,
+                    ):
+                        _publish_staged_outputs(
+                            staged_ctx,
+                            plan=plan,
+                            overwrite=bool(args.overwrite),
+                            handoff_package_dir=args.handoff_package_dir,
+                        )
+                    result.publish_status = "ok"
+                    with profiler.phase(
+                        "validate_published_outputs",
+                        validation_path=plan.zarr_path,
+                        require_subject=bool(plan.run_inference or plan.run_finalization),
+                        require_refined=bool(plan.run_finalization),
+                    ) as phase:
+                        status, detail = validate_outputs(
+                            Path(plan.zarr_path),
+                            subject_run=validation_subject_run,
+                            refined_run=plan.refined_run,
+                            require_subject=bool(plan.run_inference or plan.run_finalization),
+                            require_refined=bool(plan.run_finalization),
+                        )
+                        phase["validation_status"] = status
+                        phase["validation_detail"] = detail
                     result.validation_status = status
                     if status != "ok":
                         raise RuntimeError(f"published output validation failed: {detail}")
                     if not bool(args.keep_staged_output):
                         try:
-                            _cleanup_output_staging(staged_ctx)
+                            with profiler.phase(
+                                "cleanup_output_staging",
+                                staged_zarr_path=str(staged_ctx.staged_zarr_path),
+                            ):
+                                _cleanup_output_staging(staged_ctx)
                             result.output_staging_status = "cleaned"
                         except Exception as cleanup_exc:
                             result.output_staging_status = f"cleanup_failed:{cleanup_exc}"
@@ -1073,21 +1190,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else:
                     result.publish_status = "not_requested"
                 if args.consolidate_metadata:
-                    zarr.consolidate_metadata(plan.zarr_path)
+                    with profiler.phase("consolidate_metadata", zarr_path=plan.zarr_path):
+                        zarr.consolidate_metadata(plan.zarr_path)
         except Exception as exc:
             result.error = str(exc)
             exit_code = 1
             print(f"error: {exc}", file=sys.stderr, flush=True)
             if staged_ctx is not None and not bool(args.keep_staged_output):
                 try:
-                    _cleanup_output_staging(staged_ctx)
+                    with profiler.phase(
+                        "cleanup_output_staging_after_error",
+                        staged_zarr_path=str(staged_ctx.staged_zarr_path),
+                    ):
+                        _cleanup_output_staging(staged_ctx)
                     result.output_staging_status = "cleaned_after_error"
                 except Exception as cleanup_exc:
                     result.output_staging_status = f"cleanup_failed_after_error:{cleanup_exc}"
                     print(f"warning: staged output cleanup failed after error: {cleanup_exc}", file=sys.stderr)
             if not bool(args.continue_on_error):
+                profiler.record_finish(
+                    "archive_total",
+                    {
+                        "duration_seconds": float(time.perf_counter() - archive_started),
+                        "status": "error",
+                        "error": str(exc),
+                    },
+                )
+                result.workflow_profile = profiler.summary()
                 results.append(result)
                 break
+        profiler.record_finish(
+            "archive_total",
+            {
+                "duration_seconds": float(time.perf_counter() - archive_started),
+                "status": "error" if result.error else "ok",
+                "error": result.error or "",
+            },
+        )
+        result.workflow_profile = profiler.summary()
         results.append(result)
 
     if args.json_report:
