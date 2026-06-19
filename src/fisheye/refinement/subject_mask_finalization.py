@@ -13,7 +13,10 @@ from typing import Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
-from scipy.ndimage import binary_fill_holes
+
+from ..shared.mask_geometry import connected_component_labels as _connected_component_labels
+from ..shared.mask_geometry import fill_holes as _fill_holes
+from ..shared.mask_geometry import hole_stats as _hole_stats
 
 
 QUALITY_CLEAN = 0
@@ -230,18 +233,6 @@ def _binary_close(mask: np.ndarray, radius: int) -> np.ndarray:
     return closed.astype(bool, copy=False)
 
 
-def _fill_holes(mask: np.ndarray) -> np.ndarray:
-    mask_bool = mask.astype(bool, copy=False)
-    if not np.any(mask_bool):
-        return mask_bool.copy()
-    return np.asarray(binary_fill_holes(mask_bool), dtype=bool)
-
-
-def _connected_component_labels(mask: np.ndarray) -> tuple[np.ndarray, int]:
-    num_labels, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
-    return labels.astype(np.int32, copy=False), int(num_labels - 1)
-
-
 def _component_stats(mask: np.ndarray) -> _MaskComponentStats:
     mask_bool = np.asarray(mask).astype(bool, copy=False)
     if not np.any(mask_bool):
@@ -358,20 +349,6 @@ def _largest_component_fraction(mask: np.ndarray, *, stats: _MaskComponentStats 
     return (stats or _component_stats(mask)).largest_component_fraction
 
 
-def _hole_stats(mask: np.ndarray) -> tuple[int, float, int]:
-    mask_bool = mask.astype(bool, copy=False)
-    if not np.any(mask_bool):
-        return 0, 0.0, 0
-    filled = _fill_holes(mask_bool)
-    holes = filled & ~mask_bool
-    hole_area = int(np.count_nonzero(holes))
-    if hole_area == 0:
-        return 0, 0.0, 0
-    _labeled, count = _connected_component_labels(holes)
-    denom = max(1, int(np.count_nonzero(filled)))
-    return int(count), float(hole_area / denom), hole_area
-
-
 def _build_metrics(
     *,
     initial_mask: np.ndarray,
@@ -395,7 +372,12 @@ def _build_metrics(
     high_threshold = float(policy.high_threshold if policy.high_threshold is not None else policy.threshold)
     removed_high_prob_area = int(np.count_nonzero(removed & (probabilities >= high_threshold)))
     hole_count_before, hole_fraction_before, _hole_area_before = _hole_stats(initial_mask)
-    hole_count_after, hole_fraction_after, _hole_area_after = _hole_stats(final_mask)
+    if policy.fill_holes:
+        # Closing/filling happens before area filtering and component selection; those later
+        # steps can remove pixels/components but cannot introduce enclosed background holes.
+        hole_count_after, hole_fraction_after = 0, 0.0
+    else:
+        hole_count_after, hole_fraction_after, _hole_area_after = _hole_stats(final_mask)
     component_count_before = int(initial_component_stats.component_count)
     component_count_after = int(final_component_stats.component_count)
     return {

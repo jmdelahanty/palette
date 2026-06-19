@@ -53,6 +53,7 @@ from collections import Counter
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.mask_geometry import mask_pixel_centroid as _mask_pixel_centroid
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..registry.stage_complete import emit_stage_completion, extract_dataset_metadata
@@ -822,16 +823,11 @@ def _measure_mask(
 
     contour = contour.astype(np.float32)
 
-    ys, xs = np.nonzero(mask.astype(np.uint8))
-    if ys.size > 0:
-        centroid = np.array([float(xs.mean()), float(ys.mean())], dtype=np.float32)
-    else:
-        centroid = np.full(2, np.nan, dtype=np.float32)
-
     try:
         (xc, yc), (axis_a, axis_b), angle = cv2.fitEllipse(contour)
     except cv2.error:
         ellipse = np.full(5, np.nan, dtype=np.float32)
+        centroid = _mask_pixel_centroid(mask)
         return False, ellipse, centroid, contour, "ellipse_estimate_failed"
 
     major = float(axis_a)
@@ -844,6 +840,7 @@ def _measure_mask(
 
     if not all(np.isfinite([xc, yc, major, minor, theta])) or major <= 0.0 or minor <= 0.0:
         ellipse = np.full(5, np.nan, dtype=np.float32)
+        centroid = _mask_pixel_centroid(mask)
         return False, ellipse, centroid, contour, "ellipse_invalid_params"
 
     centroid = np.array([float(xc), float(yc)], dtype=np.float32)

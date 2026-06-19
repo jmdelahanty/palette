@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import binary_fill_holes
 import zarr
 
 from fisheye.refinement import subject_body_mask_qc as mod
@@ -60,6 +61,22 @@ def test_compute_subject_body_mask_qc_flags_missing_fragmented_and_branched_mask
 
     assert "missing_subject_body_mask" in str(batch.reason_labels[3])
     assert bool(batch.severe_qc_failure[3]) is True
+
+
+def test_hole_metrics_matches_scipy_filled_area_fraction() -> None:
+    mask = np.zeros((32, 32), dtype=bool)
+    mask[4:28, 4:28] = True
+    mask[10:14, 10:16] = False
+    mask[19:23, 18:24] = False
+
+    filled = binary_fill_holes(mask)
+    expected_area = float(np.count_nonzero(filled & ~mask))
+    expected_fraction = float(expected_area / max(1.0, float(np.count_nonzero(filled))))
+
+    area, fraction = mod._hole_metrics(mask, float(np.count_nonzero(mask)))
+
+    assert area == expected_area
+    np.testing.assert_allclose(fraction, expected_fraction)
 
 
 def test_write_subject_body_mask_qc_group_persists_component_qc() -> None:

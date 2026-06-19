@@ -17,13 +17,14 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
-from scipy.ndimage import binary_fill_holes, convolve
+from scipy.ndimage import convolve
 from skimage.measure import label as label_components
 from skimage.morphology import convex_hull_image, skeletonize
 import zarr
 
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.json_safety import json_attr_safe
+from ..shared.mask_geometry import hole_stats
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..utils.zarr_io import open_zarr_root
 
@@ -132,11 +133,7 @@ def _solidity(mask: np.ndarray, total_area: float) -> float:
 def _hole_metrics(mask: np.ndarray, total_area: float) -> tuple[float, float]:
     if total_area <= 0.0:
         return 0.0, 0.0
-    mask_bool = np.asarray(mask, dtype=bool)
-    filled = binary_fill_holes(mask_bool)
-    hole_area = float(np.count_nonzero(filled & ~mask_bool))
-    filled_area = float(np.count_nonzero(filled))
-    fraction = float(hole_area / max(1.0, filled_area))
+    _hole_count, fraction, hole_area = hole_stats(mask)
     return hole_area, fraction
 
 

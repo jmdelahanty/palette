@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import time
 from typing import Mapping
 
-import cv2
 import numpy as np
 
 from .refine_eye_masks import _measure_mask
+from ..shared.mask_geometry import select_component_near_point as _select_component_near_point
 
 EYES_UNION_ASSIGNMENT_METHOD = "subject_eyes_union_keypoint_assignment_v1"
 EYE_COMPONENTS = ("eye_left", "eye_right")
@@ -21,11 +22,7 @@ class EyesUnionAssignmentResult:
     reason_labels: Mapping[str, np.ndarray]
     assignment_status: np.ndarray
     summary: dict[str, object]
-
-
-def _valid_eye_point(point: np.ndarray) -> bool:
-    arr = np.asarray(point, dtype=np.float32).reshape(-1)
-    return arr.size >= 2 and bool(np.all(np.isfinite(arr[:2])))
+    phase_seconds: Mapping[str, float]
 
 
 def _split_union_by_keypoints(
@@ -49,33 +46,56 @@ def _split_union_by_keypoints(
     return left_mask, right_mask
 
 
-def _select_component_near_point(mask: np.ndarray, point_xy: np.ndarray) -> np.ndarray:
-    binary = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
-    selected = np.zeros_like(binary, dtype=bool)
-    if int(np.count_nonzero(binary)) <= 0:
-        return selected
+def _split_union_by_keypoints_batch_into(
+    union_masks: np.ndarray,
+    eye_left: np.ndarray,
+    eye_right: np.ndarray,
+    *,
+    row_indices: np.ndarray,
+    left_out: np.ndarray,
+    right_out: np.ndarray,
+    batch_size: int = 32,
+) -> None:
+    """Split candidate rows by keypoint distance into caller-owned buffers."""
 
-    label_count, labels, _stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    if label_count <= 1:
-        return selected
+    rows = np.asarray(row_indices, dtype=np.int64).reshape(-1)
+    if rows.size == 0:
+        return
+    if batch_size <= 0:
+        raise ValueError("split batch_size must be positive.")
 
-    point = np.asarray(point_xy, dtype=np.float32).reshape(-1)
-    best_label = 0
-    best_distance = float("inf")
-    for label_idx in range(1, int(label_count)):
-        centroid = np.asarray(centroids[label_idx], dtype=np.float32)
-        distance = float(np.sum(np.square(centroid[:2] - point[:2], dtype=np.float32), dtype=np.float32))
-        if distance < best_distance:
-            best_distance = distance
-            best_label = int(label_idx)
+    union_bool = np.asarray(union_masks, dtype=bool)
+    if union_bool.ndim != 3:
+        raise ValueError(f"union_masks must have shape (N,H,W), got {tuple(union_bool.shape)}.")
+    height = int(union_bool.shape[1])
+    width = int(union_bool.shape[2])
+    x_grid = np.arange(width, dtype=np.float32).reshape(1, 1, width)
+    y_grid = np.arange(height, dtype=np.float32).reshape(1, height, 1)
 
-    if best_label > 0:
-        selected = labels == best_label
-    return selected
+    left_points = np.asarray(eye_left, dtype=np.float32)
+    right_points = np.asarray(eye_right, dtype=np.float32)
+    for offset in range(0, int(rows.size), int(batch_size)):
+        batch_rows = rows[offset : offset + int(batch_size)]
+        left = left_points[batch_rows]
+        right = right_points[batch_rows]
+        union = union_bool[batch_rows]
+        left_dx = x_grid - left[:, 0].reshape(-1, 1, 1)
+        left_dy = y_grid - left[:, 1].reshape(-1, 1, 1)
+        right_dx = x_grid - right[:, 0].reshape(-1, 1, 1)
+        right_dy = y_grid - right[:, 1].reshape(-1, 1, 1)
+        dist_left = left_dx * left_dx + left_dy * left_dy
+        dist_right = right_dx * right_dx + right_dy * right_dy
+        assign_left = dist_left <= dist_right
+        left_out[batch_rows] = np.asarray(union & assign_left, dtype=np.uint8)
+        right_out[batch_rows] = np.asarray(union & ~assign_left, dtype=np.uint8)
 
 
 def _join_reason_tags(tags: list[str]) -> str:
     return "|".join(str(tag) for tag in tags if str(tag).strip())
+
+
+def _add_phase(phase_seconds: dict[str, float], name: str, started_at: float) -> None:
+    phase_seconds[str(name)] = float(phase_seconds.get(str(name), 0.0)) + float(time.perf_counter() - started_at)
 
 
 def assign_eyes_union_to_lr(
@@ -84,6 +104,7 @@ def assign_eyes_union_to_lr(
     keypoints_roi: np.ndarray,
     keypoint_success: np.ndarray,
     eye_keypoint_indices: tuple[int, int],
+    split_batch_size: int = 32,
 ) -> EyesUnionAssignmentResult:
     """Convert raw ``eyes_union`` masks into canonical LR eye component masks.
 
@@ -127,31 +148,56 @@ def assign_eyes_union_to_lr(
     assignment_status = np.empty((total_rows,), dtype=object)
     status_counts: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
+    phase_seconds: dict[str, float] = {}
+
+    phase_start = time.perf_counter()
+    union_bool = union > 0
+    union_nonempty = np.any(union_bool, axis=(1, 2))
+    left_points = np.asarray(keypoints[:, left_idx, :2], dtype=np.float32)
+    right_points = np.asarray(keypoints[:, right_idx, :2], dtype=np.float32)
+    left_valid = np.all(np.isfinite(left_points), axis=1)
+    right_valid = np.all(np.isfinite(right_points), axis=1)
+    coincident = np.all(np.isclose(left_points, right_points, atol=1e-3), axis=1)
+    candidate_rows = np.flatnonzero(union_nonempty & success & left_valid & right_valid & ~coincident)
+    _split_union_by_keypoints_batch_into(
+        union_bool,
+        left_points,
+        right_points,
+        row_indices=candidate_rows,
+        left_out=left_masks,
+        right_out=right_masks,
+        batch_size=int(split_batch_size),
+    )
+    _add_phase(phase_seconds, "split_by_keypoint", phase_start)
 
     for row_idx in range(total_rows):
-        union_mask = np.asarray(union[row_idx], dtype=bool)
         tags = ["assigned_from_eyes_union"]
         status = "assigned"
 
-        if int(np.count_nonzero(union_mask)) <= 0:
+        if not bool(union_nonempty[row_idx]):
             tags.append("eyes_union_empty")
             status = "failed_empty_union"
         elif not bool(success[row_idx]):
             tags.append("keypoint_fail")
             status = "failed_keypoint_status"
         else:
-            eye_left = np.asarray(keypoints[row_idx, left_idx, :2], dtype=np.float32)
-            eye_right = np.asarray(keypoints[row_idx, right_idx, :2], dtype=np.float32)
-            if not _valid_eye_point(eye_left) or not _valid_eye_point(eye_right):
+            eye_left = left_points[row_idx]
+            eye_right = right_points[row_idx]
+            if not bool(left_valid[row_idx]) or not bool(right_valid[row_idx]):
                 tags.append("missing_eye_keypoints")
                 status = "failed_missing_eye_keypoints"
-            elif bool(np.allclose(eye_left, eye_right, atol=1e-3)):
+            elif bool(coincident[row_idx]):
                 tags.append("coincident_eye_keypoints")
                 status = "failed_coincident_eye_keypoints"
             else:
-                split_left, split_right = _split_union_by_keypoints(union_mask, eye_left, eye_right)
+                split_left = np.asarray(left_masks[row_idx], dtype=bool).copy()
+                split_right = np.asarray(right_masks[row_idx], dtype=bool).copy()
+                left_masks[row_idx] = 0
+                right_masks[row_idx] = 0
+                phase_start = time.perf_counter()
                 selected_left = _select_component_near_point(split_left, eye_left)
                 selected_right = _select_component_near_point(split_right, eye_right)
+                _add_phase(phase_seconds, "select_components", phase_start)
                 if int(np.count_nonzero(selected_left)) <= 0 or int(np.count_nonzero(selected_right)) <= 0:
                     tags.append("split_empty_component")
                     status = "failed_empty_split_component"
@@ -162,12 +208,14 @@ def assign_eyes_union_to_lr(
                     left_masks[row_idx] = selected_left.astype(np.uint8, copy=False)
                     right_masks[row_idx] = selected_right.astype(np.uint8, copy=False)
                     tags.append("split_by_keypoint")
+                    phase_start = time.perf_counter()
                     left_success, _left_ellipse, _left_centroid, _left_contour, left_failure = _measure_mask(
                         left_masks[row_idx]
                     )
                     right_success, _right_ellipse, _right_centroid, _right_contour, right_failure = _measure_mask(
                         right_masks[row_idx]
                     )
+                    _add_phase(phase_seconds, "measure_ellipse", phase_start)
                     if not bool(left_success):
                         tags.append("ellipse_fail_left")
                         if left_failure:
@@ -179,12 +227,14 @@ def assign_eyes_union_to_lr(
                     if not bool(left_success and right_success):
                         status = "assigned_needs_review"
 
+        phase_start = time.perf_counter()
         reason = _join_reason_tags(tags)
         assignment_status[row_idx] = status
         reason_labels["eye_left"][row_idx] = reason
         reason_labels["eye_right"][row_idx] = reason
         status_counts[str(status)] += 1
         reason_counts[reason] += 1
+        _add_phase(phase_seconds, "reason_labels", phase_start)
 
     assigned_count = int(status_counts.get("assigned", 0))
     needs_review_count = int(status_counts.get("assigned_needs_review", 0))
@@ -203,6 +253,7 @@ def assign_eyes_union_to_lr(
         reason_labels=reason_labels,
         assignment_status=assignment_status,
         summary=summary,
+        phase_seconds=phase_seconds,
     )
 
 
