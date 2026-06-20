@@ -175,6 +175,30 @@ diagnostic first: warp a sample of existing masks using refined keypoint heading
 atlases, and test whether atlas residuals predict current QC failures. Do not change the storage
 contract or finalizer until that diagnostic proves the priors are robust.
 
+**Registration needs both location and size.** A crisp atlas requires each ROI normalized for
+translation, rotation, and scale. Translation is already free (crops are centered on the
+detection); rotation needs heading alignment; scale needs an explicit step (the fixed `roi_size`
+window does not normalize apparent size). So "similar locations" needs rotation on top of the
+free centering, and "similar sizes" needs scale — full canonicalization is a *similarity
+transform* per ROI, not just a rotation. Record any heading/scale you remove rather than discard
+it: apparent size and heading can be signal, not nuisance.
+
+**Eyes are only semi-rigid — their orientation is signal.** Eye *socket location* is body-rigid
+(a location atlas would be clean), but eye *orientation* is a free degree of freedom: the eyes
+rotate nasally (converged) vs temporally/laterally (diverged) frame to frame. The pipeline already
+measures exactly this — `analysis/eye_angle_runs` derives per-eye angle, vergence (eyes opposite),
+and version (eyes together) from the eye-mask ellipse major axis (`analysis/eye_angle_analysis.py`,
+`analysis/eye_angle_io.py`). So an atlas of eye *shape* would smear by the vergence angle, and that
+angle is **signal, not nuisance** — it is measured, never normalized away. A useful eye atlas would
+register *location* only, leaving orientation as the quantity of interest.
+
+**Keep stored ROI geometry axis-aligned.** Crops are centered, axis-aligned windows
+(`tracking/crop.py`), so a mask in ROI space projects back to full-video coordinates with only
+the crop offset — no rotation. Canonicalizing the *stored* masks into a heading-aligned frame
+would force every downstream consumer that maps masks onto raw video to carry and invert a
+per-ROI rotation. So any body-frame work must stay an analysis-time overlay, never a change to
+the stored crop/mask geometry.
+
 ## 4. Non-canonical implementation checklist
 
 This checklist keeps the current ROI-local subject-mask contract intact. Canonical body-frame
