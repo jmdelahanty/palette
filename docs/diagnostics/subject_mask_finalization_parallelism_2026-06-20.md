@@ -153,6 +153,34 @@ area, centroid, and bbox is now shared across finalization, review helpers, and 
   use planar/2D connectivity or per-slice calls, else 3D labeling merges unrelated ROIs across
   the N axis.
 
+**Padding stabilizes the output, not the computation.** Ragged results (variable component
+count, variable contour length) can be written into fixed-shape arrays by padding to a chosen
+`K_max` with a sentinel (NaN/-1) plus a present/overflow flag — and the storage already does this
+via the fixed component axis (`mask_present`/`area_px` are `(N, n_components)` with absent
+components flagged) and the ellipse `np.full((N,5), nan)` fill. That lets downstream reductions
+vectorize (`np.nanmax`, `(areas > t).sum(axis=1)`), but it does **not** speed up the per-mask
+labeling/contour/fit — the irregular op still runs per row. Never pad data that feeds a solver
+(contour points → ellipse): fake points bias the fit.
+
+**Is the irregularity fundamental? It depends on the op's class:**
+- *Fixed-depth local ops* — area, centroid, bbox, and dilate/erode/close (fixed kernel) — are
+  not irregular at all; fixed-size stencils/reductions that vectorize and GPU-batch cleanly
+  (`kornia`/`cucim`). Morphology is in this class — just unbatched *here*.
+- *Global-connectivity ops* — connected-components, `binary_fill_holes`, largest-component
+  selection, watershed — are **inherently** not a single SIMD op: deciding "same blob?" needs
+  propagation whose *depth = the component's diameter* (data-dependent), and the component count
+  is data-dependent (ragged). Intrinsic to the problem. Still *parallelizable* on GPU (iterative
+  label propagation / block union-find, as in `cucim`) — just not as numpy broadcasting.
+- *Ragged-input geometric fits* — `fitEllipse` — are irregular mainly because of their **input**:
+  the conic least-squares is a masked reduction (scatter matrix = Σ of fixed 6-vectors) plus a
+  fixed 6×6 eigensolve, which *is* batchable given padded points + a validity mask. The
+  genuinely irregular upstream step is contour extraction (boundary tracing, ragged point count).
+  So the fit math could batch; the contour can't easily.
+
+Net: connectivity is essentially irregular (data-dependent propagation depth); ellipse is
+irregular by composition (its core fit could batch, its contour input can't); morphology isn't
+irregular at all. None collapse to a numpy reduction, but all are GPU-parallelizable.
+
 ### Orthogonal future lever: canonical body-frame masks
 
 Canonicalizing ROIs into a shared body frame is a separate idea from vectorizing the current
@@ -234,7 +262,10 @@ analysis is a later diagnostic path, not a prerequisite for the following work.
    - Require parity/equivalence evidence before production use.
    - Status: diagnostic harness added at
      `fisheye.diagnostics.benchmark_subject_mask_primitives`; no production dependency or
-     finalizer behavior change yet.
+     finalizer behavior change yet. Real GoodCopBadCop slices show `cc3d` is
+     parity-correct and sometimes faster than OpenCV for connected components, but
+     not consistently faster across components/ranges. Treat it as a guarded
+     candidate backend, not a default replacement.
 6. **Continue storage/publish optimization separately.**
    - Keep dense masks for current consumers; use RLE/chunk-size experiments to reduce publication
      cost without changing biological semantics.
@@ -296,3 +327,21 @@ Implementation note: cuCIM GPU backends run in a subprocess worker. On the 2026-
 workstation check, cuCIM completed successfully but could segfault during Python
 interpreter teardown if used in-process; subprocess isolation keeps the diagnostic
 command itself reliable.
+
+Real-slice check on
+`/groups/johnson/johnsonlab/jeremy/recordings/2026-06-14T21-12-08Z_arena_1_GoodCopBadCop/...`
+using `subject_masks_unet_registry_subject_mask_dense_and_rle_smoke_20260620_apply_01`
+showed clean parity for `cc3d`, `skimage`, and `cucim` against the OpenCV reference.
+The speed result was component/range dependent:
+
+- rows `0:1024`, `subject_body`: OpenCV 2344 masks/s, `cc3d` 2302 masks/s.
+- rows `0:1024`, `swim_bladder`: OpenCV 2609 masks/s, `cc3d` 2324 masks/s.
+- rows `0:1024`, `eyes_union`: OpenCV 3427 masks/s, `cc3d` 2270 masks/s.
+- rows `60000:61024`, `subject_body`: OpenCV 1473 masks/s, `cc3d` 2292 masks/s.
+- rows `60000:61024`, `swim_bladder`: OpenCV 3084 masks/s, `cc3d` 2222 masks/s.
+- rows `60000:61024`, `eyes_union`: OpenCV 2193 masks/s, `cc3d` 2310 masks/s.
+
+Interpretation: `cc3d` is worth keeping in the benchmark harness and may be worth
+an opt-in connected-components backend after stage-level profiling, but the current
+data does not justify replacing OpenCV globally. cuCIM was parity-correct but slower
+than both OpenCV and `cc3d` on these CPU-sized real slices.

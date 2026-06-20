@@ -91,7 +91,7 @@ def _load_real_masks(
     row_count: int,
     threshold: float,
 ) -> np.ndarray:
-    root = open_zarr_root(zarr_path, mode="r", use_consolidated=False)
+    root = open_zarr_root(zarr_path, mode="r")
     group = root["subject_mask_runs"][str(subject_run)]
     labels = tuple(str(label) for label in group.attrs.get("mask_labels", ()))
     if component not in labels:
