@@ -591,6 +591,10 @@ Chunking policy:
 
 - Keep dense compatibility cache chunks as `(storage_row_chunk, 1, H, W)` using
   `refined_subject_mask_storage_chunks(...)`.
+- The historical dense cache row chunk is small for interactive one-ROI review
+  access. Large cluster publication can benchmark explicit refined dense row
+  chunks such as `256` and `512`; those reduce PRFS file count but increase the
+  logical amount decompressed for random single-ROI reads.
 - Chunk per-component row metadata arrays on the existing metric row grid, for
   example `(refined_subject_mask_metric_row_chunk(N),)` for `present` and
   `(refined_subject_mask_metric_row_chunk(N), 4)` for `bbox_xyxy`.
@@ -600,6 +604,11 @@ Chunking policy:
   sequential chunks, such as 1-16 MiB of `uint32` payload, after benchmarking.
 - Record requested and effective worker row chunk sizes in run attrs whenever
   parallel writers are used.
+- Parallel finalizer workers must own whole physical Zarr chunks for every array
+  they write. When a benchmark run increases dense mask row chunks, worker row
+  chunks must be rounded to the metric/dense chunk grid; otherwise partial writes
+  to compressed chunks reintroduce read-modify-write overhead and stale-overwrite
+  risk.
 
 Ragged payload writes need special care. Do not let multiple workers append to
 one shared component `counts` array. Use one of these safe patterns:

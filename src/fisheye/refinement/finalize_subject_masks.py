@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
 from datetime import datetime, timezone
+import math
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
@@ -51,6 +52,7 @@ from ..shared.subject_mask_chunks import (
     REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT,
     refined_subject_mask_dask_worker_row_chunk,
     refined_subject_mask_metric_row_chunk,
+    refined_subject_mask_storage_row_chunk,
     refined_subject_mask_storage_chunks,
 )
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
@@ -975,17 +977,46 @@ def _row_chunks(total_rows: int, chunk_size: int) -> list[tuple[int, int]]:
     ]
 
 
-def _dask_worker_row_chunk_size(total_rows: int, requested_chunk_size: int) -> int:
+def _parallel_worker_row_chunk_size(
+    total_rows: int,
+    requested_chunk_size: int,
+    *,
+    dense_mask_row_chunk: int | None = None,
+) -> int:
     """Return a worker chunk size that avoids concurrent partial Zarr chunk writes."""
 
-    return refined_subject_mask_dask_worker_row_chunk(total_rows, requested_chunk_size)
+    metric_aligned = refined_subject_mask_dask_worker_row_chunk(total_rows, requested_chunk_size)
+    metric_chunk = refined_subject_mask_metric_row_chunk(total_rows)
+    dense_chunk = refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk)
+    alignment = math.lcm(int(metric_chunk), int(dense_chunk))
+    if metric_aligned <= alignment:
+        return int(alignment)
+    return int(((metric_aligned + alignment - 1) // alignment) * alignment)
 
 
-def _worker_chunk_size_for_backend(total_rows: int, requested_chunk_size: int, execution_backend: str) -> int:
+def _worker_chunk_size_for_backend(
+    total_rows: int,
+    requested_chunk_size: int,
+    execution_backend: str,
+    *,
+    dense_mask_row_chunk: int | None = None,
+) -> int:
     requested = max(1, int(requested_chunk_size))
     if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
-        return _dask_worker_row_chunk_size(total_rows, requested)
+        return _parallel_worker_row_chunk_size(
+            total_rows,
+            requested,
+            dense_mask_row_chunk=dense_mask_row_chunk,
+        )
     return requested
+
+
+def _chunk_alignment_label(execution_backend: str, *, dense_mask_row_chunk: int | None = None) -> str:
+    if execution_backend not in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
+        return "requested_chunk_size"
+    if dense_mask_row_chunk is None:
+        return REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
+    return "refined_subject_mask_metric_row_chunk+dense_mask_row_chunk"
 
 
 def _row_chunk_shards(
@@ -1063,6 +1094,7 @@ def _create_component_shell(
     height: int,
     width: int,
     retain_source_seeds: bool,
+    dense_mask_row_chunk: int | None = None,
 ) -> zarr.Group:
     component_group = run_group.require_group("components").require_group(component_name)
     metric_chunks = (refined_subject_mask_metric_row_chunk(total_rows),)
@@ -1115,7 +1147,11 @@ def _create_component_shell(
             "source_seed_masks_roi",
             shape=(total_rows, height, width),
             dtype=np.uint8,
-            chunks=(refined_subject_mask_metric_row_chunk(total_rows), int(height), int(width)),
+            chunks=(
+                refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk),
+                int(height),
+                int(width),
+            ),
         )
         component_group.attrs["source_seed_masks_schema_id"] = _SOURCE_SEED_MASKS_SCHEMA_ID
         component_group.attrs["source_seed_masks_status"] = "retained"
@@ -1213,10 +1249,17 @@ def _create_refined_run_shell(
     provenance_inputs: Mapping[str, object],
     stage_command: Optional[str],
     retain_source_seeds: bool,
+    dense_mask_row_chunk: int | None = None,
 ) -> zarr.Group:
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
     width = int(source.masks_roi.shape[3])
+    dense_storage_chunks = refined_subject_mask_storage_chunks(
+        total_rows,
+        height,
+        width,
+        dense_mask_row_chunk,
+    )
     component_names = tuple(str(name) for name in component_names)
     created = _utc_now()
 
@@ -1232,7 +1275,7 @@ def _create_refined_run_shell(
         "masks_roi",
         shape=(total_rows, len(component_names), height, width),
         dtype=np.uint8,
-        chunks=refined_subject_mask_storage_chunks(total_rows, height, width),
+        chunks=dense_storage_chunks,
     )
     run_group.create_array(
         "available_channels",
@@ -1301,6 +1344,7 @@ def _create_refined_run_shell(
             height=height,
             width=width,
             retain_source_seeds=retain_source_seeds,
+            dense_mask_row_chunk=dense_mask_row_chunk,
         )
 
     if source.run_name:
@@ -1314,6 +1358,8 @@ def _create_refined_run_shell(
     run_group.attrs["source_crop_run"] = source.crop_run
     run_group.attrs.update(source.source_crop_snapshot)
     run_group.attrs["mask_labels"] = list(component_names)
+    run_group.attrs["dense_mask_row_chunk"] = int(dense_storage_chunks[0])
+    run_group.attrs["dense_mask_storage_chunks"] = [int(value) for value in dense_storage_chunks]
     run_group.attrs["label_schema_id"] = _infer_refined_label_schema_id(component_names)
     run_group.attrs["output_semantics"] = "multilabel"
     run_group.attrs["refinement_semantics"] = "canonical_component_masks"
@@ -1385,6 +1431,8 @@ def _create_refined_run_shell(
             "chunk_size": provenance_inputs.get("chunk_size"),
             "worker_chunk_size": provenance_inputs.get("worker_chunk_size"),
             "chunk_count": provenance_inputs.get("chunk_count"),
+            "dense_mask_row_chunk": provenance_inputs.get("dense_mask_row_chunk"),
+            "dense_mask_storage_chunks": provenance_inputs.get("dense_mask_storage_chunks"),
             "write_eye_geometry": provenance_inputs.get("eye_geometry_requested"),
             "write_component_contours": provenance_inputs.get("component_contours_requested"),
             "retain_source_seeds": provenance_inputs.get("retain_source_seeds"),
@@ -3103,6 +3151,7 @@ def finalize_subject_mask_run(
     retain_source_seeds: bool = False,
     mask_storage: str = "dense_uint8",
     mask_rle_validation_mode: str = "full",
+    dense_mask_row_chunk: int | None = None,
     postcompute_backend: str = _SERIAL_POSTCOMPUTE_BACKEND,
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
@@ -3155,8 +3204,22 @@ def finalize_subject_mask_run(
         raise ValueError("postcompute_backend='process_shards' requires a filesystem zarr_path.")
     source = _load_source_subject_mask_run(root, subject_run)
     total_rows = int(source.masks_roi.shape[0])
+    height = int(source.masks_roi.shape[2])
+    width = int(source.masks_roi.shape[3])
+    effective_dense_mask_row_chunk = refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk)
+    dense_mask_storage_chunks = refined_subject_mask_storage_chunks(
+        total_rows,
+        height,
+        width,
+        effective_dense_mask_row_chunk,
+    )
     requested_chunk_size = max(1, int(chunk_size))
-    worker_chunk_size = _worker_chunk_size_for_backend(total_rows, requested_chunk_size, execution_backend)
+    worker_chunk_size = _worker_chunk_size_for_backend(
+        total_rows,
+        requested_chunk_size,
+        execution_backend,
+        dense_mask_row_chunk=effective_dense_mask_row_chunk,
+    )
     chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
     dask_metadata: dict[str, object] = {
         "execution_backend": execution_backend,
@@ -3167,10 +3230,9 @@ def finalize_subject_mask_run(
         "worker_process_count": normalized_num_workers,
         "dask_requested_chunk_size": requested_chunk_size,
         "dask_chunk_size": worker_chunk_size,
-        "dask_chunk_alignment": (
-            REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT
-            if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}
-            else "requested_chunk_size"
+        "dask_chunk_alignment": _chunk_alignment_label(
+            execution_backend,
+            dense_mask_row_chunk=dense_mask_row_chunk,
         ),
         "dask_version": getattr(dask, "__version__", "unknown"),
     }
@@ -3206,6 +3268,8 @@ def finalize_subject_mask_run(
         "chunk_size": requested_chunk_size,
         "worker_chunk_size": worker_chunk_size,
         "chunk_count": len(chunk_ranges),
+        "dense_mask_row_chunk": int(effective_dense_mask_row_chunk),
+        "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "metric_level": metric_level,
         "write_eye_geometry": bool(write_eye_geometry),
         "write_component_contours": bool(write_component_contours),
@@ -3232,6 +3296,8 @@ def finalize_subject_mask_run(
         total_rows=int(total_rows),
         requested_chunk_size=int(requested_chunk_size),
         worker_chunk_size=int(worker_chunk_size),
+        dense_mask_row_chunk=int(effective_dense_mask_row_chunk),
+        dense_mask_storage_chunks=[int(value) for value in dense_mask_storage_chunks],
         chunk_count=int(len(chunk_ranges)),
         execution_backend=str(execution_backend),
         scheduler=str(scheduler_key),
@@ -3257,8 +3323,6 @@ def finalize_subject_mask_run(
 
     stage_start = time.perf_counter()
     timing = _TimingRecorder()
-    height = int(source.masks_roi.shape[2])
-    width = int(source.masks_roi.shape[3])
     component_names = tuple(component_names)
     component_to_index = {name: idx for idx, name in enumerate(component_names)}
     reason_labels_by_component = {
@@ -3298,6 +3362,8 @@ def finalize_subject_mask_run(
         "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
         "mask_storage_requested": mask_storage,
         "mask_rle_validation_mode": mask_rle_validation_mode,
+        "dense_mask_row_chunk": int(effective_dense_mask_row_chunk),
+        "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3326,6 +3392,8 @@ def finalize_subject_mask_run(
         "chunk_size": int(requested_chunk_size),
         "worker_chunk_size": int(worker_chunk_size),
         "chunk_count": int(len(chunk_ranges)),
+        "dense_mask_row_chunk": int(effective_dense_mask_row_chunk),
+        "dense_mask_storage_chunks": [int(value) for value in dense_mask_storage_chunks],
         "component_metric_level": metric_level,
         "eye_geometry_requested": bool(write_eye_geometry),
         "component_contours_requested": bool(write_component_contours),
@@ -3353,6 +3421,7 @@ def finalize_subject_mask_run(
                 provenance_inputs=provenance_inputs,
                 stage_command=" ".join(sys.argv) if sys.argv else "unknown",
                 retain_source_seeds=bool(retain_source_seeds),
+                dense_mask_row_chunk=int(effective_dense_mask_row_chunk),
             )
 
     if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
@@ -3773,6 +3842,11 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_chunk_timings"] = list(_json_safe(timing.chunk_timings))
     run_group.attrs["smart_finalizer_review_counts"] = review_counts
     run_group.attrs["smart_finalizer_chunk_size"] = int(max(1, int(chunk_size)))
+    run_group.attrs["smart_finalizer_worker_chunk_size"] = int(worker_chunk_size)
+    run_group.attrs["smart_finalizer_dense_mask_row_chunk"] = int(effective_dense_mask_row_chunk)
+    run_group.attrs["smart_finalizer_dense_mask_storage_chunks"] = [
+        int(value) for value in dense_mask_storage_chunks
+    ]
     run_group.attrs["smart_finalizer_chunk_count"] = int(len(chunk_ranges))
     run_group.attrs["smart_finalizer_metric_level"] = metric_level
     run_group.attrs["smart_finalizer_write_eye_geometry"] = bool(write_eye_geometry)
@@ -3795,7 +3869,7 @@ def finalize_subject_mask_run(
     run_group.attrs["dask_scheduler"] = scheduler_key
     run_group.attrs["dask_num_workers"] = normalized_num_workers
     run_group.attrs["worker_process_count"] = normalized_num_workers
-    run_group.attrs["dask_chunk_size"] = int(max(1, int(chunk_size)))
+    run_group.attrs["dask_chunk_size"] = int(worker_chunk_size)
     run_group.attrs["dask_version"] = getattr(dask, "__version__", "unknown")
     refined_parent.attrs["latest"] = target_run
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
@@ -3852,6 +3926,7 @@ def finalize_subject_masks(
     retain_source_seeds: bool = False,
     mask_storage: str = "dense_uint8",
     mask_rle_validation_mode: str = "full",
+    dense_mask_row_chunk: int | None = None,
     postcompute_backend: str = _SERIAL_POSTCOMPUTE_BACKEND,
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
@@ -3880,6 +3955,7 @@ def finalize_subject_masks(
         retain_source_seeds=retain_source_seeds,
         mask_storage=mask_storage,
         mask_rle_validation_mode=mask_rle_validation_mode,
+        dense_mask_row_chunk=dense_mask_row_chunk,
         postcompute_backend=postcompute_backend,
         postcompute_chunk_size=postcompute_chunk_size,
         postcompute_num_workers=postcompute_num_workers,
@@ -3991,6 +4067,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dense-mask-row-chunk",
+        type=int,
+        help=(
+            "Rows per physical Zarr chunk for dense refined masks_roi and retained "
+            "source_seed_masks_roi arrays. Defaults to the current contract policy."
+        ),
+    )
+    parser.add_argument(
         "--postcompute-backend",
         choices=_POSTCOMPUTE_BACKENDS,
         default=_SERIAL_POSTCOMPUTE_BACKEND,
@@ -4084,6 +4168,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         retain_source_seeds=bool(args.retain_source_seeds),
         mask_storage=args.mask_storage,
         mask_rle_validation_mode=args.mask_rle_validation_mode,
+        dense_mask_row_chunk=args.dense_mask_row_chunk,
         postcompute_backend=args.postcompute_backend,
         postcompute_chunk_size=args.postcompute_chunk_size,
         postcompute_num_workers=args.postcompute_num_workers,

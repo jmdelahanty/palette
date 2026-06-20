@@ -35,6 +35,7 @@ MODEL_TOP_K=5
 MODEL_REQUIRE_UNIQUE=0
 MODEL_INCLUDE_NON_SUCCESS=0
 FINALIZE_CHUNK_SIZE=256
+FINALIZE_DENSE_MASK_ROW_CHUNK=""
 FINALIZE_EXECUTION_BACKEND="process_shards"
 FINALIZE_SCHEDULER="processes"
 FINALIZE_NUM_WORKERS="auto"
@@ -124,6 +125,9 @@ Options:
   --model-include-non-success
                             Include non-success registry model rows
   --finalize-chunk-size N   Refined finalizer chunk size (default: 256)
+  --finalize-dense-mask-row-chunk N
+                            Physical dense masks_roi row chunk for refined outputs
+                            (default: finalizer storage policy)
   --finalize-execution-backend NAME
                             serial_driver|dask_worker_chunks|process_shards (default: process_shards)
   --finalize-scheduler NAME Dask scheduler for dask_worker_chunks: single-threaded|threads|processes|distributed
@@ -199,6 +203,7 @@ while [[ $# -gt 0 ]]; do
     --model-require-unique) MODEL_REQUIRE_UNIQUE=1; shift;;
     --model-include-non-success) MODEL_INCLUDE_NON_SUCCESS=1; shift;;
     --finalize-chunk-size) FINALIZE_CHUNK_SIZE="$2"; shift 2;;
+    --finalize-dense-mask-row-chunk) FINALIZE_DENSE_MASK_ROW_CHUNK="$2"; shift 2;;
     --finalize-execution-backend) FINALIZE_EXECUTION_BACKEND="$2"; shift 2;;
     --finalize-scheduler) FINALIZE_SCHEDULER="$2"; shift 2;;
     --finalize-num-workers) FINALIZE_NUM_WORKERS="$2"; shift 2;;
@@ -230,6 +235,12 @@ fi
 if [[ "$FINALIZE_EXECUTION_BACKEND" != "serial_driver" && "$FINALIZE_EXECUTION_BACKEND" != "dask_worker_chunks" && "$FINALIZE_EXECUTION_BACKEND" != "process_shards" ]]; then
   echo "--finalize-execution-backend must be serial_driver, dask_worker_chunks, or process_shards." >&2
   exit 2
+fi
+if [[ -n "$FINALIZE_DENSE_MASK_ROW_CHUNK" ]]; then
+  if ! [[ "$FINALIZE_DENSE_MASK_ROW_CHUNK" =~ ^[0-9]+$ ]] || [[ "$FINALIZE_DENSE_MASK_ROW_CHUNK" -lt 1 ]]; then
+    echo "--finalize-dense-mask-row-chunk must be a positive integer." >&2
+    exit 2
+  fi
 fi
 if [[ "$FINALIZE_SCHEDULER" != "single-threaded" && "$FINALIZE_SCHEDULER" != "threads" && "$FINALIZE_SCHEDULER" != "processes" && "$FINALIZE_SCHEDULER" != "distributed" ]]; then
   echo "--finalize-scheduler must be single-threaded, threads, processes, or distributed." >&2
@@ -498,6 +509,7 @@ SUBJECT_ARGS=(
   --roi-live-gpu-chunk-frames "$ROI_LIVE_GPU_CHUNK_FRAMES"
   --progress-dir "$RUN_DIR/progress"
 )
+if [[ -n "$FINALIZE_DENSE_MASK_ROW_CHUNK" ]]; then SUBJECT_ARGS+=(--finalize-dense-mask-row-chunk "$FINALIZE_DENSE_MASK_ROW_CHUNK"); fi
 if [[ -n "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-chunk-size "$FINALIZE_POSTCOMPUTE_CHUNK_SIZE"); fi
 if [[ "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" != "auto" && -n "$FINALIZE_POSTCOMPUTE_NUM_WORKERS" ]]; then SUBJECT_ARGS+=(--finalize-postcompute-num-workers "$FINALIZE_POSTCOMPUTE_NUM_WORKERS"); fi
 if [[ "$MODEL_REQUIRE_UNIQUE" == "1" ]]; then SUBJECT_ARGS+=(--model-require-unique); fi
@@ -761,6 +773,7 @@ echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS device=$DEVICE"
 echo "Split finalization job: $SPLIT_FINALIZATION_JOB"
 echo "Finalizer: chunk_size=$FINALIZE_CHUNK_SIZE workers=$FINALIZE_NUM_WORKERS backend=$FINALIZE_EXECUTION_BACKEND scheduler=$FINALIZE_SCHEDULER"
+echo "Finalizer dense mask row chunk: ${FINALIZE_DENSE_MASK_ROW_CHUNK:-<default>}"
 echo "Refined mask storage: $MASK_STORAGE"
 echo "Finalizer resources: queue=${FINALIZE_QUEUE:-<default>} ncores=$FINALIZE_NCORES mem_gb=$FINALIZE_MEM_GB max_active=$FINALIZE_MAX_ACTIVE"
 echo "ROI cache root: ${ROI_CACHE_ROOT:-<none>}"

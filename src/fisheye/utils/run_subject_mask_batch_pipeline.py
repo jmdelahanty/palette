@@ -421,6 +421,8 @@ def _finalization_command(
     ]
     if args.finalize_num_workers is not None:
         cmd.extend(["--num-workers", str(args.finalize_num_workers)])
+    if args.finalize_dense_mask_row_chunk is not None:
+        cmd.extend(["--dense-mask-row-chunk", str(args.finalize_dense_mask_row_chunk)])
     if args.write_eye_geometry:
         cmd.append("--write-eye-geometry")
     if args.write_component_contours:
@@ -925,6 +927,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--finalize-chunk-size", type=int, default=64)
+    parser.add_argument(
+        "--finalize-dense-mask-row-chunk",
+        type=int,
+        help=(
+            "Rows per physical Zarr chunk for dense refined masks_roi. Defaults to "
+            "finalize_subject_masks' current storage policy."
+        ),
+    )
     parser.add_argument(
         "--finalize-execution-backend",
         choices=("serial_driver", "dask_worker_chunks", "process_shards"),

@@ -946,6 +946,46 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert "process_shard_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
 
 
+def test_worker_chunk_size_aligns_to_dense_mask_row_chunk() -> None:
+    assert mod._worker_chunk_size_for_backend(
+        120_221,
+        256,
+        "process_shards",
+        dense_mask_row_chunk=256,
+    ) == 256
+    assert mod._worker_chunk_size_for_backend(
+        120_221,
+        256,
+        "process_shards",
+        dense_mask_row_chunk=512,
+    ) == 512
+
+
+def test_finalize_subject_masks_records_dense_mask_row_chunk(monkeypatch, tmp_path: Path) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+
+    summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_dense_chunk_001",
+        chunk_size=1,
+        dense_mask_row_chunk=512,
+    )
+
+    assert summary["dense_mask_row_chunk"] == 2
+    assert summary["dense_mask_storage_chunks"] == [2, 1, 10, 10]
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_masks_dense_chunk_001"]
+    assert tuple(int(v) for v in run["masks_roi"].chunks) == (2, 1, 10, 10)
+    assert run.attrs["dense_mask_row_chunk"] == 2
+    assert run.attrs["dense_mask_storage_chunks"] == [2, 1, 10, 10]
+    provenance_parameters = run.attrs["provenance"]["parameters"]
+    assert provenance_parameters["dense_mask_row_chunk"] == 2
+    assert provenance_parameters["dense_mask_storage_chunks"] == [2, 1, 10, 10]
+
+
 def test_refresh_refined_subject_mask_metrics_can_refresh_component_contours(monkeypatch, tmp_path: Path) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     zarr_path = tmp_path / "analysis.zarr"

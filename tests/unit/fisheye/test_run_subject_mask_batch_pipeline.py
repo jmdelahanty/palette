@@ -315,6 +315,7 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
         finalize_execution_backend="process_shards",
         finalize_scheduler="processes",
         finalize_num_workers=8,
+        finalize_dense_mask_row_chunk=512,
         finalize_postcompute_backend="process_shards",
         finalize_postcompute_chunk_size=512,
         finalize_postcompute_num_workers=4,
@@ -344,6 +345,7 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
     assert cmd[cmd.index("--postcompute-backend") + 1] == "process_shards"
     assert cmd[cmd.index("--postcompute-chunk-size") + 1] == "512"
     assert cmd[cmd.index("--postcompute-num-workers") + 1] == "4"
+    assert cmd[cmd.index("--dense-mask-row-chunk") + 1] == "512"
     assert cmd[cmd.index("--mask-storage") + 1] == "dense_and_rle"
     assert cmd[cmd.index("--mask-rle-validation-mode") + 1] == "invariants"
     assert "--write-eye-geometry" in cmd
@@ -358,6 +360,7 @@ def test_finalization_command_uses_length_safe_progress_filename(tmp_path: Path)
         finalize_execution_backend="process_shards",
         finalize_scheduler="processes",
         finalize_num_workers=8,
+        finalize_dense_mask_row_chunk=None,
         finalize_postcompute_backend="process_shards",
         finalize_postcompute_chunk_size=None,
         finalize_postcompute_num_workers=None,
