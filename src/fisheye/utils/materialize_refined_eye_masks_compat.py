@@ -17,6 +17,7 @@ import zarr
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..refinement.refine_eye_masks import _compute_roi_metrics, _measure_mask, _write_contours_from_masks
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -247,7 +248,7 @@ def _load_subject_component_masks(
     width: int,
 ) -> np.ndarray:
     empty = np.zeros((total_rois, height, width), dtype=np.uint8)
-    if group is None or "masks_roi" not in group:
+    if group is None:
         return empty
     label_map = _label_index_map(group)
     if component_name not in label_map:
@@ -256,7 +257,17 @@ def _load_subject_component_masks(
     available = _available_channel_mask(group, expected_count=max(len(label_map), component_idx + 1))
     if component_idx >= int(available.shape[0]) or not bool(available[component_idx]):
         return empty
-    return np.asarray(group["masks_roi"][:, component_idx], dtype=np.uint8)
+    try:
+        mask_store = open_mask_store(
+            group,
+            source_path=str(getattr(group, "path", "") or "<subject_mask_run>"),
+            prefer="dense",
+        )
+    except MaskStoreError:
+        return empty
+    if int(mask_store.n_rows) != int(total_rois):
+        return empty
+    return mask_store.read_dense(rows=slice(0, total_rois), channels=component_idx)[:, 0]
 
 
 def _load_keypoints_roi(
@@ -356,10 +367,17 @@ def _load_eye_masks_and_edit_state(refined_group: zarr.Group) -> tuple[np.ndarra
             "refined_subject_masks run does not expose canonical left/right eye components: "
             f"missing {', '.join(missing)}."
         )
-    masks_roi = np.asarray(refined_group["masks_roi"][:], dtype=np.uint8)
-    eye_masks = np.stack(
-        [np.asarray(masks_roi[:, label_map[name]], dtype=np.uint8) for name in EYE_COMPONENTS],
-        axis=1,
+    try:
+        mask_store = open_mask_store(
+            refined_group,
+            source_path=str(getattr(refined_group, "path", "") or "<refined_subject_masks_run>"),
+            prefer="dense",
+        )
+    except MaskStoreError as exc:
+        raise RuntimeError(f"refined_subject_masks run is missing usable mask storage: {exc}") from exc
+    eye_masks = mask_store.read_dense(
+        rows=slice(0, int(mask_store.n_rows)),
+        channels=[label_map[name] for name in EYE_COMPONENTS],
     )
 
     edit_applied_arr = refined_group.get("edit_applied")

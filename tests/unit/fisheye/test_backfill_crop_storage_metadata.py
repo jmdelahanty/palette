@@ -377,6 +377,7 @@ def test_main_uses_direct_crop_parent_metadata_when_root_consolidated_is_stale(
     run.create_array("frame_counts", data=np.array([1, 1], dtype=np.int32))
     run.create_array("detection_indices", data=np.array([0, 1], dtype=np.int32))
 
+    zarr.consolidate_metadata(str(zarr_path))
     root_meta_path = zarr_path / "zarr.json"
     root_meta = json.loads(root_meta_path.read_text(encoding="utf-8"))
     root_meta["consolidated_metadata"]["metadata"]["crop_runs"]["attributes"].pop("latest_materialized", None)

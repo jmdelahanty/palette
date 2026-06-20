@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-04-26
+last_verified: 2026-06-19
 -->
 
 Purpose: define the merged training artifact for a generalized ROI-local
@@ -60,10 +60,16 @@ The new subject-mask artifact is additive:
 - `training_task = "subject_masks"` is a separate training task.
 - Exporters may project eye-mask labels into the subject-mask schema when that
   projection is explicit and loss-masked.
-- Current implementation ingests `subject_mask_runs` directly. Legacy
-  `eye_masks_runs` / `refined_eye_masks_runs` and refined-subject sources should
-  be projected or materialized into a `subject_mask_runs` adapter first until
-  direct source adapters are implemented.
+- Current implementation ingests `subject_mask_runs` and coherent
+  `refined_subject_masks_runs` directly. Refined-source reads go through the
+  mask-store boundary, so analysis inputs may provide dense `masks_roi` or
+  compact `mask_rle`. The exported training artifact still writes dense
+  `subject_mask_runs/<run>/masks_roi` with
+  `mask_storage_format = "dense_uint8"` and
+  `mask_storage_surface = "masks_roi"`.
+- Legacy `eye_masks_runs` / `refined_eye_masks_runs` should be projected or
+  materialized into a subject-mask source first until direct eye-mask adapters
+  are implemented.
 
 Runtime/source-stage compatibility note:
 
@@ -117,7 +123,8 @@ scripts/py -m fisheye.utils.audit_subject_mask_training_sources \
 The audit checks the manifest `selected_sources` rows against source zarrs:
 
 - selected `source_stage_group/source_subject_mask_run` exists
-- selected crop run exists and row-counts match `masks_roi`
+- selected crop run exists and row-counts match the source physical mask store
+  (`masks_roi` or compact `mask_rle` through `MaskStore`)
 - `label_schema_id`, `mask_labels`, `available_channels`, and
   `available_components` agree
 - component review state/intended-use from registry agrees with
@@ -128,7 +135,8 @@ The audit checks the manifest `selected_sources` rows against source zarrs:
 
 Use `--allow-unapproved-refined` only for draft/QA exports that intentionally
 mirror the exporter override. Use `--read-masks-for-rates` when
-`metrics/mask_present` is missing and a heavier `masks_roi` scan is acceptable.
+`metrics/mask_present` is missing and heavier dense materialization through
+`MaskStore` is acceptable.
 
 ## Evolution Policy
 
@@ -249,6 +257,9 @@ Implications:
       attrs:
         label_schema_id
         mask_labels
+        mask_storage_format    "dense_uint8"
+        mask_storage_surface   "masks_roi"
+        mask_store_encoding    "dense_uint8"
         allow_partial_supervision
 
   splits/
@@ -266,8 +277,11 @@ Implications:
     source_zarr_path           (M,) string
     source_stage_group         (M,) string
     source_run_name            (M,) string
+    source_crop_run            (M,) string
     source_label_schema_id     (M,) string
     source_projection_mode     (M,) string
+    source_mask_store_encoding (M,) string
+    source_mask_storage_surface (M,) string
 
   attrs:
     zarr_purpose               "training"
@@ -287,11 +301,17 @@ Required root attrs:
   - `input_format` (`gray` or `rgb`)
   - `label_schema_id`
   - `mask_labels`
+  - `mask_storage_format = "dense_uint8"`
+  - `mask_storage_surface = "masks_roi"`
   - `allow_partial_supervision` (`true`)
   - `source_stage` (`subject_mask_runs`, `refined_subject_masks_runs`,
     `eye_masks_runs`, `refined_eye_masks_runs`, or `mixed`)
   - `source_count`
   - `source_zarr_paths`
+  - `source_mask_store_encoding`
+  - `source_mask_store_encodings`
+  - `source_mask_storage_surface`
+  - `source_mask_storage_surfaces`
   - `split_seed`
 
 Required root groups:
@@ -338,15 +358,27 @@ Required attrs:
 
 - `label_schema_id`
 - `mask_labels`
+- `mask_storage_format = "dense_uint8"`
+- `mask_storage_surface = "masks_roi"`
+- `mask_store_encoding = "dense_uint8"`
 - `allow_partial_supervision = true`
 - `source_mask_stage`
 - `source_crop_run`
 - `source_zarr_path`
 
-Dense `masks_roi` remains the training artifact compatibility contract. Compact
-binary storage options such as RLE should be introduced behind a mask
-materialization API first; see
+Dense `masks_roi` is the training artifact compatibility contract. Compact
+binary storage options such as RLE are valid analysis-source storage only when
+read through the mask-store materialization API. A training artifact must not
+store `subject_mask_runs/<run>/mask_rle`; if a compact analysis source was used,
+that source encoding is recorded in `source_mask_store_encoding(s)` and the
+physical source surface is recorded in `source_mask_storage_surface(s)` while
+the training run itself remains dense. See
 [`mask_rle_storage_design_and_benchmark_plan.md`](mask_rle_storage_design_and_benchmark_plan.md).
+
+Current readers tolerate older dense training artifacts that predate
+`mask_storage_format` and `mask_storage_surface`, but if those attrs are present
+they must match the dense training contract. Readers reject training artifacts
+that expose compact `subject_mask_runs/<run>/mask_rle`.
 
 Recommended attrs:
 
@@ -354,6 +386,10 @@ Recommended attrs:
 - `valid_channel_counts`
 - `dense_channel_counts`
 - `explicit_negative_channel_counts`
+- `source_mask_store_encoding`
+- `source_mask_store_encodings`
+- `source_mask_storage_surface`
+- `source_mask_storage_surfaces`
 
 ### Channel validity invariant
 
@@ -400,10 +436,20 @@ Required source-table arrays:
   - shape: `(M,)`
 - `source_run_name`
   - shape: `(M,)`
+- `source_crop_run`
+  - shape: `(M,)`
 - `source_label_schema_id`
   - shape: `(M,)`
 - `source_projection_mode`
   - shape: `(M,)`
+- `source_mask_store_encoding`
+  - shape: `(M,)`
+  - source analysis mask-store encoding used by the exporter, for example
+    `dense_uint8` or `component_rle_v1`
+- `source_mask_storage_surface`
+  - shape: `(M,)`
+  - physical source mask surface used by the exporter, currently `masks_roi`
+    for dense sources or `mask_rle` for compact analysis sources
 
 Required attrs:
 

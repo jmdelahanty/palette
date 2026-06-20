@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-28
+last_verified: 2026-06-19
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
@@ -278,6 +278,27 @@ Current implementation note:
   `--execution-backend dask_worker_chunks --scheduler processes --num-workers 48
   --chunk-size 64 --metric-level cheap`, then refreshed eye geometry with
   `fisheye.utils.backfill_refined_subject_eye_geometry`
+
+Source ROI pixel/decode provenance preservation:
+
+- finalization from a raw `subject_mask_runs/<run>` must preserve the source
+  crop snapshot attrs, including `source_crop_storage_mode`,
+  `source_crop_signature`, `source_crop_revision`,
+  `source_roi_image_representation`, `source_roi_pixel_contract_name`, and
+  `source_roi_pixel_contract`
+- finalization must also preserve ROI read/cache attrs when the raw subject-mask
+  run exposed them: `source_roi_read_mode`, `roi_cache_policy`,
+  `source_roi_cache_used`, `source_roi_cache_backend`,
+  `source_roi_cache_key`, `source_roi_cache_path`,
+  `source_roi_cache_canonical_path`,
+  `source_roi_cache_expected_archive_path`,
+  `source_roi_live_acceleration_requested`,
+  `source_roi_live_acceleration_effective`,
+  `source_roi_live_acceleration_fallback_reason`, and
+  `source_roi_live_gpu_chunk_frames`
+- `source_roi_cache_path` is the effective runtime path from the raw inference
+  job and may be node-local scratch; `source_roi_cache_canonical_path` is the
+  durable cache identity when a staged cache was used
 - for legacy raw eye-stage data, the compatibility bridge remains:
   `refined_eye_masks_runs` or `eye_masks_runs`
   -> projected/backfilled `subject_mask_runs/<run>`
@@ -409,7 +430,22 @@ refined_subject_masks_runs/
     frame_counts                            (F,) int32           # recommended
     detection_indices                       (N,) int32           # recommended
     detection_source                        (N,) int8
-    masks_roi                               (N, C, H, W) uint8
+    masks_roi                               (N, C, H, W) uint8 optional when mask_rle is authoritative
+    mask_rle/                               # optional compact mirror or authoritative compact store
+      attrs:
+        schema_id                           "palette_mask_rle_binary_v1"
+        mask_encoding                       "coco_rle_fortran_v1"
+        mask_value_semantics                "binary_0_1"
+        layout                              "component_groups"
+        encoded_shape_hw                    [H, W]
+        component_names                     [<component_name>, ...]
+      components/
+        <component_index>_<component_name>/
+          counts                            (total_counts,) uint32
+          indptr                            (N + 1,) int64
+          present                           (N,) bool
+          area_px                           (N,) int32
+          bbox_xyxy                         (N, 4) int32
     available_channels                      (C,) bool
     edit_applied                            (N, C) bool
     metrics/
@@ -447,9 +483,48 @@ Required arrays:
 - `detection_source`
   - shape: `(N,)`
   - expected to align with the source crop run
+- physical mask store
+  - either dense `masks_roi` or compact `mask_rle` must be present
+  - consumers should use `fisheye.shared.mask_store.open_mask_store(...)`
+    when they can tolerate either physical encoding
 - `masks_roi`
   - shape: `(N, C, H, W)`
-  - canonical refined binary masks
+  - dense refined binary masks
+  - default compatibility surface for historical readers
+  - live review/edit authority surface when present; current Palette review/edit
+    tooling materializes this dense cache before editing compact-only runs
+  - omitted when `mask_storage_encoding == "component_rle_v1"` and
+    `masks_roi_materialized == false`
+  - can be materialized/refreshed from compact `mask_rle` with
+    `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --apply`
+  - can be removed again with the same utility's `--delete-dense --apply`
+    option when compact `mask_rle` remains present
+- `mask_rle`
+  - compact component-separated exact binary masks
+  - written as an additive mirror by
+    `finalize_subject_masks --mask-storage dense_and_rle`
+  - written as the only physical mask store by
+    `finalize_subject_masks --mask-storage rle_v1`
+  - consumers that need dense masks should use `fisheye.shared.mask_store.open_mask_store(...)`
+    rather than assuming a single physical encoding
+  - not yet the direct edit/writeback surface; if dense `masks_roi` was
+    materialized and edited, compact `mask_rle` should be considered stale until
+    regenerated with
+    `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --refresh-rle --apply`
+  - edit paths that mutate materialized dense masks must stamp
+    `mask_rle_stale = true` plus `mask_rle_stale_at_utc`,
+    `mask_rle_stale_reason`, `mask_rle_stale_component_names`, and row summary
+    attrs (`mask_rle_stale_row_count`, `mask_rle_stale_row_min`,
+    `mask_rle_stale_row_max`)
+  - modern readers must reject stale compact RLE by default; only diagnostic
+    callers should pass `allow_stale_rle=True`, and production consumers should
+    use dense `masks_roi` or refresh the compact store first
+  - registry sync exposes storage audit fields in
+    `subject_mask_performance_latest` and
+    `recording_subject_mask_performance_latest`, including dense/RLE logical
+    bytes, backend-reported stored bytes when available, dense-cache
+    materialization provenance, RLE refresh timestamps, and stale row/component
+    scope
 - `available_channels`
   - shape: `(C,)`
   - run-level declaration of which components are semantically available in the
@@ -886,7 +961,8 @@ Geometry policy:
 - refined component masks remain the canonical source artifact
 - geometry derived from those masks should carry its own validity flags
 - geometry primitives stored here should be recomputable from
-  `masks_roi` plus the documented method/policy attrs
+  the physical mask store (`masks_roi` or compact `mask_rle` through
+  `MaskStore`) plus the documented method/policy attrs
 - downstream `analysis/subject_shape_runs` should consume refined masks and/or these
   mask-local primitives, not raw `subject_mask_runs`
 
@@ -1079,7 +1155,12 @@ This contract is intentionally non-destructive.
 ## Validation Invariants
 
 - all row-aligned arrays share the same first dimension `N`
-- `masks_roi.shape[1] == available_channels.shape[0] == edit_applied.shape[1]`
+- at least one physical mask store exists: dense `masks_roi` or compact
+  `mask_rle`
+- if dense `masks_roi` exists, then
+  `masks_roi.shape[1] == available_channels.shape[0] == edit_applied.shape[1]`
+- if compact `mask_rle` exists, then `mask_rle.attrs["component_names"]`
+  must align with the refined component/channel order
 - `metrics/mask_present.shape == metrics/area_px.shape == (N, C)`
 - if a component subgroup exists, its per-row arrays must have first dimension `N`
 - unavailable channels must remain zero/false across mask/edit/metrics arrays

@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from fisheye.utils.export_subject_mask_training_zarr import (
     SUBJECT_STAGE_CHOICES,
     TARGET_SCHEMAS,
@@ -189,24 +190,22 @@ def _mask_present_rates_from_metrics(
     }
 
 
-def _mask_present_rates_from_masks(
-    subject_group: zarr.Group,
+def _mask_present_rates_from_mask_store(
+    mask_store: MaskStore,
     *,
     labels: Sequence[str],
     total_rows: int,
     context: str,
     warnings: list[str],
 ) -> dict[str, float]:
-    if "masks_roi" not in subject_group:
-        return {}
     try:
-        masks = np.asarray(subject_group["masks_roi"][:], dtype=np.uint8)
+        masks = np.asarray(mask_store.read_dense(), dtype=np.uint8)
     except Exception as exc:
-        warnings.append(f"{context}: failed reading masks_roi; rate parity skipped ({exc})")
+        warnings.append(f"{context}: failed materializing mask store; rate parity skipped ({exc})")
         return {}
     if masks.ndim != 4 or int(masks.shape[0]) != total_rows or int(masks.shape[1]) != len(labels):
         warnings.append(
-            f"{context}: masks_roi shape {tuple(masks.shape)} does not match "
+            f"{context}: materialized mask store shape {tuple(masks.shape)} does not match "
             f"(rows={total_rows}, channels={len(labels)}); rate parity skipped"
         )
         return {}
@@ -507,21 +506,32 @@ def _audit_one_source(
             f"(disk={labels!r}, expected={list(TARGET_SCHEMAS[schema_id])!r})"
         )
 
-    masks = subject_group.get("masks_roi")
+    mask_store: Optional[MaskStore] = None
     total_rows: Optional[int] = None
-    if not _is_array(masks):
-        errors.append(f"{subject_context}: missing required array masks_roi")
-    else:
-        shape = tuple(int(dim) for dim in masks.shape)
+    try:
+        mask_store = open_mask_store(
+            subject_group,
+            source_path=f"{zarr_path}/{stage_group}/{resolved_run}",
+            prefer="dense",
+        )
+    except (MaskStoreError, ValueError) as exc:
+        errors.append(f"{subject_context}: missing usable mask store (expected masks_roi or mask_rle): {exc}")
+
+    if mask_store is not None:
+        shape = tuple(int(dim) for dim in mask_store.shape)
+        total_rows = int(mask_store.n_rows)
         if len(shape) != 4:
-            errors.append(f"{subject_context}: masks_roi must be 4D (N,C,H,W), got {shape}")
-        else:
-            total_rows = shape[0]
-            if labels and shape[1] != len(labels):
-                errors.append(
-                    f"{subject_context}: masks_roi channel count mismatch "
-                    f"({shape[1]} != mask_labels {len(labels)})"
-                )
+            errors.append(f"{subject_context}: mask store must materialize as 4D (N,C,H,W), got {shape}")
+        if labels and int(mask_store.n_channels) != len(labels):
+            errors.append(
+                f"{subject_context}: mask store channel count mismatch "
+                f"({mask_store.n_channels} != mask_labels {len(labels)})"
+            )
+        if labels and tuple(mask_store.mask_labels) != tuple(labels):
+            errors.append(
+                f"{subject_context}: mask store label mismatch "
+                f"({list(mask_store.mask_labels)!r} != mask_labels {labels!r})"
+            )
 
     manifest_total = _as_int(source.get("total_samples"))
     if manifest_total is not None and total_rows is not None and manifest_total != total_rows:
@@ -559,7 +569,7 @@ def _audit_one_source(
         elif int(roi.shape[0]) != total_rows:
             errors.append(
                 f"{subject_context}: row mismatch between crop_runs/{resolved_crop_run}/roi_images "
-                f"({roi.shape[0]}) and masks_roi ({total_rows})"
+                f"({roi.shape[0]}) and masks ({total_rows})"
             )
 
     rate_by_component: dict[str, float] = {}
@@ -571,9 +581,9 @@ def _audit_one_source(
             context=subject_context,
             warnings=warnings,
         )
-        if not rate_by_component and read_masks_for_rates:
-            rate_by_component = _mask_present_rates_from_masks(
-                subject_group,
+        if not rate_by_component and read_masks_for_rates and mask_store is not None:
+            rate_by_component = _mask_present_rates_from_mask_store(
+                mask_store,
                 labels=labels,
                 total_rows=total_rows,
                 context=subject_context,
@@ -606,6 +616,8 @@ def _audit_one_source(
         "total_samples": total_rows,
         "mask_labels": labels,
         "available_components": available_components,
+        "source_mask_store_encoding": mask_store.encoding if mask_store is not None else None,
+        "source_mask_storage_surface": mask_store.storage_surface if mask_store is not None else None,
         "component_rate_parity_checked": sorted(rate_by_component),
         "errors": errors,
         "warnings": warnings,

@@ -1,7 +1,7 @@
 # Refined Subject-Mask Geometry Cache And Propagation Design
 <!-- design-meta
 status: draft
-last_updated: 2026-04-29
+last_updated: 2026-06-19
 -->
 
 Purpose: define how Palette should store contour/topology-derived mask
@@ -18,8 +18,9 @@ This document connects the boundaries defined in:
 
 ## Decision Summary
 
-- `refined_subject_masks_runs/<run>/masks_roi` is the canonical refined mask
-  pixel surface for subject-mask analysis.
+- `refined_subject_masks_runs/<run>` is the canonical refined mask-pixel
+  authority for subject-mask analysis. Its physical mask store may be dense
+  `masks_roi`, compact `mask_rle`, or both; readers should use `MaskStore`.
 - Component contours are mask-local derived caches, not independent biological
   truth.
 - Component-local scalar metrics and simple QC should be regenerated
@@ -42,16 +43,19 @@ mask edit -> regenerate same-row mask-local caches -> mark downstream derived ro
 
 ### Canonical Refined Mask
 
-The canonical refined mask is the binary mask stored in:
+The canonical refined mask is the binary mask exposed by the run's logical mask
+store:
 
 ```text
-refined_subject_masks_runs/<run>/masks_roi[row, channel, y, x]
+MaskStore(refined_subject_masks_runs/<run>).read_dense(row, channel)[y, x]
 ```
 
 This is the editable/refined working artifact. It is the source for downstream
-mask-local geometry and biological analysis. It is distinct from raw model
-probabilities in `subject_mask_runs`, which remain immutable provenance
-evidence.
+mask-local geometry and biological analysis. Physical storage may be dense
+`masks_roi` or compact `mask_rle`; manual edit/writeback tools may materialize
+dense `masks_roi` as a compatibility cache before writing row-local edits. The
+refined mask store is distinct from raw model probabilities in
+`subject_mask_runs`, which remain immutable provenance evidence.
 
 ### Mask-Local Geometry Cache
 
@@ -124,7 +128,8 @@ As of 2026-04-29:
   archives. They can be added with the component-contour backfill command; the
   feeding canary refined run has been backfilled for validation.
 - Subject-shape overlays currently compute body, swim-bladder, and eye display
-  contours from `masks_roi` at render time by default, and expose
+  contours from the refined run's physical mask store through `MaskStore` at
+  render time by default, and expose
   `mask`/`persisted`/`auto`/`compare` contour-source modes for audit.
 - The subject-shape run persists interpreted outputs such as centerlines,
   body-frame-related arrays, tail anchors, and swim-bladder caudal anchor
@@ -319,10 +324,11 @@ A visualization should be explicit about contour source.
 
 Recommended modes:
 
-- `mask`: compute display contours from current `masks_roi`.
+- `mask`: compute display contours from the current physical mask store
+  (`masks_roi` or compact `mask_rle` through `MaskStore`).
 - `persisted`: draw stored `components/<component>/contours`.
 - `auto`: draw persisted contours when present and source-compatible, otherwise
-  compute from `masks_roi`.
+  compute from the physical mask store.
 - `compare`: draw both persisted and recomputed contours to audit stale or
   divergent geometry.
 
@@ -632,7 +638,8 @@ scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics \
 
 ## Validation Checklist
 
-- A recomputed display contour from `masks_roi` matches the visible mask.
+- A recomputed display contour from the physical mask store matches the visible
+  mask.
 - A persisted contour drawn in `compare` mode agrees with recomputed mask
   contours for unchanged rows.
 - Editing one mask row regenerates only same-row mask-local caches.
@@ -640,8 +647,8 @@ scripts/py -m fisheye.utils.backfill_refined_subject_mask_metrics \
   kinematic, bout, or plot outputs.
 - Downstream validation can report stale/source-drift state after a refined
   mask edit.
-- Crimson can draw all four components from `masks_roi` even when body/swim
-  contours are absent.
+- Crimson can draw all four components from the refined subject-mask logical
+  mask store even when body/swim contours are absent.
 
 ## Open Questions
 

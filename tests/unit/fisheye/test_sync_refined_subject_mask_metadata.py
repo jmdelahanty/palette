@@ -8,6 +8,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.tune import refined_subject_mask_review as review_mod
 from fisheye.utils import sync_refined_subject_mask_metadata as cli_mod
 from fisheye.utils import write_refined_subject_mask_edit as write_cli_mod
@@ -73,6 +74,12 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
         refined_run="refined_subject_masks_001",
         components=("subject_body", "swim_bladder"),
     )
+    write_component_rle_mask_store_from_dense(
+        refined.group,
+        refined.group["masks_roi"],
+        component_names=refined.component_names,
+        encode_row_chunk_size=1,
+    )
 
     edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
     edited[0, 1:7, 1:7] = 0
@@ -126,6 +133,12 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
+    assert bool(run.attrs["mask_rle_stale"]) is True
+    assert run.attrs["mask_rle_stale_reason"] == "interactive_refined_subject_mask_edit"
+    assert run.attrs["mask_rle_stale_component_names"] == ["subject_body"]
+    assert run.attrs["mask_rle_stale_row_count"] == 1
+    assert run.attrs["mask_rle_stale_row_min"] == 0
+    assert run.attrs["mask_rle_stale_row_max"] == 0
     body_provenance = body_group["provenance"]
     swim_provenance = swim_group["provenance"]
     assert bool(np.asarray(body_group["edit_applied"][0], dtype=bool)) is True

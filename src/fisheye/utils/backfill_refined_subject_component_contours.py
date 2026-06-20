@@ -10,6 +10,7 @@ from typing import Optional, Sequence
 
 import zarr
 
+from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.refined_subject_component_contours import (
     ComponentContourSummary,
     build_component_contours_from_masks,
@@ -76,14 +77,20 @@ def _get_group_path(group: zarr.Group, path: str) -> zarr.Group | None:
     return current if isinstance(current, zarr.Group) else None
 
 
+def _group_source_path(group: zarr.Group) -> str:
+    return str(getattr(group, "name", "") or "")
+
+
 def _dry_run_component(
     refined_group: zarr.Group,
     component: str,
     *,
     min_points: int,
 ) -> ComponentContourSummary:
-    masks_roi = refined_group.get("masks_roi")
-    roi_count = int(masks_roi.shape[0]) if masks_roi is not None and len(tuple(masks_roi.shape)) >= 1 else 0
+    try:
+        roi_count = int(open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense").n_rows)
+    except MaskStoreError:
+        roi_count = 0
     component_group = _get_group_path(refined_group, f"components/{component}")
     existing_summary = (
         summarize_existing_component_contours(component_group, component=component, roi_count=roi_count)

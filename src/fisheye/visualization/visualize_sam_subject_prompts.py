@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.run_sam_subject_masks import (
     BOX_PROMPT_SOURCE_CHOICES,
@@ -44,7 +45,8 @@ class LoadedSubjectRun:
     run_name: str
     mask_labels: tuple[str, ...]
     available_channels: np.ndarray
-    masks_roi: zarr.Array
+    masks_roi: Any | None
+    mask_store: MaskStore | None = None
 
 
 def _require_gui_display() -> None:
@@ -79,14 +81,23 @@ def _load_subject_run(root: zarr.Group, subject_run: str | None) -> LoadedSubjec
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"subject_mask_runs/{run_name} missing usable mask_labels attr.")
     available = run_group.get("available_channels")
+    if available is None:
+        raise RuntimeError(f"subject_mask_runs/{run_name} missing available_channels.")
     masks_roi = run_group.get("masks_roi")
-    if available is None or masks_roi is None:
-        raise RuntimeError(f"subject_mask_runs/{run_name} missing available_channels or masks_roi.")
+    try:
+        mask_store = open_mask_store(
+            run_group,
+            source_path=f"subject_mask_runs/{run_name}",
+            prefer="dense",
+        )
+    except MaskStoreError as exc:
+        raise RuntimeError(f"subject_mask_runs/{run_name} missing usable mask store (masks_roi or mask_rle).") from exc
     return LoadedSubjectRun(
         run_name=run_name,
         mask_labels=tuple(str(item) for item in labels_raw),
         available_channels=np.asarray(available[:], dtype=bool),
         masks_roi=masks_roi,
+        mask_store=mask_store,
     )
 
 
@@ -97,6 +108,10 @@ def _subject_body_mask_for_row(subject_run: LoadedSubjectRun | None, row_idx: in
         return None
     channel_idx = subject_run.mask_labels.index("subject_body")
     if channel_idx >= int(subject_run.available_channels.shape[0]) or not bool(subject_run.available_channels[channel_idx]):
+        return None
+    if subject_run.mask_store is not None:
+        return np.asarray(subject_run.mask_store.read_dense(rows=int(row_idx), channels=channel_idx)[0, 0], dtype=np.uint8)
+    if subject_run.masks_roi is None:
         return None
     return np.asarray(subject_run.masks_roi[int(row_idx), channel_idx], dtype=np.uint8)
 

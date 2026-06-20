@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.utils.backfill_refined_subject_component_contours import (
     backfill_refined_subject_component_contours,
 )
@@ -83,6 +84,41 @@ def test_backfill_refined_subject_component_contours_writes_body_and_swim(tmp_pa
         assert contours["points_xy"].shape[1] == 2
         assert np.all(np.asarray(contours["ptr"][:]) >= 0)
         assert np.all(np.asarray(contours["len"][:]) > 0)
+
+
+def test_backfill_refined_subject_component_contours_reads_compact_mask_store(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "compact_analysis.zarr"
+    root = _build_refined_zarr(zarr_path)
+    run = root["refined_subject_masks_runs/refined_001"]
+    write_component_rle_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=tuple(str(value) for value in run.attrs["mask_labels"]),
+        encode_row_chunk_size=1,
+    )
+    del run["masks_roi"]
+
+    dry_run = backfill_refined_subject_component_contours(
+        zarr_path,
+        components=["subject_body", "swim_bladder"],
+        apply=False,
+    )
+    assert dry_run["would_write_count"] == 2
+    assert [item["roi_count"] for item in dry_run["components"]] == [2, 2]
+
+    summary = backfill_refined_subject_component_contours(
+        zarr_path,
+        components=["subject_body", "swim_bladder"],
+        apply=True,
+        chunk_size=1,
+    )
+
+    assert summary["written_count"] == 2
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    refined = reopened["refined_subject_masks_runs/refined_001"]
+    assert "masks_roi" not in refined
+    assert tuple(refined["components/subject_body/contours/ptr"].shape) == (2,)
+    assert tuple(refined["components/swim_bladder/contours/ptr"].shape) == (2,)
 
 
 def test_backfill_refined_subject_component_contours_skips_existing_without_overwrite(tmp_path: Path) -> None:

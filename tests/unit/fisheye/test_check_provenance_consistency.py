@@ -67,6 +67,11 @@ class _FakeGroup:
         return self._children.keys()
 
 
+class _FakeMaskStore:
+    def __init__(self, n_rows: int) -> None:
+        self.n_rows = int(n_rows)
+
+
 def _build_root_with_detect() -> _FakeGroup:
     root = _FakeGroup()
     detect_runs = root.create_group("detect_runs")
@@ -321,3 +326,31 @@ def test_collect_provenance_reports_stale_downstream_crop_snapshots() -> None:
     assert len(record.downstream_crop_snapshot_issues) == 2
     assert len(record.subject_mask_crop_snapshot_issues) == 1
     assert len(record.refined_subject_mask_crop_snapshot_issues) == 1
+
+
+def test_collect_provenance_counts_compact_refined_subject_mask_rows(monkeypatch) -> None:
+    root = _build_root_with_detect()
+    refined_subject_mask_runs = root.create_group("refined_subject_masks_runs")
+    refined_subject_masks = refined_subject_mask_runs.create_group("refined_subject_001")
+    refined_subject_masks.attrs["mask_labels"] = ["subject_body", "eye_left"]
+    refined_subject_masks.create_group("mask_rle")
+    refined_subject_mask_runs.attrs["latest"] = "refined_subject_001"
+
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    def _open_mask_store(group: object, **kwargs: object) -> _FakeMaskStore:
+        calls.append((group, kwargs))
+        return _FakeMaskStore(7)
+
+    monkeypatch.setattr(mod, "open_mask_store", _open_mask_store)
+
+    record = mod.collect_provenance(root)  # type: ignore[arg-type]
+
+    assert record.refined_subject_mask_run == "refined_subject_001"
+    assert record.refined_subject_mask_rows == 7
+    assert calls == [
+        (
+            refined_subject_masks,
+            {"prefer": "dense", "allow_stale_rle": True},
+        )
+    ]

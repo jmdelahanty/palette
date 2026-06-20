@@ -15,6 +15,7 @@ import zarr
 from fisheye.registry.db import Registry
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.frame_flags import resolve_row_identity_arrays
+from fisheye.shared.mask_store import MaskStore, open_mask_store
 from fisheye.shared.type_conversions import normalize_attr as _as_text
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
@@ -49,6 +50,8 @@ SUPERVISION_MODE_CODES = {
     "explicit_negative": 2,
     "box_only": 3,
 }
+TRAINING_MASK_STORAGE_FORMAT = "dense_uint8"
+TRAINING_MASK_STORAGE_SURFACE = "masks_roi"
 
 _utc_now = utc_now
 
@@ -293,7 +296,10 @@ class SubjectResolvedSource:
     source_refined_row_ids: np.ndarray
     source_detect_row_index: np.ndarray
     detection_source: np.ndarray
-    masks_roi: zarr.Array
+    mask_store: MaskStore
+    mask_shape_hw: Tuple[int, int]
+    mask_store_encoding: str
+    mask_store_surface: str
     row_count: int
     input_format: str
 
@@ -320,13 +326,20 @@ def _resolve_source_spec(
         raise ValueError(f"{source_path.name}: crop_runs/{crop_run} missing roi_images.")
     if "bbox_norm_coords" not in crop_group:
         raise ValueError(f"{source_path.name}: crop_runs/{crop_run} missing bbox_norm_coords.")
-    if "masks_roi" not in subject_group:
-        raise ValueError(f"{source_path.name}: {stage_group}/{subject_run} missing masks_roi.")
-
     source_schema_id, source_labels, available_channels = _resolve_source_schema(
         subject_group,
         stage_group=stage_group,
     )
+    mask_store = open_mask_store(
+        subject_group,
+        source_path=f"{source_path}/{stage_group}/{subject_run}",
+        prefer="dense",
+    )
+    if tuple(mask_store.mask_labels) != tuple(source_labels):
+        raise ValueError(
+            f"{source_path.name}: {stage_group}/{subject_run} mask store labels mismatch: "
+            f"{list(mask_store.mask_labels)!r} != {source_labels!r}."
+        )
     if stage_group == "refined_subject_masks_runs" and not (
         bool(allow_unapproved_refined) or bool(spec.allow_unapproved_refined)
     ):
@@ -339,11 +352,10 @@ def _resolve_source_spec(
         )
     projection_mode = _projection_mode(source_schema_id, target_schema_id)
     roi_images = crop_group["roi_images"]
-    masks_roi = subject_group["masks_roi"]
-    if int(roi_images.shape[0]) != int(masks_roi.shape[0]):
+    if int(roi_images.shape[0]) != int(mask_store.n_rows):
         raise ValueError(
             f"{source_path.name}: row mismatch between crop_runs/{crop_run}/roi_images "
-            f"({roi_images.shape[0]}) and subject_mask_runs/{subject_run}/masks_roi ({masks_roi.shape[0]})."
+            f"({roi_images.shape[0]}) and {stage_group}/{subject_run} masks ({mask_store.n_rows})."
         )
     bbox_norm = crop_group["bbox_norm_coords"]
     crop_bbox = crop_group["crop_bbox_norm_coords"] if "crop_bbox_norm_coords" in crop_group else bbox_norm
@@ -386,8 +398,11 @@ def _resolve_source_spec(
         source_refined_row_ids=source_refined_row_ids,
         source_detect_row_index=source_detect_row_index,
         detection_source=detection_source,
-        masks_roi=masks_roi,
-        row_count=int(masks_roi.shape[0]),
+        mask_store=mask_store,
+        mask_shape_hw=mask_store.shape_hw,
+        mask_store_encoding=str(mask_store.encoding),
+        mask_store_surface=str(mask_store.storage_surface),
+        row_count=int(mask_store.n_rows),
         input_format=input_format,
     )
 
@@ -500,6 +515,76 @@ def _summarize_channel_supervision(
         positive_row_counts[str(label)] = positive_count
         negative_row_counts[str(label)] = int(supervised_count - positive_count)
         unsupervised_row_counts[str(label)] = int(target_valid_channels.shape[0] - supervised_count)
+        if supervised_count > 0:
+            available_labels.append(str(label))
+        else:
+            missing_labels.append(str(label))
+
+    eye_supervised = any(supervised_row_counts.get(label, 0) > 0 for label in eye_labels)
+    body_supervised = supervised_row_counts.get("subject_body", 0) > 0
+    bladder_supervised = supervised_row_counts.get("swim_bladder", 0) > 0
+    if eye_supervised and not body_supervised and not bladder_supervised:
+        coverage_class = "eyes_only"
+    elif all(count > 0 for count in supervised_row_counts.values()):
+        coverage_class = "dense_all_components"
+    else:
+        coverage_class = "partial_subject_masks"
+
+    return {
+        "coverage_class": coverage_class,
+        "contains_only_eye_masks": bool(coverage_class == "eyes_only"),
+        "available_labels": available_labels,
+        "missing_labels": missing_labels,
+        "supervised_row_counts": supervised_row_counts,
+        "positive_row_counts": positive_row_counts,
+        "negative_row_counts": negative_row_counts,
+        "unsupervised_row_counts": unsupervised_row_counts,
+    }
+
+
+def _empty_supervision_count_arrays(channel_count: int) -> Dict[str, np.ndarray]:
+    return {
+        "supervised": np.zeros((channel_count,), dtype=np.int64),
+        "positive": np.zeros((channel_count,), dtype=np.int64),
+    }
+
+
+def _update_supervision_count_arrays(
+    counts: Dict[str, np.ndarray],
+    *,
+    masks_roi: np.ndarray,
+    target_valid_channels: np.ndarray,
+) -> None:
+    masks = np.asarray(masks_roi, dtype=np.uint8)
+    valid = np.asarray(target_valid_channels, dtype=np.bool_)
+    for idx in range(int(valid.shape[1])):
+        valid_mask = valid[:, idx]
+        positive_mask = np.sum(masks[:, idx], axis=(1, 2)) > 0
+        counts["supervised"][idx] += int(np.sum(valid_mask))
+        counts["positive"][idx] += int(np.sum(valid_mask & positive_mask))
+
+
+def _summarize_channel_supervision_from_counts(
+    *,
+    counts: Dict[str, np.ndarray],
+    total_rows: int,
+    mask_labels: Sequence[str],
+) -> Dict[str, Any]:
+    supervised_row_counts: Dict[str, int] = {}
+    positive_row_counts: Dict[str, int] = {}
+    negative_row_counts: Dict[str, int] = {}
+    unsupervised_row_counts: Dict[str, int] = {}
+    available_labels: List[str] = []
+    missing_labels: List[str] = []
+
+    eye_labels = {"eyes_union", "eye_left", "eye_right"}
+    for idx, label in enumerate(mask_labels):
+        supervised_count = int(counts["supervised"][idx])
+        positive_count = int(counts["positive"][idx])
+        supervised_row_counts[str(label)] = supervised_count
+        positive_row_counts[str(label)] = positive_count
+        negative_row_counts[str(label)] = int(supervised_count - positive_count)
+        unsupervised_row_counts[str(label)] = int(total_rows - supervised_count)
         if supervised_count > 0:
             available_labels.append(str(label))
         else:
@@ -682,8 +767,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
     for item in resolved_sources[1:]:
         if tuple(int(v) for v in item.roi_images.shape[1:]) != tuple(int(v) for v in ref_source.roi_images.shape[1:]):
             raise ValueError("All source roi_images arrays must share identical shape after the row axis.")
-        if tuple(int(v) for v in item.masks_roi.shape[2:]) != tuple(int(v) for v in ref_source.masks_roi.shape[2:]):
-            raise ValueError("All source masks_roi arrays must share identical HxW.")
+        if tuple(int(v) for v in item.mask_shape_hw) != tuple(int(v) for v in ref_source.mask_shape_hw):
+            raise ValueError("All source mask stores must share identical HxW.")
         if item.input_format != ref_source.input_format:
             raise ValueError(
                 f"Mixed input formats are not supported yet ({ref_source.input_format} vs {item.input_format})."
@@ -695,7 +780,7 @@ def export_merged_subject_mask_training_zarr_from_sources(
 
     roi_shape = tuple(int(v) for v in ref_source.roi_images.shape[1:])
     bbox_shape = tuple(int(v) for v in ref_source.bbox_norm_coords.shape[1:])
-    mask_shape = tuple(int(v) for v in ref_source.masks_roi.shape[2:])
+    mask_shape = tuple(int(v) for v in ref_source.mask_shape_hw)
     roi_dtype = ref_source.roi_images.dtype
     mask_dtype = np.dtype(np.uint8)
     train_idx, val_idx, test_idx = _make_split_indices(
@@ -840,6 +925,10 @@ def export_merged_subject_mask_training_zarr_from_sources(
     source_dataset_ids: List[str] = []
     source_paths: List[str] = []
     source_crop_runs: List[str] = []
+    source_mask_store_encodings: List[str] = []
+    source_mask_storage_surfaces: List[str] = []
+    supervision_counts = _empty_supervision_count_arrays(len(target_labels))
+    mask_row_chunk = max(1, int(getattr(masks_dest, "chunks", (min(256, total_samples),))[0]))
 
     for source_idx, source in enumerate(resolved_sources):
         count = int(source.row_count)
@@ -855,22 +944,34 @@ def export_merged_subject_mask_training_zarr_from_sources(
         source_refined_row_ids_dest[row_slice] = source.source_refined_row_ids
         source_detect_row_index_dest[row_slice] = source.source_detect_row_index
 
-        source_masks = np.asarray(source.masks_roi[:], dtype=np.uint8)
-        projected_masks, projected_valid = _project_masks_and_validity(
-            source_masks,
-            source_schema_id=source.source_schema_id,
-            source_available=source.available_channels,
-            target_schema_id=target_schema_id,
-        )
-        masks_dest[row_slice] = projected_masks
-        target_valid_dest[row_slice] = projected_valid
+        for start in range(0, count, mask_row_chunk):
+            stop = min(count, start + mask_row_chunk)
+            source_chunk = slice(start, stop)
+            dest_chunk = slice(offset + start, offset + stop)
+            source_masks = np.asarray(
+                source.mask_store.read_dense(rows=source_chunk),
+                dtype=np.uint8,
+            )
+            projected_masks, projected_valid = _project_masks_and_validity(
+                source_masks,
+                source_schema_id=source.source_schema_id,
+                source_available=source.available_channels,
+                target_schema_id=target_schema_id,
+            )
+            masks_dest[dest_chunk] = projected_masks
+            target_valid_dest[dest_chunk] = projected_valid
+            _update_supervision_count_arrays(
+                supervision_counts,
+                masks_roi=projected_masks,
+                target_valid_channels=projected_valid,
+            )
 
-        label_codes = np.zeros((count, len(target_labels)), dtype=np.uint8)
-        supervision_codes = np.zeros((count, len(target_labels)), dtype=np.uint8)
-        label_codes[projected_valid] = np.uint8(LABEL_ORIGIN_CODES["auto"])
-        supervision_codes[projected_valid] = np.uint8(SUPERVISION_MODE_CODES["dense"])
-        label_origin_dest[row_slice] = label_codes
-        supervision_mode_dest[row_slice] = supervision_codes
+            label_codes = np.zeros((stop - start, len(target_labels)), dtype=np.uint8)
+            supervision_codes = np.zeros((stop - start, len(target_labels)), dtype=np.uint8)
+            label_codes[projected_valid] = np.uint8(LABEL_ORIGIN_CODES["auto"])
+            supervision_codes[projected_valid] = np.uint8(SUPERVISION_MODE_CODES["dense"])
+            label_origin_dest[dest_chunk] = label_codes
+            supervision_mode_dest[dest_chunk] = supervision_codes
 
         source_stage_groups.append(str(source.stage_group))
         source_run_names.append(str(source.subject_run))
@@ -879,14 +980,19 @@ def export_merged_subject_mask_training_zarr_from_sources(
         source_dataset_ids.append(str(source.dataset_id))
         source_paths.append(str(source.source_zarr))
         source_crop_runs.append(str(source.crop_run))
+        source_mask_store_encodings.append(str(source.mask_store_encoding))
+        source_mask_storage_surfaces.append(str(source.mask_store_surface))
         offset += count
 
     _write_string_array(source_index, "source_dataset_id", source_dataset_ids)
     _write_string_array(source_index, "source_zarr_path", source_paths)
     _write_string_array(source_index, "source_stage_group", source_stage_groups)
     _write_string_array(source_index, "source_run_name", source_run_names)
+    _write_string_array(source_index, "source_crop_run", source_crop_runs)
     _write_string_array(source_index, "source_label_schema_id", source_schema_ids)
     _write_string_array(source_index, "source_projection_mode", source_projection_modes)
+    _write_string_array(source_index, "source_mask_store_encoding", source_mask_store_encodings)
+    _write_string_array(source_index, "source_mask_storage_surface", source_mask_storage_surfaces)
     source_index.attrs.update(
         {
             "mapping_version": 1,
@@ -896,11 +1002,9 @@ def export_merged_subject_mask_training_zarr_from_sources(
         }
     )
 
-    masks_final = np.asarray(masks_dest[:], dtype=np.uint8)
-    valid_final = np.asarray(target_valid_dest[:], dtype=np.bool_)
-    supervision_summary = _summarize_channel_supervision(
-        masks_roi=masks_final,
-        target_valid_channels=valid_final,
+    supervision_summary = _summarize_channel_supervision_from_counts(
+        counts=supervision_counts,
+        total_rows=total_samples,
         mask_labels=target_labels,
     )
     source_subject_mask_run = _collapse_source_attr(source_run_names)
@@ -909,6 +1013,10 @@ def export_merged_subject_mask_training_zarr_from_sources(
     crop_group.attrs.update(
         {
             "source_count": int(len(resolved_sources)),
+            "source_crop_run": source_crop_run,
+            "source_crop_runs": list(source_crop_runs),
+            "source_zarr_path": _collapse_source_attr(source_paths),
+            "source_zarr_paths": list(source_paths),
             "bbox_norm_coords_semantics": "source_crop_bbox_xywhn",
             "crop_bbox_norm_coords_semantics": "source_crop_stage_bbox_xywhn",
         }
@@ -917,10 +1025,17 @@ def export_merged_subject_mask_training_zarr_from_sources(
         {
             "label_schema_id": target_schema_id,
             "mask_labels": target_labels,
+            "mask_storage_format": TRAINING_MASK_STORAGE_FORMAT,
+            "mask_storage_surface": TRAINING_MASK_STORAGE_SURFACE,
+            "mask_store_encoding": TRAINING_MASK_STORAGE_FORMAT,
             "allow_partial_supervision": True,
             "source_mask_stage": source_stage_groups[0] if len(set(source_stage_groups)) == 1 else "mixed",
             "source_subject_mask_run": source_subject_mask_run,
             "source_crop_run": source_crop_run,
+            "source_mask_store_encoding": _collapse_source_attr(source_mask_store_encodings),
+            "source_mask_store_encodings": list(source_mask_store_encodings),
+            "source_mask_storage_surface": _collapse_source_attr(source_mask_storage_surfaces),
+            "source_mask_storage_surfaces": list(source_mask_storage_surfaces),
             "valid_channel_counts": supervision_summary["supervised_row_counts"],
             "positive_channel_counts": supervision_summary["positive_row_counts"],
             "dense_channel_counts": supervision_summary["supervised_row_counts"],
@@ -946,6 +1061,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "input_format": ref_source.input_format,
         "label_schema_id": target_schema_id,
         "mask_labels": target_labels,
+        "mask_storage_format": TRAINING_MASK_STORAGE_FORMAT,
+        "mask_storage_surface": TRAINING_MASK_STORAGE_SURFACE,
         "allow_partial_supervision": True,
         "source_stage": source_stage_groups[0] if len(set(source_stage_groups)) == 1 else "mixed",
         "source_count": int(len(resolved_sources)),
@@ -955,6 +1072,10 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "source_subject_mask_runs": list(source_run_names),
         "source_crop_run": source_crop_run,
         "source_crop_runs": list(source_crop_runs),
+        "source_mask_store_encoding": _collapse_source_attr(source_mask_store_encodings),
+        "source_mask_store_encodings": list(source_mask_store_encodings),
+        "source_mask_storage_surface": _collapse_source_attr(source_mask_storage_surfaces),
+        "source_mask_storage_surfaces": list(source_mask_storage_surfaces),
         "split_seed": int(split_seed),
         "split": {
             "train_ratio": float(train_ratio),
@@ -999,6 +1120,8 @@ def export_merged_subject_mask_training_zarr_from_sources(
         "channel_supervision_summary": training_summary,
         "source_subject_mask_run": source_subject_mask_run or None,
         "source_crop_run": source_crop_run or None,
+        "source_mask_store_encoding": _collapse_source_attr(source_mask_store_encodings) or None,
+        "source_mask_storage_surface": _collapse_source_attr(source_mask_storage_surfaces) or None,
     }
 
 
@@ -1094,6 +1217,18 @@ def validate_merged_subject_mask_training_zarr(
     for name in required_mask_arrays:
         if name not in masks:
             errors.append(f"missing required array subject_mask_runs/{mask_latest}/{name}.")
+    if "mask_rle" in masks:
+        errors.append("training subject_mask_runs must store dense masks_roi only; compact mask_rle is analysis-only.")
+    if _as_text(masks.attrs.get("mask_storage_format")) != TRAINING_MASK_STORAGE_FORMAT:
+        errors.append(
+            f"subject_mask_runs/{mask_latest} attr mask_storage_format must be "
+            f"{TRAINING_MASK_STORAGE_FORMAT!r}."
+        )
+    if _as_text(masks.attrs.get("mask_storage_surface")) != TRAINING_MASK_STORAGE_SURFACE:
+        errors.append(
+            f"subject_mask_runs/{mask_latest} attr mask_storage_surface must be "
+            f"{TRAINING_MASK_STORAGE_SURFACE!r}."
+        )
     source_index = root["source_index"]
     required_source_arrays = (
         "source_dataset_idx",
@@ -1105,8 +1240,11 @@ def validate_merged_subject_mask_training_zarr(
         "source_zarr_path",
         "source_stage_group",
         "source_run_name",
+        "source_crop_run",
         "source_label_schema_id",
         "source_projection_mode",
+        "source_mask_store_encoding",
+        "source_mask_storage_surface",
     )
     for name in required_source_arrays:
         if name not in source_index:
@@ -1195,6 +1333,21 @@ def validate_merged_subject_mask_training_zarr(
             errors.append(f"{opt_name} must be integer dtype.")
 
     source_count = int(source_index["source_dataset_id"].shape[0])
+    for name in (
+        "source_zarr_path",
+        "source_stage_group",
+        "source_run_name",
+        "source_crop_run",
+        "source_label_schema_id",
+        "source_projection_mode",
+        "source_mask_store_encoding",
+        "source_mask_storage_surface",
+    ):
+        if name in source_index and int(source_index[name].shape[0]) != source_count:
+            errors.append(
+                f"source_index/{name} length must match source_index/source_dataset_id "
+                f"({source_index[name].shape[0]} != {source_count})."
+            )
     if source_dataset_idx.ndim == 1 and source_count > 0:
         if int(np.min(source_dataset_idx)) < 0 or int(np.max(source_dataset_idx)) >= source_count:
             errors.append("source_dataset_idx contains out-of-range values.")
@@ -1219,6 +1372,14 @@ def validate_merged_subject_mask_training_zarr(
         mask_labels = training_export.get("mask_labels")
         if not isinstance(mask_labels, list) or len(mask_labels) != int(masks_roi.shape[1]):
             errors.append("training_export.mask_labels missing or invalid.")
+        if _as_text(training_export.get("mask_storage_format")) != TRAINING_MASK_STORAGE_FORMAT:
+            errors.append(
+                f"training_export.mask_storage_format must be {TRAINING_MASK_STORAGE_FORMAT!r}."
+            )
+        if _as_text(training_export.get("mask_storage_surface")) != TRAINING_MASK_STORAGE_SURFACE:
+            errors.append(
+                f"training_export.mask_storage_surface must be {TRAINING_MASK_STORAGE_SURFACE!r}."
+            )
 
         summary = training_export.get("channel_supervision_summary")
         if not isinstance(summary, dict):

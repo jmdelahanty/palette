@@ -167,8 +167,10 @@ Key point:
 - optional `masks_roi` arrays may exist in legacy/projection runs as
   compatibility caches, but native raw model writers should not require or
   create thresholded masks as raw authority
-- `refined_subject_masks_runs/<run>/masks_roi` is the canonical thresholded,
-  reviewable/refined mask surface
+- `refined_subject_masks_runs/<run>` is the canonical thresholded,
+  reviewable/refined logical mask surface. It may be physically backed by
+  dense `masks_roi`, compact `mask_rle`, or both; consumers should route reads
+  through `MaskStore`.
 - `components/<name>/...` holds component-scoped metadata, provenance, and any
   component-specific details
 - sparse multi-source workflows should assemble directly into

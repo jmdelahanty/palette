@@ -49,6 +49,10 @@ def test_backfill_eye_mask_lineage_dry_run_reports_without_writing(tmp_path: Pat
         zarr_use="analysis",
         eye_attrs={LEGACY_SOURCE_KEYPOINT_RUN_ATTR: "kp_legacy_eye"},
         refined_attrs={LEGACY_SOURCE_KEYPOINT_RUN_ATTR: "kp_legacy_refined"},
+        keypoint_runs={
+            "keypoints_runs": "kp_legacy_eye",
+            "refined_keypoints_runs": "kp_legacy_refined",
+        },
     )
 
     rc = mod.main([str(zarr_path)])

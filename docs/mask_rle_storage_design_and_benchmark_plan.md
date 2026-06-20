@@ -29,20 +29,66 @@ The target architecture should separate:
 - **Materialization API**: a reader that returns dense masks for training,
   rendering, editing, and metrics regardless of physical encoding.
 
+## Implementation Status
+
+Implemented surfaces:
+
+- `fisheye.shared.mask_rle` encodes/decodes exact binary COCO-style RLE with
+  typed NumPy arrays.
+- `fisheye.shared.mask_store.open_mask_store(...)` materializes dense masks from
+  either dense `masks_roi` or compact component RLE.
+- `MaskStore.storage_surface` and `MaskStore.storage_path` report the selected
+  physical backing surface (`masks_roi` or `mask_rle`) so exporters, auditors,
+  and provenance writers do not infer this independently from encoding names.
+- `fisheye.shared.mask_store.write_component_rle_mask_store_from_dense(...)`
+  streams dense masks row chunks into `mask_rle/components/...` without loading
+  the full dense tensor into memory.
+- `fisheye.refinement.finalize_subject_masks --mask-storage dense_and_rle`
+  writes the historical dense `masks_roi` plus an additive compact
+  `mask_rle/components/...` mirror.
+- `fisheye.refinement.finalize_subject_masks --mask-storage rle_v1`
+  writes the same compact `mask_rle/components/...` store and removes the dense
+  `masks_roi` compatibility cache after finalization/postcompute completes.
+- `fisheye.utils.materialize_refined_subject_mask_store` can dry-run,
+  materialize, refresh, or delete the dense `masks_roi` compatibility cache for
+  a compact refined-subject run, and can regenerate compact `mask_rle` from the
+  current dense cache with `--refresh-rle`.
+- `fisheye.diagnostics.benchmark_mask_rle_storage` uses the same shared writer
+  so benchmark layout and production layout stay aligned.
+- Stage-array validation accepts refined-subject-mask runs with either dense
+  `masks_roi` or a valid compact `mask_rle` store.
+- `fisheye.shared.refined_subject_masks_io.load_refined_subject_masks_run_tables(...)`
+  reads dense or compact stores through `MaskStore` and fails early when an
+  advertised compact store is stale/unreadable instead of silently returning a
+  metadata-only table.
+- `docs/examples/read_subject_masks_from_example_recording.py` demonstrates
+  the storage-agnostic refined read path through `MaskStore` instead of direct
+  `masks_roi` indexing.
+- `subject_mask_performance` registry rows expose compact storage fields:
+  `mask_storage_encoding`, `mask_store_encodings_json`,
+  `masks_roi_materialized`, `mask_rle_materialized`, `mask_rle_schema_id`,
+  `mask_rle_encoding`, and `mask_rle_layout`.
+
+Current compatibility rule: `dense_uint8` remains the default. `dense_and_rle`
+is the preferred shadow/audit mode. `rle_v1` is available for compact-only
+experiments and consumers that are already audited through the `MaskStore`
+materialization boundary.
+
 ## Is Zarr a Poor Fit for RLE?
 
 Not necessarily. Zarr is strongest for typed arrays, and RLE can be represented
 as typed arrays instead of JSON-per-row blobs.
 
-A Zarr-native COCO-style RLE layout can use flat payload arrays plus offsets:
+A Zarr-native COCO-style RLE layout can use typed payload arrays plus offsets.
+Prefer one compact group per semantic component:
 
 ```text
-mask_rle_counts        uint32  (total_run_count,)
-mask_rle_indptr        int64   (N * C + 1,)
-mask_present           bool    (N, C)
-mask_shape             attrs: [H, W]
-mask_encoding          attr: "coco_rle_fortran_v1"
-mask_value_semantics   attr: "binary_0_1"
+mask_rle/components/<component>/counts      uint32  (total_run_count_for_component,)
+mask_rle/components/<component>/indptr      int64   (N + 1,)
+mask_rle/components/<component>/present     bool    (N,)
+mask_rle/components/<component>/area_px     int32   (N,)
+mask_rle/components/<component>/bbox_xyxy   int32   (N, 4)
+mask_rle attrs: shape=[H, W], encoding, value_semantics
 ```
 
 This follows the same storage pattern already used by eye contour arrays:
@@ -384,11 +430,15 @@ Dense assumptions are present in:
 
 Needed change:
 
-- Training datasets should consume the mask API, not direct `masks_roi` arrays.
-- Exporters can choose the output policy:
-  - dense training snapshot for maximal compatibility;
-  - compact authoritative snapshot plus materialization cache;
-  - compact source plus dense exported artifact.
+- Training exporters and promotion tools should consume the mask API for
+  analysis-source reads, not direct `refined_subject_masks_runs/*/masks_roi`
+  arrays.
+- Training artifacts themselves remain dense-only for this migration:
+  `subject_mask_runs/<run>/masks_roi` is the model-input contract and
+  `subject_mask_runs/<run>/mask_rle` is rejected by validators/loaders.
+- Exporters can read compact analysis sources, but must materialize dense
+  exported artifacts until there is an explicit future training-artifact
+  contract for compact masks.
 - The trainer still receives dense tensors.
 
 ### Diagnostics, Profiles, and Metrics
@@ -402,30 +452,42 @@ Dense scans are present in profile/audit utilities such as:
 
 Needed change:
 
-- Metrics should compute from `MaskStore.read(...)` or from precomputed compact
+- Metrics should compute from `MaskStore.read_dense(...)` or from precomputed compact
   metrics such as area/bbox when available.
 - Storage benchmarks should report both physical Zarr size and logical decoded
   mask shape.
 
-## Proposed RLE Schema
+## Implemented RLE Schema
 
-For each mask run, support either dense arrays or a compact `mask_rle/` group.
+For each mask run, support either dense arrays or a compact component-group
+`mask_rle/` group.
 
 ```text
 <mask_run>/
   attrs:
-    mask_storage_encoding = "rle_binary_v1"
-    mask_encoding_order = "fortran"
-    mask_value_semantics = "binary_0_1"
-    masks_roi_materialized = false
+    mask_storage_encoding = "dense_uint8+component_rle_v1"
+    mask_store_encodings = ["dense_uint8", "component_rle_v1"]
+    masks_roi_materialized = true
+    mask_rle_materialized = true
 
   mask_rle/
-    counts                  (total_run_count,) uint32
-    indptr                  (N * C + 1,) int64
-    shape                   (2,) int32          # [H, W]
-    row_channel_present     (N, C) bool
-    row_channel_area_px     (N, C) int32        # optional but useful
-    row_channel_bbox_xyxy   (N, C, 4) int32     # optional but useful
+    attrs:
+      schema_id = "palette_mask_rle_binary_v1"
+      mask_encoding = "coco_rle_fortran_v1"
+      mask_value_semantics = "binary_0_1"
+      layout = "component_groups"
+      encoded_shape_hw = [H, W]
+      component_names = [...]
+
+    components/
+      00_subject_body/
+        counts                  (total_count_values_for_component,) uint32
+        indptr                  (N + 1,) int64
+        present                 (N,) bool
+        area_px                 (N,) int32
+        bbox_xyxy               (N, 4) int32
+      01_eye_left/
+        ...
 ```
 
 Compatibility rules:
@@ -433,9 +495,125 @@ Compatibility rules:
 - If `masks_roi` exists, legacy readers may use it.
 - If `masks_roi` is absent and `mask_rle/` exists, modern readers must
   materialize dense masks on demand.
-- Writers must record whether `masks_roi` is authoritative or a cache.
+- If `mask_rle_stale == true`, `open_mask_store(..., prefer="rle")` must fail
+  unless the caller explicitly passes `allow_stale_rle=True` for diagnostics.
+  Ordinary consumers should prefer dense `masks_roi` or refresh compact storage
+  with `materialize_refined_subject_mask_store --refresh-rle --apply`.
+- Writers must record whether `masks_roi` is materialized using
+  `masks_roi_materialized`, `mask_store_encodings`, and
+  `mask_storage_encoding`.
 - Probability arrays remain dense/quantized arrays and are not represented as
   binary RLE.
+
+## Recommended Migration Target
+
+Use whole-ROI typed-array RLE as the first compact canonical encoding.
+
+This is the best fit for Palette's current Zarr model because it keeps the
+logical mask surface exact while preserving typed, chunked arrays. It avoids
+JSON-per-row blobs, avoids lossy contour-only storage, and avoids making every
+consumer learn a tight-bbox ragged representation before the shared mask API
+exists.
+
+The recommended first target is:
+
+- **Canonical compact surface**: `mask_rle/components/<component>/` with exact
+  whole-ROI binary masks.
+- **Compatibility cache**: optional dense `masks_roi` materialized from
+  `mask_rle/`.
+- **Future optimization**: optional `tight_bbox_rle_v2` after readers and
+  writers are already using `MaskStore`.
+
+Bit-packed masks are the fallback if RLE does not beat dense Zarr compression
+enough in benchmarks. Contours remain derived geometry/QC outputs, not the only
+authoritative mask surface.
+
+### Why Not Tight-BBox RLE First?
+
+Tight bbox plus RLE is probably the smallest final representation for sparse
+ROI masks, but it adds two extra sources of complexity:
+
+- each row/channel has its own encoded image shape and origin;
+- materializers must paste decoded local masks back into full ROI coordinates
+  before Crimson, training, metrics, and edit tools see them.
+
+Those are solvable, but they are not the right first migration step. Whole-ROI
+RLE gives an exact compact encoding while preserving the existing `(H, W)` mask
+contract. Add bbox metadata in v1 for metrics and future migration planning,
+then only promote bbox-local RLE after the API boundary is stable.
+
+## Chunked Storage Contract For Compact Masks
+
+Compact masks must still follow Palette's Zarr write-safety rule: no two
+workers may write different logical slices inside the same physical Zarr chunk.
+
+Recommended layout:
+
+```text
+<mask_run>/
+  attrs:
+    mask_storage_encoding = "dense_uint8+component_rle_v1"
+    mask_store_encodings = ["dense_uint8", "component_rle_v1"]
+    mask_rle_materialized = true
+
+  mask_rle/
+    attrs:
+      schema_id = "palette_mask_rle_binary_v1"
+      encoded_shape_hw = [H, W]
+      layout = "component_groups"
+      component_names = ["subject_body", "eye_left", ...]
+
+    components/
+      00_subject_body/
+        attrs:
+          component_name = "subject_body"
+          component_index = 0
+        counts        uint32 (total_count_values_for_component,)
+        indptr        int64  (N + 1,)
+        present       bool   (N,)
+        area_px       int32  (N,)
+        bbox_xyxy     int32  (N, 4)
+
+      01_eye_left/
+        counts
+        indptr
+        present
+        area_px
+        bbox_xyxy
+```
+
+Chunking policy:
+
+- Keep dense compatibility cache chunks as `(storage_row_chunk, 1, H, W)` using
+  `refined_subject_mask_storage_chunks(...)`.
+- Chunk per-component row metadata arrays on the existing metric row grid, for
+  example `(refined_subject_mask_metric_row_chunk(N),)` for `present` and
+  `(refined_subject_mask_metric_row_chunk(N), 4)` for `bbox_xyxy`.
+- Chunk per-component `indptr` on the same row grid plus one boundary entry;
+  the driver should normally write `indptr`, not workers.
+- Chunk each component's `counts` as a 1D payload array targeting large
+  sequential chunks, such as 1-16 MiB of `uint32` payload, after benchmarking.
+- Record requested and effective worker row chunk sizes in run attrs whenever
+  parallel writers are used.
+
+Ragged payload writes need special care. Do not let multiple workers append to
+one shared component `counts` array. Use one of these safe patterns:
+
+- **Two-pass final array**: compute per-row/channel encoded lengths, have the
+  driver prefix-sum and create per-component `indptr`, then workers write only
+  their assigned non-overlapping `counts[start:end]` ranges per component.
+- **Shard then reduce**: each worker writes a private temporary shard with local
+  counts and metadata; the driver validates, concatenates, writes final arrays,
+  and removes shards.
+- **Serialized writer**: one writer appends all encoded payloads. This is
+  simplest but should be a fallback for small runs or debugging.
+
+The shard-then-reduce path is the safest first implementation because it avoids
+concurrent ragged appends and matches the current row-sharded finalizer design.
+Each worker should own a row shard and encode all components for that shard.
+Component groups are separated in the final layout, but component-sharded
+execution is not the preferred first implementation because it rereads the same
+rows and complicates row-level provenance/QC joins.
 
 ## Storage Benchmark Plan
 
@@ -498,6 +676,7 @@ Suggested options:
 - `--channels all|0,1,...`
 - `--write-temp-zarr`
 - `--codec zstd|blosc-zstd|none`
+- `--encode-workers 1|N`
 - `--decode-benchmark-rows 1024`
 - `--delete-temp`
 
@@ -550,13 +729,216 @@ If savings are modest after Zarr compression, prioritize reference/alias runs
 for migration workflows and keep dense masks as the main training snapshot
 format.
 
-## Recommended Order of Work
+## Initial Local Component-Layout Benchmark Result
+
+Local component-group benchmark, run on 2026-06-19:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_mask_rle_storage \
+  /nvme1/recordings/2026-01-28T19-22-28Z_arena_2_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_2_DefaultScreen_analysis.zarr \
+  --families refined_subject_masks_runs \
+  --runs latest \
+  --sample-rows all \
+  --decode-benchmark-rows 1024 \
+  --encode-workers 4 \
+  --write-temp-zarr \
+  --delete-temp \
+  --json-report /tmp/palette_mask_rle_component_full_workers4.json \
+  --jsonl-report /tmp/palette_mask_rle_component_full_workers4.jsonl \
+  --markdown-report /tmp/palette_mask_rle_component_full_workers4.md
+```
+
+Result for
+`refined_subject_masks_runs/refined_subject_masks_smart_finalizer_pilot_20260504`:
+
+| surface | value |
+| --- | ---: |
+| shape | `23287 x 4 x 512 x 512` |
+| dense logical bytes | 22.7 GiB |
+| dense physical bytes | 14.1 MiB |
+| RLE logical bytes | 40.9 MiB |
+| component-RLE physical bytes | 3.9 MiB |
+| dense-to-RLE logical ratio | 568.98x |
+| dense-to-component-RLE physical ratio | 3.60x |
+| encoder | process_shards/4 |
+| encode rate | 797.4 rows/s |
+| decode benchmark rate | 5819.4 rows/s |
+
+Interpretation:
+
+- Dense Zarr compression is already very effective for these masks.
+- Whole-ROI RLE still produced a meaningful physical storage reduction on this
+  refined subject-mask run.
+- Decode speed is comfortably above current review/training row-access needs.
+- Encode speed is acceptable for a finalizer-side optional compact writer, but
+  should not be inserted into latency-sensitive paths until writer benchmarks
+  are run on larger GoodCopBadCop-style runs.
+- The process-sharded encoder is row-sharded: each worker encodes all
+  components for an assigned row range, then the driver concatenates shard
+  payloads and offset-adjusts each component's `indptr`. This preserves the
+  canonical row/component order while avoiding unsafe concurrent appends to the
+  final ragged `counts` arrays.
+
+## Implementation Checklist
+
+### Phase 0: Benchmark And Decision Gate
 
 1. Implement the read-only benchmark utility.
-2. Run it on the approved migrated training Zarrs and summarize by family.
-3. Decide whether RLE, bitpacking, or reference/alias runs give the best return.
-4. Add a `MaskStore` reader API with dense and RLE backends.
-5. Migrate training loaders to `MaskStore`.
-6. Migrate Crimson/review read paths to `MaskStore`.
-7. Add write support and copy-on-write semantics for edited compact masks.
-8. Only then consider making compact binary masks a default writer policy.
+2. Run it on representative `subject_mask_runs`,
+   `refined_subject_masks_runs`, and any remaining supported eye-mask runs.
+3. Report dense logical bytes, dense physical bytes, RLE logical bytes, RLE
+   physical bytes, object count, encode speed, batch decode speed, and random
+   row decode speed.
+4. Keep dense storage as default unless whole-ROI RLE gives meaningful physical
+   savings after current Zarr compression.
+
+### Phase 1: Shared API Boundary
+
+1. Add a `MaskStore` / `MaskSurface` API that can expose dense masks from
+   multiple physical encodings.
+2. Implement a dense `masks_roi` backend first with no behavior change.
+3. Implement RLE encode/decode helpers with exact parity tests for empty masks,
+   holes, multiple components, all-foreground masks, and every component order.
+4. Add `MaskStore.read_dense(row_indices, channels=None)` as the consumer-facing
+   method. Consumers should not inspect `mask_rle/` directly.
+
+### Phase 2: RLE Writer In Shadow Mode
+
+1. Add a writer option:
+   `--mask-storage dense_uint8|rle_v1|dense_and_rle`. **Implemented for
+   refined-subject finalization.**
+2. Start with `dense_and_rle` for selected runs so dense readers remain
+   unaffected while RLE parity is audited.
+3. Use shard-then-reduce or two-pass prefix-sum writing for `mask_rle/counts`;
+   never concurrent append.
+4. Validate every written RLE row/channel against the dense source before
+   marking the run complete. **Implemented at the shared writer boundary**:
+   `write_component_rle_mask_store_from_dense(..., validate_roundtrip=True)`
+   streams decoded `mask_rle` chunks back through `MaskStore` and raises before
+   completion if any row/channel differs from the dense source.
+5. Stamp `mask_storage_encoding`, dense-cache status, chunk policy, worker chunk
+   policy, and RLE schema ID in run attrs and registry extracts. The registry
+   now extracts dense/RLE logical byte counts, backend-reported stored byte
+   counts when available, dense-cache materialization provenance, RLE refresh
+   timestamps, and stale row/component scope. Stored byte counts may be `NULL`
+   for zarr backends that do not expose `nbytes_stored`.
+
+### Phase 3: Consumer Migration
+
+1. Migrate diagnostics and training exporters to `MaskStore` first. In progress:
+   `analysis/subject_shape_runs`, refined-subject eye geometry/backfill,
+   component contour generation/backfill, subject-mask training-source audit,
+   subject-mask training export, subject-mask batch output validation, and the
+   refined subject-mask contract validator now read through `MaskStore`.
+   Recording-step status checks fall back to chunked `MaskStore` reads when
+   frame-count and `metrics/mask_present` summaries are missing, so compact-only
+   refined-subject runs can still report coverage.
+   Subject-mask training export uses `MaskStore` only for source analysis
+   reads; the merged training artifact remains dense-only and stamps
+   `mask_storage_format = "dense_uint8"` plus
+   `mask_storage_surface = "masks_roi"`.
+   Subject-body and swim-bladder batch review selection also use `MaskStore`
+   row counts for stale-row filtering, so compact-only refined runs no longer
+   require dense `masks_roi` solely to bound pending review rows.
+   Subject-shape overlay visualization reads component masks through
+   `MaskStore`, including skeleton/contour debug overlays from compact-only
+   refined runs.
+   Provenance consistency diagnostics count compact refined-subject mask rows
+   through `MaskStore`, so compact-only runs are not reported as row-missing
+   merely because dense `masks_roi` was not materialized.
+   The subject-mask/keypoint eye-coverage diagnostic also opens the resolved
+   subject run through `MaskStore`; it computes component presence in row chunks
+   and runs the eyes-union assignment dry-run chunked, so compact-only refined
+   subject runs are no longer rejected for missing dense `masks_roi`.
+   Eye-geometry source resolution exposes a dense array-like eye-mask view backed
+   by `MaskStore`, so refined-subject eye geometry/export paths can consume
+   compact-only refined runs without requiring dense `masks_roi`.
+   Subject-body mask QC reads the `subject_body` component through `MaskStore`
+   before writing unchanged `components/subject_body/qc` outputs, so compact-only
+   refined runs can still receive body topology/shape QC.
+   Swim-bladder patch review uses the resolved `SourceSubjectMaskRun.masks_roi`
+   surface for source overlays when available and falls back to `MaskStore` for
+   compact-only source masks instead of treating missing dense `masks_roi` as an
+   empty overlay. It still relies on refined-subject review materialization
+   before writing edits to compact-only refined runs.
+   Subject-mask inspector overlay/summary reads masks through `MaskStore`, so it
+   can inspect dense raw runs next to compact-only refined runs without
+   requiring a dense `masks_roi` compatibility cache.
+   Refined-eye compatibility materialization reads eye components from the
+   refined-subject physical mask store through `MaskStore` and still writes the
+   legacy dense `refined_eye_masks_runs/<run>/masks_roi` artifact for Crimson and
+   historical consumers.
+   Refined-source assembly can also import compact refined component sources and
+   still writes a dense assembled run. Training exports still write dense
+   `subject_mask_runs/<run>/masks_roi` artifacts. Refined subject-mask review
+   can open compact-only runs by materializing a dense `masks_roi`
+   compatibility cache first; it does not yet edit compact RLE in place.
+   The non-UI `fisheye.refinement.refine_subject_masks` dry-run/planning path
+   inspects existing refined runs through `MaskStore` without materializing
+   dense masks, while the actual apply path remains an edit boundary and uses
+   the shared refined-review opener to materialize `masks_roi` before writeback.
+   `fisheye.utils.merge_subject_mask_runs` accepts source subject-mask runs
+   backed by either dense `masks_roi` or compact `mask_rle` through `MaskStore`,
+   while intentionally writing a dense merged `subject_mask_runs/<run>/masks_roi`
+   output because merged raw subject-mask runs remain training/export-friendly
+   dense artifacts.
+   `fisheye.refinement.finalize_subject_masks` can consume source
+   `subject_mask_runs` backed by compact `mask_rle` when neither dense
+   `masks_roi` nor `mask_probs_roi` is present, and records `mask_rle` as the
+   source surface in component provenance.
+   The SAM subject-prompt visualizer loads optional source body overlays through
+   `MaskStore`, so compact raw subject-mask runs can be inspected without
+   materializing dense `masks_roi`.
+2. Migrate remaining review UI and Crimson-facing read paths next.
+3. Migrate edit/writeback paths only after read paths are stable; edited compact
+   masks should re-encode the touched row/channel and refresh metrics.
+4. Add a materializer command that can create, refresh, or delete dense
+   `masks_roi` compatibility caches from compact masks, and can refresh compact
+   `mask_rle` from the current dense cache after review/edit marks it stale.
+   **Implemented for refined-subject runs**:
+   `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store`.
+   The refined subject-mask contract validator also uses `MaskStore` for
+   validation and conservative backfill: missing run-level metrics and
+   per-component metric mirrors can be repaired from compact `mask_rle` without
+   recreating dense `masks_roi`.
+   Stage-completion array validation now treats compact `mask_rle` as a valid
+   refined-subject physical mask store when the parent shape metadata and each
+   component pointer table pass cheap structural checks (`indptr[0] == 0`,
+   monotonic pointers, and `indptr[-1] == len(counts)`).
+5. Add registry/audit fields for compact encoding, dense cache presence,
+   encoded byte size, dense cache byte size, and materialization freshness.
+
+Remaining default-migration blockers:
+
+- Crimson-facing readers must either call Palette's `MaskStore`-equivalent
+  contract or explicitly materialize dense masks before display/edit.
+- Legacy eye-mask training/export paths remain dense by design and should not
+  be used as proof that refined-subject compact storage is fully deployed.
+- Remaining readme/workflow snippets that index
+  `refined_subject_masks_runs/*/masks_roi` directly should be updated or
+  clearly labeled dense-only compatibility examples.
+- Operators need a real-recording smoke for `--mask-storage rle_v1` followed by
+  subject-shape, eye-geometry, component-contour, training-export, and review
+  materialization checks before `rle_v1` becomes the default.
+
+### Phase 4: Default Writer Migration
+
+1. Make compact RLE the default only for new large refined subject-mask runs
+   after training exporters/promoters, review, Crimson, and diagnostics all
+   read analysis sources through `MaskStore`; training artifacts/loaders remain
+   dense-only unless a future training-artifact contract explicitly changes
+   that boundary.
+2. Keep probability arrays dense or quantized; do not RLE `mask_probs_roi`.
+3. Keep dense training snapshots available when throughput matters more than
+   storage size.
+4. Treat existing dense runs as valid legacy data; do not rewrite them until a
+   reader-compatible backfill tool exists.
+
+### Phase 5: Optional Tight-BBox RLE v2
+
+1. Add `encoded_bbox_xyxy_roi` in v1 so bbox distributions are known before
+   changing the physical encoding.
+2. Prototype bbox-local RLE as a new schema ID, not as a silent change to v1.
+3. Require parity against whole-ROI dense masks after paste-back.
+4. Promote bbox-local RLE only if it materially improves storage or transfer
+   size beyond whole-ROI RLE.

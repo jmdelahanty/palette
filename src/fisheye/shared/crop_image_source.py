@@ -546,6 +546,7 @@ class CropImageSource:
     roi_cache_created: bool = False
     roi_cache_key: str | None = None
     roi_cache_path: str | None = None
+    roi_cache_canonical_path: str | None = None
     roi_cache_backend: str | None = None
     roi_image_representation: str | None = ROI_IMAGE_REPRESENTATION
     roi_pixel_contract: dict[str, Any] | None = None
@@ -844,6 +845,12 @@ class CropImageSource:
         self.roi_cache_created = False
         self.roi_cache_key = str(cache_arr.manifest.get("cache_key") or "") or None
         self.roi_cache_path = str(cache_arr.manifest_path)
+        staging = cache_arr.manifest.get("staging")
+        if isinstance(staging, dict):
+            requested_manifest = staging.get("requested_manifest_path")
+            self.roi_cache_canonical_path = str(requested_manifest) if requested_manifest else str(cache_arr.manifest_path)
+        else:
+            self.roi_cache_canonical_path = str(cache_arr.manifest_path)
         self.roi_cache_backend = "flat_bin_v1"
         self.roi_read_mode = "flat_bin_roi_cache"
         builder = cache_arr.manifest.get("builder")

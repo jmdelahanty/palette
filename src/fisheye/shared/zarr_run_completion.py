@@ -64,7 +64,14 @@ def _has_children(parent_group: Any) -> bool:
 def require_runs_parent(root: Any, name: str) -> Any:
     """Return a runs-parent group, stamping new empty parents as strict."""
 
-    parent = root.require_group(name)
+    if hasattr(root, "require_group"):
+        parent = root.require_group(name)
+    elif name in root:
+        parent = root[name]
+    elif hasattr(root, "create_group"):
+        parent = root.create_group(name)
+    else:
+        raise AttributeError(f"Root object does not support require_group/create_group for {name!r}.")
     attrs = parent.attrs
     if attrs.get(COMPLETION_EPOCH_ATTR) is None and not _has_children(parent):
         attrs[COMPLETION_EPOCH_ATTR] = COMPLETION_EPOCH_STRICT

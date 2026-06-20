@@ -6,6 +6,7 @@ import zarr
 
 from fisheye.refinement import subject_body_mask_qc as mod
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 
 
 def _body_mask(height: int = 32, width: int = 32) -> np.ndarray:
@@ -32,6 +33,18 @@ def _build_refined_root() -> zarr.Group:
     masks[2, 0, 20:24, 20:24] = 1
     run.create_array("masks_roi", data=masks, chunks=(1, 1, 32, 32), overwrite=True)
     return root
+
+
+def _replace_refined_masks_with_rle(root: zarr.Group) -> None:
+    run = root["refined_subject_masks_runs"]["refined_001"]
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    del run["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        run,
+        dense,
+        component_names=[str(label) for label in run.attrs["mask_labels"]],
+        encode_row_chunk_size=1,
+    )
 
 
 def test_compute_subject_body_mask_qc_flags_missing_fragmented_and_branched_masks() -> None:
@@ -94,6 +107,27 @@ def test_write_subject_body_mask_qc_group_persists_component_qc() -> None:
     assert run.attrs["subject_body_mask_qc_status"] == "computed"
     assert qc["severe_qc_failure"][:].tolist() == [False, True, True]
     assert qc["requires_review"][:].tolist() == [False, True, True]
+    assert qc["component_count"][:].tolist() == [1, 1, 2]
+    reasons = read_reason_labels(qc)
+    assert reasons is not None
+    assert reasons[0] == "ok"
+    assert "branched_body_mask" in str(reasons[1])
+    assert "fragmented_subject_body_mask" in str(reasons[2])
+
+
+def test_write_subject_body_mask_qc_group_reads_compact_mask_store() -> None:
+    root = _build_refined_root()
+    _replace_refined_masks_with_rle(root)
+
+    summary = mod.write_subject_body_mask_qc_group(root, refined_run="refined_001", chunk_size=2)
+
+    assert summary["status"] == "updated"
+    assert summary["row_count"] == 3
+    assert summary["severe_qc_failure_count"] == 2
+    run = root["refined_subject_masks_runs"]["refined_001"]
+    assert "masks_roi" not in run
+    qc = run["components"]["subject_body"]["qc"]
+    assert qc["severe_qc_failure"][:].tolist() == [False, True, True]
     assert qc["component_count"][:].tolist() == [1, 1, 2]
     reasons = read_reason_labels(qc)
     assert reasons is not None

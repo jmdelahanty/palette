@@ -51,5 +51,5 @@ def test_extract_skeleton_edges_defaults_to_triangle_for_three_keypoints() -> No
 
     edges, source = _extract_skeleton_edges(run, n_keypoints=3)
 
-    assert source == "default_triangle"
+    assert source == "legacy_default_triangle"
     assert edges.tolist() == [[0, 1], [0, 2], [1, 2]]

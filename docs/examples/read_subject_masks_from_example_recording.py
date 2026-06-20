@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Minimal Zarr reader for subject masks in the transferred example recording.
 
-This example intentionally reads one ROI row at a time. Dense mask arrays can be
-large, so avoid slicing ``[:]`` unless you really want to load the full run.
+This example intentionally reads one ROI row at a time. Refined binary masks are
+read through ``fisheye.shared.mask_store.open_mask_store(...)`` so the same code
+works for dense ``masks_roi`` and compact ``mask_rle`` stores.
 
 Example:
 
@@ -22,6 +23,8 @@ from typing import Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_store import MaskStore, open_mask_store
+
 
 DEFAULT_ANALYSIS_ZARR = Path(
     "/groups/anibody/anibody/fish/example_recording/zarr/"
@@ -40,9 +43,23 @@ def _print_array_summary(name: str, array: zarr.Array) -> None:
     print(f"{name}: shape={array.shape} dtype={array.dtype} chunks={array.chunks}")
 
 
-def _component_area(mask_stack: zarr.Array, row: int, channel: int) -> int:
-    # This reads only one 512x512 component mask, not the full mask run.
-    mask = np.asarray(mask_stack[row, channel], dtype=np.uint8)
+def _print_optional_node_summary(group: zarr.Group, name: str, label: str) -> None:
+    node = group.get(name)
+    if node is None:
+        print(f"{label}: <absent>")
+        return
+    if isinstance(node, zarr.Array):
+        _print_array_summary(label, node)
+        return
+    attrs = dict(node.attrs) if isinstance(node, zarr.Group) else {}
+    schema_id = attrs.get("schema_id") or attrs.get("mask_encoding") or "group"
+    component_names = attrs.get("component_names") or []
+    print(f"{label}: group schema={schema_id} components={component_names}")
+
+
+def _component_area(mask_store: MaskStore, row: int, channel: int) -> int:
+    # This reads only one ROI-local component mask, not the full mask run.
+    mask = np.asarray(mask_store.read_dense(rows=row, channels=channel)[0, 0], dtype=np.uint8)
     return int(mask.astype(bool).sum())
 
 
@@ -70,11 +87,19 @@ def read_subject_mask_example(
 
     print(f"refined_run: {refined_run}")
     print(f"refined_labels: {refined_labels}")
-    _print_array_summary("refined/masks_roi", refined["masks_roi"])
+    refined_mask_store = open_mask_store(
+        refined,
+        source_path=f"refined_subject_masks_runs/{refined_run}",
+        prefer="dense",
+    )
+    print(f"refined_mask_store_encoding: {refined_mask_store.encoding}")
+    print(f"refined_mask_store_shape: {refined_mask_store.shape}")
+    _print_optional_node_summary(refined, "masks_roi", "refined/masks_roi")
+    _print_optional_node_summary(refined, "mask_rle", "refined/mask_rle")
     _print_array_summary("refined/metrics/area_px", refined["metrics/area_px"])
     print()
 
-    n_rows = int(refined["masks_roi"].shape[0])
+    n_rows = int(refined_mask_store.n_rows)
     if row < 0 or row >= n_rows:
         raise IndexError(f"--row must be in [0, {n_rows - 1}], got {row}")
 
@@ -84,14 +109,17 @@ def read_subject_mask_example(
     print(f"frame_index: {frame_index}")
     print(f"detection_index: {detection_index}")
 
-    print("refined component areas from masks_roi[row, channel]:")
+    print("refined component areas from mask_store.read_dense(row, channel):")
     for channel, label in enumerate(refined_labels):
-        area_px = _component_area(refined["masks_roi"], row, channel)
+        area_px = _component_area(refined_mask_store, row, channel)
         cached_area_px = float(refined["metrics/area_px"][row, channel])
         print(f"  {label}: mask_area_px={area_px} cached_area_px={cached_area_px:.1f}")
 
     body_channel = refined_labels.index("subject_body")
-    body_mask = np.asarray(refined["masks_roi"][row, body_channel], dtype=np.uint8).astype(bool)
+    body_mask = np.asarray(
+        refined_mask_store.read_dense(rows=row, channels=body_channel)[0, 0],
+        dtype=np.uint8,
+    ).astype(bool)
     print()
     print("single loaded mask:")
     print(f"  label: subject_body")

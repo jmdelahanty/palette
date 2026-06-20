@@ -41,6 +41,11 @@ from ..shared.provenance_attrs import (
 )
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.mask_store import (
+    MaskStoreError,
+    open_mask_store,
+    write_component_rle_mask_store_from_dense,
+)
 from ..shared.subject_mask_chunks import (
     REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT,
     refined_subject_mask_dask_worker_row_chunk,
@@ -117,6 +122,7 @@ _PROCESS_SHARD_EXECUTION_BACKEND = "process_shards"
 _POSTCOMPUTE_BACKENDS = ("serial", "process_shards")
 _SERIAL_POSTCOMPUTE_BACKEND = "serial"
 _PROCESS_SHARD_POSTCOMPUTE_BACKEND = "process_shards"
+_MASK_STORAGE_CHOICES = ("dense_uint8", "dense_and_rle", "rle_v1")
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
 _SOURCE_SEED_MASKS_SCHEMA_ID = "refined_subject_component_source_seed_masks_v1"
@@ -600,11 +606,13 @@ def _component_surface_rows(
 
     masks = source.group.get("masks_roi")
     if masks is None:
-        raise RuntimeError(f"subject_mask_runs/{source.run_name} missing masks_roi or mask_probs_roi.")
+        if source.mask_surface_path != "mask_rle":
+            raise RuntimeError(f"subject_mask_runs/{source.run_name} missing masks_roi, mask_probs_roi, or mask_rle.")
+        masks = source.masks_roi
     return (
         np.asarray(masks[int(start_row) : int(stop_row), component_idx], dtype=np.uint8),
         False,
-        "masks_roi",
+        str(source.mask_surface_path or "masks_roi"),
         None,
         threshold,
         component_idx,
@@ -724,7 +732,7 @@ def _source_payload_for_finalized_component(
         payload["source_probability_threshold"] = float(batch.source_probability_threshold)
         payload["source_binary_derivation"] = "smart_finalize(mask_probs_roi)"
     else:
-        payload["source_binary_derivation"] = "smart_finalize(masks_roi)"
+        payload["source_binary_derivation"] = f"smart_finalize({batch.source_surface_path})"
     return payload
 
 
@@ -773,7 +781,7 @@ def _source_payload_for_assigned_eye_component(
         payload["source_probability_threshold"] = float(union_batch.source_probability_threshold)
         payload["source_binary_derivation"] = "smart_finalize(mask_probs_roi)"
     else:
-        payload["source_binary_derivation"] = "smart_finalize(masks_roi)"
+        payload["source_binary_derivation"] = f"smart_finalize({union_batch.source_surface_path})"
     return payload
 
 
@@ -2400,7 +2408,11 @@ def _process_and_write_metric_refresh_chunk(
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
     run_group = root["refined_subject_masks_runs"][refined_run]
-    masks = run_group["masks_roi"]
+    mask_store = open_mask_store(
+        run_group,
+        source_path=f"refined_subject_masks_runs/{refined_run}",
+        prefer="dense",
+    )
     row_slice = slice(int(start_row), int(stop_row))
     timing = _TimingRecorder()
     chunk_timing: dict[str, object] = {
@@ -2416,7 +2428,10 @@ def _process_and_write_metric_refresh_chunk(
 
     for component_name, component_idx in component_indices:
         phase_start = time.perf_counter()
-        component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
+        component_masks = np.asarray(
+            mask_store.read_dense(rows=row_slice, channels=int(component_idx))[:, 0],
+            dtype=np.uint8,
+        )
         write_result = _write_mask_local_metrics_chunk(
             run_group,
             component_name=str(component_name),
@@ -2471,13 +2486,23 @@ def refresh_refined_subject_mask_metrics_run(
     stage_start = time.perf_counter()
     timing = _TimingRecorder()
     run_name, run_group = _resolve_refined_subject_run_group(root, refined_run)
-    masks = run_group.get("masks_roi")
-    if masks is None:
-        raise ValueError(f"refined_subject_masks_runs/{run_name} missing masks_roi.")
-    if len(tuple(masks.shape)) != 4:
-        raise ValueError(f"refined_subject_masks_runs/{run_name}/masks_roi must be 4D, got {tuple(masks.shape)}.")
+    try:
+        mask_store = open_mask_store(
+            run_group,
+            source_path=f"refined_subject_masks_runs/{run_name}",
+            prefer="dense",
+        )
+    except MaskStoreError as exc:
+        raise ValueError(
+            f"refined_subject_masks_runs/{run_name} missing usable mask store (masks_roi or mask_rle)."
+        ) from exc
+    mask_shape = tuple(int(value) for value in mask_store.shape)
+    if len(mask_shape) != 4:
+        raise ValueError(
+            f"refined_subject_masks_runs/{run_name} mask store must be 4D, got {mask_shape}."
+        )
 
-    total_rows = int(masks.shape[0])
+    total_rows = int(mask_shape[0])
     requested_chunk_size = max(1, int(chunk_size))
     worker_chunk_size = _worker_chunk_size_for_backend(total_rows, requested_chunk_size, execution_backend)
     dask_metadata: dict[str, object] = {
@@ -2487,6 +2512,9 @@ def refresh_refined_subject_mask_metrics_run(
         "dask_scheduler": scheduler_key,
         "dask_num_workers": normalized_num_workers,
         "worker_process_count": normalized_num_workers,
+        "mask_store_encoding": mask_store.encoding,
+        "mask_storage_surface": mask_store.storage_surface,
+        "mask_store_path": mask_store.storage_path,
         "dask_requested_chunk_size": requested_chunk_size,
         "dask_chunk_size": worker_chunk_size,
         "dask_chunk_alignment": (
@@ -2496,7 +2524,7 @@ def refresh_refined_subject_mask_metrics_run(
         ),
         "dask_version": getattr(dask, "__version__", "unknown"),
     }
-    component_count = int(masks.shape[1])
+    component_count = int(mask_shape[1])
     _ensure_refined_run_metric_shell(run_group, total_rows=total_rows, component_count=component_count)
     component_indices = _component_indices_for_refined_run(run_group, components)
     chunk_ranges = _row_chunks(total_rows, worker_chunk_size)
@@ -2565,7 +2593,10 @@ def refresh_refined_subject_mask_metrics_run(
             row_slice = slice(int(start_row), int(stop_row))
             for component_name, component_idx in component_indices:
                 phase_start = time.perf_counter()
-                component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
+                component_masks = np.asarray(
+                    mask_store.read_dense(rows=row_slice, channels=int(component_idx))[:, 0],
+                    dtype=np.uint8,
+                )
                 write_result = _write_mask_local_metrics_chunk(
                     run_group,
                     component_name=component_name,
@@ -3068,6 +3099,7 @@ def finalize_subject_mask_run(
     write_eye_geometry: bool = False,
     write_component_contours: bool = False,
     retain_source_seeds: bool = False,
+    mask_storage: str = "dense_uint8",
     postcompute_backend: str = _SERIAL_POSTCOMPUTE_BACKEND,
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
@@ -3087,6 +3119,9 @@ def finalize_subject_mask_run(
     metric_level = str(metric_level)
     if metric_level not in _METRIC_LEVELS:
         raise ValueError(f"metric_level must be one of {_METRIC_LEVELS}; got {metric_level!r}.")
+    mask_storage = str(mask_storage)
+    if mask_storage not in _MASK_STORAGE_CHOICES:
+        raise ValueError(f"mask_storage must be one of {_MASK_STORAGE_CHOICES}; got {mask_storage!r}.")
     scheduler_key = _normalize_scheduler(scheduler)
     normalized_num_workers = int(num_workers) if num_workers is not None else None
     execution_backend = _normalize_execution_backend(execution_backend)
@@ -3167,6 +3202,8 @@ def finalize_subject_mask_run(
         "write_component_contours": bool(write_component_contours),
         "retain_source_seeds": bool(retain_source_seeds),
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
+        "mask_storage": mask_storage,
+        "would_write_mask_rle": mask_storage in {"dense_and_rle", "rle_v1"},
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": normalized_postcompute_chunk_size,
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3192,6 +3229,7 @@ def finalize_subject_mask_run(
         write_eye_geometry=bool(write_eye_geometry),
         write_component_contours=bool(write_component_contours),
         retain_source_seeds=bool(retain_source_seeds),
+        mask_storage=str(mask_storage),
         source_seed_masks_status="retained" if bool(retain_source_seeds) else "omitted",
         postcompute_backend=str(postcompute_backend),
         postcompute_chunk_size=int(normalized_postcompute_chunk_size),
@@ -3247,6 +3285,7 @@ def finalize_subject_mask_run(
         "retain_source_seeds": bool(retain_source_seeds),
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
+        "mask_storage_requested": mask_storage,
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3281,6 +3320,7 @@ def finalize_subject_mask_run(
         "retain_source_seeds": bool(retain_source_seeds),
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
+        "mask_storage_requested": mask_storage,
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3655,6 +3695,42 @@ def finalize_subject_mask_run(
             "reason": "no_expensive_postcompute_requested",
         }
 
+    if mask_storage in {"dense_and_rle", "rle_v1"}:
+        with progress.phase("write_component_rle_mask_store"):
+            with timing.phase("write_component_rle_mask_store"):
+                mask_rle_summary = write_component_rle_mask_store_from_dense(
+                    run_group,
+                    run_group["masks_roi"],
+                    component_names=component_names,
+                    overwrite=True,
+                    encode_row_chunk_size=max(1, min(int(worker_chunk_size), 1024)),
+                    extra_attrs={
+                        "source_array": "masks_roi",
+                        "source_encoding": "dense_uint8",
+                        "source_run": str(target_run),
+                    },
+                )
+        if mask_storage == "rle_v1":
+            del run_group["masks_roi"]
+            run_group.attrs["mask_store_encodings"] = ["component_rle_v1"]
+            run_group.attrs["mask_storage_encoding"] = "component_rle_v1"
+            run_group.attrs["masks_roi_materialized"] = False
+            mask_rle_summary["dense_cache_removed"] = True
+        else:
+            run_group.attrs["masks_roi_materialized"] = True
+    else:
+        run_group.attrs["mask_store_encodings"] = ["dense_uint8"]
+        run_group.attrs["mask_storage_encoding"] = "dense_uint8"
+        run_group.attrs["masks_roi_materialized"] = True
+        run_group.attrs["mask_rle_materialized"] = False
+        mask_rle_summary = {
+            "status": "skipped",
+            "reason": "mask_storage=dense_uint8",
+            "encoding": "component_rle_v1",
+        }
+    run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
+    run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
+
     duration_seconds = float(time.perf_counter() - stage_start)
     timing_summary = timing.summary(total_rows=total_rows, duration_seconds=duration_seconds)
     timing_summary.update(dask_metadata)
@@ -3682,6 +3758,8 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_postcompute_chunk_size"] = int(normalized_postcompute_chunk_size)
     run_group.attrs["smart_finalizer_postcompute_num_workers"] = normalized_postcompute_num_workers
     run_group.attrs["smart_finalizer_postcompute_summary"] = dict(_json_safe(postcompute_summary))
+    run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
+    run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
     run_group.attrs["smart_finalizer_execution_backend"] = execution_backend
     run_group.attrs["dask_execution_enabled"] = execution_backend == _DASK_WORKER_EXECUTION_BACKEND
     run_group.attrs["process_shard_execution_enabled"] = execution_backend == _PROCESS_SHARD_EXECUTION_BACKEND
@@ -3705,6 +3783,8 @@ def finalize_subject_mask_run(
             "write_component_contours": bool(write_component_contours),
             "retain_source_seeds": bool(retain_source_seeds),
             "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
+            "mask_storage": mask_storage,
+            "mask_rle_summary": dict(_json_safe(mask_rle_summary)),
             "postcompute_backend": postcompute_backend,
             "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
             "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3724,6 +3804,7 @@ def finalize_subject_mask_run(
         rows_total=int(total_rows),
         rows_per_second=float(timing_summary["rows_per_second"]),
         refined_run=str(target_run),
+        mask_storage=str(mask_storage),
     )
     return summary
 
@@ -3739,6 +3820,7 @@ def finalize_subject_masks(
     write_eye_geometry: bool = False,
     write_component_contours: bool = False,
     retain_source_seeds: bool = False,
+    mask_storage: str = "dense_uint8",
     postcompute_backend: str = _SERIAL_POSTCOMPUTE_BACKEND,
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
@@ -3765,6 +3847,7 @@ def finalize_subject_masks(
         write_eye_geometry=write_eye_geometry,
         write_component_contours=write_component_contours,
         retain_source_seeds=retain_source_seeds,
+        mask_storage=mask_storage,
         postcompute_backend=postcompute_backend,
         postcompute_chunk_size=postcompute_chunk_size,
         postcompute_num_workers=postcompute_num_workers,
@@ -3851,6 +3934,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Retain per-component source_seed_masks_roi debug arrays. Default production runs omit "
             "these dense intermediate masks and keep masks_roi plus finalization metrics/QC instead."
+        ),
+    )
+    parser.add_argument(
+        "--mask-storage",
+        choices=_MASK_STORAGE_CHOICES,
+        default="dense_uint8",
+        help=(
+            "Physical mask storage to materialize. dense_uint8 preserves the historical masks_roi-only "
+            "surface; dense_and_rle additionally writes mask_rle/components for compact publication and "
+            "selective reads; rle_v1 writes mask_rle/components and removes the dense masks_roi "
+            "compatibility cache after finalization/postcompute completes."
         ),
     )
     parser.add_argument(
@@ -3945,6 +4039,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_eye_geometry=bool(args.write_eye_geometry),
         write_component_contours=bool(args.write_component_contours),
         retain_source_seeds=bool(args.retain_source_seeds),
+        mask_storage=args.mask_storage,
         postcompute_backend=args.postcompute_backend,
         postcompute_chunk_size=args.postcompute_chunk_size,
         postcompute_num_workers=args.postcompute_num_workers,

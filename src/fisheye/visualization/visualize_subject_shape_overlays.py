@@ -15,6 +15,7 @@ from skimage.morphology import skeletonize
 
 from fisheye.analysis.subject_shape_runs import _longest_skeleton_endpoint_path_xy
 from fisheye.shared.crop_image_source import CropImageSource
+from fisheye.shared.mask_store import MaskStore, open_mask_store
 from fisheye.utils.zarr_io import open_zarr_root
 
 
@@ -33,6 +34,7 @@ class SubjectShapeOverlayContext:
     refined_run_name: str
     refined_group: zarr.Group
     label_map: dict[str, int]
+    mask_store: MaskStore
     crop_source: CropImageSource | None = None
 
 
@@ -96,6 +98,11 @@ def open_subject_shape_overlay_context(
     shape_run_name, shape_group = _resolve_shape_run(root, shape_run)
     refined_run_name, refined_group = _resolve_refined_run(root, shape_group, refined_run)
     label_map = _label_index_map(refined_group)
+    mask_store = open_mask_store(
+        refined_group,
+        source_path=f"refined_subject_masks_runs/{refined_run_name}",
+        prefer="dense",
+    )
     crop_source: CropImageSource | None = None
     if use_crop_images:
         try:
@@ -109,6 +116,7 @@ def open_subject_shape_overlay_context(
         refined_run_name=refined_run_name,
         refined_group=refined_group,
         label_map=label_map,
+        mask_store=mask_store,
         crop_source=crop_source,
     )
 
@@ -159,12 +167,12 @@ def _row_value(group: zarr.Group, path: str, row: int, default: object = None) -
 
 def _mask_for(ctx: SubjectShapeOverlayContext, row: int, label: str) -> np.ndarray | None:
     idx = ctx.label_map.get(label)
-    if idx is None or "masks_roi" not in ctx.refined_group:
+    if idx is None:
         return None
-    masks = ctx.refined_group["masks_roi"]
-    if int(row) < 0 or int(row) >= int(masks.shape[0]):
-        raise IndexError(f"Row {row} out of range for masks_roi with {masks.shape[0]} rows.")
-    return np.asarray(masks[int(row), int(idx)], dtype=np.uint8) > 0
+    if int(row) < 0 or int(row) >= int(ctx.mask_store.n_rows):
+        raise IndexError(f"Row {row} out of range for mask store with {ctx.mask_store.n_rows} rows.")
+    mask = ctx.mask_store.read_dense(rows=int(row), channels=int(idx))[0, 0]
+    return np.asarray(mask, dtype=np.uint8) > 0
 
 
 def _base_image(ctx: SubjectShapeOverlayContext, row: int, subject_body: np.ndarray | None) -> tuple[np.ndarray, str]:
@@ -880,7 +888,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=CONTOUR_SOURCE_CHOICES,
         default="mask",
         help=(
-            "Contour rendering source: mask computes boundaries from masks_roi; persisted draws "
+            "Contour rendering source: mask computes boundaries from the refined mask store; persisted draws "
             "components/<component>/contours; auto prefers persisted and falls back to mask; "
             "compare draws both."
         ),
@@ -888,7 +896,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--show-skeleton",
         action="store_true",
-        help="Recompute and overlay subject-body skeleton pixels from masks_roi for debug review.",
+        help="Recompute and overlay subject-body skeleton pixels from the refined mask store for debug review.",
     )
     parser.add_argument(
         "--skeleton-style",

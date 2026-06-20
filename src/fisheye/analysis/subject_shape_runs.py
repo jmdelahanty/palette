@@ -41,6 +41,7 @@ from ..shared.refined_subject_masks_io import (
     load_refined_subject_masks_run_tables,
     resolve_refined_subject_masks_run,
 )
+from ..shared.mask_store import MaskStore, open_mask_store
 from ..shared.subject_mask_chunks import (
     REFINED_SUBJECT_MASK_DASK_CHUNK_ALIGNMENT,
     refined_subject_mask_dask_worker_row_chunk,
@@ -947,6 +948,8 @@ def _prepare_subject_shape_run(
     target_run: str,
     refined_run_name: str,
     refined_group: zarr.Group,
+    source_mask_store: MaskStore,
+    source_mask_store_path: str | None,
     component_indices: Sequence[tuple[str, int]],
     requested_chunk_size: int,
     worker_chunk_size: int,
@@ -956,10 +959,7 @@ def _prepare_subject_shape_run(
     stage_command: str,
     overwrite: bool,
 ) -> zarr.Group:
-    if "masks_roi" not in refined_group:
-        raise ValueError(f"refined_subject_masks_runs/{refined_run_name} missing masks_roi.")
-    masks = refined_group["masks_roi"]
-    total_rows = int(masks.shape[0])
+    total_rows = int(source_mask_store.n_rows)
     components = tuple(name for name, _idx in component_indices)
     analysis_group = root.require_group("analysis")
     parent = require_runs_parent(analysis_group, "subject_shape_runs")
@@ -1012,10 +1012,15 @@ def _prepare_subject_shape_run(
         "dask_version": getattr(dask, "__version__", "unknown"),
     }
     source_labels = list(refined_group.attrs.get("mask_labels") or [])
+    mask_store_path = str(source_mask_store_path or source_mask_store.storage_path)
     source_refs = {
         "refined_subject_masks": f"refined_subject_masks_runs/{refined_run_name}",
-        "refined_subject_masks_masks_roi": f"refined_subject_masks_runs/{refined_run_name}/masks_roi",
+        "refined_subject_masks_mask_store": mask_store_path,
     }
+    if "masks_roi" in refined_group:
+        source_refs["refined_subject_masks_masks_roi"] = f"refined_subject_masks_runs/{refined_run_name}/masks_roi"
+    if "mask_rle" in refined_group:
+        source_refs["refined_subject_masks_mask_rle"] = f"refined_subject_masks_runs/{refined_run_name}/mask_rle"
     source_components_group = refined_group.get("components")
     source_body_qc_available = bool(
         source_components_group is not None
@@ -1043,6 +1048,9 @@ def _prepare_subject_shape_run(
             "source_mask_labels": source_labels,
             "source_mask_label_schema_id": refined_group.attrs.get("label_schema_id"),
             "source_mask_geometry_schema_id": refined_group.attrs.get("component_metrics_schema_id"),
+            "source_mask_store_encoding": source_mask_store.encoding,
+            "source_mask_storage_surface": source_mask_store.storage_surface,
+            "source_mask_store_path": mask_store_path,
             "source_body_mask_qc_available": bool(source_body_qc_available),
             "source_body_mask_qc_schema_id": (
                 refined_group["components"]["subject_body"]["qc"].attrs.get("schema_id")
@@ -1151,6 +1159,9 @@ def _prepare_subject_shape_run(
         inputs={
             "source_refined_subject_masks_run": refined_run_name,
             "source_refined_subject_masks_stage": "refined_subject_masks_runs",
+            "source_mask_store_encoding": source_mask_store.encoding,
+            "source_mask_storage_surface": source_mask_store.storage_surface,
+            "source_mask_store_path": mask_store_path,
             "source_refs": source_refs,
         },
     )
@@ -2196,14 +2207,15 @@ def _process_and_write_subject_shape_chunk_groups(
     refined_group: zarr.Group,
     run_group: zarr.Group,
     *,
+    mask_store: MaskStore,
     component_indices: Sequence[tuple[str, int]],
     start_row: int,
     stop_row: int,
     chunk_index: int,
     execution_backend: str,
 ) -> dict[str, object]:
-    masks = refined_group["masks_roi"]
     row_slice = slice(int(start_row), int(stop_row))
+    row_indices = np.arange(int(start_row), int(stop_row), dtype=np.int64)
     chunk_start = time.perf_counter()
     chunk_timing: dict[str, object] = {
         "chunk_index": int(chunk_index),
@@ -2218,7 +2230,10 @@ def _process_and_write_subject_shape_chunk_groups(
     source_body_qc: SourceBodyMaskQcBatch | None = None
     for component_name, component_idx in component_indices:
         phase_start = time.perf_counter()
-        component_masks = np.asarray(masks[row_slice, int(component_idx)], dtype=np.uint8)
+        component_masks = np.asarray(
+            mask_store.read_dense(rows=row_indices, channels=[int(component_idx)])[:, 0],
+            dtype=np.uint8,
+        )
         batch = _compute_component_batch(component_masks, str(component_name))
         _write_component_batch(run_group, str(component_name), row_slice, batch)
         batches[str(component_name)] = batch
@@ -2323,9 +2338,16 @@ def _process_and_write_subject_shape_chunk(
     chunk_index: int,
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="a")
+    refined_group = root["refined_subject_masks_runs"][refined_run]
+    mask_store = open_mask_store(
+        refined_group,
+        source_path=f"refined_subject_masks_runs/{refined_run}",
+        prefer="dense",
+    )
     return _process_and_write_subject_shape_chunk_groups(
-        root["refined_subject_masks_runs"][refined_run],
+        refined_group,
         root["analysis"]["subject_shape_runs"][shape_run],
+        mask_store=mask_store,
         component_indices=component_indices,
         start_row=start_row,
         stop_row=stop_row,
@@ -2402,8 +2424,8 @@ def write_subject_shape_run_group(
         include_relations=False,
     )
     component_indices = _resolve_components_from_refined_tables(refined_tables, components)
-    masks = refined_tables.require_masks_roi()
-    total_rows = int(masks.shape[0])
+    mask_store = refined_tables.require_mask_store()
+    total_rows = int(mask_store.n_rows)
     target_run = str(run_name or _default_run_name())
     requested_chunk_size = max(1, int(chunk_size))
     worker_chunk_size = _worker_chunk_size_for_backend(total_rows, requested_chunk_size, backend)
@@ -2439,6 +2461,8 @@ def write_subject_shape_run_group(
         target_run=target_run,
         refined_run_name=refined_run_name,
         refined_group=refined_group,
+        source_mask_store=mask_store,
+        source_mask_store_path=refined_tables.source_paths.get("mask_store"),
         component_indices=component_indices,
         requested_chunk_size=requested_chunk_size,
         worker_chunk_size=worker_chunk_size,
@@ -2475,6 +2499,7 @@ def write_subject_shape_run_group(
             result = _process_and_write_subject_shape_chunk_groups(
                 refined_group,
                 run_group,
+                mask_store=mask_store,
                 component_indices=tuple(component_indices),
                 start_row=start_row,
                 stop_row=stop_row,

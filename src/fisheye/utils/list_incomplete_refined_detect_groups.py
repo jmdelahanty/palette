@@ -12,12 +12,11 @@ from typing import Iterable, List, Optional
 
 import zarr
 
-from fisheye.shared.zarr.stage_arrays import REFINED_DETECT_SPEC, required_array_names
-
-_REFINED_REQUIRED = set(required_array_names(REFINED_DETECT_SPEC, subgroup="interpolated"))
-REQUIRED_DETECT_ARRAYS = tuple(
-    name for name in ("frame_indices", "bbox_norm_coords") if name in _REFINED_REQUIRED
-)
+# This audit targets legacy refined-detect subgroup layouts ("filtered",
+# "interpolated", and manual review groups). The current refined-detect contract
+# uses source_detections/instances, so keep this legacy minimum explicit instead
+# of deriving it from the modern StageSpec.
+REQUIRED_DETECT_ARRAYS = ("frame_indices", "bbox_norm_coords")
 
 
 @dataclass

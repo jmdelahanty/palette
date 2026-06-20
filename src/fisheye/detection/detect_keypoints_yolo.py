@@ -45,6 +45,9 @@ from ..pose.schema import PoseSchema, normalize_kpt_shape, schema_payload_from_p
 from ultralytics import YOLO, __version__ as ultralytics_version
 
 DEFAULT_POSE_SCHEMA_NAME = "traditional_v1"
+TRADITIONAL_POSE_SCHEMA, TRADITIONAL_POSE_ATTR_PAYLOAD = schema_payload_from_package(
+    DEFAULT_POSE_SCHEMA_NAME
+)
 _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 _KEYPOINT_INPUT_MODES = ("numpy-list", "tensor", "auto")

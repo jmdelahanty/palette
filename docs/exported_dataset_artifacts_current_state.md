@@ -434,7 +434,8 @@ python docs/examples/read_subject_masks_from_example_recording.py --row 0
 That example opens
 `/groups/anibody/anibody/fish/example_recording/zarr/2026-01-28T21-47-47Z_arena_1_DefaultScreen_analysis.zarr`,
 prints raw/refined subject-mask labels and array shapes, and reads one ROI row
-from `refined_subject_masks_runs/<run>/masks_roi`.
+through `fisheye.shared.mask_store.open_mask_store(...)`, so it works whether
+the refined source stores dense `masks_roi`, compact `mask_rle`, or both.
 
 ### Clipped Training Zarrs
 

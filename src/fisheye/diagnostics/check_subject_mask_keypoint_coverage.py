@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import shlex
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from fisheye.refinement.subject_eye_assignment import assign_eyes_union_to_lr
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
+from fisheye.shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from fisheye.shared.provenance_attrs import (
     resolve_assignment_keypoint_group,
     resolve_assignment_keypoints_run,
@@ -79,6 +81,9 @@ class CoverageReport:
     reason: Optional[str] = None
     subject_stage: Optional[str] = None
     subject_run: Optional[str] = None
+    mask_store_encoding: Optional[str] = None
+    mask_storage_surface: Optional[str] = None
+    mask_store_path: Optional[str] = None
     label_schema_id: Optional[str] = None
     mask_labels: list[str] = field(default_factory=list)
     available_components: list[str] = field(default_factory=list)
@@ -647,27 +652,37 @@ def _component_present_from_metrics(
     }
 
 
-def _component_present_from_masks(
-    masks_arr: object,
+def _component_present_from_mask_store(
+    mask_store: MaskStore,
     *,
     total_rois: int,
     component_indices: Mapping[str, int],
+    row_chunk_size: int = 256,
 ) -> dict[str, np.ndarray]:
-    present: dict[str, np.ndarray] = {}
-    for component, idx in component_indices.items():
-        data = masks_arr[:, idx, :, :]  # type: ignore[index]
-        arr = np.asarray(data)
-        if arr.ndim != 3 or int(arr.shape[0]) != int(total_rois):
+    components = list(component_indices.keys())
+    channel_indices = [int(component_indices[component]) for component in components]
+    present: dict[str, np.ndarray] = {
+        component: np.zeros((int(total_rois),), dtype=bool) for component in components
+    }
+    row_chunk = max(1, int(row_chunk_size))
+    for start in range(0, int(total_rois), row_chunk):
+        stop = min(int(total_rois), start + row_chunk)
+        dense = mask_store.read_dense(rows=slice(start, stop), channels=channel_indices)
+        arr = np.asarray(dense, dtype=np.uint8)
+        if arr.ndim != 4 or int(arr.shape[0]) != int(stop - start) or int(arr.shape[1]) != len(components):
             raise ValueError(
-                f"masks_roi component '{component}' slice has invalid shape {tuple(arr.shape)}."
+                f"{mask_store.source_path or '<mask_run>'} mask-store slice has invalid shape "
+                f"{tuple(arr.shape)} for rows {start}:{stop} and channels {channel_indices}."
             )
-        present[component] = np.asarray(arr.reshape(arr.shape[0], -1).any(axis=1), dtype=bool)
+        row_present = np.asarray(arr.reshape(arr.shape[0], arr.shape[1], -1).any(axis=2), dtype=bool)
+        for out_idx, component in enumerate(components):
+            present[component][start:stop] = row_present[:, out_idx]
     return present
 
 
 def _resolve_component_present(
     run_group: zarr.Group,
-    masks_arr: object,
+    mask_store: MaskStore,
     *,
     total_rois: int,
     component_indices: Mapping[str, int],
@@ -681,9 +696,10 @@ def _resolve_component_present(
     if from_metrics is not None:
         notes.append("using_metrics:metrics/mask_present")
         return from_metrics
-    notes.append("computed_component_presence_from:masks_roi")
-    return _component_present_from_masks(
-        masks_arr,
+    notes.append(f"computed_component_presence_from:mask_store:{mask_store.encoding}")
+    notes.append(f"computed_component_presence_surface:{mask_store.storage_surface}")
+    return _component_present_from_mask_store(
+        mask_store,
         total_rois=total_rois,
         component_indices=component_indices,
     )
@@ -727,7 +743,7 @@ def _collect_failure_samples(
 
 
 def _evaluate_eyes_union_assignment(
-    masks_arr: object,
+    mask_store: MaskStore,
     *,
     union_component_index: int,
     keypoints_roi: np.ndarray,
@@ -735,21 +751,68 @@ def _evaluate_eyes_union_assignment(
     keypoint_valid: np.ndarray,
     eye_indices: Mapping[str, int],
 ) -> tuple[str, dict[str, object]]:
-    assignment = assign_eyes_union_to_lr(
-        np.asarray(masks_arr[:, union_component_index, :, :], dtype=np.uint8),  # type: ignore[index]
-        keypoints_roi=np.asarray(keypoints_roi, dtype=np.float32),
-        keypoint_success=np.asarray(success_flags, dtype=bool),
-        eye_keypoint_indices=(int(eye_indices["eye_left"]), int(eye_indices["eye_right"])),
-    )
-    summary = dict(assignment.summary)
-    status = np.asarray(assignment.assignment_status, dtype=object)
-    usable_status = np.isin(status, ["assigned", "assigned_needs_review"])
     valid_rows = np.asarray(keypoint_valid, dtype=bool)
-    valid_usable_rows = int(np.count_nonzero(valid_rows & usable_status))
-    valid_needs_review_rows = int(np.count_nonzero(valid_rows & (status == "assigned_needs_review")))
-    valid_failed_rows = int(np.count_nonzero(valid_rows & ~usable_status))
+    keypoints = np.asarray(keypoints_roi, dtype=np.float32)
+    success = np.asarray(success_flags, dtype=bool)
+    if keypoints.ndim != 3 or int(keypoints.shape[0]) != int(mask_store.n_rows):
+        raise ValueError(
+            f"keypoints_roi must have row count {mask_store.n_rows} for eyes_union assignment, "
+            f"got {tuple(keypoints.shape)}."
+        )
+    if int(success.shape[0]) != int(mask_store.n_rows):
+        raise ValueError(
+            f"keypoint_success row count {int(success.shape[0])} does not match mask rows {mask_store.n_rows}."
+        )
+    if int(valid_rows.shape[0]) != int(mask_store.n_rows):
+        raise ValueError(
+            f"keypoint_valid row count {int(valid_rows.shape[0])} does not match mask rows {mask_store.n_rows}."
+        )
 
-    summary["keypoint_valid_rows"] = int(np.count_nonzero(valid_rows))
+    status_counts: Counter[str] = Counter()
+    reason_counts: Counter[str] = Counter()
+    phase_seconds: Counter[str] = Counter()
+    valid_usable_rows = 0
+    valid_needs_review_rows = 0
+    valid_failed_rows = 0
+    row_chunk = 256
+    for start in range(0, int(mask_store.n_rows), row_chunk):
+        stop = min(int(mask_store.n_rows), start + row_chunk)
+        union_masks = mask_store.read_dense(rows=slice(start, stop), channels=int(union_component_index))
+        union = np.asarray(union_masks[:, 0, :, :], dtype=np.uint8)
+        assignment = assign_eyes_union_to_lr(
+            union,
+            keypoints_roi=keypoints[start:stop],
+            keypoint_success=success[start:stop],
+            eye_keypoint_indices=(int(eye_indices["eye_left"]), int(eye_indices["eye_right"])),
+        )
+        status = np.asarray(assignment.assignment_status, dtype=object)
+        status_counts.update(str(value) for value in status.tolist())
+        reason_counts.update(str(value) for value in assignment.reason_labels["eye_left"].tolist())
+        phase_seconds.update({str(key): float(value) for key, value in assignment.phase_seconds.items()})
+
+        valid_chunk = valid_rows[start:stop]
+        usable_status = np.isin(status, ["assigned", "assigned_needs_review"])
+        valid_usable_rows += int(np.count_nonzero(valid_chunk & usable_status))
+        valid_needs_review_rows += int(np.count_nonzero(valid_chunk & (status == "assigned_needs_review")))
+        valid_failed_rows += int(np.count_nonzero(valid_chunk & ~usable_status))
+
+    assigned_count = int(status_counts.get("assigned", 0))
+    needs_review_count = int(status_counts.get("assigned_needs_review", 0))
+    summary = {
+        "assignment_method": "subject_eyes_union_keypoint_assignment_v1",
+        "total_rows": int(mask_store.n_rows),
+        "assigned_rows": assigned_count,
+        "assigned_needs_review_rows": needs_review_count,
+        "failed_rows": int(mask_store.n_rows) - assigned_count - needs_review_count,
+        "status_counts": dict(status_counts),
+        "reason_counts": dict(reason_counts),
+        "phase_seconds": dict(phase_seconds),
+        "mask_store_encoding": mask_store.encoding,
+        "mask_storage_surface": mask_store.storage_surface,
+        "mask_store_path": mask_store.storage_path,
+        "evaluation_row_chunk_size": int(row_chunk),
+        "keypoint_valid_rows": int(np.count_nonzero(valid_rows)),
+    }
     summary["keypoint_valid_assigned_rows"] = valid_usable_rows
     summary["keypoint_valid_assigned_needs_review_rows"] = valid_needs_review_rows
     summary["keypoint_valid_failed_rows"] = valid_failed_rows
@@ -795,20 +858,28 @@ def _analyze_root(
         label_schema_id=_normalize_attr(subject_group.attrs.get("label_schema_id")),
     )
 
-    masks_arr = subject_group.get("masks_roi")
-    if masks_arr is None:
+    try:
+        mask_store = open_mask_store(
+            subject_group,
+            source_path=f"{resolved_stage}/{resolved_subject_run}",
+            prefer="dense",
+        )
+    except MaskStoreError as exc:
         report.status = "missing"
-        report.reason = f"{resolved_stage}/{resolved_subject_run} missing masks_roi."
+        report.reason = f"{resolved_stage}/{resolved_subject_run} has no usable mask store: {exc}"
         return report
-    masks_shape = tuple(int(dim) for dim in getattr(masks_arr, "shape", ()))
+    masks_shape = tuple(int(dim) for dim in mask_store.shape)
     if len(masks_shape) != 4:
         report.status = "missing"
         report.reason = (
-            f"{resolved_stage}/{resolved_subject_run}/masks_roi must have shape (N, C, H, W), "
+            f"{resolved_stage}/{resolved_subject_run} mask store must have shape (N, C, H, W), "
             f"got {masks_shape}."
         )
         return report
     report.total_rois = int(masks_shape[0])
+    report.mask_store_encoding = mask_store.encoding
+    report.mask_storage_surface = mask_store.storage_surface
+    report.mask_store_path = mask_store.storage_path
     channel_count = int(masks_shape[1])
 
     mask_labels = _canonical_components(subject_group.attrs.get("mask_labels"))
@@ -820,7 +891,7 @@ def _analyze_root(
         report.status = "missing"
         report.reason = (
             f"{resolved_stage}/{resolved_subject_run} mask_labels count {len(mask_labels)} "
-            f"does not match masks_roi channel count {channel_count}."
+            f"does not match mask-store channel count {channel_count}."
         )
         report.mask_labels = mask_labels
         return report
@@ -915,7 +986,7 @@ def _analyze_root(
         )
         component_present = _resolve_component_present(
             subject_group,
-            masks_arr,
+            mask_store,
             total_rois=report.total_rois,
             component_indices=selection.component_indices,
             notes=report.notes,
@@ -939,7 +1010,7 @@ def _analyze_root(
         eye_component_present = np.asarray(component_present[EYE_UNION_COMPONENT], dtype=bool)
         try:
             assignment_status, assignment_summary = _evaluate_eyes_union_assignment(
-                masks_arr,
+                mask_store,
                 union_component_index=int(selection.component_indices[EYE_UNION_COMPONENT]),
                 keypoints_roi=keypoints_roi,
                 success_flags=success_flags,
@@ -978,6 +1049,9 @@ def _report_to_log_payload(report: CoverageReport) -> dict[str, object]:
         "reason": report.reason,
         "subject_stage": report.subject_stage,
         "subject_run": report.subject_run,
+        "mask_store_encoding": report.mask_store_encoding,
+        "mask_storage_surface": report.mask_storage_surface,
+        "mask_store_path": report.mask_store_path,
         "label_schema_id": report.label_schema_id,
         "mask_labels": report.mask_labels,
         "available_components": report.available_components,
@@ -1014,6 +1088,12 @@ def _print_report(report: CoverageReport, *, show_pass: bool) -> None:
         print(f"reason: {report.reason}")
     if report.subject_stage and report.subject_run:
         print(f"subject_run: {report.subject_stage}/{report.subject_run}")
+    if report.mask_store_encoding:
+        print(f"mask_store_encoding: {report.mask_store_encoding}")
+    if report.mask_storage_surface:
+        print(f"mask_storage_surface: {report.mask_storage_surface}")
+    if report.mask_store_path:
+        print(f"mask_store_path: {report.mask_store_path}")
     if report.label_schema_id:
         print(f"label_schema_id: {report.label_schema_id}")
     if report.eye_component_mode:

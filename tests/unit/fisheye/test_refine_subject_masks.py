@@ -11,6 +11,7 @@ import zarr
 
 from fisheye.refinement import refine_subject_masks as mod
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.tune import refined_subject_mask_review as review_mod
 
 os.environ.setdefault("OMP_NUM_THREADS", "2")
@@ -74,6 +75,12 @@ def test_refine_subject_masks_batches_driver_writeback_and_records_scheduler_att
         refined_run="refined_subject_masks_001",
         components=("subject_body", "swim_bladder"),
     )
+    write_component_rle_mask_store_from_dense(
+        refined.group,
+        refined.group["masks_roi"],
+        component_names=refined.component_names,
+        encode_row_chunk_size=1,
+    )
 
     edited0 = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
     edited0[0, 1:7, 1:7] = 0
@@ -105,6 +112,12 @@ def test_refine_subject_masks_batches_driver_writeback_and_records_scheduler_att
     assert run.attrs["dask_scheduler"] == "single-threaded"
     assert run.attrs["dask_num_workers"] is None
     assert int(run.attrs["dask_chunk_size"]) == 1
+    assert bool(run.attrs["mask_rle_stale"]) is True
+    assert run.attrs["mask_rle_stale_reason"] == "batch_refined_subject_mask_edit"
+    assert run.attrs["mask_rle_stale_component_names"] == ["subject_body"]
+    assert run.attrs["mask_rle_stale_row_count"] == 2
+    assert run.attrs["mask_rle_stale_row_min"] == 0
+    assert run.attrs["mask_rle_stale_row_max"] == 1
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
@@ -255,6 +268,57 @@ def test_refine_subject_masks_cli_dry_run_reports_existing_target(tmp_path: Path
     root_after = zarr.open_group(str(zarr_path), mode="r")
     updated_after = str(root_after["refined_subject_masks_runs"]["refined_subject_masks_001"].attrs.get("updated_at_utc") or "")
     assert updated_after == updated_before
+
+
+def test_refine_subject_masks_dry_run_inspects_compact_existing_target_without_materializing_dense(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "subject_review_compact.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    _source, refined = review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    run = refined.group
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    del run["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        run,
+        dense,
+        component_names=list(refined.component_names),
+        encode_row_chunk_size=1,
+    )
+    assert "masks_roi" not in run
+
+    summary = mod.refine_subject_masks(
+        zarr_path,
+        refined_run="refined_subject_masks_001",
+        components=("subject_body",),
+        roi_indices=[0, 1],
+        chunk_size=1,
+        scheduler="single-threaded",
+        dry_run=True,
+    )
+
+    assert summary["status"] == "planned"
+    assert summary["refined_run_exists"] is True
+    assert summary["would_create_refined_run"] is False
+    assert summary["mutates_archive"] is False
+    assert summary["component_names"] == ["subject_body"]
+    assert summary["roi_indices"] == [0, 1]
+    assert summary["total_roi_count"] == 2
+    assert summary["refined_mask_store_encoding"] == "component_rle_v1"
+    assert summary["refined_mask_storage_surface"] == "mask_rle"
+    assert summary["refined_mask_store_path"] == "refined_subject_masks_runs/refined_subject_masks_001/mask_rle"
+
+    root_after = zarr.open_group(str(zarr_path), mode="r")
+    run_after = root_after["refined_subject_masks_runs/refined_subject_masks_001"]
+    assert "masks_roi" not in run_after
+    assert "mask_rle" in run_after
 
 
 def test_parse_scheduler_arg_rejects_invalid_value() -> None:

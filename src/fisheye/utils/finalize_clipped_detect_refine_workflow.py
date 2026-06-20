@@ -15,6 +15,7 @@ import zarr
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from fisheye.shared.zarr_run_completion import require_runs_parent
 from fisheye.utils.plan_clipped_detect_refine_workflow import PLAN_SCHEMA
 from fisheye.utils.system import get_environment_summary, get_git_info, get_platform_info
 from fisheye.utils.validate_refined_detect_run import validate_refined_detect_run
@@ -296,9 +297,7 @@ def _write_collection_group(
     group = finalized.require_group(collection_id)
     for key, value in manifest.items():
         group.attrs[key] = value
-    refined_parent = root.get("refined_detect_runs")
-    if refined_parent is None:
-        raise ValueError("Cannot finalize clipped collection: refined_detect_runs is missing.")
+    refined_parent = require_runs_parent(root, "refined_detect_runs")
     refined_parent.attrs["latest_collection"] = collection_id
     refined_parent.attrs["latest_collection_path"] = _collection_group_path(collection_id)
     return _collection_group_path(collection_id)

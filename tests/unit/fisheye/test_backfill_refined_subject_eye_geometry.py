@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+import zarr
 
 import fisheye.utils.backfill_refined_subject_eye_geometry as mod
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 
 
 class _FakeArray:
@@ -154,6 +157,39 @@ def test_writer_marks_eye_geometry_computed_and_clears_deferred_status() -> None
     assert group.attrs["eye_geometry_status"] == "computed"
     assert "eye_geometry_deferred_reason" not in group.attrs
     assert "relations/eye_pair/metrics/separation_valid" in group
+
+
+def test_writer_and_backfill_read_compact_mask_store_without_dense_masks(tmp_path: Path) -> None:
+    root = zarr.open_group(str(tmp_path / "compact_eye_geometry.zarr"), mode="w")
+    group = root.require_group("refined_subject_masks_runs").require_group("refined_001")
+    labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    group.attrs["mask_labels"] = labels
+    masks = np.zeros((3, len(labels), 16, 16), dtype=np.uint8)
+    masks[:, 1, 2:7, 2:7] = 1
+    masks[:, 2, 9:14, 9:14] = 1
+    dense = group.create_array("masks_roi", data=masks, chunks=(1, 1, 16, 16), overwrite=True)
+    group.create_array("available_channels", data=np.ones((len(labels),), dtype=bool), overwrite=True)
+    write_component_rle_mask_store_from_dense(
+        group,
+        dense,
+        component_names=tuple(labels),
+        encode_row_chunk_size=1,
+    )
+    del group["masks_roi"]
+
+    dry_run = mod._backfill_run_group(group, apply=False)
+
+    assert dry_run.status == "ok"
+    assert dry_run.roi_count == 3
+    assert dry_run.geometry_existing is False
+
+    summary = mod.write_refined_subject_eye_geometry(group)
+
+    assert summary["status"] == "updated"
+    assert "masks_roi" not in group
+    assert tuple(group["components/eye_left/geometry/ellipse_params"].shape) == (3, 5)
+    assert tuple(group["components/eye_right/geometry/ellipse_params"].shape) == (3, 5)
+    assert tuple(group["relations/eye_pair/metrics/separation_px"].shape) == (3,)
 
 
 def test_missing_eye_labels_are_not_eligible() -> None:

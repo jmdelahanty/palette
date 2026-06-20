@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import zarr
 
 import fisheye.visualization.visualize_swim_bladder_mask_patches as swim_mod
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.visualization.visualize_swim_bladder_mask_patches import (
     _build_view,
     _extract_patch_bounds,
@@ -16,6 +18,7 @@ from fisheye.visualization.visualize_swim_bladder_mask_patches import (
     _resolve_erase_mode,
     _resolve_swim_bladder_center_with_source,
     _resolve_swim_bladder_keypoint_center,
+    _source_component_mask_row,
     _target_canvas_shape,
     _validate_keypoint_group_alignment,
     parse_args,
@@ -135,6 +138,64 @@ def test_resolve_swim_bladder_keypoint_center_fails_closed_for_missing_or_unsucc
     )
     assert center_missing is None
     assert source_missing == "missing_keypoint"
+
+
+def test_source_component_mask_row_prefers_source_abstraction_over_group_array() -> None:
+    source_masks = np.zeros((2, 1, 8, 8), dtype=np.uint8)
+    source_masks[1, 0, 2:4, 3:5] = 1
+    stale_group_masks = np.zeros_like(source_masks)
+    source = SimpleNamespace(
+        masks_roi=_FakeArray(source_masks),
+        group=_FakeGroup({"masks_roi": _FakeArray(stale_group_masks)}),
+        mask_labels=["swim_bladder"],
+        available_channels=np.asarray([True], dtype=bool),
+    )
+
+    mask = _source_component_mask_row(source, "swim_bladder", 1, fallback_shape=(8, 8))
+
+    np.testing.assert_array_equal(mask, source_masks[1, 0])
+
+
+def test_source_component_mask_row_uses_zero_fallback_for_unavailable_component() -> None:
+    source = SimpleNamespace(
+        masks_roi=None,
+        group=_FakeGroup({}),
+        mask_labels=["swim_bladder"],
+        available_channels=np.asarray([False], dtype=bool),
+    )
+
+    mask = _source_component_mask_row(source, "swim_bladder", 0, fallback_shape=(6, 7))
+
+    np.testing.assert_array_equal(mask, np.zeros((6, 7), dtype=np.uint8))
+
+
+def test_source_component_mask_row_reads_compact_mask_store(tmp_path: Path) -> None:
+    root = zarr.open_group(str(tmp_path / "compact_source.zarr"), mode="w")
+    run = root.create_group("subject_mask_runs").create_group("subject_masks_001")
+    labels = ["subject_body", "swim_bladder"]
+    run.attrs["mask_labels"] = labels
+    masks = np.zeros((2, 2, 8, 8), dtype=np.uint8)
+    masks[1, 1, 2:4, 3:6] = 1
+    dense = run.create_array("masks_roi", data=masks, chunks=(1, 1, 8, 8), overwrite=True)
+    run.create_array("available_channels", data=np.asarray([True, True], dtype=bool), overwrite=True)
+    write_component_rle_mask_store_from_dense(
+        run,
+        dense,
+        component_names=labels,
+        encode_row_chunk_size=1,
+    )
+    del run["masks_roi"]
+    source = SimpleNamespace(
+        masks_roi=None,
+        group=run,
+        mask_labels=labels,
+        available_channels=np.asarray([True, True], dtype=bool),
+    )
+
+    mask = _source_component_mask_row(source, "swim_bladder", 1, fallback_shape=(8, 8))
+
+    np.testing.assert_array_equal(mask, masks[1, 1])
+    assert "masks_roi" not in run
 
 
 def test_validate_keypoint_group_alignment_rejects_mismatched_crop_lineage() -> None:

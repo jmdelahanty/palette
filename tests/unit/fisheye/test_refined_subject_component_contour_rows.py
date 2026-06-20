@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.refined_subject_component_contours import (
     refresh_component_contour_rows_from_masks,
     write_refined_subject_component_contours,
@@ -80,6 +81,35 @@ def test_refresh_component_contour_row_appends_points_and_moves_pointer(tmp_path
     assert _decode_bytes_row(component["row_updated_at_utc_bytes"][0]) == "2026-04-29T12:00:00+00:00"
     assert refreshed_contours.attrs["cache_coverage"] == "full_indexed_rows"
     assert refreshed_contours.attrs["orphaned_points_possible"] is True
+
+
+def test_write_component_contours_reads_compact_mask_store_without_dense_masks(tmp_path: Path) -> None:
+    run = _build_refined_run(tmp_path / "compact_contours.zarr")
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    write_component_rle_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=tuple(str(value) for value in run.attrs["mask_labels"]),
+        encode_row_chunk_size=1,
+    )
+    del run["masks_roi"]
+
+    summaries = write_refined_subject_component_contours(
+        run,
+        components=["subject_body", "swim_bladder"],
+        source_mask_run="refined",
+        chunk_rois=1,
+    )
+
+    assert [summary.status for summary in summaries] == ["written", "written"]
+    assert "masks_roi" not in run
+    for component in ("subject_body", "swim_bladder"):
+        contours = run[f"components/{component}/contours"]
+        assert tuple(contours["ptr"].shape) == (2,)
+        assert tuple(contours["len"].shape) == (2,)
+        assert int(np.count_nonzero(np.asarray(contours["len"][:], dtype=np.int64) > 0)) == int(
+            np.count_nonzero(dense[:, run.attrs["mask_labels"].index(component)].reshape(2, -1).any(axis=1))
+        )
 
 
 def test_refresh_component_contour_row_initializes_partial_cache_when_missing(tmp_path: Path) -> None:

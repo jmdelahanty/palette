@@ -13,7 +13,12 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.registry.db import Registry, _extract_eye_mask_performance_rows, _extract_subject_mask_performance_rows
+from fisheye.registry.db import (
+    Registry,
+    _extract_eye_mask_performance_rows,
+    _extract_subject_mask_component_quality_rows,
+    _extract_subject_mask_performance_rows,
+)
 from fisheye.registry.maintenance import (
     _backfill_keypoint_profiles,
     _backfill_eye_mask_profiles,
@@ -60,6 +65,7 @@ from fisheye.registry.maintenance import (
     main as maintenance_main,
 )
 from fisheye.shared.stage_provenance import build_stage_provenance
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 
 
 def _create_quality_zarr(path: Path) -> None:
@@ -1428,6 +1434,47 @@ def test_schema_has_subject_mask_performance_table_views_and_indexes(tmp_path: P
         """
     ).fetchone()
     assert table is not None
+    table_columns = {
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(subject_mask_performance);").fetchall()
+    }
+    for column in (
+        "source_crop_storage_mode",
+        "source_crop_signature",
+        "source_crop_revision",
+        "source_roi_image_representation",
+        "source_roi_pixel_contract_name",
+        "source_roi_pixel_contract_json",
+        "source_roi_read_mode",
+        "roi_cache_policy",
+        "source_roi_cache_used",
+        "source_roi_cache_backend",
+        "source_roi_live_acceleration_effective",
+        "source_roi_live_gpu_chunk_frames",
+        "mask_storage_encoding",
+        "mask_store_encodings_json",
+        "masks_roi_materialized",
+        "mask_rle_materialized",
+        "mask_rle_schema_id",
+        "mask_rle_encoding",
+        "mask_rle_layout",
+        "masks_roi_logical_bytes",
+        "masks_roi_stored_bytes",
+        "masks_roi_materialized_from",
+        "masks_roi_materialized_at_utc",
+        "mask_rle_logical_bytes",
+        "mask_rle_stored_bytes",
+        "mask_rle_refreshed_at_utc",
+        "mask_rle_refresh_row_count",
+        "mask_rle_stale",
+        "mask_rle_stale_reason",
+        "mask_rle_stale_at_utc",
+        "mask_rle_stale_component_names_json",
+        "mask_rle_stale_row_count",
+        "mask_rle_stale_row_min",
+        "mask_rle_stale_row_max",
+    ):
+        assert column in table_columns
 
     views = registry.conn.execute(
         """
@@ -1444,6 +1491,19 @@ def test_schema_has_subject_mask_performance_table_views_and_indexes(tmp_path: P
         "subject_mask_performance_latest",
         "recording_subject_mask_performance_latest",
     }
+    for view_name in ("subject_mask_performance_latest", "recording_subject_mask_performance_latest"):
+        view_columns = {
+            str(row["name"])
+            for row in registry.conn.execute(f"PRAGMA table_info({view_name});").fetchall()
+        }
+        assert "source_roi_pixel_contract_name" in view_columns
+        assert "source_roi_read_mode" in view_columns
+        assert "source_roi_cache_backend" in view_columns
+        assert "mask_storage_encoding" in view_columns
+        assert "mask_rle_layout" in view_columns
+        assert "masks_roi_logical_bytes" in view_columns
+        assert "mask_rle_logical_bytes" in view_columns
+        assert "mask_rle_stale_component_names_json" in view_columns
 
     idx = registry.conn.execute(
         """
@@ -6277,8 +6337,20 @@ def test_backfill_keypoint_profiles_dry_run_and_apply(
     assert str(row["profile_run"]) == "keypoint_profile_001"
     assert str(row["keypoint_method"]) == "traditional_pose"
     assert float(row["usable_rate"]) == pytest.approx(0.75)
-    assert str(row["genotype"]) == "Tg(elavl3:gcamp7f)"
-    assert int(row["dpf_at_acquisition"]) == 7
+    assert row["genotype"] is None
+    assert row["dpf_at_acquisition"] is None
+
+    raw_row = registry.conn.execute(
+        """
+        SELECT genotype, dpf_at_acquisition
+        FROM keypoint_data_profile
+        WHERE dataset_id = ? AND profile_run = ?;
+        """,
+        (dataset_id, "keypoint_profile_001"),
+    ).fetchone()
+    assert raw_row is not None
+    assert str(raw_row["genotype"]) == "Tg(elavl3:gcamp7f)"
+    assert int(raw_row["dpf_at_acquisition"]) == 7
     registry.close()
 
 
@@ -7765,6 +7837,21 @@ def test_extract_subject_mask_performance_rows_falls_back_to_provenance_payload(
         },
         inputs={
             "source_crop_run": "crop_001",
+            "source_crop_storage_mode": "geometry_only",
+            "source_crop_signature": "crop-sig-provenance",
+            "source_crop_revision": 8,
+            "source_roi_image_representation": "grayscale_uint8",
+            "source_roi_pixel_contract_name": "nv12_luma_plane_uint8",
+            "source_roi_pixel_contract": {
+                "name": "nv12_luma_plane_uint8",
+                "decode_backend": "pynvvc_luma",
+            },
+            "source_roi_read_mode": "flat_bin_roi_cache",
+            "roi_cache_policy": "always",
+            "source_roi_cache_used": True,
+            "source_roi_cache_backend": "flat_bin_v1",
+            "roi_live_acceleration_effective": "gpu",
+            "roi_live_gpu_chunk_frames": 64,
             "source_keypoint_group": "refined_keypoints_runs",
             "source_keypoints_run": "refined_kp_001",
             "sam_checkpoint_path": "/tmp/sam3.pt",
@@ -7816,6 +7903,18 @@ def test_extract_subject_mask_performance_rows_falls_back_to_provenance_payload(
     assert row["subject_mask_method"] == "sam3_interactive_keypoints_detect_box_body_v1"
     assert row["run_semantics"] == "sam_body_mask_inference"
     assert row["source_crop_run"] == "crop_001"
+    assert row["source_crop_storage_mode"] == "geometry_only"
+    assert row["source_crop_signature"] == "crop-sig-provenance"
+    assert row["source_crop_revision"] == 8
+    assert row["source_roi_image_representation"] == "grayscale_uint8"
+    assert row["source_roi_pixel_contract_name"] == "nv12_luma_plane_uint8"
+    assert json.loads(str(row["source_roi_pixel_contract_json"]))["decode_backend"] == "pynvvc_luma"
+    assert row["source_roi_read_mode"] == "flat_bin_roi_cache"
+    assert row["roi_cache_policy"] == "always"
+    assert row["source_roi_cache_used"] == 1
+    assert row["source_roi_cache_backend"] == "flat_bin_v1"
+    assert row["source_roi_live_acceleration_effective"] == "gpu"
+    assert row["source_roi_live_gpu_chunk_frames"] == 64
     assert row["source_keypoint_group"] == "refined_keypoints_runs"
     assert row["source_keypoints_run"] == "refined_kp_001"
 
@@ -7831,6 +7930,39 @@ def test_extract_subject_mask_performance_rows_prefers_run_attrs_for_lineage(tmp
     run.attrs["label_schema_id"] = "subject_v1_lr"
     run.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right"]
     run.attrs["source_crop_run"] = "crop_attrs"
+    run.attrs["source_crop_storage_mode"] = "materialized"
+    run.attrs["source_crop_signature"] = "crop-sig-attrs"
+    run.attrs["source_crop_revision"] = 9
+    run.attrs["source_roi_image_representation"] = "grayscale_uint8"
+    run.attrs["source_roi_pixel_contract_name"] = "attrs_contract"
+    run.attrs["source_roi_pixel_contract"] = {
+        "name": "attrs_contract",
+        "decode_backend": "attrs_backend",
+    }
+    run.attrs["source_roi_read_mode"] = "materialized_crop_run"
+    run.attrs["roi_cache_policy"] = "never"
+    run.attrs["source_roi_cache_used"] = "false"
+    run.attrs["source_roi_cache_backend"] = "attrs_cache_backend"
+    run.attrs["source_roi_live_acceleration_effective"] = "cpu"
+    run.attrs["source_roi_live_gpu_chunk_frames"] = 22
+    run.attrs["mask_storage_encoding"] = "dense_uint8+component_rle_v1"
+    run.attrs["mask_store_encodings"] = ["dense_uint8", "component_rle_v1"]
+    run.attrs["masks_roi_materialized"] = True
+    run.attrs["mask_rle_materialized"] = True
+    run.attrs["mask_rle_schema_id"] = "palette_mask_rle_binary_v1"
+    run.attrs["mask_rle_encoding"] = "coco_rle_fortran_v1"
+    run.attrs["mask_rle_layout"] = "component_groups"
+    run.attrs["masks_roi_materialized_from"] = "mask_rle"
+    run.attrs["masks_roi_materialized_at_utc"] = "2026-03-02T06:10:00+00:00"
+    run.attrs["mask_rle_refreshed_at_utc"] = "2026-03-02T06:11:00+00:00"
+    run.attrs["mask_rle_refresh_row_count"] = 3
+    run.attrs["mask_rle_stale"] = True
+    run.attrs["mask_rle_stale_reason"] = "unit_test_edit"
+    run.attrs["mask_rle_stale_at_utc"] = "2026-03-02T06:12:00+00:00"
+    run.attrs["mask_rle_stale_component_names"] = ["subject_body"]
+    run.attrs["mask_rle_stale_row_count"] = 1
+    run.attrs["mask_rle_stale_row_min"] = 0
+    run.attrs["mask_rle_stale_row_max"] = 0
     run.attrs["source_keypoint_group"] = "refined_keypoints_runs"
     run.attrs["source_keypoints_run"] = "refined_kp_attrs"
     run.attrs["source_subject_mask_run"] = "subject_masks_attrs"
@@ -7847,6 +7979,18 @@ def test_extract_subject_mask_performance_rows_prefers_run_attrs_for_lineage(tmp
         },
         inputs={
             "source_crop_run": "crop_provenance",
+            "source_crop_storage_mode": "geometry_only",
+            "source_crop_signature": "crop-sig-provenance",
+            "source_crop_revision": 1,
+            "source_roi_image_representation": "wrong_representation",
+            "source_roi_pixel_contract_name": "provenance_contract",
+            "source_roi_pixel_contract": {"name": "provenance_contract"},
+            "source_roi_read_mode": "flat_bin_roi_cache",
+            "roi_cache_policy": "always",
+            "source_roi_cache_used": True,
+            "source_roi_cache_backend": "provenance_cache_backend",
+            "source_roi_live_acceleration_effective": "gpu",
+            "source_roi_live_gpu_chunk_frames": 64,
             "source_keypoint_group": "keypoints_runs",
             "source_keypoints_run": "kp_provenance",
             "source_subject_mask_run": "subject_masks_provenance",
@@ -7869,12 +8013,115 @@ def test_extract_subject_mask_performance_rows_prefers_run_attrs_for_lineage(tmp
     assert row["subject_mask_method"] == "refine_subject_masks"
     assert row["label_schema_id"] == "subject_v1_lr"
     assert row["source_crop_run"] == "crop_attrs"
+    assert row["source_crop_storage_mode"] == "materialized"
+    assert row["source_crop_signature"] == "crop-sig-attrs"
+    assert row["source_crop_revision"] == 9
+    assert row["source_roi_image_representation"] == "grayscale_uint8"
+    assert row["source_roi_pixel_contract_name"] == "attrs_contract"
+    assert json.loads(str(row["source_roi_pixel_contract_json"]))["decode_backend"] == "attrs_backend"
+    assert row["source_roi_read_mode"] == "materialized_crop_run"
+    assert row["roi_cache_policy"] == "never"
+    assert row["source_roi_cache_used"] == 0
+    assert row["source_roi_cache_backend"] == "attrs_cache_backend"
+    assert row["source_roi_live_acceleration_effective"] == "cpu"
+    assert row["source_roi_live_gpu_chunk_frames"] == 22
+    assert row["mask_storage_encoding"] == "dense_uint8+component_rle_v1"
+    assert json.loads(str(row["mask_store_encodings_json"])) == ["dense_uint8", "component_rle_v1"]
+    assert row["masks_roi_materialized"] == 1
+    assert row["mask_rle_materialized"] == 1
+    assert row["mask_rle_schema_id"] == "palette_mask_rle_binary_v1"
+    assert row["mask_rle_encoding"] == "coco_rle_fortran_v1"
+    assert row["mask_rle_layout"] == "component_groups"
+    assert row["masks_roi_materialized_from"] == "mask_rle"
+    assert row["masks_roi_materialized_at_utc"] == "2026-03-02T06:10:00+00:00"
+    assert row["mask_rle_refreshed_at_utc"] == "2026-03-02T06:11:00+00:00"
+    assert row["mask_rle_refresh_row_count"] == 3
+    assert row["mask_rle_stale"] == 1
+    assert row["mask_rle_stale_reason"] == "unit_test_edit"
+    assert row["mask_rle_stale_at_utc"] == "2026-03-02T06:12:00+00:00"
+    assert json.loads(str(row["mask_rle_stale_component_names_json"])) == ["subject_body"]
+    assert row["mask_rle_stale_row_count"] == 1
+    assert row["mask_rle_stale_row_min"] == 0
+    assert row["mask_rle_stale_row_max"] == 0
     assert row["source_keypoint_group"] == "refined_keypoints_runs"
     assert row["source_keypoints_run"] == "refined_kp_attrs"
     assert row["source_subject_mask_run"] == "subject_masks_attrs"
     assert row["source_subject_mask_method"] == "sam_body_mask_inference"
     assert row["run_semantics"] == "refined_subject_mask_review"
     assert row["probability_semantics"] == "normalized_background_diff"
+
+
+def test_extract_subject_mask_rows_use_exact_rle_presence_union(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_mask_rle_only_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("refined_subject_masks_runs")
+    parent.attrs["latest"] = "refined_subject_masks_rle_only"
+    run = parent.create_group("refined_subject_masks_rle_only")
+    labels = ["subject_body", "eye_left", "eye_right"]
+    run.attrs.update(
+        {
+            "created_at_utc": "2026-06-19T01:02:03+00:00",
+            "method": "smart_finalizer",
+            "label_schema_id": "subject_v1_lr",
+            "mask_labels": labels,
+            "mask_storage_encoding": "component_rle_v1",
+            "mask_store_encodings": ["component_rle_v1"],
+            "masks_roi_materialized": False,
+            "mask_rle_materialized": True,
+        }
+    )
+    run.create_array("detection_source", data=np.asarray([0, 0, 0], dtype=np.int8), overwrite=True)
+    run.create_array("available_channels", data=np.asarray([True, True, True], dtype=bool), overwrite=True)
+    run.create_array("edit_applied", data=np.zeros((3, 3), dtype=bool), overwrite=True)
+    dense = np.zeros((3, 3, 8, 8), dtype=np.uint8)
+    dense[0, 0, 1:3, 1:3] = 1
+    dense[0, 1, 2:4, 2:4] = 1
+    dense[1, 0, 1:3, 1:3] = 1
+    dense[1, 2, 4:6, 4:6] = 1
+    tmp = run.create_array("masks_roi", data=dense, chunks=(3, 1, 8, 8), overwrite=True)
+    write_component_rle_mask_store_from_dense(
+        run,
+        tmp,
+        component_names=tuple(labels),
+        encode_row_chunk_size=2,
+    )
+    del run["masks_roi"]
+    run.attrs["mask_storage_encoding"] = "component_rle_v1"
+    run.attrs["mask_store_encodings"] = ["component_rle_v1"]
+    run.attrs["masks_roi_materialized"] = False
+
+    performance_rows = _extract_subject_mask_performance_rows(
+        root,
+        zarr_path=zarr_path,
+        recording_id="recording_rle_only",
+        zarr_use="analysis",
+    )
+    component_rows = _extract_subject_mask_component_quality_rows(
+        root,
+        zarr_path=zarr_path,
+        recording_id="recording_rle_only",
+        zarr_use="analysis",
+    )
+
+    assert len(performance_rows) == 1
+    performance = performance_rows[0]
+    assert performance["total_rois"] == 3
+    assert performance["rows_with_any_mask"] == 2
+    assert performance["coverage_percent"] == pytest.approx(2.0 / 3.0 * 100.0)
+    assert performance["mask_storage_encoding"] == "component_rle_v1"
+    assert performance["masks_roi_materialized"] == 0
+    assert performance["mask_rle_materialized"] == 1
+    expected_rle_logical_bytes = 0
+    components_group = run["mask_rle"]["components"]
+    for component_key in sorted(str(key) for key in components_group.group_keys()):
+        component_group = components_group[component_key]
+        for array_name in ("counts", "indptr", "present", "area_px", "bbox_xyxy"):
+            expected_rle_logical_bytes += int(component_group[array_name].nbytes)
+    assert performance["masks_roi_logical_bytes"] is None
+    assert performance["mask_rle_logical_bytes"] == expected_rle_logical_bytes
+    assert "mask_rle_stored_bytes" in performance
+    counts = {str(row["component_name"]): int(row["rows_with_component_mask"]) for row in component_rows}
+    assert counts == {"subject_body": 2, "eye_left": 1, "eye_right": 1}
 
 
 def test_backfill_subject_mask_performance_dry_run_and_apply(tmp_path: Path) -> None:
@@ -10451,6 +10698,16 @@ def test_subject_mask_registry_semantics_columns_migrate_existing_registry(tmp_p
     assert "source_dish_mask_array" in columns
     assert "tuning_source" in columns
     assert "tuning_timestamp" in columns
+    assert "mask_storage_encoding" in columns
+    assert "mask_store_encodings_json" in columns
+    assert "masks_roi_materialized" in columns
+    assert "mask_rle_materialized" in columns
+    assert "mask_rle_schema_id" in columns
+    assert "mask_rle_encoding" in columns
+    assert "mask_rle_layout" in columns
+    assert "masks_roi_logical_bytes" in columns
+    assert "mask_rle_logical_bytes" in columns
+    assert "mask_rle_stale_component_names_json" in columns
     row = reopened.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()
     assert row is not None
     assert int(row["version"]) == max(version for version, _name, _fn in reopened._schema_migrations())

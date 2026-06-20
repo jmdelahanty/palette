@@ -23,6 +23,7 @@ from fisheye.shared.provenance_attrs import (
     extract_source_crop_snapshot_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.mask_store import MaskStore, open_mask_store
 from fisheye.shared.row_lineage import assert_row_lineage_sources_equal, copy_row_lineage_arrays
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -49,7 +50,7 @@ _OPTIONAL_CROP_SNAPSHOT_FIELDS = (
 class ResolvedSubjectRun:
     run_name: str
     run_group: zarr.Group
-    masks_roi: zarr.Array
+    mask_store: MaskStore
     mask_probs_roi: Optional[zarr.Array]
     crop_run: str
     mask_labels: tuple[str, ...]
@@ -118,11 +119,13 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
     if run_name not in parent:
         raise ValueError(f"subject_mask_runs/{run_name} not found.")
     group = parent[run_name]
-    masks_roi = group.get("masks_roi")
-    if masks_roi is None:
-        raise ValueError(f"subject_mask_runs/{run_name} missing masks_roi.")
-    if len(masks_roi.shape) != 4:
-        raise ValueError(f"subject_mask_runs/{run_name} masks_roi must be 4D, got {masks_roi.shape}.")
+    mask_store = open_mask_store(
+        group,
+        source_path=f"subject_mask_runs/{run_name}",
+        prefer="dense",
+    )
+    if len(mask_store.shape) != 4:
+        raise ValueError(f"subject_mask_runs/{run_name} mask store must be 4D, got {mask_store.shape}.")
     detection_source = group.get("detection_source")
     if detection_source is None:
         raise ValueError(f"subject_mask_runs/{run_name} missing detection_source.")
@@ -146,22 +149,25 @@ def _resolve_subject_run(root: zarr.Group, run_name: str) -> ResolvedSubjectRun:
         return None
 
     mask_probs_roi = group.get("mask_probs_roi")
-    if mask_probs_roi is not None and tuple(mask_probs_roi.shape) != tuple(masks_roi.shape):
+    if mask_probs_roi is not None and tuple(mask_probs_roi.shape) != tuple(mask_store.shape):
         raise ValueError(
             f"subject_mask_runs/{run_name} mask_probs_roi shape {mask_probs_roi.shape} "
-            f"does not match masks_roi {masks_roi.shape}."
+            f"does not match mask store {mask_store.shape}."
         )
     probabilities_encoding = _normalize_encoding(group.attrs.get("probabilities_encoding"))
     if probabilities_encoding is None:
-        probs_dtype = mask_probs_roi.dtype if mask_probs_roi is not None else masks_roi.dtype
+        dense = group.get("masks_roi")
+        probs_dtype = mask_probs_roi.dtype if mask_probs_roi is not None else getattr(dense, "dtype", np.dtype(np.uint8))
         probabilities_encoding = _default_encoding_for_dtype(np.dtype(probs_dtype))
     probability_source_path = (
-        f"subject_mask_runs/{run_name}/mask_probs_roi" if mask_probs_roi is not None else f"subject_mask_runs/{run_name}/masks_roi"
+        f"subject_mask_runs/{run_name}/mask_probs_roi"
+        if mask_probs_roi is not None
+        else mask_store.storage_path
     )
     return ResolvedSubjectRun(
         run_name=run_name,
         run_group=group,
-        masks_roi=masks_roi,
+        mask_store=mask_store,
         mask_probs_roi=mask_probs_roi,
         crop_run=str(crop_run),
         mask_labels=tuple(str(item) for item in labels_raw),
@@ -203,7 +209,7 @@ def _semantic_probabilities(
     component_idx: int,
 ) -> np.ndarray:
     if source.mask_probs_roi is None:
-        return np.asarray(source.masks_roi[row_slice, component_idx : component_idx + 1], dtype=np.float32)
+        return np.asarray(source.mask_store.read_dense(rows=row_slice, channels=slice(component_idx, component_idx + 1)), dtype=np.float32)
     batch = np.asarray(source.mask_probs_roi[row_slice, component_idx : component_idx + 1])
     return _decode_probabilities(batch, encoding=source.probabilities_encoding)
 
@@ -322,20 +328,20 @@ def merge_subject_mask_runs(
             f"Alignment mismatch for source_crop_run: {body_source.crop_run!r} != {eye_source.crop_run!r}."
         )
     shared_crop_snapshot = _resolve_shared_crop_snapshot(body_source, eye_source)
-    if int(body_source.masks_roi.shape[0]) != int(eye_source.masks_roi.shape[0]):
+    if int(body_source.mask_store.shape[0]) != int(eye_source.mask_store.shape[0]):
         raise ValueError(
-            f"Row-count mismatch: {body_source.masks_roi.shape[0]} != {eye_source.masks_roi.shape[0]}."
+            f"Row-count mismatch: {body_source.mask_store.shape[0]} != {eye_source.mask_store.shape[0]}."
         )
-    if tuple(body_source.masks_roi.shape[2:]) != tuple(eye_source.masks_roi.shape[2:]):
+    if tuple(body_source.mask_store.shape[2:]) != tuple(eye_source.mask_store.shape[2:]):
         raise ValueError(
-            f"ROI shape mismatch: {body_source.masks_roi.shape[2:]} != {eye_source.masks_roi.shape[2:]}."
+            f"ROI shape mismatch: {body_source.mask_store.shape[2:]} != {eye_source.mask_store.shape[2:]}."
         )
     _required_array_equal("detection_source", body_source.detection_source, eye_source.detection_source)
     assert_row_lineage_sources_equal(_source_lineage_arrays(body_source), _source_lineage_arrays(eye_source))
 
-    total_rows = int(body_source.masks_roi.shape[0])
-    height = int(body_source.masks_roi.shape[2])
-    width = int(body_source.masks_roi.shape[3])
+    total_rows = int(body_source.mask_store.shape[0])
+    height = int(body_source.mask_store.shape[2])
+    width = int(body_source.mask_store.shape[3])
     created_at = _utc_now()
     shared_crop_inputs = {"source_crop_run": body_source.crop_run, **shared_crop_snapshot}
     component_provenance = {
@@ -557,9 +563,9 @@ def merge_subject_mask_runs(
         merged_masks = np.zeros((end_idx - start_idx, len(TARGET_LABELS), height, width), dtype=np.uint8)
         merged_probs = np.zeros((end_idx - start_idx, len(TARGET_LABELS), height, width), dtype=np.float32)
 
-        merged_masks[:, 0:1] = np.asarray(body_source.masks_roi[row_slice, body_idx : body_idx + 1], dtype=np.uint8)
-        merged_masks[:, 1:2] = np.asarray(eye_source.masks_roi[row_slice, eye_left_idx : eye_left_idx + 1], dtype=np.uint8)
-        merged_masks[:, 2:3] = np.asarray(eye_source.masks_roi[row_slice, eye_right_idx : eye_right_idx + 1], dtype=np.uint8)
+        merged_masks[:, 0:1] = body_source.mask_store.read_dense(rows=row_slice, channels=slice(body_idx, body_idx + 1))
+        merged_masks[:, 1:2] = eye_source.mask_store.read_dense(rows=row_slice, channels=slice(eye_left_idx, eye_left_idx + 1))
+        merged_masks[:, 2:3] = eye_source.mask_store.read_dense(rows=row_slice, channels=slice(eye_right_idx, eye_right_idx + 1))
 
         merged_probs[:, 0:1] = _semantic_probabilities(body_source, row_slice, body_idx)
         merged_probs[:, 1:2] = _semantic_probabilities(eye_source, row_slice, eye_left_idx)

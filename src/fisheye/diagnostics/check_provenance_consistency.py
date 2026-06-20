@@ -13,6 +13,7 @@ import zarr
 from rich.console import Console
 from rich.table import Table
 
+from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs
 from ..shared.refined_detect_curation import (
     has_curated_refined_detect_surface,
@@ -87,6 +88,19 @@ def _count_detections(group: Optional[zarr.Group]) -> Optional[int]:
         return _safe_len(group)
     arr = _safe_get(group, "bbox_norm_coords") or _safe_get(group, "bbox_coords") or _safe_get(group, "bbox")
     return _safe_len(arr)
+
+
+def _refined_subject_mask_row_count(group: Optional[zarr.Group]) -> Optional[int]:
+    if group is None:
+        return None
+    try:
+        return int(open_mask_store(group, prefer="dense", allow_stale_rle=True).n_rows)
+    except (MaskStoreError, ValueError):
+        pass
+    rows = _safe_len(_safe_get(group, "masks_roi"))
+    if rows is not None:
+        return rows
+    return _safe_len(_safe_get(group, "mask_probs_roi"))
 
 
 def _safe_array_data(group: Optional[zarr.Group], key: str) -> Optional[np.ndarray]:
@@ -563,11 +577,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     refined_subject_mask_parent = root.get("refined_subject_masks_runs")
     refined_subject_mask_latest = _latest(refined_subject_mask_parent)
     refined_subject_mask_group = _first_matching_run(refined_subject_mask_parent, refined_subject_mask_latest)
-    refined_subject_mask_rows = (
-        _safe_len(_safe_get(refined_subject_mask_group, "masks_roi")) if refined_subject_mask_group else None
-    )
-    if refined_subject_mask_rows is None and refined_subject_mask_group is not None:
-        refined_subject_mask_rows = _safe_len(_safe_get(refined_subject_mask_group, "mask_probs_roi"))
+    refined_subject_mask_rows = _refined_subject_mask_row_count(refined_subject_mask_group)
     refined_subject_mask_crop_snapshot_issues = _collect_downstream_crop_snapshot_issues(
         stage_label="Refined subject mask",
         run_name=refined_subject_mask_latest,

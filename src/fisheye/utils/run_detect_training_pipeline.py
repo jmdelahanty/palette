@@ -194,6 +194,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--rig-id", type=str)
     parser.add_argument("--arena-id", type=str)
     parser.add_argument("--path-contains", type=str)
+    parser.add_argument("--source-layout", type=str, help="Exact source layout match, e.g. rolling_clips.")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output-file-list", type=Path, help="Write matched zarr paths to file.")
 

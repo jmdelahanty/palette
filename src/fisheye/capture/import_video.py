@@ -460,6 +460,18 @@ def _process_video_gpu_kvikio(
     return write_times
 
 
+def _process_video_gpu(*args, **kwargs):
+    """Compatibility wrapper for legacy private imports."""
+
+    return _process_video_gpu_kvikio(*args, **kwargs)
+
+
+def _process_video_cpu(*_args, **_kwargs):
+    """Fail-fast placeholder for the unsupported CPU import path."""
+
+    raise NotImplementedError("CPU video import processing is not implemented; use GPU import.")
+
+
 def _finalize_kvikio_zarr_metadata(
     zarr_path: Path,
     *,

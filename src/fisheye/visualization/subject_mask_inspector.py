@@ -13,6 +13,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -65,12 +66,20 @@ class LoadedMaskRun:
     crop_run: str
     mask_labels: tuple[str, ...]
     available_channels: np.ndarray
-    masks_roi: Any
+    mask_store: MaskStore
     metrics: Any | None
     method: str | None
     source_subject_mask_run: str | None
     review_status: Mapping[str, object] | None
     component_reviews: Mapping[str, Mapping[str, object]]
+
+    def read_component_mask(self, roi_idx: int, component_idx: int) -> np.ndarray:
+        """Read one ROI-local component mask through the logical mask store."""
+
+        return np.asarray(
+            self.mask_store.read_dense(rows=int(roi_idx), channels=int(component_idx))[0, 0],
+            dtype=np.uint8,
+        )
 
 
 @dataclass(frozen=True)
@@ -137,10 +146,17 @@ def _load_mask_run(
     labels_raw = group.attrs.get("mask_labels")
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"{parent_path}/{resolved_name} missing usable mask_labels attr.")
-    masks_roi = group.get("masks_roi")
     available = group.get("available_channels")
-    if masks_roi is None or available is None:
-        raise RuntimeError(f"{parent_path}/{resolved_name} missing masks_roi or available_channels.")
+    if available is None:
+        raise RuntimeError(f"{parent_path}/{resolved_name} missing available_channels.")
+    try:
+        mask_store = open_mask_store(
+            group,
+            source_path=f"{parent_path}/{resolved_name}",
+            prefer="dense",
+        )
+    except MaskStoreError as exc:
+        raise RuntimeError(f"{parent_path}/{resolved_name} missing usable mask storage: {exc}") from exc
     crop_run = str(group.attrs.get("source_crop_run") or "")
     if not crop_run:
         crop_run = _resolve_crop_run(root, None)
@@ -151,7 +167,7 @@ def _load_mask_run(
         crop_run=crop_run,
         mask_labels=tuple(str(item) for item in labels_raw),
         available_channels=np.asarray(available[:], dtype=bool),
-        masks_roi=masks_roi,
+        mask_store=mask_store,
         metrics=group.get("metrics"),
         method=str(group.attrs.get("method")) if group.attrs.get("method") is not None else None,
         source_subject_mask_run=(
@@ -271,7 +287,7 @@ def _mask_for_component(run: LoadedMaskRun | None, component_name: str, roi_idx:
     comp_idx = _component_index(run, component_name)
     if comp_idx is None:
         return None
-    return np.asarray(run.masks_roi[int(roi_idx), comp_idx], dtype=np.uint8)
+    return run.read_component_mask(int(roi_idx), comp_idx)
 
 
 def _extract_largest_external_contour(mask: np.ndarray | None) -> np.ndarray | None:
@@ -361,7 +377,7 @@ def _stage_summary_lines(run: LoadedMaskRun | None, component_name: str, roi_idx
     if comp_idx is None:
         return [header, f"method={method}", f"{component_name}: unavailable"]
 
-    mask = np.asarray(run.masks_roi[int(roi_idx), comp_idx], dtype=np.uint8)
+    mask = run.read_component_mask(int(roi_idx), comp_idx)
     present = bool(np.count_nonzero(mask) > 0)
     area = float(np.count_nonzero(mask))
     centroid_xy, centroid_valid, bbox_xyxy, bbox_valid = _component_geometry(run, component_name, roi_idx)
@@ -475,7 +491,7 @@ def _flagged_roi_indices(
 ) -> list[int]:
     if refined is None:
         return []
-    total_rois = int(refined.masks_roi.shape[0])
+    total_rois = int(refined.mask_store.n_rows)
     return [
         roi_idx
         for roi_idx in range(total_rois)

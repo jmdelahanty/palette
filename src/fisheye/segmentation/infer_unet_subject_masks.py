@@ -1035,6 +1035,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
             "source_roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
+            "source_roi_cache_canonical_path": getattr(crop_source, "roi_cache_canonical_path", None),
             "source_roi_cache_expected_archive_path": (
                 str(args.roi_cache_expected_archive_path)
                 if args.roi_cache_expected_archive_path is not None
@@ -1158,6 +1159,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "roi_cache_backend": getattr(crop_source, "roi_cache_backend", None),
         "roi_cache_key": crop_source.roi_cache_key,
         "roi_cache_path": crop_source.roi_cache_path,
+        "roi_cache_canonical_path": getattr(crop_source, "roi_cache_canonical_path", None),
         "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
         "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
         "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
@@ -1170,6 +1172,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         provenance_inputs["model_resolution"] = model_resolution_payload
     if crop_source.roi_cache_path is not None:
         provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
+    if getattr(crop_source, "roi_cache_canonical_path", None) is not None:
+        provenance_inputs["roi_cache_canonical_path"] = crop_source.roi_cache_canonical_path
     provenance = build_stage_provenance(
         stage="subject_masks",
         command=" ".join(sys.argv),

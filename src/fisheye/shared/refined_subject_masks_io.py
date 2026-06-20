@@ -1,10 +1,12 @@
 """Logical readers for ``refined_subject_masks_runs``.
 
-Refined subject-mask runs are editable, dense mask artifacts. Unlike most
-analysis readers, this module intentionally does not materialize ``masks_roi``
-as a NumPy array by default; callers get the array handle and can slice only the
-rows/channels they need. Small run metadata, metrics, row lineage, component
-QC, and component geometry arrays are exposed as logical tables.
+Refined subject-mask runs may store masks as dense ``masks_roi`` arrays or as a
+compact physical mask store. Unlike most analysis readers, this module
+intentionally does not materialize the full mask tensor as a NumPy array by
+default; callers get the dense array handle when present plus a ``MaskStore``
+reader that can materialize requested rows/channels. Small run metadata,
+metrics, row lineage, component QC, and component geometry arrays are exposed as
+logical tables.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from .mask_store import MaskStore, MaskStoreError, open_mask_store
 from .zarr_helpers import (
     normalize_zarr_path as _normalize_path,
     read_zarr_array_mapping,
@@ -126,6 +129,7 @@ class RefinedSubjectMasksRunTables:
     label_to_index: Mapping[str, int]
     available_channels: np.ndarray
     masks_roi: Any | None
+    mask_store: MaskStore | None
     run_arrays: Mapping[str, np.ndarray]
     metrics: Mapping[str, np.ndarray]
     components: Mapping[str, RefinedSubjectComponentTables]
@@ -136,6 +140,8 @@ class RefinedSubjectMasksRunTables:
     def n_rows(self) -> int:
         if self.masks_roi is not None:
             return int(self.masks_roi.shape[0])
+        if self.mask_store is not None:
+            return int(self.mask_store.n_rows)
         for name in REFINED_SUBJECT_MASKS_ROW_LINEAGE_ARRAYS:
             values = self.run_arrays.get(name)
             if values is not None and values.shape:
@@ -154,6 +160,8 @@ class RefinedSubjectMasksRunTables:
     def channel_count(self) -> int:
         if self.masks_roi is not None and len(tuple(self.masks_roi.shape)) >= 2:
             return int(self.masks_roi.shape[1])
+        if self.mask_store is not None:
+            return int(self.mask_store.n_channels)
         return int(self.available_channels.shape[0])
 
     def component_index(self, component_name: str) -> int:
@@ -190,6 +198,11 @@ class RefinedSubjectMasksRunTables:
             raise RefinedSubjectMasksIOError(f"{self.run_path} was loaded without masks_roi.")
         return self.masks_roi
 
+    def require_mask_store(self) -> MaskStore:
+        if self.mask_store is None:
+            raise RefinedSubjectMasksIOError(f"{self.run_path} was loaded without a readable mask store.")
+        return self.mask_store
+
 
 def _mask_labels(group: Any) -> tuple[str, ...]:
     labels_raw = _attrs_dict(group).get("mask_labels")
@@ -213,6 +226,10 @@ def _run_n_rows(run_group: Any) -> int:
     masks = run_group.get("masks_roi") if hasattr(run_group, "get") else None
     if masks is not None and hasattr(masks, "shape") and len(tuple(masks.shape)) >= 1:
         return int(masks.shape[0])
+    try:
+        return int(open_mask_store(run_group, prefer="rle", allow_stale_rle=True).n_rows)
+    except (MaskStoreError, ValueError):
+        pass
     for name in REFINED_SUBJECT_MASKS_SMALL_RUN_ARRAYS:
         arr = run_group.get(name) if hasattr(run_group, "get") else None
         if arr is not None and hasattr(arr, "shape") and tuple(arr.shape):
@@ -224,6 +241,10 @@ def _roi_shape(run_group: Any) -> tuple[int, int]:
     masks = run_group.get("masks_roi") if hasattr(run_group, "get") else None
     if masks is not None and hasattr(masks, "shape") and len(tuple(masks.shape)) >= 4:
         return (int(masks.shape[2]), int(masks.shape[3]))
+    try:
+        return open_mask_store(run_group, prefer="rle", allow_stale_rle=True).shape_hw
+    except (MaskStoreError, ValueError):
+        pass
     return (0, 0)
 
 
@@ -309,6 +330,17 @@ def load_refined_subject_masks_run_tables(
     channel_count = int(masks_roi.shape[1]) if masks_roi is not None and len(tuple(masks_roi.shape)) >= 2 else len(labels)
     available_channels = _available_channels(run_group, channel_count=channel_count)
     source_paths: dict[str, str] = {"run": run_path}
+    mask_store: MaskStore | None = None
+    try:
+        mask_store = open_mask_store(run_group, source_path=run_path, prefer="dense" if include_masks_roi else "rle")
+    except (MaskStoreError, ValueError) as exc:
+        has_mask_surface = (
+            (run_group.get("masks_roi") if hasattr(run_group, "get") else None) is not None
+            or (run_group.get("mask_rle") if hasattr(run_group, "get") else None) is not None
+        )
+        if has_mask_surface:
+            raise RefinedSubjectMasksIOError(f"{run_path} has an unreadable mask store: {exc}") from exc
+        mask_store = None
 
     run_arrays = read_zarr_array_mapping(
         run_group,
@@ -319,6 +351,8 @@ def load_refined_subject_masks_run_tables(
     )
     if masks_roi is not None:
         source_paths["masks_roi"] = f"{run_path}/masks_roi"
+    if mask_store is not None:
+        source_paths["mask_store"] = mask_store.storage_path
 
     metrics = (
         read_zarr_array_mapping(
@@ -443,6 +477,7 @@ def load_refined_subject_masks_run_tables(
         label_to_index=label_to_index,
         available_channels=available_channels,
         masks_roi=masks_roi,
+        mask_store=mask_store,
         run_arrays=run_arrays,
         metrics=metrics,
         components=components,
@@ -471,7 +506,13 @@ def discover_refined_subject_masks_run_options(root: zarr.Group) -> list[Refined
         except RefinedSubjectMasksIOError:
             continue
         masks = run_group.get("masks_roi")
-        channel_count = int(masks.shape[1]) if masks is not None and len(tuple(masks.shape)) >= 2 else len(labels)
+        if masks is not None and len(tuple(masks.shape)) >= 2:
+            channel_count = int(masks.shape[1])
+        else:
+            try:
+                channel_count = int(open_mask_store(run_group, prefer="rle", allow_stale_rle=True).n_channels)
+            except (MaskStoreError, ValueError):
+                channel_count = len(labels)
         available = _available_channels(run_group, channel_count=channel_count)
         available_components = tuple(
             label for idx, label in enumerate(labels) if idx < int(available.shape[0]) and bool(available[idx])

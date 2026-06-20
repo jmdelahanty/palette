@@ -38,6 +38,11 @@ class FakeGroup(dict[str, object]):
         return arr
 
 
+class FakeMaskStore:
+    def __init__(self, n_rows: int) -> None:
+        self.n_rows = int(n_rows)
+
+
 def _mk_subject_run(
     parent: FakeGroup,
     run_name: str,
@@ -201,6 +206,19 @@ def test_build_plans_filters_to_stale_refined_rows(
     assert ok[0].zarr_path == stale_path
     assert ok[0].refined_run == "refined_stale"
     assert ok[0].roi_indices == [0]
+
+
+def test_pending_stale_roi_indices_uses_mask_store_count_without_dense_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = FakeGroup()
+    components = run.create_group("components")
+    subject_body = components.create_group("subject_body")
+    subject_body.attrs["source_update_pending_rows"] = [0, 1, 1, 2, 99]
+    monkeypatch.setattr(mod, "open_mask_store", lambda run_group, prefer="dense": FakeMaskStore(2))
+
+    assert "masks_roi" not in run
+    assert mod._pending_stale_roi_indices(run, "subject_body") == [0, 1]
 
 
 def test_build_plans_skips_swim_only_refined_and_falls_back_to_subject(

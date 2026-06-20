@@ -19,6 +19,8 @@ from typing import Iterable, List, Optional
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_store import MaskStoreError, open_mask_store
+
 
 REVIEW_STATES = {"approved", "pending", "rejected", "needs_review"}
 COMPONENT_NAME = "subject_body"
@@ -157,11 +159,19 @@ def _normalize_stale_roi_indices(raw: object, *, total_rois: Optional[int] = Non
     return normalized
 
 
+def _mask_store_row_count(run_group: object) -> Optional[int]:
+    if not _is_group_like(run_group):
+        return None
+    try:
+        return int(open_mask_store(run_group, prefer="dense").n_rows)
+    except (MaskStoreError, ValueError):
+        return None
+
+
 def _pending_stale_roi_indices(run_group: object, component_name: str) -> list[int]:
     if not _is_group_like(run_group):
         return []
-    masks_arr = run_group.get("masks_roi")
-    total_rois = int(masks_arr.shape[0]) if masks_arr is not None and hasattr(masks_arr, "shape") else None
+    total_rois = _mask_store_row_count(run_group)
     components_parent = run_group.get("components")
     if not _is_group_like(components_parent):
         return []

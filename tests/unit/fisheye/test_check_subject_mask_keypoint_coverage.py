@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import zarr
 
 from fisheye.diagnostics import check_subject_mask_keypoint_coverage as mod
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 
 
 class _FakeGroup(dict):
@@ -260,6 +262,92 @@ def test_analyze_root_uses_union_component_when_lr_components_are_not_available(
     assert report.eyes_union_assignment_summary["assigned_rows"] == 2
     assert report.eyes_union_assignment_summary["keypoint_valid_assigned_rows"] == 2
     assert report.eyes_union_assignment_summary["keypoint_valid_failed_rows"] == 0
+
+
+def test_analyze_root_reads_compact_refined_subject_masks_without_dense_masks_roi(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "compact_refined_subject_masks_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.create_group("crop_001")
+    crop.create_array("frame_indices", data=np.asarray([100, 101, 102], dtype=np.int64))
+
+    keypoints_roi = np.asarray(
+        [
+            [[9.0, 9.0], [5.0, 2.0], [5.0, 5.0], [2.0, 2.0]],
+            [[9.0, 9.0], [5.0, 2.0], [6.0, 5.0], [2.0, 2.0]],
+            [[9.0, 9.0], [5.0, 2.0], [7.0, 5.0], [2.0, 2.0]],
+        ],
+        dtype=np.float32,
+    )
+    kp_parent = root.create_group("refined_keypoints_runs")
+    kp_parent.attrs["latest"] = "kp_001"
+    kp = kp_parent.create_group("kp_001")
+    kp.attrs["keypoint_labels"] = ["tail_tip", "eye_right", "swim_bladder", "eye_left"]
+    kp.create_array("keypoints_roi", data=keypoints_roi)
+    kp.create_array("detection_success", data=np.asarray([True, True, True], dtype=bool))
+
+    refined_parent = root.create_group("refined_subject_masks_runs")
+    refined_parent.attrs["latest"] = "refined_subject_masks_compact"
+    run = refined_parent.create_group("refined_subject_masks_compact")
+    labels = ["subject_body", "eyes_union", "swim_bladder"]
+    run.attrs.update(
+        {
+            "source_crop_run": "crop_001",
+            "source_keypoint_group": "refined_keypoints_runs",
+            "source_keypoints_run": "kp_001",
+            "label_schema_id": "subject_v1_union",
+            "mask_labels": labels,
+            "component_review_statuses": {"eyes_union": {"state": "approved"}},
+        }
+    )
+    run.create_array("available_channels", data=np.asarray([False, True, False], dtype=bool))
+    masks = np.zeros((3, 3, 8, 8), dtype=np.uint8)
+    masks[:, 1, 1:4, 1:4] = 1
+    masks[:, 1, 1:4, 4:7] = 1
+    write_component_rle_mask_store_from_dense(
+        run,
+        masks,
+        component_names=labels,
+        encode_row_chunk_size=2,
+    )
+    assert "masks_roi" not in run
+
+    report = mod._analyze_root(
+        root=root,
+        zarr_path=zarr_path,
+        stage="auto",
+        subject_run=None,
+        eye_mode="auto",
+        keypoint_group=None,
+        keypoint_run=None,
+        allow_latest_keypoint_fallback=False,
+        sample_limit=5,
+    )
+
+    assert report.status == "pass"
+    assert report.subject_stage == "refined_subject_masks_runs"
+    assert report.mask_store_encoding == "component_rle_v1"
+    assert report.mask_storage_surface == "mask_rle"
+    assert report.mask_store_path == "refined_subject_masks_runs/refined_subject_masks_compact/mask_rle"
+    assert report.eye_component_mode == "union"
+    assert report.eye_component_indices == {"eyes_union": 1}
+    assert report.keypoint_valid_rows == 3
+    assert report.rows_with_eye_component_masks == 3
+    assert report.rows_missing_eye_component_masks == 0
+    assert report.eyes_union_assignment_status == "ready"
+    assert report.eyes_union_assignment_summary["mask_store_encoding"] == "component_rle_v1"
+    assert report.eyes_union_assignment_summary["mask_storage_surface"] == "mask_rle"
+    assert (
+        report.eyes_union_assignment_summary["mask_store_path"]
+        == "refined_subject_masks_runs/refined_subject_masks_compact/mask_rle"
+    )
+    assert "computed_component_presence_from:mask_store:component_rle_v1" in report.notes
+    assert "computed_component_presence_surface:mask_rle" in report.notes
+    assert "eyes_union_assignment_dry_run_checked" in report.notes
 
 
 def test_analyze_root_reports_union_assignment_not_ready_for_unsplittable_union(

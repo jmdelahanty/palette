@@ -8,6 +8,7 @@ import pytest
 import zarr
 
 from fisheye.shared.provenance_attrs import build_source_keypoints_attrs
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.zarr.stage_arrays import SUBJECT_MASKS_SPEC, validate_run
 from fisheye.utils import merge_subject_mask_runs as mod
 
@@ -84,6 +85,18 @@ def _create_subject_run(
         )
     run.create_array("available_channels", data=np.asarray(available_channels, dtype=bool), overwrite=True)
     return run
+
+
+def _convert_to_compact_only_subject_run(run: zarr.Group) -> None:
+    masks = run["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        run,
+        masks,
+        component_names=tuple(str(value) for value in run.attrs["mask_labels"]),
+        encode_row_chunk_size=1,
+    )
+    del run["masks_roi"]
+    run.attrs["masks_roi_materialized"] = False
 
 
 def test_merge_subject_mask_runs_combines_body_and_eye_components(
@@ -342,6 +355,125 @@ def test_merge_subject_mask_runs_combines_body_and_eye_components(
         "subject_mask_runs/subject_masks_from_refined_eye_masks_001/masks_roi"
     )
 
+    validation = validate_run(run, SUBJECT_MASKS_SPEC)
+    assert validation.valid, validation.errors
+
+
+def test_merge_subject_mask_runs_reads_compact_source_mask_stores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zarr_path = tmp_path / "recording_compact_sources.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    monkeypatch.setattr(
+        mod,
+        "get_git_info",
+        lambda repo_path=None: {  # noqa: ARG005
+            "commit_hash": "e" * 40,
+            "short_hash": "eeeeeeee",
+            "branch": "main",
+            "is_dirty": False,
+            "remote_url": "git@example.com:palette.git",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_environment_info",
+        lambda **_kwargs: {
+            "environment": {"python": "3.11"},
+            "platform": {
+                "hostname": "merge-host",
+                "system": "Linux",
+                "release": "6.8",
+                "python_version": "3.11.13",
+                "machine": "x86_64",
+            },
+        },
+    )
+
+    body_masks = np.asarray(
+        [
+            [
+                [[1, 0], [0, 1]],
+                [[0, 0], [0, 0]],
+                [[0, 0], [0, 0]],
+            ],
+            [
+                [[0, 1], [1, 0]],
+                [[0, 0], [0, 0]],
+                [[0, 0], [0, 0]],
+            ],
+        ],
+        dtype=np.uint8,
+    )
+    body = _create_subject_run(
+        root,
+        run_name="body_compact_001",
+        mask_labels=["subject_body", "eyes_union", "swim_bladder"],
+        available_channels=np.asarray([True, False, False], dtype=bool),
+        masks=body_masks,
+        probs=None,
+    )
+    _convert_to_compact_only_subject_run(body)
+
+    eye_masks = np.asarray(
+        [
+            [
+                [[0, 0], [0, 0]],
+                [[1, 0], [0, 0]],
+                [[0, 1], [0, 0]],
+                [[0, 0], [0, 0]],
+            ],
+            [
+                [[0, 0], [0, 0]],
+                [[0, 0], [1, 0]],
+                [[0, 0], [0, 1]],
+                [[0, 0], [0, 0]],
+            ],
+        ],
+        dtype=np.uint8,
+    )
+    eyes = _create_subject_run(
+        root,
+        run_name="eyes_compact_001",
+        mask_labels=["subject_body", "eye_left", "eye_right", "swim_bladder"],
+        available_channels=np.asarray([False, True, True, False], dtype=bool),
+        masks=eye_masks,
+        probs=None,
+    )
+    _convert_to_compact_only_subject_run(eyes)
+
+    summary = mod.merge_subject_mask_runs(
+        zarr_path,
+        body_run="body_compact_001",
+        eye_run="eyes_compact_001",
+        run_name="merged_from_compact_001",
+        apply=True,
+    )
+
+    assert summary["status"] == "updated"
+    run = root["subject_mask_runs/merged_from_compact_001"]
+    expected_masks = np.asarray(
+        [
+            [
+                [[1, 0], [0, 1]],
+                [[1, 0], [0, 0]],
+                [[0, 1], [0, 0]],
+                [[0, 0], [0, 0]],
+            ],
+            [
+                [[0, 1], [1, 0]],
+                [[0, 0], [1, 0]],
+                [[0, 0], [0, 1]],
+                [[0, 0], [0, 0]],
+            ],
+        ],
+        dtype=np.uint8,
+    )
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][:], dtype=np.uint8), expected_masks)
+    np.testing.assert_allclose(np.asarray(run["mask_probs_roi"][:], dtype=np.float32), expected_masks.astype(np.float32))
+    assert run.attrs["provenance"]["artifacts"]["body_probability_source_path"] == "subject_mask_runs/body_compact_001/mask_rle"
+    assert run.attrs["provenance"]["artifacts"]["eye_probability_source_path"] == "subject_mask_runs/eyes_compact_001/mask_rle"
     validation = validate_run(run, SUBJECT_MASKS_SPEC)
     assert validation.valid, validation.errors
 

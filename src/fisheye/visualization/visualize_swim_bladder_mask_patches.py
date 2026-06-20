@@ -20,6 +20,7 @@ import numpy as np
 import zarr
 
 from ..shared.crop_image_source import CropImageSource
+from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.provenance_attrs import resolve_source_keypoints_run
 from ..tune.refined_subject_mask_review import (
     DEFAULT_REVIEW_INTENDED_USE,
@@ -200,6 +201,43 @@ def _resolve_swim_bladder_keypoint_center(
         if kp.shape[0] >= 2 and np.all(np.isfinite(kp[:2])):
             return (float(kp[0]), float(kp[1])), "keypoint"
     return None, "missing_keypoint"
+
+
+def _source_component_mask_row(
+    source: object,
+    component_name: str,
+    roi_idx: int,
+    *,
+    fallback_shape: tuple[int, int],
+) -> np.ndarray:
+    mask_labels = tuple(str(label) for label in getattr(source, "mask_labels", ()) or ())
+    available_channels = np.asarray(getattr(source, "available_channels", ()), dtype=bool)
+    fallback = np.zeros((int(fallback_shape[0]), int(fallback_shape[1])), dtype=np.uint8)
+    if component_name not in mask_labels:
+        return fallback
+    component_idx = int(mask_labels.index(component_name))
+    if component_idx >= int(available_channels.shape[0]) or not bool(available_channels[component_idx]):
+        return fallback
+
+    masks_roi = getattr(source, "masks_roi", None)
+    if masks_roi is None:
+        group = getattr(source, "group", None)
+        if group is not None and "masks_roi" in group:
+            masks_roi = group["masks_roi"]
+        elif group is not None:
+            try:
+                return np.asarray(
+                    open_mask_store(group, prefer="dense").read_dense(
+                        rows=int(roi_idx),
+                        channels=component_idx,
+                    )[0, 0],
+                    dtype=np.uint8,
+                )
+            except (MaskStoreError, ValueError, KeyError):
+                return fallback
+    if masks_roi is None:
+        return fallback
+    return np.asarray(masks_roi[int(roi_idx), component_idx], dtype=np.uint8)
 
 
 def _parse_roi_indices_arg(raw: str) -> list[int]:
@@ -874,12 +912,11 @@ def create_viewer(
             return
         roi_arr = np.asarray(roi_img, dtype=np.uint8)
         masks_row = np.asarray(edit_masks_row, dtype=np.uint8)
-        source_mask = np.asarray(
-            swim_source.group["masks_roi"][int(state["loaded_roi_idx"]), swim_source.mask_labels.index("swim_bladder")]
-            if "swim_bladder" in swim_source.mask_labels
-            and bool(swim_source.available_channels[swim_source.mask_labels.index("swim_bladder")])
-            else np.zeros_like(masks_row[component_idx]),
-            dtype=np.uint8,
+        source_mask = _source_component_mask_row(
+            swim_source,
+            "swim_bladder",
+            int(state["loaded_roi_idx"]),
+            fallback_shape=tuple(int(value) for value in masks_row[component_idx].shape),
         )
         padding_val = max(1, int(cv2.getTrackbarPos("Padding", CONTROL_WINDOW_NAME)))
         brush_val = max(1, int(cv2.getTrackbarPos("Brush", CONTROL_WINDOW_NAME)))

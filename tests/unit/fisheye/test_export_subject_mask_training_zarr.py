@@ -11,6 +11,7 @@ import zarr
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.utils import check_training_registry as registry_view
 from fisheye.utils import validate_subject_mask_training_zarr as validate_cli
 from fisheye.utils.export_subject_mask_training_zarr import (
@@ -162,6 +163,21 @@ def _write_refined_subject_source(
     }
 
 
+def _replace_refined_masks_with_rle(path: Path, *, run_name: str = "refined_subject_masks_001") -> np.ndarray:
+    root = zarr.open_group(str(path), mode="a")
+    refined = root[f"refined_subject_masks_runs/{run_name}"]
+    masks = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    labels = [str(label) for label in refined.attrs["mask_labels"]]
+    del refined["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        refined,
+        masks,
+        component_names=labels,
+        encode_row_chunk_size=2,
+    )
+    return masks
+
+
 def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) -> None:
     source_path = tmp_path / "source_subject_lr.zarr"
     out_path = tmp_path / "merged_subject_lr.zarr"
@@ -220,10 +236,19 @@ def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) 
         122,
         123,
     ]
+    assert root["source_index/source_crop_run"][:].tolist() == ["crop_001"]
+    assert root["source_index/source_mask_store_encoding"][:].tolist() == ["dense_uint8"]
+    assert root["source_index/source_mask_storage_surface"][:].tolist() == ["masks_roi"]
     assert recheck["channels"] == 4
 
     latest = str(root["subject_mask_runs"].attrs["latest"])
     run = root[f"subject_mask_runs/{latest}"]
+    crop_latest = str(root["crop_runs"].attrs["latest"])
+    crop_run = root[f"crop_runs/{crop_latest}"]
+    assert crop_run.attrs["source_crop_run"] == "crop_001"
+    assert crop_run.attrs["source_crop_runs"] == ["crop_001"]
+    assert crop_run.attrs["source_zarr_path"] == str(source_path.resolve())
+    assert crop_run.attrs["source_zarr_paths"] == [str(source_path.resolve())]
     target_valid = np.asarray(run["target_valid_channels"][:], dtype=np.bool_)
     assert target_valid.shape == (4, 4)
     assert target_valid[:, 0].tolist() == [False, False, False, False]
@@ -268,6 +293,8 @@ def test_export_subject_mask_training_reads_refined_subject_source(tmp_path: Pat
 
     assert summary["total_samples"] == 4
     assert summary["channels"] == 3
+    assert summary["source_mask_store_encoding"] == "dense_uint8"
+    assert summary["source_mask_storage_surface"] == "masks_roi"
     assert summary["coverage_class"] == "dense_all_components"
     assert summary["source_subject_mask_run"] == "refined_subject_masks_001"
 
@@ -294,6 +321,89 @@ def test_export_subject_mask_training_reads_refined_subject_source(tmp_path: Pat
     assert int(np.sum(masks[:, 0])) > 0
     assert int(np.sum(masks[:, 1])) > 0
     assert int(np.sum(masks[:, 2])) > 0
+
+
+def test_export_subject_mask_training_reads_compact_refined_subject_source(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_refined_compact.zarr"
+    out_path = tmp_path / "merged_subject_refined_compact.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_refined_compact",
+        session_uuid="subject_source_refined_compact",
+        include_body=True,
+        include_swim_bladder=True,
+    )
+    _write_refined_subject_source(source_path)
+    expected_source_masks = _replace_refined_masks_with_rle(source_path)
+
+    summary = export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        source_stage_group="refined_subject_masks_runs",
+        subject_run="refined_subject_masks_001",
+        subject_label_schema="subject_v1_union",
+        overwrite=True,
+    )
+
+    assert summary["total_samples"] == 4
+    assert summary["channels"] == 3
+    assert summary["source_mask_store_encoding"] == "component_rle_v1"
+    assert summary["source_mask_storage_surface"] == "mask_rle"
+
+    root = zarr.open_group(str(out_path), mode="r")
+    latest = str(root["subject_mask_runs"].attrs["latest"])
+    run = root[f"subject_mask_runs/{latest}"]
+    assert "masks_roi" in run
+    assert "mask_rle" not in run
+    assert run.attrs["mask_storage_format"] == "dense_uint8"
+    assert run.attrs["mask_storage_surface"] == "masks_roi"
+    assert run.attrs["mask_store_encoding"] == "dense_uint8"
+    assert run.attrs["source_mask_store_encoding"] == "component_rle_v1"
+    assert run.attrs["source_mask_store_encodings"] == ["component_rle_v1"]
+    assert root.attrs["training_export"]["mask_storage_format"] == "dense_uint8"
+    assert root.attrs["training_export"]["mask_storage_surface"] == "masks_roi"
+    assert root.attrs["training_export"]["source_mask_store_encodings"] == ["component_rle_v1"]
+    assert root.attrs["training_export"]["source_mask_storage_surface"] == "mask_rle"
+    assert root.attrs["training_export"]["source_mask_storage_surfaces"] == ["mask_rle"]
+    assert root["source_index/source_crop_run"][:].tolist() == ["crop_001"]
+    assert root["source_index/source_mask_store_encoding"][:].tolist() == ["component_rle_v1"]
+    assert root["source_index/source_mask_storage_surface"][:].tolist() == ["mask_rle"]
+
+    exported_masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    expected_union = np.zeros((4, 3, 16, 16), dtype=np.uint8)
+    expected_union[:, 0] = expected_source_masks[:, 0]
+    expected_union[:, 1] = np.maximum(expected_source_masks[:, 1], expected_source_masks[:, 2])
+    expected_union[:, 2] = expected_source_masks[:, 3]
+    assert np.array_equal(exported_masks, expected_union)
+
+
+def test_validate_subject_mask_training_rejects_compact_training_mask_surface(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_refined_compact_invalid.zarr"
+    out_path = tmp_path / "merged_subject_refined_compact_invalid.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_refined_compact_invalid",
+        session_uuid="subject_source_refined_compact_invalid",
+        include_body=True,
+        include_swim_bladder=True,
+    )
+    _write_refined_subject_source(source_path)
+
+    export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        source_stage_group="refined_subject_masks_runs",
+        subject_run="refined_subject_masks_001",
+        subject_label_schema="subject_v1_union",
+        overwrite=True,
+    )
+
+    root = zarr.open_group(str(out_path), mode="a")
+    latest = str(root["subject_mask_runs"].attrs["latest"])
+    root[f"subject_mask_runs/{latest}"].create_group("mask_rle")
+
+    with pytest.raises(ValueError, match="compact mask_rle is analysis-only"):
+        validate_merged_subject_mask_training_zarr(out_path)
 
 
 def test_export_subject_mask_training_rejects_unapproved_refined_source(tmp_path: Path) -> None:

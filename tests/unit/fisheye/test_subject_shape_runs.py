@@ -7,6 +7,7 @@ import zarr
 
 from fisheye.analysis import subject_shape_runs as mod
 from fisheye.refinement.subject_body_mask_qc import write_subject_body_mask_qc_group
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 
 
 def _patch_provenance(monkeypatch) -> None:
@@ -232,6 +233,43 @@ def test_write_subject_shape_run_group_creates_coherent_components_and_relations
     )
     assert np.all(np.asarray(body["bspline_arc_length_px"][:], dtype=np.float32) > 0)
     assert run.attrs["provenance"]["stage"] == "analysis.subject_shape_runs"
+
+
+def test_write_subject_shape_run_group_reads_compact_mask_store_without_dense_masks(monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    root = _build_refined_root()
+    refined = root["refined_subject_masks_runs"]["refined_001"]
+    dense = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    write_component_rle_mask_store_from_dense(
+        refined,
+        refined["masks_roi"],
+        component_names=tuple(str(value) for value in refined.attrs["mask_labels"]),
+        encode_row_chunk_size=2,
+    )
+    del refined["masks_roi"]
+
+    summary = mod.write_subject_shape_run_group(
+        root,
+        refined_run="refined_001",
+        run_name="shape_rle_only",
+        chunk_size=2,
+    )
+
+    assert summary["status"] == "updated"
+    run = root["analysis"]["subject_shape_runs"]["shape_rle_only"]
+    assert run.attrs["source_mask_store_encoding"] == "component_rle_v1"
+    assert run.attrs["source_mask_storage_surface"] == "mask_rle"
+    assert run.attrs["source_mask_store_path"] == "refined_subject_masks_runs/refined_001/mask_rle"
+    assert run.attrs["source_refs"]["refined_subject_masks_mask_store"] == (
+        "refined_subject_masks_runs/refined_001/mask_rle"
+    )
+    assert "refined_subject_masks_masks_roi" not in run.attrs["source_refs"]
+    assert run.attrs["source_refs"]["refined_subject_masks_mask_rle"] == (
+        "refined_subject_masks_runs/refined_001/mask_rle"
+    )
+    assert run["components"]["subject_body"]["mask_present"][:].tolist() == [True, True, True]
+    assert run["components"]["eye_left"]["area_px"][:].tolist() == dense[:, 1].sum(axis=(1, 2)).tolist()
+    assert run["body_frame"]["valid"][:].tolist() == [True, True, True]
 
 
 def test_write_subject_shape_run_uses_dask_worker_chunks(tmp_path: Path, monkeypatch) -> None:

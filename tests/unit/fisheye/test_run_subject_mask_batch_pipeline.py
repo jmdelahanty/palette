@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.zarr_run_completion import RUN_COMPLETION_STATUS_ATTR
 from fisheye.utils import run_subject_mask_batch_pipeline as mod
 
@@ -81,6 +82,40 @@ def test_emit_paths_prints_selected_archives(tmp_path: Path, capsys: pytest.Capt
     assert mod.main([str(tmp_path), "--emit-paths"]) == 0
 
     assert capsys.readouterr().out.strip() == str(zarr_path)
+
+
+def test_validate_outputs_accepts_compact_refined_mask_store(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    subject_parent = root.require_group("subject_mask_runs")
+    subject = subject_parent.create_group("subject_run")
+    subject.attrs["mask_labels"] = list(mod.RAW_COMPONENTS)
+    subject.create_array("mask_probs_roi", data=np.zeros((2, 3, 4, 4), dtype=np.uint8))
+
+    refined_parent = root.require_group("refined_subject_masks_runs")
+    refined = refined_parent.create_group("refined_run")
+    refined.attrs["mask_labels"] = list(mod.REFINED_COMPONENTS)
+    refined.attrs["label_schema_id"] = "subject_v1_lr"
+    masks = np.zeros((2, 4, 4, 4), dtype=np.uint8)
+    masks[:, 0, 1:3, 1:3] = 1
+    write_component_rle_mask_store_from_dense(
+        refined,
+        masks,
+        component_names=mod.REFINED_COMPONENTS,
+        encode_row_chunk_size=1,
+    )
+    components = refined.require_group("components")
+    for component in mod.REFINED_COMPONENTS:
+        components.require_group(component)
+
+    status, details = mod.validate_outputs(
+        zarr_path,
+        subject_run="subject_run",
+        refined_run="refined_run",
+    )
+
+    assert status == "ok"
+    assert "refined_mask_store=component_rle_v1" in details
 
 
 def _seed_subject_mask_batch_prereqs(zarr_path: Path) -> None:

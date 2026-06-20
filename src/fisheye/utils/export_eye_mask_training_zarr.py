@@ -897,9 +897,24 @@ def _collapse_source_attr(values: Sequence[str], *, mixed_value: str = "mixed") 
     return mixed_value
 
 
-def _merge_chunks(chunks: Optional[Tuple[int, ...]], *, total_samples: int) -> Optional[Tuple[int, ...]]:
+def _default_chunks_for_shape(shape: Sequence[int], *, total_samples: int) -> Tuple[int, ...]:
+    normalized_shape = tuple(max(1, int(value)) for value in shape)
+    if not normalized_shape:
+        return (max(1, int(total_samples)),)
+    row_chunk = max(1, min(256, int(total_samples), normalized_shape[0]))
+    return (row_chunk, *normalized_shape[1:])
+
+
+def _merge_chunks(
+    chunks: Optional[Tuple[int, ...]],
+    *,
+    total_samples: int,
+    shape: Optional[Sequence[int]] = None,
+) -> Tuple[int, ...]:
     if chunks is None:
-        return None
+        if shape is None:
+            return (max(1, int(total_samples)),)
+        return _default_chunks_for_shape(shape, total_samples=total_samples)
     normalized: List[int] = []
     for idx, value in enumerate(chunks):
         try:
@@ -911,7 +926,11 @@ def _merge_chunks(chunks: Optional[Tuple[int, ...]], *, total_samples: int) -> O
         if idx == 0:
             chunk = max(1, min(chunk, max(1, int(total_samples))))
         normalized.append(chunk)
-    return tuple(normalized) if normalized else None
+    if normalized:
+        return tuple(normalized)
+    if shape is None:
+        return (max(1, int(total_samples)),)
+    return _default_chunks_for_shape(shape, total_samples=total_samples)
 
 
 def _copy_progress(total: int) -> Optional["Progress"]:
@@ -1549,7 +1568,7 @@ def export_merged_eye_mask_training_zarr_from_sources(
         "roi_images",
         shape=roi_shape,
         dtype=ref_source.roi_images.dtype,
-        chunks=_merge_chunks(getattr(ref_source.roi_images, "chunks", None), total_samples=total_samples),
+        chunks=_merge_chunks(getattr(ref_source.roi_images, "chunks", None), total_samples=total_samples, shape=roi_shape),
         overwrite=True,
     )
     bbox_shape = (total_samples, *tuple(int(v) for v in ref_source.bbox_norm.shape[1:]))
@@ -1557,14 +1576,14 @@ def export_merged_eye_mask_training_zarr_from_sources(
         "bbox_norm_coords",
         shape=bbox_shape,
         dtype=ref_source.bbox_norm.dtype,
-        chunks=_merge_chunks(getattr(ref_source.bbox_norm, "chunks", None), total_samples=total_samples),
+        chunks=_merge_chunks(getattr(ref_source.bbox_norm, "chunks", None), total_samples=total_samples, shape=bbox_shape),
         overwrite=True,
     )
     crop_bbox_dest = dst_crop.create_array(
         "crop_bbox_norm_coords",
         shape=bbox_shape,
         dtype=ref_source.bbox_norm.dtype,
-        chunks=_merge_chunks(getattr(ref_source.bbox_norm, "chunks", None), total_samples=total_samples),
+        chunks=_merge_chunks(getattr(ref_source.bbox_norm, "chunks", None), total_samples=total_samples, shape=bbox_shape),
         overwrite=True,
     )
 
@@ -1578,7 +1597,7 @@ def export_merged_eye_mask_training_zarr_from_sources(
         int(ref_source.masks_roi.shape[2]),
         int(ref_source.masks_roi.shape[3]),
     )
-    masks_chunks = _merge_chunks(getattr(ref_source.masks_roi, "chunks", None), total_samples=total_samples)
+    masks_chunks = _merge_chunks(getattr(ref_source.masks_roi, "chunks", None), total_samples=total_samples, shape=masks_shape)
     if masks_chunks is not None and len(masks_chunks) >= 2 and mask_channel_count == 1:
         masks_chunks = (int(masks_chunks[0]), 1, *tuple(int(v) for v in masks_chunks[2:]))
     masks_dest = dst_eye.create_array(
@@ -1593,7 +1612,11 @@ def export_merged_eye_mask_training_zarr_from_sources(
         "ellipse_params",
         shape=ellipse_params_shape,
         dtype=ref_source.ellipse_params.dtype,
-        chunks=_merge_chunks(getattr(ref_source.ellipse_params, "chunks", None), total_samples=total_samples),
+        chunks=_merge_chunks(
+            getattr(ref_source.ellipse_params, "chunks", None),
+            total_samples=total_samples,
+            shape=ellipse_params_shape,
+        ),
         overwrite=True,
     )
     ellipse_success_shape = (total_samples, *tuple(int(v) for v in ref_source.ellipse_success.shape[1:]))
@@ -1601,7 +1624,11 @@ def export_merged_eye_mask_training_zarr_from_sources(
         "ellipse_success",
         shape=ellipse_success_shape,
         dtype=ref_source.ellipse_success.dtype,
-        chunks=_merge_chunks(getattr(ref_source.ellipse_success, "chunks", None), total_samples=total_samples),
+        chunks=_merge_chunks(
+            getattr(ref_source.ellipse_success, "chunks", None),
+            total_samples=total_samples,
+            shape=ellipse_success_shape,
+        ),
         overwrite=True,
     )
     mask_probs_dest: Optional[zarr.Array] = None
@@ -1611,6 +1638,7 @@ def export_merged_eye_mask_training_zarr_from_sources(
             if resolved_sources[0].mask_probs_src is not None
             else None,
             total_samples=total_samples,
+            shape=masks_shape,
         )
         if mask_probs_chunks is not None and len(mask_probs_chunks) >= 2 and mask_channel_count == 1:
             mask_probs_chunks = (int(mask_probs_chunks[0]), 1, *tuple(int(v) for v in mask_probs_chunks[2:]))
@@ -1894,6 +1922,9 @@ def export_merged_eye_mask_training_zarr_from_sources(
         }
     )
 
+    mark_run_complete(dst_crop, parent_group=dst_crop_parent, run_name=run_name)
+    mark_run_complete(dst_eye, parent_group=dst_eye_parent, run_name=run_name)
+
     summary: Dict[str, Any]
     if validate:
         summary = validate_merged_eye_mask_training_zarr(
@@ -2008,8 +2039,6 @@ def export_merged_eye_mask_training_zarr_from_sources(
         )
         summary["source_subject_mask_run"] = resolved_sources[0].selection.source_subject_mask_run
         summary["source_crop_run"] = resolved_sources[0].selection.crop_run
-    mark_run_complete(dst_crop, parent_group=dst_crop_parent, run_name=run_name)
-    mark_run_complete(dst_eye, parent_group=dst_eye_parent, run_name=run_name)
     return summary
 
 

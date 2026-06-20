@@ -526,9 +526,14 @@ def test_sync_eye_mask_registry_rows_after_run_writes_status_and_refreshes(
     monkeypatch.setattr(mod, "Registry", _FakeRegistry)
     monkeypatch.setattr(mod, "upsert_recording_step_status", _fake_upsert)
     monkeypatch.setattr(mod, "_zarr_mtime_ns", lambda _path: 123)
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.require_group("eye_masks_runs").require_group("eye_masks_001")
+    root.require_group("refined_eye_masks_runs").require_group("refined_eye_masks_001")
+    root.require_group("subject_mask_runs").require_group("subject_masks_001")
 
     result = mod._sync_eye_mask_registry_rows_after_run(
-        zarr_path=tmp_path / "recording_analysis.zarr",
+        zarr_path=zarr_path,
         stage_payloads={
             "eye_masks": {
                 "run_name": "eye_masks_001",
@@ -618,9 +623,12 @@ def test_sync_eye_mask_registry_rows_after_run_refresh_failure_is_non_fatal(
 
     monkeypatch.setattr(mod, "Registry", _FakeRegistry)
     monkeypatch.setattr(mod, "upsert_recording_step_status", lambda *_args, **_kwargs: None)
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.require_group("eye_masks_runs").require_group("eye_masks_001")
 
     result = mod._sync_eye_mask_registry_rows_after_run(
-        zarr_path=tmp_path / "recording_analysis.zarr",
+        zarr_path=zarr_path,
         stage_payloads={"eye_masks": {"run_name": "eye_masks_001", "source_runs": {}}},
     )
 

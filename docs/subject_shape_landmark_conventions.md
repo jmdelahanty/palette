@@ -359,7 +359,9 @@ mask-derived fields.
 
 For mask overlays:
 
-- draw `masks_roi` fills from `refined_subject_masks_runs`
+- draw mask fills from the `refined_subject_masks_runs` logical mask store
+  (`masks_roi` when dense is present, otherwise compact `mask_rle` through
+  `MaskStore`)
 - resolve channels by `mask_labels`
 - use persisted component contours when available
 - fall back to client-side contours when persisted contours are missing

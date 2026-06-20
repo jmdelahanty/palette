@@ -188,8 +188,9 @@ usually be an axis or enum column, not a child group.
 
 Observed examples:
 
-- `refined_subject_masks_runs` stores canonical dense `masks_roi`, then also
-  component-local mirrors and per-component metrics.
+- `refined_subject_masks_runs` exposes a canonical logical mask store
+  (`masks_roi`, compact `mask_rle`, or both), then also component-local mirrors
+  and per-component metrics.
 - `subject_shape_runs` stores `components/<component>` groups for common
   metrics, plus many body-specific arrays.
 
@@ -449,7 +450,9 @@ Current issue:
 
 Direction:
 
-- keep canonical dense `mask_probs_roi` / `masks_roi`
+- keep dense `mask_probs_roi` for raw probability evidence and route refined
+  binary masks through the logical mask-store boundary (`masks_roi` and/or
+  compact `mask_rle`)
 - stack common component metrics by component axis
 - keep packed contours, but use one shared contour group rather than one group
   per component

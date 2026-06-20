@@ -43,6 +43,7 @@ from ..shared.refined_subject_eye_geometry import (
 )
 from ..shared.workflow_profile import WorkflowProfiler
 from ..shared.workflow_profile import json_safe
+from ..shared.zarr_run_completion import require_runs_parent
 from ..tune.refined_subject_mask_review import _load_source_subject_mask_run
 from ..utils.zarr_io import open_zarr_root
 
@@ -169,7 +170,7 @@ def _copy_group_attrs_only(
 ) -> zarr.Group | None:
     if run_name not in source_parent:
         return None
-    target_parent = target_root.require_group(parent_name)
+    target_parent = require_runs_parent(target_root, parent_name)
     target_parent.attrs["latest"] = str(run_name)
     source_run = source_parent[run_name]
     target_run = target_parent.require_group(run_name)
@@ -189,7 +190,7 @@ def _copy_subject_mask_slice(
     if source_parent is None or source_run_name not in source_parent:
         raise RuntimeError(f"subject_mask_runs/{source_run_name} not found.")
     source_run = source_parent[source_run_name]
-    target_parent = target_root.require_group("subject_mask_runs")
+    target_parent = require_runs_parent(target_root, "subject_mask_runs")
     target_parent.attrs["latest"] = str(source_run_name)
     target_run = target_parent.require_group(source_run_name)
     _copy_attrs(source_run, target_run)

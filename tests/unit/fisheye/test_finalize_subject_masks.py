@@ -11,6 +11,8 @@ from fisheye.diagnostics.benchmark_subject_mask_full_finalizer import (
 )
 from fisheye.refinement import finalize_subject_masks as mod
 from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from fisheye.shared.mask_store import open_mask_store, write_component_rle_mask_store_from_dense
+from fisheye.shared.zarr.stage_arrays import REFINED_SUBJECT_MASKS_SPEC, validate_run
 from fisheye.tune import refined_subject_mask_review as review_mod
 
 
@@ -80,6 +82,23 @@ def _build_probability_root(store_path: Path | None = None) -> zarr.Group:
             "source_crop_signature": {"signature_version": 2, "crop_revision": 7},
             "source_crop_revision": 7,
             "source_detect_review_status_ref": "refined_detect_runs/refined_detect_001/review_status",
+            "source_roi_image_representation": "grayscale_uint8",
+            "source_roi_pixel_contract_name": "nv12_luma_plane_uint8",
+            "source_roi_pixel_contract": {
+                "name": "nv12_luma_plane_uint8",
+                "decode_backend": "pynvvc_luma",
+            },
+            "source_roi_read_mode": "flat_bin_roi_cache",
+            "roi_cache_policy": "always",
+            "source_roi_cache_used": True,
+            "source_roi_cache_backend": "flat_bin_v1",
+            "source_roi_cache_key": "cache-key-001",
+            "source_roi_cache_path": "/scratch/job123/cache.flat_roi_cache.json",
+            "source_roi_cache_canonical_path": "/groups/cache/cache.flat_roi_cache.json",
+            "source_roi_cache_expected_archive_path": "/groups/recordings/rec/zarr/rec_analysis.zarr",
+            "source_roi_live_acceleration_requested": "gpu",
+            "source_roi_live_acceleration_effective": "gpu",
+            "source_roi_live_gpu_chunk_frames": 64,
             "method": "unet_subject_masks_v1",
             "mask_labels": ["subject_body", "eyes_union", "swim_bladder"],
             "label_schema_id": "subject_v1_union_eyes",
@@ -163,6 +182,23 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run.attrs["dask_num_workers"] == 2
     assert run.attrs["smart_finalizer_timing_summary"]["chunk_count"] == 2
     assert len(run.attrs["smart_finalizer_chunk_timings"]) == 2
+    assert run.attrs["source_roi_image_representation"] == "grayscale_uint8"
+    assert run.attrs["source_roi_pixel_contract_name"] == "nv12_luma_plane_uint8"
+    assert run.attrs["source_roi_pixel_contract"]["decode_backend"] == "pynvvc_luma"
+    assert run.attrs["source_roi_read_mode"] == "flat_bin_roi_cache"
+    assert run.attrs["roi_cache_policy"] == "always"
+    assert run.attrs["source_roi_cache_used"] is True
+    assert run.attrs["source_roi_cache_backend"] == "flat_bin_v1"
+    assert run.attrs["source_roi_cache_key"] == "cache-key-001"
+    assert run.attrs["source_roi_cache_path"] == "/scratch/job123/cache.flat_roi_cache.json"
+    assert run.attrs["source_roi_cache_canonical_path"] == "/groups/cache/cache.flat_roi_cache.json"
+    assert (
+        run.attrs["source_roi_cache_expected_archive_path"]
+        == "/groups/recordings/rec/zarr/rec_analysis.zarr"
+    )
+    assert run.attrs["source_roi_live_acceleration_requested"] == "gpu"
+    assert run.attrs["source_roi_live_acceleration_effective"] == "gpu"
+    assert run.attrs["source_roi_live_gpu_chunk_frames"] == 64
     provenance_parameters = run.attrs["provenance"]["parameters"]
     assert provenance_parameters["execution_backend"] == "serial_driver"
     assert provenance_parameters["dask_scheduler"] == "threads"
@@ -217,6 +253,170 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run["components/subject_body"].attrs["source_seed_masks_status"] == "omitted"
     assert "source_seed_masks_roi" not in run["components/subject_body"]
     assert "relations" not in run
+
+
+def test_finalize_subject_mask_run_can_materialize_component_rle_mask_store(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_rle",
+        chunk_size=1,
+        mask_storage="dense_and_rle",
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["mask_storage"] == "dense_and_rle"
+    assert summary["mask_rle_summary"]["status"] == "written"
+    assert summary["mask_rle_summary"]["layout"] == "component_groups"
+    assert summary["mask_rle_summary"]["roundtrip_validation"] == {
+        "status": "passed",
+        "rows_checked": 2,
+        "channels_checked": 4,
+        "chunks_checked": 2,
+        "row_chunk_size": 1,
+    }
+    assert "write_component_rle_mask_store" in summary["timing_summary"]["phase_seconds"]
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_rle"]
+    assert run.attrs["mask_storage_encoding"] == "dense_uint8+component_rle_v1"
+    assert run.attrs["mask_store_encodings"] == ["dense_uint8", "component_rle_v1"]
+    assert run.attrs["mask_rle_materialized"] is True
+    assert run.attrs["smart_finalizer_mask_rle_summary"]["roundtrip_validation"]["status"] == "passed"
+    assert run["mask_rle"].attrs["schema_id"] == "palette_mask_rle_binary_v1"
+    assert run["mask_rle"].attrs["layout"] == "component_groups"
+
+    dense = (np.asarray(run["masks_roi"][:], dtype=np.uint8) > 0).astype(np.uint8)
+    store = open_mask_store(run, prefer="rle")
+    assert store.encoding == "component_rle_v1"
+    np.testing.assert_array_equal(store.read_dense(), dense)
+    np.testing.assert_array_equal(
+        store.read_dense(rows=[1], channels=["eye_left"]),
+        dense[1:2, 1:2],
+    )
+
+
+def test_finalize_subject_mask_run_reads_compact_source_mask_store(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+    source = root["subject_mask_runs/subject_probs_001"]
+    dense_source = (np.asarray(source["mask_probs_roi"][:], dtype=np.uint8) >= 128).astype(np.uint8)
+    dense_array = source.create_array("masks_roi", data=dense_source, overwrite=True)
+    write_component_rle_mask_store_from_dense(
+        source,
+        dense_array,
+        component_names=tuple(str(value) for value in source.attrs["mask_labels"]),
+        encode_row_chunk_size=1,
+    )
+    del source["masks_roi"]
+    del source["mask_probs_roi"]
+    source.attrs["masks_roi_materialized"] = False
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_from_compact_source",
+        chunk_size=1,
+    )
+
+    assert summary["status"] == "updated"
+    run = root["refined_subject_masks_runs/refined_subject_masks_from_compact_source"]
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    assert masks.shape == (2, 4, 10, 10)
+    assert np.count_nonzero(masks[:, 0]) > 0
+    assert np.count_nonzero(masks[:, 1]) > 0
+    assert np.count_nonzero(masks[:, 2]) > 0
+    provenance = run["components/subject_body/provenance"].attrs
+    assert provenance["source_surface_path"] == "subject_mask_runs/subject_probs_001/mask_rle"
+    assert provenance["source_surface_kind"] == "binary"
+    assert provenance["source_binary_derivation"] == "smart_finalize(mask_rle)"
+    eye_provenance = run["components/eye_left/provenance"].attrs
+    assert eye_provenance["source_surface_path"] == "subject_mask_runs/subject_probs_001/mask_rle"
+    assert eye_provenance["source_binary_derivation"] == "smart_finalize(mask_rle)"
+    validation = validate_run(run, REFINED_SUBJECT_MASKS_SPEC)
+    assert validation.valid, validation.errors
+
+
+def test_finalize_subject_mask_run_can_write_rle_only_mask_store(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_rle_only",
+        chunk_size=1,
+        mask_storage="rle_v1",
+        write_eye_geometry=True,
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["mask_storage"] == "rle_v1"
+    assert summary["write_eye_geometry"] is True
+    assert summary["mask_rle_summary"]["status"] == "written"
+    assert summary["mask_rle_summary"]["dense_cache_removed"] is True
+    assert summary["mask_rle_summary"]["roundtrip_validation"]["status"] == "passed"
+    assert summary["mask_rle_summary"]["roundtrip_validation"]["rows_checked"] == 2
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_rle_only"]
+    assert "masks_roi" not in run
+    assert run.attrs["eye_geometry_status"] == "computed"
+    assert "relations/eye_pair/metrics/separation_px" in run
+    assert run.attrs["mask_storage_encoding"] == "component_rle_v1"
+    assert run.attrs["mask_store_encodings"] == ["component_rle_v1"]
+    assert run.attrs["masks_roi_materialized"] is False
+    assert run.attrs["mask_rle_materialized"] is True
+    store = open_mask_store(run, prefer="rle")
+    assert store.encoding == "component_rle_v1"
+    assert store.read_dense().shape == (2, 4, 10, 10)
+    assert store.read_dense(rows=[1], channels=["eye_left"]).shape == (1, 1, 10, 10)
+    validation = validate_run(run, REFINED_SUBJECT_MASKS_SPEC)
+    assert validation.valid, validation.errors
+
+
+def test_refresh_refined_subject_mask_metrics_reads_rle_only_mask_store(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_refresh_rle_only",
+        chunk_size=1,
+        mask_storage="rle_v1",
+    )
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_refresh_rle_only"]
+    assert "masks_roi" not in run
+    labels = list(run.attrs["mask_labels"])
+    body_idx = labels.index("subject_body")
+    run["metrics/area_px"][:, body_idx] = 0.0
+    run["components/subject_body"]["area_px"][:] = 0.0
+
+    summary = mod.refresh_refined_subject_mask_metrics_run(
+        root,
+        refined_run="refined_subject_masks_smart_refresh_rle_only",
+        components=["subject_body"],
+        chunk_size=1,
+        metric_level="cheap",
+    )
+
+    assert summary["components"] == ["subject_body"]
+    assert summary["mask_store_encoding"] == "component_rle_v1"
+    assert summary["mask_storage_surface"] == "mask_rle"
+    assert (
+        summary["mask_store_path"]
+        == "refined_subject_masks_runs/refined_subject_masks_smart_refresh_rle_only/mask_rle"
+    )
+    assert "masks_roi" not in run
+    assert np.count_nonzero(np.asarray(run["metrics/area_px"][:, body_idx], dtype=np.float32)) > 0
+    assert np.count_nonzero(np.asarray(run["components/subject_body"]["area_px"][:], dtype=np.float32)) > 0
+    assert summary["timing_summary"]["mask_store_encoding"] == "component_rle_v1"
+    assert summary["timing_summary"]["mask_storage_surface"] == "mask_rle"
+    store = open_mask_store(run, prefer="rle")
+    assert store.encoding == "component_rle_v1"
 
 
 def test_finalize_subject_mask_run_can_retain_source_seed_masks(monkeypatch) -> None:

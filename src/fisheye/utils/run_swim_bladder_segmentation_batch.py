@@ -284,6 +284,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--roi-cache-dir", type=str, help="Optional scratch directory for temporary ROI caches.")
     parser.add_argument(
+        "--roi-cache-manifest",
+        type=str,
+        help="Optional existing flat ROI cache manifest to reuse for every archive.",
+    )
+    parser.add_argument(
         "--roi-live-acceleration",
         choices=("auto", "cpu", "gpu"),
         default="auto",

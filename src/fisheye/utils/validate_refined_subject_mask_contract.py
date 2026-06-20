@@ -12,11 +12,12 @@ import numpy as np
 import zarr
 
 from fisheye.shared.detect_reason_codec import write_reason_columns
+from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from fisheye.utils.zarr_io import open_zarr_root
 
 REQUIRED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
-REQUIRED_RUN_ARRAYS = ("detection_source", "masks_roi", "available_channels", "edit_applied")
+REQUIRED_RUN_ARRAYS = ("detection_source", "available_channels", "edit_applied")
 REQUIRED_RUN_METRICS = ("mask_present", "area_px")
 RECOMMENDED_GEOMETRY_METRICS = ("centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid")
 REQUIRED_COMPONENT_ARRAYS = ("reason_bytes", "mask_present", "area_px", "edit_applied")
@@ -187,6 +188,42 @@ def _compute_mask_geometry_chunk(masks: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
+def _validate_mask_store_decodable(mask_store: Any, *, run_path: str, issues: list[ContractIssue]) -> None:
+    """Exercise compact stores through the same dense materialization API consumers use."""
+
+    if getattr(mask_store, "storage_surface", "") != "mask_rle":
+        return
+    total_rows = int(mask_store.n_rows)
+    channels = int(mask_store.n_channels)
+    height, width = (int(value) for value in mask_store.shape_hw)
+    chunk_rows = refined_subject_mask_metric_row_chunk(total_rows)
+    try:
+        for start in range(0, total_rows, chunk_rows):
+            stop = min(total_rows, start + chunk_rows)
+            decoded = mask_store.read_dense(rows=slice(start, stop))
+            expected_shape = (int(stop - start), channels, height, width)
+            if tuple(int(value) for value in decoded.shape) != expected_shape:
+                _add_issue(
+                    issues,
+                    severity="error",
+                    code="invalid_mask_store",
+                    path=f"{run_path}/mask_rle",
+                    message=(
+                        "compact mask_rle decoded to unexpected shape "
+                        f"{tuple(decoded.shape)} for rows {start}:{stop}, expected {expected_shape}."
+                    ),
+                )
+                return
+    except Exception as exc:
+        _add_issue(
+            issues,
+            severity="error",
+            code="invalid_mask_store",
+            path=f"{run_path}/mask_rle",
+            message=f"compact mask_rle failed dense materialization: {exc}",
+        )
+
+
 def _ensure_array(
     group: zarr.Group,
     name: str,
@@ -240,6 +277,11 @@ def _backfill_masks_roi_from_components(
 ) -> bool:
     if "masks_roi" in run:
         return False
+    try:
+        open_mask_store(run, source_path="refined_subject_masks_runs/<backfill>", prefer="dense")
+        return False
+    except (MaskStoreError, ValueError):
+        pass
     components_group = run.get("components")
     if not _is_group(components_group):
         raise ValueError("Cannot backfill masks_roi without components/<label>/ mask arrays.")
@@ -292,13 +334,16 @@ def _backfill_masks_roi_from_components(
 
 
 def _backfill_run_metrics(run: zarr.Group, labels: Sequence[str], summary: dict[str, object]) -> bool:
-    masks = run.get("masks_roi")
-    if not _is_array(masks):
+    try:
+        mask_store = open_mask_store(run, source_path="refined_subject_masks_runs/<backfill>", prefer="dense")
+    except (MaskStoreError, ValueError):
         return False
-    shape = tuple(int(dim) for dim in masks.shape)
+    shape = tuple(int(dim) for dim in mask_store.shape)
     if len(shape) != 4:
         return False
     total_rows, channels = shape[0], shape[1]
+    if labels and int(channels) != len(labels):
+        raise ValueError(f"Cannot backfill metrics: mask channels {channels} != len(mask_labels) {len(labels)}.")
     metrics = run.require_group("metrics")
     targets = {
         "mask_present": ((total_rows, channels), bool, _metric_chunks_2d(total_rows), False),
@@ -320,7 +365,7 @@ def _backfill_run_metrics(run: zarr.Group, labels: Sequence[str], summary: dict[
     chunk_rows = refined_subject_mask_metric_row_chunk(total_rows)
     for start in range(0, total_rows, chunk_rows):
         stop = min(total_rows, start + chunk_rows)
-        computed = _compute_mask_geometry_chunk(np.asarray(masks[start:stop], dtype=np.uint8))
+        computed = _compute_mask_geometry_chunk(mask_store.read_dense(rows=slice(start, stop)))
         for name, arr in arrays.items():
             arr[start:stop] = computed[name]
     summary.setdefault("backfilled", []).extend(f"metrics/{name}" for name in missing)
@@ -333,9 +378,17 @@ def _backfill_component_arrays(
     available: np.ndarray,
     summary: dict[str, object],
 ) -> bool:
-    masks_shape = _array_shape(run, "masks_roi")
-    if masks_shape is None or len(masks_shape) != 4:
+    try:
+        mask_store = open_mask_store(run, source_path="refined_subject_masks_runs/<backfill>", prefer="dense")
+    except (MaskStoreError, ValueError):
         return False
+    masks_shape = tuple(int(dim) for dim in mask_store.shape)
+    if len(masks_shape) != 4:
+        return False
+    if labels and int(masks_shape[1]) != len(labels):
+        raise ValueError(
+            f"Cannot backfill component arrays: mask channels {masks_shape[1]} != len(mask_labels) {len(labels)}."
+        )
     total_rows = int(masks_shape[0])
     components = run.require_group("components")
     metrics = run.get("metrics")
@@ -432,6 +485,7 @@ def validate_refined_subject_mask_contract(
 
     run_path = f"refined_subject_masks_runs/{resolved_run}"
     labels = _normalize_labels(run.attrs.get("mask_labels"))
+    mask_store = None
     for attr in REQUIRED_RUN_ATTRS:
         if attr not in run.attrs:
             _add_issue(
@@ -460,6 +514,44 @@ def validate_refined_subject_mask_contract(
         )
 
     masks_shape = None
+    try:
+        mask_store = open_mask_store(run, source_path=run_path, prefer="dense")
+        masks_shape = tuple(int(dim) for dim in mask_store.shape)
+        if len(masks_shape) != 4:
+            _add_issue(
+                issues,
+                severity="error",
+                code="shape_mismatch",
+                path=f"{run_path}/mask_store",
+                message=f"mask store must materialize as 4D (N,C,H,W), got {masks_shape}.",
+            )
+        elif labels and int(mask_store.n_channels) != len(labels):
+            _add_issue(
+                issues,
+                severity="error",
+                code="channel_label_mismatch",
+                path=f"{run_path}/mask_store",
+                message=f"mask store channel count {mask_store.n_channels} != len(mask_labels) {len(labels)}.",
+            )
+        if labels and tuple(mask_store.mask_labels) != tuple(labels):
+            _add_issue(
+                issues,
+                severity="error",
+                code="mask_store_label_mismatch",
+                path=f"{run_path}/mask_store",
+                message=f"mask store labels {list(mask_store.mask_labels)!r} != mask_labels {labels!r}.",
+            )
+        _validate_mask_store_decodable(mask_store, run_path=run_path, issues=issues)
+    except (MaskStoreError, ValueError) as exc:
+        _add_issue(
+            issues,
+            severity="error",
+            code="missing_mask_store",
+            path=f"{run_path}/mask_store",
+            message=f"Run must provide dense masks_roi or compact mask_rle storage ({exc}).",
+            backfillable=True,
+        )
+
     for name in REQUIRED_RUN_ARRAYS:
         node = run.get(name)
         if not _is_array(node):
@@ -469,36 +561,18 @@ def validate_refined_subject_mask_contract(
                 code="missing_array",
                 path=f"{run_path}/{name}",
                 message=f"Missing required array {name!r}.",
-                backfillable=name == "available_channels" or name == "masks_roi",
+                backfillable=name == "available_channels",
             )
             continue
         shape = tuple(int(dim) for dim in node.shape)
-        if name == "masks_roi":
-            masks_shape = shape
-            if len(shape) != 4:
-                _add_issue(
-                    issues,
-                    severity="error",
-                    code="shape_mismatch",
-                    path=f"{run_path}/masks_roi",
-                    message=f"masks_roi must be 4D (N,C,H,W), got {shape}.",
-                )
-            elif labels and int(shape[1]) != len(labels):
-                _add_issue(
-                    issues,
-                    severity="error",
-                    code="channel_label_mismatch",
-                    path=f"{run_path}/masks_roi",
-                    message=f"masks_roi channel count {shape[1]} != len(mask_labels) {len(labels)}.",
-                )
-        elif name == "detection_source" and masks_shape is not None and len(shape) == 1 and len(masks_shape) == 4:
+        if name == "detection_source" and masks_shape is not None and len(shape) == 1 and len(masks_shape) == 4:
             if int(shape[0]) != int(masks_shape[0]):
                 _add_issue(
                     issues,
                     severity="error",
                     code="row_count_mismatch",
                     path=f"{run_path}/detection_source",
-                    message=f"detection_source length {shape[0]} != masks_roi rows {masks_shape[0]}.",
+                    message=f"detection_source length {shape[0]} != mask rows {masks_shape[0]}.",
                 )
 
     if masks_shape is None:
@@ -524,7 +598,7 @@ def validate_refined_subject_mask_contract(
                 severity="error",
                 code="available_channel_mismatch",
                 path=f"{run_path}/available_channels",
-                message=f"available_channels length {available.shape[0]} != masks_roi channels {channel_count}.",
+                message=f"available_channels length {available.shape[0]} != mask channels {channel_count}.",
             )
 
     edit_shape = _array_shape(run, "edit_applied")

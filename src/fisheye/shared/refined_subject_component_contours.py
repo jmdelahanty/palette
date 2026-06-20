@@ -10,6 +10,8 @@ import cv2
 import numpy as np
 import zarr
 
+from .mask_store import MaskStoreError, open_mask_store
+
 
 COMPONENT_CONTOUR_SCHEMA_ID = "component_contours_v1"
 COMPONENT_ROW_UPDATE_SCHEMA_ID = "refined_subject_component_row_updates_v1"
@@ -45,6 +47,10 @@ class ComponentContourRowUpdateSummary:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _group_source_path(group: zarr.Group) -> str:
+    return str(getattr(group, "name", "") or "")
 
 
 def extract_largest_external_contour(
@@ -457,15 +463,16 @@ def refresh_component_contour_rows_from_masks(
     component_name = str(component)
     if component_name not in label_map:
         raise KeyError(f"Component {component_name!r} is not present in refined mask labels.")
-    masks_roi = refined_group.get("masks_roi")
-    if masks_roi is None or len(tuple(masks_roi.shape)) != 4:
-        raise ValueError("refined_group must contain masks_roi with shape (N,C,H,W).")
-    roi_count = int(masks_roi.shape[0])
+    try:
+        mask_store = open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense")
+    except MaskStoreError as exc:
+        raise ValueError("refined_group must contain masks_roi or compact mask_rle storage.") from exc
+    roi_count = int(mask_store.n_rows)
     component_idx = int(label_map[component_name])
-    if component_idx < 0 or component_idx >= int(masks_roi.shape[1]):
+    if component_idx < 0 or component_idx >= int(mask_store.n_channels):
         raise ValueError(
-            f"Component {component_name!r} channel {component_idx} outside masks_roi channel count "
-            f"{int(masks_roi.shape[1])}."
+            f"Component {component_name!r} channel {component_idx} outside mask store channel count "
+            f"{int(mask_store.n_channels)}."
         )
     if not _component_available(refined_group, component_idx):
         raise ValueError(f"Component {component_name!r} is marked unavailable in available_channels.")
@@ -473,11 +480,12 @@ def refresh_component_contour_rows_from_masks(
     component_group = refined_group.require_group("components").require_group(component_name)
     updated_at = str(updated_at_utc or _utc_now())
     source_label_schema = refined_group.attrs.get("label_schema_id")
-    source_mask_run = str(refined_group.attrs.get("run_name") or refined_group.name.rstrip("/").split("/")[-1])
+    refined_path = _group_source_path(refined_group)
+    source_mask_run = str(refined_group.attrs.get("run_name") or refined_path.rstrip("/").split("/")[-1])
     summaries: list[ComponentContourRowUpdateSummary] = []
     for row_index in row_indices:
         row_idx = int(row_index)
-        mask = np.asarray(masks_roi[row_idx, component_idx], dtype=np.uint8)
+        mask = mask_store.read_dense(rows=row_idx, channels=component_idx)[0, 0]
         summaries.append(
             write_component_contour_row(
                 component_group,
@@ -507,30 +515,24 @@ def build_component_contours_from_masks(
     label_map = _label_index_map(refined_group)
     if component not in label_map:
         return [], ComponentContourSummary(component=component, status="missing_label", roi_count=0, reason="label absent")
-    masks_roi = refined_group.get("masks_roi")
-    if masks_roi is None:
+    try:
+        mask_store = open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense")
+    except MaskStoreError:
         return [], ComponentContourSummary(
             component=component,
-            status="missing_masks_roi",
+            status="missing_mask_store",
             roi_count=0,
-            reason="masks_roi array missing",
+            reason="neither masks_roi nor mask_rle storage is available",
         )
-    if len(tuple(masks_roi.shape)) != 4:
-        return [], ComponentContourSummary(
-            component=component,
-            status="shape_mismatch",
-            roi_count=0,
-            reason=f"masks_roi shape is {tuple(masks_roi.shape)}",
-        )
-    roi_count = int(masks_roi.shape[0])
-    channel_count = int(masks_roi.shape[1])
+    roi_count = int(mask_store.n_rows)
+    channel_count = int(mask_store.n_channels)
     component_idx = int(label_map[component])
     if component_idx < 0 or component_idx >= channel_count:
         return [], ComponentContourSummary(
             component=component,
             status="shape_mismatch",
             roi_count=roi_count,
-            reason=f"component channel {component_idx} outside masks_roi channel count {channel_count}",
+            reason=f"component channel {component_idx} outside mask store channel count {channel_count}",
         )
     if not _component_available(refined_group, component_idx):
         return [], ComponentContourSummary(
@@ -544,7 +546,8 @@ def build_component_contours_from_masks(
     contour_count = 0
     point_count = 0
     for row_idx in range(roi_count):
-        contour = extract_largest_external_contour(masks_roi[row_idx, component_idx], min_points=min_points)
+        mask = mask_store.read_dense(rows=row_idx, channels=component_idx)[0, 0]
+        contour = extract_largest_external_contour(mask, min_points=min_points)
         contours.append(contour)
         if contour is not None:
             contour_count += 1
@@ -569,8 +572,11 @@ def write_refined_subject_component_contours(
 ) -> list[ComponentContourSummary]:
     """Write component contour caches for selected refined mask components."""
 
-    masks_roi = refined_group.get("masks_roi")
-    roi_count = int(masks_roi.shape[0]) if masks_roi is not None and len(tuple(masks_roi.shape)) >= 1 else 0
+    try:
+        mask_store = open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense")
+        roi_count = int(mask_store.n_rows)
+    except MaskStoreError:
+        roi_count = 0
     source_label_schema = refined_group.attrs.get("label_schema_id")
     summaries: list[ComponentContourSummary] = []
     for component in components:

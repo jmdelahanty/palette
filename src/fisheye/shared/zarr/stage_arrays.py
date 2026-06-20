@@ -200,6 +200,181 @@ def _validate_specs(
                 )
 
 
+_REFINED_SUBJECT_MASK_RLE_COMPONENT_SPECS: Tuple[ArraySpec, ...] = (
+    ArraySpec("counts", "uint32", ("n_counts",)),
+    ArraySpec("indptr", "int64", ("n_rois_plus_one",)),
+    ArraySpec("present", "bool", ("n_rois",)),
+    ArraySpec("area_px", "int32", ("n_rois",)),
+    ArraySpec("bbox_xyxy", "int32", ("n_rois", 4)),
+)
+
+
+def _validate_shape_hw_attr(
+    attrs: object,
+    *,
+    attr_name: str,
+    group_label: str,
+    errors: List[str],
+) -> tuple[int, int] | None:
+    if not hasattr(attrs, "get"):
+        errors.append(f"{group_label}: attrs object does not support get()")
+        return None
+    raw_shape = attrs.get(attr_name)
+    if not isinstance(raw_shape, (list, tuple)) or len(raw_shape) != 2:
+        errors.append(f"{group_label}: attr '{attr_name}' must be a 2-item [height, width] sequence")
+        return None
+    try:
+        height = int(raw_shape[0])
+        width = int(raw_shape[1])
+    except (TypeError, ValueError):
+        errors.append(f"{group_label}: attr '{attr_name}' must contain integer dimensions, got {raw_shape!r}")
+        return None
+    if height <= 0 or width <= 0:
+        errors.append(f"{group_label}: attr '{attr_name}' dimensions must be positive, got {(height, width)!r}")
+        return None
+    return (height, width)
+
+
+def _group_key_names(group: object) -> Tuple[str, ...]:
+    if hasattr(group, "group_keys"):
+        return tuple(str(key) for key in group.group_keys())
+    if hasattr(group, "keys"):
+        return tuple(str(key) for key in group.keys())
+    return ()
+
+
+def _validate_refined_subject_mask_rle_component_integrity(
+    component_group: object,
+    *,
+    component_name: str,
+    parent_shape_hw: tuple[int, int] | None,
+    errors: List[str],
+) -> None:
+    label = f"refined_subject_masks/mask_rle/components/{component_name}"
+    attrs = getattr(component_group, "attrs", {})
+    component_shape_hw = None
+    if hasattr(attrs, "get") and "encoded_shape_hw" in attrs:
+        component_shape_hw = _validate_shape_hw_attr(
+            attrs,
+            attr_name="encoded_shape_hw",
+            group_label=label,
+            errors=errors,
+        )
+        if parent_shape_hw is not None and component_shape_hw is not None and component_shape_hw != parent_shape_hw:
+            errors.append(
+                f"{label}: attr 'encoded_shape_hw' {component_shape_hw!r} does not match parent {parent_shape_hw!r}"
+            )
+
+    arrays: dict[str, object] = {}
+    for array_name in ("counts", "indptr", "present", "area_px", "bbox_xyxy"):
+        arrays[array_name] = component_group.get(array_name) if hasattr(component_group, "get") else None
+    if not all(hasattr(array_obj, "shape") for array_obj in arrays.values()):
+        return
+
+    counts = arrays["counts"]
+    indptr = arrays["indptr"]
+    present = arrays["present"]
+    area_px = arrays["area_px"]
+    bbox_xyxy = arrays["bbox_xyxy"]
+
+    row_count = int(present.shape[0])
+    if int(area_px.shape[0]) != row_count:
+        errors.append(f"{label}: area_px length {int(area_px.shape[0])} must equal present length {row_count}")
+    if int(bbox_xyxy.shape[0]) != row_count:
+        errors.append(f"{label}: bbox_xyxy length {int(bbox_xyxy.shape[0])} must equal present length {row_count}")
+    if int(indptr.shape[0]) != row_count + 1:
+        errors.append(
+            f"{label}: indptr length {int(indptr.shape[0])} must equal present length + 1 ({row_count + 1})"
+        )
+        return
+
+    try:
+        pointers = np.asarray(indptr[:], dtype=np.int64).reshape(-1)
+    except Exception as exc:  # pragma: no cover - defensive for unusual stores
+        errors.append(f"{label}: failed to read indptr for structural validation: {exc}")
+        return
+    if pointers.size == 0:
+        errors.append(f"{label}: indptr must contain at least one pointer")
+        return
+    if int(pointers[0]) != 0 or np.any(np.diff(pointers) < 0):
+        errors.append(f"{label}: indptr must start at zero and be monotonically non-decreasing")
+    counts_len = int(counts.shape[0])
+    if int(pointers[-1]) != counts_len:
+        errors.append(f"{label}: indptr terminates at {int(pointers[-1])}, but counts has {counts_len} values")
+
+
+def _validate_refined_subject_mask_storage(
+    group: zarr.Group,
+    *,
+    errors: List[str],
+    warnings: List[str],
+) -> None:
+    """Allow compact mask_rle as the refined-subject mask physical surface."""
+
+    dense_missing_error = "refined_subject_masks: missing required array 'masks_roi'"
+    rle_group = group.get("mask_rle") if hasattr(group, "get") else None
+    if rle_group is None:
+        return
+
+    if not _is_group_like(rle_group):
+        errors.append("refined_subject_masks/mask_rle: exists but is not a group")
+        return
+
+    attrs = getattr(rle_group, "attrs", {})
+    for attr_name in ("schema_id", "mask_encoding", "mask_value_semantics", "layout", "encoded_shape_hw", "component_names"):
+        if attr_name not in attrs:
+            errors.append(f"refined_subject_masks/mask_rle: missing required attr '{attr_name}'")
+    if attrs.get("schema_id") != "palette_mask_rle_binary_v1":
+        errors.append(
+            "refined_subject_masks/mask_rle: attr 'schema_id' expected "
+            "'palette_mask_rle_binary_v1', got {!r}".format(attrs.get("schema_id"))
+        )
+    if attrs.get("layout") != "component_groups":
+        errors.append(
+            "refined_subject_masks/mask_rle: attr 'layout' expected "
+            "'component_groups', got {!r}".format(attrs.get("layout"))
+        )
+    parent_shape_hw = _validate_shape_hw_attr(
+        attrs,
+        attr_name="encoded_shape_hw",
+        group_label="refined_subject_masks/mask_rle",
+        errors=errors,
+    )
+
+    components = rle_group.get("components") if hasattr(rle_group, "get") else None
+    if components is None or not _is_group_like(components):
+        errors.append("refined_subject_masks/mask_rle: missing required subgroup 'components'")
+        return
+    component_names = _group_key_names(components)
+    if not component_names:
+        errors.append("refined_subject_masks/mask_rle/components: no component groups found")
+        return
+
+    for component_name in component_names:
+        component_group = components[component_name]
+        if not _is_group_like(component_group):
+            errors.append(
+                f"refined_subject_masks/mask_rle/components/{component_name}: exists but is not a group"
+            )
+            continue
+        _validate_specs(
+            component_group,
+            _REFINED_SUBJECT_MASK_RLE_COMPONENT_SPECS,
+            group_label=f"refined_subject_masks/mask_rle/components/{component_name}",
+            errors=errors,
+            warnings=warnings,
+        )
+        _validate_refined_subject_mask_rle_component_integrity(
+            component_group,
+            component_name=component_name,
+            parent_shape_hw=parent_shape_hw,
+            errors=errors,
+        )
+
+    if dense_missing_error in errors:
+        errors[:] = [message for message in errors if message != dense_missing_error]
+
+
 def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
     errors: List[str] = []
     warnings: List[str] = []
@@ -242,6 +417,9 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
                 errors=errors,
                 warnings=warnings,
             )
+
+    if spec.stage_name == "refined_subject_masks":
+        _validate_refined_subject_mask_storage(group, errors=errors, warnings=warnings)
 
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
 

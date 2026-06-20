@@ -204,7 +204,7 @@ def _make_keypoint_root() -> _FakeGroup:
 def test_create_refined_keypoint_run_emits_derived_metrics_schema(monkeypatch) -> None:
     root = _make_keypoint_root()
 
-    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
     monkeypatch.setattr(mod, "_resolve_status_context_from_root", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mod, "_resolve_status_context", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mod, "_emit_refined_keypoint_status", lambda **_kwargs: False)
@@ -416,7 +416,7 @@ def test_process_refinement_chunk_accepts_extended_keypoint_order(monkeypatch) -
     run.create_array("effective_se2_radius", data=np.asarray([2.0], dtype=np.float64), chunks=(1,))
     run.create_array("detection_success", data=np.asarray([True], dtype=np.bool_), chunks=(1,))
 
-    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
 
     result = mod._process_refinement_chunk(
         "/tmp/unused.zarr",

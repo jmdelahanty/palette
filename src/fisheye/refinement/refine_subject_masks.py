@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - depends on optional dependency
     HAVE_DISTRIBUTED = False
 
 from ..tune.refined_subject_mask_review import (
+    RefinedSubjectMaskRun,
     _component_sync_state,
     _capture_component_sync_states,
     _component_sync_states_changed,
@@ -40,6 +41,7 @@ from ..tune.refined_subject_mask_review import (
     _write_refined_subject_component_apply_rows,
     prepare_refined_subject_run,
 )
+from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.subject_mask_registry_status import emit_refined_subject_mask_stage_completion
 from ..utils.zarr_io import open_zarr_root
 
@@ -129,6 +131,57 @@ def _resolve_refined_run_name(
     return _default_refined_run_name(), "inferred_new", False
 
 
+def _open_existing_refined_subject_run_for_plan(
+    root,
+    refined_run: str,
+) -> tuple[RefinedSubjectMaskRun, int, str, str, str]:
+    """Inspect an existing refined run without materializing dense masks.
+
+    The normal review/apply opener is an edit boundary and may create
+    ``masks_roi`` from compact ``mask_rle``. Planning runs in read-only mode, so
+    it must use the logical mask-store surface instead.
+    """
+
+    refined_parent = root.get("refined_subject_masks_runs")
+    if refined_parent is None or str(refined_run) not in refined_parent:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
+
+    run_group = refined_parent[str(refined_run)]
+    labels_raw = run_group.attrs.get("mask_labels")
+    if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
+    component_names = tuple(str(item) for item in labels_raw)
+    try:
+        mask_store = open_mask_store(
+            run_group,
+            source_path=f"refined_subject_masks_runs/{refined_run}",
+            prefer="dense",
+        )
+    except (MaskStoreError, ValueError) as exc:
+        raise RuntimeError(
+            f"refined_subject_masks_runs/{refined_run} has no usable dense or compact mask store."
+        ) from exc
+    if tuple(mask_store.mask_labels) != component_names:
+        raise RuntimeError(
+            f"refined_subject_masks_runs/{refined_run} mask-store labels "
+            f"{list(mask_store.mask_labels)!r} do not match mask_labels {list(component_names)!r}."
+        )
+
+    return (
+        RefinedSubjectMaskRun(
+            run_name=str(refined_run),
+            parent=refined_parent,
+            group=run_group,
+            component_names=component_names,
+            component_to_index={name: idx for idx, name in enumerate(component_names)},
+        ),
+        int(mask_store.n_rows),
+        str(mask_store.encoding),
+        str(mask_store.storage_surface),
+        str(mask_store.storage_path),
+    )
+
+
 def _collect_component_args(
     component_groups: Optional[Sequence[Sequence[str]]],
     component_values: Optional[Sequence[str]],
@@ -187,10 +240,15 @@ def _build_refined_subject_apply_plan(
         source_run_name = inferred_source.run_name
 
     if target_exists:
-        refined = _open_existing_refined_subject_run(root, target_run)
+        (
+            refined,
+            total_rois,
+            mask_store_encoding,
+            mask_storage_surface,
+            mask_store_path,
+        ) = _open_existing_refined_subject_run_for_plan(root, target_run)
         selected_components = _normalize_refined_component_names(refined, components)
         available_components = list(refined.component_names)
-        total_rois = int(refined.group["masks_roi"].shape[0])
         if not source_run_name:
             source_run_name = str(refined.group.attrs.get("source_subject_mask_run") or "")
     else:
@@ -199,6 +257,9 @@ def _build_refined_subject_apply_plan(
         available_components = [str(label) for label in source.mask_labels]
         total_rois = int(source.masks_roi.shape[0])
         source_run_name = source.run_name
+        mask_store_encoding = None
+        mask_storage_surface = None
+        mask_store_path = None
 
     selected_rows = (
         tuple(_normalize_roi_indices(roi_indices, total_rois))
@@ -221,6 +282,9 @@ def _build_refined_subject_apply_plan(
         "roi_indices": [int(roi_idx) for roi_idx in selected_rows],
         "roi_count": int(len(selected_rows)),
         "total_roi_count": int(total_rois),
+        "refined_mask_store_encoding": mask_store_encoding,
+        "refined_mask_storage_surface": mask_storage_surface,
+        "refined_mask_store_path": mask_store_path,
         "chunk_count": int(len(row_chunks)),
         "chunk_size": int(chunk_size),
         "scheduler": scheduler_key,
@@ -460,7 +524,12 @@ def refine_subject_masks(
                 component_updates=component_updates[str(component_name)],
             )
 
-    updated_at_utc = _finalize_refined_subject_apply(refined, updated_components=selected_components)
+    updated_at_utc = _finalize_refined_subject_apply(
+        refined,
+        updated_components=selected_components,
+        updated_rows=selected_rows,
+        stale_reason="batch_refined_subject_mask_edit",
+    )
     refined.group.attrs["dask_scheduler"] = scheduler_key
     refined.group.attrs["dask_num_workers"] = int(num_workers) if num_workers is not None else None
     refined.group.attrs["dask_chunk_size"] = int(chunk_size)

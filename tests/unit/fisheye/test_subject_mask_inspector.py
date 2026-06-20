@@ -5,6 +5,7 @@ import os
 import numpy as np
 import zarr
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.tune import refined_subject_mask_review as review_mod
 from fisheye.visualization import subject_mask_inspector as mod
 
@@ -73,6 +74,20 @@ def _build_inspector_root():
     return root
 
 
+def _replace_refined_masks_with_rle(root: zarr.Group) -> np.ndarray:
+    refined = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
+    dense = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    labels = [str(label) for label in refined.attrs["mask_labels"]]
+    del refined["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        refined,
+        dense,
+        component_names=labels,
+        encode_row_chunk_size=1,
+    )
+    return dense
+
+
 def test_load_runs_infers_matching_latest_refined_run() -> None:
     root = _build_inspector_root()
 
@@ -103,6 +118,26 @@ def test_stage_summary_lines_include_raw_and_refined_metrics() -> None:
     assert any("sigma_noise=" in line for line in refined_lines)
     assert any("ipr=" in line for line in refined_lines)
     assert any("solidity=" in line for line in refined_lines)
+
+
+def test_refined_run_can_use_compact_mask_store_without_dense_masks_roi() -> None:
+    root = _build_inspector_root()
+    dense = _replace_refined_masks_with_rle(root)
+
+    subject, refined = mod._load_runs(root, subject_run="subject_masks_001", refined_run="refined_subject_masks_001")
+
+    assert subject is not None
+    assert refined is not None
+    assert "masks_roi" not in refined.group
+    assert refined.mask_store.encoding == "component_rle_v1"
+    np.testing.assert_array_equal(
+        mod._mask_for_component(refined, "subject_body", 0),
+        dense[0, refined.mask_labels.index("subject_body")],
+    )
+    lines = mod._stage_summary_lines(refined, "subject_body", 0)
+    assert lines[0] == "refined_subject_masks_runs/refined_subject_masks_001"
+    flagged = mod._flagged_roi_indices(refined, "subject_body", thresholds=mod.InspectorThresholds())
+    assert 0 in flagged
 
 
 def test_component_geometry_reads_run_level_bbox_and_centroid() -> None:
@@ -162,7 +197,7 @@ def test_draw_component_shape_overlay_draws_contour_and_hull() -> None:
 
     assert int(np.count_nonzero(drawn)) > 0
     assert np.any(np.all(drawn == np.asarray(mod.HULL_COLOR, dtype=np.uint8), axis=2))
-    assert np.any(np.all(drawn == np.asarray(mod.COMPONENT_COLORS["swim_bladder"], dtype=np.uint8), axis=2))
+    assert np.any(np.all(drawn == np.asarray(mod.CONTOUR_COLOR, dtype=np.uint8), axis=2))
 
 
 def test_cycle_component_index_wraps() -> None:

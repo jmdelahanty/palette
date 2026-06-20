@@ -14,6 +14,7 @@ import zarr
 
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.json_safety import json_attr_safe
+from ..shared.mask_store import MaskStore, MaskStoreError, open_mask_store
 from ..shared.provenance_attrs import (
     ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
     CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS,
@@ -39,7 +40,6 @@ from ..tune.refined_subject_mask_review import (
     _load_refined_eye_mask_source,
     _load_source_subject_mask_run,
     _normalize_component_name,
-    _open_existing_refined_subject_run,
     _review_payload,
 )
 from .subject_eye_assignment import EYES_UNION_ASSIGNMENT_METHOD, assign_eyes_union_to_lr
@@ -66,6 +66,39 @@ _SOURCE_VIEW_CROP_SIGNATURE_DIFF_PATHS = frozenset(
 
 
 _json_safe = json_attr_safe
+
+
+class _MaskStoreDenseArrayView:
+    """Array-like dense view for readers that still use ``masks_roi`` indexing."""
+
+    def __init__(self, mask_store: MaskStore):
+        self._mask_store = mask_store
+        self.shape = tuple(int(dim) for dim in mask_store.shape)
+        self.dtype = np.dtype(np.uint8)
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        row_scalar = False
+        if not isinstance(key, tuple):
+            rows = key
+            channels = None
+            tail = ()
+            row_scalar = isinstance(rows, (int, np.integer))
+        else:
+            padded = tuple(key) + (slice(None),) * max(0, 4 - len(key))
+            rows, channels, *tail = padded[:4]
+            row_scalar = isinstance(rows, (int, np.integer))
+        dense = self._mask_store.read_dense(rows=rows, channels=channels)
+        if row_scalar:
+            dense = dense[0]
+        if channels is not None and isinstance(channels, (int, np.integer)):
+            dense = dense[0] if dense.ndim == 3 else dense[:, 0]
+        if tail and any(item != slice(None) for item in tail):
+            dense = dense[(slice(None),) * (dense.ndim - len(tail)) + tuple(tail)]
+        return dense
 
 
 def _resolve_latest_parent_run(parent: Any, label: str) -> str:
@@ -236,13 +269,23 @@ def _component_seed_from_source(source: SourceSubjectMaskRun, component_name: st
 def _load_refined_subject_mask_source(root: zarr.Group, refined_subject_run: Optional[str]) -> SourceSubjectMaskRun:
     parent = root.get("refined_subject_masks_runs")
     run_name = refined_subject_run or _resolve_latest_parent_run(parent, "refined_subject_masks_runs")
-    _open_existing_refined_subject_run(root, run_name)
-    assert parent is not None
+    if parent is None or str(run_name) not in parent:
+        raise RuntimeError(f"refined_subject_masks_runs/{run_name} not found.")
     group = parent[run_name]
-    masks_arr = group.get("masks_roi")
-    if masks_arr is None:
-        raise RuntimeError(f"refined_subject_masks_runs/{run_name} missing masks_roi.")
-    if len(masks_arr.shape) != 4:
+    try:
+        mask_store = open_mask_store(
+            group,
+            source_path=f"refined_subject_masks_runs/{run_name}",
+            prefer="dense",
+        )
+    except (MaskStoreError, ValueError) as exc:
+        raise RuntimeError(
+            f"refined_subject_masks_runs/{run_name} missing usable mask store (masks_roi or mask_rle)."
+        ) from exc
+    dense_masks = group.get("masks_roi")
+    masks_arr = dense_masks if dense_masks is not None else _MaskStoreDenseArrayView(mask_store)
+    mask_surface_path = mask_store.storage_surface
+    if len(tuple(masks_arr.shape)) != 4:
         raise RuntimeError(
             f"refined_subject_masks_runs/{run_name}/masks_roi must have shape (N, C, H, W), got {masks_arr.shape}."
         )
@@ -304,6 +347,8 @@ def _load_refined_subject_mask_source(root: zarr.Group, refined_subject_run: Opt
         ),
         source_refined_row_ids=_lineage_array(root, group, crop_run=crop_run, name="source_refined_row_ids"),
         source_detect_row_index=_lineage_array(root, group, crop_run=crop_run, name="source_detect_row_index"),
+        mask_surface_kind="binary",
+        mask_surface_path=mask_surface_path,
     )
 
 
@@ -569,6 +614,7 @@ def _component_seed_from_refined_subject_source(
         "source_method": source.source_method or source.group.attrs.get("method") or "unknown",
         "source_channels": [component_name],
         "source_crop_run": source.crop_run,
+        "source_mask_surface_path": source.mask_surface_path,
         **source.source_crop_snapshot,
     }
     label_schema_id = source.group.attrs.get("label_schema_id")

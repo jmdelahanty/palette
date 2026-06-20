@@ -317,6 +317,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
             self.roi_cache_used = True
             self.roi_cache_key = "cache-key-001"
             self.roi_cache_path = str(cache_dir)
+            self.roi_cache_canonical_path = "/groups/cache/fake-cache.flat_roi_cache.json"
             self.roi_live_acceleration_requested = "cpu"
             self.roi_live_acceleration_effective = "cpu"
             self.roi_live_acceleration_fallback_reason = None
@@ -367,6 +368,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
         seen["roi_read_mode"] = roi_source.roi_read_mode
         seen["roi_cache_used"] = roi_source.roi_cache_used
         seen["roi_cache_path"] = roi_source.roi_cache_path
+        seen["roi_cache_canonical_path"] = roi_source.roi_cache_canonical_path
         if write_masks_roi:
             run_group.create_array(
                 "masks_roi",
@@ -459,6 +461,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert seen["roi_read_mode"] == "temporary_cache"
     assert seen["roi_cache_used"] is True
     assert Path(str(seen["roi_cache_path"])).exists()
+    assert seen["roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
     assert seen["mask_probs_chunk_rois"] == 2
     assert seen["mask_probs_dtype"] == "uint8"
     assert seen["write_masks_roi"] is False
@@ -475,6 +478,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert run_group.attrs["roi_cache_policy"] == "always"
     assert run_group.attrs["source_roi_cache_used"] is True
     assert run_group.attrs["source_roi_cache_path"]
+    assert run_group.attrs["source_roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
     assert run_group.attrs["source_roi_live_acceleration_requested"] == "cpu"
     assert run_group.attrs["source_roi_live_acceleration_effective"] == "cpu"
     assert run_group.attrs["source_roi_live_gpu_chunk_frames"] == 11
@@ -494,6 +498,7 @@ def test_infer_unet_subject_masks_supports_geometry_only_crop_runs_with_temporar
     assert provenance_inputs["source_crop_signature"] == "sig-001"
     assert provenance_inputs["source_crop_revision"] == 4
     assert provenance_inputs["source_detect_review_status_ref"] == "refined_detect_runs/refined_001/review_status"
+    assert provenance_inputs["roi_cache_canonical_path"] == "/groups/cache/fake-cache.flat_roi_cache.json"
     assert provenance_inputs["assignment_keypoint_group"] == "refined_keypoints_runs"
     assert provenance_inputs["assignment_keypoints_run"] == "refined_kp_001"
     assert run_group["mask_probs_roi"].shape == (2, 3, 4, 4)

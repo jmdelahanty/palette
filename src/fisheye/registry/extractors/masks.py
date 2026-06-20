@@ -62,6 +62,44 @@ def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _lookup_attr(attrs: Mapping[str, Any], provenance_inputs: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        value = attrs.get(name)
+        if value is not None:
+            return value
+        value = provenance_inputs.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _resolve_source_roi_pixel_contract(
+    attrs: Mapping[str, Any],
+    provenance_inputs: Mapping[str, Any],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    contract = _coerce_mapping(_lookup_attr(attrs, provenance_inputs, "source_roi_pixel_contract"))
+    contract_name = _decode_attr(_lookup_attr(attrs, provenance_inputs, "source_roi_pixel_contract_name"))
+    if contract_name is None and contract is not None:
+        contract_name = _decode_attr(contract.get("name"))
+    return contract, contract_name
+
+
+def _as_bool_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, np.integer)):
+        return 1 if int(value) != 0 else 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return 1
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return 0
+    return None
+
+
 def _open_child_group(parent: Any, key: str) -> Any:
     store = getattr(parent, "store", None)
     if store is None:
@@ -96,6 +134,70 @@ def _get_group(parent: Any, key: str) -> Any:
     if child is not None:
         return child
     return _open_child_group(parent, key)
+
+
+def _array_logical_bytes(array: Any) -> Optional[int]:
+    if array is None:
+        return None
+    nbytes = getattr(array, "nbytes", None)
+    if nbytes is not None:
+        try:
+            return int(nbytes() if callable(nbytes) else nbytes)
+        except Exception:
+            pass
+    shape = getattr(array, "shape", None)
+    dtype = getattr(array, "dtype", None)
+    if shape is None or dtype is None:
+        return None
+    try:
+        itemsize = int(np.dtype(dtype).itemsize)
+        total = int(itemsize)
+        for dim in shape:
+            total *= int(dim)
+        return int(total)
+    except Exception:
+        return None
+
+
+def _array_stored_bytes(array: Any) -> Optional[int]:
+    if array is None:
+        return None
+    for attr_name in ("nbytes_stored", "nbytes_stored_sync"):
+        value = getattr(array, attr_name, None)
+        if value is None:
+            continue
+        try:
+            resolved = value() if callable(value) else value
+        except Exception:
+            continue
+        if hasattr(resolved, "__await__"):
+            continue
+        try:
+            return int(resolved)
+        except Exception:
+            continue
+    return None
+
+
+def _sum_optional_ints(values: Sequence[Optional[int]]) -> Optional[int]:
+    present = [int(value) for value in values if value is not None]
+    return int(sum(present)) if present else None
+
+
+def _mask_rle_component_arrays(rle_group: Any) -> List[Any]:
+    arrays: List[Any] = []
+    components_group = _get_group(rle_group, "components") if rle_group is not None else None
+    if components_group is None:
+        return arrays
+    for component_key in _run_names(components_group):
+        component_group = _get_group(components_group, component_key)
+        if component_group is None:
+            continue
+        for array_name in ("counts", "indptr", "present", "area_px", "bbox_xyxy"):
+            array = _get_group(component_group, array_name)
+            if array is not None:
+                arrays.append(array)
+    return arrays
 
 
 def _format_ratio(numerator: Optional[int], denominator: Optional[int]) -> Optional[float]:
@@ -229,6 +331,17 @@ def _extract_subject_mask_total_rois(run_group: zarr.Group, attrs: Mapping[str, 
             return int(values.sum())
         except Exception:
             return None
+    rle_group = _get_group(run_group, "mask_rle")
+    components_group = _get_group(rle_group, "components") if rle_group is not None else None
+    if components_group is not None:
+        try:
+            for component_key in _run_names(components_group):
+                component_group = _get_group(components_group, component_key)
+                indptr = _get_group(component_group, "indptr") if component_group is not None else None
+                if indptr is not None and getattr(indptr, "shape", None):
+                    return max(0, int(indptr.shape[0]) - 1)
+        except Exception:
+            return None
     return None
 
 
@@ -267,9 +380,94 @@ def _extract_subject_mask_presence(
         except Exception:
             pass
 
+    rle_group = _get_group(run_group, "mask_rle")
+    components_group = _get_group(rle_group, "components") if rle_group is not None else None
+    if components_group is not None:
+        try:
+            union_present: Optional[np.ndarray] = None
+            for component_key in _run_names(components_group):
+                component_group = _get_group(components_group, component_key)
+                if component_group is None:
+                    continue
+                component_attrs = dict(getattr(component_group, "attrs", {}) or {})
+                component_name = _decode_attr(component_attrs.get("component_name"))
+                if not component_name:
+                    raw_index = component_attrs.get("component_index")
+                    index = _as_int(raw_index)
+                    if index is None:
+                        prefix = str(component_key).split("_", 1)[0]
+                        index = int(prefix) if prefix.isdigit() else None
+                    if index is not None and 0 <= index < len(mask_labels):
+                        component_name = str(mask_labels[index])
+                if component_name not in counts_by_label:
+                    continue
+                present = _get_group(component_group, "present")
+                if present is None:
+                    continue
+                values = np.asarray(present[:], dtype=bool).reshape(-1)
+                counts_by_label[str(component_name)] = int(np.count_nonzero(values))
+                union_present = values.copy() if union_present is None else (union_present | values)
+            if counts_by_label:
+                any_present_rows = int(np.count_nonzero(union_present)) if union_present is not None else None
+                return any_present_rows, counts_by_label
+        except Exception:
+            pass
+
     if total_rois is not None and total_rois >= 0:
         return 0, counts_by_label
     return None, counts_by_label
+
+
+def _extract_mask_storage_fields(run_group: zarr.Group, attrs: Mapping[str, Any]) -> Dict[str, Any]:
+    masks_roi = _get_group(run_group, "masks_roi")
+    rle_group = _get_group(run_group, "mask_rle")
+    rle_attrs = dict(getattr(rle_group, "attrs", {}) or {}) if rle_group is not None else {}
+    rle_arrays = _mask_rle_component_arrays(rle_group)
+
+    store_encodings = _coerce_text_list(attrs.get("mask_store_encodings"))
+    if not store_encodings:
+        if masks_roi is not None:
+            store_encodings.append("dense_uint8")
+        if rle_group is not None:
+            store_encodings.append("component_rle_v1")
+
+    storage_encoding = _decode_attr(attrs.get("mask_storage_encoding"))
+    if not storage_encoding and store_encodings:
+        storage_encoding = "+".join(store_encodings)
+
+    masks_roi_materialized = _as_bool_int(attrs.get("masks_roi_materialized"))
+    if masks_roi_materialized is None:
+        masks_roi_materialized = 1 if masks_roi is not None else 0
+    mask_rle_materialized = _as_bool_int(attrs.get("mask_rle_materialized"))
+    if mask_rle_materialized is None:
+        mask_rle_materialized = 1 if rle_group is not None else 0
+    stale_components = _coerce_text_list(attrs.get("mask_rle_stale_component_names"))
+
+    return {
+        "mask_storage_encoding": storage_encoding,
+        "mask_store_encodings_json": _json_dumps(store_encodings) if store_encodings else None,
+        "masks_roi_materialized": masks_roi_materialized,
+        "mask_rle_materialized": mask_rle_materialized,
+        "mask_rle_schema_id": _decode_attr(attrs.get("mask_rle_schema_id")) or _decode_attr(rle_attrs.get("schema_id")),
+        "mask_rle_encoding": _decode_attr(attrs.get("mask_rle_encoding")) or _decode_attr(rle_attrs.get("mask_encoding")),
+        "mask_rle_layout": _decode_attr(attrs.get("mask_rle_layout")) or _decode_attr(rle_attrs.get("layout")),
+        "masks_roi_logical_bytes": _array_logical_bytes(masks_roi),
+        "masks_roi_stored_bytes": _array_stored_bytes(masks_roi),
+        "masks_roi_materialized_from": _decode_attr(attrs.get("masks_roi_materialized_from")),
+        "masks_roi_materialized_at_utc": _decode_attr(attrs.get("masks_roi_materialized_at_utc")),
+        "mask_rle_logical_bytes": _sum_optional_ints([_array_logical_bytes(array) for array in rle_arrays]),
+        "mask_rle_stored_bytes": _sum_optional_ints([_array_stored_bytes(array) for array in rle_arrays]),
+        "mask_rle_refreshed_at_utc": _decode_attr(attrs.get("mask_rle_refreshed_at_utc"))
+        or _decode_attr(rle_attrs.get("refreshed_at_utc")),
+        "mask_rle_refresh_row_count": _as_int(attrs.get("mask_rle_refresh_row_count")),
+        "mask_rle_stale": _as_bool_int(attrs.get("mask_rle_stale")),
+        "mask_rle_stale_reason": _decode_attr(attrs.get("mask_rle_stale_reason")),
+        "mask_rle_stale_at_utc": _decode_attr(attrs.get("mask_rle_stale_at_utc")),
+        "mask_rle_stale_component_names_json": _json_dumps(stale_components) if stale_components else None,
+        "mask_rle_stale_row_count": _as_int(attrs.get("mask_rle_stale_row_count")),
+        "mask_rle_stale_row_min": _as_int(attrs.get("mask_rle_stale_row_min")),
+        "mask_rle_stale_row_max": _as_int(attrs.get("mask_rle_stale_row_max")),
+    }
 
 
 def _extract_subject_mask_performance_rows(
@@ -427,6 +625,14 @@ def _extract_subject_mask_performance_rows(
             rois_per_second = None
             if duration_seconds is not None and duration_seconds > 0 and total_rois is not None:
                 rois_per_second = float(total_rois) / float(duration_seconds)
+            source_roi_pixel_contract, source_roi_pixel_contract_name = _resolve_source_roi_pixel_contract(
+                attrs,
+                provenance_inputs,
+            )
+            source_roi_cache_used = _as_bool_int(
+                _lookup_attr(attrs, provenance_inputs, "source_roi_cache_used", "roi_cache_used")
+            )
+            mask_storage_fields = _extract_mask_storage_fields(run_group, attrs)
 
             rows.append(
                 {
@@ -440,6 +646,45 @@ def _extract_subject_mask_performance_rows(
                     "source_crop_run": _decode_attr(attrs.get("source_crop_run")) or _decode_attr(
                         provenance_inputs.get("source_crop_run")
                     ),
+                    "source_crop_storage_mode": _decode_attr(
+                        _lookup_attr(attrs, provenance_inputs, "source_crop_storage_mode")
+                    ),
+                    "source_crop_signature": _decode_attr(
+                        _lookup_attr(attrs, provenance_inputs, "source_crop_signature")
+                    ),
+                    "source_crop_revision": _as_int(
+                        _lookup_attr(attrs, provenance_inputs, "source_crop_revision")
+                    ),
+                    "source_roi_image_representation": _decode_attr(
+                        _lookup_attr(attrs, provenance_inputs, "source_roi_image_representation")
+                    ),
+                    "source_roi_pixel_contract_name": source_roi_pixel_contract_name,
+                    "source_roi_pixel_contract_json": _json_dumps(source_roi_pixel_contract),
+                    "source_roi_read_mode": _decode_attr(
+                        _lookup_attr(attrs, provenance_inputs, "source_roi_read_mode")
+                    ),
+                    "roi_cache_policy": _decode_attr(_lookup_attr(attrs, provenance_inputs, "roi_cache_policy")),
+                    "source_roi_cache_used": source_roi_cache_used,
+                    "source_roi_cache_backend": _decode_attr(
+                        _lookup_attr(attrs, provenance_inputs, "source_roi_cache_backend", "roi_cache_backend")
+                    ),
+                    "source_roi_live_acceleration_effective": _decode_attr(
+                        _lookup_attr(
+                            attrs,
+                            provenance_inputs,
+                            "source_roi_live_acceleration_effective",
+                            "roi_live_acceleration_effective",
+                        )
+                    ),
+                    "source_roi_live_gpu_chunk_frames": _as_int(
+                        _lookup_attr(
+                            attrs,
+                            provenance_inputs,
+                            "source_roi_live_gpu_chunk_frames",
+                            "roi_live_gpu_chunk_frames",
+                        )
+                    ),
+                    **mask_storage_fields,
                     "source_keypoint_group": _decode_attr(attrs.get("source_keypoint_group")) or _decode_attr(
                         provenance_inputs.get("source_keypoint_group")
                     ),

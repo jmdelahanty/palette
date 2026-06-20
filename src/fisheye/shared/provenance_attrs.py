@@ -23,6 +23,18 @@ SOURCE_CROP_REVISION_ATTR = "source_crop_revision"
 SOURCE_ROI_IMAGE_REPRESENTATION_ATTR = "source_roi_image_representation"
 SOURCE_ROI_PIXEL_CONTRACT_ATTR = "source_roi_pixel_contract"
 SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR = "source_roi_pixel_contract_name"
+SOURCE_ROI_READ_MODE_ATTR = "source_roi_read_mode"
+ROI_CACHE_POLICY_ATTR = "roi_cache_policy"
+SOURCE_ROI_CACHE_USED_ATTR = "source_roi_cache_used"
+SOURCE_ROI_CACHE_BACKEND_ATTR = "source_roi_cache_backend"
+SOURCE_ROI_CACHE_KEY_ATTR = "source_roi_cache_key"
+SOURCE_ROI_CACHE_PATH_ATTR = "source_roi_cache_path"
+SOURCE_ROI_CACHE_CANONICAL_PATH_ATTR = "source_roi_cache_canonical_path"
+SOURCE_ROI_CACHE_EXPECTED_ARCHIVE_PATH_ATTR = "source_roi_cache_expected_archive_path"
+SOURCE_ROI_LIVE_ACCELERATION_REQUESTED_ATTR = "source_roi_live_acceleration_requested"
+SOURCE_ROI_LIVE_ACCELERATION_EFFECTIVE_ATTR = "source_roi_live_acceleration_effective"
+SOURCE_ROI_LIVE_ACCELERATION_FALLBACK_REASON_ATTR = "source_roi_live_acceleration_fallback_reason"
+SOURCE_ROI_LIVE_GPU_CHUNK_FRAMES_ATTR = "source_roi_live_gpu_chunk_frames"
 CANONICAL_SOURCE_CROP_SNAPSHOT_ATTRS = (
     SOURCE_CROP_STORAGE_MODE_ATTR,
     SOURCE_CROP_SIGNATURE_ATTR,
@@ -152,6 +164,22 @@ def build_source_roi_pixel_attrs(roi_source: Any = None) -> Dict[str, Any]:
     return payload
 
 
+def _as_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return None
+
+
 def extract_source_crop_snapshot_attrs(attrs: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Return normalized canonical crop snapshot attrs from an attr mapping."""
     attr_map = attrs or {}
@@ -184,5 +212,29 @@ def extract_source_crop_snapshot_attrs(attrs: Optional[Mapping[str, Any]]) -> Di
     contract_name = normalize_attr(attr_map.get(SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR))
     if contract_name is not None:
         payload[SOURCE_ROI_PIXEL_CONTRACT_NAME_ATTR] = contract_name
+
+    cache_used = _as_bool(attr_map.get(SOURCE_ROI_CACHE_USED_ATTR))
+    if cache_used is not None:
+        payload[SOURCE_ROI_CACHE_USED_ATTR] = cache_used
+
+    for key in (
+        SOURCE_ROI_READ_MODE_ATTR,
+        ROI_CACHE_POLICY_ATTR,
+        SOURCE_ROI_CACHE_BACKEND_ATTR,
+        SOURCE_ROI_CACHE_KEY_ATTR,
+        SOURCE_ROI_CACHE_PATH_ATTR,
+        SOURCE_ROI_CACHE_CANONICAL_PATH_ATTR,
+        SOURCE_ROI_CACHE_EXPECTED_ARCHIVE_PATH_ATTR,
+        SOURCE_ROI_LIVE_ACCELERATION_REQUESTED_ATTR,
+        SOURCE_ROI_LIVE_ACCELERATION_EFFECTIVE_ATTR,
+        SOURCE_ROI_LIVE_ACCELERATION_FALLBACK_REASON_ATTR,
+    ):
+        value = normalize_attr(attr_map.get(key))
+        if value is not None:
+            payload[key] = value
+
+    gpu_chunk_frames = as_int(attr_map.get(SOURCE_ROI_LIVE_GPU_CHUNK_FRAMES_ATTR))
+    if gpu_chunk_frames is not None and gpu_chunk_frames >= 0:
+        payload[SOURCE_ROI_LIVE_GPU_CHUNK_FRAMES_ATTR] = int(gpu_chunk_frames)
 
     return payload

@@ -12,6 +12,7 @@ import zarr.api.synchronous as zarr_sync_api
 import zarr.core.sync as zarr_sync
 from zarr.storage import MemoryStore
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.utils.audit_subject_mask_training_sources import (
     audit_selected_subject_mask_training_sources,
 )
@@ -117,6 +118,19 @@ def _write_source_root(
     return root
 
 
+def _replace_run_masks_with_rle(run: zarr.Group) -> np.ndarray:
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    labels = [str(label) for label in run.attrs["mask_labels"]]
+    del run["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        run,
+        masks,
+        component_names=labels,
+        encode_row_chunk_size=2,
+    )
+    return masks
+
+
 def _manifest_source(
     path: Path,
     *,
@@ -168,6 +182,47 @@ def test_audit_subject_mask_training_sources_accepts_refined_manifest_source() -
     assert summary["valid"] is True
     assert summary["errors"] == []
     assert summary["sources"][0]["available_components"] == sorted(LABELS)
+    assert summary["sources"][0]["source_mask_store_encoding"] == "dense_uint8"
+    assert summary["sources"][0]["source_mask_storage_surface"] == "masks_roi"
+    assert summary["sources"][0]["component_rate_parity_checked"] == sorted(LABELS)
+
+
+def test_audit_subject_mask_training_sources_accepts_compact_refined_source() -> None:
+    path = Path("/tmp/source_compact.zarr")
+    root = _write_source_root()
+    run = root["refined_subject_masks_runs/refined_subject_masks_001"]
+    _replace_run_masks_with_rle(run)
+
+    summary = audit_selected_subject_mask_training_sources(
+        [_manifest_source(path)],
+        open_zarr=_opener({str(path): root}),
+    )
+
+    assert summary["valid"] is True
+    assert summary["errors"] == []
+    assert summary["sources"][0]["source_mask_store_encoding"] == "component_rle_v1"
+    assert summary["sources"][0]["source_mask_storage_surface"] == "mask_rle"
+    assert summary["sources"][0]["component_rate_parity_checked"] == sorted(LABELS)
+
+
+def test_audit_subject_mask_training_sources_can_rate_check_compact_source_without_metrics() -> None:
+    path = Path("/tmp/source_compact_no_metrics.zarr")
+    root = _write_source_root()
+    run = root["refined_subject_masks_runs/refined_subject_masks_001"]
+    del run["metrics"]
+    _replace_run_masks_with_rle(run)
+
+    summary = audit_selected_subject_mask_training_sources(
+        [_manifest_source(path)],
+        open_zarr=_opener({str(path): root}),
+        read_masks_for_rates=True,
+    )
+
+    assert summary["valid"] is True
+    assert summary["errors"] == []
+    assert summary["warnings"] == []
+    assert summary["sources"][0]["source_mask_store_encoding"] == "component_rle_v1"
+    assert summary["sources"][0]["source_mask_storage_surface"] == "mask_rle"
     assert summary["sources"][0]["component_rate_parity_checked"] == sorted(LABELS)
 
 

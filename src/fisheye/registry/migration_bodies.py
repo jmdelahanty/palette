@@ -2405,6 +2405,36 @@ class RegistryMigrationMixin:
             """
         )
 
+    def _migration_057_subject_mask_storage_byte_fields(self) -> None:
+        """Expose dense/RLE mask storage sizes and cache freshness in registry views."""
+
+        self._migration_032_subject_mask_registry()
+        self._ensure_columns(
+            "subject_mask_performance",
+            {
+                "masks_roi_logical_bytes": "INTEGER",
+                "masks_roi_stored_bytes": "INTEGER",
+                "masks_roi_materialized_from": "TEXT",
+                "masks_roi_materialized_at_utc": "TEXT",
+                "mask_rle_logical_bytes": "INTEGER",
+                "mask_rle_stored_bytes": "INTEGER",
+                "mask_rle_refreshed_at_utc": "TEXT",
+                "mask_rle_refresh_row_count": "INTEGER",
+                "mask_rle_stale": "INTEGER",
+                "mask_rle_stale_reason": "TEXT",
+                "mask_rle_stale_at_utc": "TEXT",
+                "mask_rle_stale_component_names_json": "TEXT",
+                "mask_rle_stale_row_count": "INTEGER",
+                "mask_rle_stale_row_min": "INTEGER",
+                "mask_rle_stale_row_max": "INTEGER",
+            },
+        )
+        self._migration_033_subject_mask_registry_semantics_columns()
+        self._migration_036_subject_mask_component_latest_views()
+        self._migration_037_subject_mask_component_eye_compat_latest_views()
+        self._migration_038_subject_mask_component_partial_run_preference()
+        self._migration_039_subject_mask_component_source_stale_views()
+
     def _migration_015_eye_mask_performance_registry(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -4219,8 +4249,8 @@ class RegistryMigrationMixin:
                 SELECT
                     ddp.dataset_id AS dataset_id,
                     ddp.profile_run AS profile_run,
-                    COALESCE(dcc.recording_id, tip.recording_id) AS recording_id,
-                    COALESCE(dcc.zarr_use, tip.zarr_use) AS zarr_use,
+                    COALESCE(dcc.recording_id, ddp.recording_id) AS recording_id,
+                    COALESCE(dcc.zarr_use, ddp.zarr_use) AS zarr_use,
                     ddp.detection_type AS detection_type,
                     ddp.detection_path AS detection_path,
                     ddp.profile_created_utc AS profile_created_utc,
@@ -4251,14 +4281,8 @@ class RegistryMigrationMixin:
                     COALESCE(dcc.dish_design, ddp.dish_design) AS dish_design,
                     COALESCE(dcc.canvas_name, ddp.canvas_name) AS canvas_name,
                     COALESCE(dcc.protocol_name, ddp.protocol_name) AS protocol_name,
-                    CASE
-                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.genotype
-                        ELSE COALESCE(dcc.genotype, ddp.genotype)
-                    END AS genotype,
-                    CASE
-                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.dpf_at_acquisition
-                        ELSE COALESCE(dcc.dpf_at_acquisition, ddp.dpf_at_acquisition)
-                    END AS dpf_at_acquisition,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     ddp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY ddp.dataset_id
@@ -4536,14 +4560,8 @@ class RegistryMigrationMixin:
                     COALESCE(dcc.dish_design, kdp.dish_design) AS dish_design,
                     COALESCE(dcc.canvas_name, kdp.canvas_name) AS canvas_name,
                     COALESCE(dcc.protocol_name, kdp.protocol_name) AS protocol_name,
-                    CASE
-                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.genotype
-                        ELSE COALESCE(dcc.genotype, kdp.genotype)
-                    END AS genotype,
-                    CASE
-                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.dpf_at_acquisition
-                        ELSE COALESCE(dcc.dpf_at_acquisition, kdp.dpf_at_acquisition)
-                    END AS dpf_at_acquisition,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     kdp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY kdp.dataset_id, COALESCE(kdp.keypoint_method, '')
@@ -4907,14 +4925,8 @@ class RegistryMigrationMixin:
                     COALESCE(dcc.dish_design, emdp.dish_design) AS dish_design,
                     COALESCE(dcc.canvas_name, emdp.canvas_name) AS canvas_name,
                     COALESCE(dcc.protocol_name, emdp.protocol_name) AS protocol_name,
-                    CASE
-                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.genotype
-                        ELSE COALESCE(dcc.genotype, emdp.genotype)
-                    END AS genotype,
-                    CASE
-                        WHEN dcc.subject_context_source = 'normalized' THEN dcc.dpf_at_acquisition
-                        ELSE COALESCE(dcc.dpf_at_acquisition, emdp.dpf_at_acquisition)
-                    END AS dpf_at_acquisition,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     emdp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY emdp.dataset_id, COALESCE(emdp.stage_group, ''), COALESCE(emdp.eye_mask_method, '')
@@ -5488,6 +5500,40 @@ class RegistryMigrationMixin:
                 subject_mask_method TEXT,
                 label_schema_id TEXT,
                 source_crop_run TEXT,
+                source_crop_storage_mode TEXT,
+                source_crop_signature TEXT,
+                source_crop_revision INTEGER,
+                source_roi_image_representation TEXT,
+                source_roi_pixel_contract_name TEXT,
+                source_roi_pixel_contract_json TEXT,
+                source_roi_read_mode TEXT,
+                roi_cache_policy TEXT,
+                source_roi_cache_used INTEGER,
+                source_roi_cache_backend TEXT,
+                source_roi_live_acceleration_effective TEXT,
+                source_roi_live_gpu_chunk_frames INTEGER,
+                mask_storage_encoding TEXT,
+                mask_store_encodings_json TEXT,
+                masks_roi_materialized INTEGER,
+                mask_rle_materialized INTEGER,
+                mask_rle_schema_id TEXT,
+                mask_rle_encoding TEXT,
+                mask_rle_layout TEXT,
+                masks_roi_logical_bytes INTEGER,
+                masks_roi_stored_bytes INTEGER,
+                masks_roi_materialized_from TEXT,
+                masks_roi_materialized_at_utc TEXT,
+                mask_rle_logical_bytes INTEGER,
+                mask_rle_stored_bytes INTEGER,
+                mask_rle_refreshed_at_utc TEXT,
+                mask_rle_refresh_row_count INTEGER,
+                mask_rle_stale INTEGER,
+                mask_rle_stale_reason TEXT,
+                mask_rle_stale_at_utc TEXT,
+                mask_rle_stale_component_names_json TEXT,
+                mask_rle_stale_row_count INTEGER,
+                mask_rle_stale_row_min INTEGER,
+                mask_rle_stale_row_max INTEGER,
                 source_keypoint_group TEXT,
                 source_keypoints_run TEXT,
                 source_subject_mask_run TEXT,
@@ -5571,6 +5617,40 @@ class RegistryMigrationMixin:
                 "subject_mask_method": "TEXT",
                 "label_schema_id": "TEXT",
                 "source_crop_run": "TEXT",
+                "source_crop_storage_mode": "TEXT",
+                "source_crop_signature": "TEXT",
+                "source_crop_revision": "INTEGER",
+                "source_roi_image_representation": "TEXT",
+                "source_roi_pixel_contract_name": "TEXT",
+                "source_roi_pixel_contract_json": "TEXT",
+                "source_roi_read_mode": "TEXT",
+                "roi_cache_policy": "TEXT",
+                "source_roi_cache_used": "INTEGER",
+                "source_roi_cache_backend": "TEXT",
+                "source_roi_live_acceleration_effective": "TEXT",
+                "source_roi_live_gpu_chunk_frames": "INTEGER",
+                "mask_storage_encoding": "TEXT",
+                "mask_store_encodings_json": "TEXT",
+                "masks_roi_materialized": "INTEGER",
+                "mask_rle_materialized": "INTEGER",
+                "mask_rle_schema_id": "TEXT",
+                "mask_rle_encoding": "TEXT",
+                "mask_rle_layout": "TEXT",
+                "masks_roi_logical_bytes": "INTEGER",
+                "masks_roi_stored_bytes": "INTEGER",
+                "masks_roi_materialized_from": "TEXT",
+                "masks_roi_materialized_at_utc": "TEXT",
+                "mask_rle_logical_bytes": "INTEGER",
+                "mask_rle_stored_bytes": "INTEGER",
+                "mask_rle_refreshed_at_utc": "TEXT",
+                "mask_rle_refresh_row_count": "INTEGER",
+                "mask_rle_stale": "INTEGER",
+                "mask_rle_stale_reason": "TEXT",
+                "mask_rle_stale_at_utc": "TEXT",
+                "mask_rle_stale_component_names_json": "TEXT",
+                "mask_rle_stale_row_count": "INTEGER",
+                "mask_rle_stale_row_min": "INTEGER",
+                "mask_rle_stale_row_max": "INTEGER",
                 "source_keypoint_group": "TEXT",
                 "source_keypoints_run": "TEXT",
                 "source_subject_mask_run": "TEXT",
@@ -5700,6 +5780,40 @@ class RegistryMigrationMixin:
                 subject_mask_method,
                 label_schema_id,
                 source_crop_run,
+                source_crop_storage_mode,
+                source_crop_signature,
+                source_crop_revision,
+                source_roi_image_representation,
+                source_roi_pixel_contract_name,
+                source_roi_pixel_contract_json,
+                source_roi_read_mode,
+                roi_cache_policy,
+                source_roi_cache_used,
+                source_roi_cache_backend,
+                source_roi_live_acceleration_effective,
+                source_roi_live_gpu_chunk_frames,
+                mask_storage_encoding,
+                mask_store_encodings_json,
+                masks_roi_materialized,
+                mask_rle_materialized,
+                mask_rle_schema_id,
+                mask_rle_encoding,
+                mask_rle_layout,
+                masks_roi_logical_bytes,
+                masks_roi_stored_bytes,
+                masks_roi_materialized_from,
+                masks_roi_materialized_at_utc,
+                mask_rle_logical_bytes,
+                mask_rle_stored_bytes,
+                mask_rle_refreshed_at_utc,
+                mask_rle_refresh_row_count,
+                mask_rle_stale,
+                mask_rle_stale_reason,
+                mask_rle_stale_at_utc,
+                mask_rle_stale_component_names_json,
+                mask_rle_stale_row_count,
+                mask_rle_stale_row_min,
+                mask_rle_stale_row_max,
                 source_keypoint_group,
                 source_keypoints_run,
                 source_subject_mask_run,
@@ -5778,6 +5892,40 @@ class RegistryMigrationMixin:
                 subject_mask_method,
                 label_schema_id,
                 source_crop_run,
+                source_crop_storage_mode,
+                source_crop_signature,
+                source_crop_revision,
+                source_roi_image_representation,
+                source_roi_pixel_contract_name,
+                source_roi_pixel_contract_json,
+                source_roi_read_mode,
+                roi_cache_policy,
+                source_roi_cache_used,
+                source_roi_cache_backend,
+                source_roi_live_acceleration_effective,
+                source_roi_live_gpu_chunk_frames,
+                mask_storage_encoding,
+                mask_store_encodings_json,
+                masks_roi_materialized,
+                mask_rle_materialized,
+                mask_rle_schema_id,
+                mask_rle_encoding,
+                mask_rle_layout,
+                masks_roi_logical_bytes,
+                masks_roi_stored_bytes,
+                masks_roi_materialized_from,
+                masks_roi_materialized_at_utc,
+                mask_rle_logical_bytes,
+                mask_rle_stored_bytes,
+                mask_rle_refreshed_at_utc,
+                mask_rle_refresh_row_count,
+                mask_rle_stale,
+                mask_rle_stale_reason,
+                mask_rle_stale_at_utc,
+                mask_rle_stale_component_names_json,
+                mask_rle_stale_row_count,
+                mask_rle_stale_row_min,
+                mask_rle_stale_row_max,
                 source_keypoint_group,
                 source_keypoints_run,
                 source_subject_mask_run,

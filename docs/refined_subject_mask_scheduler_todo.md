@@ -206,8 +206,9 @@ islands, holes, and small gaps should be handled.
 Core boundary:
 
 - raw `subject_mask_runs/<run>` probability maps are immutable evidence
-- `refined_subject_masks_runs/<run>/masks_roi` is the post-finalization binary
-  candidate surface
+- `refined_subject_masks_runs/<run>` exposes the post-finalization binary
+  candidate surface as a logical mask store. It may be physically backed by
+  dense `masks_roi`, compact `mask_rle`, or both.
 - cleanup must be component-aware; one morphology policy is not valid for body,
   eyes, and swim bladder
 - cleanup should be auditable, not silent

@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from fisheye.analysis import subject_shape_runs
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.visualization.visualize_subject_shape_overlays import (
     export_subject_shape_overlays,
     open_subject_shape_overlay_context,
@@ -82,6 +83,18 @@ def _build_refined_root(store_path: Path) -> zarr.Group:
     return root
 
 
+def _replace_refined_masks_with_rle(root: zarr.Group) -> None:
+    run = root["refined_subject_masks_runs"]["refined_001"]
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    del run["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        run,
+        dense,
+        component_names=[str(label) for label in run.attrs["mask_labels"]],
+        encode_row_chunk_size=1,
+    )
+
+
 def _add_persisted_eye_left_contours(root: zarr.Group) -> None:
     run = root["refined_subject_masks_runs"]["refined_001"]
     contours = run.require_group("components").require_group("eye_left").require_group("contours")
@@ -124,6 +137,29 @@ def test_render_subject_shape_overlay_from_mask_background(tmp_path: Path, monke
     labels = [collection.get_label() for collection in fig.axes[0].collections]
     assert "body skeleton" in labels
     assert "snout tip" in labels
+    fig.canvas.draw()
+    plt.close(fig)
+
+
+def test_render_subject_shape_overlay_reads_compact_mask_store(tmp_path: Path, monkeypatch) -> None:
+    _patch_provenance(monkeypatch)
+    zarr_path = tmp_path / "shape.zarr"
+    root = _build_refined_root(zarr_path)
+    _replace_refined_masks_with_rle(root)
+    subject_shape_runs.write_subject_shape_run_group(
+        root,
+        zarr_path=zarr_path,
+        refined_run="refined_001",
+        run_name="shape_001",
+    )
+
+    ctx = open_subject_shape_overlay_context(zarr_path, shape_run="shape_001", use_crop_images=False)
+    fig = render_subject_shape_overlay(ctx, row=0, show_skeleton=True)
+
+    assert "masks_roi" not in ctx.refined_group
+    assert ctx.mask_store.encoding == "component_rle_v1"
+    labels = [collection.get_label() for collection in fig.axes[0].collections]
+    assert "body skeleton" in labels
     fig.canvas.draw()
     plt.close(fig)
 

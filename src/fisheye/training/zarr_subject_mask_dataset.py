@@ -14,6 +14,9 @@ from torch.utils.data import Dataset
 
 from .config import SubjectMaskDatasetConfig, SubjectMaskTrainingConfig
 
+TRAINING_MASK_STORAGE_FORMAT = "dense_uint8"
+TRAINING_MASK_STORAGE_SURFACE = "masks_roi"
+
 
 @dataclass
 class SubjectMaskTargetStore:
@@ -183,6 +186,23 @@ def load_subject_mask_training_artifact(
     if "masks_roi" not in mask_group or "target_valid_channels" not in mask_group:
         raise ValueError(
             f"{source_path}: subject_mask_runs/{mask_name} missing masks_roi or target_valid_channels."
+        )
+    if "mask_rle" in mask_group:
+        raise ValueError(
+            f"{source_path}: subject_mask_runs/{mask_name} contains compact mask_rle; "
+            "subject-mask training artifacts must expose dense masks_roi only."
+        )
+    mask_storage_format = str(mask_group.attrs.get("mask_storage_format") or "").strip()
+    if mask_storage_format and mask_storage_format != TRAINING_MASK_STORAGE_FORMAT:
+        raise ValueError(
+            f"{source_path}: subject_mask_runs/{mask_name} mask_storage_format must be "
+            f"{TRAINING_MASK_STORAGE_FORMAT!r}, got {mask_storage_format!r}."
+        )
+    mask_storage_surface = str(mask_group.attrs.get("mask_storage_surface") or "").strip()
+    if mask_storage_surface and mask_storage_surface != TRAINING_MASK_STORAGE_SURFACE:
+        raise ValueError(
+            f"{source_path}: subject_mask_runs/{mask_name} mask_storage_surface must be "
+            f"{TRAINING_MASK_STORAGE_SURFACE!r}, got {mask_storage_surface!r}."
         )
 
     label_schema_id = str(mask_group.attrs.get("label_schema_id") or "").strip()

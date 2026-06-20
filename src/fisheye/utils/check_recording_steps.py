@@ -23,6 +23,7 @@ from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
 )
+from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.type_conversions import status_text as _status_text
@@ -599,17 +600,41 @@ def _extract_subject_mask_coverage(group: Optional[zarr.Group]) -> Optional[floa
 
     metrics = group.get("metrics")
     if metrics is None:
-        return None
+        return _extract_subject_mask_coverage_from_store(group)
     mask_present = metrics.get("mask_present")
     if mask_present is None:
-        return None
+        return _extract_subject_mask_coverage_from_store(group)
     try:
         values = np.asarray(mask_present[:], dtype=bool)
     except Exception:
-        return None
+        return _extract_subject_mask_coverage_from_store(group)
     if values.size == 0 or values.shape[0] == 0:
-        return None
+        return _extract_subject_mask_coverage_from_store(group)
     return float(np.sum(np.any(values, axis=1))) / float(values.shape[0]) * 100.0
+
+
+def _extract_subject_mask_coverage_from_store(group: Optional[zarr.Group]) -> Optional[float]:
+    if group is None:
+        return None
+    try:
+        mask_store = open_mask_store(group, prefer="dense")
+    except (MaskStoreError, ValueError):
+        return None
+    total_rows = int(mask_store.n_rows)
+    if total_rows <= 0:
+        return None
+    present_rows = 0
+    step = 256
+    for start in range(0, total_rows, step):
+        stop = min(total_rows, start + step)
+        try:
+            block = np.asarray(mask_store.read_dense(rows=slice(start, stop)), dtype=np.uint8)
+        except (MaskStoreError, ValueError):
+            return None
+        if block.ndim != 4 or block.shape[0] == 0:
+            continue
+        present_rows += int(np.sum(np.any(block > 0, axis=(1, 2, 3))))
+    return float(present_rows) / float(total_rows) * 100.0
 
 
 def _extract_subject_mask_run_summary(

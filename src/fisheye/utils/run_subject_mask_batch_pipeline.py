@@ -31,6 +31,7 @@ from typing import Any, Iterable, Optional, Sequence
 import zarr
 
 from fisheye.registry.db import RegistryPaths
+from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.subject_mask_registry_status import (
     emit_refined_subject_mask_stage_completion,
     emit_subject_mask_stage_completion,
@@ -770,12 +771,20 @@ def validate_outputs(
         refined_labels = tuple(str(label) for label in refined.attrs.get("mask_labels", ()))
         if any(label not in refined_labels for label in REFINED_COMPONENTS):
             return "failed", f"refined mask labels {refined_labels!r} missing {REFINED_COMPONENTS!r}"
-        if "masks_roi" not in refined:
-            return "failed", f"refined_subject_masks_runs/{refined_run} missing masks_roi"
+        try:
+            mask_store = open_mask_store(
+                refined,
+                source_path=f"{zarr_path}/refined_subject_masks_runs/{refined_run}",
+                prefer="dense",
+            )
+        except (MaskStoreError, ValueError) as exc:
+            return "failed", f"refined_subject_masks_runs/{refined_run} missing usable mask store: {exc}"
+        if any(label not in mask_store.mask_labels for label in REFINED_COMPONENTS):
+            return "failed", f"refined mask store labels {mask_store.mask_labels!r} missing {REFINED_COMPONENTS!r}"
         for component in REFINED_COMPONENTS:
             if f"components/{component}" not in refined:
                 return "failed", f"refined_subject_masks_runs/{refined_run} missing components/{component}"
-        details.append(f"refined_mask_labels={refined_labels}")
+        details.append(f"refined_mask_labels={refined_labels}; refined_mask_store={mask_store.encoding}")
     return "ok", "; ".join(details)
 
 

@@ -1115,7 +1115,7 @@ def _build_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "roi_live_gpu_chunk_frames",
         *TUNING_OVERRIDE_KEYS,
     ):
-        value = getattr(args, key)
+        value = getattr(args, key, None)
         if value is not None:
             overrides[key] = value
     return overrides

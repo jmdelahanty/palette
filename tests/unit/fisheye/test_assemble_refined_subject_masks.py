@@ -10,6 +10,7 @@ import zarr
 from fisheye.refinement import assemble_refined_subject_masks as assemble_mod
 from fisheye.refinement import refine_subject_masks as batch_mod
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
@@ -988,6 +989,19 @@ def _mark_refined_component_review(run: zarr.Group, component_name: str, *, stat
     }
 
 
+def _replace_refined_masks_with_rle(run: zarr.Group) -> np.ndarray:
+    masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    labels = [str(label) for label in run.attrs["mask_labels"]]
+    del run["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        run,
+        masks,
+        component_names=labels,
+        encode_row_chunk_size=1,
+    )
+    return masks
+
+
 def test_assemble_refined_subject_run_can_import_components_from_refined_subject_runs(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_assembly_root()
@@ -1073,6 +1087,37 @@ def test_assemble_refined_subject_run_can_import_components_from_refined_subject
     assert run.attrs["refined_subject_mask_review_status"]["state"] == "pending"
     assert body_provenance["source_review_status"]["state"] == "approved"
     assert swim_provenance["source_review_status"]["state"] == "approved"
+
+
+def test_assemble_refined_subject_run_imports_compact_refined_subject_source(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_assembly_root()
+
+    assemble_mod.assemble_refined_subject_run(
+        root,
+        body_run="body_run_001",
+        refined_run="refined_subject_body_compact_source_001",
+    )
+    body_refined = root["refined_subject_masks_runs"]["refined_subject_body_compact_source_001"]
+    expected_body_masks = _replace_refined_masks_with_rle(body_refined)
+    _mark_refined_component_review(body_refined, "subject_body")
+
+    summary = assemble_mod.assemble_refined_subject_run(
+        root,
+        body_refined_run="refined_subject_body_compact_source_001",
+        refined_run="refined_subject_assembled_from_compact_refined_001",
+    )
+
+    assert summary["status"] == "updated"
+    run = root["refined_subject_masks_runs"]["refined_subject_assembled_from_compact_refined_001"]
+    np.testing.assert_array_equal(
+        np.asarray(run["masks_roi"][:, 0], dtype=np.uint8),
+        expected_body_masks[:, 0],
+    )
+    provenance = run["components/subject_body/provenance"].attrs
+    assert provenance["source_stage"] == "refined_subject_masks_runs"
+    assert provenance["source_run"] == "refined_subject_body_compact_source_001"
+    assert provenance["source_mask_surface_path"] == "mask_rle"
 
 
 def test_assemble_refined_subject_run_promotes_refined_component_reviews_when_requested(monkeypatch) -> None:

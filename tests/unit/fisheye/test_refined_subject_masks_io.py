@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.mask_rle import encode_mask_component_stack_rle
+from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.refined_subject_masks_io import (
     RefinedSubjectMasksIOError,
     discover_refined_subject_masks_run_options,
@@ -16,6 +18,35 @@ from fisheye.shared.refined_subject_masks_io import (
 
 def _write_array(group: zarr.Group, name: str, values: np.ndarray) -> None:
     group.create_array(name, data=values, chunks=values.shape, overwrite=True)
+
+
+def _write_component_rle(run: zarr.Group, masks: np.ndarray, labels: tuple[str, ...]) -> None:
+    encoded = encode_mask_component_stack_rle(masks, component_names=labels)
+    rle = run.create_group("mask_rle")
+    rle.attrs.update(
+        {
+            "schema_id": "palette_mask_rle_binary_v1",
+            "mask_encoding": "coco_rle_fortran_v1",
+            "mask_value_semantics": "binary_0_1",
+            "encoded_shape_hw": [int(encoded.shape_hw[0]), int(encoded.shape_hw[1])],
+            "layout": "component_groups",
+            "component_names": list(labels),
+        }
+    )
+    components = rle.create_group("components")
+    for component in encoded.components:
+        group = components.create_group(f"{component.component_index:02d}_{component.component_name}")
+        group.attrs.update(
+            {
+                "component_name": component.component_name,
+                "component_index": int(component.component_index),
+            }
+        )
+        _write_array(group, "counts", component.counts)
+        _write_array(group, "indptr", component.indptr)
+        _write_array(group, "present", component.present)
+        _write_array(group, "area_px", component.area_px)
+        _write_array(group, "bbox_xyxy", component.bbox_xyxy)
 
 
 def _make_refined_subject_archive(tmp_path: Path) -> zarr.Group:
@@ -84,6 +115,10 @@ def _make_refined_subject_archive(tmp_path: Path) -> zarr.Group:
     return root
 
 
+def _refined_run(root: zarr.Group) -> zarr.Group:
+    return root["refined_subject_masks_runs/refined_1"]
+
+
 def test_discover_refined_subject_masks_options_uses_latest_and_mask_metadata(tmp_path: Path) -> None:
     root = _make_refined_subject_archive(tmp_path)
 
@@ -102,6 +137,27 @@ def test_discover_refined_subject_masks_options_uses_latest_and_mask_metadata(tm
     assert option.roi_shape == (8, 8)
     assert option.is_latest is True
     assert "latest" in option.label
+
+
+def test_discover_refined_subject_masks_options_uses_compact_store_metadata(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+    for name in ("masks_roi", "frame_indices", "detection_indices", "edit_applied", "detection_source", "metrics"):
+        if name in run:
+            del run[name]
+
+    options = discover_refined_subject_masks_run_options(root)
+
+    assert len(options) == 1
+    option = options[0]
+    assert option.run_name == "refined_1"
+    assert option.n_rows == 3
+    assert option.channel_count == 4
+    assert option.roi_shape == (8, 8)
+    assert option.available_components == ("subject_body", "eye_left", "eye_right")
 
 
 def test_load_refined_subject_masks_run_tables_reads_logical_surfaces(tmp_path: Path) -> None:
@@ -131,6 +187,11 @@ def test_load_refined_subject_masks_run_tables_reads_logical_surfaces(tmp_path: 
         tables.source_paths["components/subject_body/qc/requires_review"]
         == "refined_subject_masks_runs/refined_1/components/subject_body/qc/requires_review"
     )
+    assert tables.require_mask_store().encoding == "dense_uint8"
+    np.testing.assert_array_equal(
+        tables.require_mask_store().read_dense(rows=[1], channels=["subject_body"]),
+        np.asarray(root["refined_subject_masks_runs/refined_1/masks_roi"][1:2, 0:1], dtype=np.uint8),
+    )
 
 
 def test_load_refined_subject_masks_run_tables_can_skip_dense_masks(tmp_path: Path) -> None:
@@ -156,3 +217,156 @@ def test_resolve_refined_subject_masks_run_rejects_missing_run(tmp_path: Path) -
 
     with pytest.raises(RefinedSubjectMasksIOError, match="not found"):
         resolve_refined_subject_masks_run(root, "missing_refined")
+
+
+def test_open_mask_store_reads_dense_masks_by_rows_and_components(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+
+    store = open_mask_store(run, source_path="refined_subject_masks_runs/refined_1")
+
+    assert store.encoding == "dense_uint8"
+    assert store.storage_surface == "masks_roi"
+    assert store.storage_path == "refined_subject_masks_runs/refined_1/masks_roi"
+    assert store.mask_labels == ("subject_body", "eye_left", "eye_right", "swim_bladder")
+    assert store.shape == (3, 4, 8, 8)
+    masks = store.read_dense(rows=[0, 2], channels=["eye_left", "eye_right"])
+    expected = np.asarray(run["masks_roi"][:], dtype=np.uint8)[[0, 2]][:, [1, 2]]
+    np.testing.assert_array_equal(masks, expected)
+
+
+def test_open_mask_store_reads_component_rle_without_dense_masks(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+    del run["masks_roi"]
+
+    store = open_mask_store(run, source_path="refined_subject_masks_runs/refined_1", prefer="rle")
+
+    assert store.encoding == "component_rle_v1"
+    assert store.storage_surface == "mask_rle"
+    assert store.storage_path == "refined_subject_masks_runs/refined_1/mask_rle"
+    assert store.shape == (3, 4, 8, 8)
+    masks = store.read_dense(rows=slice(1, 3), channels=("subject_body", "eye_right"))
+    np.testing.assert_array_equal(masks, dense[1:3][:, [0, 2]])
+    one = store.read_dense(rows=0, channels="eye_left")
+    np.testing.assert_array_equal(one, dense[0:1, 1:2])
+
+
+def test_open_mask_store_prefers_dense_when_both_surfaces_exist(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+
+    dense_store = open_mask_store(run)
+    compact_store = open_mask_store(run, prefer="rle")
+    assert dense_store.encoding == "dense_uint8"
+    assert dense_store.storage_surface == "masks_roi"
+    assert compact_store.encoding == "component_rle_v1"
+    assert compact_store.storage_surface == "mask_rle"
+
+
+def test_open_mask_store_rejects_missing_component_payload(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+    del run["masks_roi"]
+    del run["mask_rle/components/02_eye_right"]
+
+    store = open_mask_store(run, prefer="rle")
+    with pytest.raises(MaskStoreError, match="missing component index 2"):
+        store.read_dense(rows=[0], channels=["eye_right"])
+
+
+def test_load_refined_subject_masks_tables_uses_component_rle_store_when_dense_skipped(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+
+    tables = load_refined_subject_masks_run_tables(root, include_masks_roi=False)
+
+    assert tables.masks_roi is None
+    assert tables.require_mask_store().encoding == "component_rle_v1"
+    np.testing.assert_array_equal(
+        tables.require_mask_store().read_dense(rows=[0, 2], channels=["eye_left"]),
+        dense[[0, 2]][:, 1:2],
+    )
+    assert tables.source_paths["mask_store"] == "refined_subject_masks_runs/refined_1/mask_rle"
+
+
+def test_load_refined_subject_masks_tables_uses_mask_store_for_shape_when_dense_and_lineage_absent(
+    tmp_path: Path,
+) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+    for name in ("masks_roi", "frame_indices", "detection_indices", "edit_applied", "detection_source", "metrics"):
+        if name in run:
+            del run[name]
+
+    tables = load_refined_subject_masks_run_tables(
+        root,
+        include_masks_roi=True,
+        include_metrics=False,
+        include_components=False,
+        include_relations=False,
+        run_array_names=("available_channels",),
+    )
+
+    assert tables.masks_roi is None
+    assert tables.n_rows == 3
+    assert tables.channel_count == 4
+    assert tables.require_mask_store().encoding == "component_rle_v1"
+    assert tables.source_paths["mask_store"] == "refined_subject_masks_runs/refined_1/mask_rle"
+
+
+def test_load_refined_subject_masks_tables_prefers_dense_when_rle_is_stale(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+    run.attrs["mask_rle_stale"] = True
+
+    tables = load_refined_subject_masks_run_tables(root, include_masks_roi=True)
+
+    assert tables.require_mask_store().encoding == "dense_uint8"
+    np.testing.assert_array_equal(
+        tables.require_mask_store().read_dense(rows=[0], channels=["subject_body"]),
+        dense[0:1, 0:1],
+    )
+
+
+def test_load_refined_subject_masks_tables_rejects_stale_rle_when_dense_skipped(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+    run.attrs["mask_rle_stale"] = True
+
+    with pytest.raises(RefinedSubjectMasksIOError, match="mask_rle is marked stale"):
+        load_refined_subject_masks_run_tables(root, include_masks_roi=False)
+
+
+def test_load_refined_subject_masks_tables_rejects_stale_compact_only_store(tmp_path: Path) -> None:
+    root = _make_refined_subject_archive(tmp_path)
+    run = _refined_run(root)
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    dense = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    _write_component_rle(run, dense, labels)
+    del run["masks_roi"]
+    run.attrs["mask_rle_stale"] = True
+
+    with pytest.raises(RefinedSubjectMasksIOError, match="mask_rle is marked stale"):
+        load_refined_subject_masks_run_tables(root)

@@ -111,6 +111,9 @@ def _build_training_root(
             dtype=np.bool_,
         )
     mask.attrs["mask_labels"] = mask_labels
+    mask.attrs["mask_storage_format"] = "dense_uint8"
+    mask.attrs["mask_storage_surface"] = "masks_roi"
+    mask.attrs["mask_store_encoding"] = "dense_uint8"
     mask.create_array("masks_roi", data=masks, chunks=(2, len(mask_labels), 8, 8))
     mask.create_array("target_valid_channels", data=valid, chunks=(4, len(mask_labels)))
 
@@ -143,6 +146,48 @@ def test_load_subject_mask_training_artifact_reads_schema_and_splits(
     assert store.val_indices.tolist() == [3]
     assert store.meta["source_subject_mask_run"] == "subject_masks_source_001"
     assert store.meta["source_crop_run"] == "crop_source_001"
+
+
+def test_load_subject_mask_training_artifact_rejects_compact_mask_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "subject_training_compact.zarr"
+    artifact.mkdir()
+    (artifact / "zarr.json").write_text("{}", encoding="utf-8")
+    fake_root = _build_training_root()
+    fake_root["subject_mask_runs"]["training_export_001"].create_group("mask_rle")
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(mod.zarr, "Group", _FakeGroup)
+
+    with pytest.raises(ValueError, match="must expose dense masks_roi only"):
+        mod.load_subject_mask_training_artifact(
+            artifact,
+            subject_mask_run=None,
+            crop_run=None,
+            expected_label_schema_id="subject_v1_union",
+        )
+
+
+def test_load_subject_mask_training_artifact_rejects_non_dense_storage_attr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "subject_training_bad_storage.zarr"
+    artifact.mkdir()
+    (artifact / "zarr.json").write_text("{}", encoding="utf-8")
+    fake_root = _build_training_root()
+    fake_root["subject_mask_runs"]["training_export_001"].attrs["mask_storage_format"] = "component_rle_v1"
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: fake_root)
+    monkeypatch.setattr(mod.zarr, "Group", _FakeGroup)
+
+    with pytest.raises(ValueError, match="mask_storage_format must be 'dense_uint8'"):
+        mod.load_subject_mask_training_artifact(
+            artifact,
+            subject_mask_run=None,
+            crop_run=None,
+            expected_label_schema_id="subject_v1_union",
+        )
 
 
 def test_load_subject_mask_training_artifact_falls_back_to_source_index_run_names(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import zarr
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.visualization import visualize_sam_subject_prompts as mod
 
 
@@ -86,6 +88,37 @@ def test_subject_body_mask_for_row_reads_available_channel() -> None:
 
     mask = mod._subject_body_mask_for_row(loaded, 1)
 
+    assert mask is not None
+    assert mask.shape == (5, 6)
+    assert int(np.count_nonzero(mask)) == 6
+
+
+def test_load_subject_run_reads_compact_mask_store(tmp_path) -> None:
+    zarr_path = tmp_path / "subject_prompt_compact.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("subject_mask_runs")
+    parent.attrs["latest"] = "subject_compact_001"
+    run = parent.create_group("subject_compact_001")
+    run.attrs["mask_labels"] = ["subject_body", "eyes_union"]
+    run.create_array("available_channels", data=np.asarray([True, False], dtype=bool), overwrite=True)
+    masks = np.zeros((2, 2, 5, 6), dtype=np.uint8)
+    masks[1, 0, 1:3, 2:5] = 1
+    dense = run.create_array("masks_roi", data=masks, overwrite=True)
+    write_component_rle_mask_store_from_dense(
+        run,
+        dense,
+        component_names=("subject_body", "eyes_union"),
+        encode_row_chunk_size=1,
+    )
+    del run["masks_roi"]
+    run.attrs["masks_roi_materialized"] = False
+
+    loaded = mod._load_subject_run(root, "subject_compact_001")
+    mask = mod._subject_body_mask_for_row(loaded, 1)
+
+    assert loaded is not None
+    assert loaded.masks_roi is None
+    assert loaded.mask_store is not None
     assert mask is not None
     assert mask.shape == (5, 6)
     assert int(np.count_nonzero(mask)) == 6

@@ -11,6 +11,7 @@ import zarr
 
 from fisheye.registry.db import Registry
 from fisheye.registry.status_ledger import upsert_recording_step_status
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.utils import check_recording_steps as mod
 
 
@@ -640,6 +641,43 @@ def test_check_zarr_reads_subject_mask_status_and_components(tmp_path: Path) -> 
     review_status = info["refined_subject_mask_review_status"]
     assert isinstance(review_status, dict)
     assert review_status["state"] == "pending"
+
+
+def test_check_zarr_reads_refined_subject_mask_coverage_from_compact_store(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "refined_subject_mask_compact_status_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+
+    refined_parent = root.create_group("refined_subject_masks_runs")
+    refined_parent.attrs["latest"] = "refined_subject_masks_compact"
+    refined_run = refined_parent.create_group("refined_subject_masks_compact")
+    labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    refined_run.attrs["mask_labels"] = labels
+    refined_run.attrs["refined_subject_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+    }
+    refined_run.create_array(
+        "available_channels",
+        data=np.array([True, True, True, False], dtype=np.bool_),
+    )
+    masks = np.zeros((4, 4, 8, 8), dtype=np.uint8)
+    masks[0, 0, 1:4, 1:4] = 1
+    masks[2, 1, 2:5, 2:5] = 1
+    masks[3, 2, 3:6, 3:6] = 1
+    write_component_rle_mask_store_from_dense(
+        refined_run,
+        masks,
+        component_names=labels,
+        encode_row_chunk_size=2,
+    )
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["refined_subject_masks_present"] is True
+    assert info["refined_subject_masks_coverage"] == pytest.approx(75.0)
+    assert info["refined_subject_mask_available_components"] == ["subject_body", "eye_left", "eye_right"]
+    assert info["refined_subject_mask_unavailable_components"] == ["swim_bladder"]
 
 
 def test_check_zarr_reads_subject_mask_tuning_component_statuses(

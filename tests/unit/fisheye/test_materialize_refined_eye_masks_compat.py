@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.tune import eye_mask_review as eye_review_mod
 from fisheye.tune import refined_subject_mask_review as review_mod
 from fisheye.utils import materialize_refined_eye_masks_compat as compat_mod
@@ -99,6 +100,9 @@ class _FakeGroup:
 
     def keys(self):
         return list(self._children.keys())
+
+    def items(self):
+        return self._children.items()
 
     def __contains__(self, key: str) -> bool:
         try:
@@ -277,6 +281,20 @@ def _build_materialize_root() -> _FakeGroup:
     return root
 
 
+def _replace_refined_subject_masks_with_rle(root: _FakeGroup) -> np.ndarray:
+    refined = root["refined_subject_masks_runs/refined_subject_masks_001"]
+    dense = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    labels = [str(label) for label in refined.attrs["mask_labels"]]
+    del refined["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        refined,
+        dense,
+        component_names=labels,
+        encode_row_chunk_size=1,
+    )
+    return dense
+
+
 def test_materialize_refined_eye_masks_compat_creates_derived_run_and_preserves_refine_summary(monkeypatch) -> None:
     _patch_stage_provenance(monkeypatch)
     root = _build_materialize_root()
@@ -318,6 +336,28 @@ def test_materialize_refined_eye_masks_compat_creates_derived_run_and_preserves_
     assert tuple(np.asarray(run["ellipse_success"][:], dtype=bool).shape) == (2, 2)
     assert tuple(np.asarray(run["metrics/area_refined"][:], dtype=np.float32).shape) == (2, 2)
     assert tuple(np.asarray(run["metrics/reason_bytes"][:], dtype=np.uint8).shape[:1]) == (2,)
+
+
+def test_materialize_refined_eye_masks_compat_reads_compact_refined_subject_masks(monkeypatch) -> None:
+    _patch_stage_provenance(monkeypatch)
+    root = _build_materialize_root()
+    dense = _replace_refined_subject_masks_with_rle(root)
+    monkeypatch.setattr(compat_mod, "_open_root", lambda source, mode="a": root)  # noqa: ARG005
+    monkeypatch.setattr(
+        eye_review_mod,
+        "_update_postprocess_summary",
+        lambda _root, refined, *, print_summary: refined.attrs.__setitem__("postprocess_synced", True),  # noqa: ARG005
+    )
+
+    summary = compat_mod.materialize_refined_eye_masks_compat(
+        root,
+        refined_subject_run="refined_subject_masks_001",
+    )
+
+    assert summary["status"] == "updated"
+    assert "masks_roi" not in root["refined_subject_masks_runs/refined_subject_masks_001"]
+    run = root["refined_eye_masks_runs/refined_eye_masks_legacy_001"]
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][:], dtype=np.uint8), dense)
 
 
 def test_apply_component_review_status_triggers_eye_compat_materialization(monkeypatch) -> None:

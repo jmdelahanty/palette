@@ -151,11 +151,11 @@ def _build_query_signature(args: argparse.Namespace, *, model_input: str) -> dic
         "arena_id": args.arena_id,
         "path_contains": args.path_contains,
         "limit": args.limit,
-        "source_layout": args.source_layout,
-        "source_type": args.source_type,
-        "input_format": args.input_format,
+        "source_layout": getattr(args, "source_layout", None),
+        "source_type": getattr(args, "source_type", "refined"),
+        "input_format": getattr(args, "input_format", "gray"),
         "model_input": model_input,
-        "training_sample_duplicate_policy": args.training_sample_duplicate_policy,
+        "training_sample_duplicate_policy": getattr(args, "training_sample_duplicate_policy", "error"),
     }
 
 
@@ -188,8 +188,8 @@ def _default_set_name(
             _slug_component(dish_raw, fallback="all_dishes"),
             _slug_component(canvas_raw, fallback="unknown_canvas"),
             _slug_component(rig_raw, fallback="unknown_rig"),
-            _slug_component(args.source_type, fallback="source"),
-            _slug_component(args.input_format, fallback="input"),
+            _slug_component(getattr(args, "source_type", "refined"), fallback="source"),
+            _slug_component(getattr(args, "input_format", "gray"), fallback="input"),
             query_hash,
         ]
     )

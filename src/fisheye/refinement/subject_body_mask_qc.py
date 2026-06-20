@@ -25,6 +25,7 @@ import zarr
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import hole_stats
+from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from ..utils.zarr_io import open_zarr_root
 
@@ -418,16 +419,23 @@ def write_subject_body_mask_qc_group(
 
     resolved_policy = policy or SubjectBodyMaskQcPolicy()
     run_name, refined_group = _resolve_refined_run(root, refined_run)
-    if "masks_roi" not in refined_group:
-        raise ValueError(f"refined_subject_masks_runs/{run_name} missing masks_roi.")
     body_idx = _subject_body_channel_index(refined_group)
     if not _available_channel(refined_group, body_idx):
         raise ValueError(f"refined_subject_masks_runs/{run_name} subject_body channel is unavailable.")
 
-    masks = refined_group["masks_roi"]
-    if len(tuple(masks.shape)) != 4:
-        raise ValueError(f"refined_subject_masks_runs/{run_name}/masks_roi must be 4D, got {tuple(masks.shape)}.")
-    row_count = int(masks.shape[0])
+    try:
+        mask_store = open_mask_store(
+            refined_group,
+            source_path=f"refined_subject_masks_runs/{run_name}",
+            prefer="dense",
+        )
+    except (MaskStoreError, ValueError) as exc:
+        raise ValueError(
+            f"refined_subject_masks_runs/{run_name} missing usable mask store (masks_roi or mask_rle)."
+        ) from exc
+    if len(tuple(mask_store.shape)) != 4:
+        raise ValueError(f"refined_subject_masks_runs/{run_name} mask store must be 4D, got {tuple(mask_store.shape)}.")
+    row_count = int(mask_store.n_rows)
     chunk = max(1, int(chunk_size))
     qc_group = _prepare_qc_group(refined_group, row_count=row_count, policy=resolved_policy, overwrite=overwrite)
     reason_labels = np.full((row_count,), "ok", dtype=object)
@@ -436,7 +444,7 @@ def write_subject_body_mask_qc_group(
     for start in range(0, row_count, chunk):
         stop = min(row_count, start + chunk)
         row_slice = slice(start, stop)
-        batch_masks = np.asarray(masks[row_slice, body_idx], dtype=np.uint8)
+        batch_masks = np.asarray(mask_store.read_dense(rows=row_slice, channels=body_idx)[:, 0], dtype=np.uint8)
         batch = compute_subject_body_mask_qc(batch_masks, policy=resolved_policy)
         _write_qc_batch(qc_group, row_slice, batch)
         reason_labels[row_slice] = batch.reason_labels

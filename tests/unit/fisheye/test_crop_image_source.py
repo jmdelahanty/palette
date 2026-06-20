@@ -302,6 +302,47 @@ def test_crop_image_source_builds_and_reuses_temporary_roi_cache(tmp_path: Path)
     source_reused.close()
 
 
+def test_crop_image_source_records_canonical_path_for_staged_flat_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    zarr_path = _make_geometry_only_archive(tmp_path)
+    scratch_manifest = tmp_path / "scratch" / "cache.flat_roi_cache.json"
+    canonical_manifest = tmp_path / "canonical" / "cache.flat_roi_cache.json"
+
+    class _FakeFlatCache:
+        def __init__(self) -> None:
+            self.manifest_path = scratch_manifest.resolve()
+            self.manifest = {
+                "cache_key": "cache-key-001",
+                "staging": {"requested_manifest_path": str(canonical_manifest)},
+                "builder": {"pixel_contract": {"name": "nv12_luma_plane_uint8"}},
+            }
+            self.shape = (2, 4, 4)
+            self.dtype = np.dtype(np.uint8)
+
+        def __getitem__(self, key):
+            return np.zeros(self.shape, dtype=np.uint8)[key]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(crop_mod, "open_flat_roi_cache", lambda *_args, **_kwargs: _FakeFlatCache())
+
+    source = CropImageSource.open(
+        zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path=zarr_path,
+        crop_run="crop_geometry",
+        roi_cache_manifest=scratch_manifest,
+    )
+
+    assert source.roi_cache_path == str(scratch_manifest.resolve())
+    assert source.roi_cache_canonical_path == str(canonical_manifest)
+    assert source.roi_cache_backend == "flat_bin_v1"
+    assert source.roi_read_mode == "flat_bin_roi_cache"
+    source.close()
+
+
 def test_crop_image_source_cache_console_messages_include_run_and_runtime_summary(tmp_path: Path) -> None:
     zarr_path = _make_geometry_only_archive(tmp_path)
     cache_dir = tmp_path / "roi-cache"

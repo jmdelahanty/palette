@@ -9,6 +9,7 @@ from typing import Any, Optional
 import numpy as np
 import zarr
 
+from .mask_store import MaskStore, MaskStoreError, open_mask_store
 from .provenance_attrs import resolve_source_keypoints_run
 from .refined_subject_eye_geometry import EYE_COMPONENTS
 from .zarr_run_completion import resolve_latest_complete_run_name
@@ -218,6 +219,64 @@ class ChannelSelectionArray:
         return _stack_component_values(values, row_scalar=_is_scalar_row_key(row_key))
 
 
+class MaskStoreChannelSelectionArray:
+    """Array-like view selecting semantic component channels from ``MaskStore``."""
+
+    def __init__(self, mask_store: MaskStore, channel_indices: Sequence[int]):
+        if not channel_indices:
+            raise ValueError("At least one channel index is required.")
+        self._mask_store = mask_store
+        self._channel_indices = tuple(int(v) for v in channel_indices)
+        if any(idx < 0 or idx >= int(mask_store.shape[1]) for idx in self._channel_indices):
+            raise ValueError(f"Channel indices {self._channel_indices} out of range for mask store {mask_store.shape}.")
+        self.shape = (
+            int(mask_store.shape[0]),
+            len(self._channel_indices),
+            int(mask_store.shape[2]),
+            int(mask_store.shape[3]),
+        )
+        self.ndim = len(self.shape)
+        self.dtype = np.dtype(np.uint8)
+        self.chunks = None
+
+    def __array__(self, dtype=None) -> np.ndarray:
+        values = np.asarray(self[:])
+        return values.astype(dtype, copy=False) if dtype is not None else values
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple):
+            values = self._mask_store.read_dense(rows=key, channels=self._channel_indices)
+            return values[0] if _is_scalar_row_key(key) else values
+
+        if not key:
+            return self[:]
+        row_key = key[0]
+        if len(key) == 1:
+            values = self._mask_store.read_dense(rows=row_key, channels=self._channel_indices)
+            return values[0] if _is_scalar_row_key(row_key) else values
+
+        channel_key = key[1]
+        tail_key = tuple(key[2:])
+        selected = _select_channel_indices(channel_key, len(self._channel_indices))
+        source_channels = [self._channel_indices[idx] for idx in selected]
+        values = self._mask_store.read_dense(rows=row_key, channels=source_channels)
+
+        row_scalar = _is_scalar_row_key(row_key)
+        channel_scalar = isinstance(channel_key, (int, np.integer))
+        if row_scalar:
+            values = values[0]
+        if channel_scalar:
+            values = values[0] if row_scalar else values[:, 0]
+        if tail_key:
+            if row_scalar and channel_scalar:
+                values = values[tail_key]
+            elif row_scalar or channel_scalar:
+                values = values[(slice(None), *tail_key)]
+            else:
+                values = values[(slice(None), slice(None), *tail_key)]
+        return values
+
+
 @dataclass
 class EyeGeometrySource:
     stage_group: str
@@ -238,10 +297,13 @@ def _has_subject_eye_geometry(group: zarr.Group) -> bool:
     label_map = _label_index_map(group)
     if any(component not in label_map for component in EYE_COMPONENTS):
         return False
-    masks = _group_get(group, "masks_roi")
-    if masks is None or len(_shape(masks)) != 4:
+    try:
+        mask_store = open_mask_store(group, prefer="dense")
+    except (MaskStoreError, ValueError):
         return False
-    channel_count = int(_shape(masks)[1])
+    if len(mask_store.shape) != 4:
+        return False
+    channel_count = int(mask_store.shape[1])
     if any(int(label_map[component]) >= channel_count for component in EYE_COMPONENTS):
         return False
     for component in EYE_COMPONENTS:
@@ -315,7 +377,12 @@ def _build_subject_source(
     if not _has_subject_eye_geometry(group):
         raise ValueError(f"{EYE_GEOMETRY_STAGE_REFINED_SUBJECT}/{run_name} missing canonical eye geometry.")
     label_map = _label_index_map(group)
-    masks = ChannelSelectionArray(group["masks_roi"], [label_map["eye_left"], label_map["eye_right"]])
+    mask_store = open_mask_store(
+        group,
+        source_path=f"{EYE_GEOMETRY_STAGE_REFINED_SUBJECT}/{run_name}",
+        prefer="dense",
+    )
+    masks = MaskStoreChannelSelectionArray(mask_store, [label_map["eye_left"], label_map["eye_right"]])
     ellipse_params = StackedComponentArray(
         [
             group["components/eye_left/geometry/ellipse_params"],

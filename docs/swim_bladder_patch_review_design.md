@@ -83,8 +83,12 @@ Primary source arrays:
 
 - `crop_runs/<run>/roi_images`
 - `refined_keypoints_runs/<run>/keypoints_roi`
-- `subject_mask_runs/<run>/masks_roi` or
-  `refined_subject_masks_runs/<run>/masks_roi`
+- resolved source swim-bladder masks from the `SourceSubjectMaskRun.masks_roi`
+  abstraction, which may be dense `masks_roi` or thresholded probability-backed
+  masks depending on the source run
+- editable refined masks from the `refined_subject_masks_runs/<run>` logical
+  mask store; compact-only refined runs must materialize the dense `masks_roi`
+  compatibility cache before manual editing/writeback
 
 Required keypoint:
 
@@ -173,7 +177,9 @@ Recommended controls:
 The patch reviewer should not create a separate swim-bladder-only runtime stage.
 It should write to the canonical refined subject-mask stage:
 
-- `refined_subject_masks_runs/<run>/masks_roi[:, swim_bladder_channel, :, :]`
+- logical swim-bladder component masks in `refined_subject_masks_runs/<run>`;
+  the manual editor writes through the dense `masks_roi` compatibility cache
+  for the touched rows/channels
 - `components/swim_bladder/reason_bytes`
 - `components/swim_bladder/mask_present`
 - `components/swim_bladder/area_px`
@@ -183,6 +189,11 @@ Expected attrs to update:
 
 - `component_review_statuses["swim_bladder"]`
 - parent `refined_subject_mask_review_status` when appropriate
+
+When a refined run is compact-only (`mask_rle` without dense `masks_roi`), the
+review/edit path should use the refined-subject review materialization boundary
+to create a dense `masks_roi` cache before editing. Saves update the dense
+authoring surface and mark compact RLE stale until it is refreshed.
 - optional `component_summary_statistics["swim_bladder"]`
 
 ## Geometry Scope

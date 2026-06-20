@@ -23,6 +23,7 @@ import zarr
 from scipy.ndimage import gaussian_filter1d
 
 from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels, write_reason_columns
+from ..shared.mask_store import MaskStore, MaskStoreError, mark_mask_rle_stale_attrs, materialize_dense_masks_roi_from_store, open_mask_store
 from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
     build_source_keypoints_attrs,
@@ -189,6 +190,36 @@ class _ThresholdedProbabilityMaskArray:
         if ndim == 3:
             return channel_thresholds.reshape((-1, 1, 1))
         return channel_thresholds
+
+
+class _MaskStoreArray:
+    """Array-like dense binary view over a compact mask store."""
+
+    dtype = np.dtype(np.uint8)
+
+    def __init__(self, mask_store: MaskStore) -> None:
+        self._mask_store = mask_store
+        self.shape = tuple(int(dim) for dim in mask_store.shape)
+
+    def __getitem__(self, key: object) -> np.ndarray:
+        if isinstance(key, tuple):
+            if len(key) > 4:
+                raise IndexError("too many indices for mask store array")
+            normalized = key + (slice(None),) * (4 - len(key))
+        else:
+            normalized = (key, slice(None), slice(None), slice(None))
+        row_key, channel_key, y_key, x_key = normalized
+        row_scalar = isinstance(row_key, (int, np.integer))
+        channel_scalar = isinstance(channel_key, (int, np.integer))
+        dense = self._mask_store.read_dense(rows=row_key, channels=channel_key)
+        dense = dense[:, :, y_key, x_key]
+        if row_scalar and channel_scalar:
+            return dense[0, 0]
+        if row_scalar:
+            return dense[0]
+        if channel_scalar:
+            return dense[:, 0]
+        return dense
 
 
 @dataclass(frozen=True)
@@ -1183,22 +1214,33 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     probability_encoding: Optional[str] = None
     if masks_roi is None:
         probabilities = group.get("mask_probs_roi")
-        if probabilities is None:
-            raise RuntimeError(f"subject_mask_runs/{run_name} missing masks_roi or mask_probs_roi.")
-        if len(probabilities.shape) != 4:
-            raise RuntimeError(
-                f"subject_mask_runs/{run_name}/mask_probs_roi must have shape (N, C, H, W), "
-                f"got {probabilities.shape}."
+        if probabilities is not None:
+            if len(probabilities.shape) != 4:
+                raise RuntimeError(
+                    f"subject_mask_runs/{run_name}/mask_probs_roi must have shape (N, C, H, W), "
+                    f"got {probabilities.shape}."
+                )
+            probability_thresholds = _probability_thresholds_for_labels(group, mask_labels)
+            probability_encoding = _probability_encoding_for_group(group)
+            masks_roi = _ThresholdedProbabilityMaskArray(
+                probabilities,
+                thresholds=probability_thresholds,
+                encoding=probability_encoding,
             )
-        probability_thresholds = _probability_thresholds_for_labels(group, mask_labels)
-        probability_encoding = _probability_encoding_for_group(group)
-        masks_roi = _ThresholdedProbabilityMaskArray(
-            probabilities,
-            thresholds=probability_thresholds,
-            encoding=probability_encoding,
-        )
-        mask_surface_kind = "thresholded_probability"
-        mask_surface_path = "mask_probs_roi"
+            mask_surface_kind = "thresholded_probability"
+            mask_surface_path = "mask_probs_roi"
+        else:
+            try:
+                mask_store = open_mask_store(
+                    group,
+                    source_path=f"subject_mask_runs/{run_name}",
+                    prefer="rle",
+                )
+            except MaskStoreError as exc:
+                raise RuntimeError(f"subject_mask_runs/{run_name} missing masks_roi, mask_probs_roi, or mask_rle.") from exc
+            masks_roi = _MaskStoreArray(mask_store)
+            mask_surface_kind = "binary"
+            mask_surface_path = "mask_rle"
     def _lineage_array(name: str) -> Any | None:
         if name in group:
             return group[name]
@@ -1728,7 +1770,25 @@ def _open_or_create_refined_subject_run(
         component_to_index = {name: idx for idx, name in enumerate(component_names)}
         masks_arr = run_group.get("masks_roi")
         if masks_arr is None:
-            raise RuntimeError(f"refined_subject_masks_runs/{target_run} missing masks_roi.")
+            if "mask_rle" not in run_group:
+                raise RuntimeError(f"refined_subject_masks_runs/{target_run} missing masks_roi or mask_rle.")
+            try:
+                materialize_dense_masks_roi_from_store(
+                    run_group,
+                    chunk_size=256,
+                    overwrite=False,
+                    source_path=f"refined_subject_masks_runs/{target_run}",
+                )
+            except (MaskStoreError, ValueError) as exc:
+                raise RuntimeError(
+                    f"refined_subject_masks_runs/{target_run} missing masks_roi and dense cache "
+                    f"could not be materialized from mask_rle."
+                ) from exc
+            masks_arr = run_group.get("masks_roi")
+            if masks_arr is None:
+                raise RuntimeError(
+                    f"refined_subject_masks_runs/{target_run} dense masks_roi was not materialized from mask_rle."
+                )
         total_rois = int(masks_arr.shape[0])
         metric_chunks = _refined_metric_chunks_2d(total_rois)
         metric_chunks_2 = _refined_metric_chunks_lastdim(total_rois, 2)
@@ -1884,7 +1944,20 @@ def _open_existing_refined_subject_run(
     if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
         raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
     if "masks_roi" not in run_group:
-        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing masks_roi.")
+        if "mask_rle" not in run_group:
+            raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing masks_roi or mask_rle.")
+        try:
+            materialize_dense_masks_roi_from_store(
+                run_group,
+                chunk_size=256,
+                overwrite=False,
+                source_path=f"refined_subject_masks_runs/{refined_run}",
+            )
+        except (MaskStoreError, ValueError) as exc:
+            raise RuntimeError(
+                f"refined_subject_masks_runs/{refined_run} missing masks_roi and dense cache "
+                f"could not be materialized from mask_rle."
+            ) from exc
     component_names = tuple(str(item) for item in labels_raw)
     return RefinedSubjectMaskRun(
         run_name=str(refined_run),
@@ -2190,6 +2263,8 @@ def _finalize_refined_subject_apply(
     refined: RefinedSubjectMaskRun,
     *,
     updated_components: Optional[Sequence[str]] = None,
+    updated_rows: Sequence[int] = (),
+    stale_reason: str = "dense_refined_subject_mask_edit",
 ) -> str:
     updated_at_utc = _utc_now()
     refined.group.attrs["updated_at_utc"] = updated_at_utc
@@ -2199,6 +2274,13 @@ def _finalize_refined_subject_apply(
 
         write_refined_subject_eye_geometry(refined.group, updated_components=updated_components)
     _materialize_refined_eye_compat_if_needed(refined, updated_components=updated_components)
+    mark_mask_rle_stale_attrs(
+        refined.group,
+        updated_at_utc=updated_at_utc,
+        updated_components=updated_components,
+        updated_rows=updated_rows,
+        reason=stale_reason,
+    )
     return updated_at_utc
 
 
@@ -2256,7 +2338,12 @@ def _apply_refined_subject_roi_rows(
             reason=str(update_reason or f"{update_mode}_refined_subject_mask_edit"),
         )
 
-    updated_at_utc = _finalize_refined_subject_apply(refined, updated_components=normalized_components)
+    updated_at_utc = _finalize_refined_subject_apply(
+        refined,
+        updated_components=normalized_components,
+        updated_rows=normalized_rows,
+        stale_reason=str(update_reason or f"{update_mode}_refined_subject_mask_edit"),
+    )
     resolved_method = str(update_method or DEFAULT_RUN_METHOD)
     for component_name in normalized_components:
         comp_idx = int(refined.component_to_index[component_name])

@@ -996,9 +996,11 @@ SAM/SAM2/SAM3 write-back, and swim-bladder refresh flows.
 | `mask_probs_roi` | `(n_rois, C, H, W)` | `float16/float32/uint8` | Decoded or quantized semantic probabilities in `[0,1]`; probability-first raw runs treat this as the canonical model output. |
 | `available_channels` | `(C,)` | `bool` | Run-level declaration of which channels are semantically valid |
 
-Compact binary mask storage alternatives such as RLE are deferred. Current
-readers should continue to support dense `masks_roi`; proposed RLE storage,
-reader abstraction, and benchmark gates are documented in
+Compact binary mask storage is currently implemented for refined subject-mask
+runs, not raw probability-first subject-mask runs. Raw subject-mask readers
+should continue to treat `mask_probs_roi` as the canonical model-output surface
+and dense `masks_roi` as an optional thresholded compatibility cache. The
+shared compact-mask reader/writer design is documented in
 `docs/mask_rle_storage_design_and_benchmark_plan.md`.
 
 `metrics/` subgroup:
@@ -1059,16 +1061,21 @@ temporal context, or cross-component relationship belongs in
 | `source_refined_row_ids` *(recommended)* | `(n_rois,)` | `int64` | Copied from the upstream subject-mask/crop lineage when available |
 | `source_detect_row_index` *(recommended)* | `(n_rois,)` | `int32` | Copied from the upstream subject-mask/crop lineage when available |
 | `detection_source` | `(n_rois,)` | `int8` | Expected to align with the source crop run |
-| `masks_roi` | `(n_rois, C, H, W)` | `uint8` | Canonical refined binary masks |
+| `masks_roi` *(optional when compact-only)* | `(n_rois, C, H, W)` | `uint8` | Dense refined binary masks |
+| `mask_rle/` *(optional)* | component groups | typed arrays | Compact exact binary masks; may mirror `masks_roi` or be the authoritative physical mask store |
 | `available_channels` | `(C,)` | `bool` | Declares which refined components are intentionally present |
 | `edit_applied` | `(n_rois, C)` | `bool` | True when the refined channel differs from the source subject-mask run |
 | `reason_bytes` *(optional)* | `(n_rois, width)` | `uint8` | Null-terminated UTF-8 reason labels |
 | `reason` *(optional)* | `(n_rois,)` | `string` | Human-readable reason tags |
 
-Compact binary mask storage alternatives such as RLE are deferred. Refined
-editing surfaces may materialize dense masks from compact storage in the future,
-but the current compatibility contract remains dense `masks_roi`. See
+Refined subject-mask runs may now use `mask_storage_encoding="dense_uint8"`,
+`"dense_uint8+component_rle_v1"`, or `"component_rle_v1"`. Dense `masks_roi`
+remains the default compatibility surface. Compact-only readers should
+materialize masks through `fisheye.shared.mask_store.open_mask_store(...)`; see
 `docs/mask_rle_storage_design_and_benchmark_plan.md`.
+Use `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store` to
+dry-run, recreate, refresh, or delete the dense `masks_roi` compatibility cache
+for compact refined-subject runs.
 
 `metrics/` subgroup:
 

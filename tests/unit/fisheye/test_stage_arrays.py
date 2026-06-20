@@ -12,6 +12,7 @@ import zarr.core.sync as zarr_sync
 from zarr.core.dtype import VariableLengthUTF8
 from zarr.storage import MemoryStore
 
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.shared.zarr.stage_arrays import (
     BOUT_KINEMATICS_SPEC,
     BOUT_CLASSIFICATION_SPEC,
@@ -378,6 +379,62 @@ def test_validate_run_accepts_current_refined_mask_specs() -> None:
 
         result = validate_run(group, stage_spec)
         assert result.valid, f"{stage_spec.stage_name} errors: {result.errors}"
+
+
+def test_validate_run_accepts_refined_subject_masks_with_rle_store_without_dense_masks() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, REFINED_SUBJECT_MASKS_SPEC)
+    group.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    write_component_rle_mask_store_from_dense(
+        group,
+        group["masks_roi"],
+        component_names=tuple(str(value) for value in group.attrs["mask_labels"]),
+        encode_row_chunk_size=2,
+    )
+    del group["masks_roi"]
+
+    result = validate_run(group, REFINED_SUBJECT_MASKS_SPEC)
+
+    assert result.valid, result.errors
+
+
+def test_validate_run_rejects_refined_subject_rle_with_bad_indptr_terminal() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, REFINED_SUBJECT_MASKS_SPEC)
+    group.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    write_component_rle_mask_store_from_dense(
+        group,
+        group["masks_roi"],
+        component_names=tuple(str(value) for value in group.attrs["mask_labels"]),
+        encode_row_chunk_size=2,
+    )
+    del group["masks_roi"]
+    component = group["mask_rle"]["components"]["00_subject_body"]
+    component["indptr"][-1] = int(component["indptr"][-1]) + 1
+
+    result = validate_run(group, REFINED_SUBJECT_MASKS_SPEC)
+
+    assert not result.valid
+    assert any("indptr terminates" in message and "counts has" in message for message in result.errors)
+
+
+def test_validate_run_rejects_refined_subject_rle_with_bad_shape_attr() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, REFINED_SUBJECT_MASKS_SPEC)
+    group.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    write_component_rle_mask_store_from_dense(
+        group,
+        group["masks_roi"],
+        component_names=tuple(str(value) for value in group.attrs["mask_labels"]),
+        encode_row_chunk_size=2,
+    )
+    del group["masks_roi"]
+    group["mask_rle"].attrs["encoded_shape_hw"] = [0, DEFAULT_DIMS["W"]]
+
+    result = validate_run(group, REFINED_SUBJECT_MASKS_SPEC)
+
+    assert not result.valid
+    assert any("encoded_shape_hw" in message and "positive" in message for message in result.errors)
 
 
 def test_validate_run_reports_missing_required_arrays() -> None:

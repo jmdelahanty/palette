@@ -8,6 +8,8 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import zarr
 
+from .mask_store import MaskStoreError, open_mask_store
+
 EYE_COMPONENTS = ("eye_left", "eye_right")
 EYE_GEOMETRY_SCHEMA_ID = "refined_subject_eye_geometry_v1"
 EYE_PAIR_RELATION_SCHEMA_ID = "refined_subject_eye_pair_relation_v1"
@@ -15,6 +17,10 @@ EYE_PAIR_RELATION_SCHEMA_ID = "refined_subject_eye_pair_relation_v1"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _group_source_path(group: zarr.Group) -> str:
+    return str(getattr(group, "name", "") or "")
 
 
 def _label_index_map(group: zarr.Group) -> dict[str, int]:
@@ -64,10 +70,10 @@ def write_refined_subject_eye_geometry(
 ) -> dict[str, Any]:
     """Write canonical LR eye geometry/relation arrays into a refined subject run.
 
-    Geometry is derived from the run-level ``masks_roi`` channels for
-    ``eye_left`` and ``eye_right``. This makes the refined subject-mask run the
-    canonical geometry surface; legacy refined-eye runs can still be
-    materialized from it as compatibility artifacts.
+    Geometry is derived from the run-level physical mask store for ``eye_left``
+    and ``eye_right``. This makes the refined subject-mask run the canonical
+    geometry surface; legacy refined-eye runs can still be materialized from it
+    as compatibility artifacts.
     """
 
     if not _eye_geometry_should_update(updated_components):
@@ -77,11 +83,12 @@ def write_refined_subject_eye_geometry(
     missing = [name for name in EYE_COMPONENTS if name not in label_map]
     if missing:
         return {"status": "skipped", "reason": "missing_eye_components", "missing_components": missing}
-    if "masks_roi" not in refined_group:
+    try:
+        mask_store = open_mask_store(refined_group, source_path=_group_source_path(refined_group), prefer="dense")
+    except MaskStoreError:
         return {"status": "skipped", "reason": "missing_masks_roi"}
 
-    masks_roi = refined_group["masks_roi"]
-    total_rois = int(masks_roi.shape[0])
+    total_rois = int(mask_store.n_rows)
     chunk_rois = max(1, min(256, total_rois if total_rois > 0 else 1))
     ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros((total_rois, 2), dtype=bool)
@@ -96,7 +103,7 @@ def write_refined_subject_eye_geometry(
             if not _component_available(refined_group, comp_idx):
                 contours[component_name].append(None)
                 continue
-            mask = np.asarray(masks_roi[row_idx, comp_idx], dtype=np.uint8)
+            mask = mask_store.read_dense(rows=row_idx, channels=comp_idx)[0, 0]
             success, ellipse, centroid, contour, _failure = _measure_eye_mask(mask)
             ellipse_params[row_idx, eye_idx] = np.asarray(ellipse, dtype=np.float32)
             ellipse_success[row_idx, eye_idx] = bool(success)

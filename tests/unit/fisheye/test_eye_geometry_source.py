@@ -7,6 +7,7 @@ import pytest
 
 from fisheye.shared.eye_geometry_source import EYE_GEOMETRY_STAGE_REFINED_SUBJECT
 from fisheye.shared.eye_geometry_source import resolve_eye_geometry_source
+from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
 from fisheye.utils import export_eye_mask_training_zarr as export_mod
 
 
@@ -48,6 +49,9 @@ class _FakeGroup(dict):
         child = _FakeGroup()
         parent[name] = child
         return child
+
+    def create_group(self, path: str) -> "_FakeGroup":
+        return self.require_group(path)
 
     def create_array(self, path: str, *, data: Any, **_kwargs) -> _FakeArray:
         parent, name = self._resolve_parent(path)
@@ -114,8 +118,8 @@ def _add_refined_subject_run(root: _FakeGroup, run_name: str = "refined_subject_
         }
     )
     masks = np.zeros((2, 4, 3, 4), dtype=np.uint8)
-    masks[:, 1] = 11
-    masks[:, 2] = 22
+    masks[:, 1, :, :2] = 1
+    masks[:, 2, :, 2:] = 1
     run.create_array("masks_roi", data=masks)
     run.create_array(
         "components/eye_left/geometry/ellipse_params",
@@ -143,8 +147,8 @@ def test_resolver_prefers_latest_refined_subject_geometry() -> None:
     assert source.source_refined_eye_run == "refined_eye_001"
     expected_masks = np.stack(
         [
-            np.full((3, 4), 11, dtype=np.uint8),
-            np.full((3, 4), 22, dtype=np.uint8),
+            np.pad(np.ones((3, 2), dtype=np.uint8), ((0, 0), (0, 2))),
+            np.pad(np.ones((3, 2), dtype=np.uint8), ((0, 0), (2, 0))),
         ],
         axis=0,
     )
@@ -152,6 +156,30 @@ def test_resolver_prefers_latest_refined_subject_geometry() -> None:
     assert source.ellipse_params.shape == (2, 2, 5)
     np.testing.assert_array_equal(np.asarray(source.ellipse_params[:, :, 0]), np.asarray([[1.0, 2.0], [1.0, 2.0]]))
     np.testing.assert_array_equal(np.asarray(source.ellipse_success[:]), np.asarray([[True, True], [False, True]]))
+
+
+def test_resolver_reads_refined_subject_eye_masks_from_compact_store() -> None:
+    root = _FakeGroup()
+    _add_refined_eye_run(root)
+    subject = _add_refined_subject_run(root)
+    dense = np.asarray(subject["masks_roi"][:], dtype=np.uint8)
+    del subject["masks_roi"]
+    write_component_rle_mask_store_from_dense(
+        subject,
+        dense,
+        component_names=[str(label) for label in subject.attrs["mask_labels"]],
+        encode_row_chunk_size=1,
+    )
+
+    source = resolve_eye_geometry_source(root)
+
+    assert source.stage_group == EYE_GEOMETRY_STAGE_REFINED_SUBJECT
+    assert source.run_name == "refined_subject_001"
+    assert "masks_roi" not in subject
+    assert source.masks_roi.shape == (2, 2, 3, 4)
+    np.testing.assert_array_equal(np.asarray(source.masks_roi[0, :, 0, 0]), np.asarray([1, 0], dtype=np.uint8))
+    np.testing.assert_array_equal(np.asarray(source.masks_roi[0, :, 0, 3]), np.asarray([0, 1], dtype=np.uint8))
+    np.testing.assert_array_equal(np.asarray(source.masks_roi[:, 1, 0, 3]), np.asarray([1, 1], dtype=np.uint8))
 
 
 def test_explicit_refined_subject_run_resolves_canonical_subject() -> None:
@@ -202,4 +230,4 @@ def test_eye_mask_training_export_auto_selects_refined_subject_geometry() -> Non
     assert selection.source_refined_subject_masks_run == "refined_subject_001"
     assert selection.source_subject_mask_run == "subject_masks_001"
     assert geometry is not None
-    np.testing.assert_array_equal(np.asarray(geometry.masks_roi[0, :, 0, 0]), np.asarray([11, 22], dtype=np.uint8))
+    np.testing.assert_array_equal(np.asarray(geometry.masks_roi[0, :, 0, 0]), np.asarray([1, 0], dtype=np.uint8))

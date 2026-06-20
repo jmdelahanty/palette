@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-28
+last_verified: 2026-06-19
 -->
 
 Purpose: define the runtime/storage contract for a generalized ROI-local
@@ -370,6 +370,35 @@ subject-mask inference path, the run should also record:
 - structured `model_info` when available
 - the crop-read provenance attrs already used by other ROI-driven stages, such
   as `source_crop_storage_mode` and `source_roi_read_mode`
+
+ROI pixel/decode provenance:
+
+- `source_roi_image_representation` names the channel layout supplied to the
+  model, for example `grayscale_uint8`.
+- `source_roi_pixel_contract_name` names the stable pixel contract. Current
+  flat-cache subject-mask/keypoint runs should report
+  `nv12_luma_plane_uint8` when consuming PyNvVideoCodec NV12 luma crops.
+- `source_roi_pixel_contract` is the structured contract payload, including
+  decode backend/colorimetry details when known.
+- `source_roi_read_mode` records the read surface used by inference, for
+  example `materialized_crop_run`, `temporary_cache`, or `flat_bin_roi_cache`.
+- `roi_cache_policy` records the requested cache policy for geometry-only crop
+  reads.
+- `source_roi_cache_used` records whether inference actually read from a cache.
+- `source_roi_cache_backend` records the cache layout/backend when a cache was
+  used, for example `flat_bin_v1`.
+- `source_roi_cache_path` is the effective runtime path read by this job. On
+  cluster jobs this may be a node-local scratch copy.
+- `source_roi_cache_canonical_path` should be written when an explicit staged
+  cache is consumed from a scratch copy; it identifies the durable/canonical
+  manifest path represented by the runtime copy.
+- `source_roi_cache_expected_archive_path` should be written when the job
+  validates a staged cache against an expected source analysis zarr.
+- `source_roi_live_acceleration_requested`,
+  `source_roi_live_acceleration_effective`,
+  `source_roi_live_acceleration_fallback_reason`, and
+  `source_roi_live_gpu_chunk_frames` record live geometry-only ROI extraction
+  behavior when inference does not read a materialized crop run.
 
 Recommended `run_semantics` for the shipped path:
 

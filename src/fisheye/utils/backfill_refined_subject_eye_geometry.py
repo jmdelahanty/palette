@@ -13,6 +13,7 @@ from ..cli.shared_args import add_log_args
 from ..shared.batch_logging import JsonLogger as SharedJsonLogger
 from ..shared.batch_logging import make_run_id
 from ..shared.environment import resolve_log_dir as resolve_shared_log_dir
+from ..shared.mask_store import MaskStoreError, open_mask_store
 from ..shared.refined_subject_eye_geometry import EYE_COMPONENTS, write_refined_subject_eye_geometry
 from ..shared.zarr_helpers import _direct_group_names, _group_names, _open_group_direct, _open_mode, _root_fs_path
 from .zarr_io import open_zarr_root
@@ -126,6 +127,10 @@ def _available_channels(group: zarr.Group) -> Optional[np.ndarray]:
         return np.asarray(available_arr, dtype=bool).reshape(-1)
 
 
+def _group_source_path(group: zarr.Group) -> str:
+    return str(getattr(group, "name", "") or "")
+
+
 def _path_exists(group: zarr.Group, path: str) -> bool:
     try:
         return group.get(path) is not None
@@ -177,14 +182,13 @@ def _inspect_run_group(run_group: zarr.Group) -> BackfillResult:
     if missing_components:
         return BackfillResult(status="no_lr_eyes", reason="missing eye_left/eye_right mask labels")
 
-    masks_roi = run_group.get("masks_roi")
-    if masks_roi is None:
-        return BackfillResult(status="missing_masks_roi", reason="masks_roi array missing")
-    if len(tuple(masks_roi.shape)) != 4:
-        return BackfillResult(status="shape_mismatch", reason=f"masks_roi shape is {tuple(masks_roi.shape)}")
+    try:
+        mask_store = open_mask_store(run_group, source_path=_group_source_path(run_group), prefer="dense")
+    except MaskStoreError as exc:
+        return BackfillResult(status="missing_masks_roi", reason=str(exc))
 
-    roi_count = int(masks_roi.shape[0])
-    channel_count = int(masks_roi.shape[1])
+    roi_count = int(mask_store.n_rows)
+    channel_count = int(mask_store.n_channels)
     eye_indices = [int(label_map[component]) for component in EYE_COMPONENTS]
     if any(index < 0 or index >= channel_count for index in eye_indices):
         return BackfillResult(
