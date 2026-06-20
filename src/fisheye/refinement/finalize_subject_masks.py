@@ -3696,6 +3696,11 @@ def finalize_subject_mask_run(
         }
 
     if mask_storage in {"dense_and_rle", "rle_v1"}:
+        rle_encode_workers = max(1, int(normalized_num_workers or 1))
+        rle_source_zarr_path = zarr_path if zarr_path is not None and rle_encode_workers > 1 else None
+        rle_source_run_path = (
+            f"refined_subject_masks_runs/{target_run}" if rle_source_zarr_path is not None else None
+        )
         with progress.phase("write_component_rle_mask_store"):
             with timing.phase("write_component_rle_mask_store"):
                 mask_rle_summary = write_component_rle_mask_store_from_dense(
@@ -3704,6 +3709,9 @@ def finalize_subject_mask_run(
                     component_names=component_names,
                     overwrite=True,
                     encode_row_chunk_size=max(1, min(int(worker_chunk_size), 1024)),
+                    encode_workers=rle_encode_workers,
+                    source_zarr_path=rle_source_zarr_path,
+                    source_run_path=rle_source_run_path,
                     extra_attrs={
                         "source_array": "masks_roi",
                         "source_encoding": "dense_uint8",

@@ -112,6 +112,39 @@ def test_component_rle_writer_stamps_storage_attrs_and_clears_stale_marker(tmp_p
     assert "mask_rle_stale_reason" not in run.attrs
 
 
+def test_component_rle_writer_process_shards_encode_before_single_parent_write(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("refined_subject_masks_runs")
+    run = parent.create_group("refined_001")
+    labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    run.attrs["mask_labels"] = labels
+    masks = np.zeros((6, len(labels), 12, 10), dtype=np.uint8)
+    for row in range(masks.shape[0]):
+        masks[row, 0, 1 + row % 3 : 5 + row % 3, 2:6] = 1
+        masks[row, 1, 3:7, 1 + row % 4 : 4 + row % 4] = 1
+        masks[row, 3, 7:10, row % 5 : row % 5 + 3] = 1
+    dense = run.create_array("masks_roi", data=masks, chunks=(2, 1, 12, 10), overwrite=True)
+
+    summary = write_component_rle_mask_store_from_dense(
+        run,
+        dense,
+        component_names=tuple(labels),
+        encode_row_chunk_size=2,
+        encode_workers=2,
+        source_zarr_path=zarr_path,
+        source_run_path="refined_subject_masks_runs/refined_001",
+    )
+
+    assert summary["encode_backend"] == "process_shards"
+    assert summary["encode_workers"] == 2
+    assert summary["encode_shard_count"] == 2
+    assert summary["roundtrip_validation"]["status"] == "passed"
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    store = open_mask_store(reopened["refined_subject_masks_runs/refined_001"], prefer="rle")
+    np.testing.assert_array_equal(store.read_dense(), masks)
+
+
 def test_mark_mask_rle_stale_attrs_records_dense_edit_scope(tmp_path: Path) -> None:
     zarr_path = tmp_path / "analysis.zarr"
     _expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)

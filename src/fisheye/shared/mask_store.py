@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
+import zarr
 
 from .mask_rle import (
     MASK_RLE_ENCODING,
@@ -334,6 +337,174 @@ def write_encoded_component_rle_mask_store(
     }
 
 
+def _component_rle_empty_stack(
+    *,
+    n_rows: int,
+    n_channels: int,
+    height: int,
+    width: int,
+    names: Sequence[str],
+) -> EncodedMaskComponentStack:
+    return encode_mask_component_stack_rle(
+        np.zeros((int(n_rows), int(n_channels), int(height), int(width)), dtype=np.uint8),
+        component_names=tuple(str(value) for value in names),
+    )
+
+
+def _encode_dense_component_rle_serial(
+    dense_masks: Any,
+    *,
+    n_rows: int,
+    n_channels: int,
+    height: int,
+    width: int,
+    names: Sequence[str],
+    row_chunk: int,
+    row_offset: int = 0,
+) -> EncodedMaskComponentStack:
+    shards: list[EncodedMaskComponentStack] = []
+    for start in range(int(row_offset), int(row_offset) + int(n_rows), int(row_chunk)):
+        stop = min(int(row_offset) + int(n_rows), start + int(row_chunk))
+        dense_chunk = np.asarray(dense_masks[start:stop], dtype=np.uint8)
+        if dense_chunk.ndim == 3:
+            dense_chunk = dense_chunk[:, None, :, :]
+        shards.append(encode_mask_component_stack_rle(dense_chunk, component_names=tuple(names)))
+    if shards:
+        return concatenate_encoded_mask_component_stacks(shards)
+    return _component_rle_empty_stack(
+        n_rows=0,
+        n_channels=int(n_channels),
+        height=int(height),
+        width=int(width),
+        names=names,
+    )
+
+
+def _row_shards(n_rows: int, *, shard_count: int, row_chunk: int) -> list[tuple[int, int]]:
+    if int(n_rows) <= 0:
+        return []
+    rows_per_chunk = max(1, int(row_chunk))
+    total_chunks = int(np.ceil(int(n_rows) / rows_per_chunk))
+    requested = max(1, min(int(shard_count), total_chunks))
+    edges = [
+        min(int(n_rows), int(np.floor(chunk_idx * total_chunks / requested)) * rows_per_chunk)
+        for chunk_idx in range(requested + 1)
+    ]
+    edges[-1] = int(n_rows)
+    shards: list[tuple[int, int]] = []
+    for start, stop in zip(edges[:-1], edges[1:]):
+        if int(stop) > int(start):
+            shards.append((int(start), int(stop)))
+    return shards
+
+
+def _encode_component_rle_process_worker(
+    zarr_path: str,
+    run_path: str,
+    source_array: str,
+    start_row: int,
+    stop_row: int,
+    row_chunk: int,
+    component_names: tuple[str, ...],
+) -> EncodedMaskComponentStack:
+    root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    run_group = root[str(run_path)]
+    dense_masks = run_group[str(source_array)]
+    shape = tuple(int(value) for value in dense_masks.shape)
+    if len(shape) == 3:
+        _total_rows, height, width = shape
+        n_channels = 1
+    elif len(shape) == 4:
+        _total_rows, n_channels, height, width = shape
+    else:
+        raise MaskStoreError(f"Expected dense masks with shape (N,C,H,W) or (N,H,W), got {shape!r}.")
+    return _encode_dense_component_rle_serial(
+        dense_masks,
+        n_rows=max(0, int(stop_row) - int(start_row)),
+        n_channels=int(n_channels),
+        height=int(height),
+        width=int(width),
+        names=component_names,
+        row_chunk=max(1, int(row_chunk)),
+        row_offset=int(start_row),
+    )
+
+
+def _encode_dense_component_rle(
+    dense_masks: Any,
+    *,
+    n_rows: int,
+    n_channels: int,
+    height: int,
+    width: int,
+    names: Sequence[str],
+    row_chunk: int,
+    encode_workers: int = 1,
+    source_zarr_path: str | Path | None = None,
+    source_run_path: str | None = None,
+    source_array: str = "masks_roi",
+) -> tuple[EncodedMaskComponentStack, dict[str, object]]:
+    """Encode dense masks in row shards, returning one parent-writable payload."""
+
+    worker_count = max(1, int(encode_workers))
+    if worker_count <= 1 or source_zarr_path is None or not source_run_path or int(n_rows) <= int(row_chunk):
+        encoded = _encode_dense_component_rle_serial(
+            dense_masks,
+            n_rows=int(n_rows),
+            n_channels=int(n_channels),
+            height=int(height),
+            width=int(width),
+            names=names,
+            row_chunk=max(1, int(row_chunk)),
+        )
+        return encoded, {
+            "encode_backend": "serial",
+            "encode_workers": 1,
+            "encode_shard_count": 1 if int(n_rows) > 0 else 0,
+        }
+
+    shards = _row_shards(int(n_rows), shard_count=worker_count, row_chunk=max(1, int(row_chunk)))
+    if len(shards) <= 1:
+        encoded = _encode_dense_component_rle_serial(
+            dense_masks,
+            n_rows=int(n_rows),
+            n_channels=int(n_channels),
+            height=int(height),
+            width=int(width),
+            names=names,
+            row_chunk=max(1, int(row_chunk)),
+        )
+        return encoded, {
+            "encode_backend": "serial",
+            "encode_workers": 1,
+            "encode_shard_count": 1 if int(n_rows) > 0 else 0,
+        }
+
+    component_names = tuple(str(value) for value in names)
+    with ProcessPoolExecutor(max_workers=min(worker_count, len(shards))) as pool:
+        futures = [
+            pool.submit(
+                _encode_component_rle_process_worker,
+                str(source_zarr_path),
+                str(source_run_path),
+                str(source_array),
+                int(start),
+                int(stop),
+                int(row_chunk),
+                component_names,
+            )
+            for start, stop in shards
+        ]
+        encoded_shards = [future.result() for future in futures]
+    encoded = concatenate_encoded_mask_component_stacks(encoded_shards)
+    return encoded, {
+        "encode_backend": "process_shards",
+        "encode_workers": int(min(worker_count, len(shards))),
+        "encode_shard_count": int(len(shards)),
+        "encode_row_shards": [[int(start), int(stop)] for start, stop in shards],
+    }
+
+
 def write_component_rle_mask_store_from_dense(
     run_group: Any,
     dense_masks: Any,
@@ -341,6 +512,10 @@ def write_component_rle_mask_store_from_dense(
     component_names: Sequence[str] | None = None,
     overwrite: bool = True,
     encode_row_chunk_size: int = 256,
+    encode_workers: int = 1,
+    source_zarr_path: str | Path | None = None,
+    source_run_path: str | None = None,
+    source_array: str = "masks_roi",
     validate_roundtrip: bool = True,
     count_chunk_bytes: int = 4 * 1024 * 1024,
     extra_attrs: Mapping[str, Any] | None = None,
@@ -355,10 +530,8 @@ def write_component_rle_mask_store_from_dense(
     if len(shape) == 3:
         n_rows, height, width = shape
         n_channels = 1
-        squeeze_channel = True
     elif len(shape) == 4:
         n_rows, n_channels, height, width = shape
-        squeeze_channel = False
     else:
         raise MaskStoreError(f"Expected dense masks with shape (N,C,H,W) or (N,H,W), got {shape!r}.")
 
@@ -367,21 +540,19 @@ def write_component_rle_mask_store_from_dense(
         raise MaskStoreError(f"Expected {n_channels} component names for dense masks, got {len(names)}.")
 
     row_chunk = max(1, int(encode_row_chunk_size))
-    shards: list[EncodedMaskComponentStack] = []
-    for start in range(0, int(n_rows), row_chunk):
-        stop = min(int(n_rows), start + row_chunk)
-        dense_chunk = np.asarray(dense_masks[start:stop], dtype=np.uint8)
-        if squeeze_channel:
-            dense_chunk = dense_chunk[:, None, :, :]
-        shards.append(encode_mask_component_stack_rle(dense_chunk, component_names=names))
-
-    if shards:
-        encoded = concatenate_encoded_mask_component_stacks(shards)
-    else:
-        encoded = encode_mask_component_stack_rle(
-            np.zeros((0, int(n_channels), int(height), int(width)), dtype=np.uint8),
-            component_names=names,
-        )
+    encoded, encode_summary = _encode_dense_component_rle(
+        dense_masks,
+        n_rows=int(n_rows),
+        n_channels=int(n_channels),
+        height=int(height),
+        width=int(width),
+        names=names,
+        row_chunk=row_chunk,
+        encode_workers=max(1, int(encode_workers)),
+        source_zarr_path=source_zarr_path,
+        source_run_path=source_run_path,
+        source_array=source_array,
+    )
     summary = write_encoded_component_rle_mask_store(
         run_group,
         encoded,
@@ -395,6 +566,7 @@ def write_component_rle_mask_store_from_dense(
             "source_encoding": "dense_uint8",
             "encode_row_chunk_size": int(row_chunk),
             "roundtrip_validation_requested": bool(validate_roundtrip),
+            **encode_summary,
         }
     )
     if validate_roundtrip:
