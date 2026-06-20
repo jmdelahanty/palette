@@ -27,6 +27,17 @@ def test_parser_accepts_compact_mask_storage_mode() -> None:
     assert args.mask_storage == "rle_v1"
 
 
+def test_safe_artifact_filename_hashes_long_names() -> None:
+    filename = mod._safe_artifact_filename(
+        ("recording_analysis", "subject_masks_" + ("very_long_" * 40)),
+        ".workflow.profile.jsonl",
+    )
+
+    assert len(filename) <= mod.MAX_ARTIFACT_FILENAME_CHARS
+    assert filename.endswith(".workflow.profile.jsonl")
+    assert "__" in filename
+
+
 def test_zarr_paths_from_report_reads_unique_result_paths(tmp_path: Path) -> None:
     report = tmp_path / "report.json"
     report.write_text(
@@ -338,6 +349,72 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
     assert "--write-eye-geometry" in cmd
     assert "--write-component-contours" in cmd
     assert "--retain-source-seeds" in cmd
+
+
+def test_finalization_command_uses_length_safe_progress_filename(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        finalize_chunk_size=256,
+        metric_level="cheap",
+        finalize_execution_backend="process_shards",
+        finalize_scheduler="processes",
+        finalize_num_workers=8,
+        finalize_postcompute_backend="process_shards",
+        finalize_postcompute_chunk_size=None,
+        finalize_postcompute_num_workers=None,
+        mask_storage="dense_and_rle",
+        mask_rle_validation_mode="invariants",
+        write_eye_geometry=True,
+        write_component_contours=True,
+        retain_source_seeds=False,
+        progress_dir=tmp_path / "progress",
+        overwrite=False,
+    )
+    long_run = "refined_subject_masks_" + ("invariant_validation_" * 20)
+    plan = mod.ArchivePlan(
+        zarr_path=str(tmp_path / "recording_analysis.zarr"),
+        subject_run="subject_run",
+        refined_run=long_run,
+        crop_run="crop_run",
+        assignment_keypoint_group="refined_keypoints_runs",
+        assignment_keypoint_run="refined_keypoints",
+        has_subject_runs=True,
+        has_refined_subject_runs=False,
+        run_inference=True,
+        run_finalization=True,
+    )
+
+    cmd = mod._finalization_command(args, plan)
+    progress_path = Path(cmd[cmd.index("--progress-jsonl") + 1])
+
+    assert len(progress_path.name) <= mod.MAX_ARTIFACT_FILENAME_CHARS
+    assert progress_path.name.endswith(".finalization.progress.jsonl")
+
+
+def test_workflow_profile_path_uses_length_safe_filename(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        workflow_profile_dir=tmp_path / "profiles",
+        progress_dir=None,
+        workflow_stage="finalization",
+    )
+    long_run = "refined_subject_masks_" + ("invariant_validation_" * 20)
+    plan = mod.ArchivePlan(
+        zarr_path=str(tmp_path / "recording_analysis.zarr"),
+        subject_run="subject_run",
+        refined_run=long_run,
+        crop_run="crop_run",
+        assignment_keypoint_group="refined_keypoints_runs",
+        assignment_keypoint_run="refined_keypoints",
+        has_subject_runs=True,
+        has_refined_subject_runs=False,
+        run_inference=False,
+        run_finalization=True,
+    )
+
+    profile_path = mod._workflow_profile_path(args, plan)
+
+    assert profile_path is not None
+    assert len(profile_path.name) <= mod.MAX_ARTIFACT_FILENAME_CHARS
+    assert profile_path.name.endswith(".workflow.profile.jsonl")
 
 
 def test_staged_output_overlay_keeps_inputs_symlinked_and_outputs_local(tmp_path: Path) -> None:

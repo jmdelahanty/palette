@@ -126,6 +126,8 @@ Options:
   --finalize-chunk-size N   Refined finalizer chunk size (default: 256)
   --finalize-execution-backend NAME
                             serial_driver|dask_worker_chunks|process_shards (default: process_shards)
+  --finalize-scheduler NAME Dask scheduler for dask_worker_chunks: single-threaded|threads|processes|distributed
+                            (default: processes; ignored by process_shards)
   --finalize-num-workers N|auto
                             Refined finalizer worker count (default: auto => --ncores)
   --finalize-postcompute-backend NAME
@@ -198,6 +200,7 @@ while [[ $# -gt 0 ]]; do
     --model-include-non-success) MODEL_INCLUDE_NON_SUCCESS=1; shift;;
     --finalize-chunk-size) FINALIZE_CHUNK_SIZE="$2"; shift 2;;
     --finalize-execution-backend) FINALIZE_EXECUTION_BACKEND="$2"; shift 2;;
+    --finalize-scheduler) FINALIZE_SCHEDULER="$2"; shift 2;;
     --finalize-num-workers) FINALIZE_NUM_WORKERS="$2"; shift 2;;
     --finalize-postcompute-backend) FINALIZE_POSTCOMPUTE_BACKEND="$2"; shift 2;;
     --finalize-postcompute-chunk-size) FINALIZE_POSTCOMPUTE_CHUNK_SIZE="$2"; shift 2;;
@@ -226,6 +229,10 @@ if [[ "$SOURCE" != "filesystem" && "$SOURCE" != "registry" ]]; then
 fi
 if [[ "$FINALIZE_EXECUTION_BACKEND" != "serial_driver" && "$FINALIZE_EXECUTION_BACKEND" != "dask_worker_chunks" && "$FINALIZE_EXECUTION_BACKEND" != "process_shards" ]]; then
   echo "--finalize-execution-backend must be serial_driver, dask_worker_chunks, or process_shards." >&2
+  exit 2
+fi
+if [[ "$FINALIZE_SCHEDULER" != "single-threaded" && "$FINALIZE_SCHEDULER" != "threads" && "$FINALIZE_SCHEDULER" != "processes" && "$FINALIZE_SCHEDULER" != "distributed" ]]; then
+  echo "--finalize-scheduler must be single-threaded, threads, processes, or distributed." >&2
   exit 2
 fi
 if [[ "$FINALIZE_POSTCOMPUTE_BACKEND" != "serial" && "$FINALIZE_POSTCOMPUTE_BACKEND" != "process_shards" ]]; then

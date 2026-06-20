@@ -12,6 +12,7 @@ The utility is intentionally conservative:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -44,6 +45,7 @@ from fisheye.shared.zarr_discovery import discover_registry_zarr_entries
 RAW_COMPONENTS = ("subject_body", "eyes_union", "swim_bladder")
 REFINED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
 OUTPUT_RUN_PARENTS = ("subject_mask_runs", "refined_subject_masks_runs")
+MAX_ARTIFACT_FILENAME_CHARS = 220
 
 
 @dataclass(frozen=True)
@@ -431,9 +433,11 @@ def _finalization_command(
     if args.finalize_postcompute_num_workers is not None:
         cmd.extend(["--postcompute-num-workers", str(args.finalize_postcompute_num_workers)])
     if args.progress_dir is not None:
-        archive_component = _safe_path_component(Path(plan.zarr_path).stem)
-        run_component = _safe_path_component(plan.refined_run)
-        progress_path = args.progress_dir.expanduser().resolve() / f"{archive_component}__{run_component}.finalization.progress.jsonl"
+        progress_filename = _safe_artifact_filename(
+            (Path(plan.zarr_path).stem, plan.refined_run),
+            ".finalization.progress.jsonl",
+        )
+        progress_path = args.progress_dir.expanduser().resolve() / progress_filename
         cmd.extend(["--progress-jsonl", str(progress_path)])
     if defer_registry_status:
         cmd.append("--defer-registry-status")
@@ -454,17 +458,34 @@ def _safe_path_component(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value)) or "item"
 
 
+def _safe_artifact_filename(
+    components: Sequence[str],
+    suffix: str,
+    *,
+    max_chars: int = MAX_ARTIFACT_FILENAME_CHARS,
+) -> str:
+    safe_components = [_safe_path_component(component) for component in components if str(component)]
+    stem = "__".join(safe_components) or "artifact"
+    filename = f"{stem}{suffix}"
+    if len(filename) <= max_chars:
+        return filename
+
+    digest = hashlib.sha1(stem.encode("utf-8")).hexdigest()[:12]
+    prefix_budget = max(16, max_chars - len(suffix) - len(digest) - 2)
+    prefix = stem[:prefix_budget].rstrip("._-") or "artifact"
+    return f"{prefix}__{digest}{suffix}"
+
+
 def _workflow_profile_path(args: argparse.Namespace, plan: ArchivePlan) -> Path | None:
     profile_dir = args.workflow_profile_dir or args.progress_dir
     if profile_dir is None:
         return None
-    archive_component = _safe_path_component(Path(plan.zarr_path).stem)
-    stage_component = _safe_path_component(str(args.workflow_stage))
-    run_component = _safe_path_component(plan.subject_run if plan.run_inference else plan.refined_run)
-    return (
-        profile_dir.expanduser().resolve()
-        / f"{archive_component}__{stage_component}__{run_component}.workflow.profile.jsonl"
+    run_name = plan.subject_run if plan.run_inference else plan.refined_run
+    filename = _safe_artifact_filename(
+        (Path(plan.zarr_path).stem, str(args.workflow_stage), run_name),
+        ".workflow.profile.jsonl",
     )
+    return profile_dir.expanduser().resolve() / filename
 
 
 def _remove_path(path: Path) -> None:
@@ -475,9 +496,8 @@ def _remove_path(path: Path) -> None:
 
 
 def _subject_mask_package_path(base_dir: Path, zarr_path: Path, run_name: str) -> Path:
-    archive_component = _safe_path_component(zarr_path.stem)
-    run_component = _safe_path_component(run_name)
-    return base_dir.expanduser().resolve() / f"{archive_component}__{run_component}.tar"
+    filename = _safe_artifact_filename((zarr_path.stem, run_name), ".tar")
+    return base_dir.expanduser().resolve() / filename
 
 
 def _create_run_group_tar_package(source_run_path: Path, package_path: Path) -> dict[str, Any]:
@@ -559,9 +579,8 @@ def _prepare_output_staging_zarr(
     stage_finalization_input: bool = False,
 ) -> OutputStagingContext:
     source_zarr_path = source_zarr_path.expanduser().resolve()
-    archive_component = _safe_path_component(source_zarr_path.stem)
-    run_component = _safe_path_component(plan.subject_run)
-    staged_zarr_path = staging_root.expanduser().resolve() / f"{archive_component}__{run_component}.zarr"
+    staged_filename = _safe_artifact_filename((source_zarr_path.stem, plan.subject_run), ".zarr")
+    staged_zarr_path = staging_root.expanduser().resolve() / staged_filename
     if staged_zarr_path.exists() or staged_zarr_path.is_symlink():
         if not overwrite:
             raise FileExistsError(f"Staged output zarr already exists: {staged_zarr_path}")
