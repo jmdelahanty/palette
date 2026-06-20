@@ -232,7 +232,9 @@ analysis is a later diagnostic path, not a prerequisite for the following work.
    - Test `cc3d` for CPU connected components and `cucim`/`kornia` for GPU morphology in a
      diagnostic harness.
    - Require parity/equivalence evidence before production use.
-   - Status: future diagnostic, no dependency change yet.
+   - Status: diagnostic harness added at
+     `fisheye.diagnostics.benchmark_subject_mask_primitives`; no production dependency or
+     finalizer behavior change yet.
 6. **Continue storage/publish optimization separately.**
    - Keep dense masks for current consumers; use RLE/chunk-size experiments to reduce publication
      cost without changing biological semantics.
@@ -244,7 +246,53 @@ analysis is a later diagnostic path, not a prerequisite for the following work.
 - `src/fisheye/refinement/finalize_subject_masks.py` — backends, task build, worker, merge, provenance, argparse.
 - `src/fisheye/refinement/subject_mask_finalization.py` — `finalize_component_mask` per-component compute (`:128`).
 - `src/fisheye/shared/mask_geometry.py` — shared spatial-mask reductions and binary-mask primitives.
+- `src/fisheye/diagnostics/benchmark_subject_mask_primitives.py` — optional primitive backend
+  benchmark for `cc3d`, `cucim`, and `kornia`.
 - `src/fisheye/shared/subject_mask_chunks.py` — chunk sizes + the 256-row worker clamp.
 - `src/fisheye/utils/run_subject_mask_batch_pipeline.py` — batch defaults (parallel-by-default).
 - `scripts/submit_subject_mask_batches_bsub.sh` — cross-run LSF array-job fan-out.
 - `tests/unit/fisheye/test_finalize_subject_masks.py` — backend parity tests.
+
+## Primitive Backend Benchmark Commands
+
+Synthetic CPU smoke:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_subject_mask_primitives \
+  --row-count 256 \
+  --height 512 \
+  --width 512 \
+  --repeat 3
+```
+
+CUDA/GPU candidate smoke, when a GPU is visible:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_subject_mask_primitives \
+  --row-count 256 \
+  --height 512 \
+  --width 512 \
+  --repeat 3 \
+  --include-gpu
+```
+
+Real subject-mask slice:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_subject_mask_primitives \
+  --zarr /path/to/analysis.zarr \
+  --subject-run subject_masks_<run> \
+  --component subject_body \
+  --start-row 0 \
+  --row-count 1024 \
+  --repeat 3
+```
+
+Interpretation rule: parity comes first. A backend that is faster but returns
+`parity="fail"` is not a candidate for production until the semantic mismatch is
+understood and documented.
+
+Implementation note: cuCIM GPU backends run in a subprocess worker. On the 2026-06-20
+workstation check, cuCIM completed successfully but could segfault during Python
+interpreter teardown if used in-process; subprocess isolation keeps the diagnostic
+command itself reliable.
