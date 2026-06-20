@@ -6,7 +6,8 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+import time
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
 import zarr
@@ -25,6 +26,9 @@ from .zarr_helpers import zarr_attrs_dict, zarr_child_group, zarr_group_keys
 
 class MaskStoreError(ValueError):
     """Raised when a mask store cannot resolve or materialize masks."""
+
+
+MASK_RLE_VALIDATION_MODES = ("full", "invariants", "none")
 
 
 def _mask_labels(group: Any, channel_count: int | None = None) -> tuple[str, ...]:
@@ -88,6 +92,21 @@ def _component_rle_logical_bytes(encoded: EncodedMaskComponentStack) -> int:
             + component.bbox_xyxy.nbytes
         )
     return int(total)
+
+
+def _normalize_mask_rle_validation_mode(
+    validation_mode: str | None,
+    *,
+    validate_roundtrip: bool,
+) -> str:
+    if validation_mode is None:
+        return "full" if bool(validate_roundtrip) else "none"
+    mode = str(validation_mode).strip().lower()
+    if mode not in MASK_RLE_VALIDATION_MODES:
+        raise ValueError(
+            f"mask_rle validation_mode must be one of {MASK_RLE_VALIDATION_MODES}; got {validation_mode!r}."
+        )
+    return mode
 
 
 def _utc_now() -> str:
@@ -517,8 +536,10 @@ def write_component_rle_mask_store_from_dense(
     source_run_path: str | None = None,
     source_array: str = "masks_roi",
     validate_roundtrip: bool = True,
+    validation_mode: str | None = None,
     count_chunk_bytes: int = 4 * 1024 * 1024,
     extra_attrs: Mapping[str, Any] | None = None,
+    progress_callback: Callable[..., None] | None = None,
 ) -> dict[str, object]:
     """Stream dense masks into component-separated RLE storage.
 
@@ -538,8 +559,30 @@ def write_component_rle_mask_store_from_dense(
     names = tuple(str(value) for value in component_names) if component_names is not None else _mask_labels(run_group, n_channels)
     if len(names) != int(n_channels):
         raise MaskStoreError(f"Expected {n_channels} component names for dense masks, got {len(names)}.")
+    validation_mode = _normalize_mask_rle_validation_mode(
+        validation_mode,
+        validate_roundtrip=bool(validate_roundtrip),
+    )
 
+    def emit(event: str, **payload: object) -> None:
+        if progress_callback is not None:
+            progress_callback(str(event), **payload)
+
+    phase_seconds: dict[str, float] = {}
     row_chunk = max(1, int(encode_row_chunk_size))
+    encode_started = time.perf_counter()
+    emit(
+        "component_rle_encode_start",
+        rows=int(n_rows),
+        channels=int(n_channels),
+        height=int(height),
+        width=int(width),
+        encode_row_chunk_size=int(row_chunk),
+        encode_workers=max(1, int(encode_workers)),
+        source_zarr_path=str(source_zarr_path) if source_zarr_path is not None else None,
+        source_run_path=str(source_run_path) if source_run_path is not None else None,
+        source_array=str(source_array),
+    )
     encoded, encode_summary = _encode_dense_component_rle(
         dense_masks,
         n_rows=int(n_rows),
@@ -553,6 +596,20 @@ def write_component_rle_mask_store_from_dense(
         source_run_path=source_run_path,
         source_array=source_array,
     )
+    phase_seconds["encode"] = float(time.perf_counter() - encode_started)
+    emit(
+        "component_rle_encode_end",
+        duration_seconds=phase_seconds["encode"],
+        logical_bytes=_component_rle_logical_bytes(encoded),
+        **encode_summary,
+    )
+    write_started = time.perf_counter()
+    emit(
+        "component_rle_parent_write_start",
+        rows=int(encoded.n_rows),
+        components=int(len(encoded.components)),
+        logical_bytes=_component_rle_logical_bytes(encoded),
+    )
     summary = write_encoded_component_rle_mask_store(
         run_group,
         encoded,
@@ -561,23 +618,249 @@ def write_component_rle_mask_store_from_dense(
         row_chunk_size=row_chunk,
         extra_attrs=extra_attrs,
     )
+    phase_seconds["parent_write"] = float(time.perf_counter() - write_started)
+    emit(
+        "component_rle_parent_write_end",
+        duration_seconds=phase_seconds["parent_write"],
+        stored_logical_bytes=int(summary.get("logical_bytes") or 0),
+        component_count=int(summary.get("component_count") or 0),
+    )
     summary.update(
         {
             "source_encoding": "dense_uint8",
             "encode_row_chunk_size": int(row_chunk),
-            "roundtrip_validation_requested": bool(validate_roundtrip),
+            "validation_mode": str(validation_mode),
+            "mask_rle_validation_mode": str(validation_mode),
+            "roundtrip_validation_requested": validation_mode == "full",
+            "phase_seconds": dict(phase_seconds),
             **encode_summary,
         }
     )
-    if validate_roundtrip:
+    if validation_mode == "full":
+        validation_started = time.perf_counter()
+        emit(
+            "component_rle_roundtrip_validation_start",
+            rows=int(n_rows),
+            channels=int(n_channels),
+            row_chunk_size=int(row_chunk),
+        )
         validation = validate_component_rle_mask_store_against_dense(
             run_group,
             dense_masks,
             row_chunk_size=row_chunk,
             source_path=str(extra_attrs.get("source_path", "")) if extra_attrs else "",
         )
+        phase_seconds["roundtrip_validation"] = float(time.perf_counter() - validation_started)
+        emit(
+            "component_rle_roundtrip_validation_end",
+            duration_seconds=phase_seconds["roundtrip_validation"],
+            **validation,
+        )
+        summary["phase_seconds"] = dict(phase_seconds)
         summary["roundtrip_validation"] = validation
+        summary["mask_rle_validation"] = {"mode": "full", **validation}
+    elif validation_mode == "invariants":
+        validation_started = time.perf_counter()
+        emit(
+            "component_rle_invariant_validation_start",
+            rows=int(n_rows),
+            channels=int(n_channels),
+        )
+        validation = validate_component_rle_mask_store_invariants(
+            run_group,
+            expected_shape=(int(n_rows), int(n_channels), int(height), int(width)),
+            component_names=names,
+            source_path=str(extra_attrs.get("source_path", "")) if extra_attrs else "",
+        )
+        phase_seconds["invariant_validation"] = float(time.perf_counter() - validation_started)
+        emit(
+            "component_rle_invariant_validation_end",
+            duration_seconds=phase_seconds["invariant_validation"],
+            **validation,
+        )
+        summary["phase_seconds"] = dict(phase_seconds)
+        summary["mask_rle_validation"] = validation
+        summary["roundtrip_validation"] = {
+            "status": "skipped",
+            "reason": "validation_mode=invariants",
+        }
+    else:
+        summary["mask_rle_validation"] = {
+            "status": "skipped",
+            "mode": "none",
+            "reason": "validation_mode=none",
+        }
+        summary["roundtrip_validation"] = {
+            "status": "skipped",
+            "reason": "validation_mode=none",
+        }
     return summary
+
+
+def validate_component_rle_mask_store_invariants(
+    run_group: Any,
+    *,
+    expected_shape: Sequence[int] | None = None,
+    component_names: Sequence[str] | None = None,
+    source_path: str = "",
+) -> dict[str, object]:
+    """Validate compact ``mask_rle`` structure without dense pixel round-trips."""
+
+    rle_group = zarr_child_group(run_group, "mask_rle")
+    if rle_group is None:
+        raise MaskStoreError(f"{source_path or '<mask_run>'} is missing mask_rle.")
+    attrs = zarr_attrs_dict(rle_group)
+
+    def fail(message: str) -> None:
+        raise MaskStoreError(f"Component RLE invariant validation failed: {message}")
+
+    if attrs.get("schema_id") != MASK_RLE_SCHEMA_ID:
+        fail(f"schema_id {attrs.get('schema_id')!r} != {MASK_RLE_SCHEMA_ID!r}.")
+    if attrs.get("mask_encoding") != MASK_RLE_ENCODING:
+        fail(f"mask_encoding {attrs.get('mask_encoding')!r} != {MASK_RLE_ENCODING!r}.")
+    if attrs.get("layout") != "component_groups":
+        fail(f"layout {attrs.get('layout')!r} != 'component_groups'.")
+
+    raw_shape = attrs.get("encoded_shape_hw")
+    if not isinstance(raw_shape, (list, tuple)) or len(raw_shape) != 2:
+        fail("encoded_shape_hw must contain [height, width].")
+    height, width = (int(raw_shape[0]), int(raw_shape[1]))
+    if height < 1 or width < 1:
+        fail(f"encoded_shape_hw must be positive, got {(height, width)!r}.")
+    total_pixels = int(height * width)
+
+    raw_names = attrs.get("component_names")
+    if not isinstance(raw_names, (list, tuple)) or not raw_names:
+        fail("component_names attr must be a non-empty list.")
+    names = tuple(str(value) for value in raw_names)
+    if component_names is not None and tuple(str(value) for value in component_names) != names:
+        fail(f"component_names {names!r} do not match expected {tuple(component_names)!r}.")
+
+    try:
+        n_rows = int(attrs["n_rows"])
+        component_count = int(attrs["component_count"])
+    except Exception as exc:
+        raise MaskStoreError("Component RLE invariant validation failed: missing n_rows/component_count attrs.") from exc
+    if n_rows < 0:
+        fail(f"n_rows must be non-negative, got {n_rows}.")
+    if component_count != len(names):
+        fail(f"component_count {component_count} != len(component_names) {len(names)}.")
+
+    if expected_shape is not None:
+        expected = tuple(int(value) for value in expected_shape)
+        if len(expected) == 3:
+            expected = (int(expected[0]), 1, int(expected[1]), int(expected[2]))
+        if len(expected) != 4:
+            fail(f"expected_shape must have 3 or 4 dimensions, got {expected_shape!r}.")
+        if expected != (n_rows, component_count, height, width):
+            fail(f"shape {(n_rows, component_count, height, width)!r} != expected {expected!r}.")
+
+    components_parent = zarr_child_group(rle_group, "components")
+    if components_parent is None:
+        fail("missing components group.")
+    groups_by_index = _component_groups_by_index(rle_group)
+    total_count_values = 0
+    total_present_rows = 0
+    components_checked = 0
+    for component_idx, component_name in enumerate(names):
+        component_group = groups_by_index.get(int(component_idx))
+        if component_group is None:
+            fail(f"missing component group for index {component_idx} ({component_name!r}).")
+        component_attrs = zarr_attrs_dict(component_group)
+        if str(component_attrs.get("component_name")) != str(component_name):
+            fail(
+                f"component {component_idx} name {component_attrs.get('component_name')!r} "
+                f"!= {component_name!r}."
+            )
+        if int(component_attrs.get("component_index", -1)) != int(component_idx):
+            fail(f"component {component_name!r} has wrong component_index attr.")
+        for array_name in ("counts", "indptr", "present", "area_px", "bbox_xyxy"):
+            if array_name not in component_group:
+                fail(f"component {component_name!r} missing {array_name}.")
+
+        counts = np.asarray(component_group["counts"][:])
+        indptr = np.asarray(component_group["indptr"][:], dtype=np.int64)
+        present = np.asarray(component_group["present"][:], dtype=bool)
+        area_px = np.asarray(component_group["area_px"][:], dtype=np.int64)
+        bbox_xyxy = np.asarray(component_group["bbox_xyxy"][:], dtype=np.int64)
+
+        if indptr.shape != (n_rows + 1,):
+            fail(f"component {component_name!r} indptr shape {indptr.shape!r} != {(n_rows + 1,)!r}.")
+        if present.shape != (n_rows,):
+            fail(f"component {component_name!r} present shape {present.shape!r} != {(n_rows,)!r}.")
+        if area_px.shape != (n_rows,):
+            fail(f"component {component_name!r} area_px shape {area_px.shape!r} != {(n_rows,)!r}.")
+        if bbox_xyxy.shape != (n_rows, 4):
+            fail(f"component {component_name!r} bbox_xyxy shape {bbox_xyxy.shape!r} != {(n_rows, 4)!r}.")
+        if int(indptr[0]) != 0:
+            fail(f"component {component_name!r} indptr[0] must be 0.")
+        row_count_lengths = np.diff(indptr)
+        if np.any(row_count_lengths <= 0):
+            first = int(np.flatnonzero(row_count_lengths <= 0)[0])
+            fail(f"component {component_name!r} row {first} has no RLE count payload.")
+        if np.any(row_count_lengths < 0):
+            first = int(np.flatnonzero(row_count_lengths < 0)[0])
+            fail(f"component {component_name!r} indptr decreases at row {first}.")
+        if int(indptr[-1]) != int(counts.shape[0]):
+            fail(
+                f"component {component_name!r} indptr[-1] {int(indptr[-1])} "
+                f"!= counts length {int(counts.shape[0])}."
+            )
+        if counts.size:
+            row_sums = np.add.reduceat(np.asarray(counts, dtype=np.int64), indptr[:-1])
+            bad_sum = np.flatnonzero(row_sums != total_pixels)
+            if bad_sum.size:
+                first = int(bad_sum[0])
+                fail(
+                    f"component {component_name!r} row {first} RLE count sum "
+                    f"{int(row_sums[first])} != {total_pixels}."
+                )
+        if np.any(area_px < 0) or np.any(area_px > total_pixels):
+            first = int(np.flatnonzero((area_px < 0) | (area_px > total_pixels))[0])
+            fail(f"component {component_name!r} row {first} has out-of-bounds area {int(area_px[first])}.")
+        if not np.array_equal(present, area_px > 0):
+            first = int(np.flatnonzero(present != (area_px > 0))[0])
+            fail(f"component {component_name!r} row {first} present does not match area_px > 0.")
+
+        x0 = bbox_xyxy[:, 0]
+        y0 = bbox_xyxy[:, 1]
+        x1 = bbox_xyxy[:, 2]
+        y1 = bbox_xyxy[:, 3]
+        present_rows = present
+        if np.any(present_rows):
+            sane = (
+                (x0[present_rows] >= 0)
+                & (y0[present_rows] >= 0)
+                & (x1[present_rows] <= width)
+                & (y1[present_rows] <= height)
+                & (x1[present_rows] > x0[present_rows])
+                & (y1[present_rows] > y0[present_rows])
+            )
+            if not np.all(sane):
+                first_present = np.flatnonzero(present_rows)
+                first_bad = int(first_present[np.flatnonzero(~sane)[0]])
+                fail(f"component {component_name!r} row {first_bad} has invalid present bbox.")
+        absent_rows = ~present_rows
+        if np.any(absent_rows) and np.any(bbox_xyxy[absent_rows] != 0):
+            first_absent = np.flatnonzero(absent_rows)
+            first_bad = int(first_absent[np.flatnonzero(np.any(bbox_xyxy[absent_rows] != 0, axis=1))[0]])
+            fail(f"component {component_name!r} row {first_bad} has non-zero absent bbox.")
+
+        components_checked += 1
+        total_count_values += int(counts.shape[0])
+        total_present_rows += int(np.count_nonzero(present))
+
+    return {
+        "status": "passed",
+        "mode": "invariants",
+        "rows_checked": int(n_rows),
+        "channels_checked": int(component_count),
+        "components_checked": int(components_checked),
+        "counts_values_checked": int(total_count_values),
+        "present_rows": int(total_present_rows),
+        "shape": [int(n_rows), int(component_count), int(height), int(width)],
+        "logical_dense_validation": False,
+    }
 
 
 def validate_component_rle_mask_store_against_dense(

@@ -42,6 +42,7 @@ from ..shared.provenance_attrs import (
 from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.mask_store import (
+    MASK_RLE_VALIDATION_MODES,
     MaskStoreError,
     open_mask_store,
     write_component_rle_mask_store_from_dense,
@@ -123,6 +124,7 @@ _POSTCOMPUTE_BACKENDS = ("serial", "process_shards")
 _SERIAL_POSTCOMPUTE_BACKEND = "serial"
 _PROCESS_SHARD_POSTCOMPUTE_BACKEND = "process_shards"
 _MASK_STORAGE_CHOICES = ("dense_uint8", "dense_and_rle", "rle_v1")
+_MASK_RLE_VALIDATION_MODES = MASK_RLE_VALIDATION_MODES
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
 _SOURCE_SEED_MASKS_SCHEMA_ID = "refined_subject_component_source_seed_masks_v1"
@@ -3100,6 +3102,7 @@ def finalize_subject_mask_run(
     write_component_contours: bool = False,
     retain_source_seeds: bool = False,
     mask_storage: str = "dense_uint8",
+    mask_rle_validation_mode: str = "full",
     postcompute_backend: str = _SERIAL_POSTCOMPUTE_BACKEND,
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
@@ -3122,6 +3125,12 @@ def finalize_subject_mask_run(
     mask_storage = str(mask_storage)
     if mask_storage not in _MASK_STORAGE_CHOICES:
         raise ValueError(f"mask_storage must be one of {_MASK_STORAGE_CHOICES}; got {mask_storage!r}.")
+    mask_rle_validation_mode = str(mask_rle_validation_mode).strip().lower()
+    if mask_rle_validation_mode not in _MASK_RLE_VALIDATION_MODES:
+        raise ValueError(
+            f"mask_rle_validation_mode must be one of {_MASK_RLE_VALIDATION_MODES}; "
+            f"got {mask_rle_validation_mode!r}."
+        )
     scheduler_key = _normalize_scheduler(scheduler)
     normalized_num_workers = int(num_workers) if num_workers is not None else None
     execution_backend = _normalize_execution_backend(execution_backend)
@@ -3203,6 +3212,7 @@ def finalize_subject_mask_run(
         "retain_source_seeds": bool(retain_source_seeds),
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "mask_storage": mask_storage,
+        "mask_rle_validation_mode": mask_rle_validation_mode,
         "would_write_mask_rle": mask_storage in {"dense_and_rle", "rle_v1"},
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": normalized_postcompute_chunk_size,
@@ -3230,6 +3240,7 @@ def finalize_subject_mask_run(
         write_component_contours=bool(write_component_contours),
         retain_source_seeds=bool(retain_source_seeds),
         mask_storage=str(mask_storage),
+        mask_rle_validation_mode=str(mask_rle_validation_mode),
         source_seed_masks_status="retained" if bool(retain_source_seeds) else "omitted",
         postcompute_backend=str(postcompute_backend),
         postcompute_chunk_size=int(normalized_postcompute_chunk_size),
@@ -3286,6 +3297,7 @@ def finalize_subject_mask_run(
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
         "mask_storage_requested": mask_storage,
+        "mask_rle_validation_mode": mask_rle_validation_mode,
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3321,6 +3333,7 @@ def finalize_subject_mask_run(
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "source_seed_masks_reason": "retain_source_seeds=true" if bool(retain_source_seeds) else "production_default",
         "mask_storage_requested": mask_storage,
+        "mask_rle_validation_mode": mask_rle_validation_mode,
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3701,6 +3714,10 @@ def finalize_subject_mask_run(
         rle_source_run_path = (
             f"refined_subject_masks_runs/{target_run}" if rle_source_zarr_path is not None else None
         )
+
+        def _emit_rle_progress(event: str, **payload: object) -> None:
+            progress.emit(str(event), **payload)
+
         with progress.phase("write_component_rle_mask_store"):
             with timing.phase("write_component_rle_mask_store"):
                 mask_rle_summary = write_component_rle_mask_store_from_dense(
@@ -3712,11 +3729,13 @@ def finalize_subject_mask_run(
                     encode_workers=rle_encode_workers,
                     source_zarr_path=rle_source_zarr_path,
                     source_run_path=rle_source_run_path,
+                    validation_mode=mask_rle_validation_mode,
                     extra_attrs={
                         "source_array": "masks_roi",
                         "source_encoding": "dense_uint8",
                         "source_run": str(target_run),
                     },
+                    progress_callback=_emit_rle_progress,
                 )
         if mask_storage == "rle_v1":
             del run_group["masks_roi"]
@@ -3737,6 +3756,7 @@ def finalize_subject_mask_run(
             "encoding": "component_rle_v1",
         }
     run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
+    run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = mask_rle_validation_mode
     run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
 
     duration_seconds = float(time.perf_counter() - stage_start)
@@ -3767,6 +3787,7 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_postcompute_num_workers"] = normalized_postcompute_num_workers
     run_group.attrs["smart_finalizer_postcompute_summary"] = dict(_json_safe(postcompute_summary))
     run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
+    run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = mask_rle_validation_mode
     run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
     run_group.attrs["smart_finalizer_execution_backend"] = execution_backend
     run_group.attrs["dask_execution_enabled"] = execution_backend == _DASK_WORKER_EXECUTION_BACKEND
@@ -3792,6 +3813,7 @@ def finalize_subject_mask_run(
             "retain_source_seeds": bool(retain_source_seeds),
             "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
             "mask_storage": mask_storage,
+            "mask_rle_validation_mode": mask_rle_validation_mode,
             "mask_rle_summary": dict(_json_safe(mask_rle_summary)),
             "postcompute_backend": postcompute_backend,
             "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
@@ -3829,6 +3851,7 @@ def finalize_subject_masks(
     write_component_contours: bool = False,
     retain_source_seeds: bool = False,
     mask_storage: str = "dense_uint8",
+    mask_rle_validation_mode: str = "full",
     postcompute_backend: str = _SERIAL_POSTCOMPUTE_BACKEND,
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
@@ -3856,6 +3879,7 @@ def finalize_subject_masks(
         write_component_contours=write_component_contours,
         retain_source_seeds=retain_source_seeds,
         mask_storage=mask_storage,
+        mask_rle_validation_mode=mask_rle_validation_mode,
         postcompute_backend=postcompute_backend,
         postcompute_chunk_size=postcompute_chunk_size,
         postcompute_num_workers=postcompute_num_workers,
@@ -3956,6 +3980,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--mask-rle-validation-mode",
+        choices=_MASK_RLE_VALIDATION_MODES,
+        default="full",
+        help=(
+            "Validation policy after writing component RLE. full decodes and compares every dense mask "
+            "pixel against the source; invariants checks schema, row counts, RLE count sums, presence, "
+            "area, and bbox consistency without reconstructing the dense logical surface; none skips "
+            "compact-store validation."
+        ),
+    )
+    parser.add_argument(
         "--postcompute-backend",
         choices=_POSTCOMPUTE_BACKENDS,
         default=_SERIAL_POSTCOMPUTE_BACKEND,
@@ -4048,6 +4083,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_component_contours=bool(args.write_component_contours),
         retain_source_seeds=bool(args.retain_source_seeds),
         mask_storage=args.mask_storage,
+        mask_rle_validation_mode=args.mask_rle_validation_mode,
         postcompute_backend=args.postcompute_backend,
         postcompute_chunk_size=args.postcompute_chunk_size,
         postcompute_num_workers=args.postcompute_num_workers,

@@ -10,6 +10,7 @@ from fisheye.shared.mask_store import (
     mark_mask_rle_stale_attrs,
     open_mask_store,
     validate_component_rle_mask_store_against_dense,
+    validate_component_rle_mask_store_invariants,
     write_component_rle_mask_store_from_dense,
 )
 from fisheye.utils.materialize_refined_subject_mask_store import (
@@ -112,6 +113,53 @@ def test_component_rle_writer_stamps_storage_attrs_and_clears_stale_marker(tmp_p
     assert "mask_rle_stale_reason" not in run.attrs
 
 
+def test_component_rle_writer_supports_invariant_validation_mode(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    progress_events: list[str] = []
+
+    summary = write_component_rle_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=tuple(str(value) for value in run.attrs["mask_labels"]),
+        encode_row_chunk_size=1,
+        validation_mode="invariants",
+        progress_callback=lambda event, **_payload: progress_events.append(event),
+    )
+
+    assert summary["mask_rle_validation_mode"] == "invariants"
+    assert summary["mask_rle_validation"]["status"] == "passed"
+    assert summary["mask_rle_validation"]["logical_dense_validation"] is False
+    assert summary["roundtrip_validation"] == {
+        "status": "skipped",
+        "reason": "validation_mode=invariants",
+    }
+    assert summary["phase_seconds"]["invariant_validation"] >= 0.0
+    assert progress_events[-2:] == [
+        "component_rle_invariant_validation_start",
+        "component_rle_invariant_validation_end",
+    ]
+
+
+def test_component_rle_invariant_validation_rejects_corrupt_indptr(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    _expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    component = run["mask_rle/components/00_subject_body"]
+    bad_indptr = np.asarray(component["indptr"][:], dtype=np.int64)
+    bad_indptr[-1] += 1
+    component["indptr"][:] = bad_indptr
+
+    with pytest.raises(ValueError, match="indptr\\[-1\\]"):
+        validate_component_rle_mask_store_invariants(
+            run,
+            expected_shape=run["masks_roi"].shape,
+            component_names=tuple(str(value) for value in run.attrs["mask_labels"]),
+            source_path="refined_subject_masks_runs/refined_001",
+        )
+
+
 def test_component_rle_writer_process_shards_encode_before_single_parent_write(tmp_path: Path) -> None:
     zarr_path = tmp_path / "analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -125,6 +173,7 @@ def test_component_rle_writer_process_shards_encode_before_single_parent_write(t
         masks[row, 1, 3:7, 1 + row % 4 : 4 + row % 4] = 1
         masks[row, 3, 7:10, row % 5 : row % 5 + 3] = 1
     dense = run.create_array("masks_roi", data=masks, chunks=(2, 1, 12, 10), overwrite=True)
+    progress_events: list[str] = []
 
     summary = write_component_rle_mask_store_from_dense(
         run,
@@ -134,11 +183,23 @@ def test_component_rle_writer_process_shards_encode_before_single_parent_write(t
         encode_workers=2,
         source_zarr_path=zarr_path,
         source_run_path="refined_subject_masks_runs/refined_001",
+        progress_callback=lambda event, **_payload: progress_events.append(event),
     )
 
     assert summary["encode_backend"] == "process_shards"
     assert summary["encode_workers"] == 2
     assert summary["encode_shard_count"] == 2
+    assert summary["phase_seconds"]["encode"] >= 0.0
+    assert summary["phase_seconds"]["parent_write"] >= 0.0
+    assert summary["phase_seconds"]["roundtrip_validation"] >= 0.0
+    assert progress_events == [
+        "component_rle_encode_start",
+        "component_rle_encode_end",
+        "component_rle_parent_write_start",
+        "component_rle_parent_write_end",
+        "component_rle_roundtrip_validation_start",
+        "component_rle_roundtrip_validation_end",
+    ]
     assert summary["roundtrip_validation"]["status"] == "passed"
     reopened = zarr.open_group(str(zarr_path), mode="r")
     store = open_mask_store(reopened["refined_subject_masks_runs/refined_001"], prefer="rle")

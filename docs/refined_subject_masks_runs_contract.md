@@ -525,6 +525,10 @@ Required arrays:
     bytes, backend-reported stored bytes when available, dense-cache
     materialization provenance, RLE refresh timestamps, and stale row/component
     scope
+  - finalizer attrs include `smart_finalizer_mask_rle_validation_mode` and
+    `smart_finalizer_mask_rle_summary`; production cluster runs use invariant
+    validation by default, while full dense round-trip validation remains
+    available for canaries and audits
 - `available_channels`
   - shape: `(C,)`
   - run-level declaration of which components are semantically available in the

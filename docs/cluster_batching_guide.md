@@ -935,6 +935,7 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
 | `--retain-source-seeds`   | off     | Retain dense `source_seed_masks_roi` debug arrays in refined runs |
 | `--mask-storage`          | `dense_uint8` | Refined mask storage mode: `dense_uint8`, `dense_and_rle`, or `rle_v1` |
+| `--mask-rle-validation-mode` | `invariants` | Compact RLE validation mode: `invariants` for production structural checks, `full` for dense round-trip audits, or `none` for deliberate low-level debugging |
 | `--device`                 | `0` when `--gpus > 0` | Torch device override       |
 | `--overwrite`              | off     | Pass overwrite through to child stages   |
 | `--camera-id-filter`       | *(none)* | Filter by camera_id (registry only)     |
@@ -984,6 +985,11 @@ the historical dense `masks_roi` compatibility cache while also writing
 `mask_rle`. Use `rle_v1` only after that smoke validates; it writes the compact
 component RLE surface without retaining dense `masks_roi`, so consumers must read
 through the logical mask-store contract or explicitly materialize a dense cache.
+The batch default `--mask-rle-validation-mode invariants` checks compact-store
+schema, dimensions, `indptr`, per-row RLE count sums, presence/area, and bbox
+bounds without decoding the full dense logical mask surface. Use
+`--mask-rle-validation-mode full` for targeted canaries or debugging when
+dense-vs-RLE pixel equality must be proven end-to-end.
 
 This uses PRFS as the durable cross-node handoff and node-local scratch only as
 per-job acceleration. Do not rely on one job's `/scratch` contents being visible

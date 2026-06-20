@@ -74,6 +74,11 @@ is the preferred shadow/audit mode. `rle_v1` is available for compact-only
 experiments and consumers that are already audited through the `MaskStore`
 materialization boundary.
 
+Validation rule: production batch runs use invariant validation for compact
+RLE. This validates the typed compact store without decoding the entire dense
+logical surface. Full dense round-trip validation remains available for targeted
+audits and canaries.
+
 ## Is Zarr a Poor Fit for RLE?
 
 Not necessarily. Zarr is strongest for typed arrays, and RLE can be represented
@@ -812,11 +817,16 @@ Interpretation:
    unaffected while RLE parity is audited.
 3. Use shard-then-reduce or two-pass prefix-sum writing for `mask_rle/counts`;
    never concurrent append.
-4. Validate every written RLE row/channel against the dense source before
-   marking the run complete. **Implemented at the shared writer boundary**:
-   `write_component_rle_mask_store_from_dense(..., validate_roundtrip=True)`
-   streams decoded `mask_rle` chunks back through `MaskStore` and raises before
-   completion if any row/channel differs from the dense source.
+4. Validate written RLE before marking the run complete. **Implemented at the
+   shared writer boundary** with explicit validation modes:
+   `validation_mode="full"` decodes every compact row/channel back through
+   `MaskStore` and compares it against the dense source. This is the strongest
+   audit mode, but it touches the full dense logical surface.
+   `validation_mode="invariants"` checks schema, row/channel shape, component
+   payload presence, monotonic `indptr`, per-row RLE count sums, presence/area
+   consistency, and bbox bounds without reconstructing dense masks. This is the
+   production batch default. `validation_mode="none"` is reserved for low-level
+   debugging and should not be used for production runs.
 5. Stamp `mask_storage_encoding`, dense-cache status, chunk policy, worker chunk
    policy, and RLE schema ID in run attrs and registry extracts. The registry
    now extracts dense/RLE logical byte counts, backend-reported stored byte

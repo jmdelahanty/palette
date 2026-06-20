@@ -43,6 +43,7 @@ FINALIZE_POSTCOMPUTE_CHUNK_SIZE=""
 FINALIZE_POSTCOMPUTE_NUM_WORKERS="auto"
 METRIC_LEVEL="cheap"
 MASK_STORAGE="dense_uint8"
+MASK_RLE_VALIDATION_MODE="invariants"
 WRITE_EYE_GEOMETRY=1
 WRITE_COMPONENT_CONTOURS=1
 RETAIN_SOURCE_SEEDS=0
@@ -136,6 +137,9 @@ Options:
   --metric-level LEVEL      cheap|full (default: cheap)
   --mask-storage MODE       dense_uint8|dense_and_rle|rle_v1 for refined masks
                             (default: dense_uint8)
+  --mask-rle-validation-mode MODE
+                            full|invariants|none after writing compact mask_rle
+                            (default: invariants for production batch runs)
   --no-write-eye-geometry   Do not ask finalizer to write eye geometry
   --no-write-component-contours
                             Do not ask finalizer to write component contours
@@ -200,6 +204,7 @@ while [[ $# -gt 0 ]]; do
     --finalize-postcompute-num-workers) FINALIZE_POSTCOMPUTE_NUM_WORKERS="$2"; shift 2;;
     --metric-level) METRIC_LEVEL="$2"; shift 2;;
     --mask-storage) MASK_STORAGE="$2"; shift 2;;
+    --mask-rle-validation-mode) MASK_RLE_VALIDATION_MODE="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
     --no-write-component-contours) WRITE_COMPONENT_CONTOURS=0; shift;;
     --retain-source-seeds) RETAIN_SOURCE_SEEDS=1; shift;;
@@ -229,6 +234,10 @@ if [[ "$FINALIZE_POSTCOMPUTE_BACKEND" != "serial" && "$FINALIZE_POSTCOMPUTE_BACK
 fi
 if [[ "$MASK_STORAGE" != "dense_uint8" && "$MASK_STORAGE" != "dense_and_rle" && "$MASK_STORAGE" != "rle_v1" ]]; then
   echo "--mask-storage must be dense_uint8, dense_and_rle, or rle_v1." >&2
+  exit 2
+fi
+if [[ "$MASK_RLE_VALIDATION_MODE" != "full" && "$MASK_RLE_VALIDATION_MODE" != "invariants" && "$MASK_RLE_VALIDATION_MODE" != "none" ]]; then
+  echo "--mask-rle-validation-mode must be full, invariants, or none." >&2
   exit 2
 fi
 if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && "$REQUIRE_ROI_CACHE" != "1" ]]; then
@@ -471,6 +480,7 @@ SUBJECT_ARGS=(
   --model-label-schema-id "$MODEL_LABEL_SCHEMA_ID"
   --metric-level "$METRIC_LEVEL"
   --mask-storage "$MASK_STORAGE"
+  --mask-rle-validation-mode "$MASK_RLE_VALIDATION_MODE"
   --finalize-chunk-size "$FINALIZE_CHUNK_SIZE"
   --finalize-execution-backend "$FINALIZE_EXECUTION_BACKEND"
   --finalize-scheduler "$FINALIZE_SCHEDULER"

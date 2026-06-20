@@ -405,6 +405,8 @@ def _finalization_command(
         args.metric_level,
         "--mask-storage",
         args.mask_storage,
+        "--mask-rle-validation-mode",
+        args.mask_rle_validation_mode,
         "--execution-backend",
         args.finalize_execution_backend,
         "--scheduler",
@@ -891,6 +893,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Refined subject-mask physical storage passed to finalize_subject_masks. "
             "dense_uint8 preserves the historical dense masks_roi surface; dense_and_rle "
             "writes dense masks plus compact component RLE; rle_v1 writes compact RLE only."
+        ),
+    )
+    parser.add_argument(
+        "--mask-rle-validation-mode",
+        choices=("full", "invariants", "none"),
+        default="invariants",
+        help=(
+            "Compact mask_rle validation policy passed to finalize_subject_masks. Batch/cluster "
+            "production defaults to invariants so compact stores are structurally validated without "
+            "decoding the entire dense logical mask surface."
         ),
     )
     parser.add_argument("--finalize-chunk-size", type=int, default=64)
