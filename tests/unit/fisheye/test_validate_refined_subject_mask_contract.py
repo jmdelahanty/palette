@@ -30,12 +30,16 @@ def _make_archive(
     omit_component_arrays: bool = False,
     omit_component_provenance: bool = False,
     omit_metrics: bool = False,
+    omit_source_crop_row_ids: bool = False,
 ) -> None:
     root = zarr.open_group(str(zarr_path), mode="w")
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "crop_test"
     crop = crop_parent.create_group("crop_test")
     crop.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
+    crop.create_array("detection_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
+    crop.create_array("source_refined_row_ids", data=np.asarray([100, 101], dtype=np.int64), overwrite=True)
+    crop.create_array("source_detect_row_index", data=np.asarray([200, 201], dtype=np.int32), overwrite=True)
     crop.create_array("roi_coordinates_full", data=np.asarray([[2, 3], [4, 5]], dtype=np.int32), overwrite=True)
     parent = root.create_group("refined_subject_masks_runs")
     parent.attrs["latest"] = "refined_subject_test"
@@ -61,7 +65,11 @@ def _make_archive(
     masks[:, 2, 2:4, 5:7] = 1
     masks[:, 3, 4:6, 3:5] = 1
     run.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
-    run.create_array("source_crop_row_ids", data=np.asarray([0, 1], dtype=np.int64), overwrite=True)
+    run.create_array("detection_indices", data=np.asarray([0, 1], dtype=np.int32), overwrite=True)
+    run.create_array("source_refined_row_ids", data=np.asarray([100, 101], dtype=np.int64), overwrite=True)
+    run.create_array("source_detect_row_index", data=np.asarray([200, 201], dtype=np.int32), overwrite=True)
+    if not omit_source_crop_row_ids:
+        run.create_array("source_crop_row_ids", data=np.asarray([0, 1], dtype=np.int64), overwrite=True)
     run.create_array("detection_source", data=np.asarray([0, 0], dtype=np.int8), overwrite=True)
     run.create_array("masks_roi", data=masks, chunks=(1, 1, 8, 8), overwrite=True)
     run.create_array("available_channels", data=np.ones((len(LABELS),), dtype=bool), overwrite=True)
@@ -164,6 +172,47 @@ def test_validate_refined_subject_mask_contract_rejects_source_crop_frame_mismat
 
     assert summary["valid"] is False
     assert any(issue["code"] == "source_crop_frame_mismatch" for issue in summary["errors"])
+
+
+def test_backfill_refined_subject_mask_contract_writes_direct_source_crop_row_ids(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "archive_missing_crop_rows.zarr"
+    _make_archive(zarr_path, omit_source_crop_row_ids=True)
+
+    before = validate_refined_subject_mask_contract(zarr_path)
+    assert before["valid"] is False
+    missing = [issue for issue in before["errors"] if issue["path"].endswith("/source_crop_row_ids")]
+    assert len(missing) == 1
+    assert missing[0]["backfillable"] is True
+
+    backfill = backfill_refined_subject_mask_contract(zarr_path)
+    after = validate_refined_subject_mask_contract(zarr_path)
+
+    assert "source_crop_row_ids" in backfill["backfilled"]
+    assert backfill["source_crop_row_ids_backfill_policy"] == "direct_row_identity_after_matching_crop_row_arrays"
+    assert after["valid"] is True
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_test"]
+    np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.asarray([0, 1], dtype=np.int64))
+
+
+def test_backfill_refined_subject_mask_contract_refuses_mismatched_direct_rows(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "archive_mismatched_crop_rows.zarr"
+    _make_archive(zarr_path, omit_source_crop_row_ids=True)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["crop_runs/crop_test/detection_indices"][1] = np.int32(99)
+
+    before = validate_refined_subject_mask_contract(zarr_path)
+    assert before["valid"] is False
+    missing = [issue for issue in before["errors"] if issue["path"].endswith("/source_crop_row_ids")]
+    assert len(missing) == 1
+    assert missing[0]["backfillable"] is False
+
+    try:
+        backfill_refined_subject_mask_contract(zarr_path)
+    except ValueError as exc:
+        assert "detection_indices" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected direct-row source_crop_row_ids backfill to be refused.")
 
 
 def test_validate_refined_subject_mask_contract_rejects_corrupt_compact_mask_store(tmp_path: Path) -> None:

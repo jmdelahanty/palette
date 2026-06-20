@@ -13,6 +13,7 @@ import zarr
 
 from fisheye.shared.detect_reason_codec import write_reason_columns
 from fisheye.shared.mask_store import MaskStoreError, open_mask_store
+from fisheye.shared.row_lineage import direct_source_crop_row_ids
 from fisheye.shared.subject_mask_chunks import refined_subject_mask_metric_row_chunk
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -39,6 +40,12 @@ REQUIRED_RUN_ATTRS = (
     "duration_seconds",
     "refined_subject_mask_review_status",
     "component_review_statuses",
+)
+DIRECT_CROP_ROW_BACKFILL_CHECK_ARRAYS = (
+    "frame_indices",
+    "detection_indices",
+    "source_refined_row_ids",
+    "source_detect_row_index",
 )
 
 
@@ -301,6 +308,61 @@ def _validate_source_crop_row_mapping(
         )
 
 
+def _direct_source_crop_row_ids_backfillable(
+    root: zarr.Group,
+    run: zarr.Group,
+    *,
+    total_rows: Optional[int],
+) -> tuple[bool, str]:
+    if total_rows is None:
+        return False, "mask row count is unknown"
+    crop_run = run.attrs.get("source_crop_run")
+    if not isinstance(crop_run, str) or not crop_run.strip():
+        return False, "source_crop_run attr is missing"
+    crop_group = root.get(f"crop_runs/{crop_run}")
+    if not _is_group(crop_group):
+        return False, f"crop_runs/{crop_run} is missing"
+    for array_name in DIRECT_CROP_ROW_BACKFILL_CHECK_ARRAYS:
+        crop_node = crop_group.get(array_name)
+        run_node = run.get(array_name)
+        if not (_is_array(crop_node) and _is_array(run_node)):
+            if array_name == "frame_indices":
+                return False, "frame_indices is required on both run and crop for direct-row backfill"
+            continue
+        if tuple(int(dim) for dim in crop_node.shape) != (int(total_rows),):
+            return False, f"crop {array_name} shape {tuple(crop_node.shape)} is not ({total_rows},)"
+        if tuple(int(dim) for dim in run_node.shape) != (int(total_rows),):
+            return False, f"run {array_name} shape {tuple(run_node.shape)} is not ({total_rows},)"
+        if not np.array_equal(np.asarray(crop_node[:]), np.asarray(run_node[:])):
+            return False, f"run {array_name} does not match crop {array_name}"
+    return True, "run rows match source crop rows exactly"
+
+
+def _backfill_direct_source_crop_row_ids(
+    root: zarr.Group,
+    run: zarr.Group,
+    *,
+    total_rows: Optional[int],
+    summary: dict[str, object],
+) -> bool:
+    if "source_crop_row_ids" in run:
+        return False
+    ok, reason = _direct_source_crop_row_ids_backfillable(root, run, total_rows=total_rows)
+    if not ok:
+        raise ValueError(f"Cannot backfill source_crop_row_ids: {reason}.")
+    data = direct_source_crop_row_ids(int(total_rows))
+    run.create_array(
+        "source_crop_row_ids",
+        data=data,
+        chunks=_metric_chunks(int(total_rows)),
+        overwrite=True,
+    )
+    summary.setdefault("backfilled", []).append("source_crop_row_ids")
+    summary["source_crop_row_ids_backfill_policy"] = "direct_row_identity_after_matching_crop_row_arrays"
+    summary["source_crop_row_ids_backfill_reason"] = reason
+    return True
+
+
 def _ensure_array(
     group: zarr.Group,
     name: str,
@@ -528,6 +590,14 @@ def backfill_refined_subject_mask_contract(
     labels = _normalize_labels(run.attrs.get("mask_labels"))
     if not labels:
         raise ValueError("Cannot backfill without mask_labels.")
+    try:
+        mask_store = open_mask_store(run, source_path=f"refined_subject_masks_runs/{resolved_run}", prefer="dense")
+        masks_shape = tuple(int(dim) for dim in mask_store.shape)
+        total_rows = int(masks_shape[0]) if len(masks_shape) == 4 else None
+    except (MaskStoreError, ValueError):
+        total_rows = _array_shape(run, "masks_roi")
+        total_rows = int(total_rows[0]) if total_rows is not None and len(total_rows) == 4 else None
+    _backfill_direct_source_crop_row_ids(root, run, total_rows=total_rows, summary=summary)
     _backfill_available_channels(run, labels, summary)
     available_node = run.get("available_channels")
     if not _is_array(available_node):
@@ -629,16 +699,24 @@ def validate_refined_subject_mask_contract(
             backfillable=True,
         )
 
+    if masks_shape is None:
+        masks_shape = _array_shape(run, "masks_roi")
+    total_rows = int(masks_shape[0]) if masks_shape is not None and len(masks_shape) == 4 else None
+    channel_count = int(masks_shape[1]) if masks_shape is not None and len(masks_shape) == 4 else None
+
     for name in REQUIRED_RUN_ARRAYS:
         node = run.get(name)
         if not _is_array(node):
+            backfillable = name == "available_channels"
+            if name == "source_crop_row_ids":
+                backfillable, _reason = _direct_source_crop_row_ids_backfillable(root, run, total_rows=total_rows)
             _add_issue(
                 issues,
                 severity="error",
                 code="missing_array",
                 path=f"{run_path}/{name}",
                 message=f"Missing required array {name!r}.",
-                backfillable=name == "available_channels",
+                backfillable=backfillable,
             )
             continue
         shape = tuple(int(dim) for dim in node.shape)
@@ -661,10 +739,6 @@ def validate_refined_subject_mask_contract(
                     message=f"{name} length {shape[0]} != mask rows {masks_shape[0]}.",
                 )
 
-    if masks_shape is None:
-        masks_shape = _array_shape(run, "masks_roi")
-    total_rows = int(masks_shape[0]) if masks_shape is not None and len(masks_shape) == 4 else None
-    channel_count = int(masks_shape[1]) if masks_shape is not None and len(masks_shape) == 4 else None
     _validate_source_crop_row_mapping(root, run, run_path=run_path, total_rows=total_rows, issues=issues)
 
     available = None

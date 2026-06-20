@@ -146,6 +146,22 @@ Modern refined subject-mask runs must carry explicit crop-row lineage:
 Consumers must not assume refined-mask row `i` equals crop row `i` except as a
 warned legacy/off-contract fallback.
 
+Legacy refined subject-mask runs that predate `source_crop_row_ids` may be
+upgraded with:
+
+```bash
+scripts/py -m fisheye.utils.validate_refined_subject_mask_contract /path/to/analysis.zarr \
+  --run latest \
+  --backfill
+```
+
+The validator only writes `source_crop_row_ids = arange(N)` when the refined run
+and `crop_runs/<source_crop_run>` have the same row count and matching
+`frame_indices` plus any shared row-identity arrays such as `detection_indices`,
+`source_refined_row_ids`, and `source_detect_row_index`. If those checks fail,
+regenerate from a modern `subject_mask_runs` source instead of guessing row
+lineage.
+
 Writers should preserve stable logical row identity when available:
 
 - copy `source_refined_row_ids` from upstream refined-detect/crop lineage when
