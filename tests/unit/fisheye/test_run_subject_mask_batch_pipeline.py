@@ -17,6 +17,13 @@ def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
     args = mod._build_parser().parse_args(["/recordings"])
 
     assert args.finalize_postcompute_backend == "process_shards"
+    assert args.mask_storage == "dense_uint8"
+
+
+def test_parser_accepts_compact_mask_storage_mode() -> None:
+    args = mod._build_parser().parse_args(["/recordings", "--mask-storage", "rle_v1"])
+
+    assert args.mask_storage == "rle_v1"
 
 
 def test_zarr_paths_from_report_reads_unique_result_paths(tmp_path: Path) -> None:
@@ -299,6 +306,7 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
         finalize_postcompute_backend="process_shards",
         finalize_postcompute_chunk_size=512,
         finalize_postcompute_num_workers=4,
+        mask_storage="dense_and_rle",
         write_eye_geometry=True,
         write_component_contours=True,
         retain_source_seeds=True,
@@ -323,6 +331,7 @@ def test_finalization_command_passes_postcompute_options(tmp_path: Path) -> None
     assert cmd[cmd.index("--postcompute-backend") + 1] == "process_shards"
     assert cmd[cmd.index("--postcompute-chunk-size") + 1] == "512"
     assert cmd[cmd.index("--postcompute-num-workers") + 1] == "4"
+    assert cmd[cmd.index("--mask-storage") + 1] == "dense_and_rle"
     assert "--write-eye-geometry" in cmd
     assert "--write-component-contours" in cmd
     assert "--retain-source-seeds" in cmd

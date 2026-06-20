@@ -806,7 +806,8 @@ Interpretation:
 
 1. Add a writer option:
    `--mask-storage dense_uint8|rle_v1|dense_and_rle`. **Implemented for
-   refined-subject finalization.**
+   refined-subject finalization and exposed through the subject-mask cluster
+   batch submitter.**
 2. Start with `dense_and_rle` for selected runs so dense readers remain
    unaffected while RLE parity is audited.
 3. Use shard-then-reduce or two-pass prefix-sum writing for `mask_rle/counts`;
@@ -920,6 +921,9 @@ Remaining default-migration blockers:
 - Operators need a real-recording smoke for `--mask-storage rle_v1` followed by
   subject-shape, eye-geometry, component-contour, training-export, and review
   materialization checks before `rle_v1` becomes the default.
+- Run the cluster smoke in two steps: first `--mask-storage dense_and_rle` to
+  validate compact RLE while preserving dense compatibility, then
+  `--mask-storage rle_v1` to validate compact-only publication and consumers.
 
 ### Phase 4: Default Writer Migration
 

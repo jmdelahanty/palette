@@ -403,6 +403,8 @@ def _finalization_command(
         str(args.finalize_chunk_size),
         "--metric-level",
         args.metric_level,
+        "--mask-storage",
+        args.mask_storage,
         "--execution-backend",
         args.finalize_execution_backend,
         "--scheduler",
@@ -881,6 +883,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-require-unique", action="store_true")
     parser.add_argument("--model-include-non-success", action="store_true")
     parser.add_argument("--metric-level", choices=("cheap", "full"), default="cheap")
+    parser.add_argument(
+        "--mask-storage",
+        choices=("dense_uint8", "dense_and_rle", "rle_v1"),
+        default="dense_uint8",
+        help=(
+            "Refined subject-mask physical storage passed to finalize_subject_masks. "
+            "dense_uint8 preserves the historical dense masks_roi surface; dense_and_rle "
+            "writes dense masks plus compact component RLE; rle_v1 writes compact RLE only."
+        ),
+    )
     parser.add_argument("--finalize-chunk-size", type=int, default=64)
     parser.add_argument(
         "--finalize-execution-backend",

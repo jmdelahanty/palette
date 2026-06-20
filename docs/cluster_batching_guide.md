@@ -934,6 +934,7 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--finalize-postcompute-chunk-size` | *(finalizer default)* | Rows per postcompute shard; defaults inside the finalizer to `--finalize-chunk-size` |
 | `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
 | `--retain-source-seeds`   | off     | Retain dense `source_seed_masks_roi` debug arrays in refined runs |
+| `--mask-storage`          | `dense_uint8` | Refined mask storage mode: `dense_uint8`, `dense_and_rle`, or `rle_v1` |
 | `--device`                 | `0` when `--gpus > 0` | Torch device override       |
 | `--overwrite`              | off     | Pass overwrite through to child stages   |
 | `--camera-id-filter`       | *(none)* | Filter by camera_id (registry only)     |
@@ -976,6 +977,13 @@ By default, refined subject-mask finalization omits dense
 `source_seed_masks_roi` arrays and records `source_seed_masks_status="omitted"`.
 Use `--retain-source-seeds` only for diagnostic runs where seed-vs-final mask
 comparison is needed.
+
+Refined-mask storage is selectable with `--mask-storage`. Use
+`dense_and_rle` for the first compact-storage cluster smoke because it preserves
+the historical dense `masks_roi` compatibility cache while also writing
+`mask_rle`. Use `rle_v1` only after that smoke validates; it writes the compact
+component RLE surface without retaining dense `masks_roi`, so consumers must read
+through the logical mask-store contract or explicitly materialize a dense cache.
 
 This uses PRFS as the durable cross-node handoff and node-local scratch only as
 per-job acceleration. Do not rely on one job's `/scratch` contents being visible

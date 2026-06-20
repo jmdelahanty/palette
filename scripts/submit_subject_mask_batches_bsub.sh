@@ -42,6 +42,7 @@ FINALIZE_POSTCOMPUTE_BACKEND="process_shards"
 FINALIZE_POSTCOMPUTE_CHUNK_SIZE=""
 FINALIZE_POSTCOMPUTE_NUM_WORKERS="auto"
 METRIC_LEVEL="cheap"
+MASK_STORAGE="dense_uint8"
 WRITE_EYE_GEOMETRY=1
 WRITE_COMPONENT_CONTOURS=1
 RETAIN_SOURCE_SEEDS=0
@@ -133,6 +134,8 @@ Options:
   --finalize-postcompute-num-workers N|auto
                             Postcompute worker count (default: finalizer uses --finalize-num-workers)
   --metric-level LEVEL      cheap|full (default: cheap)
+  --mask-storage MODE       dense_uint8|dense_and_rle|rle_v1 for refined masks
+                            (default: dense_uint8)
   --no-write-eye-geometry   Do not ask finalizer to write eye geometry
   --no-write-component-contours
                             Do not ask finalizer to write component contours
@@ -196,6 +199,7 @@ while [[ $# -gt 0 ]]; do
     --finalize-postcompute-chunk-size) FINALIZE_POSTCOMPUTE_CHUNK_SIZE="$2"; shift 2;;
     --finalize-postcompute-num-workers) FINALIZE_POSTCOMPUTE_NUM_WORKERS="$2"; shift 2;;
     --metric-level) METRIC_LEVEL="$2"; shift 2;;
+    --mask-storage) MASK_STORAGE="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
     --no-write-component-contours) WRITE_COMPONENT_CONTOURS=0; shift;;
     --retain-source-seeds) RETAIN_SOURCE_SEEDS=1; shift;;
@@ -221,6 +225,10 @@ if [[ "$FINALIZE_EXECUTION_BACKEND" != "serial_driver" && "$FINALIZE_EXECUTION_B
 fi
 if [[ "$FINALIZE_POSTCOMPUTE_BACKEND" != "serial" && "$FINALIZE_POSTCOMPUTE_BACKEND" != "process_shards" ]]; then
   echo "--finalize-postcompute-backend must be serial or process_shards." >&2
+  exit 2
+fi
+if [[ "$MASK_STORAGE" != "dense_uint8" && "$MASK_STORAGE" != "dense_and_rle" && "$MASK_STORAGE" != "rle_v1" ]]; then
+  echo "--mask-storage must be dense_uint8, dense_and_rle, or rle_v1." >&2
   exit 2
 fi
 if [[ "$STAGE_ROI_CACHE_TO_SCRATCH" == "1" && "$REQUIRE_ROI_CACHE" != "1" ]]; then
@@ -462,6 +470,7 @@ SUBJECT_ARGS=(
   --model-component-coverage-key "$MODEL_COMPONENT_COVERAGE_KEY"
   --model-label-schema-id "$MODEL_LABEL_SCHEMA_ID"
   --metric-level "$METRIC_LEVEL"
+  --mask-storage "$MASK_STORAGE"
   --finalize-chunk-size "$FINALIZE_CHUNK_SIZE"
   --finalize-execution-backend "$FINALIZE_EXECUTION_BACKEND"
   --finalize-scheduler "$FINALIZE_SCHEDULER"
@@ -735,6 +744,7 @@ echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS device=$DEVICE"
 echo "Split finalization job: $SPLIT_FINALIZATION_JOB"
 echo "Finalizer: chunk_size=$FINALIZE_CHUNK_SIZE workers=$FINALIZE_NUM_WORKERS backend=$FINALIZE_EXECUTION_BACKEND scheduler=$FINALIZE_SCHEDULER"
+echo "Refined mask storage: $MASK_STORAGE"
 echo "Finalizer resources: queue=${FINALIZE_QUEUE:-<default>} ncores=$FINALIZE_NCORES mem_gb=$FINALIZE_MEM_GB max_active=$FINALIZE_MAX_ACTIVE"
 echo "ROI cache root: ${ROI_CACHE_ROOT:-<none>}"
 echo "Stage ROI cache to scratch: $STAGE_ROI_CACHE_TO_SCRATCH"
