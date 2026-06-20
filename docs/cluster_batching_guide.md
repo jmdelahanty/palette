@@ -930,7 +930,7 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--allow-missing-roi-cache` | off    | Allow fallback when no flat cache manifest is found |
 | `--batch-size-sm`          | `128`   | Subject-mask inference batch size        |
 | `--finalize-num-workers`   | `auto`  | Refined finalizer workers; `auto` resolves to finalization CPU slots |
-| `--finalize-dense-mask-row-chunk` | *(finalizer default)* | Physical row chunk for dense refined `masks_roi`; benchmark values like `256` or `512` to reduce PRFS file counts |
+| `--finalize-dense-mask-row-chunk` | `256` | Physical row chunk for dense refined `masks_roi`; `256` is the current cluster production candidate |
 | `--finalize-postcompute-backend` | `process_shards` | Expensive finalizer postcompute backend for eye geometry/body-swim contours; use `serial` only for historical in-process debugging |
 | `--finalize-postcompute-chunk-size` | *(finalizer default)* | Rows per postcompute shard; defaults inside the finalizer to `--finalize-chunk-size` |
 | `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
@@ -970,11 +970,13 @@ keep compute-heavy finalization on node-local scratch.
 
 Dense refined-mask chunking affects both publication and interactive readers.
 The historical default keeps small dense `masks_roi` chunks for one-ROI review
-access, but that creates many files on PRFS. For production-scale benchmark
-runs, use `--finalize-dense-mask-row-chunk 256` or `512` together with matching
-`--finalize-chunk-size`; the finalizer rounds parallel worker chunks to the
+access, but that creates many files on PRFS. The current cluster production
+candidate is `--finalize-dense-mask-row-chunk 256` together with matching
+`--finalize-chunk-size 256`; the finalizer rounds parallel worker chunks to the
 metric/dense chunk grid so workers own whole physical chunks and avoid
-concurrent partial-chunk read-modify-write hazards.
+concurrent partial-chunk read-modify-write hazards. A 512-row benchmark reduced
+file count further but increased finalization wall time enough to lose overall,
+so treat `512` as experimental rather than the default.
 
 When the finalizer writes eye geometry and component contours, the batch
 workflow defaults to `--finalize-postcompute-backend process_shards`. This keeps

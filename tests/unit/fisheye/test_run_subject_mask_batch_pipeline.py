@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -17,6 +18,7 @@ def test_parser_defaults_to_sharded_postcompute_for_batch_workflow() -> None:
     args = mod._build_parser().parse_args(["/recordings"])
 
     assert args.finalize_postcompute_backend == "process_shards"
+    assert args.finalize_dense_mask_row_chunk == mod.DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK
     assert args.mask_storage == "dense_uint8"
     assert args.mask_rle_validation_mode == "invariants"
 
@@ -36,6 +38,40 @@ def test_safe_artifact_filename_hashes_long_names() -> None:
     assert len(filename) <= mod.MAX_ARTIFACT_FILENAME_CHARS
     assert filename.endswith(".workflow.profile.jsonl")
     assert "__" in filename
+
+
+def test_consolidate_metadata_quietly_suppresses_expected_zarr_noise(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_consolidate(path: str) -> None:
+        assert path == "/tmp/archive.zarr"
+        warnings.warn("Object at logs is not recognized as a component of a Zarr hierarchy.", UserWarning)
+        warnings.warn("Object at .failed is not recognized as a component of a Zarr hierarchy.", UserWarning)
+        warnings.warn("Object at .imports is not recognized as a component of a Zarr hierarchy.", UserWarning)
+        warnings.warn("Object at .incoming is not recognized as a component of a Zarr hierarchy.", UserWarning)
+        warnings.warn(
+            "Consolidated metadata is currently not part in the Zarr format 3 specification. "
+            "It may not be supported by other zarr implementations and may change in the future.",
+            UserWarning,
+        )
+
+    monkeypatch.setattr(mod.zarr, "consolidate_metadata", _fake_consolidate)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mod._consolidate_metadata_quietly("/tmp/archive.zarr")
+
+    assert caught == []
+
+
+def test_consolidate_metadata_quietly_does_not_hide_unexpected_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_consolidate(path: str) -> None:
+        warnings.warn("unexpected zarr consolidation issue", UserWarning)
+
+    monkeypatch.setattr(mod.zarr, "consolidate_metadata", _fake_consolidate)
+
+    with pytest.warns(UserWarning, match="unexpected zarr consolidation issue"):
+        mod._consolidate_metadata_quietly("/tmp/archive.zarr")
 
 
 def test_zarr_paths_from_report_reads_unique_result_paths(tmp_path: Path) -> None:

@@ -592,9 +592,10 @@ Chunking policy:
 - Keep dense compatibility cache chunks as `(storage_row_chunk, 1, H, W)` using
   `refined_subject_mask_storage_chunks(...)`.
 - The historical dense cache row chunk is small for interactive one-ROI review
-  access. Large cluster publication can benchmark explicit refined dense row
-  chunks such as `256` and `512`; those reduce PRFS file count but increase the
-  logical amount decompressed for random single-ROI reads.
+  access. Large cluster publication should use explicit refined dense row chunk
+  `256`, the current production candidate. A `512` row chunk reduces PRFS file
+  count further but was slower overall in the 2026-06-20 GoodCopBadCop benchmark,
+  and it increases the logical amount decompressed for random single-ROI reads.
 - Chunk per-component row metadata arrays on the existing metric row grid, for
   example `(refined_subject_mask_metric_row_chunk(N),)` for `present` and
   `(refined_subject_mask_metric_row_chunk(N), 4)` for `bbox_xyxy`.

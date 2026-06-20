@@ -35,7 +35,7 @@ MODEL_TOP_K=5
 MODEL_REQUIRE_UNIQUE=0
 MODEL_INCLUDE_NON_SUCCESS=0
 FINALIZE_CHUNK_SIZE=256
-FINALIZE_DENSE_MASK_ROW_CHUNK=""
+FINALIZE_DENSE_MASK_ROW_CHUNK=256
 FINALIZE_EXECUTION_BACKEND="process_shards"
 FINALIZE_SCHEDULER="processes"
 FINALIZE_NUM_WORKERS="auto"
@@ -127,7 +127,7 @@ Options:
   --finalize-chunk-size N   Refined finalizer chunk size (default: 256)
   --finalize-dense-mask-row-chunk N
                             Physical dense masks_roi row chunk for refined outputs
-                            (default: finalizer storage policy)
+                            (default: 256, current cluster production candidate)
   --finalize-execution-backend NAME
                             serial_driver|dask_worker_chunks|process_shards (default: process_shards)
   --finalize-scheduler NAME Dask scheduler for dask_worker_chunks: single-threaded|threads|processes|distributed
@@ -773,7 +773,7 @@ echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB gpus=$GPUS device=$DEVICE"
 echo "Split finalization job: $SPLIT_FINALIZATION_JOB"
 echo "Finalizer: chunk_size=$FINALIZE_CHUNK_SIZE workers=$FINALIZE_NUM_WORKERS backend=$FINALIZE_EXECUTION_BACKEND scheduler=$FINALIZE_SCHEDULER"
-echo "Finalizer dense mask row chunk: ${FINALIZE_DENSE_MASK_ROW_CHUNK:-<default>}"
+echo "Finalizer dense mask row chunk: ${FINALIZE_DENSE_MASK_ROW_CHUNK:-<finalizer default>}"
 echo "Refined mask storage: $MASK_STORAGE"
 echo "Finalizer resources: queue=${FINALIZE_QUEUE:-<default>} ncores=$FINALIZE_NCORES mem_gb=$FINALIZE_MEM_GB max_active=$FINALIZE_MAX_ACTIVE"
 echo "ROI cache root: ${ROI_CACHE_ROOT:-<none>}"

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import warnings
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -46,6 +47,14 @@ RAW_COMPONENTS = ("subject_body", "eyes_union", "swim_bladder")
 REFINED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
 OUTPUT_RUN_PARENTS = ("subject_mask_runs", "refined_subject_masks_runs")
 MAX_ARTIFACT_FILENAME_CHARS = 220
+DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK = 256
+_EXPECTED_NON_ZARR_SIDECAR_WARNING_RE = (
+    r"Object at (logs|\.failed|\.imports|\.incoming) is not recognized as a component "
+    r"of a Zarr hierarchy\."
+)
+_ZARR_V3_CONSOLIDATED_METADATA_WARNING_RE = (
+    r"Consolidated metadata is currently not part in the Zarr format 3 specification\."
+)
 
 
 @dataclass(frozen=True)
@@ -757,6 +766,23 @@ def _cleanup_output_staging(ctx: OutputStagingContext) -> None:
         pass
 
 
+def _consolidate_metadata_quietly(zarr_path: str | Path) -> None:
+    """Refresh consolidated metadata without leaking known sidecar warnings to stderr."""
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_EXPECTED_NON_ZARR_SIDECAR_WARNING_RE,
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=_ZARR_V3_CONSOLIDATED_METADATA_WARNING_RE,
+            category=UserWarning,
+        )
+        zarr.consolidate_metadata(str(zarr_path))
+
+
 def _open_group(path: Path) -> zarr.Group:
     try:
         return zarr.open_group(str(path), mode="r", use_consolidated=False)
@@ -930,9 +956,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--finalize-dense-mask-row-chunk",
         type=int,
+        default=DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK,
         help=(
-            "Rows per physical Zarr chunk for dense refined masks_roi. Defaults to "
-            "finalize_subject_masks' current storage policy."
+            "Rows per physical Zarr chunk for dense refined masks_roi "
+            f"(default: {DEFAULT_FINALIZE_DENSE_MASK_ROW_CHUNK}, current batch production candidate). "
+            "Pass 16 explicitly for the historical small-chunk dense layout."
         ),
     )
     parser.add_argument(
@@ -1254,7 +1282,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     result.publish_status = "not_requested"
                 if args.consolidate_metadata:
                     with profiler.phase("consolidate_metadata", zarr_path=plan.zarr_path):
-                        zarr.consolidate_metadata(plan.zarr_path)
+                        _consolidate_metadata_quietly(plan.zarr_path)
         except Exception as exc:
             result.error = str(exc)
             exit_code = 1
