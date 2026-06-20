@@ -71,6 +71,62 @@ def connected_component_labels(mask: np.ndarray) -> tuple[np.ndarray, int]:
     return labels.astype(np.int32, copy=False), int(num_labels - 1)
 
 
+def batch_mask_spatial_metrics(masks: np.ndarray) -> dict[str, np.ndarray]:
+    """Compute area, centroid, and bbox metrics for a stack of binary masks.
+
+    The final two axes are interpreted as ``(H, W)``. Any leading dimensions are
+    preserved, so callers can pass either ``(N,H,W)`` component masks or
+    ``(N,C,H,W)`` multi-component masks.
+    """
+
+    binary = np.asarray(masks, dtype=np.uint8) > 0
+    if binary.ndim < 3:
+        raise ValueError(f"Expected masks with at least 3 dimensions (...,H,W), got {tuple(binary.shape)}.")
+    leading_shape = tuple(int(dim) for dim in binary.shape[:-2])
+    height = int(binary.shape[-2])
+    width = int(binary.shape[-1])
+    flat_count = int(np.prod(leading_shape, dtype=np.int64)) if leading_shape else 1
+    flat = binary.reshape(flat_count, height, width)
+
+    area_px_flat = flat.reshape(flat_count, -1).sum(axis=1, dtype=np.int64).astype(np.float32)
+    mask_present_flat = area_px_flat > 0.0
+    centroid_xy_flat = np.zeros((flat_count, 2), dtype=np.float32)
+    bbox_xyxy_flat = np.zeros((flat_count, 4), dtype=np.float32)
+
+    if flat_count > 0 and bool(np.any(mask_present_flat)):
+        y_counts = flat.sum(axis=2, dtype=np.float32)
+        x_counts = flat.sum(axis=1, dtype=np.float32)
+        y_coords = np.arange(height, dtype=np.float32)
+        x_coords = np.arange(width, dtype=np.float32)
+        denominator = np.maximum(area_px_flat, 1.0).astype(np.float32, copy=False)
+        centroid_xy_flat[:, 0] = np.asarray(x_counts @ x_coords, dtype=np.float32) / denominator
+        centroid_xy_flat[:, 1] = np.asarray(y_counts @ y_coords, dtype=np.float32) / denominator
+        centroid_xy_flat[~mask_present_flat] = 0.0
+
+        row_has_mask = flat.any(axis=2)
+        col_has_mask = flat.any(axis=1)
+        y_indices = np.arange(height, dtype=np.int32).reshape(1, height)
+        x_indices = np.arange(width, dtype=np.int32).reshape(1, width)
+        y_min = np.where(row_has_mask, y_indices, height).min(axis=1)
+        y_max = np.where(row_has_mask, y_indices, -1).max(axis=1)
+        x_min = np.where(col_has_mask, x_indices, width).min(axis=1)
+        x_max = np.where(col_has_mask, x_indices, -1).max(axis=1)
+        bbox_xyxy_flat[:, 0] = x_min.astype(np.float32, copy=False)
+        bbox_xyxy_flat[:, 1] = y_min.astype(np.float32, copy=False)
+        bbox_xyxy_flat[:, 2] = x_max.astype(np.float32, copy=False)
+        bbox_xyxy_flat[:, 3] = y_max.astype(np.float32, copy=False)
+        bbox_xyxy_flat[~mask_present_flat] = 0.0
+
+    return {
+        "mask_present": mask_present_flat.reshape(leading_shape).astype(bool, copy=False),
+        "area_px": area_px_flat.reshape(leading_shape).astype(np.float32, copy=False),
+        "centroid_xy": centroid_xy_flat.reshape((*leading_shape, 2)).astype(np.float32, copy=False),
+        "centroid_valid": mask_present_flat.reshape(leading_shape).astype(bool, copy=False),
+        "bbox_xyxy": bbox_xyxy_flat.reshape((*leading_shape, 4)).astype(np.float32, copy=False),
+        "bbox_valid": mask_present_flat.reshape(leading_shape).astype(bool, copy=False),
+    }
+
+
 def select_component_near_point(mask: np.ndarray, point_xy: np.ndarray) -> np.ndarray:
     """Return the connected component whose centroid is nearest ``point_xy``.
 

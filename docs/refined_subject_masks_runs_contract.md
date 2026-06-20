@@ -131,6 +131,21 @@ Do not use physical row position as durable identity. Physical row order is an
 array layout detail and may change when rows are sorted, compacted, migrated,
 or late-appended.
 
+Modern refined subject-mask runs must carry explicit crop-row lineage:
+
+- `source_crop_run` attr is required.
+- `source_crop_row_ids` array is required with shape `(N,)`.
+- `frame_indices` array is required with shape `(N,)` and stores
+  archive-global frame indices.
+- For every mask row `i`,
+  `crop_runs/<source_crop_run>/frame_indices[source_crop_row_ids[i]]`
+  must equal `refined_subject_masks_runs/<run>/frame_indices[i]`.
+- ROI-local masks and contours must be placed using
+  `crop_runs/<source_crop_run>/roi_coordinates_full[source_crop_row_ids[i]]`.
+
+Consumers must not assume refined-mask row `i` equals crop row `i` except as a
+warned legacy/off-contract fallback.
+
 Writers should preserve stable logical row identity when available:
 
 - copy `source_refined_row_ids` from upstream refined-detect/crop lineage when
@@ -426,9 +441,10 @@ refined_subject_masks_runs/
   attrs:
     latest                                  "<run_id>"
   <run_id>/
-    frame_indices                           (N,) int32           # recommended
+    frame_indices                           (N,) int32
     frame_counts                            (F,) int32           # recommended
     detection_indices                       (N,) int32           # recommended
+    source_crop_row_ids                     (N,) int64
     detection_source                        (N,) int8
     masks_roi                               (N, C, H, W) uint8 optional when mask_rle is authoritative
     mask_rle/                               # optional compact mirror or authoritative compact store
@@ -557,9 +573,13 @@ These are the shared run-level mask geometry arrays. They apply uniformly to
 every refined component channel and are represented in code by
 `REFINED_SUBJECT_MASKS_SPEC`.
 
-Recommended lineage arrays:
+Required lineage arrays:
 
 - `frame_indices`
+- `source_crop_row_ids`
+
+Recommended lineage arrays:
+
 - `frame_counts`
 - `detection_indices`
 

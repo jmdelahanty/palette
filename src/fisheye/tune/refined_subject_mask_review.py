@@ -24,6 +24,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels, write_reason_columns
 from ..shared.mask_store import MaskStore, MaskStoreError, mark_mask_rle_stale_attrs, materialize_dense_masks_roi_from_store, open_mask_store
+from ..shared.mask_geometry import batch_mask_spatial_metrics
 from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
     build_source_keypoints_attrs,
@@ -33,7 +34,7 @@ from ..shared.provenance_attrs import (
     resolve_source_keypoints_run,
 )
 from ..shared.refined_subject_component_contours import refresh_component_contour_rows_from_masks
-from ..shared.row_lineage import copy_row_lineage_arrays_from_sources
+from ..shared.row_lineage import copy_row_lineage_arrays_from_sources, resolve_source_crop_row_ids
 from ..shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
@@ -138,6 +139,7 @@ class SourceSubjectMaskRun:
     source_keypoint_group: Optional[str]
     assignment_keypoints_run: Optional[str] = None
     assignment_keypoint_group: Optional[str] = None
+    source_crop_row_ids: Any | None = None
     source_refined_row_ids: Any | None = None
     source_detect_row_index: Any | None = None
     mask_surface_kind: str = "binary"
@@ -749,54 +751,20 @@ def _write_refined_component_last_update(
 
 
 def _compute_mask_metrics(masks_roi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    binary = np.asarray(masks_roi, dtype=np.uint8) > 0
-    area = np.sum(binary.reshape(binary.shape[0], binary.shape[1], -1), axis=2, dtype=np.int64)
-    present = area > 0
-    return present.astype(bool), np.asarray(area, dtype=np.float32)
-
-
-def _compute_single_mask_geometry_metrics(mask: np.ndarray) -> tuple[np.ndarray, bool, np.ndarray, bool]:
-    binary = np.asarray(mask, dtype=np.uint8) > 0
-    centroid_xy = np.zeros((2,), dtype=np.float32)
-    bbox_xyxy = np.zeros((4,), dtype=np.float32)
-    if int(np.count_nonzero(binary)) <= 0:
-        return centroid_xy, False, bbox_xyxy, False
-
-    ys, xs = np.nonzero(binary)
-    centroid_xy[:] = np.asarray([xs.mean(), ys.mean()], dtype=np.float32)
-    bbox_xyxy[:] = np.asarray(
-        [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())],
-        dtype=np.float32,
-    )
-    return centroid_xy, True, bbox_xyxy, True
+    metrics = batch_mask_spatial_metrics(masks_roi)
+    return np.asarray(metrics["mask_present"], dtype=bool), np.asarray(metrics["area_px"], dtype=np.float32)
 
 
 def _compute_geometry_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarray]:
     binary = np.asarray(masks_roi, dtype=np.uint8)
     if binary.ndim != 4:
         raise ValueError(f"Expected masks with shape (N,C,H,W), got {tuple(binary.shape)}")
-    total_rois = int(binary.shape[0])
-    channel_count = int(binary.shape[1])
-    centroid_xy = np.zeros((total_rois, channel_count, 2), dtype=np.float32)
-    centroid_valid = np.zeros((total_rois, channel_count), dtype=bool)
-    bbox_xyxy = np.zeros((total_rois, channel_count, 4), dtype=np.float32)
-    bbox_valid = np.zeros((total_rois, channel_count), dtype=bool)
-
-    for roi_idx in range(total_rois):
-        for comp_idx in range(channel_count):
-            centroid, centroid_is_valid, bbox, bbox_is_valid = _compute_single_mask_geometry_metrics(
-                binary[roi_idx, comp_idx]
-            )
-            centroid_xy[roi_idx, comp_idx] = centroid
-            centroid_valid[roi_idx, comp_idx] = centroid_is_valid
-            bbox_xyxy[roi_idx, comp_idx] = bbox
-            bbox_valid[roi_idx, comp_idx] = bbox_is_valid
-
+    metrics = batch_mask_spatial_metrics(binary)
     return {
-        "centroid_xy": centroid_xy,
-        "centroid_valid": centroid_valid,
-        "bbox_xyxy": bbox_xyxy,
-        "bbox_valid": bbox_valid,
+        "centroid_xy": np.asarray(metrics["centroid_xy"], dtype=np.float32),
+        "centroid_valid": np.asarray(metrics["centroid_valid"], dtype=bool),
+        "bbox_xyxy": np.asarray(metrics["bbox_xyxy"], dtype=np.float32),
+        "bbox_valid": np.asarray(metrics["bbox_valid"], dtype=bool),
     }
 
 
@@ -1248,6 +1216,15 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
             return crop_group.get(name)
         return None
 
+    total_rows = int(masks_roi.shape[0])
+    frame_indices = _lineage_array("frame_indices")
+    source_crop_row_ids = resolve_source_crop_row_ids(
+        group,
+        crop_group,
+        total_rois=total_rows,
+        frame_indices=frame_indices,
+    )
+
     return SourceSubjectMaskRun(
         run_name=run_name,
         group=group,
@@ -1257,7 +1234,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
         detection_source=group["detection_source"],
         mask_labels=mask_labels,
         available_channels=np.asarray(available[:], dtype=bool),
-        frame_indices=_lineage_array("frame_indices"),
+        frame_indices=frame_indices,
         frame_counts=_lineage_array("frame_counts"),
         detection_indices=_lineage_array("detection_indices"),
         source_method=str(group.attrs.get("method")) if group.attrs.get("method") is not None else None,
@@ -1275,6 +1252,7 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
             if resolve_assignment_keypoint_group(group.attrs) is not None
             else None
         ),
+        source_crop_row_ids=source_crop_row_ids,
         source_refined_row_ids=_lineage_array("source_refined_row_ids"),
         source_detect_row_index=_lineage_array("source_detect_row_index"),
         mask_surface_kind=mask_surface_kind,
@@ -1372,6 +1350,18 @@ def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[st
     )
     if detection_source is None:
         raise RuntimeError(f"Could not resolve detection_source for refined_eye_masks_runs/{run_name}.")
+    frame_indices = _resolve_source_lineage_array(
+        root,
+        source_group=group,
+        source_crop_run=crop_run,
+        array_name="frame_indices",
+    )
+    source_crop_row_ids = resolve_source_crop_row_ids(
+        group,
+        crop_group,
+        total_rois=int(masks.shape[0]),
+        frame_indices=frame_indices,
+    )
 
     return SourceSubjectMaskRun(
         run_name=run_name,
@@ -1382,7 +1372,7 @@ def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[st
         detection_source=detection_source,
         mask_labels=REFINED_EYE_COMPONENTS,
         available_channels=np.ones((2,), dtype=bool),
-        frame_indices=_resolve_source_lineage_array(root, source_group=group, source_crop_run=crop_run, array_name="frame_indices"),
+        frame_indices=frame_indices,
         frame_counts=_resolve_source_lineage_array(root, source_group=group, source_crop_run=crop_run, array_name="frame_counts"),
         detection_indices=_resolve_source_lineage_array(root, source_group=group, source_crop_run=crop_run, array_name="detection_indices"),
         source_method=str(group.attrs.get("method")) if group.attrs.get("method") is not None else None,
@@ -1400,6 +1390,7 @@ def _load_refined_eye_mask_source(root: zarr.Group, refined_eye_run: Optional[st
             if resolve_assignment_keypoint_group(group.attrs) is not None
             else None
         ),
+        source_crop_row_ids=source_crop_row_ids,
         source_refined_row_ids=_resolve_source_lineage_array(
             root,
             source_group=group,
@@ -1528,6 +1519,11 @@ def _create_refined_subject_run_from_component_seeds(
     total_rois = int(reference_source.masks_roi.shape[0])
     height = int(reference_source.masks_roi.shape[2])
     width = int(reference_source.masks_roi.shape[3])
+    if reference_source.source_crop_row_ids is None:
+        source_path = getattr(reference_source.group, "path", reference_source.run_name)
+        raise ValueError(
+            f"{source_path} cannot create refined_subject_masks_runs without source_crop_row_ids."
+        )
     component_names = tuple(str(name) for name in component_names)
     storage_chunks = refined_subject_mask_storage_chunks(total_rois, height, width)
     metric_chunks = _refined_metric_chunks_2d(total_rois)
@@ -1570,6 +1566,7 @@ def _create_refined_subject_run_from_component_seeds(
             "frame_indices": reference_source.frame_indices,
             "frame_counts": reference_source.frame_counts,
             "detection_indices": reference_source.detection_indices,
+            "source_crop_row_ids": reference_source.source_crop_row_ids,
             "source_refined_row_ids": reference_source.source_refined_row_ids,
             "source_detect_row_index": reference_source.source_detect_row_index,
         },
@@ -2095,13 +2092,15 @@ def _compute_refined_subject_component_apply_rows(
         component_sources = {name: source for name in refined.component_names}
     comp_idx = int(refined.component_to_index[component_name])
     row_count = int(len(roi_indices))
-    mask_present = np.zeros((row_count,), dtype=bool)
-    area_px = np.zeros((row_count,), dtype=np.float32)
+    component_masks = np.asarray(edited_masks_batch[:, comp_idx], dtype=np.uint8)
+    spatial_metrics = batch_mask_spatial_metrics(component_masks)
+    mask_present = np.asarray(spatial_metrics["mask_present"], dtype=bool)
+    area_px = np.asarray(spatial_metrics["area_px"], dtype=np.float32)
     edit_applied = np.zeros((row_count,), dtype=bool)
-    centroid_xy = np.zeros((row_count, 2), dtype=np.float32)
-    centroid_valid = np.zeros((row_count,), dtype=bool)
-    bbox_xyxy = np.zeros((row_count, 4), dtype=np.float32)
-    bbox_valid = np.zeros((row_count,), dtype=bool)
+    centroid_xy = np.asarray(spatial_metrics["centroid_xy"], dtype=np.float32)
+    centroid_valid = np.asarray(spatial_metrics["centroid_valid"], dtype=bool)
+    bbox_xyxy = np.asarray(spatial_metrics["bbox_xyxy"], dtype=np.float32)
+    bbox_valid = np.asarray(spatial_metrics["bbox_valid"], dtype=bool)
     component_count = np.zeros((row_count,), dtype=np.int32)
     largest_component_fraction = np.zeros((row_count,), dtype=np.float32)
     hole_count = np.zeros((row_count,), dtype=np.int32)
@@ -2116,23 +2115,14 @@ def _compute_refined_subject_component_apply_rows(
     reason_labels = np.empty((row_count,), dtype=object)
 
     for row_offset, roi_idx in enumerate(roi_indices):
-        current_mask = np.asarray(edited_masks_batch[row_offset, comp_idx], dtype=np.uint8)
+        current_mask = component_masks[row_offset]
         source_mask = _source_seed_mask_for_component(refined, component_name, int(roi_idx))
         if source_mask is None:
             source_mask = _source_mask_for_resolved_component(component_sources, component_name, int(roi_idx))
-        area = float(np.count_nonzero(current_mask))
-        present = bool(area > 0.0)
         edited = not np.array_equal(current_mask, source_mask)
-        centroid, centroid_is_valid, bbox, bbox_is_valid = _compute_single_mask_geometry_metrics(current_mask)
         comp_count, largest_frac, holes, hole_frac = _compute_single_mask_topology_metrics(current_mask)
 
-        mask_present[row_offset] = present
-        area_px[row_offset] = np.float32(area)
         edit_applied[row_offset] = edited
-        centroid_xy[row_offset] = centroid
-        centroid_valid[row_offset] = centroid_is_valid
-        bbox_xyxy[row_offset] = bbox
-        bbox_valid[row_offset] = bbox_is_valid
         component_count[row_offset] = np.int32(comp_count)
         largest_component_fraction[row_offset] = np.float32(largest_frac)
         hole_count[row_offset] = np.int32(holes)

@@ -23,7 +23,7 @@ from ..diagnostics.preview_eye_mask_background_subtraction import (
 )
 from ..shared.crop_image_source import CropImageSource
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
-from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -542,6 +542,7 @@ def segment_subject_masks_from_root(
             run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
 
         copy_row_lineage_arrays(run_group, crop_group, total_rois=roi_count)
+        write_direct_source_crop_row_ids(run_group, total_rois=roi_count)
         storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
         metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
         run_group.create_array("detection_source", data=detection_source, overwrite=True)

@@ -691,7 +691,7 @@ def _publish_staged_outputs(
     plan: ArchivePlan,
     overwrite: bool,
     handoff_package_dir: Optional[Path] = None,
-) -> None:
+) -> dict[str, Any]:
     root = _open_group_mutable(ctx.source_zarr_path)
     if plan.run_inference:
         require_runs_parent(root, "subject_mask_runs")
@@ -713,11 +713,20 @@ def _publish_staged_outputs(
             run_name=plan.refined_run,
             overwrite=overwrite,
         ))
+    published_run_groups = [
+        {
+            "run_group_path": str(publish_plan.target_path),
+            "run_name": str(publish_plan.target_path.name),
+            "parent": str(publish_plan.target_path.parent.name),
+        }
+        for publish_plan in publish_plans
+    ]
     for publish_plan in publish_plans:
         _commit_run_group_publish(publish_plan)
 
     root = _open_group_mutable(ctx.source_zarr_path)
     publish_payload = _staging_publish_payload(ctx)
+    handoff_packages: list[dict[str, Any]] = []
     if plan.run_inference:
         subject_parent = require_runs_parent(root, "subject_mask_runs")
         subject_group = subject_parent[plan.subject_run]
@@ -729,6 +738,7 @@ def _publish_staged_outputs(
                 _subject_mask_package_path(handoff_package_dir, ctx.source_zarr_path, plan.subject_run),
             )
             subject_group.attrs["cluster_run_package"] = dict(package_payload)
+            handoff_packages.append(dict(package_payload))
         if not emit_subject_mask_stage_completion(
             root,
             ctx.source_zarr_path,
@@ -755,6 +765,12 @@ def _publish_staged_outputs(
             raise RuntimeError(
                 f"Failed to emit registry status for refined_subject_masks_runs/{plan.refined_run}"
             )
+    return {
+        "published_run_groups": published_run_groups,
+        "published_run_group_count": int(len(published_run_groups)),
+        "handoff_packages": handoff_packages,
+        "handoff_package_count": int(len(handoff_packages)),
+    }
 
 
 def _cleanup_output_staging(ctx: OutputStagingContext) -> None:
@@ -1241,13 +1257,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         staged_zarr_path=str(staged_ctx.staged_zarr_path),
                         target_zarr_path=plan.zarr_path,
                         handoff_package_dir=str(args.handoff_package_dir) if args.handoff_package_dir else None,
-                    ):
-                        _publish_staged_outputs(
+                    ) as phase:
+                        phase.update(_publish_staged_outputs(
                             staged_ctx,
                             plan=plan,
                             overwrite=bool(args.overwrite),
                             handoff_package_dir=args.handoff_package_dir,
-                        )
+                        ))
                     result.publish_status = "ok"
                     with profiler.phase(
                         "validate_published_outputs",

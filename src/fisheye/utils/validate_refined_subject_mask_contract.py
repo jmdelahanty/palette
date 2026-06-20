@@ -17,7 +17,13 @@ from fisheye.shared.subject_mask_chunks import refined_subject_mask_metric_row_c
 from fisheye.utils.zarr_io import open_zarr_root
 
 REQUIRED_COMPONENTS = ("subject_body", "eye_left", "eye_right", "swim_bladder")
-REQUIRED_RUN_ARRAYS = ("detection_source", "available_channels", "edit_applied")
+REQUIRED_RUN_ARRAYS = (
+    "frame_indices",
+    "source_crop_row_ids",
+    "detection_source",
+    "available_channels",
+    "edit_applied",
+)
 REQUIRED_RUN_METRICS = ("mask_present", "area_px")
 RECOMMENDED_GEOMETRY_METRICS = ("centroid_xy", "centroid_valid", "bbox_xyxy", "bbox_valid")
 REQUIRED_COMPONENT_ARRAYS = ("reason_bytes", "mask_present", "area_px", "edit_applied")
@@ -221,6 +227,77 @@ def _validate_mask_store_decodable(mask_store: Any, *, run_path: str, issues: li
             code="invalid_mask_store",
             path=f"{run_path}/mask_rle",
             message=f"compact mask_rle failed dense materialization: {exc}",
+        )
+
+
+def _validate_source_crop_row_mapping(
+    root: zarr.Group,
+    run: zarr.Group,
+    *,
+    run_path: str,
+    total_rows: Optional[int],
+    issues: list[ContractIssue],
+) -> None:
+    if total_rows is None:
+        return
+    crop_run = run.attrs.get("source_crop_run")
+    if not isinstance(crop_run, str) or not crop_run.strip():
+        return
+    crop_group = root.get(f"crop_runs/{crop_run}")
+    if not _is_group(crop_group):
+        _add_issue(
+            issues,
+            severity="error",
+            code="missing_source_crop_run",
+            path=f"crop_runs/{crop_run}",
+            message=f"source_crop_run {crop_run!r} is not present in this archive.",
+        )
+        return
+    crop_frames_node = crop_group.get("frame_indices")
+    frame_node = run.get("frame_indices")
+    crop_row_node = run.get("source_crop_row_ids")
+    if not (_is_array(crop_frames_node) and _is_array(frame_node) and _is_array(crop_row_node)):
+        return
+    frame_indices = np.asarray(frame_node[:], dtype=np.int64).reshape(-1)
+    crop_row_ids = np.asarray(crop_row_node[:], dtype=np.int64).reshape(-1)
+    crop_frames = np.asarray(crop_frames_node[:], dtype=np.int64).reshape(-1)
+    if int(frame_indices.shape[0]) != int(total_rows):
+        _add_issue(
+            issues,
+            severity="error",
+            code="row_count_mismatch",
+            path=f"{run_path}/frame_indices",
+            message=f"frame_indices length {frame_indices.shape[0]} != mask rows {total_rows}.",
+        )
+        return
+    if int(crop_row_ids.shape[0]) != int(total_rows):
+        _add_issue(
+            issues,
+            severity="error",
+            code="row_count_mismatch",
+            path=f"{run_path}/source_crop_row_ids",
+            message=f"source_crop_row_ids length {crop_row_ids.shape[0]} != mask rows {total_rows}.",
+        )
+        return
+    if crop_row_ids.size and (int(crop_row_ids.min()) < 0 or int(crop_row_ids.max()) >= int(crop_frames.shape[0])):
+        _add_issue(
+            issues,
+            severity="error",
+            code="source_crop_row_out_of_bounds",
+            path=f"{run_path}/source_crop_row_ids",
+            message="source_crop_row_ids contains rows outside crop_runs/<source_crop_run>/frame_indices.",
+        )
+        return
+    if not np.array_equal(crop_frames[crop_row_ids], frame_indices):
+        _add_issue(
+            issues,
+            severity="error",
+            code="source_crop_frame_mismatch",
+            path=f"{run_path}/source_crop_row_ids",
+            message=(
+                "crop_runs/<source_crop_run>/frame_indices[source_crop_row_ids] "
+                "does not match refined frame_indices."
+            ),
         )
 
 
@@ -574,11 +651,21 @@ def validate_refined_subject_mask_contract(
                     path=f"{run_path}/detection_source",
                     message=f"detection_source length {shape[0]} != mask rows {masks_shape[0]}.",
                 )
+        if name in {"frame_indices", "source_crop_row_ids"} and masks_shape is not None and len(shape) == 1 and len(masks_shape) == 4:
+            if int(shape[0]) != int(masks_shape[0]):
+                _add_issue(
+                    issues,
+                    severity="error",
+                    code="row_count_mismatch",
+                    path=f"{run_path}/{name}",
+                    message=f"{name} length {shape[0]} != mask rows {masks_shape[0]}.",
+                )
 
     if masks_shape is None:
         masks_shape = _array_shape(run, "masks_roi")
     total_rows = int(masks_shape[0]) if masks_shape is not None and len(masks_shape) == 4 else None
     channel_count = int(masks_shape[1]) if masks_shape is not None and len(masks_shape) == 4 else None
+    _validate_source_crop_row_mapping(root, run, run_path=run_path, total_rows=total_rows, issues=issues)
 
     available = None
     available_node = run.get("available_channels")

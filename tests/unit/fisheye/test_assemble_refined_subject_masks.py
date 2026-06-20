@@ -175,6 +175,7 @@ def _build_assembly_root() -> zarr.Group:
     crop.attrs["crop_revision"] = 4
     crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001/review_status"
     crop.create_array("roi_images", data=np.zeros((2, 8, 8), dtype=np.uint8), overwrite=True)
+    crop.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
 
     body_masks = np.zeros((2, 1, 8, 8), dtype=np.uint8)
     body_masks[0, 0, 1:7, 1:7] = 1
@@ -392,6 +393,11 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
     assert run.attrs["source_crop_signature"] == "{'signature_version': 2, 'crop_revision': 4}"
     assert run.attrs["source_crop_revision"] == 4
     assert run.attrs["source_detect_review_status_ref"] == "refined_detect_runs/refined_detect_001/review_status"
+    np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.asarray([0, 1], dtype=np.int64))
+    np.testing.assert_array_equal(
+        root[f"crop_runs/{run.attrs['source_crop_run']}"]["frame_indices"][run["source_crop_row_ids"][:]],
+        run["frame_indices"][:],
+    )
     np.testing.assert_array_equal(
         np.asarray(run["available_channels"][:], dtype=bool),
         np.asarray([True, True, True, True], dtype=bool),

@@ -33,6 +33,7 @@ REFINED_SUBJECT_MASKS_ROW_LINEAGE_ARRAYS: tuple[str, ...] = (
     "frame_indices",
     "frame_counts",
     "detection_indices",
+    "source_crop_row_ids",
     "source_refined_row_ids",
     "source_detect_row_index",
 )

@@ -105,9 +105,10 @@ subject_mask_runs/
   attrs:
     latest                     "<run_id>"
   <run_id>/
-    frame_indices              (N,) int32           # new runs should include
+    frame_indices              (N,) int32
     frame_counts               (F,) int32           # new runs should include
     detection_indices          (N,) int32           # new runs should include
+    source_crop_row_ids        (N,) int64
     detection_source           (N,) int8
     mask_probs_roi             (N, C, H, W) float16/float32/uint8
     available_channels         (C,) bool
@@ -124,6 +125,13 @@ subject_mask_runs/
 
 Required arrays:
 
+- `frame_indices`
+  - shape: `(N,)`
+  - archive-global frame index for each subject-mask row
+- `source_crop_row_ids`
+  - shape: `(N,)`
+  - row index into `crop_runs/<source_crop_run>`
+  - required for frame-perfect mask-to-video placement
 - `detection_source`
   - shape: `(N,)`
   - expected to match the source crop run
@@ -138,9 +146,22 @@ Required arrays:
 
 Recommended lineage arrays:
 
-- `frame_indices`
 - `frame_counts`
 - `detection_indices`
+
+Frame-perfect crop-row invariant:
+
+```python
+crop = root[f"crop_runs/{subject.attrs['source_crop_run']}"]
+np.array_equal(
+    crop["frame_indices"][subject["source_crop_row_ids"][:]],
+    subject["frame_indices"][:],
+)
+```
+
+Consumers must not assume subject-mask row `i` equals crop row `i` unless
+`source_crop_row_ids` is absent in a legacy/off-contract run and the caller has
+explicitly opted into a warned compatibility fallback.
 
 Required `metrics/` subgroup arrays:
 

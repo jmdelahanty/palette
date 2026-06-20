@@ -113,12 +113,113 @@ parallel axis available in that corner. Whether it's worth building depends on h
 6. **Extend provenance.** Add the component-partition mode to `dask_metadata` so runs record it.
 7. **Name the non-Dask floor.** Per-row cv2/scipy ops are the real cost; cross-axis Dask only
    fills cores. Vectorizing/batching the morphology (or GPU) is a separate, larger lever and
-   should not be conflated with this parallelization work.
+   should not be conflated with this parallelization work. See the status table below.
+
+### Vectorization status (current) — substantiates item 7
+
+A repo-wide check (2026-06-20): mask compute uses a **batched-output convention** (functions
+take `(N,...)`, pre-allocate arrays, write back by row-slice), but much of the expensive
+topology/shape compute is still per-row Python loops over cv2/scipy. No GPU/batched-morphology
+library is used for masks (`cupy` is present but only for video decode/crop/tracking, not masks).
+
+| Operation | Vectorized over batch? | Location |
+|---|---|---|
+| area / mask_present | **Yes** — shared batch reduction | `shared/mask_geometry.py:74` `batch_mask_spatial_metrics` |
+| centroid / bbox in finalizer | **Yes** — shared batch reduction | `refinement/finalize_subject_masks.py:1532` `_compute_component_spatial_metrics` |
+| centroid / bbox in review helpers | **Yes** — shared batch reduction | `tune/refined_subject_mask_review.py:758` `_compute_geometry_metrics` |
+| centroid / bbox in subject-shape | **Yes** — shared batch reduction | `analysis/subject_shape_runs.py:1223` `_compute_component_batch` |
+| principal axis (PCA) | No — per-row loop + `eigh` | `analysis/subject_shape_runs.py:1173` |
+| ellipse fit | No — per-row loop over `cv2` | `analysis/subject_shape_runs.py:1211` |
+| connected-components / fill-holes / morphologyEx / select | No — per-(ROI,component) loop | `refinement/subject_mask_finalization.py:128` |
+| QC (solidity/holes/skeleton) | No — per-row loop | `refinement/subject_body_mask_qc.py:155` |
+
+The same per-row-loop pattern still repeats in **three** places for topology/QC/shape fitting
+(finalization topology, component QC, subject-shape). The low-risk spatial-metric cleanup for
+area, centroid, and bbox is now shared across finalization, review helpers, and subject-shape.
+
+**Why the hard ones are hard, and the ladder of options:**
+- **Already vectorized in shared code:** area, mask-present, centroid, and bbox are pure
+  reductions (`sum`, weighted mean, min/max over a fixed grid). They are safe numpy work, not
+  Dask work.
+- **Connected-components** is a graph flood-fill (iterative union-find, data-dependent control
+  flow, ragged output), not a reduction — it can't be expressed as one numpy array op. Faster
+  via `cc3d` (CPU C++ labeler) or `cucim` (GPU labeler, RAPIDS/`cupy`).
+- **Morphology** (close/open/dilate/erode) batches well on GPU via `kornia` (max-pool based) or
+  `cucim`.
+- **`cv2.fitEllipse`** is the stubborn one: it needs a contour first (`findContours`, irregular)
+  and then a variable-size conic least-squares fit (point count differs per mask, so inputs
+  can't be stacked). Best case is GPU-per-contour or accepting the loop.
+- Caveat for `cc3d`/`cucim`: a stack of independent 2D masks `(N,H,W)` is not a 3D volume —
+  use planar/2D connectivity or per-slice calls, else 3D labeling merges unrelated ROIs across
+  the N axis.
+
+### Orthogonal future lever: canonical body-frame masks
+
+Canonicalizing ROIs into a shared body frame is a separate idea from vectorizing the current
+operations. It does **not** make connected-components or `cv2.fitEllipse` naturally vectorized:
+a flood-fill is still data-dependent, and ellipse fitting still needs irregular contours. The
+potential win is different: for rigid structures such as eyes and swim bladder, a reliable
+heading-aligned ROI could make fixed spatial priors, component templates, or per-pixel atlases
+meaningful enough to avoid some global search work.
+
+The distinction is the reduction axis:
+- Scalar reductions such as `area_px.mean()` discard position; alignment is irrelevant because
+  an area is an area.
+- Atlas reductions such as `masks[:, swim_bladder].mean(axis=0)` keep `(H,W)` position; without
+  registration, pixel `(x,y)` is not the same anatomical location across ROIs, so the result is a
+  smear rather than a useful template.
+
+This is most plausible for eyes and swim bladder, less so for body/tail masks because articulation
+keeps those components high-variance even after heading alignment. Treat it as a read-only
+diagnostic first: warp a sample of existing masks using refined keypoint heading, build component
+atlases, and test whether atlas residuals predict current QC failures. Do not change the storage
+contract or finalizer until that diagnostic proves the priors are robust.
+
+## 4. Non-canonical implementation checklist
+
+This checklist keeps the current ROI-local subject-mask contract intact. Canonical body-frame
+analysis is a later diagnostic path, not a prerequisite for the following work.
+
+1. **Make crop-row lineage mandatory for modern subject/refined masks.**
+   - Require `source_crop_row_ids` on `subject_mask_runs` and `refined_subject_masks_runs`.
+   - Validate `crop_runs/<source_crop_run>/frame_indices[source_crop_row_ids] == frame_indices`.
+   - Allow direct-row fallback only while upgrading legacy runs that have exact row/frame parity.
+   - Status: implemented in the current worktree; tests cover finalization, assembly, review, and
+     contract validation.
+2. **Share vectorized spatial metrics across mask consumers.**
+   - Keep one policy-free helper for area, mask-present, centroid, and bbox.
+   - Use it from finalization, review helpers, and subject-shape runs.
+   - Status: implemented in the current worktree through `shared.mask_geometry.batch_mask_spatial_metrics`.
+3. **Reduce duplicate topology passes without changing semantics.**
+   - Reuse connected-component stats across thresholding, small-component removal, selection,
+     metrics, and reason labels.
+   - Preserve row-wise cv2/scipy behavior for connected-components, hole stats, and ellipse/QC.
+   - Status: partially implemented; hysteresis thresholding now returns reusable component stats,
+     and existing min-area/selection paths already pass stats forward.
+4. **Improve operational telemetry and defaults.**
+   - Keep per-chunk phase timing for finalization, topology/hole metrics, eye assignment,
+     dense/RLE writes, contours, and component metric writes.
+   - Keep workflow-level JSONL timing for staging, inference, finalization, validation, publish,
+     and cleanup.
+   - Record which run groups and handoff packages were published so PRFS/NRS publish cost can be
+     interpreted after cluster runs.
+   - Status: implemented in the current worktree.
+5. **Benchmark optional faster morphology/labeling libraries before adopting them.**
+   - Test `cc3d` for CPU connected components and `cucim`/`kornia` for GPU morphology in a
+     diagnostic harness.
+   - Require parity/equivalence evidence before production use.
+   - Status: future diagnostic, no dependency change yet.
+6. **Continue storage/publish optimization separately.**
+   - Keep dense masks for current consumers; use RLE/chunk-size experiments to reduce publication
+     cost without changing biological semantics.
+   - Treat sharded storage as a later stable-surface option after edit/write patterns settle.
+   - Status: future production-hardening track.
 
 ## Critical files
 
 - `src/fisheye/refinement/finalize_subject_masks.py` — backends, task build, worker, merge, provenance, argparse.
 - `src/fisheye/refinement/subject_mask_finalization.py` — `finalize_component_mask` per-component compute (`:128`).
+- `src/fisheye/shared/mask_geometry.py` — shared spatial-mask reductions and binary-mask primitives.
 - `src/fisheye/shared/subject_mask_chunks.py` — chunk sizes + the 256-row worker clamp.
 - `src/fisheye/utils/run_subject_mask_batch_pipeline.py` — batch defaults (parallel-by-default).
 - `scripts/submit_subject_mask_batches_bsub.sh` — cross-run LSF array-job fan-out.

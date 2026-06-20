@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 from ..refinement.refine_eye_masks import _measure_mask
 from ..shared.detect_reason_codec import decode_reason_bytes
 from ..shared.json_safety import json_attr_safe
+from ..shared.mask_geometry import batch_mask_spatial_metrics
 from ..shared.row_lineage import copy_row_lineage_arrays
 from ..shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -47,7 +48,6 @@ from ..shared.subject_mask_chunks import (
     refined_subject_mask_dask_worker_row_chunk,
     refined_subject_mask_metric_row_chunk,
 )
-from ..tune.refined_subject_mask_review import _compute_geometry_metrics, _compute_mask_metrics
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 from .subject_shape_spline import (
@@ -1222,8 +1222,7 @@ def _compute_ellipse_metrics(masks: np.ndarray) -> tuple[np.ndarray, np.ndarray]
 
 def _compute_component_batch(masks: np.ndarray, component_name: str) -> ComponentBatch:
     masks_u8 = np.asarray(masks, dtype=np.uint8)
-    mask_present, area_px = _compute_mask_metrics(masks_u8[:, None, :, :])
-    geometry = _compute_geometry_metrics(masks_u8[:, None, :, :])
+    spatial_metrics = batch_mask_spatial_metrics(masks_u8)
     if component_name == "subject_body":
         axis_xy, axis_valid, major_length, minor_length = _compute_principal_axis_metrics(masks_u8)
     else:
@@ -1239,12 +1238,12 @@ def _compute_component_batch(masks: np.ndarray, component_name: str) -> Componen
         ellipse_params = np.full((row_count, 5), np.nan, dtype=np.float32)
         ellipse_success = np.zeros((row_count,), dtype=bool)
     return ComponentBatch(
-        mask_present=np.asarray(mask_present[:, 0], dtype=bool),
-        area_px=np.asarray(area_px[:, 0], dtype=np.float32),
-        centroid_xy=np.asarray(geometry["centroid_xy"][:, 0, :], dtype=np.float32),
-        centroid_valid=np.asarray(geometry["centroid_valid"][:, 0], dtype=bool),
-        bbox_xyxy=np.asarray(geometry["bbox_xyxy"][:, 0, :], dtype=np.float32),
-        bbox_valid=np.asarray(geometry["bbox_valid"][:, 0], dtype=bool),
+        mask_present=np.asarray(spatial_metrics["mask_present"], dtype=bool),
+        area_px=np.asarray(spatial_metrics["area_px"], dtype=np.float32),
+        centroid_xy=np.asarray(spatial_metrics["centroid_xy"], dtype=np.float32),
+        centroid_valid=np.asarray(spatial_metrics["centroid_valid"], dtype=bool),
+        bbox_xyxy=np.asarray(spatial_metrics["bbox_xyxy"], dtype=np.float32),
+        bbox_valid=np.asarray(spatial_metrics["bbox_valid"], dtype=bool),
         principal_axis_xy=axis_xy,
         principal_axis_valid=axis_valid,
         principal_axis_length_px=major_length,

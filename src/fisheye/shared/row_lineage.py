@@ -18,6 +18,7 @@ ROW_IDENTITY_ARRAYS: Tuple[str, ...] = (
     "source_frame_indices",
     "source_clip_indices",
     "source_clip_local_frame_indices",
+    "source_crop_row_ids",
     "source_refined_row_ids",
     "source_detect_row_index",
 )
@@ -27,11 +28,13 @@ PER_ROI_ROW_LINEAGE_ARRAYS = {
     "source_frame_indices",
     "source_clip_indices",
     "source_clip_local_frame_indices",
+    "source_crop_row_ids",
     "detection_indices",
     "source_refined_row_ids",
     "source_detect_row_index",
 }
 COUNT_ROW_LINEAGE_ARRAYS = {"frame_counts"}
+SOURCE_CROP_ROW_IDS_ARRAY = "source_crop_row_ids"
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,114 @@ def _read_array(source_group: zarr.Group, name: str) -> tuple[object, np.ndarray
     if source_arr is None:
         return None
     return source_arr, np.asarray(source_arr[:])
+
+
+def _as_array(value: object | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return np.asarray(value)
+    try:
+        return np.asarray(value[:])  # type: ignore[index]
+    except Exception:
+        return np.asarray(value)
+
+
+def direct_source_crop_row_ids(total_rois: int) -> np.ndarray:
+    """Return explicit crop-row IDs for a run that is row-aligned to its crop run."""
+
+    return np.arange(int(total_rois), dtype=np.int64)
+
+
+def _validate_source_crop_row_frame_alignment(
+    source_crop_row_ids: np.ndarray,
+    *,
+    crop_group: zarr.Group | None,
+    frame_indices: object | None,
+    total_rois: int,
+) -> None:
+    """Ensure source crop rows point at the same frame index as the target rows."""
+
+    validate_row_lineage_array(
+        SOURCE_CROP_ROW_IDS_ARRAY,
+        np.asarray(source_crop_row_ids),
+        total_rois=total_rois,
+    )
+    if crop_group is None or "frame_indices" not in crop_group:
+        return
+    crop_frames = np.asarray(crop_group["frame_indices"][:], dtype=np.int64).reshape(-1)
+    crop_row_ids = np.asarray(source_crop_row_ids, dtype=np.int64).reshape(-1)
+    if crop_row_ids.size and (int(crop_row_ids.min()) < 0 or int(crop_row_ids.max()) >= int(crop_frames.shape[0])):
+        raise ValueError("source_crop_row_ids contains rows outside the referenced source_crop_run.")
+    source_frames = _as_array(frame_indices)
+    if source_frames is None:
+        return
+    source_frames = np.asarray(source_frames, dtype=np.int64).reshape(-1)
+    if int(source_frames.shape[0]) != int(crop_row_ids.shape[0]):
+        raise ValueError(
+            "frame_indices length does not match source_crop_row_ids length "
+            f"({source_frames.shape[0]} != {crop_row_ids.shape[0]})."
+        )
+    crop_frames_for_rows = crop_frames[crop_row_ids]
+    if not np.array_equal(source_frames, crop_frames_for_rows):
+        raise ValueError("source_crop_row_ids do not map to matching crop frame_indices.")
+
+
+def resolve_source_crop_row_ids(
+    source_group: zarr.Group,
+    crop_group: zarr.Group | None,
+    *,
+    total_rois: int,
+    frame_indices: object | None = None,
+    allow_direct_row_fallback: bool = True,
+) -> object | None:
+    """Resolve explicit source crop rows, synthesizing only verified direct alignment.
+
+    Modern mask/keypoint consumers should use this array instead of assuming row
+    ``N`` in a downstream run maps to row ``N`` in ``crop_runs/<source_crop_run>``.
+    For legacy direct crop-row-aligned runs, the helper synthesizes ``0..N-1``
+    only when the referenced crop run has the same row count and, when available,
+    matching ``frame_indices``.
+    """
+
+    payload = _read_array(source_group, SOURCE_CROP_ROW_IDS_ARRAY)
+    if payload is not None:
+        source_array, data = payload
+        _validate_source_crop_row_frame_alignment(
+            np.asarray(data, dtype=np.int64).reshape(-1),
+            crop_group=crop_group,
+            frame_indices=frame_indices,
+            total_rois=total_rois,
+        )
+        return source_array
+
+    if not allow_direct_row_fallback or crop_group is None:
+        return None
+    crop_frame_indices = crop_group.get("frame_indices")
+    if crop_frame_indices is None:
+        return None
+    if int(crop_frame_indices.shape[0]) != int(total_rois):
+        return None
+    fallback = direct_source_crop_row_ids(total_rois)
+    _validate_source_crop_row_frame_alignment(
+        fallback,
+        crop_group=crop_group,
+        frame_indices=frame_indices,
+        total_rois=total_rois,
+    )
+    return fallback
+
+
+def write_direct_source_crop_row_ids(
+    target_group: zarr.Group,
+    *,
+    total_rois: int,
+    overwrite: bool = True,
+) -> None:
+    """Write ``source_crop_row_ids`` for outputs that preserve crop row order."""
+
+    data = direct_source_crop_row_ids(total_rois)
+    _write_array(target_group, SOURCE_CROP_ROW_IDS_ARRAY, data, source_array=None, overwrite=overwrite)
 
 
 def _write_array(

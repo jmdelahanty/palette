@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.json_safety import json_attr_safe
+from ..shared.mask_geometry import batch_mask_spatial_metrics
 from ..shared.provenance_attrs import (
     ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
     build_assignment_keypoint_attrs,
@@ -1081,6 +1082,7 @@ def _source_lineage_map(source: SourceSubjectMaskRun) -> dict[str, object | None
         "frame_indices": source.frame_indices,
         "frame_counts": source.frame_counts,
         "detection_indices": source.detection_indices,
+        "source_crop_row_ids": source.source_crop_row_ids,
         "source_refined_row_ids": source.source_refined_row_ids,
         "source_detect_row_index": source.source_detect_row_index,
     }
@@ -1530,58 +1532,10 @@ def _compute_component_hole_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarr
 def _compute_component_spatial_metrics(masks: np.ndarray) -> dict[str, np.ndarray]:
     """Compute mask-local spatial metrics for one component over a row chunk."""
 
-    binary = np.asarray(masks, dtype=np.uint8) > 0
+    binary = np.asarray(masks, dtype=np.uint8)
     if binary.ndim != 3:
         raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}.")
-    row_count, height, width = (int(dim) for dim in binary.shape)
-    area_px = binary.reshape(row_count, -1).sum(axis=1, dtype=np.int64).astype(np.float32)
-    mask_present = area_px > 0.0
-
-    centroid_xy = np.zeros((row_count, 2), dtype=np.float32)
-    centroid_valid = mask_present.astype(bool, copy=True)
-    bbox_xyxy = np.zeros((row_count, 4), dtype=np.float32)
-    bbox_valid = mask_present.astype(bool, copy=True)
-    if row_count == 0 or not bool(np.any(mask_present)):
-        return {
-            "mask_present": mask_present.astype(bool, copy=False),
-            "area_px": area_px,
-            "centroid_xy": centroid_xy,
-            "centroid_valid": centroid_valid,
-            "bbox_xyxy": bbox_xyxy,
-            "bbox_valid": bbox_valid,
-        }
-
-    y_counts = binary.sum(axis=2, dtype=np.float32)
-    x_counts = binary.sum(axis=1, dtype=np.float32)
-    y_coords = np.arange(height, dtype=np.float32)
-    x_coords = np.arange(width, dtype=np.float32)
-    denominator = np.maximum(area_px, 1.0).astype(np.float32, copy=False)
-    centroid_xy[:, 0] = np.asarray(x_counts @ x_coords, dtype=np.float32) / denominator
-    centroid_xy[:, 1] = np.asarray(y_counts @ y_coords, dtype=np.float32) / denominator
-    centroid_xy[~mask_present] = 0.0
-
-    row_has_mask = binary.any(axis=2)
-    col_has_mask = binary.any(axis=1)
-    y_indices = np.arange(height, dtype=np.int32).reshape(1, height)
-    x_indices = np.arange(width, dtype=np.int32).reshape(1, width)
-    y_min = np.where(row_has_mask, y_indices, height).min(axis=1)
-    y_max = np.where(row_has_mask, y_indices, -1).max(axis=1)
-    x_min = np.where(col_has_mask, x_indices, width).min(axis=1)
-    x_max = np.where(col_has_mask, x_indices, -1).max(axis=1)
-    bbox_xyxy[:, 0] = x_min.astype(np.float32, copy=False)
-    bbox_xyxy[:, 1] = y_min.astype(np.float32, copy=False)
-    bbox_xyxy[:, 2] = x_max.astype(np.float32, copy=False)
-    bbox_xyxy[:, 3] = y_max.astype(np.float32, copy=False)
-    bbox_xyxy[~mask_present] = 0.0
-
-    return {
-        "mask_present": mask_present.astype(bool, copy=False),
-        "area_px": area_px,
-        "centroid_xy": centroid_xy,
-        "centroid_valid": centroid_valid,
-        "bbox_xyxy": bbox_xyxy,
-        "bbox_valid": bbox_valid,
-    }
+    return batch_mask_spatial_metrics(binary)
 
 
 def _write_component_metrics_chunk(
@@ -3206,6 +3160,11 @@ def finalize_subject_mask_run(
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
     width = int(source.masks_roi.shape[3])
+    if source.source_crop_row_ids is None:
+        raise ValueError(
+            f"subject_mask_runs/{source.run_name} cannot be finalized without source_crop_row_ids; "
+            "write or backfill explicit crop-row lineage first."
+        )
     effective_dense_mask_row_chunk = refined_subject_mask_storage_row_chunk(total_rows, dense_mask_row_chunk)
     dense_mask_storage_chunks = refined_subject_mask_storage_chunks(
         total_rows,

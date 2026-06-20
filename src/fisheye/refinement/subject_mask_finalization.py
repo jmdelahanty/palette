@@ -14,7 +14,6 @@ from typing import Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
-from ..shared.mask_geometry import connected_component_labels as _connected_component_labels
 from ..shared.mask_geometry import fill_holes as _fill_holes
 from ..shared.mask_geometry import hole_stats as _hole_stats
 
@@ -145,8 +144,7 @@ def finalize_component_mask(
             f"Policy component {resolved_policy.component_name!r} does not match {component_name!r}"
         )
     probabilities = _coerce_probability_surface(surface, surface_is_probability=surface_is_probability)
-    initial_mask = _threshold_surface(probabilities, resolved_policy)
-    initial_stats = _component_stats(initial_mask)
+    initial_mask, initial_stats = _threshold_surface_with_stats(probabilities, resolved_policy)
     closed_mask = _binary_close(initial_mask, resolved_policy.closing_radius)
     filled_mask = _fill_holes(closed_mask) if resolved_policy.fill_holes else closed_mask
     min_area_mask, min_area_stats = _remove_small_components_with_stats(
@@ -206,22 +204,27 @@ def _coerce_probability_surface(surface: np.ndarray, *, surface_is_probability: 
     return (arr > 0).astype(np.float32)
 
 
-def _threshold_surface(probabilities: np.ndarray, policy: ComponentFinalizationPolicy) -> np.ndarray:
+def _threshold_surface_with_stats(
+    probabilities: np.ndarray,
+    policy: ComponentFinalizationPolicy,
+) -> tuple[np.ndarray, _MaskComponentStats]:
     if policy.low_threshold is None or policy.high_threshold is None:
-        return probabilities >= float(policy.threshold)
+        mask = probabilities >= float(policy.threshold)
+        return mask, _component_stats(mask)
 
     low_mask = probabilities >= float(policy.low_threshold)
     high_mask = probabilities >= float(policy.high_threshold)
     if not np.any(high_mask):
-        return high_mask
+        empty = _empty_component_stats(tuple(high_mask.shape))
+        return empty.labels > 0, empty
 
-    labeled, count = _connected_component_labels(low_mask)
-    selected = np.zeros_like(low_mask, dtype=bool)
-    for label_idx in range(1, count + 1):
-        component = labeled == label_idx
-        if np.any(component & high_mask):
-            selected |= component
-    return selected
+    low_stats = _component_stats(low_mask)
+    if low_stats.component_count == 0:
+        return low_stats.labels > 0, low_stats
+    high_labels = np.unique(low_stats.labels[high_mask])
+    keep_labels = high_labels[high_labels > 0].astype(np.int32, copy=False)
+    selected_stats = _subset_component_stats(low_stats, keep_labels)
+    return selected_stats.labels > 0, selected_stats
 
 
 def _binary_close(mask: np.ndarray, radius: int) -> np.ndarray:

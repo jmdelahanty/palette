@@ -54,6 +54,7 @@ def _build_probability_root(store_path: Path | None = None) -> zarr.Group:
     crop.attrs["crop_revision"] = 7
     crop.attrs["detect_review_status_ref"] = "refined_detect_runs/refined_detect_001/review_status"
     crop.create_array("roi_images", data=np.zeros((2, 10, 10), dtype=np.uint8), overwrite=True)
+    crop.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
 
     kp_parent = root.create_group("refined_keypoints_runs")
     kp_parent.attrs["latest"] = "refined_kp_001"
@@ -199,6 +200,11 @@ def test_finalize_subject_mask_run_creates_refined_candidates_from_probabilities
     assert run.attrs["source_roi_live_acceleration_requested"] == "gpu"
     assert run.attrs["source_roi_live_acceleration_effective"] == "gpu"
     assert run.attrs["source_roi_live_gpu_chunk_frames"] == 64
+    np.testing.assert_array_equal(run["source_crop_row_ids"][:], np.asarray([0, 1], dtype=np.int64))
+    np.testing.assert_array_equal(
+        root[f"crop_runs/{run.attrs['source_crop_run']}"]["frame_indices"][run["source_crop_row_ids"][:]],
+        run["frame_indices"][:],
+    )
     provenance_parameters = run.attrs["provenance"]["parameters"]
     assert provenance_parameters["execution_backend"] == "serial_driver"
     assert provenance_parameters["dask_scheduler"] == "threads"

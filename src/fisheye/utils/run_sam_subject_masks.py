@@ -26,7 +26,7 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     build_source_roi_pixel_attrs,
 )
-from fisheye.shared.row_lineage import copy_row_lineage_arrays
+from fisheye.shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
 from fisheye.shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -1704,6 +1704,7 @@ def write_sam_subject_mask_run(
         run_group.attrs["source_roi_cache_path"] = source_roi_cache_path
 
     copy_row_lineage_arrays(run_group, crop_group, total_rois=n_rows)
+    write_direct_source_crop_row_ids(run_group, total_rois=n_rows)
     _copy_detection_source_array(run_group, crop_group)
 
     storage_chunks = subject_mask_storage_chunks(n_rows, height, width)

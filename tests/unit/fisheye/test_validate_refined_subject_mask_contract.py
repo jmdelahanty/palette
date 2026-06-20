@@ -32,6 +32,11 @@ def _make_archive(
     omit_metrics: bool = False,
 ) -> None:
     root = zarr.open_group(str(zarr_path), mode="w")
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_test"
+    crop = crop_parent.create_group("crop_test")
+    crop.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
+    crop.create_array("roi_coordinates_full", data=np.asarray([[2, 3], [4, 5]], dtype=np.int32), overwrite=True)
     parent = root.create_group("refined_subject_masks_runs")
     parent.attrs["latest"] = "refined_subject_test"
     run = parent.create_group("refined_subject_test")
@@ -55,6 +60,8 @@ def _make_archive(
     masks[:, 1, 2:4, 2:4] = 1
     masks[:, 2, 2:4, 5:7] = 1
     masks[:, 3, 4:6, 3:5] = 1
+    run.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32), overwrite=True)
+    run.create_array("source_crop_row_ids", data=np.asarray([0, 1], dtype=np.int64), overwrite=True)
     run.create_array("detection_source", data=np.asarray([0, 0], dtype=np.int8), overwrite=True)
     run.create_array("masks_roi", data=masks, chunks=(1, 1, 8, 8), overwrite=True)
     run.create_array("available_channels", data=np.ones((len(LABELS),), dtype=bool), overwrite=True)
@@ -145,6 +152,18 @@ def test_validate_refined_subject_mask_contract_accepts_compact_mask_store(tmp_p
     run = root["refined_subject_masks_runs/refined_subject_test"]
     assert "masks_roi" not in run
     assert "mask_rle" in run
+
+
+def test_validate_refined_subject_mask_contract_rejects_source_crop_frame_mismatch(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "archive.zarr"
+    _make_archive(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["refined_subject_masks_runs/refined_subject_test/source_crop_row_ids"][:] = np.asarray([1, 0], dtype=np.int64)
+
+    summary = validate_refined_subject_mask_contract(zarr_path)
+
+    assert summary["valid"] is False
+    assert any(issue["code"] == "source_crop_frame_mismatch" for issue in summary["errors"])
 
 
 def test_validate_refined_subject_mask_contract_rejects_corrupt_compact_mask_store(tmp_path: Path) -> None:

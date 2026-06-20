@@ -33,6 +33,7 @@ def _build_subject_review_root():
     roi_images[0, 1:7, 1:7] = 70
     roi_images[1, 2:6, 2:6] = 120
     crop.create_array("roi_images", data=roi_images)
+    crop.create_array("frame_indices", data=np.asarray([10, 11], dtype=np.int32))
 
     subject_parent = root.create_group("subject_mask_runs")
     subject_parent.attrs["latest"] = "subject_masks_001"

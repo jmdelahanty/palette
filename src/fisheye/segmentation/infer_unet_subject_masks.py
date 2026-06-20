@@ -29,7 +29,7 @@ from ..shared.provenance_attrs import (
     build_source_roi_pixel_attrs,
 )
 from ..shared.row_alignment import assert_row_alignment
-from ..shared.row_lineage import copy_row_lineage_arrays
+from ..shared.row_lineage import copy_row_lineage_arrays, write_direct_source_crop_row_ids
 from ..shared.subject_mask_registry_status import emit_subject_mask_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -991,6 +991,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     try:
         copy_row_lineage_arrays(run_group, crop_group, total_rois=total_rois)
+        write_direct_source_crop_row_ids(run_group, total_rois=total_rois)
         _copy_detection_source_array(run_group, crop_group)
         if "detection_source" not in run_group:
             run_group.create_array(
