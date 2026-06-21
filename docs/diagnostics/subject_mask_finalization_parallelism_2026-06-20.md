@@ -450,6 +450,41 @@ still useful for ranking which repeated work to attack first.
   `total_shards`, and `worker_count`. This does not change scheduling, but it makes future long
   cluster jobs interpretable before the first large shard completes.
 
+### Phase H: direct bitpacked compact output
+
+- Problem found from the first compact-output canary setup: `--mask-storage bitpacked_v1` was
+  still creating and writing dense `masks_roi`, then streaming that dense array into
+  `mask_bitpacked` and deleting `masks_roi`. That mode reduced the final artifact footprint, but
+  did not remove dense write cost from the finalizer itself.
+- Implemented direct `bitpacked_v1` finalization:
+  - `refined_subject_masks_runs/<run>/mask_bitpacked/masks_packed` is created during target
+    initialization;
+  - each finalized component chunk writes `write_mask_bitpacked_<component>` directly from the
+    in-memory binary masks;
+  - dense `masks_roi` is never materialized for `bitpacked_v1`;
+  - `dense_uint8`, `dense_and_bitpacked`, RLE modes, and dense training/export surfaces keep their
+    previous behavior.
+- Validation semantics changed deliberately for direct compact-only output:
+  - direct `bitpacked_v1` cannot do dense roundtrip validation because there is no authoritative
+    dense array in the run;
+  - it records `mask_bitpacked_validation.mode = "invariants"` and
+    `roundtrip_validation.status = "skipped"` with reason
+    `direct_bitpacked_output_has_no_dense_masks_roi`;
+  - focused tests compare direct bitpacked output against a dense baseline for equivalence.
+- Compatibility fix: assignment-reuse eye geometry now resolves row count through `MaskStore`
+  instead of requiring `masks_roi`, so compact-only runs can still write
+  `relations/eye_pair/metrics/separation_px` and eye contours.
+- Local 512-row GoodCopBadCop smoke, `process_shards`, 4 workers, `--mask-storage bitpacked_v1`:
+  - finalizer duration: 8.83s; 57.98 rows/s;
+  - output size: ~0.57 MiB refined run; no dense `masks_roi`;
+  - `process_shard_compute`: 5.76s;
+  - `write_component_contours`: 0.45s;
+  - direct bitpacked writes: ~0.08-0.10s per component across the two 256-row chunks;
+  - `validate_bitpacked_mask_store`: 0.002s.
+- Next required benchmark: rerun the full-recording cluster canary after deploying this direct
+  compact output slice. The currently running `subject_mask_finalizer_bitpacked_canary_20260621_142426`
+  was submitted before this direct-write patch and is a dense-first compact baseline.
+
 ### Phase E: contract decision, not optimization
 
 - Decide whether ellipse failure should remain part of assignment status or become a later QC

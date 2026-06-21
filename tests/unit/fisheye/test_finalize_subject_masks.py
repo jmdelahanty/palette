@@ -427,6 +427,18 @@ def test_finalize_subject_mask_run_can_write_rle_only_mask_store(monkeypatch) ->
 def test_finalize_subject_mask_run_can_write_bitpacked_only_mask_store(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()
+    dense_summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_bitpacked_only_dense_baseline",
+        chunk_size=1,
+        mask_storage="dense_uint8",
+    )
+    assert dense_summary["status"] == "updated"
+    dense_baseline = np.asarray(
+        root["refined_subject_masks_runs/refined_subject_masks_smart_bitpacked_only_dense_baseline/masks_roi"][:],
+        dtype=np.uint8,
+    )
 
     summary = mod.finalize_subject_mask_run(
         root,
@@ -440,10 +452,13 @@ def test_finalize_subject_mask_run_can_write_bitpacked_only_mask_store(monkeypat
     assert summary["status"] == "updated"
     assert summary["mask_storage"] == "bitpacked_v1"
     assert summary["write_eye_geometry"] is True
-    assert summary["mask_bitpacked_summary"]["status"] == "written"
+    assert summary["mask_bitpacked_summary"]["status"] == "written_direct"
     assert summary["mask_bitpacked_summary"]["dense_cache_removed"] is True
-    assert summary["mask_bitpacked_summary"]["roundtrip_validation"]["status"] == "passed"
-    assert summary["mask_bitpacked_summary"]["roundtrip_validation"]["rows_checked"] == 2
+    assert summary["mask_bitpacked_summary"]["mask_bitpacked_validation"]["status"] == "passed"
+    assert summary["mask_bitpacked_summary"]["roundtrip_validation"]["status"] == "skipped"
+    assert "write_bitpacked_mask_store" not in summary["timing_summary"]["phase_seconds"]
+    assert "validate_bitpacked_mask_store" in summary["timing_summary"]["phase_seconds"]
+    assert "write_mask_bitpacked_subject_body" in summary["timing_summary"]["phase_seconds"]
 
     run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_bitpacked_only"]
     assert "masks_roi" not in run
@@ -457,6 +472,7 @@ def test_finalize_subject_mask_run_can_write_bitpacked_only_mask_store(monkeypat
     store = open_mask_store(run, prefer="bitpacked")
     assert store.encoding == "bitpacked_binary_v1"
     assert store.read_dense().shape == (2, 4, 10, 10)
+    np.testing.assert_array_equal(store.read_dense(), dense_baseline)
     assert store.read_dense(rows=[1], channels=["eye_left"]).shape == (1, 1, 10, 10)
     validation = validate_run(run, REFINED_SUBJECT_MASKS_SPEC)
     assert validation.valid, validation.errors
@@ -1084,6 +1100,42 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert row_ranges[0][0] == 0
     assert row_ranges[-1][1] == masks.shape[0]
     assert all(left[1] == right[0] for left, right in zip(row_ranges, row_ranges[1:]))
+
+
+def test_finalize_subject_masks_process_shards_can_write_direct_bitpacked(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    zarr_path = tmp_path / "analysis.zarr"
+    _build_probability_root(zarr_path)
+
+    summary = mod.finalize_subject_masks(
+        zarr_path,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_process_shards_bitpacked_001",
+        chunk_size=1,
+        execution_backend="process_shards",
+        num_workers=2,
+        mask_storage="bitpacked_v1",
+    )
+
+    assert summary["execution_backend"] == "process_shards"
+    assert summary["mask_storage"] == "bitpacked_v1"
+    assert summary["mask_bitpacked_summary"]["status"] == "written_direct"
+    assert summary["mask_bitpacked_summary"]["roundtrip_validation"]["status"] == "skipped"
+    root = zarr.open_group(str(zarr_path), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_masks_smart_process_shards_bitpacked_001"]
+    assert "masks_roi" not in run
+    assert "mask_bitpacked/masks_packed" in run
+    assert run.attrs["mask_storage_encoding"] == "bitpacked_binary_v1"
+    assert run.attrs["masks_roi_materialized"] is False
+    assert run.attrs["mask_bitpacked_materialized"] is True
+    store = open_mask_store(run, prefer="bitpacked")
+    assert store.read_dense().shape == (2, 4, 10, 10)
+    phase_seconds = run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+    assert "write_bitpacked_mask_store" not in phase_seconds
+    assert "write_mask_bitpacked_subject_body" in phase_seconds
 
 
 def test_worker_chunk_size_aligns_to_dense_mask_row_chunk() -> None:

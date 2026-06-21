@@ -36,6 +36,16 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.json_safety import json_attr_safe
 from ..shared.mask_geometry import batch_mask_spatial_metrics
+from ..shared.mask_bitpack import (
+    MASK_BITPACKED_AXIS,
+    MASK_BITPACKED_BITORDER,
+    MASK_BITPACKED_ENCODING,
+    MASK_BITPACKED_LAYOUT,
+    MASK_BITPACKED_SCHEMA_ID,
+    MASK_BITPACKED_VALUE_SEMANTICS,
+    pack_binary_mask_stack,
+    packed_width_bytes,
+)
 from ..shared.provenance_attrs import (
     ASSIGNMENT_KEYPOINT_CONTRACT_VALUE,
     build_assignment_keypoint_attrs,
@@ -48,6 +58,7 @@ from ..shared.mask_store import (
     MaskStoreError,
     open_mask_store,
     update_mask_storage_attrs,
+    validate_bitpacked_mask_store_invariants,
     write_bitpacked_mask_store_from_dense,
     write_component_rle_mask_store_from_dense,
 )
@@ -140,6 +151,7 @@ _MASK_STORAGE_CHOICES = (
 _MASK_STORAGES_WITH_BITPACKED = {"dense_and_bitpacked", "bitpacked_v1", "dense_bitpacked_and_rle"}
 _MASK_STORAGES_WITH_RLE = {"dense_and_rle", "rle_v1", "dense_bitpacked_and_rle"}
 _MASK_STORAGES_REMOVE_DENSE = {"bitpacked_v1", "rle_v1"}
+_MASK_STORAGES_DIRECT_BITPACKED = {"bitpacked_v1"}
 _MASK_RLE_VALIDATION_MODES = MASK_RLE_VALIDATION_MODES
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
@@ -1256,6 +1268,56 @@ def _create_finalization_metric_shell(
         metrics_group.attrs["source_surface_kind"] = str(batch.source_surface_kind)
 
 
+def _create_bitpacked_mask_store_shell(
+    run_group: zarr.Group,
+    *,
+    total_rows: int,
+    component_names: Sequence[str],
+    height: int,
+    width: int,
+    row_chunk: int,
+    extra_attrs: Mapping[str, object] | None = None,
+) -> zarr.Group:
+    names = tuple(str(value) for value in component_names)
+    n_rows = int(total_rows)
+    n_channels = int(len(names))
+    mask_height = int(height)
+    mask_width = int(width)
+    packed_width = packed_width_bytes(mask_width)
+    if "mask_bitpacked" in run_group:
+        del run_group["mask_bitpacked"]
+    group = run_group.create_group("mask_bitpacked")
+    group.attrs.update(
+        {
+            "schema_id": MASK_BITPACKED_SCHEMA_ID,
+            "mask_encoding": MASK_BITPACKED_ENCODING,
+            "mask_value_semantics": MASK_BITPACKED_VALUE_SEMANTICS,
+            "layout": MASK_BITPACKED_LAYOUT,
+            "logical_shape": [n_rows, n_channels, mask_height, mask_width],
+            "encoded_shape": [n_rows, n_channels, mask_height, int(packed_width)],
+            "component_names": list(names),
+            "packed_axis": MASK_BITPACKED_AXIS,
+            "packed_bitorder": MASK_BITPACKED_BITORDER,
+            "packed_width_bytes": int(packed_width),
+            "source_encoding": "chunk_finalizer_binary_masks",
+        }
+    )
+    if extra_attrs:
+        group.attrs.update(dict(extra_attrs))
+    group.create_array(
+        "masks_packed",
+        shape=(n_rows, n_channels, mask_height, int(packed_width)),
+        chunks=(min(max(1, n_rows), max(1, int(row_chunk))), 1, mask_height, int(packed_width)),
+        dtype="uint8",
+        fill_value=0,
+        overwrite=True,
+    )
+    run_group.attrs["mask_bitpacked_schema_id"] = MASK_BITPACKED_SCHEMA_ID
+    run_group.attrs["mask_bitpacked_encoding"] = MASK_BITPACKED_ENCODING
+    run_group.attrs["mask_bitpacked_layout"] = MASK_BITPACKED_LAYOUT
+    return group
+
+
 def _create_refined_run_shell(
     *,
     refined_parent: zarr.Group,
@@ -1267,6 +1329,8 @@ def _create_refined_run_shell(
     stage_command: Optional[str],
     retain_source_seeds: bool,
     dense_mask_row_chunk: int | None = None,
+    create_dense_masks: bool = True,
+    create_bitpacked_masks: bool = False,
 ) -> zarr.Group:
     total_rows = int(source.masks_roi.shape[0])
     height = int(source.masks_roi.shape[2])
@@ -1287,13 +1351,27 @@ def _create_refined_run_shell(
         chunks=(refined_subject_mask_metric_row_chunk(total_rows),),
         overwrite=True,
     )
-    _create_filled_array(
-        run_group,
-        "masks_roi",
-        shape=(total_rows, len(component_names), height, width),
-        dtype=np.uint8,
-        chunks=dense_storage_chunks,
-    )
+    if create_dense_masks:
+        _create_filled_array(
+            run_group,
+            "masks_roi",
+            shape=(total_rows, len(component_names), height, width),
+            dtype=np.uint8,
+            chunks=dense_storage_chunks,
+        )
+    if create_bitpacked_masks:
+        _create_bitpacked_mask_store_shell(
+            run_group,
+            total_rows=total_rows,
+            component_names=component_names,
+            height=height,
+            width=width,
+            row_chunk=int(dense_storage_chunks[0]),
+            extra_attrs={
+                "source_run": str(target_run),
+                "source_array": "chunk_finalizer_binary_masks",
+            },
+        )
     run_group.create_array(
         "available_channels",
         data=np.ones((len(component_names),), dtype=bool),
@@ -1752,8 +1830,17 @@ def _write_canonical_component_chunk(
 ) -> _ComponentMetricWriteResult:
     masks_u8 = np.asarray(masks, dtype=np.uint8)
     source_u8 = np.asarray(source_masks, dtype=np.uint8)
-    with _timed_chunk_phase(timing, chunk_timing, f"write_masks_roi_{component_name}"):
-        run_group["masks_roi"][row_slice, int(component_idx)] = masks_u8
+    if "masks_roi" in run_group:
+        with _timed_chunk_phase(timing, chunk_timing, f"write_masks_roi_{component_name}"):
+            run_group["masks_roi"][row_slice, int(component_idx)] = masks_u8
+    elif "mask_bitpacked" in run_group:
+        with _timed_chunk_phase(timing, chunk_timing, f"write_mask_bitpacked_{component_name}"):
+            run_group["mask_bitpacked/masks_packed"][
+                row_slice,
+                int(component_idx) : int(component_idx) + 1,
+            ] = pack_binary_mask_stack(masks_u8[:, None, :, :])
+    else:
+        raise RuntimeError("Refined subject-mask run has neither masks_roi nor mask_bitpacked storage.")
     component_group = run_group["components"][component_name]
     if retain_source_seeds:
         with _timed_chunk_phase(timing, chunk_timing, f"write_source_seed_masks_{component_name}"):
@@ -2038,11 +2125,12 @@ def _write_sharded_eye_geometry(
     label_map = _label_index_map(run_group)
     if not set(_EYE_COMPONENTS).issubset(label_map):
         return {"status": "skipped", "reason": "missing_eye_components"}
-    masks_roi = run_group.get("masks_roi")
-    if masks_roi is None:
-        return {"status": "skipped", "reason": "missing_masks_roi"}
+    try:
+        mask_store = open_mask_store(run_group, source_path=f"refined_subject_masks_runs/{refined_run}", prefer="dense")
+    except MaskStoreError as exc:
+        return {"status": "skipped", "reason": "missing_mask_store", "error": str(exc)}
 
-    total_rois = int(masks_roi.shape[0])
+    total_rois = int(mask_store.n_rows)
     ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros((total_rois, 2), dtype=bool)
     separation_px = np.full((total_rois,), np.nan, dtype=np.float32)
@@ -3190,6 +3278,7 @@ def finalize_subject_mask_run(
     mask_storage = str(mask_storage)
     if mask_storage not in _MASK_STORAGE_CHOICES:
         raise ValueError(f"mask_storage must be one of {_MASK_STORAGE_CHOICES}; got {mask_storage!r}.")
+    direct_bitpacked_output = mask_storage in _MASK_STORAGES_DIRECT_BITPACKED
     mask_rle_validation_mode = str(mask_rle_validation_mode).strip().lower()
     if mask_rle_validation_mode not in _MASK_RLE_VALIDATION_MODES:
         raise ValueError(
@@ -3445,6 +3534,8 @@ def finalize_subject_mask_run(
                 stage_command=" ".join(sys.argv) if sys.argv else "unknown",
                 retain_source_seeds=bool(retain_source_seeds),
                 dense_mask_row_chunk=int(effective_dense_mask_row_chunk),
+                create_dense_masks=not direct_bitpacked_output,
+                create_bitpacked_masks=direct_bitpacked_output,
             )
 
     if execution_backend in {_DASK_WORKER_EXECUTION_BACKEND, _PROCESS_SHARD_EXECUTION_BACKEND}:
@@ -3843,7 +3934,37 @@ def finalize_subject_mask_run(
             "reason": "no_expensive_postcompute_requested",
         }
 
-    if mask_storage in _MASK_STORAGES_WITH_BITPACKED:
+    if direct_bitpacked_output:
+        with progress.phase("validate_bitpacked_mask_store"):
+            with timing.phase("validate_bitpacked_mask_store"):
+                validation = validate_bitpacked_mask_store_invariants(
+                    run_group,
+                    expected_shape=(int(total_rows), int(len(component_names)), int(height), int(width)),
+                    component_names=component_names,
+                    source_path=f"refined_subject_masks_runs/{target_run}",
+                )
+        packed = run_group["mask_bitpacked/masks_packed"]
+        logical_bytes = int(np.prod(tuple(int(value) for value in packed.shape), dtype=np.int64))
+        mask_bitpacked_summary = {
+            "status": "written_direct",
+            "encoding": MASK_BITPACKED_ENCODING,
+            "layout": MASK_BITPACKED_LAYOUT,
+            "source_encoding": "chunk_finalizer_binary_masks",
+            "rows": int(total_rows),
+            "channels": int(len(component_names)),
+            "shape": [int(total_rows), int(len(component_names)), int(height), int(width)],
+            "encoded_shape": [int(value) for value in packed.shape],
+            "component_names": list(component_names),
+            "logical_bytes": int(logical_bytes),
+            "validation_mode": "invariants",
+            "requested_validation_mode": str(mask_rle_validation_mode),
+            "mask_bitpacked_validation": validation,
+            "roundtrip_validation": {
+                "status": "skipped",
+                "reason": "direct_bitpacked_output_has_no_dense_masks_roi",
+            },
+        }
+    elif mask_storage in _MASK_STORAGES_WITH_BITPACKED:
         def _emit_bitpacked_progress(event: str, **payload: object) -> None:
             progress.emit(str(event), **payload)
 
