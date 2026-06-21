@@ -78,9 +78,9 @@ analysis/detection_occupancy_runs/<run>/
         display_order
         geometry_type
         bounds_xyxy
-        polygon_offsets
-        polygon_xy
-        mask_ref_path_bytes
+        polygon_offsets          # optional for polygon zone sets
+        polygon_xy               # optional for polygon zone sets
+        mask_ref_path_bytes      # optional for mask-backed zone sets
       summary/
         frame_count
         time_s

@@ -30,6 +30,7 @@ def _():
         build_debug_tables as build_goodcopbadcop_debug_tables,
         build_detection_occupancy_output,
         build_distance_figure,
+        build_spatial_occupancy_output,
         build_summary as build_goodcopbadcop_summary,
         is_goodcopbadcop_option,
         load_goodcopbadcop_view,
@@ -53,6 +54,7 @@ def _():
         build_goodcopbadcop_controls,
         build_goodcopbadcop_debug_tables,
         build_goodcopbadcop_summary,
+        build_spatial_occupancy_output,
         build_spec_provenance_panel,
         build_static_artifacts_panel,
         discover_interactive_spec_options,
@@ -207,6 +209,7 @@ def _(build_goodcopbadcop_controls, gcb_loaded, mo):
         gcb_epoch_options = gcb_controls.epoch_options
         gcb_heatmap_bins = gcb_controls.heatmap_bins
         gcb_chaser_overlay = gcb_controls.chaser_overlay
+        gcb_spatial_zone_set_picker = gcb_controls.spatial_zone_set_picker
     else:
         gcb_controls = None
         gcb_distance_series_picker = None
@@ -215,6 +218,7 @@ def _(build_goodcopbadcop_controls, gcb_loaded, mo):
         gcb_epoch_options = {}
         gcb_heatmap_bins = None
         gcb_chaser_overlay = None
+        gcb_spatial_zone_set_picker = None
     return (
         gcb_chaser_overlay,
         gcb_controls,
@@ -222,6 +226,7 @@ def _(build_goodcopbadcop_controls, gcb_loaded, mo):
         gcb_epoch_options,
         gcb_epoch_picker,
         gcb_heatmap_bins,
+        gcb_spatial_zone_set_picker,
         gcb_time_range,
     )
 
@@ -234,6 +239,7 @@ def _(
     gcb_epoch_options,
     gcb_epoch_picker,
     gcb_heatmap_bins,
+    gcb_spatial_zone_set_picker,
     gcb_time_range,
     mo,
 ):
@@ -252,6 +258,7 @@ def _(
             epoch_options=gcb_epoch_options,
             heatmap_bins=gcb_heatmap_bins,
             chaser_overlay=gcb_chaser_overlay,
+            spatial_zone_set_picker=gcb_spatial_zone_set_picker,
         )
     else:
         gcb_controls_output = mo.md("")
@@ -338,6 +345,22 @@ def _(build_detection_occupancy_output, gcb_loaded, gcb_time_window, go, mo):
     else:
         gcb_occupancy_output = mo.md("")
     gcb_occupancy_output
+    return
+
+
+@app.cell
+def _(build_spatial_occupancy_output, gcb_loaded, gcb_spatial_zone_set_picker, gcb_time_window, go, mo):
+    if gcb_loaded is not None and gcb_time_window is not None:
+        gcb_spatial_occupancy_output = build_spatial_occupancy_output(
+            mo,
+            go,
+            loaded=gcb_loaded,
+            window=gcb_time_window,
+            spatial_zone_set_picker=gcb_spatial_zone_set_picker,
+        )
+    else:
+        gcb_spatial_occupancy_output = mo.md("")
+    gcb_spatial_occupancy_output
     return
 
 

@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import zarr
 
+from fisheye.analysis.chaser_distance_runs import write_chaser_distance_run
 from fisheye.analysis.chaser_state_interpolator import write_columnar_dataset
 from fisheye.analysis.stimulus_response import (
     ConcentricStepData,
@@ -20,6 +21,10 @@ from fisheye.analysis.stimulus_response_omr import OMRStepData
 from fisheye.utils.export_cross_recording_analytics import export_sources
 from fisheye.utils.export_cross_recording_analytics import main as export_main
 from fisheye.utils.virtual_collection_manifest import with_manifest_sha256
+from tests.unit.fisheye.test_goodcopbadcop_interactive import (
+    _make_archive_with_detection_occupancy,
+    _make_chaser_result,
+)
 
 
 def _array(group, name: str, values) -> None:
@@ -523,6 +528,96 @@ def test_export_cross_recording_analytics_writes_first_tables(tmp_path: Path) ->
     assert len(movement_rows) == 2
     assert movement_rows[0]["measurement_family"] == "movement"
     assert movement_rows[0]["physical_active_duration_s"] == 0.12
+
+
+def test_export_cross_recording_analytics_reads_goodcopbadcop_tables(tmp_path: Path) -> None:
+    source = _make_archive_with_detection_occupancy(tmp_path)
+    write_chaser_distance_run(source, _make_chaser_result(source), overwrite=True)
+    output = tmp_path / "exports" / "palette_analytics"
+
+    manifest = export_sources(
+        [source],
+        output_root=output,
+        export_run_id="goodcopbadcop_export",
+        tables=(
+            "goodcopbadcop_spatial_occupancy_zones",
+            "goodcopbadcop_chaser_epoch_summary",
+            "goodcopbadcop_chaser_distance_histogram",
+        ),
+        jobs=1,
+    )
+
+    assert manifest["row_counts_by_table"]["goodcopbadcop_spatial_occupancy_zones"] == 12
+    assert manifest["row_counts_by_table"]["goodcopbadcop_chaser_epoch_summary"] == 6
+    assert manifest["row_counts_by_table"]["goodcopbadcop_chaser_distance_histogram"] == 18
+
+    spatial_rows = _read_dataset(
+        output,
+        "goodcopbadcop_spatial_occupancy_zones",
+        "goodcopbadcop_export",
+    )
+    pre_top_left = next(
+        row
+        for row in spatial_rows
+        if row["window_label"] == "pre_event" and row["zone_id"] == "top_left"
+    )
+    assert pre_top_left["detection_occupancy_run"] == "occupancy_1"
+    assert pre_top_left["detection_occupancy_path"] == "analysis/detection_occupancy_runs/occupancy_1"
+    assert pre_top_left["source_detection_path"] == "refined_detect_runs/refined_1/instances"
+    assert pre_top_left["zone_set_id"] == "image_quadrants_v1"
+    assert pre_top_left["zone_set_source"] == "predefined_spec:quadrants.v1"
+    assert pre_top_left["coordinate_frame"] == "source_image_px"
+    assert pre_top_left["x_axis_direction"] == "right"
+    assert pre_top_left["y_axis_direction"] == "down"
+    assert pre_top_left["display_order"] == 0
+    assert pre_top_left["x_min"] == 0.0
+    assert pre_top_left["y_min"] == 0.0
+    assert pre_top_left["x_max"] == 10.0
+    assert pre_top_left["y_max"] == 10.0
+    assert pre_top_left["frame_count"] == 1
+    np.testing.assert_allclose(pre_top_left["time_s"], 0.1)
+    np.testing.assert_allclose(pre_top_left["fraction_of_epoch"], 0.1)
+    assert pre_top_left["detected_frame_count"] == 10
+    assert len(pre_top_left["source_lineage_hash"]) == 64
+
+    chaser_summary_rows = _read_dataset(
+        output,
+        "goodcopbadcop_chaser_epoch_summary",
+        "goodcopbadcop_export",
+    )
+    post_chaser_1 = next(
+        row
+        for row in chaser_summary_rows
+        if row["window_label"] == "post_event" and row["chaser_index"] == 1
+    )
+    assert post_chaser_1["chaser_distance_run"] == "chaser_distance_1"
+    assert post_chaser_1["chaser_distance_schema_id"] == "palette.chaser_distance.v1"
+    assert post_chaser_1["source_detection_path"] == "refined_detect_runs/refined_1/instances"
+    assert post_chaser_1["source_stimulus_run"] == "stimulus_1"
+    assert post_chaser_1["source_stimulus_epoch_run"] == "epochs_1"
+    assert post_chaser_1["threshold_mm"] == 20.0
+    assert post_chaser_1["valid_frame_count"] == 3
+    assert post_chaser_1["p50_distance_mm"] == 6.0
+    np.testing.assert_allclose(post_chaser_1["duration_s"], 0.3)
+
+    histogram_rows = _read_dataset(
+        output,
+        "goodcopbadcop_chaser_distance_histogram",
+        "goodcopbadcop_export",
+    )
+    pre_chaser_0_bin_0 = next(
+        row
+        for row in histogram_rows
+        if row["window_label"] == "pre_event"
+        and row["chaser_index"] == 0
+        and row["distance_bin_index"] == 0
+    )
+    assert pre_chaser_0_bin_0["bin_left_mm"] == 0.0
+    assert pre_chaser_0_bin_0["bin_right_mm"] == 2.0
+    assert pre_chaser_0_bin_0["bin_center_mm"] == 1.0
+    assert pre_chaser_0_bin_0["hist_count"] == 1
+    assert pre_chaser_0_bin_0["valid_sample_count"] == 3
+    assert len({row["source_lineage_hash"] for row in histogram_rows}) == 18
 
 
 def test_export_cross_recording_analytics_uses_bout_kinematics_source_refs_fallback(

@@ -135,6 +135,50 @@ def test_build_manifest_excludes_records_missing_required_run(monkeypatch, tmp_p
     assert record["status"]["exclusions"]
 
 
+def test_build_manifest_goodcopbadcop_profile_resolves_required_runs(monkeypatch, tmp_path: Path) -> None:
+    root = FakeRoot()
+    run_data = {
+        ("analysis/detection_occupancy_runs", "occupancy_latest"): {
+            "schema_id": "palette.detection_occupancy.v1",
+            "schema_version": 1,
+            "method": "detection_centroid_epoch_occupancy",
+            "method_version": "1",
+            "source_fingerprint": "occupancy_fp",
+        },
+        ("analysis/chaser_distance_runs", "chaser_latest"): {
+            "schema_id": "palette.chaser_distance.v1",
+            "schema_version": 1,
+            "method": "offline_detection_to_chaser_distance",
+            "method_version": "1",
+            "source_fingerprint": "chaser_fp",
+        },
+    }
+    for (parent, run_id), attrs in run_data.items():
+        root.runs[(parent, run_id)] = FakeGroup(attrs)
+        root.latest[parent] = run_id
+    _install_fake_zarr(monkeypatch, root)
+    zarr_path = tmp_path / "recording_goodcopbadcop_analysis.zarr"
+    zarr_path.mkdir()
+
+    manifest = builder.build_manifest_from_zarrs(
+        [zarr_path],
+        collection_id="goodcopbadcop_test_v001",
+        collection_name="GoodCopBadCop Test",
+        profile_id=builder.PROFILE_GOODCOPBADCOP_CHASER,
+        created_utc="2026-06-21T12:00:00Z",
+    )
+
+    assert verify_manifest_sha256(manifest)
+    assert manifest["export_profiles"][0]["profile_id"] == "goodcopbadcop_chaser"
+    record = manifest["records"][0]
+    assert record["status"]["included"] is True
+    assert record["source_runs"]["detection_occupancy_run"]["required"] is True
+    assert record["source_runs"]["detection_occupancy_run"]["run_id"] == "occupancy_latest"
+    assert record["source_runs"]["chaser_distance_run"]["required"] is True
+    assert record["source_runs"]["chaser_distance_run"]["run_id"] == "chaser_latest"
+    assert "swim_bout_run" not in record["source_runs"]
+
+
 def test_build_manifest_cli_writes_stamped_manifest(monkeypatch, tmp_path: Path, capsys) -> None:
     root = _fake_root()
     _install_fake_zarr(monkeypatch, root)

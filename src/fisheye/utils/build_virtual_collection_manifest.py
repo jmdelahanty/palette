@@ -19,16 +19,7 @@ from fisheye.utils.zarr_io import open_zarr_root
 
 
 PROFILE_MOVEMENT_BOUTS = "movement_bouts"
-
-RUN_FAMILIES = (
-    "track_kinematics_run",
-    "swim_bout_run",
-    "bout_kinematics_run",
-    "eye_angle_run",
-    "tail_kinematics_run",
-    "stimulus_run",
-    "stimulus_response_run",
-)
+PROFILE_GOODCOPBADCOP_CHASER = "goodcopbadcop_chaser"
 
 
 def _utc_now() -> str:
@@ -45,22 +36,33 @@ def _recording_id_from_path(zarr_path: Path) -> str:
 
 
 def _profile_spec(profile_id: str) -> dict[str, Any]:
-    if profile_id != PROFILE_MOVEMENT_BOUTS:
-        raise ValueError(f"Unsupported export profile for v1 builder: {profile_id}")
-    return {
-        "profile_id": PROFILE_MOVEMENT_BOUTS,
-        "required_run_families": [
-            "track_kinematics_run",
-            "swim_bout_run",
-            "bout_kinematics_run",
-        ],
-        "optional_run_families": [
-            "eye_angle_run",
-            "tail_kinematics_run",
-            "stimulus_run",
-            "stimulus_response_run",
-        ],
-    }
+    if profile_id == PROFILE_MOVEMENT_BOUTS:
+        return {
+            "profile_id": PROFILE_MOVEMENT_BOUTS,
+            "required_run_families": [
+                "track_kinematics_run",
+                "swim_bout_run",
+                "bout_kinematics_run",
+            ],
+            "optional_run_families": [
+                "eye_angle_run",
+                "tail_kinematics_run",
+                "stimulus_run",
+                "stimulus_response_run",
+            ],
+        }
+    if profile_id == PROFILE_GOODCOPBADCOP_CHASER:
+        return {
+            "profile_id": PROFILE_GOODCOPBADCOP_CHASER,
+            "required_run_families": [
+                "detection_occupancy_run",
+                "chaser_distance_run",
+            ],
+            "optional_run_families": [
+                "stimulus_run",
+            ],
+        }
+    raise ValueError(f"Unsupported export profile for v1 builder: {profile_id}")
 
 
 def _jsonish_attr(value: Any) -> Any:
@@ -222,6 +224,8 @@ def _build_record(
     tail_kinematics_run: str | None,
     stimulus_run: str | None,
     stimulus_response_run: str | None,
+    detection_occupancy_run: str | None,
+    chaser_distance_run: str | None,
 ) -> dict[str, Any]:
     resolved_path = zarr_path.expanduser().resolve()
     root = open_zarr_root(resolved_path, mode="r")
@@ -273,10 +277,27 @@ def _build_record(
             "run_path_prefix": "analysis/stimulus_response_runs",
             "label": "Stimulus-response run",
         },
+        "detection_occupancy_run": {
+            "parent_path": ("analysis", "detection_occupancy_runs"),
+            "run_name": detection_occupancy_run,
+            "run_path_prefix": "analysis/detection_occupancy_runs",
+            "label": "Detection-occupancy run",
+        },
+        "chaser_distance_run": {
+            "parent_path": ("analysis", "chaser_distance_runs"),
+            "run_name": chaser_distance_run,
+            "run_path_prefix": "analysis/chaser_distance_runs",
+            "label": "Chaser-distance run",
+        },
     }
 
     source_runs: dict[str, dict[str, Any]] = {}
-    for family in RUN_FAMILIES:
+    selected_families = tuple(
+        dict.fromkeys(
+            list(profile["required_run_families"]) + list(profile["optional_run_families"])
+        )
+    )
+    for family in selected_families:
         spec = run_specs[family]
         required = family in required_families
         entry, warning = _resolve_run_entry(
@@ -314,7 +335,7 @@ def _build_record(
             "recording_id": recording_id,
         },
         "protocol": {
-            "stimulus_run_id": source_runs["stimulus_run"].get("run_id"),
+            "stimulus_run_id": source_runs.get("stimulus_run", {}).get("run_id"),
             "protocol_signature_hash": _attr(root, "protocol_signature_hash", "derived_protocol_hash"),
             "protocol_semantic_hash": _attr(root, "protocol_semantic_hash"),
             "protocol_snapshot_sha256": _attr(root, "protocol_snapshot_sha256"),
@@ -358,6 +379,8 @@ def build_manifest_from_zarrs(
     tail_kinematics_run: str | None = None,
     stimulus_run: str | None = None,
     stimulus_response_run: str | None = None,
+    detection_occupancy_run: str | None = None,
+    chaser_distance_run: str | None = None,
 ) -> dict[str, Any]:
     if not zarr_paths:
         raise ValueError("At least one analysis Zarr path is required")
@@ -376,6 +399,8 @@ def build_manifest_from_zarrs(
             tail_kinematics_run=tail_kinematics_run,
             stimulus_run=stimulus_run,
             stimulus_response_run=stimulus_response_run,
+            detection_occupancy_run=detection_occupancy_run,
+            chaser_distance_run=chaser_distance_run,
         )
         for path in zarr_paths
     ]
@@ -424,7 +449,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--collection-id", required=True)
     parser.add_argument("--collection-name", required=True)
     parser.add_argument("--output", "-o", type=Path, required=True)
-    parser.add_argument("--profile", default=PROFILE_MOVEMENT_BOUTS, choices=[PROFILE_MOVEMENT_BOUTS])
+    parser.add_argument(
+        "--profile",
+        default=PROFILE_MOVEMENT_BOUTS,
+        choices=[PROFILE_MOVEMENT_BOUTS, PROFILE_GOODCOPBADCOP_CHASER],
+    )
     parser.add_argument("--created-by", default="palette")
     parser.add_argument("--storage-tier", default="hot_nvme")
     parser.add_argument("--track-kinematics-run")
@@ -434,6 +463,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tail-kinematics-run")
     parser.add_argument("--stimulus-run")
     parser.add_argument("--stimulus-response-run")
+    parser.add_argument("--detection-occupancy-run")
+    parser.add_argument("--chaser-distance-run")
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -456,6 +487,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             tail_kinematics_run=args.tail_kinematics_run,
             stimulus_run=args.stimulus_run,
             stimulus_response_run=args.stimulus_response_run,
+            detection_occupancy_run=args.detection_occupancy_run,
+            chaser_distance_run=args.chaser_distance_run,
         )
         write_manifest(args.output, manifest, overwrite=args.overwrite)
         print(manifest["manifest_sha256"])

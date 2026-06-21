@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
+from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import decode_null_terminated_text
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -29,6 +30,28 @@ class GoodCopBadCopWindow:
     start_time_s: float
     end_time_s: float
     duration_s: float
+
+
+@dataclass(frozen=True)
+class GoodCopBadCopSpatialOccupancyZoneSet:
+    zone_set_id: str
+    zone_set_source: str
+    coordinate_frame: str
+    coordinate_origin: str
+    x_axis_direction: str
+    y_axis_direction: str
+    zone_id: tuple[str, ...]
+    zone_label: tuple[str, ...]
+    display_order: np.ndarray
+    bounds_xyxy: np.ndarray
+    frame_count: np.ndarray
+    time_s: np.ndarray
+    fraction_of_epoch: np.ndarray
+    fraction_of_detected: np.ndarray
+    detected_frame_count: np.ndarray
+    missing_frame_count: np.ndarray
+    total_span_frames: np.ndarray
+    coverage_pct: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -58,9 +81,11 @@ class GoodCopBadCopInteractiveData:
     stimulus_epoch_window_id: Optional[np.ndarray]
     windows: tuple[GoodCopBadCopWindow, ...]
     chaser_indices: np.ndarray
+    chaser_color_hex: Mapping[int, str]
     fish_centroid_arena_xy: np.ndarray
     fish_valid: np.ndarray
     chaser_arena_xy: Optional[np.ndarray]
+    chaser_source_img_xy: Optional[np.ndarray]
     chaser_valid: Optional[np.ndarray]
     distance_mm: np.ndarray
     nearest_distance_mm: Optional[np.ndarray]
@@ -69,6 +94,7 @@ class GoodCopBadCopInteractiveData:
     occupancy_counts: Optional[np.ndarray]
     occupancy_x_edges: Optional[np.ndarray]
     occupancy_y_edges: Optional[np.ndarray]
+    spatial_occupancy: tuple[GoodCopBadCopSpatialOccupancyZoneSet, ...]
 
 
 def _normalize_path(path: str) -> str:
@@ -126,6 +152,46 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(default)
 
 
+def _unit_color_to_hex(red: object, green: object, blue: object) -> Optional[str]:
+    try:
+        channels = [float(red), float(green), float(blue)]
+    except Exception:
+        return None
+    if not all(np.isfinite(value) for value in channels):
+        return None
+    values = [int(round(max(0.0, min(1.0, value)) * 255.0)) for value in channels]
+    return f"#{values[0]:02x}{values[1]:02x}{values[2]:02x}"
+
+
+def _chaser_colors_from_protocol_payload(payload: Mapping[str, Any]) -> dict[int, str]:
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        return {}
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        parameters = step.get("parameters")
+        if not isinstance(parameters, Mapping):
+            continue
+        chasers = parameters.get("chasers")
+        if not isinstance(chasers, list):
+            continue
+        colors: dict[int, str] = {}
+        for index, chaser in enumerate(chasers):
+            if not isinstance(chaser, Mapping):
+                continue
+            color = _unit_color_to_hex(
+                chaser.get("color_r"),
+                chaser.get("color_g"),
+                chaser.get("color_b"),
+            )
+            if color:
+                colors[int(index)] = color
+        if colors:
+            return colors
+    return {}
+
+
 def _decode_text_column(data: np.ndarray) -> list[str]:
     values = np.asarray(data)
     if values.ndim == 2 and values.dtype.kind in ("u", "i"):
@@ -181,6 +247,328 @@ def _load_array(
         if required:
             raise ValueError(f"Interactive source array not found for {key!r}: {path}") from exc
         return None
+
+
+def _load_array_at_path(root: zarr.Group, path: str) -> Optional[np.ndarray]:
+    try:
+        return np.asarray(root[_normalize_path(path)][:])
+    except Exception:
+        return None
+
+
+def _derive_detection_spatial_occupancy_path(source_paths: Mapping[str, str]) -> Optional[str]:
+    explicit = source_paths.get("detection_spatial_occupancy")
+    if explicit:
+        return _normalize_path(explicit)
+    for key in (
+        "detection_occupancy_heatmap_normalized",
+        "detection_occupancy_heatmap_counts",
+        "detection_occupancy_windows_label_bytes",
+    ):
+        path = source_paths.get(key)
+        if not path:
+            continue
+        normalized = _normalize_path(path)
+        marker = "/heatmaps/"
+        if marker in normalized:
+            return normalized.split(marker, 1)[0] + "/spatial_occupancy"
+        marker = "/windows/"
+        if marker in normalized:
+            return normalized.split(marker, 1)[0] + "/spatial_occupancy"
+    return None
+
+
+def _load_optional_summary_array(
+    group: zarr.Group,
+    name: str,
+    *,
+    shape: tuple[int, ...],
+    dtype: Any,
+) -> np.ndarray:
+    if name in group:
+        data = np.asarray(group[name][:], dtype=dtype)
+        if data.shape == shape:
+            return data
+    return np.zeros(shape, dtype=dtype)
+
+
+def _load_spatial_occupancy_zone_sets(
+    root: zarr.Group,
+    source_paths: Mapping[str, str],
+) -> tuple[GoodCopBadCopSpatialOccupancyZoneSet, ...]:
+    spatial_path = _derive_detection_spatial_occupancy_path(source_paths)
+    if not spatial_path:
+        return ()
+    try:
+        spatial_parent = root[_normalize_path(spatial_path)]
+    except Exception:
+        return ()
+
+    zone_sets: list[GoodCopBadCopSpatialOccupancyZoneSet] = []
+    for zone_set_id in _group_keys(spatial_parent):
+        try:
+            zone_group = spatial_parent[zone_set_id]
+            zone_spec = zone_group["zone_spec"]
+            summary = zone_group["summary"]
+        except Exception:
+            continue
+        frame_count = _load_array_at_path(root, _join_path(spatial_path, zone_set_id, "summary/frame_count"))
+        if frame_count is None:
+            continue
+        frame_count = np.asarray(frame_count, dtype=np.int64)
+        if frame_count.ndim != 2:
+            continue
+        n_windows, n_zones = frame_count.shape
+
+        zone_ids_raw = (
+            np.asarray(zone_spec["zone_id"][:])
+            if "zone_id" in zone_spec
+            else np.zeros((n_zones, 1), dtype=np.uint8)
+        )
+        zone_ids = tuple(_decode_text_column(zone_ids_raw)[:n_zones])
+        if len(zone_ids) < n_zones:
+            zone_ids = tuple([*zone_ids, *(f"zone_{idx}" for idx in range(len(zone_ids), n_zones))])
+
+        if "label_bytes" in zone_spec:
+            labels = tuple(_decode_text_column(np.asarray(zone_spec["label_bytes"][:]))[:n_zones])
+        else:
+            labels = zone_ids
+        if len(labels) < n_zones:
+            labels = tuple([*labels, *zone_ids[len(labels) :]])
+
+        display_order = (
+            np.asarray(zone_spec["display_order"][:], dtype=np.int16).reshape(-1)
+            if "display_order" in zone_spec
+            else np.arange(n_zones, dtype=np.int16)
+        )
+        if display_order.shape[0] != n_zones:
+            display_order = np.arange(n_zones, dtype=np.int16)
+        bounds_xyxy = (
+            np.asarray(zone_spec["bounds_xyxy"][:], dtype=np.float64)
+            if "bounds_xyxy" in zone_spec
+            else np.zeros((n_zones, 4), dtype=np.float64)
+        )
+        if bounds_xyxy.shape != (n_zones, 4):
+            bounds_xyxy = np.zeros((n_zones, 4), dtype=np.float64)
+
+        zone_sets.append(
+            GoodCopBadCopSpatialOccupancyZoneSet(
+                zone_set_id=str(zone_set_id),
+                zone_set_source=str(zone_group.attrs.get("zone_set_source") or ""),
+                coordinate_frame=str(zone_group.attrs.get("coordinate_frame") or ""),
+                coordinate_origin=str(zone_group.attrs.get("coordinate_origin") or ""),
+                x_axis_direction=str(zone_group.attrs.get("x_axis_direction") or ""),
+                y_axis_direction=str(zone_group.attrs.get("y_axis_direction") or ""),
+                zone_id=zone_ids,
+                zone_label=labels,
+                display_order=display_order,
+                bounds_xyxy=bounds_xyxy,
+                frame_count=frame_count,
+                time_s=_load_optional_summary_array(summary, "time_s", shape=(n_windows, n_zones), dtype=np.float64),
+                fraction_of_epoch=_load_optional_summary_array(
+                    summary,
+                    "fraction_of_epoch",
+                    shape=(n_windows, n_zones),
+                    dtype=np.float64,
+                ),
+                fraction_of_detected=_load_optional_summary_array(
+                    summary,
+                    "fraction_of_detected",
+                    shape=(n_windows, n_zones),
+                    dtype=np.float64,
+                ),
+                detected_frame_count=_load_optional_summary_array(
+                    summary,
+                    "detected_frame_count",
+                    shape=(n_windows,),
+                    dtype=np.int64,
+                ),
+                missing_frame_count=_load_optional_summary_array(
+                    summary,
+                    "missing_frame_count",
+                    shape=(n_windows,),
+                    dtype=np.int64,
+                ),
+                total_span_frames=_load_optional_summary_array(
+                    summary,
+                    "total_span_frames",
+                    shape=(n_windows,),
+                    dtype=np.int64,
+                ),
+                coverage_pct=_load_optional_summary_array(
+                    summary,
+                    "coverage_pct",
+                    shape=(n_windows,),
+                    dtype=np.float64,
+                ),
+            )
+        )
+    return tuple(zone_sets)
+
+
+def _resolve_source_stimulus(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    spec: Mapping[str, Any],
+) -> tuple[Optional[str], Optional[str]]:
+    stimulus_run: Optional[str] = None
+    stimulus_path: Optional[str] = None
+    try:
+        run_group = root[_normalize_path(run_path)]
+        raw_run = getattr(run_group, "attrs", {}).get("source_stimulus_run")
+        if raw_run:
+            stimulus_run = str(raw_run).strip() or None
+        raw_path = getattr(run_group, "attrs", {}).get("source_stimulus_path")
+        if raw_path:
+            stimulus_path = _normalize_path(str(raw_path))
+    except Exception:
+        stimulus_run = None
+        stimulus_path = None
+
+    source_runs = spec.get("source_runs")
+    if isinstance(source_runs, Mapping) and source_runs.get("stimulus"):
+        stimulus_run = stimulus_run or str(source_runs["stimulus"]).strip() or None
+        stimulus_path = stimulus_path or _join_path("analysis/stimulus_runs", str(source_runs["stimulus"]))
+
+    if not stimulus_run and stimulus_path:
+        parts = _normalize_path(stimulus_path).split("/")
+        if len(parts) >= 3 and parts[-3:-1] == ["analysis", "stimulus_runs"]:
+            stimulus_run = parts[-1]
+
+    return stimulus_run, stimulus_path
+
+
+def _load_chaser_color_hex(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    spec: Mapping[str, Any],
+    chaser_indices: np.ndarray,
+) -> dict[int, str]:
+    _stimulus_run, stimulus_path = _resolve_source_stimulus(root, run_path=run_path, spec=spec)
+
+    if not stimulus_path:
+        return {}
+    try:
+        stimulus_group = root[stimulus_path]
+    except Exception:
+        return {}
+    protocol_json = getattr(stimulus_group, "attrs", {}).get("protocol_json")
+    if not protocol_json:
+        return {}
+    try:
+        payload = json.loads(str(protocol_json))
+    except Exception:
+        return {}
+
+    by_protocol_index = _chaser_colors_from_protocol_payload(payload)
+    if not by_protocol_index:
+        return {}
+    out: dict[int, str] = {}
+    for chaser_index in np.asarray(chaser_indices, dtype=np.int64).reshape(-1).tolist():
+        color = by_protocol_index.get(int(chaser_index))
+        if color:
+            out[int(chaser_index)] = color
+    return out
+
+
+def _xy_pair_from_attr(value: object) -> Optional[tuple[float, float]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return None
+    if not isinstance(value, (list, tuple, np.ndarray)) or len(value) < 2:
+        return None
+    x = _safe_float(value[0])
+    y = _safe_float(value[1])
+    if not np.isfinite(x) or not np.isfinite(y):
+        return None
+    return float(x), float(y)
+
+
+def _arena_origin_from_run(
+    root: zarr.Group,
+    *,
+    run_path: str,
+) -> Optional[tuple[float, float]]:
+    try:
+        run_group = root[_normalize_path(run_path)]
+    except Exception:
+        return None
+    attrs = getattr(run_group, "attrs", {})
+    origin = _xy_pair_from_attr(attrs.get("arena_origin_in_canvas_xy"))
+    if origin is not None:
+        return origin
+    x = _safe_float(attrs.get("arena_origin_in_canvas_x_px"))
+    y = _safe_float(attrs.get("arena_origin_in_canvas_y_px"))
+    if np.isfinite(x) and np.isfinite(y):
+        return float(x), float(y)
+    return None
+
+
+def _arena_origin_from_stimulus(
+    root: zarr.Group,
+    *,
+    stimulus_path: Optional[str],
+) -> Optional[tuple[float, float]]:
+    if not stimulus_path:
+        return None
+    try:
+        stimulus_group = root[_normalize_path(stimulus_path)]
+        calibration = stimulus_group.get("calibration")
+        arena_geometry = calibration.get("arena_geometry") if calibration is not None else None
+    except Exception:
+        return None
+    if arena_geometry is None:
+        return None
+    attrs = getattr(arena_geometry, "attrs", {})
+    x = _safe_float(attrs.get("arena_origin_in_canvas_x_px"))
+    y = _safe_float(attrs.get("arena_origin_in_canvas_y_px"))
+    if np.isfinite(x) and np.isfinite(y):
+        return float(x), float(y)
+    return None
+
+
+def _load_chaser_source_img_xy(
+    root: zarr.Group,
+    *,
+    run_path: str,
+    spec: Mapping[str, Any],
+    chaser_arena_xy: Optional[np.ndarray],
+) -> Optional[np.ndarray]:
+    if chaser_arena_xy is None:
+        return None
+
+    stimulus_run, stimulus_path = _resolve_source_stimulus(root, run_path=run_path, spec=spec)
+    origin = _arena_origin_from_run(root, run_path=run_path) or _arena_origin_from_stimulus(
+        root,
+        stimulus_path=stimulus_path,
+    )
+    if origin is None:
+        return None
+
+    calibration = load_calibration_transform(root, stimulus_run=stimulus_run)
+    homography = calibration.get("homography")
+    if homography is None:
+        return None
+    homography = np.asarray(homography, dtype=np.float64)
+    if homography.shape != (3, 3):
+        return None
+    try:
+        canvas_to_source = np.linalg.inv(homography)
+    except np.linalg.LinAlgError:
+        return None
+
+    source_xy = np.full_like(np.asarray(chaser_arena_xy, dtype=np.float64), np.nan, dtype=np.float64)
+    finite = np.isfinite(chaser_arena_xy).all(axis=2)
+    if not np.any(finite):
+        return source_xy
+    origin_xy = np.asarray(origin, dtype=np.float64).reshape(1, 2)
+    canvas_xy = np.asarray(chaser_arena_xy, dtype=np.float64)[finite] + origin_xy
+    source_xy[finite] = projector_to_camera_px(canvas_xy, canvas_to_source)
+    return source_xy
 
 
 def resolve_related_detection_occupancy_run_path(
@@ -259,15 +647,31 @@ def _source_paths_for_chaser_dashboard(
     add_run_path("epoch_hist_density", "epoch_distributions/hist_density")
 
     if detection_occupancy_run_path:
-        add_path("detection_occupancy_windows_label_bytes", _join_path(detection_occupancy_run_path, "windows/label_bytes"))
-        add_path("detection_occupancy_windows_start_frame", _join_path(detection_occupancy_run_path, "windows/start_frame"))
+        add_path(
+            "detection_occupancy_windows_label_bytes",
+            _join_path(detection_occupancy_run_path, "windows/label_bytes"),
+        )
+        add_path(
+            "detection_occupancy_windows_start_frame",
+            _join_path(detection_occupancy_run_path, "windows/start_frame"),
+        )
         add_path("detection_occupancy_windows_end_frame", _join_path(detection_occupancy_run_path, "windows/end_frame"))
-        add_path("detection_occupancy_windows_start_time_s", _join_path(detection_occupancy_run_path, "windows/start_time_s"))
-        add_path("detection_occupancy_windows_end_time_s", _join_path(detection_occupancy_run_path, "windows/end_time_s"))
+        add_path(
+            "detection_occupancy_windows_start_time_s",
+            _join_path(detection_occupancy_run_path, "windows/start_time_s"),
+        )
+        add_path(
+            "detection_occupancy_windows_end_time_s",
+            _join_path(detection_occupancy_run_path, "windows/end_time_s"),
+        )
         add_path("detection_occupancy_heatmap_counts", _join_path(detection_occupancy_run_path, "heatmaps/counts"))
-        add_path("detection_occupancy_heatmap_normalized", _join_path(detection_occupancy_run_path, "heatmaps/normalized"))
+        add_path(
+            "detection_occupancy_heatmap_normalized",
+            _join_path(detection_occupancy_run_path, "heatmaps/normalized"),
+        )
         add_path("detection_occupancy_heatmap_x_edges", _join_path(detection_occupancy_run_path, "heatmaps/x_edges"))
         add_path("detection_occupancy_heatmap_y_edges", _join_path(detection_occupancy_run_path, "heatmaps/y_edges"))
+        add_path("detection_spatial_occupancy", _join_path(detection_occupancy_run_path, "spatial_occupancy"))
 
     return source_paths
 
@@ -283,7 +687,10 @@ def build_goodcopbadcop_chaser_dashboard_spec(
     """Build a renderer-neutral GoodCopBadCop chaser dashboard spec."""
 
     attrs = dict(getattr(run_group, "attrs", {}))
-    resolved_occupancy_path = detection_occupancy_run_path or resolve_related_detection_occupancy_run_path(root, run_group)
+    resolved_occupancy_path = detection_occupancy_run_path or resolve_related_detection_occupancy_run_path(
+        root,
+        run_group,
+    )
     source_paths = _source_paths_for_chaser_dashboard(
         root,
         run_path=run_path,
@@ -353,6 +760,15 @@ def build_goodcopbadcop_chaser_dashboard_spec(
                 "x_edges_path_key": "detection_occupancy_heatmap_x_edges",
                 "y_edges_path_key": "detection_occupancy_heatmap_y_edges",
                 "enabled": bool(resolved_occupancy_path),
+            },
+            {
+                "id": "detection_spatial_occupancy",
+                "kind": "zone_summary",
+                "spatial_occupancy_path_key": "detection_spatial_occupancy",
+                "enabled": bool(
+                    resolved_occupancy_path
+                    and _node_exists(root, _join_path(resolved_occupancy_path, "spatial_occupancy"))
+                ),
             },
         ],
     }
@@ -482,6 +898,12 @@ def load_goodcopbadcop_interactive_data(
     chaser_valid = _load_array(root, source_paths, "chaser_valid")
     if chaser_valid is not None:
         chaser_valid = chaser_valid.astype(bool, copy=False)
+    chaser_source_img_xy = _load_chaser_source_img_xy(
+        root,
+        run_path=run_path,
+        spec=spec,
+        chaser_arena_xy=chaser_xy,
+    )
 
     distance_mm = _load_array(root, source_paths, "distance_mm", required=True).astype(np.float64, copy=False)
     if distance_mm.ndim == 1:
@@ -490,6 +912,12 @@ def load_goodcopbadcop_interactive_data(
     if chaser_indices is None:
         chaser_indices = np.arange(distance_mm.shape[1], dtype=np.int32)
     chaser_indices = chaser_indices.astype(np.int32, copy=False).reshape(-1)
+    chaser_color_hex = _load_chaser_color_hex(
+        root,
+        run_path=run_path,
+        spec=spec,
+        chaser_indices=chaser_indices,
+    )
 
     nearest_distance_mm = _load_array(root, source_paths, "nearest_distance_mm")
     if nearest_distance_mm is not None:
@@ -503,6 +931,7 @@ def load_goodcopbadcop_interactive_data(
     occupancy_counts = _load_array(root, source_paths, "detection_occupancy_heatmap_counts")
     occupancy_x_edges = _load_array(root, source_paths, "detection_occupancy_heatmap_x_edges")
     occupancy_y_edges = _load_array(root, source_paths, "detection_occupancy_heatmap_y_edges")
+    spatial_occupancy = _load_spatial_occupancy_zone_sets(root, source_paths)
 
     return GoodCopBadCopInteractiveData(
         zarr_path=archive,
@@ -519,9 +948,11 @@ def load_goodcopbadcop_interactive_data(
         stimulus_epoch_window_id=stimulus_epoch_window_id,
         windows=windows,
         chaser_indices=chaser_indices,
+        chaser_color_hex=chaser_color_hex,
         fish_centroid_arena_xy=fish_xy,
         fish_valid=fish_valid,
         chaser_arena_xy=chaser_xy,
+        chaser_source_img_xy=chaser_source_img_xy,
         chaser_valid=chaser_valid,
         distance_mm=distance_mm,
         nearest_distance_mm=nearest_distance_mm,
@@ -530,6 +961,7 @@ def load_goodcopbadcop_interactive_data(
         occupancy_counts=occupancy_counts,
         occupancy_x_edges=occupancy_x_edges,
         occupancy_y_edges=occupancy_y_edges,
+        spatial_occupancy=spatial_occupancy,
     )
 
 
@@ -620,3 +1052,60 @@ def to_chaser_position_dataframe(
     if not frames:
         return pd.DataFrame(columns=["time_s", "frame_index", "chaser_index", "x", "y", "chaser_valid"])
     return pd.concat(frames, ignore_index=True)
+
+
+def to_spatial_occupancy_dataframe(data: GoodCopBadCopInteractiveData) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for zone_set in data.spatial_occupancy:
+        n_windows, n_zones = zone_set.frame_count.shape
+        for window_idx in range(n_windows):
+            window = data.windows[window_idx] if window_idx < len(data.windows) else None
+            window_id = window.window_id if window is not None else int(window_idx)
+            window_label = window.label if window is not None else f"window_{window_idx}"
+            for zone_idx in range(n_zones):
+                rows.append(
+                    {
+                        "zone_set_id": zone_set.zone_set_id,
+                        "zone_set_source": zone_set.zone_set_source,
+                        "coordinate_frame": zone_set.coordinate_frame,
+                        "coordinate_origin": zone_set.coordinate_origin,
+                        "x_axis_direction": zone_set.x_axis_direction,
+                        "y_axis_direction": zone_set.y_axis_direction,
+                        "window_id": int(window_id),
+                        "window_label": str(window_label),
+                        "window_index": int(window_idx),
+                        "zone_index": int(zone_idx),
+                        "display_order": int(zone_set.display_order[zone_idx])
+                        if zone_idx < zone_set.display_order.shape[0]
+                        else int(zone_idx),
+                        "zone_id": (
+                            str(zone_set.zone_id[zone_idx])
+                            if zone_idx < len(zone_set.zone_id)
+                            else f"zone_{zone_idx}"
+                        ),
+                        "zone_label": str(zone_set.zone_label[zone_idx])
+                        if zone_idx < len(zone_set.zone_label)
+                        else f"zone {zone_idx}",
+                        "x_min": float(zone_set.bounds_xyxy[zone_idx, 0]),
+                        "y_min": float(zone_set.bounds_xyxy[zone_idx, 1]),
+                        "x_max": float(zone_set.bounds_xyxy[zone_idx, 2]),
+                        "y_max": float(zone_set.bounds_xyxy[zone_idx, 3]),
+                        "frame_count": int(zone_set.frame_count[window_idx, zone_idx]),
+                        "time_s": float(zone_set.time_s[window_idx, zone_idx]),
+                        "fraction_of_epoch": float(zone_set.fraction_of_epoch[window_idx, zone_idx]),
+                        "fraction_of_detected": float(zone_set.fraction_of_detected[window_idx, zone_idx]),
+                        "detected_frame_count": int(zone_set.detected_frame_count[window_idx])
+                        if window_idx < zone_set.detected_frame_count.shape[0]
+                        else 0,
+                        "missing_frame_count": int(zone_set.missing_frame_count[window_idx])
+                        if window_idx < zone_set.missing_frame_count.shape[0]
+                        else 0,
+                        "total_span_frames": int(zone_set.total_span_frames[window_idx])
+                        if window_idx < zone_set.total_span_frames.shape[0]
+                        else 0,
+                        "coverage_pct": float(zone_set.coverage_pct[window_idx])
+                        if window_idx < zone_set.coverage_pct.shape[0]
+                        else 0.0,
+                    }
+                )
+    return pd.DataFrame(rows)

@@ -803,6 +803,10 @@ lineage, and DuckDB queries Parquet.
   `collection_manifest_sha256` in both the export manifest and exported rows.
 - It writes partitioned Parquet datasets and an export manifest.
 - Keep dependencies optional until the workflow is stable.
+- Protocol-specific table extensions should stay in this export family when
+  they are derived from existing per-recording analysis runs. The first
+  GoodCopBadCop chaser tables are specified in
+  [`goodcopbadcop_group_export_design.md`](goodcopbadcop_group_export_design.md).
 
 ### Phase 3. Polars/DuckDB Smoke Queries
 

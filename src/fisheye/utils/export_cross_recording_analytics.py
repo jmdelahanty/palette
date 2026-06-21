@@ -48,6 +48,12 @@ DEFAULT_TABLES = (
     "swim_bout_metrics",
     "bout_kinematics_metrics",
 )
+GOODCOPBADCOP_TABLES = (
+    "goodcopbadcop_spatial_occupancy_zones",
+    "goodcopbadcop_chaser_epoch_summary",
+    "goodcopbadcop_chaser_distance_histogram",
+)
+AVAILABLE_TABLES = DEFAULT_TABLES + GOODCOPBADCOP_TABLES
 
 
 @dataclass(frozen=True)
@@ -302,6 +308,141 @@ def _read_1d_array(group: Any, name: str) -> np.ndarray | None:
     if arr.ndim != 1:
         return None
     return arr
+
+
+def _read_array(group: Any, name: str) -> np.ndarray | None:
+    if not _has_child(group, name):
+        return None
+    try:
+        return np.asarray(group[name][:])
+    except Exception:
+        return None
+
+
+def _decode_text_column(values: Any, *, fallback_count: int = 0) -> list[str | None]:
+    if values is None:
+        return [None] * int(fallback_count)
+    arr = np.asarray(values)
+    if arr.ndim == 0:
+        return [decode_null_terminated_text(arr.item(), errors="ignore")]
+    if arr.ndim == 2 and arr.dtype.kind in ("u", "i"):
+        return [decode_null_terminated_text(row, errors="ignore") for row in arr]
+    flat = arr.reshape(-1)
+    return [decode_null_terminated_text(value, errors="ignore") for value in flat]
+
+
+def _array_scalar(values: np.ndarray | None, *indices: int) -> Any:
+    if values is None:
+        return None
+    arr = np.asarray(values)
+    if len(indices) > arr.ndim:
+        return None
+    for axis, index in enumerate(indices):
+        if index < 0 or index >= int(arr.shape[axis]):
+            return None
+    try:
+        return _scalar_for_parquet(arr[indices])
+    except Exception:
+        return None
+
+
+def _array_float(values: np.ndarray | None, *indices: int) -> float | None:
+    return _safe_float(_array_scalar(values, *indices))
+
+
+def _array_int(values: np.ndarray | None, *indices: int) -> int | None:
+    return _safe_int(_array_scalar(values, *indices))
+
+
+def _json_mapping_attr(attrs: Mapping[str, Any], name: str) -> dict[str, Any]:
+    value = _parse_jsonish(attrs.get(name))
+    if isinstance(value, Mapping):
+        return {str(key): value[key] for key in value}
+    return {}
+
+
+def _source_refs_json(source_refs: Mapping[str, Any]) -> str:
+    return _json_dumps_safe(dict(source_refs))
+
+
+def _window_rows_from_group(group: Any) -> list[dict[str, Any]]:
+    if not _has_child(group, "windows"):
+        return []
+    windows = group["windows"]
+    n_rows = _row_count_from_group(
+        windows,
+        names=("window_id", "label_bytes", "start_frame", "end_frame", "start_time_s", "end_time_s", "duration_s"),
+    )
+    if n_rows <= 0:
+        return []
+    labels = _decode_text_column(_read_array(windows, "label_bytes"), fallback_count=n_rows)
+    window_id = _read_1d_array(windows, "window_id")
+    start_frame = _read_1d_array(windows, "start_frame")
+    end_frame = _read_1d_array(windows, "end_frame")
+    start_time = _read_1d_array(windows, "start_time_s")
+    end_time = _read_1d_array(windows, "end_time_s")
+    duration = _read_1d_array(windows, "duration_s")
+
+    rows: list[dict[str, Any]] = []
+    for idx in range(n_rows):
+        start_time_s = _array_float(start_time, idx)
+        end_time_s = _array_float(end_time, idx)
+        duration_s = _array_float(duration, idx)
+        if duration_s is None and start_time_s is not None and end_time_s is not None:
+            duration_s = end_time_s - start_time_s
+        rows.append(
+            {
+                "window_index": idx,
+                "window_id": _array_int(window_id, idx) if window_id is not None else idx,
+                "window_label": labels[idx] if idx < len(labels) else None,
+                "start_frame": _array_int(start_frame, idx),
+                "end_frame": _array_int(end_frame, idx),
+                "start_time_s": start_time_s,
+                "end_time_s": end_time_s,
+                "duration_s": duration_s,
+            }
+        )
+    return rows
+
+
+def _epoch_summary_window_rows(group: Any) -> list[dict[str, Any]]:
+    if not _has_child(group, "epoch_summary"):
+        return []
+    summary = group["epoch_summary"]
+    n_rows = _row_count_from_group(
+        summary,
+        names=("window_id", "label_bytes", "start_frame", "end_frame"),
+    )
+    if n_rows <= 0:
+        return []
+    labels = _decode_text_column(_read_array(summary, "label_bytes"), fallback_count=n_rows)
+    window_id = _read_1d_array(summary, "window_id")
+    start_frame = _read_1d_array(summary, "start_frame")
+    end_frame = _read_1d_array(summary, "end_frame")
+    start_time = _read_1d_array(summary, "start_time_s")
+    end_time = _read_1d_array(summary, "end_time_s")
+    duration = _read_1d_array(summary, "duration_s")
+
+    rows: list[dict[str, Any]] = []
+    for idx in range(n_rows):
+        start_time_s = _array_float(start_time, idx)
+        end_time_s = _array_float(end_time, idx)
+        duration_s = _array_float(duration, idx)
+        if duration_s is None and start_time_s is not None and end_time_s is not None:
+            duration_s = end_time_s - start_time_s
+        rows.append(
+            {
+                "window_index": idx,
+                "window_id": _array_int(window_id, idx) if window_id is not None else idx,
+                "window_label": labels[idx] if idx < len(labels) else None,
+                "start_frame": _array_int(start_frame, idx),
+                "end_frame": _array_int(end_frame, idx),
+                "start_time_s": start_time_s,
+                "end_time_s": end_time_s,
+                "duration_s": duration_s,
+            }
+        )
+    return rows
 
 
 def _read_table_rows(
@@ -1009,6 +1150,497 @@ def _load_bout_kinematics_metrics(
     return rows
 
 
+def _load_goodcopbadcop_spatial_occupancy_zones(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_spatial_occupancy_zones"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/detection_occupancy_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    if not _has_child(run_group, "spatial_occupancy"):
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing spatial_occupancy group",
+            "detection_occupancy_run": run_name,
+        })
+        return []
+
+    run_attrs = _attrs_dict(run_group)
+    source_refs = _json_mapping_attr(run_attrs, "source_refs")
+    windows = _window_rows_from_group(run_group)
+    spatial_parent = run_group["spatial_occupancy"]
+    run_path = f"analysis/detection_occupancy_runs/{run_name}"
+    rows: list[dict[str, Any]] = []
+
+    for zone_set_name in _group_names(spatial_parent):
+        zone_group = spatial_parent[zone_set_name]
+        if not _has_child(zone_group, "zone_spec") or not _has_child(zone_group, "summary"):
+            diagnostics.append({
+                "table": table,
+                "status": "partial",
+                "reason": "zone set missing zone_spec or summary group",
+                "detection_occupancy_run": run_name,
+                "zone_set_id": zone_set_name,
+            })
+            continue
+
+        zone_attrs = _attrs_dict(zone_group)
+        zone_spec = zone_group["zone_spec"]
+        summary = zone_group["summary"]
+        frame_count = _read_array(summary, "frame_count")
+        if frame_count is None or np.asarray(frame_count).ndim != 2:
+            diagnostics.append({
+                "table": table,
+                "status": "partial",
+                "reason": "zone set summary/frame_count missing or not 2D",
+                "detection_occupancy_run": run_name,
+                "zone_set_id": zone_set_name,
+            })
+            continue
+        frame_count = np.asarray(frame_count)
+        n_windows, n_zones = int(frame_count.shape[0]), int(frame_count.shape[1])
+        zone_ids = _decode_text_column(_read_array(zone_spec, "zone_id"), fallback_count=n_zones)
+        zone_labels = _decode_text_column(_read_array(zone_spec, "label_bytes"), fallback_count=n_zones)
+        geometry_types = _decode_text_column(_read_array(zone_spec, "geometry_type"), fallback_count=n_zones)
+        display_order = _read_1d_array(zone_spec, "display_order")
+        bounds_xyxy = _read_array(zone_spec, "bounds_xyxy")
+        time_s = _read_array(summary, "time_s")
+        fraction_of_epoch = _read_array(summary, "fraction_of_epoch")
+        fraction_of_detected = _read_array(summary, "fraction_of_detected")
+        detected_frame_count = _read_1d_array(summary, "detected_frame_count")
+        missing_frame_count = _read_1d_array(summary, "missing_frame_count")
+        total_span_frames = _read_1d_array(summary, "total_span_frames")
+        coverage_pct = _read_1d_array(summary, "coverage_pct")
+        zone_set_id = str(zone_attrs.get("zone_set_id") or zone_set_name)
+
+        for window_index in range(n_windows):
+            window = (
+                windows[window_index]
+                if window_index < len(windows)
+                else {
+                    "window_index": window_index,
+                    "window_id": window_index,
+                    "window_label": None,
+                    "start_frame": None,
+                    "end_frame": None,
+                    "start_time_s": None,
+                    "end_time_s": None,
+                    "duration_s": None,
+                }
+            )
+            for zone_index in range(n_zones):
+                zone_id = (
+                    str(zone_ids[zone_index])
+                    if zone_index < len(zone_ids) and zone_ids[zone_index]
+                    else str(zone_index)
+                )
+                lineage = {
+                    "zarr_path": str(zarr_path),
+                    "detection_occupancy_run": run_name,
+                    "source_detection_path": run_attrs.get("source_detection_path"),
+                    "source_stimulus_epoch_run": run_attrs.get("source_stimulus_epoch_run"),
+                    "zone_set_id": zone_set_id,
+                    "window_id": window.get("window_id"),
+                    "zone_id": zone_id,
+                }
+                row = _common_row(
+                    export_run_id=export_run_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    table=table,
+                    lineage=lineage,
+                )
+                row.update({
+                    "detection_occupancy_run": run_name,
+                    "detection_occupancy_path": run_path,
+                    "detection_occupancy_schema_id": run_attrs.get("schema_id"),
+                    "detection_occupancy_schema_version": _safe_int(run_attrs.get("schema_version")),
+                    "detection_occupancy_method": run_attrs.get("method"),
+                    "detection_occupancy_method_version": run_attrs.get("method_version"),
+                    "source_detection_path": run_attrs.get("source_detection_path") or zone_attrs.get("source_detection_path"),
+                    "source_detection_kind": run_attrs.get("source_detection_kind"),
+                    "source_stimulus_epoch_run": run_attrs.get("source_stimulus_epoch_run"),
+                    "source_stimulus_epoch_path": run_attrs.get("source_stimulus_epoch_path") or zone_attrs.get("source_stimulus_epoch_path"),
+                    "source_refs_json": _source_refs_json(source_refs),
+                    "zone_schema_id": zone_attrs.get("schema_id"),
+                    "zone_schema_version": _safe_int(zone_attrs.get("schema_version")),
+                    "zone_set_id": zone_set_id,
+                    "zone_set_source": zone_attrs.get("zone_set_source"),
+                    "zone_set_source_ref": zone_attrs.get("zone_set_source_ref"),
+                    "coordinate_frame": zone_attrs.get("coordinate_frame"),
+                    "coordinate_origin": zone_attrs.get("coordinate_origin"),
+                    "x_axis_direction": zone_attrs.get("x_axis_direction"),
+                    "y_axis_direction": zone_attrs.get("y_axis_direction"),
+                    "width_px": _safe_int(zone_attrs.get("width") or run_attrs.get("width")),
+                    "height_px": _safe_int(zone_attrs.get("height") or run_attrs.get("height")),
+                    "fps": _safe_float(zone_attrs.get("fps") or run_attrs.get("fps")),
+                    "detection_selection_policy": zone_attrs.get("detection_selection_policy"),
+                    "zone_overlap_policy": zone_attrs.get("zone_overlap_policy"),
+                    "time_basis": zone_attrs.get("time_basis"),
+                    "window_index": _safe_int(window.get("window_index")),
+                    "window_id": _safe_int(window.get("window_id")),
+                    "window_label": window.get("window_label"),
+                    "start_frame": _safe_int(window.get("start_frame")),
+                    "end_frame": _safe_int(window.get("end_frame")),
+                    "start_time_s": _safe_float(window.get("start_time_s")),
+                    "end_time_s": _safe_float(window.get("end_time_s")),
+                    "duration_s": _safe_float(window.get("duration_s")),
+                    "zone_index": zone_index,
+                    "zone_id": zone_id,
+                    "zone_label": (
+                        str(zone_labels[zone_index])
+                        if zone_index < len(zone_labels) and zone_labels[zone_index]
+                        else zone_id
+                    ),
+                    "display_order": _array_int(display_order, zone_index),
+                    "geometry_type": (
+                        str(geometry_types[zone_index])
+                        if zone_index < len(geometry_types) and geometry_types[zone_index]
+                        else None
+                    ),
+                    "x_min": _array_float(bounds_xyxy, zone_index, 0),
+                    "y_min": _array_float(bounds_xyxy, zone_index, 1),
+                    "x_max": _array_float(bounds_xyxy, zone_index, 2),
+                    "y_max": _array_float(bounds_xyxy, zone_index, 3),
+                    "frame_count": _array_int(frame_count, window_index, zone_index),
+                    "time_s": _array_float(time_s, window_index, zone_index),
+                    "fraction_of_epoch": _array_float(fraction_of_epoch, window_index, zone_index),
+                    "fraction_of_detected": _array_float(fraction_of_detected, window_index, zone_index),
+                    "detected_frame_count": _array_int(detected_frame_count, window_index),
+                    "missing_frame_count": _array_int(missing_frame_count, window_index),
+                    "total_span_frames": _array_int(total_span_frames, window_index),
+                    "coverage_pct": _array_float(coverage_pct, window_index),
+                })
+                rows.append(row)
+    return rows
+
+
+def _chaser_indices_for_run(run_group: Any, *, fallback_count: int) -> list[int]:
+    if _has_child(run_group, "chasers"):
+        arr = _read_1d_array(run_group["chasers"], "chaser_index")
+        if arr is not None and arr.size:
+            return [_safe_int(value) if _safe_int(value) is not None else int(idx) for idx, value in enumerate(arr)]
+    if _has_child(run_group, "epoch_distributions"):
+        arr = _read_1d_array(run_group["epoch_distributions"], "chaser_index")
+        if arr is not None and arr.size:
+            return [_safe_int(value) if _safe_int(value) is not None else int(idx) for idx, value in enumerate(arr)]
+    return list(range(int(fallback_count)))
+
+
+def _chaser_common_run_fields(run_group: Any, run_name: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    attrs = _attrs_dict(run_group)
+    source_refs = _json_mapping_attr(attrs, "source_refs")
+    parameters = _json_mapping_attr(attrs, "parameters")
+    common = {
+        "chaser_distance_run": run_name,
+        "chaser_distance_path": f"analysis/chaser_distance_runs/{run_name}",
+        "chaser_distance_schema_id": attrs.get("schema_id"),
+        "chaser_distance_schema_version": _safe_int(attrs.get("schema_version")),
+        "chaser_distance_method": attrs.get("method"),
+        "chaser_distance_method_version": attrs.get("method_version"),
+        "source_detection_path": attrs.get("source_detection_path") or source_refs.get("source_detection_path"),
+        "source_detection_kind": attrs.get("source_detection_kind") or source_refs.get("source_detection_kind"),
+        "source_stimulus_run": attrs.get("source_stimulus_run") or source_refs.get("source_stimulus_run"),
+        "source_stimulus_path": attrs.get("source_stimulus_path") or source_refs.get("source_stimulus_path"),
+        "source_stimulus_epoch_run": attrs.get("source_stimulus_epoch_run") or source_refs.get("source_stimulus_epoch_run"),
+        "source_stimulus_epoch_path": attrs.get("source_stimulus_epoch_path") or source_refs.get("source_stimulus_epoch_path"),
+        "source_refs_json": _source_refs_json(source_refs),
+        "coordinate_frame": attrs.get("coordinate_frame"),
+        "coordinate_origin": attrs.get("coordinate_origin"),
+        "fps": _safe_float(attrs.get("fps")),
+        "total_frames": _safe_int(attrs.get("total_frames")),
+        "pixels_per_mm_projector": _safe_float(attrs.get("pixels_per_mm_projector")),
+    }
+    return common, source_refs, parameters
+
+
+def _fill_chaser_window_times(window: dict[str, Any], *, fps: float | None) -> dict[str, Any]:
+    out = dict(window)
+    if fps is None or fps <= 0:
+        return out
+    start_frame = _safe_int(out.get("start_frame"))
+    end_frame = _safe_int(out.get("end_frame"))
+    if start_frame is not None and out.get("start_time_s") is None:
+        out["start_time_s"] = float(start_frame) / fps
+    if end_frame is not None and out.get("end_time_s") is None:
+        out["end_time_s"] = float(end_frame + 1) / fps
+    if out.get("duration_s") is None and start_frame is not None and end_frame is not None:
+        out["duration_s"] = float(max(0, end_frame - start_frame + 1)) / fps
+    return out
+
+
+def _load_goodcopbadcop_chaser_epoch_summary(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_chaser_epoch_summary"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    if not _has_child(run_group, "epoch_summary"):
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing epoch_summary group",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    run_common, source_refs, parameters = _chaser_common_run_fields(run_group, run_name)
+    summary = run_group["epoch_summary"]
+    valid_frame_count = _read_array(summary, "valid_frame_count")
+    if valid_frame_count is None or np.asarray(valid_frame_count).ndim != 2:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "epoch_summary/valid_frame_count missing or not 2D",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    valid_frame_count = np.asarray(valid_frame_count)
+    n_windows, n_chasers = int(valid_frame_count.shape[0]), int(valid_frame_count.shape[1])
+    chaser_indices = _chaser_indices_for_run(run_group, fallback_count=n_chasers)
+    windows = _epoch_summary_window_rows(run_group)
+    fps = _safe_float(run_common.get("fps"))
+    mean_distance = _read_array(summary, "mean_distance_mm")
+    min_distance = _read_array(summary, "min_distance_mm")
+    p05_distance = _read_array(summary, "p05_distance_mm")
+    p50_distance = _read_array(summary, "p50_distance_mm")
+    p95_distance = _read_array(summary, "p95_distance_mm")
+    fraction_within_threshold = _read_array(summary, "fraction_within_threshold")
+    summary_attrs = _attrs_dict(summary)
+    threshold_mm = (
+        _safe_float(summary_attrs.get("threshold_mm"))
+        or _safe_float(parameters.get("threshold_mm"))
+    )
+
+    rows: list[dict[str, Any]] = []
+    for window_index in range(n_windows):
+        raw_window = (
+            windows[window_index]
+            if window_index < len(windows)
+            else {
+                "window_index": window_index,
+                "window_id": window_index,
+                "window_label": None,
+                "start_frame": None,
+                "end_frame": None,
+                "start_time_s": None,
+                "end_time_s": None,
+                "duration_s": None,
+            }
+        )
+        window = _fill_chaser_window_times(raw_window, fps=fps)
+        for chaser_column_index in range(n_chasers):
+            chaser_index = (
+                chaser_indices[chaser_column_index]
+                if chaser_column_index < len(chaser_indices)
+                else chaser_column_index
+            )
+            lineage = {
+                "zarr_path": str(zarr_path),
+                "chaser_distance_run": run_name,
+                "source_detection_path": source_refs.get("source_detection_path"),
+                "source_stimulus_run": source_refs.get("source_stimulus_run"),
+                "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+                "window_id": window.get("window_id"),
+                "chaser_index": chaser_index,
+            }
+            row = _common_row(
+                export_run_id=export_run_id,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                table=table,
+                lineage=lineage,
+            )
+            row.update(run_common)
+            row.update({
+                "window_index": _safe_int(window.get("window_index")),
+                "window_id": _safe_int(window.get("window_id")),
+                "window_label": window.get("window_label"),
+                "start_frame": _safe_int(window.get("start_frame")),
+                "end_frame": _safe_int(window.get("end_frame")),
+                "start_time_s": _safe_float(window.get("start_time_s")),
+                "end_time_s": _safe_float(window.get("end_time_s")),
+                "duration_s": _safe_float(window.get("duration_s")),
+                "chaser_column_index": chaser_column_index,
+                "chaser_index": _safe_int(chaser_index),
+                "threshold_mm": threshold_mm,
+                "valid_frame_count": _array_int(valid_frame_count, window_index, chaser_column_index),
+                "mean_distance_mm": _array_float(mean_distance, window_index, chaser_column_index),
+                "min_distance_mm": _array_float(min_distance, window_index, chaser_column_index),
+                "p05_distance_mm": _array_float(p05_distance, window_index, chaser_column_index),
+                "p50_distance_mm": _array_float(p50_distance, window_index, chaser_column_index),
+                "p95_distance_mm": _array_float(p95_distance, window_index, chaser_column_index),
+                "fraction_within_threshold": _array_float(
+                    fraction_within_threshold,
+                    window_index,
+                    chaser_column_index,
+                ),
+            })
+            rows.append(row)
+    return rows
+
+
+def _load_goodcopbadcop_chaser_distance_histogram(
+    root: Any,
+    *,
+    export_run_id: str,
+    zarr_path: Path,
+    recording_id: str,
+    tables: set[str],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    table = "goodcopbadcop_chaser_distance_histogram"
+    if table not in tables:
+        return []
+
+    run_group, run_name, error = _latest_run(root, "analysis/chaser_distance_runs")
+    if run_group is None or run_name is None:
+        diagnostics.append({"table": table, "status": "skipped", "reason": error})
+        return []
+    if not _has_child(run_group, "epoch_distributions"):
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "missing epoch_distributions group",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    run_common, source_refs, parameters = _chaser_common_run_fields(run_group, run_name)
+    distributions = run_group["epoch_distributions"]
+    hist_counts = _read_array(distributions, "hist_counts")
+    if hist_counts is None or np.asarray(hist_counts).ndim != 3:
+        diagnostics.append({
+            "table": table,
+            "status": "skipped",
+            "reason": "epoch_distributions/hist_counts missing or not 3D",
+            "chaser_distance_run": run_name,
+        })
+        return []
+
+    hist_counts = np.asarray(hist_counts)
+    n_windows, n_chasers, n_bins = (
+        int(hist_counts.shape[0]),
+        int(hist_counts.shape[1]),
+        int(hist_counts.shape[2]),
+    )
+    hist_density = _read_array(distributions, "hist_density")
+    valid_sample_count = _read_array(distributions, "valid_sample_count")
+    bin_edges = _read_1d_array(distributions, "bin_edges_mm")
+    bin_centers = _read_1d_array(distributions, "bin_centers_mm")
+    dist_chaser_indices = _read_1d_array(distributions, "chaser_index")
+    if dist_chaser_indices is not None and dist_chaser_indices.size:
+        chaser_indices = [
+            _safe_int(value) if _safe_int(value) is not None else int(idx)
+            for idx, value in enumerate(dist_chaser_indices)
+        ]
+    else:
+        chaser_indices = _chaser_indices_for_run(run_group, fallback_count=n_chasers)
+    windows = _epoch_summary_window_rows(run_group)
+    fps = _safe_float(run_common.get("fps"))
+    dist_attrs = _attrs_dict(distributions)
+    bin_width_mm = (
+        _safe_float(dist_attrs.get("bin_width_mm"))
+        or _safe_float(parameters.get("distribution_bin_width_mm"))
+    )
+
+    rows: list[dict[str, Any]] = []
+    for window_index in range(n_windows):
+        raw_window = (
+            windows[window_index]
+            if window_index < len(windows)
+            else {
+                "window_index": window_index,
+                "window_id": window_index,
+                "window_label": None,
+                "start_frame": None,
+                "end_frame": None,
+                "start_time_s": None,
+                "end_time_s": None,
+                "duration_s": None,
+            }
+        )
+        window = _fill_chaser_window_times(raw_window, fps=fps)
+        for chaser_column_index in range(n_chasers):
+            chaser_index = (
+                chaser_indices[chaser_column_index]
+                if chaser_column_index < len(chaser_indices)
+                else chaser_column_index
+            )
+            for bin_index in range(n_bins):
+                bin_left = _array_float(bin_edges, bin_index)
+                bin_right = _array_float(bin_edges, bin_index + 1)
+                bin_center = _array_float(bin_centers, bin_index)
+                if bin_center is None and bin_left is not None and bin_right is not None:
+                    bin_center = (bin_left + bin_right) / 2.0
+                lineage = {
+                    "zarr_path": str(zarr_path),
+                    "chaser_distance_run": run_name,
+                    "source_detection_path": source_refs.get("source_detection_path"),
+                    "source_stimulus_run": source_refs.get("source_stimulus_run"),
+                    "source_stimulus_epoch_run": source_refs.get("source_stimulus_epoch_run"),
+                    "window_id": window.get("window_id"),
+                    "chaser_index": chaser_index,
+                    "distance_bin_index": bin_index,
+                    "bin_left_mm": bin_left,
+                    "bin_right_mm": bin_right,
+                }
+                row = _common_row(
+                    export_run_id=export_run_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    table=table,
+                    lineage=lineage,
+                )
+                row.update(run_common)
+                row.update({
+                    "window_index": _safe_int(window.get("window_index")),
+                    "window_id": _safe_int(window.get("window_id")),
+                    "window_label": window.get("window_label"),
+                    "start_frame": _safe_int(window.get("start_frame")),
+                    "end_frame": _safe_int(window.get("end_frame")),
+                    "start_time_s": _safe_float(window.get("start_time_s")),
+                    "end_time_s": _safe_float(window.get("end_time_s")),
+                    "duration_s": _safe_float(window.get("duration_s")),
+                    "chaser_column_index": chaser_column_index,
+                    "chaser_index": _safe_int(chaser_index),
+                    "distance_bin_index": bin_index,
+                    "bin_left_mm": bin_left,
+                    "bin_right_mm": bin_right,
+                    "bin_center_mm": bin_center,
+                    "bin_width_mm": bin_width_mm,
+                    "hist_count": _array_int(hist_counts, window_index, chaser_column_index, bin_index),
+                    "hist_density": _array_float(hist_density, window_index, chaser_column_index, bin_index),
+                    "valid_sample_count": _array_int(valid_sample_count, window_index, chaser_column_index),
+                    "density_normalization": dist_attrs.get("density_normalization"),
+                })
+                rows.append(row)
+    return rows
+
+
 def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_id: str) -> SourceExportResult:
     zarr_path = Path(zarr_path).expanduser().resolve()
     recording_id = _recording_id_from_path(zarr_path)
@@ -1088,6 +1720,45 @@ def export_one_zarr(zarr_path: str | Path, *, tables: Sequence[str], export_run_
     if bout_kinematics_rows:
         result.rows_by_table.setdefault("bout_kinematics_metrics", []).extend(bout_kinematics_rows)
 
+    goodcopbadcop_spatial_rows = _load_goodcopbadcop_spatial_occupancy_zones(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_spatial_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_spatial_occupancy_zones", []).extend(
+            goodcopbadcop_spatial_rows
+        )
+
+    goodcopbadcop_chaser_summary_rows = _load_goodcopbadcop_chaser_epoch_summary(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_chaser_summary_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_chaser_epoch_summary", []).extend(
+            goodcopbadcop_chaser_summary_rows
+        )
+
+    goodcopbadcop_chaser_histogram_rows = _load_goodcopbadcop_chaser_distance_histogram(
+        root,
+        export_run_id=export_run_id,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        tables=table_set,
+        diagnostics=result.diagnostics,
+    )
+    if goodcopbadcop_chaser_histogram_rows:
+        result.rows_by_table.setdefault("goodcopbadcop_chaser_distance_histogram", []).extend(
+            goodcopbadcop_chaser_histogram_rows
+        )
+
     for table in table_set:
         if table not in result.rows_by_table:
             result.rows_by_table[table] = []
@@ -1111,9 +1782,9 @@ def _parse_tables(value: str | Sequence[str] | None) -> tuple[str, ...]:
         for item in value:
             raw.extend(part.strip() for part in str(item).split(","))
     tables = tuple(item for item in raw if item)
-    unknown = sorted(set(tables) - set(DEFAULT_TABLES))
+    unknown = sorted(set(tables) - set(AVAILABLE_TABLES))
     if unknown:
-        expected = ", ".join(DEFAULT_TABLES)
+        expected = ", ".join(AVAILABLE_TABLES)
         raise ValueError(f"Unknown table(s): {', '.join(unknown)}. Expected subset of: {expected}")
     return tables or DEFAULT_TABLES
 
@@ -1336,7 +2007,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tables",
         default=",".join(DEFAULT_TABLES),
-        help=f"Comma-separated table list. Available: {', '.join(DEFAULT_TABLES)}.",
+        help=f"Comma-separated table list. Available: {', '.join(AVAILABLE_TABLES)}.",
     )
     parser.add_argument("--jobs", type=int, default=1, help="Parallel extraction workers by recording.")
     parser.add_argument("--limit", type=int, help="Limit discovered sources, useful for canaries.")
