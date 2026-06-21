@@ -417,6 +417,33 @@ still useful for ranking which repeated work to attack first.
   sparse split-eye masks. Keep the explicit measured implementation unless a future candidate
   beats it on the real assignment benchmark.
 
+### Full-recording cluster canary after Phases D/F/G
+
+- Cluster canary:
+  `subject_mask_finalizer_opt_canary_20260621_140111`,
+  variant `v01_process_shards_processes_w8_c256`, run on one `short` queue job with 8 worker
+  processes against the GoodCopBadCop bitpacked-only subject-mask canary.
+- Result: 120,221 rows finalized in 739.24s, or 162.63 rows/s end-to-end.
+- Wall-time phases:
+  - `process_shard_compute`: 617.83s;
+  - `write_component_contours`: 101.73s;
+  - total `duration_seconds`: 739.24s.
+- Largest summed worker/chunk attributions remain:
+  - `finalize_subject_body`: 1081.14s;
+  - `finalize_eyes_union`: 968.43s;
+  - `finalize_swim_bladder`: 962.34s;
+  - `eye_assignment`: 535.12s, including split 198.21s, ellipse measurement 162.91s, and
+    component selection 103.18s;
+  - dense mask writes are still visible at ~142-144s per component in summed attribution.
+- Interpretation: chunked contour reads fixed the local postcompute read bottleneck, but the
+  full-recording cluster floor is now the row-sharded finalization compute plus dense mask writes.
+  Further wins should target component finalization/eye assignment semantics or dense-write volume,
+  not another serial contour-read cleanup.
+- Operational note: `process_shards` now emits one `process_shard_submitted` progress JSONL record
+  per planned shard, including `shard_index`, `start_row`, `stop_row`, `chunk_count`,
+  `total_shards`, and `worker_count`. This does not change scheduling, but it makes future long
+  cluster jobs interpretable before the first large shard completes.
+
 ### Phase E: contract decision, not optimization
 
 - Decide whether ellipse failure should remain part of assignment status or become a later QC

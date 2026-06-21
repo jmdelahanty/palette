@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -1023,6 +1024,7 @@ def test_finalize_subject_masks_dask_worker_chunks_writes_disjoint_rows(monkeypa
 def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch, tmp_path: Path) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     zarr_path = tmp_path / "analysis.zarr"
+    progress_path = tmp_path / "progress.jsonl"
     _build_probability_root(zarr_path)
 
     summary = mod.finalize_subject_masks(
@@ -1032,6 +1034,7 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
         chunk_size=1,
         execution_backend="process_shards",
         num_workers=2,
+        progress_jsonl=progress_path,
     )
 
     assert summary["execution_backend"] == "process_shards"
@@ -1057,6 +1060,21 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert np.count_nonzero(masks[:, labels.index("eye_right")]) > 0
     assert np.count_nonzero(masks[:, labels.index("swim_bladder")]) > 0
     assert "process_shard_compute" in run.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+
+    progress_records = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
+    aggregate_events = [item for item in progress_records if item["event"] == "process_shards_submitted"]
+    shard_events = [item for item in progress_records if item["event"] == "process_shard_submitted"]
+    assert aggregate_events
+    aggregate = aggregate_events[-1]
+    expected_shards = int(aggregate["shard_count"])
+    assert len(shard_events) == expected_shards
+    assert {int(item["shard_index"]) for item in shard_events} == set(range(expected_shards))
+    assert all(int(item["total_shards"]) == expected_shards for item in shard_events)
+    assert all(int(item["worker_count"]) == expected_shards for item in shard_events)
+    row_ranges = sorted((int(item["start_row"]), int(item["stop_row"])) for item in shard_events)
+    assert row_ranges[0][0] == 0
+    assert row_ranges[-1][1] == masks.shape[0]
+    assert all(left[1] == right[0] for left, right in zip(row_ranges, row_ranges[1:]))
 
 
 def test_worker_chunk_size_aligns_to_dense_mask_row_chunk() -> None:

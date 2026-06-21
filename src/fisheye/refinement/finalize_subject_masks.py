@@ -3107,6 +3107,15 @@ def _compute_finalizer_process_shards(
         for shard_index, shard in enumerate(shards):
             first_chunk = shard[0]
             last_chunk = shard[-1]
+            shard_payload = {
+                "shard_index": int(shard_index),
+                "chunk_count": int(len(shard)),
+                "start_row": int(first_chunk[1]),
+                "stop_row": int(last_chunk[2]),
+                "total_shards": int(len(shards)),
+                "worker_count": int(worker_count),
+            }
+            progress.emit("process_shard_submitted", **shard_payload)
             future = executor.submit(
                 _process_and_write_finalizer_shard,
                 str(zarr_path),
@@ -3120,12 +3129,7 @@ def _compute_finalizer_process_shards(
                 assignment_keypoints_run=assignment_keypoints_run,
                 retain_source_seeds=retain_source_seeds,
             )
-            future_to_shard[future] = {
-                "shard_index": int(shard_index),
-                "chunk_count": int(len(shard)),
-                "start_row": int(first_chunk[1]),
-                "stop_row": int(last_chunk[2]),
-            }
+            future_to_shard[future] = shard_payload
         completed = 0
         rows_completed = 0
         total_rows = int(sum(int(stop) - int(start) for start, stop in chunk_ranges))
@@ -3142,7 +3146,6 @@ def _compute_finalizer_process_shards(
             progress.emit(
                 "process_shard_completed",
                 completed_shards=int(completed),
-                total_shards=int(len(shards)),
                 rows_completed=int(rows_completed),
                 rows_total=int(total_rows),
                 **shard_payload,
