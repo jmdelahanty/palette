@@ -509,6 +509,7 @@ def build_component_contours_from_masks(
     component: str,
     *,
     min_points: int = 2,
+    read_chunk_size: int = 256,
 ) -> tuple[list[np.ndarray | None], ComponentContourSummary]:
     """Extract largest external contours for one refined mask component."""
 
@@ -542,16 +543,20 @@ def build_component_contours_from_masks(
             reason="available_channels marks component unavailable",
         )
 
-    contours: list[np.ndarray | None] = []
+    chunk_size = max(1, int(read_chunk_size))
+    contours: list[np.ndarray | None] = [None] * int(roi_count)
     contour_count = 0
     point_count = 0
-    for row_idx in range(roi_count):
-        mask = mask_store.read_dense(rows=row_idx, channels=component_idx)[0, 0]
-        contour = extract_largest_external_contour(mask, min_points=min_points)
-        contours.append(contour)
-        if contour is not None:
-            contour_count += 1
-            point_count += int(contour.shape[0])
+    for start in range(0, int(roi_count), chunk_size):
+        stop = min(int(roi_count), start + chunk_size)
+        masks = mask_store.read_dense(rows=slice(start, stop), channels=component_idx)[:, 0]
+        for offset, mask in enumerate(masks):
+            row_idx = start + int(offset)
+            contour = extract_largest_external_contour(mask, min_points=min_points)
+            contours[row_idx] = contour
+            if contour is not None:
+                contour_count += 1
+                point_count += int(contour.shape[0])
     return contours, ComponentContourSummary(
         component=component,
         status="computed",
@@ -568,6 +573,7 @@ def write_refined_subject_component_contours(
     source_mask_run: str | None = None,
     chunk_rois: int = 256,
     min_points: int = 2,
+    read_chunk_size: int = 256,
     overwrite: bool = False,
 ) -> list[ComponentContourSummary]:
     """Write component contour caches for selected refined mask components."""
@@ -597,6 +603,7 @@ def write_refined_subject_component_contours(
             refined_group,
             component_name,
             min_points=min_points,
+            read_chunk_size=read_chunk_size,
         )
         if summary.status != "computed":
             summaries.append(summary)

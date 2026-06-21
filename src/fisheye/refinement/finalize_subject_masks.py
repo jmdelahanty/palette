@@ -106,7 +106,7 @@ from ..shared.refined_subject_component_contours import (
     extract_largest_external_contour,
     write_refined_subject_component_contours,
 )
-from .subject_eye_assignment import EYES_UNION_ASSIGNMENT_METHOD, assign_eyes_union_to_lr
+from .subject_eye_assignment import EYES_UNION_ASSIGNMENT_METHOD, EyesUnionAssignmentResult, assign_eyes_union_to_lr
 from .subject_mask_finalization import (
     ComponentFinalizationPolicy,
     _default_policy_for_component,
@@ -128,6 +128,7 @@ _PROCESS_SHARD_EXECUTION_BACKEND = "process_shards"
 _POSTCOMPUTE_BACKENDS = ("serial", "process_shards")
 _SERIAL_POSTCOMPUTE_BACKEND = "serial"
 _PROCESS_SHARD_POSTCOMPUTE_BACKEND = "process_shards"
+_ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND = "assignment_reuse"
 _MASK_STORAGE_CHOICES = (
     "dense_uint8",
     "dense_and_bitpacked",
@@ -234,6 +235,7 @@ class _EyeAssignmentChunk:
     component_metrics: dict[str, dict[str, np.ndarray]]
     summary: dict[str, object]
     phase_seconds: dict[str, float]
+    eye_geometry: dict[str, object] | None
 
 
 def _utc_now() -> str:
@@ -873,6 +875,7 @@ def _assign_finalized_eyes_union_rows(
         component_metrics=component_metrics,
         summary=summary,
         phase_seconds={str(key): float(value) for key, value in dict(assignment.phase_seconds).items()},
+        eye_geometry=_eye_geometry_from_assignment_result(assignment),
     )
 
 
@@ -1502,6 +1505,47 @@ def _component_metrics_from_assigned_eye_masks(masks: np.ndarray) -> dict[str, n
     return {
         "component_count": present.astype(np.int32, copy=False),
         "largest_component_fraction": present.astype(np.float32, copy=False),
+    }
+
+
+def _eye_geometry_from_assignment_result(assignment: EyesUnionAssignmentResult) -> dict[str, object]:
+    row_count = int(next(iter(assignment.masks.values())).shape[0]) if assignment.masks else 0
+    geometry = dict(assignment.eye_geometry)
+    ellipse_params = np.asarray(geometry.get("ellipse_params"), dtype=np.float32).reshape(row_count, 2, 5)
+    ellipse_success = np.asarray(geometry.get("ellipse_success"), dtype=bool).reshape(row_count, 2)
+    centroids = np.asarray(geometry.get("centroids"), dtype=np.float32).reshape(row_count, 2, 2)
+
+    separation_px = np.full((row_count,), np.nan, dtype=np.float32)
+    separation_valid = np.zeros((row_count,), dtype=bool)
+    if row_count > 0:
+        pair_valid = np.all(ellipse_success, axis=1) & np.all(np.isfinite(centroids), axis=(1, 2))
+        separation_valid[pair_valid] = True
+        separation_px[pair_valid] = np.linalg.norm(
+            centroids[pair_valid, 0] - centroids[pair_valid, 1],
+            axis=1,
+        ).astype(np.float32, copy=False)
+
+    contours_raw = geometry.get("contours")
+    contours_by_component = contours_raw if isinstance(contours_raw, Mapping) else {}
+    eye_contours = {name: _empty_local_contour_pack(row_count) for name in _EYE_COMPONENTS}
+    for component_name in _EYE_COMPONENTS:
+        contour_values = contours_by_component.get(component_name)
+        if contour_values is None:
+            continue
+        for local_idx, contour in enumerate(contour_values):
+            if local_idx >= row_count:
+                break
+            _add_local_contour(eye_contours[component_name], local_idx, contour, min_points=1)
+
+    return {
+        "ellipse_params": ellipse_params,
+        "ellipse_success": ellipse_success,
+        "separation_px": separation_px,
+        "separation_valid": separation_valid,
+        "contours": {name: _finalize_local_contour_pack(pack) for name, pack in eye_contours.items()},
+        "ellipse_success_count": int(np.count_nonzero(ellipse_success)),
+        "pair_success_count": int(np.count_nonzero(separation_valid)),
+        "source": _ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
     }
 
 
@@ -2797,6 +2841,7 @@ def _process_and_write_finalizer_chunk_open(
     review_counts: dict[str, dict[str, int]] = {}
     reason_labels_by_component: dict[str, list[str]] = {}
     eyes_union_assignment_summary: dict[str, object] = {}
+    eye_geometry_payload: dict[str, object] | None = None
 
     for raw_component in required_raw_components:
         phase_start = time.perf_counter()
@@ -2861,6 +2906,7 @@ def _process_and_write_finalizer_chunk_open(
         chunk_timing["eye_assignment_seconds"] = elapsed
         _record_eye_assignment_phase_seconds(timing, chunk_timing, assignment_chunk.phase_seconds)
         _merge_assignment_summary(eyes_union_assignment_summary, assignment_chunk.summary)
+        eye_geometry_payload = assignment_chunk.eye_geometry
         for component_name in _EYE_COMPONENTS:
             component_idx = int(component_to_index[component_name])
             masks = np.asarray(assignment_chunk.masks[component_name], dtype=np.uint8)
@@ -2898,6 +2944,7 @@ def _process_and_write_finalizer_chunk_open(
         "reason_labels_by_component": reason_labels_by_component,
         "rows_with_nonempty_masks": int(np.count_nonzero(chunk_any)),
         "eyes_union_assignment_summary": dict(_json_safe(eyes_union_assignment_summary)),
+        "eye_geometry": eye_geometry_payload,
     }
 
 
@@ -3306,6 +3353,7 @@ def finalize_subject_mask_run(
     first_batches: dict[str, _FinalizedComponentBatch] = {}
     rows_with_nonempty_masks = 0
     eyes_union_assignment_summary: dict[str, object] = {}
+    assignment_eye_geometry_shards: list[dict[str, object]] = []
     assignment_keypoint_attrs: dict[str, object] = {}
     eye_assignment_context: _EyeAssignmentContext | None = None
     if set(_EYE_COMPONENTS).issubset(component_names):
@@ -3481,6 +3529,15 @@ def finalize_subject_mask_run(
                     eyes_union_assignment_summary,
                     dict(result["eyes_union_assignment_summary"]),
                 )
+            eye_geometry_payload = result.get("eye_geometry")
+            if isinstance(eye_geometry_payload, Mapping):
+                assignment_eye_geometry_shards.append(
+                    {
+                        "start_row": int(chunk_timing["start_row"]),
+                        "stop_row": int(chunk_timing["stop_row"]),
+                        "eye_geometry": eye_geometry_payload,
+                    }
+                )
         for component_name in component_names:
             _set_component_metric_attrs(
                 run_group["components"][component_name],
@@ -3567,6 +3624,14 @@ def finalize_subject_mask_run(
                 chunk_timing["eye_assignment_seconds"] = elapsed
                 _record_eye_assignment_phase_seconds(timing, chunk_timing, assignment_chunk.phase_seconds)
                 _merge_assignment_summary(eyes_union_assignment_summary, assignment_chunk.summary)
+                if isinstance(assignment_chunk.eye_geometry, Mapping):
+                    assignment_eye_geometry_shards.append(
+                        {
+                            "start_row": int(start_row),
+                            "stop_row": int(stop_row),
+                            "eye_geometry": assignment_chunk.eye_geometry,
+                        }
+                    )
                 for component_name in _EYE_COMPONENTS:
                     component_idx = int(component_to_index[component_name])
                     masks = np.asarray(assignment_chunk.masks[component_name], dtype=np.uint8)
@@ -3663,35 +3728,61 @@ def finalize_subject_mask_run(
     contour_components = _component_contour_targets(component_names)
     eye_geometry_requested = bool(write_eye_geometry and eye_components_present)
     component_contours_requested = bool(write_component_contours and contour_components)
+    assignment_eye_geometry_complete = bool(
+        eye_geometry_requested
+        and len(assignment_eye_geometry_shards) == len(chunk_ranges)
+        and sum(int(item["stop_row"]) - int(item["start_row"]) for item in assignment_eye_geometry_shards)
+        == int(total_rows)
+    )
     postcompute_summary: dict[str, object] = {}
     contour_summaries: list[dict[str, object]] = []
 
+    if assignment_eye_geometry_complete:
+        with progress.phase("write_eye_geometry_from_assignment"):
+            with timing.phase("write_eye_geometry_from_assignment"):
+                postcompute_summary["eye_geometry"] = _write_sharded_eye_geometry(
+                    run_group,
+                    sorted(assignment_eye_geometry_shards, key=lambda item: int(item["start_row"])),
+                    chunk_rois=max(1, min(256, total_rows if total_rows > 0 else 1)),
+                    refined_run=target_run,
+                    postcompute_backend=_ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND,
+                )
+        run_group.attrs["eye_geometry_status"] = "computed"
+
     if (
         postcompute_backend == _PROCESS_SHARD_POSTCOMPUTE_BACKEND
-        and (eye_geometry_requested or component_contours_requested)
+        and ((eye_geometry_requested and not assignment_eye_geometry_complete) or component_contours_requested)
     ):
         assert zarr_path is not None
         with progress.phase(
             "postcompute_process_shards",
-            write_eye_geometry=bool(eye_geometry_requested),
+            write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
             write_component_contours=bool(component_contours_requested),
             chunk_size=int(normalized_postcompute_chunk_size),
             num_workers=normalized_postcompute_num_workers,
         ):
             with timing.phase("postcompute_process_shards"):
-                postcompute_summary = _run_sharded_refined_subject_postcompute(
+                postcompute_result = _run_sharded_refined_subject_postcompute(
                     zarr_path,
                     refined_run=target_run,
                     chunk_size=int(normalized_postcompute_chunk_size),
                     num_workers=normalized_postcompute_num_workers,
-                    write_eye_geometry=eye_geometry_requested,
+                    write_eye_geometry=bool(eye_geometry_requested and not assignment_eye_geometry_complete),
                     write_component_contours=component_contours_requested,
                 )
+        for key, value in dict(postcompute_result).items():
+            if key == "eye_geometry" and assignment_eye_geometry_complete:
+                continue
+            postcompute_summary[str(key)] = value
         contour_summaries = _summaries_to_json_safe(
             list(postcompute_summary.get("component_contours") or [])
         )
         eye_summary = postcompute_summary.get("eye_geometry")
-        if isinstance(eye_summary, Mapping) and str(eye_summary.get("status")) == "updated":
+        if (
+            not assignment_eye_geometry_complete
+            and isinstance(eye_summary, Mapping)
+            and str(eye_summary.get("status")) == "updated"
+        ):
             run_group.attrs["eye_geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
             run_group.attrs["eye_geometry_updated_at_utc"] = _utc_now()
             run_group.attrs["eye_geometry_status"] = "computed"
@@ -3705,7 +3796,7 @@ def finalize_subject_mask_run(
             run_group.attrs["component_contours_updated_at_utc"] = _utc_now()
             run_group.attrs["component_contours_summary"] = list(_json_safe(contour_summaries))
             run_group.attrs["component_contours_postcompute_backend"] = _PROCESS_SHARD_POSTCOMPUTE_BACKEND
-    elif eye_geometry_requested:
+    elif eye_geometry_requested and not assignment_eye_geometry_complete:
         with progress.phase("write_eye_geometry"):
             with timing.phase("write_eye_geometry"):
                 postcompute_summary["eye_geometry"] = write_refined_subject_eye_geometry(run_group)

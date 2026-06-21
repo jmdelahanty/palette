@@ -272,10 +272,182 @@ analysis is a later diagnostic path, not a prerequisite for the following work.
    - Treat sharded storage as a later stable-surface option after edit/write patterns settle.
    - Status: future production-hardening track.
 
+## 5. Eye-assignment optimization checklist
+
+The current subject-mask eye assignment is intentionally more expensive than the refined-keypoint
+left/right check. Keypoint refinement rotates three points into a body frame and swaps labels if
+needed (`refinement/refine_keypoints.py:_detect_eye_flip`). Subject-mask assignment must split a
+full `eyes_union` raster into `eye_left`/`eye_right`, select connected components, and fit ellipses
+so review routing remains comparable to existing refined eye-mask behavior
+(`refinement/subject_eye_assignment.py:assign_eyes_union_to_lr`).
+
+Current cluster attribution from the bitpacked-only GoodCopBadCop canary:
+
+| Phase | Attributed seconds | Notes |
+|---|---:|---|
+| `eye_assignment_split_by_keypoint` | ~206s | currently broadcasts two dense 512x512 distance fields per row subbatch |
+| `eye_assignment_select_components` | ~105s | connected-components on split left/right masks |
+| `eye_assignment_measure_ellipse` | ~160s | contour extraction + `cv2.fitEllipse` for both eyes |
+
+Treat these phase values as summed worker attribution, not direct wall-time percentages. They are
+still useful for ranking which repeated work to attack first.
+
+### Phase A: exact split rewrite
+
+- Replace the current two-distance split with the algebraically equivalent keypoint bisector
+  half-plane:
+  `dist_left <= dist_right` can be rewritten as one signed linear expression in `(x, y)`.
+- Preserve the tie rule exactly: ties go left, matching `dist_left <= dist_right`.
+- Keep output masks byte-identical to the current implementation for all candidate rows.
+- Add direct unit tests for:
+  - random masks/keypoints with finite left/right points;
+  - coincident and nearly coincident keypoints;
+  - empty masks;
+  - points outside the ROI;
+  - tie-plane pixels.
+- Add a diagnostic benchmark that runs current split vs half-plane split on real
+  `eyes_union` chunks and reports parity plus time.
+- Acceptance gate: `np.array_equal(left_old, left_new)` and
+  `np.array_equal(right_old, right_new)` on synthetic and real slices.
+- Current status: investigated, not promoted. A half-plane implementation and benchmark diagnostic
+  now exist, but real GoodCopBadCop validation exposed float32 boundary pixels where the algebraic
+  expression can disagree with the current squared-distance implementation. A narrow exact-distance
+  boundary correction restores parity, but it makes the dense half-plane path slower than the
+  current distance path on the tested 1024-row 512x512 slice:
+  - current distance batch: best 0.494s, ~2072 candidate rows/s;
+  - exact-corrected half-plane batch: best 0.815s, ~1255 candidate rows/s.
+  Keep production on the current distance batch unless a future sparse/boundary strategy beats it
+  with byte-identical outputs.
+
+### Phase B: foreground-sparse split benchmark
+
+- Benchmark a sparse splitter that only evaluates foreground pixels from `np.nonzero(eyes_union)`.
+- Compare against the dense half-plane splitter on real GoodCopBadCop slices, because the winner
+  depends on mask density and NumPy allocation overhead.
+- Preserve the exact tie rule and output parity.
+- Acceptance gate: sparse split is adopted only if it is faster on real slices and exact-parity
+  against the half-plane split.
+- Current status: investigated, not promoted. A sparse explicit-distance implementation now exists
+  as a benchmark candidate and is byte-identical to the current distance batch on synthetic and
+  real slices. It was not faster on the tested GoodCopBadCop 1024-row 512x512 slice despite low
+  foreground density (~0.15%):
+  - current distance batch: best 0.494s, ~2071 candidate rows/s;
+  - sparse batch: best 0.509s, ~2010 candidate rows/s;
+  - row-wise sparse probe: best 0.564s.
+  The current dense NumPy distance-field implementation remains hard to beat because it is simple,
+  contiguous, and vectorized even though it touches many background pixels.
+
+### Phase C: exact component fast path
+
+- Revisit the rejected whole-component fast path, but make it fail-closed:
+  - label `eyes_union` components;
+  - compute each component's side(s) relative to the keypoint split plane;
+  - assign whole components only when every foreground pixel in that component lies on one side;
+  - fall back to pixel split when any component crosses the plane or when component count/geometry
+    is ambiguous.
+- Preserve existing `assignment_status` and `reason_labels` for every tested row.
+- Acceptance gate: status counts, reason counts, left/right masks, and downstream ellipse failure
+  labels are unchanged on real benchmark slices. If the fast path changes review labels, reject it
+  unless the review contract is intentionally revised.
+- Current status: investigated, not promoted. The fail-closed component path handled 768/1023
+  candidate rows on the tested GoodCopBadCop slice and preserved left/right masks,
+  `assignment_status`, `reason_labels`, and ellipse success flags. However, a few tiny components
+  produced different `cv2.fitEllipse` parameter values despite byte-identical masks, and the real
+  slice speedup was only modest:
+  - standard assignment: best 2.149s for 1024 rows, ~477 rows/s;
+  - component fast path: best 2.063s for 1024 rows, ~496 rows/s.
+  Keep this path disabled by default. The risk/reward is weak unless a later implementation can
+  make ellipse geometry bit-stable or explicitly narrow the contract to mask/status/reason parity.
+
+### Phase D: reduce duplicate shape work
+
+- Audit whether assignment-time `_measure_mask()` results can be carried forward into
+  postcompute eye geometry instead of fitting ellipses twice.
+- If reuse is possible, store the assignment measurements in worker-local outputs and merge them
+  deterministically with the same row-sharded process plan.
+- Keep postcompute as the authoritative writer for persisted geometry until parity is proven.
+- Acceptance gate: persisted eye geometry, contours, review statuses, and component-quality rows
+  match the current implementation on real slices.
+- Current status: implemented for assignment-derived eyes. `assign_eyes_union_to_lr` now returns the
+  ellipse parameters, success flags, centroids, and contours it already computes for
+  `eye_left`/`eye_right`. The smart finalizer carries those payloads through serial, Dask, and
+  process-shard chunk results and writes the normal refined subject eye-geometry surface through
+  the existing sharded geometry writer with `eye_geometry_postcompute_backend="assignment_reuse"`.
+  If assignment geometry shards are incomplete, the code falls back to the previous postcompute
+  path. Component contours for `subject_body` and `swim_bladder` still use the normal postcompute
+  path.
+- Local validation on a 512-row GoodCopBadCop slice with `process_shards`, `num_workers=4`,
+  `write_eye_geometry=true`, and `write_component_contours=true` completed successfully:
+  - finalizer wall time: 9.75s; reported finalizer duration: 9.66s; ~53 rows/s;
+  - `write_eye_geometry_from_assignment`: 0.151s;
+  - `eye_assignment`: 0.885s, with split 0.303s, select-components 0.230s, ellipse-measure 0.237s;
+  - `write_component_contours`: 2.675s.
+  This confirms assignment reuse removed the separate eye-geometry recomputation from the
+  production path; component contours are now the larger remaining postcompute cost.
+
+### Phase F: chunked component-contour mask reads
+
+- The direct/serial contour writer previously used `MaskStore.read_dense(rows=row_idx, ...)` once
+  per row. This was safe, but expensive for dense Zarr masks because each component contour cache
+  made hundreds or thousands of tiny reads before doing the same OpenCV contour extraction.
+- `build_component_contours_from_masks` now reads contiguous row chunks from the selected
+  `MaskStore` surface, then runs the unchanged per-row `extract_largest_external_contour` loop over
+  the in-memory chunk. This preserves the output contract and works for dense, bitpacked, and RLE
+  mask stores through the same `MaskStore.read_dense` abstraction.
+- Unit coverage pins that a 5-row component with `read_chunk_size=2` performs three mask-store
+  reads (`0:2`, `2:4`, `4:5`) rather than five per-row reads.
+- Local validation on the same 512-row GoodCopBadCop benchmark showed:
+  - finalizer wall time: 7.70s; reported finalizer duration: 7.58s; ~67.5 rows/s;
+  - `write_component_contours`: 0.447s, down from 2.675s in the previous local run;
+  - `write_eye_geometry_from_assignment`: 0.162s.
+  This makes direct component-contour writing no longer the dominant postcompute cost on the tested
+  local slice; the remaining floor is the row-sharded finalization compute itself.
+
+### Phase G: component centroid selector attempt
+
+- Investigated replacing `select_component_near_point`'s `connectedComponents` plus NumPy
+  `bincount` centroid calculation with `cv2.connectedComponentsWithStats`.
+- Result: rejected. The helper produced compatible selections in focused tests, but the real
+  1024-row GoodCopBadCop assignment benchmark slowed the standard assignment path from the prior
+  ~2.15s local slice to ~2.99s. The production helper remains on the existing
+  `connectedComponents` + cached-grid/`bincount` centroid path.
+- Revert confirmation: after restoring the original helper, the same 1024-row benchmark returned to
+  ~1.94s for standard assignment in a shorter two-repeat check.
+- Lesson: OpenCV's stats/centroid convenience path is not automatically cheaper for these small,
+  sparse split-eye masks. Keep the explicit measured implementation unless a future candidate
+  beats it on the real assignment benchmark.
+
+### Phase E: contract decision, not optimization
+
+- Decide whether ellipse failure should remain part of assignment status or become a later QC
+  status. Moving it out of assignment could make assignment much cheaper, but it changes the
+  meaning of `assigned` vs `assigned_needs_review`.
+- Do not change this in the optimization slice. Write a separate contract proposal if we want
+  assignment to mean only "left/right anatomical ownership resolved" while QC means "shape passed".
+
+### Benchmark ladder
+
+Run each candidate in this order:
+
+1. Synthetic parity and microbenchmarks for the split helper.
+2. Real 4096-row diagnostic against the same GoodCopBadCop run used in
+   `subject_mask_finalizer_performance_2026-06-18.md`.
+3. Full-recording finalizer canary with `--mask-storage bitpacked_v1`,
+   `--write-eye-geometry`, and `--write-component-contours`.
+4. Registry refresh and compare:
+   - `subject_mask_performance.rois_per_second`;
+   - `smart_finalizer_timing_summary.phase_seconds.eye_assignment_*`;
+   - `eyes_union_assignment_summary.status_counts`;
+   - component-quality rows for `eye_left` and `eye_right`.
+
 ## Critical files
 
 - `src/fisheye/refinement/finalize_subject_masks.py` — backends, task build, worker, merge, provenance, argparse.
+- `src/fisheye/refinement/subject_eye_assignment.py` — current `eyes_union` to
+  `eye_left`/`eye_right` split, component selection, ellipse check, reason labels.
 - `src/fisheye/refinement/subject_mask_finalization.py` — `finalize_component_mask` per-component compute (`:128`).
+- `src/fisheye/refinement/refine_keypoints.py` — scalar left/right keypoint
+  flip check; useful contrast but not the same workload as raster eye assignment.
 - `src/fisheye/shared/mask_geometry.py` — shared spatial-mask reductions and binary-mask primitives.
 - `src/fisheye/diagnostics/benchmark_subject_mask_primitives.py` — optional primitive backend
   benchmark for `cc3d`, `cucim`, and `kornia`.

@@ -6,7 +6,9 @@ import numpy as np
 import zarr
 
 from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
+import fisheye.shared.refined_subject_component_contours as contour_mod
 from fisheye.shared.refined_subject_component_contours import (
+    build_component_contours_from_masks,
     refresh_component_contour_rows_from_masks,
     write_refined_subject_component_contours,
 )
@@ -110,6 +112,46 @@ def test_write_component_contours_reads_compact_mask_store_without_dense_masks(t
         assert int(np.count_nonzero(np.asarray(contours["len"][:], dtype=np.int64) > 0)) == int(
             np.count_nonzero(dense[:, run.attrs["mask_labels"].index(component)].reshape(2, -1).any(axis=1))
         )
+
+
+def test_build_component_contours_reads_masks_in_chunks(monkeypatch, tmp_path: Path) -> None:
+    run = zarr.open_group(str(tmp_path / "chunked_contours.zarr"), mode="w")
+    run.attrs["mask_labels"] = ["subject_body", "swim_bladder"]
+    run.create_array("available_channels", data=np.asarray([True, True], dtype=bool), overwrite=True)
+
+    dense = np.zeros((5, 2, 16, 16), dtype=np.uint8)
+    for row_idx in range(5):
+        dense[row_idx, 0] = _rectangle_mask(16, 16, 2, 2, 10, 10)
+
+    class FakeMaskStore:
+        n_rows = 5
+        n_channels = 2
+        shape = (5, 2, 16, 16)
+        calls: list[tuple[slice | int | None, int]] = []
+
+        def read_dense(self, *, rows=None, channels=None):
+            self.calls.append((rows, int(channels)))
+            if isinstance(rows, slice):
+                return dense[rows, int(channels): int(channels) + 1]
+            return dense[int(rows): int(rows) + 1, int(channels): int(channels) + 1]
+
+    fake_store = FakeMaskStore()
+    monkeypatch.setattr(contour_mod, "open_mask_store", lambda *_args, **_kwargs: fake_store)
+
+    contours, summary = build_component_contours_from_masks(
+        run,
+        "subject_body",
+        read_chunk_size=2,
+    )
+
+    assert summary.status == "computed"
+    assert len(contours) == 5
+    assert summary.contour_count == 5
+    assert fake_store.calls == [
+        (slice(0, 2), 0),
+        (slice(2, 4), 0),
+        (slice(4, 5), 0),
+    ]
 
 
 def test_refresh_component_contour_row_initializes_partial_cache_when_missing(tmp_path: Path) -> None:

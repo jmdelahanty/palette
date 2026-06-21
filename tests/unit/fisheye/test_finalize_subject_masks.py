@@ -679,9 +679,10 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
     assert sharded.attrs["smart_finalizer_postcompute_chunk_size"] == 1
     assert sharded.attrs["smart_finalizer_postcompute_num_workers"] == 1
     assert sharded.attrs["eye_geometry_status"] == "computed"
-    assert sharded.attrs["eye_geometry_postcompute_backend"] == "process_shards"
+    assert sharded.attrs["eye_geometry_postcompute_backend"] == "assignment_reuse"
     assert sharded.attrs["component_contours_status"] == "computed"
     assert sharded.attrs["component_contours_postcompute_backend"] == "process_shards"
+    assert "write_eye_geometry_from_assignment" in sharded.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
     assert "postcompute_process_shards" in sharded.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
 
     for component in ("eye_left", "eye_right"):
@@ -773,12 +774,39 @@ def test_full_finalizer_benchmark_includes_expensive_phases(monkeypatch, tmp_pat
     assert payload["copy_summary"]["roi_count"] == 2
     assert Path(str(payload["temp_zarr_path"])).exists()
     phase_seconds = payload["phase_seconds"]
-    assert "write_eye_geometry" in phase_seconds
+    assert "write_eye_geometry_from_assignment" in phase_seconds
     assert "write_component_contours" in phase_seconds
     workflow_phase_seconds = payload["workflow_profile"]["phase_seconds"]
     assert "copy_benchmark_slice" in workflow_phase_seconds
     assert "finalizer_run" in workflow_phase_seconds
     assert payload["summary_statistics"]["rows_total"] == 2
+
+
+def test_full_finalizer_benchmark_can_remove_temp_without_profile_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    source_path = tmp_path / "source.zarr"
+    _build_probability_root(source_path)
+
+    payload = benchmark_subject_mask_full_finalizer(
+        source_path,
+        source_run="subject_probs_001",
+        start_row=0,
+        roi_count=2,
+        chunk_size=1,
+        write_eye_geometry=True,
+        write_component_contours=False,
+        temp_dir=tmp_path / "bench",
+        keep_temp=False,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["temp_removed_after_run"] is True
+    assert payload["workflow_profile_jsonl_retained"] is False
+    assert payload["workflow_profile"]["profile_jsonl"] is None
+    assert not Path(str(payload["temp_work_dir"])).exists()
 
 
 def test_full_finalizer_benchmark_can_run_sharded_postcompute(monkeypatch, tmp_path: Path) -> None:

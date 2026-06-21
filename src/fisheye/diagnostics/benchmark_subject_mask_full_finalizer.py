@@ -870,8 +870,9 @@ def benchmark_subject_mask_full_finalizer(
         if workflow_profile_jsonl is not None
         else work_dir / "full_finalizer_workflow.profile.jsonl"
     )
+    profiler_path = workflow_profile_path if bool(workflow_profile_explicit or keep_temp) else None
     profiler = WorkflowProfiler(
-        workflow_profile_path,
+        profiler_path,
         schema_prefix="palette_subject_mask_full_finalizer_benchmark_workflow",
     )
     archive_started = time.perf_counter()
