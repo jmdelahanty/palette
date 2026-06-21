@@ -13,6 +13,7 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from fisheye.registry.extractors.masks import _array_stored_bytes
 from fisheye.registry.db import (
     Registry,
     _extract_eye_mask_performance_rows,
@@ -7917,6 +7918,17 @@ def test_extract_subject_mask_performance_rows_falls_back_to_provenance_payload(
     assert row["source_roi_live_gpu_chunk_frames"] == 64
     assert row["source_keypoint_group"] == "refined_keypoints_runs"
     assert row["source_keypoints_run"] == "refined_kp_001"
+
+
+def test_mask_array_stored_bytes_skips_large_logical_arrays() -> None:
+    class _LargeArray:
+        shape = (120_221, 4, 512, 512)
+        dtype = np.dtype("uint8")
+
+        def nbytes_stored(self) -> int:
+            raise AssertionError("large arrays should not walk physical chunk storage")
+
+    assert _array_stored_bytes(_LargeArray()) is None
 
 
 def test_extract_subject_mask_performance_rows_prefers_run_attrs_for_lineage(tmp_path: Path) -> None:

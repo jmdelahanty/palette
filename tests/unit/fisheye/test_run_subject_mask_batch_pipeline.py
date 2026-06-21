@@ -80,6 +80,96 @@ def test_consolidate_metadata_quietly_does_not_hide_unexpected_warnings(
         mod._consolidate_metadata_quietly("/tmp/archive.zarr")
 
 
+def test_refresh_subject_mask_registry_views_updates_summary_tables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    calls: list[tuple[str, str, Path, str, str]] = []
+    closed: list[bool] = []
+
+    class _FakeConn:
+        def execute(self, _sql: str, _params: tuple[str, str]) -> "_FakeConn":
+            return self
+
+        def fetchone(self) -> dict[str, str]:
+            return {"dataset_id": "dataset-1", "recording_id": "recording-1", "zarr_use": "analysis"}
+
+    class _FakeRegistry:
+        def __init__(self, path: Path) -> None:
+            assert path == registry_path
+            self.conn = _FakeConn()
+
+        def refresh_subject_mask_performance_for_dataset(
+            self,
+            dataset_id: str,
+            *,
+            zarr_path: Path,
+            recording_id: str,
+            zarr_use: str,
+        ) -> int:
+            calls.append(("performance", dataset_id, zarr_path, recording_id, zarr_use))
+            return 2
+
+        def refresh_subject_mask_component_quality_for_dataset(
+            self,
+            dataset_id: str,
+            *,
+            zarr_path: Path,
+            recording_id: str,
+            zarr_use: str,
+        ) -> int:
+            calls.append(("component_quality", dataset_id, zarr_path, recording_id, zarr_use))
+            return 8
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+
+    result = mod._refresh_subject_mask_registry_views(registry_path=registry_path, zarr_path=zarr_path)
+
+    assert result["registry_refresh_status"] == "ok"
+    assert result["dataset_id"] == "dataset-1"
+    assert result["subject_mask_performance_rows"] == 2
+    assert result["subject_mask_component_quality_rows"] == 8
+    assert calls == [
+        ("performance", "dataset-1", zarr_path.resolve(), "recording-1", "analysis"),
+        ("component_quality", "dataset-1", zarr_path.resolve(), "recording-1", "analysis"),
+    ]
+    assert closed == [True]
+
+
+def test_refresh_subject_mask_registry_views_skips_without_dataset_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeConn:
+        def execute(self, _sql: str, _params: tuple[str, str]) -> "_FakeConn":
+            return self
+
+        def fetchone(self) -> None:
+            return None
+
+    class _FakeRegistry:
+        def __init__(self, _path: Path) -> None:
+            self.conn = _FakeConn()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+
+    result = mod._refresh_subject_mask_registry_views(
+        registry_path=tmp_path / "registry.sqlite",
+        zarr_path=tmp_path / "missing_analysis.zarr",
+    )
+
+    assert result["registry_refresh_status"] == "skipped"
+    assert result["reason"] == "dataset_not_in_registry"
+
+
 def test_zarr_paths_from_report_reads_unique_result_paths(tmp_path: Path) -> None:
     report = tmp_path / "report.json"
     report.write_text(

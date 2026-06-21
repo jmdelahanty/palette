@@ -58,6 +58,7 @@
 - It is acceptable to read, migrate, validate, or materialize eye-mask compatibility data when supporting historical archives or legacy consumers.
 - Canonical manual review/editing for body, swim bladder, and eye components should route through unified refined subject-mask tooling and component review state.
 - Training/export paths should prefer subject-mask contracts; eye-mask training artifacts remain legacy or compatibility-specific unless the user explicitly asks for them.
+- Subject-mask training zarrs are dense `uint8` export artifacts: compact analysis sources (`mask_bitpacked` or `mask_rle`) must be materialized through `MaskStore` into dense `subject_mask_runs/<run>/masks_roi`, with source encoding recorded in training provenance.
 
 ## Outside-Sandbox Validation Notes
 

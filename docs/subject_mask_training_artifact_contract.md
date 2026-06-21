@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: active
-last_verified: 2026-06-19
+last_verified: 2026-06-21
 -->
 
 Purpose: define the merged training artifact for a generalized ROI-local
@@ -62,8 +62,9 @@ The new subject-mask artifact is additive:
   projection is explicit and loss-masked.
 - Current implementation ingests `subject_mask_runs` and coherent
   `refined_subject_masks_runs` directly. Refined-source reads go through the
-  mask-store boundary, so analysis inputs may provide dense `masks_roi` or
-  compact `mask_rle`. The exported training artifact still writes dense
+  mask-store boundary, so analysis inputs may provide dense `masks_roi`,
+  compact editable `mask_bitpacked`, or compact final/read-mostly `mask_rle`.
+  The exported training artifact still writes dense
   `subject_mask_runs/<run>/masks_roi` with
   `mask_storage_format = "dense_uint8"` and
   `mask_storage_surface = "masks_roi"`.
@@ -368,12 +369,13 @@ Required attrs:
 - `source_zarr_path`
 
 Dense `masks_roi` is the training artifact compatibility contract. Compact
-binary storage options such as RLE are valid analysis-source storage only when
-read through the mask-store materialization API. A training artifact must not
-store `subject_mask_runs/<run>/mask_rle`; if a compact analysis source was used,
-that source encoding is recorded in `source_mask_store_encoding(s)` and the
-physical source surface is recorded in `source_mask_storage_surface(s)` while
-the training run itself remains dense. See
+binary storage options such as bitpacked masks and RLE are valid analysis-source
+storage only when read through the mask-store materialization API. A training
+artifact must not store `subject_mask_runs/<run>/mask_bitpacked` or
+`subject_mask_runs/<run>/mask_rle`; if a compact analysis source was used, that
+source encoding is recorded in `source_mask_store_encoding(s)` and the physical
+source surface is recorded in `source_mask_storage_surface(s)` while the
+training run itself remains dense. See
 [`mask_rle_storage_design_and_benchmark_plan.md`](mask_rle_storage_design_and_benchmark_plan.md).
 
 Current readers tolerate older dense training artifacts that predate

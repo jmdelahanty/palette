@@ -14,6 +14,9 @@ from fisheye.shared.type_conversions import normalize_attr as _decode_attr
 from fisheye.shared.zarr_run_completion import resolve_latest_complete_run_name
 
 
+MAX_STORED_BYTE_ACCOUNTING_LOGICAL_BYTES = 1 << 30
+
+
 def _as_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -161,6 +164,16 @@ def _array_logical_bytes(array: Any) -> Optional[int]:
 
 def _array_stored_bytes(array: Any) -> Optional[int]:
     if array is None:
+        return None
+    logical_bytes = _array_logical_bytes(array)
+    if (
+        logical_bytes is not None
+        and int(logical_bytes) > MAX_STORED_BYTE_ACCOUNTING_LOGICAL_BYTES
+    ):
+        # zarr.Array.nbytes_stored() can walk every physical chunk. For large
+        # dense mask stores that turns registry refresh into a storage crawl and
+        # blocks summary rows entirely. Logical bytes remain queryable; physical
+        # byte accounting can be done by explicit diagnostics.
         return None
     for attr_name in ("nbytes_stored", "nbytes_stored_sync"):
         value = getattr(array, attr_name, None)

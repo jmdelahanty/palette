@@ -32,7 +32,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 import zarr
 
-from fisheye.registry.db import RegistryPaths
+from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.mask_store import MaskStoreError, open_mask_store
 from fisheye.shared.subject_mask_registry_status import (
     emit_refined_subject_mask_stage_completion,
@@ -85,6 +85,9 @@ class ArchiveResult:
     output_staging_status: str = "not_requested"
     staged_zarr_path: str = ""
     publish_status: str = "not_requested"
+    registry_refresh_status: str = "not_requested"
+    subject_mask_performance_rows: Optional[int] = None
+    subject_mask_component_quality_rows: Optional[int] = None
     workflow_profile_path: str = ""
     workflow_profile: dict[str, Any] = field(default_factory=dict)
     error: str = ""
@@ -685,12 +688,73 @@ def _staging_publish_payload(ctx: OutputStagingContext) -> dict[str, Any]:
     }
 
 
+def _refresh_subject_mask_registry_views(
+    *,
+    registry_path: Optional[Path],
+    zarr_path: Path,
+) -> dict[str, Any]:
+    if registry_path is None:
+        return {"registry_refresh_status": "skipped", "reason": "no_registry"}
+
+    registry = Registry(registry_path)
+    try:
+        input_zarr_path = zarr_path.expanduser()
+        zarr_path = input_zarr_path.resolve()
+        query_paths = sorted({str(input_zarr_path), str(zarr_path)})
+        if len(query_paths) == 1:
+            query_paths.append(query_paths[0])
+        row = registry.conn.execute(
+            """
+            SELECT dataset_id, recording_id, zarr_use
+            FROM datasets
+            WHERE zarr_path IN (?, ?)
+            ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+            LIMIT 1;
+            """,
+            (query_paths[0], query_paths[1]),
+        ).fetchone()
+        if row is None:
+            return {
+                "registry_refresh_status": "skipped",
+                "reason": "dataset_not_in_registry",
+                "registry_path": str(registry_path),
+                "zarr_path": str(zarr_path),
+            }
+        dataset_id = str(row["dataset_id"])
+        performance_rows = int(
+            registry.refresh_subject_mask_performance_for_dataset(
+                dataset_id,
+                zarr_path=zarr_path,
+                recording_id=row["recording_id"],
+                zarr_use=row["zarr_use"],
+            )
+        )
+        component_quality_rows = int(
+            registry.refresh_subject_mask_component_quality_for_dataset(
+                dataset_id,
+                zarr_path=zarr_path,
+                recording_id=row["recording_id"],
+                zarr_use=row["zarr_use"],
+            )
+        )
+        return {
+            "registry_refresh_status": "ok",
+            "registry_path": str(registry_path),
+            "dataset_id": dataset_id,
+            "subject_mask_performance_rows": performance_rows,
+            "subject_mask_component_quality_rows": component_quality_rows,
+        }
+    finally:
+        registry.close()
+
+
 def _publish_staged_outputs(
     ctx: OutputStagingContext,
     *,
     plan: ArchivePlan,
     overwrite: bool,
     handoff_package_dir: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     root = _open_group_mutable(ctx.source_zarr_path)
     if plan.run_inference:
@@ -765,11 +829,16 @@ def _publish_staged_outputs(
             raise RuntimeError(
                 f"Failed to emit registry status for refined_subject_masks_runs/{plan.refined_run}"
             )
+    registry_refresh = _refresh_subject_mask_registry_views(
+        registry_path=registry_path,
+        zarr_path=ctx.source_zarr_path,
+    )
     return {
         "published_run_groups": published_run_groups,
         "published_run_group_count": int(len(published_run_groups)),
         "handoff_packages": handoff_packages,
         "handoff_package_count": int(len(handoff_packages)),
+        **registry_refresh,
     }
 
 
@@ -1272,7 +1341,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             plan=plan,
                             overwrite=bool(args.overwrite),
                             handoff_package_dir=args.handoff_package_dir,
+                            registry_path=args.registry,
                         ))
+                        result.registry_refresh_status = str(
+                            phase.get("registry_refresh_status", "not_requested")
+                        )
+                        result.subject_mask_performance_rows = phase.get("subject_mask_performance_rows")
+                        result.subject_mask_component_quality_rows = phase.get(
+                            "subject_mask_component_quality_rows"
+                        )
                     result.publish_status = "ok"
                     with profiler.phase(
                         "validate_published_outputs",
