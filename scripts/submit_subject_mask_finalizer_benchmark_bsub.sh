@@ -15,6 +15,7 @@ WALLTIME="2:00"
 MAX_ACTIVE=1
 CHUNK_SIZE=256
 METRIC_LEVEL="cheap"
+MASK_STORAGE="dense_uint8"
 WRITE_EYE_GEOMETRY=1
 WRITE_COMPONENT_CONTOURS=1
 DRY_RUN=0
@@ -45,6 +46,8 @@ Options:
   --max-active N                   Max concurrent benchmark variants (default: 1).
   --chunk-size N                   Finalizer row chunk size (default: 256).
   --metric-level LEVEL             cheap|full (default: cheap).
+  --mask-storage MODE              dense_uint8|dense_and_bitpacked|bitpacked_v1|dense_and_rle|rle_v1|dense_bitpacked_and_rle
+                                   (default: dense_uint8).
   --no-write-eye-geometry          Disable eye geometry output.
   --no-write-component-contours    Disable component contour output.
   --variant SPEC                   Add variant backend:scheduler:workers[:chunk_size].
@@ -73,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --max-active) MAX_ACTIVE="$2"; shift 2;;
     --chunk-size) CHUNK_SIZE="$2"; shift 2;;
     --metric-level) METRIC_LEVEL="$2"; shift 2;;
+    --mask-storage) MASK_STORAGE="$2"; shift 2;;
     --no-write-eye-geometry) WRITE_EYE_GEOMETRY=0; shift;;
     --no-write-component-contours) WRITE_COMPONENT_CONTOURS=0; shift;;
     --variant) VARIANTS+=("$2"); shift 2;;
@@ -93,6 +97,10 @@ if [[ "$ASSIGNMENT_KEYPOINT_GROUP" != "refined_keypoints_runs" && "$ASSIGNMENT_K
 fi
 if [[ "$METRIC_LEVEL" != "cheap" && "$METRIC_LEVEL" != "full" ]]; then
   echo "--metric-level must be cheap or full." >&2
+  exit 2
+fi
+if [[ "$MASK_STORAGE" != "dense_uint8" && "$MASK_STORAGE" != "dense_and_bitpacked" && "$MASK_STORAGE" != "bitpacked_v1" && "$MASK_STORAGE" != "dense_and_rle" && "$MASK_STORAGE" != "rle_v1" && "$MASK_STORAGE" != "dense_bitpacked_and_rle" ]]; then
+  echo "--mask-storage must be dense_uint8, dense_and_bitpacked, bitpacked_v1, dense_and_rle, rle_v1, or dense_bitpacked_and_rle." >&2
   exit 2
 fi
 
@@ -139,6 +147,7 @@ cat > "$RUN_DIR/manifest.json" <<JSON
   "assignment_keypoint_group": "$ASSIGNMENT_KEYPOINT_GROUP",
   "assignment_keypoints_run": "$ASSIGNMENT_KEYPOINT_RUN",
   "metric_level": "$METRIC_LEVEL",
+  "mask_storage": "$MASK_STORAGE",
   "write_eye_geometry": $([[ "$WRITE_EYE_GEOMETRY" == "1" ]] && echo true || echo false),
   "write_component_contours": $([[ "$WRITE_COMPONENT_CONTOURS" == "1" ]] && echo true || echo false),
   "variant_count": $idx
@@ -199,6 +208,7 @@ echo "backend=$BACKEND"
 echo "scheduler=$SCHEDULER"
 echo "workers=$WORKERS"
 echo "chunk_size=$CHUNK_SIZE"
+echo "mask_storage=$MASK_STORAGE"
 echo "scratch_root=$SCRATCH_ROOT"
 
 STAGED_ZARR="$(
@@ -250,6 +260,7 @@ cmd=(scripts/py -m fisheye.refinement.finalize_subject_masks "$STAGED_ZARR"
   --components subject_body eyes_union swim_bladder
   --chunk-size "$CHUNK_SIZE"
   --metric-level "$METRIC_LEVEL"
+  --mask-storage "$MASK_STORAGE"
   --execution-backend "$BACKEND"
   --scheduler "$SCHEDULER"
   --assignment-keypoint-group "$ASSIGNMENT_KEYPOINT_GROUP"
@@ -287,6 +298,10 @@ payload = {
     "refined_run": run_name,
     "staged_zarr_path": str(zarr_path),
     "summary_statistics": attrs.get("summary_statistics"),
+    "mask_storage": attrs.get("smart_finalizer_mask_storage"),
+    "mask_storage_encoding": attrs.get("mask_storage_encoding"),
+    "mask_store_encodings": attrs.get("mask_store_encodings"),
+    "masks_roi_materialized": attrs.get("masks_roi_materialized"),
     "smart_finalizer_execution_backend": attrs.get("smart_finalizer_execution_backend"),
     "smart_finalizer_timing_summary": attrs.get("smart_finalizer_timing_summary"),
     "dask_num_workers": attrs.get("dask_num_workers"),
@@ -305,6 +320,7 @@ SUBJECT_RUN=$(printf '%q' "$SUBJECT_RUN")
 ASSIGNMENT_KEYPOINT_GROUP=$(printf '%q' "$ASSIGNMENT_KEYPOINT_GROUP")
 ASSIGNMENT_KEYPOINT_RUN=$(printf '%q' "$ASSIGNMENT_KEYPOINT_RUN")
 METRIC_LEVEL=$(printf '%q' "$METRIC_LEVEL")
+MASK_STORAGE=$(printf '%q' "$MASK_STORAGE")
 WRITE_EYE_GEOMETRY=$WRITE_EYE_GEOMETRY
 WRITE_COMPONENT_CONTOURS=$WRITE_COMPONENT_CONTOURS
 SETTINGS

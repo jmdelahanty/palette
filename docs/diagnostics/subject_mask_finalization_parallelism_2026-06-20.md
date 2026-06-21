@@ -422,7 +422,10 @@ still useful for ranking which repeated work to attack first.
 - Cluster canary:
   `subject_mask_finalizer_opt_canary_20260621_140111`,
   variant `v01_process_shards_processes_w8_c256`, run on one `short` queue job with 8 worker
-  processes against the GoodCopBadCop bitpacked-only subject-mask canary.
+  processes against the GoodCopBadCop bitpacked-only subject-mask input canary.
+- Important caveat: the benchmark submitter did not yet expose `--mask-storage`, so the refined
+  benchmark output used the finalizer default `dense_uint8` physical store. Treat this result as
+  the dense-output baseline, not the compact-output result.
 - Result: 120,221 rows finalized in 739.24s, or 162.63 rows/s end-to-end.
 - Wall-time phases:
   - `process_shard_compute`: 617.83s;
@@ -439,6 +442,9 @@ still useful for ranking which repeated work to attack first.
   full-recording cluster floor is now the row-sharded finalization compute plus dense mask writes.
   Further wins should target component finalization/eye assignment semantics or dense-write volume,
   not another serial contour-read cleanup.
+- Follow-up implemented: the full-finalizer diagnostic and LSF benchmark submitter now accept and
+  record `--mask-storage`, so the next canary should explicitly run `--mask-storage bitpacked_v1`
+  if the goal is to measure compact-only refined output.
 - Operational note: `process_shards` now emits one `process_shard_submitted` progress JSONL record
   per planned shard, including `shard_index`, `start_row`, `stop_row`, `chunk_count`,
   `total_shards`, and `worker_count`. This does not change scheduling, but it makes future long

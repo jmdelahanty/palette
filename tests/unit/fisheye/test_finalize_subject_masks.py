@@ -767,11 +767,16 @@ def test_full_finalizer_benchmark_includes_expensive_phases(monkeypatch, tmp_pat
         chunk_size=1,
         write_eye_geometry=True,
         write_component_contours=True,
+        mask_storage="bitpacked_v1",
         temp_dir=tmp_path / "bench",
         keep_temp=True,
     )
 
     assert payload["status"] == "ok"
+    assert payload["mask_storage"] == "bitpacked_v1"
+    assert payload["mask_storage_encoding"] == "bitpacked_binary_v1"
+    assert payload["mask_store_encodings"] == ["bitpacked_binary_v1"]
+    assert payload["masks_roi_materialized"] is False
     assert payload["copy_summary"]["roi_count"] == 2
     assert Path(str(payload["temp_zarr_path"])).exists()
     phase_seconds = payload["phase_seconds"]
@@ -781,6 +786,10 @@ def test_full_finalizer_benchmark_includes_expensive_phases(monkeypatch, tmp_pat
     assert "copy_benchmark_slice" in workflow_phase_seconds
     assert "finalizer_run" in workflow_phase_seconds
     assert payload["summary_statistics"]["rows_total"] == 2
+    root = zarr.open_group(str(payload["temp_zarr_path"]), mode="r")
+    run = root["refined_subject_masks_runs/refined_subject_masks_full_finalizer_benchmark"]
+    assert "mask_bitpacked/masks_packed" in run
+    assert "masks_roi" not in run
 
 
 def test_full_finalizer_benchmark_can_remove_temp_without_profile_error(

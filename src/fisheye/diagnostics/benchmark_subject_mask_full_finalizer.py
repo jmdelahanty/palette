@@ -27,7 +27,7 @@ from ..refinement.assemble_refined_subject_masks import (
     _resolve_keypoint_success_array,
     _resolve_subject_keypoint_group,
 )
-from ..refinement.finalize_subject_masks import finalize_subject_masks
+from ..refinement.finalize_subject_masks import _MASK_STORAGE_CHOICES, finalize_subject_masks
 from ..shared.refined_subject_component_contours import (
     COMPONENT_CONTOUR_SCHEMA_ID,
     DEFAULT_BOUNDARY_POLICY,
@@ -846,6 +846,7 @@ def benchmark_subject_mask_full_finalizer(
     write_eye_geometry: bool = True,
     write_component_contours: bool = True,
     retain_source_seeds: bool = False,
+    mask_storage: str = "dense_uint8",
     postcompute_mode: str = "production",
     postcompute_chunk_size: Optional[int] = None,
     postcompute_num_workers: Optional[int] = None,
@@ -886,6 +887,7 @@ def benchmark_subject_mask_full_finalizer(
         keep_temp=bool(keep_temp),
         postcompute_mode=postcompute_mode_key,
         retain_source_seeds=bool(retain_source_seeds),
+        mask_storage=str(mask_storage),
     )
     payload: dict[str, object] | None = None
     caught: BaseException | None = None
@@ -925,6 +927,7 @@ def benchmark_subject_mask_full_finalizer(
             write_eye_geometry=bool(write_eye_geometry) and postcompute_mode_key == "production",
             write_component_contours=bool(write_component_contours) and postcompute_mode_key == "production",
             retain_source_seeds=bool(retain_source_seeds),
+            mask_storage=str(mask_storage),
             postcompute_mode=postcompute_mode_key,
         ) as phase:
             finalizer_summary = finalize_subject_masks(
@@ -937,6 +940,7 @@ def benchmark_subject_mask_full_finalizer(
                 write_eye_geometry=bool(write_eye_geometry) and postcompute_mode_key == "production",
                 write_component_contours=bool(write_component_contours) and postcompute_mode_key == "production",
                 retain_source_seeds=bool(retain_source_seeds),
+                mask_storage=str(mask_storage),
                 execution_backend=execution_backend,
                 scheduler=scheduler,
                 num_workers=num_workers,
@@ -994,6 +998,10 @@ def benchmark_subject_mask_full_finalizer(
             "requested_write_eye_geometry": bool(write_eye_geometry),
             "requested_write_component_contours": bool(write_component_contours),
             "retain_source_seeds": bool(retain_source_seeds),
+            "mask_storage": str(mask_storage),
+            "mask_storage_encoding": run_group.attrs.get("mask_storage_encoding"),
+            "mask_store_encodings": list(run_group.attrs.get("mask_store_encodings") or []),
+            "masks_roi_materialized": run_group.attrs.get("masks_roi_materialized"),
             "finalizer_write_eye_geometry": bool(write_eye_geometry) and postcompute_mode_key == "production",
             "finalizer_write_component_contours": (
                 bool(write_component_contours) and postcompute_mode_key == "production"
@@ -1069,6 +1077,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Retain source_seed_masks_roi arrays in the benchmarked refined run.",
     )
     parser.add_argument(
+        "--mask-storage",
+        choices=_MASK_STORAGE_CHOICES,
+        default="dense_uint8",
+        help="Physical mask storage mode passed to the production finalizer.",
+    )
+    parser.add_argument(
         "--postcompute-mode",
         choices=_POSTCOMPUTE_MODES,
         default="production",
@@ -1117,6 +1131,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_eye_geometry=bool(args.write_eye_geometry),
         write_component_contours=bool(args.write_component_contours),
         retain_source_seeds=bool(args.retain_source_seeds),
+        mask_storage=args.mask_storage,
         postcompute_mode=args.postcompute_mode,
         postcompute_chunk_size=args.postcompute_chunk_size,
         postcompute_num_workers=args.postcompute_num_workers,
