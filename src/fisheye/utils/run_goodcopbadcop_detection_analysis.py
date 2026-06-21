@@ -130,6 +130,21 @@ def run_for_targets(
                     }
                     for i, window in enumerate(occupancy.windows)
                 ],
+                "spatial_occupancy": [
+                    {
+                        "zone_set_id": zone_set.zone_set_id,
+                        "zone_set_source": zone_set.zone_set_source,
+                        "zone_id": list(zone_set.zone_id),
+                        "frame_count": zone_set.frame_count.tolist(),
+                        "time_s": zone_set.time_s.tolist(),
+                        "fraction_of_epoch": zone_set.fraction_of_epoch.tolist(),
+                        "fraction_of_detected": zone_set.fraction_of_detected.tolist(),
+                        "detected_frame_count": zone_set.detected_frame_count.tolist(),
+                        "missing_frame_count": zone_set.missing_frame_count.tolist(),
+                        "coverage_pct": zone_set.coverage_pct.tolist(),
+                    }
+                    for zone_set in occupancy.spatial_occupancy
+                ],
             }
         )
     return results
@@ -199,6 +214,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     f"  {window['label']}: detections={window['detection_count']} "
                     f"coverage={window['coverage_pct']:.1f}%"
                 )
+            for zone_set in row.get("spatial_occupancy", []):
+                zones = [str(value) for value in zone_set.get("zone_id", [])]
+                print(f"  spatial_occupancy/{zone_set['zone_set_id']}: zones={', '.join(zones)}")
+                for window, counts in zip(row["windows"], zone_set.get("frame_count", [])):
+                    rendered = ", ".join(
+                        f"{zone}={int(count)}" for zone, count in zip(zones, counts)
+                    )
+                    print(f"    {window['label']}: {rendered}")
         if not args.apply:
             print("dry_run: pass --apply to write zarr analysis runs")
     return 0
