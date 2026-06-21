@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -21,7 +22,7 @@ from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
 from fisheye.analysis.detection_occupancy_runs import _read_epoch_windows, _resolve_epoch_run
 from fisheye.shared.coordinate_transform import load_calibration_transform, projector_to_camera_px
 from fisheye.shared.json_safety import json_attr_safe
-from fisheye.shared.plot_artifacts import write_png_visualization_artifact
+from fisheye.shared.plot_artifacts import write_interactive_plot_spec_artifact, write_png_visualization_artifact
 from fisheye.shared.run_lineage_fingerprint import (
     build_run_lineage_payload,
     write_run_lineage_attrs,
@@ -41,6 +42,12 @@ from fisheye.visualization.plot_detection_epoch_heatmaps import (
     _resolve_detection_group,
     _resolve_dimensions,
 )
+from fisheye.visualization.goodcopbadcop_interactive import (
+    DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+    GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+    GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+    build_goodcopbadcop_chaser_dashboard_spec,
+)
 
 
 SCHEMA_ID = "palette.chaser_distance.v1"
@@ -52,6 +59,12 @@ TIMESERIES_PNG_ARTIFACT_NAME = "chaser_distance_timeseries_png"
 EPOCH_MEDIAN_PNG_ARTIFACT_NAME = "chaser_distance_epoch_median_png"
 EPOCH_DISTRIBUTION_PNG_ARTIFACT_NAME = "chaser_distance_epoch_distribution_png"
 PNG_ARTIFACT_NAME = TIMESERIES_PNG_ARTIFACT_NAME
+
+
+def _artifact_signature(payload: Mapping[str, Any]) -> str:
+    safe_payload = json_attr_safe(payload)
+    encoded = json.dumps(safe_payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _display_epoch_label(label: str) -> str:
@@ -762,12 +775,67 @@ def render_chaser_distance_epoch_distribution_png(result: ChaserDistanceResult, 
     return buf.getvalue()
 
 
+def write_goodcopbadcop_chaser_dashboard_spec_artifact(
+    root: zarr.Group,
+    run_group: zarr.Group,
+    *,
+    run_name: str,
+    run_path: str,
+    source_refs: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    overwrite: bool = True,
+) -> None:
+    """Write the GoodCopBadCop interactive dashboard spec for a chaser run."""
+
+    spec = build_goodcopbadcop_chaser_dashboard_spec(
+        root,
+        run_name=run_name,
+        run_path=run_path,
+        run_group=run_group,
+    )
+    source_paths = spec.get("source_paths", {})
+    source_runs = spec.get("source_runs", {})
+    signature = _artifact_signature(
+        {
+            "schema_id": GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+            "run_name": run_name,
+            "run_path": run_path,
+            "source_paths": source_paths,
+            "source_runs": source_runs,
+            "source_refs": source_refs,
+            "parameters": parameters,
+        }
+    )
+    write_interactive_plot_spec_artifact(
+        run_group,
+        DEFAULT_GOODCOPBADCOP_INTERACTIVE_ARTIFACT,
+        spec,
+        description="GoodCopBadCop chaser dashboard interactive plot spec.",
+        created_by="fisheye.analysis.chaser_distance_runs",
+        renderer=GOODCOPBADCOP_CHASER_DASHBOARD_RENDERER,
+        artifact_signature=signature,
+        snapshot_artifact=TIMESERIES_PNG_ARTIFACT_NAME,
+        source_paths=source_paths if isinstance(source_paths, Mapping) else None,
+        source_runs=source_runs if isinstance(source_runs, Mapping) else None,
+        parameters=parameters,
+        extra_attrs={
+            "plot_schema_id": GOODCOPBADCOP_CHASER_DASHBOARD_SPEC_SCHEMA_ID,
+            "run_name": run_name,
+            "source_refs": json_attr_safe(source_refs),
+            "summary": json_attr_safe(summary),
+        },
+        overwrite=overwrite,
+    )
+
+
 def write_chaser_distance_run(
     zarr_path: Path,
     result: ChaserDistanceResult,
     *,
     overwrite: bool = False,
     write_png: bool = True,
+    write_interactive_spec: bool = True,
 ) -> str:
     root = _open_root(zarr_path, mode="a")
     analysis = root.require_group("analysis")
@@ -1002,6 +1070,17 @@ def write_chaser_distance_run(
                 extra_attrs={"chaser_distance_schema_id": SCHEMA_ID, "summary": json_attr_safe(summary)},
                 overwrite=True,
             )
+            if write_interactive_spec:
+                write_goodcopbadcop_chaser_dashboard_spec_artifact(
+                    root,
+                    run,
+                    run_name=run_name,
+                    run_path=f"analysis/{PARENT_NAME}/{run_name}",
+                    source_refs=source_refs,
+                    parameters=parameters,
+                    summary=summary,
+                    overwrite=True,
+                )
         mark_run_complete(run, parent_group=parent, run_name=run_name)
     except Exception as exc:
         mark_run_failed(run, error=str(exc))
@@ -1050,6 +1129,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--apply", action="store_true", help="Write analysis/chaser_distance_runs/<run>.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing run with the same name.")
     parser.add_argument("--no-png", action="store_true", help="Skip PNG overview artifact.")
+    parser.add_argument(
+        "--no-interactive-spec",
+        action="store_true",
+        help="Skip the GoodCopBadCop interactive plot spec artifact.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     return parser
 
@@ -1074,6 +1158,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result,
             overwrite=bool(args.overwrite),
             write_png=not bool(args.no_png),
+            write_interactive_spec=not bool(args.no_interactive_spec),
         )
     payload = _result_payload(result)
     payload["applied_path"] = path

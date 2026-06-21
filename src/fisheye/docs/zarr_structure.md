@@ -1062,20 +1062,27 @@ temporal context, or cross-component relationship belongs in
 | `source_detect_row_index` *(recommended)* | `(n_rois,)` | `int32` | Copied from the upstream subject-mask/crop lineage when available |
 | `detection_source` | `(n_rois,)` | `int8` | Expected to align with the source crop run |
 | `masks_roi` *(optional when compact-only)* | `(n_rois, C, H, W)` | `uint8` | Dense refined binary masks |
-| `mask_rle/` *(optional)* | component groups | typed arrays | Compact exact binary masks; may mirror `masks_roi` or be the authoritative physical mask store |
+| `mask_bitpacked/` *(optional)* | `(n_rois, C, H, ceil(W/8))` | `uint8` | Fixed-size width-bitpacked exact binary masks; may mirror `masks_roi` or be the authoritative editable compact physical store |
+| `mask_rle/` *(optional)* | component groups | typed arrays | Compact component-separated exact binary masks; may mirror `masks_roi` or be the authoritative final/read-mostly physical mask store |
 | `available_channels` | `(C,)` | `bool` | Declares which refined components are intentionally present |
 | `edit_applied` | `(n_rois, C)` | `bool` | True when the refined channel differs from the source subject-mask run |
 | `reason_bytes` *(optional)* | `(n_rois, width)` | `uint8` | Null-terminated UTF-8 reason labels |
 | `reason` *(optional)* | `(n_rois,)` | `string` | Human-readable reason tags |
 
-Refined subject-mask runs may now use `mask_storage_encoding="dense_uint8"`,
-`"dense_uint8+component_rle_v1"`, or `"component_rle_v1"`. Dense `masks_roi`
-remains the default compatibility surface. Compact-only readers should
-materialize masks through `fisheye.shared.mask_store.open_mask_store(...)`; see
+Refined subject-mask runs may use `mask_storage_encoding="dense_uint8"`,
+`"dense_uint8+bitpacked_binary_v1"`, `"bitpacked_binary_v1"`,
+`"dense_uint8+component_rle_v1"`, `"component_rle_v1"`, or
+`"dense_uint8+bitpacked_binary_v1+component_rle_v1"`. Dense `masks_roi` remains
+the default compatibility surface. Compact-only readers should materialize masks
+through `fisheye.shared.mask_store.open_mask_store(...)`; see
 `docs/mask_rle_storage_design_and_benchmark_plan.md`.
 Use `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store` to
 dry-run, recreate, refresh, or delete the dense `masks_roi` compatibility cache
-for compact refined-subject runs.
+for compact refined-subject runs. The same utility refreshes compact mirrors
+from edited dense masks: `--refresh-bitpacked --components <name> --rows <idx>`
+updates fixed-size bitpacked row/channel cells, while `--refresh-rle
+--components <name>` rebuilds selected component RLE groups after the edit path
+marks RLE stale.
 
 `metrics/` subgroup:
 

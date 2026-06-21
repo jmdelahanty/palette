@@ -189,8 +189,8 @@ usually be an axis or enum column, not a child group.
 Observed examples:
 
 - `refined_subject_masks_runs` exposes a canonical logical mask store
-  (`masks_roi`, compact `mask_rle`, or both), then also component-local mirrors
-  and per-component metrics.
+  (`masks_roi`, compact `mask_bitpacked`, compact `mask_rle`, or a
+  combination), then also component-local mirrors and per-component metrics.
 - `subject_shape_runs` stores `components/<component>` groups for common
   metrics, plus many body-specific arrays.
 

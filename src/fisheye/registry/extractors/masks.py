@@ -420,6 +420,7 @@ def _extract_subject_mask_presence(
 
 def _extract_mask_storage_fields(run_group: zarr.Group, attrs: Mapping[str, Any]) -> Dict[str, Any]:
     masks_roi = _get_group(run_group, "masks_roi")
+    bitpacked_group = _get_group(run_group, "mask_bitpacked")
     rle_group = _get_group(run_group, "mask_rle")
     rle_attrs = dict(getattr(rle_group, "attrs", {}) or {}) if rle_group is not None else {}
     rle_arrays = _mask_rle_component_arrays(rle_group)
@@ -428,6 +429,8 @@ def _extract_mask_storage_fields(run_group: zarr.Group, attrs: Mapping[str, Any]
     if not store_encodings:
         if masks_roi is not None:
             store_encodings.append("dense_uint8")
+        if bitpacked_group is not None:
+            store_encodings.append("bitpacked_binary_v1")
         if rle_group is not None:
             store_encodings.append("component_rle_v1")
 

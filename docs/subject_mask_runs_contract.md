@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-06-19
+last_verified: 2026-06-20
 -->
 
 Purpose: define the runtime/storage contract for a generalized ROI-local
@@ -162,6 +162,11 @@ np.array_equal(
 Consumers must not assume subject-mask row `i` equals crop row `i` unless
 `source_crop_row_ids` is absent in a legacy/off-contract run and the caller has
 explicitly opted into a warned compatibility fallback.
+
+Modern refined-subject-mask finalization requires this array. If a new raw
+`subject_mask_runs/<run>` omits `source_crop_row_ids`, it is not a valid source
+for frame-perfect refined masks and should be regenerated or repaired before
+finalization rather than handled with a silent row-position fallback.
 
 Required `metrics/` subgroup arrays:
 

@@ -207,7 +207,8 @@ Recommended behavior:
 
 - [x] Add a deterministic subject-body mask QC helper that computes the initial
       metrics from `refined_subject_masks_runs/<run>` through `MaskStore`, so
-      dense `masks_roi` and compact `mask_rle` sources are both valid.
+      dense `masks_roi`, compact `mask_bitpacked`, and compact `mask_rle`
+      sources are all valid.
 - [x] Persist the additive `components/subject_body/qc/` group.
 - [x] Add reason-byte encoding consistent with other refined-mask review
       arrays.

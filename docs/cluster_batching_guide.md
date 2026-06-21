@@ -935,7 +935,7 @@ scripts/py -m fisheye.utils.run_subject_mask_batch_pipeline \
 | `--finalize-postcompute-chunk-size` | *(finalizer default)* | Rows per postcompute shard; defaults inside the finalizer to `--finalize-chunk-size` |
 | `--finalize-postcompute-num-workers` | `auto` | Postcompute workers; `auto` lets the finalizer reuse `--finalize-num-workers` |
 | `--retain-source-seeds`   | off     | Retain dense `source_seed_masks_roi` debug arrays in refined runs |
-| `--mask-storage`          | `dense_uint8` | Refined mask storage mode: `dense_uint8`, `dense_and_rle`, or `rle_v1` |
+| `--mask-storage`          | `dense_uint8` | Refined mask storage mode: `dense_uint8`, `dense_and_bitpacked`, `bitpacked_v1`, `dense_and_rle`, `rle_v1`, or `dense_bitpacked_and_rle` |
 | `--mask-rle-validation-mode` | `invariants` | Compact RLE validation mode: `invariants` for production structural checks, `full` for dense round-trip audits, or `none` for deliberate low-level debugging |
 | `--device`                 | `0` when `--gpus > 0` | Torch device override       |
 | `--overwrite`              | off     | Pass overwrite through to child stages   |
@@ -991,16 +991,24 @@ Use `--retain-source-seeds` only for diagnostic runs where seed-vs-final mask
 comparison is needed.
 
 Refined-mask storage is selectable with `--mask-storage`. Use
-`dense_and_rle` for the first compact-storage cluster smoke because it preserves
-the historical dense `masks_roi` compatibility cache while also writing
-`mask_rle`. Use `rle_v1` only after that smoke validates; it writes the compact
-component RLE surface without retaining dense `masks_roi`, so consumers must read
-through the logical mask-store contract or explicitly materialize a dense cache.
-The batch default `--mask-rle-validation-mode invariants` checks compact-store
-schema, dimensions, `indptr`, per-row RLE count sums, presence/area, and bbox
-bounds without decoding the full dense logical mask surface. Use
-`--mask-rle-validation-mode full` for targeted canaries or debugging when
-dense-vs-RLE pixel equality must be proven end-to-end.
+`dense_and_bitpacked` for compact-storage cluster smokes where review/painting
+may still happen: it preserves the historical dense `masks_roi` compatibility
+cache while also writing fixed-size `mask_bitpacked`. Use `bitpacked_v1` only
+after that smoke validates; it writes the compact bitpacked surface without
+retaining dense `masks_roi`, so consumers must read through the logical
+mask-store contract or explicitly materialize a dense cache. `dense_and_rle` and
+`rle_v1` remain available for final/read-mostly products where smallest storage
+footprint matters more than edit locality. `dense_bitpacked_and_rle` is an audit
+mode for comparing all three surfaces in one logical run.
+
+The batch default `--mask-rle-validation-mode invariants` is also used for
+bitpacked compact validation. For RLE it checks compact-store schema,
+dimensions, `indptr`, per-row RLE count sums, presence/area, and bbox bounds
+without decoding the full dense logical mask surface. For bitpacked it checks
+schema, logical shape, encoded shape, packed width, bit order, component labels,
+and `masks_packed` dtype/shape. Use `--mask-rle-validation-mode full` for
+targeted canaries or debugging when dense-vs-compact pixel equality must be
+proven end-to-end.
 
 This uses PRFS as the durable cross-node handoff and node-local scratch only as
 per-job acceleration. Do not rely on one job's `/scratch` contents being visible

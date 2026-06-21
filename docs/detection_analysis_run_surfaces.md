@@ -1,7 +1,7 @@
 # Detection Analysis Run Surfaces
 <!-- contract-meta
 status: draft
-last_updated: 2026-06-17
+last_updated: 2026-06-21
 -->
 
 Purpose: document how detection-related per-recording analysis products should
@@ -87,7 +87,8 @@ See [`stimulus_epoch_run_contract.md`](stimulus_epoch_run_contract.md).
 ### `analysis/detection_occupancy_runs/<run>` (implemented family)
 
 Use this for detection-derived spatial occupancy and epoch-window summaries,
-including the GoodCopBadCop advisor-style plots.
+including dense heatmaps, coarse zone summaries, and the GoodCopBadCop
+advisor-style plots.
 
 This name is better than `detection_summary_runs` because it states the
 measured quantity: where refined detections occurred over time or within
@@ -126,6 +127,10 @@ analysis/detection_occupancy_runs/<run>/
     normalized                  # optional display-normalized heatmaps
     x_edges
     y_edges
+  spatial_occupancy/
+    <zone_set_id>/
+      zone_spec/                # resolved zone geometry and labels
+      summary/                  # window x zone frame/time/fraction arrays
   visualizations/
     detection_occupancy_overview_png
 ```
@@ -136,6 +141,12 @@ Recommended `row_axis`: `stimulus_epoch_windows` for window summaries, or
 The `windows/` group may copy the resolved labels and frame bounds used for the
 measurement, but the authoritative event-window definition should remain in the
 referenced `analysis/stimulus_epoch_runs/<run>`.
+
+Coarse spatial occupancy maps, such as quadrant summaries, should live under
+`spatial_occupancy/<zone_set_id>` inside this same run. Zone sets may come from
+predefined specs, such as image quadrants, or from future experimental metadata.
+They are analysis arrays, not visualization runs. See
+[`spatial_occupancy_zone_summary_design.md`](spatial_occupancy_zone_summary_design.md).
 
 ### `analysis/detection_comparison_runs/<run>` (current compatibility family)
 
@@ -203,7 +214,8 @@ For GoodCopBadCop, the staged per-recording approach should be:
 3. Add `analysis/stimulus_epoch_runs` for reusable pre/training/post event
    windows.
 4. Add `analysis/detection_occupancy_runs` for per-recording event-aligned
-   heatmaps and coverage summaries that reference the epoch run.
+   heatmaps, spatial zone summaries, and coverage summaries that reference the
+   epoch run.
 5. Use `analysis/detection_comparison_runs` for realtime-vs-offline/crop
    sufficiency diagnostics until a deliberate path migration is made.
 6. Use `analysis/chaser_distance_runs` for stimulus-specific offline

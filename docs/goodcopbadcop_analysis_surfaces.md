@@ -1,7 +1,7 @@
 # GoodCopBadCop Analysis Surfaces
 <!-- contract-meta
 status: draft
-last_updated: 2026-06-17
+last_updated: 2026-06-21
 -->
 
 Purpose: describe the current per-recording GoodCopBadCop analysis products for
@@ -26,7 +26,8 @@ refined_detect_runs/<run>/instances
   offline refined fish detections
 
 analysis/detection_occupancy_runs/goodcopbadcop_detection_occupancy_v1_20260617
-  event-aligned refined-detection occupancy heatmaps and coverage metrics
+  event-aligned refined-detection heatmaps and coverage metrics; planned
+  spatial occupancy zone summaries live under this same run family
 
 analysis/chaser_distance_runs/goodcopbadcop_chaser_distance_v1_20260617
   framewise fish-to-chaser distances, epoch summaries, and distributions
@@ -43,6 +44,7 @@ that run instead of independently redefining what "pre", "training", and
 | --- | --- |
 | What frames define pre/training/post? | `analysis/stimulus_epoch_runs/<run>/windows/*` |
 | Where was the fish detected in each epoch? | `analysis/detection_occupancy_runs/<run>/heatmaps/*` |
+| How much time did the fish spend in coarse spatial zones? | `analysis/detection_occupancy_runs/<run>/spatial_occupancy/<zone_set_id>/summary/*` when written |
 | What was detection coverage per epoch? | `analysis/detection_occupancy_runs/<run>/coverage/*` |
 | How far was the fish from each chaser over time? | `analysis/chaser_distance_runs/<run>/distances/distance_mm` |
 | What is the median/quantile distance per epoch? | `analysis/chaser_distance_runs/<run>/epoch_summary/*` |
@@ -99,17 +101,34 @@ Detection occupancy writes:
 analysis/detection_occupancy_runs/<run>/visualizations/detection_occupancy_overview_png
 ```
 
+Coarse spatial occupancy zone summaries, such as image quadrants, should be
+stored as arrays under:
+
+```text
+analysis/detection_occupancy_runs/<run>/spatial_occupancy/<zone_set_id>/
+```
+
+These arrays are not visualization artifacts. Marimo components and interactive
+specs should point to them when rendering protocol-specific zone summaries. See
+[`spatial_occupancy_zone_summary_design.md`](spatial_occupancy_zone_summary_design.md).
+
 Chaser distance writes three separate artifacts:
 
 ```text
 analysis/chaser_distance_runs/<run>/visualizations/chaser_distance_timeseries_png
 analysis/chaser_distance_runs/<run>/visualizations/chaser_distance_epoch_median_png
 analysis/chaser_distance_runs/<run>/visualizations/chaser_distance_epoch_distribution_png
+analysis/chaser_distance_runs/<run>/visualizations/goodcopbadcop_chaser_dashboard_interactive
 ```
 
 The distribution plot renders from `epoch_distributions/hist_density`, not from
 freshly computed bins. This matters because means and medians can be similar
 while the distribution shape changes substantially across epochs.
+
+The interactive dashboard spec is a small JSON artifact stored beside the
+chaser-distance PNGs. It points to canonical source arrays in the
+chaser-distance run, the matched detection-occupancy run, and the shared
+stimulus-epoch run. It does not introduce a separate visualization run family.
 
 Export any single artifact:
 
@@ -131,6 +150,24 @@ scripts/py -m fisheye.utils.view_detection_chaser_overview <analysis.zarr> \
 The combined viewer is an export/composition helper. It does not write a new
 zarr artifact and does not recompute metrics.
 
+Open the interactive dashboard:
+
+```bash
+scripts/py -m marimo run apps/marimo/goodcopbadcop_explorer.py -- \
+  --zarr-path <analysis.zarr>
+```
+
+The same stored interactive spec can also be opened through the general Palette
+explorer:
+
+```bash
+scripts/py -m marimo run apps/marimo/palette_explorer.py -- \
+  --zarr-path <analysis.zarr>
+```
+
+See `docs/marimo_explorer_architecture.md` for the component and renderer
+registry design.
+
 ## Coordinate Notes
 
 Current external-IPC GoodCopBadCop imports use
@@ -148,5 +185,6 @@ coordinate attrs are present.
 
 - `docs/stimulus_epoch_run_contract.md`
 - `docs/detection_analysis_run_surfaces.md`
+- `docs/spatial_occupancy_zone_summary_design.md`
 - `docs/chaser_distance_run_contract.md`
 - `docs/artifact_storage_map.md`

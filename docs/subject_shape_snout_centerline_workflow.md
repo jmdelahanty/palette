@@ -42,7 +42,8 @@ endpoint and only measured the gap to `snout_tip_xy`. Current v3/v8 runs use
 The workflow consumes one refined subject-mask run:
 
 ```text
-refined_subject_masks_runs/<run> mask store (`masks_roi` and/or `mask_rle`)
+refined_subject_masks_runs/<run> logical mask store (`masks_roi`,
+`mask_bitpacked`, and/or `mask_rle`)
 refined_subject_masks_runs/<run>.attrs["mask_labels"]
 ```
 

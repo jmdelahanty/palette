@@ -462,8 +462,16 @@ refined_subject_masks_runs/
     detection_indices                       (N,) int32           # recommended
     source_crop_row_ids                     (N,) int64
     detection_source                        (N,) int8
-    masks_roi                               (N, C, H, W) uint8 optional when mask_rle is authoritative
-    mask_rle/                               # optional compact mirror or authoritative compact store
+    masks_roi                               (N, C, H, W) uint8 optional dense cache/edit surface
+    mask_bitpacked/                         # optional compact editable mirror or authoritative compact store
+      attrs:
+        schema_id                           "palette_mask_bitpacked_binary_v1"
+        mask_encoding                       "bitpacked_binary_v1"
+        layout                              "packed_width_array"
+        logical_shape                       [N, C, H, W]
+        encoded_shape                       [N, C, H, ceil(W / 8)]
+      masks_packed                          (N, C, H, ceil(W / 8)) uint8
+    mask_rle/                               # optional compact final/read-mostly mirror or authoritative compact store
       attrs:
         schema_id                           "palette_mask_rle_binary_v1"
         mask_encoding                       "coco_rle_fortran_v1"
@@ -516,7 +524,8 @@ Required arrays:
   - shape: `(N,)`
   - expected to align with the source crop run
 - physical mask store
-  - either dense `masks_roi` or compact `mask_rle` must be present
+  - at least one of dense `masks_roi`, compact editable `mask_bitpacked`, or
+    compact final `mask_rle` must be present
   - consumers should use `fisheye.shared.mask_store.open_mask_store(...)`
     when they can tolerate either physical encoding
 - `masks_roi`
@@ -525,12 +534,40 @@ Required arrays:
   - default compatibility surface for historical readers
   - live review/edit authority surface when present; current Palette review/edit
     tooling materializes this dense cache before editing compact-only runs
-  - omitted when `mask_storage_encoding == "component_rle_v1"` and
+  - omitted when `mask_storage_encoding` is compact-only and
     `masks_roi_materialized == false`
-  - can be materialized/refreshed from compact `mask_rle` with
+  - can be materialized/refreshed from compact `mask_bitpacked` or `mask_rle` with
     `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --apply`
   - can be removed again with the same utility's `--delete-dense --apply`
-    option when compact `mask_rle` remains present
+    option when compact `mask_bitpacked` or `mask_rle` remains present
+- `mask_bitpacked`
+  - compact fixed-size exact binary masks
+  - schema: `palette_mask_bitpacked_binary_v1`
+  - encoding: `bitpacked_binary_v1`
+  - layout: `packed_width_array`
+  - array: `mask_bitpacked/masks_packed`
+    - shape: `(N, C, H, ceil(W / 8))`
+    - dtype: `uint8`
+    - bit order: `little`
+  - required attrs include `logical_shape`, `encoded_shape`,
+    `component_names`, `packed_axis="width"`, `packed_bitorder="little"`,
+    and `packed_width_bytes`
+  - written as an additive mirror by
+    `finalize_subject_masks --mask-storage dense_and_bitpacked`
+  - written as the only physical mask store by
+    `finalize_subject_masks --mask-storage bitpacked_v1`
+  - preferred compact surface for analysis runs that may still need review or
+    painting, because row/channel edits rewrite fixed-size packed chunks rather
+    than shifting variable-length offsets for later rows
+  - if dense `masks_roi` is materialized and edited while `mask_bitpacked`
+    exists, Palette-owned refined-subject edit paths must refresh the affected
+    bitpacked row/channel cells immediately from dense
+  - explicit refresh is available with
+    `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --refresh-bitpacked --components eye_left --rows 42 --apply`
+    for repair workflows or non-interactive dense edits
+  - compact-only review/edit workflow is intentionally:
+    materialize dense `masks_roi` from `mask_bitpacked`, edit dense, then
+    refresh the touched `mask_bitpacked` rows/components from dense
 - `mask_rle`
   - compact component-separated exact binary masks
   - written as an additive mirror by
@@ -543,20 +580,31 @@ Required arrays:
     materialized and edited, compact `mask_rle` should be considered stale until
     regenerated with
     `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --refresh-rle --apply`
+  - component-scoped dense edits can refresh only the affected compact component
+    groups with
+    `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --refresh-rle --components eye_left --apply`
+    instead of rewriting unrelated mask components
+  - direct in-place mutation of compact RLE rows is intentionally not the review
+    write path; painting/editing should mutate dense `masks_roi`, mark compact
+    RLE stale, then refresh the edited components from dense
   - edit paths that mutate materialized dense masks must stamp
     `mask_rle_stale = true` plus `mask_rle_stale_at_utc`,
     `mask_rle_stale_reason`, `mask_rle_stale_component_names`, and row summary
     attrs (`mask_rle_stale_row_count`, `mask_rle_stale_row_min`,
     `mask_rle_stale_row_max`)
+  - when a component-scoped RLE refresh covers all names in
+    `mask_rle_stale_component_names`, the stale marker is cleared; if only a
+    subset is refreshed, the stale marker remains with the remaining component
+    names
   - modern readers must reject stale compact RLE by default; only diagnostic
     callers should pass `allow_stale_rle=True`, and production consumers should
     use dense `masks_roi` or refresh the compact store first
   - registry sync exposes storage audit fields in
     `subject_mask_performance_latest` and
-    `recording_subject_mask_performance_latest`, including dense/RLE logical
-    bytes, backend-reported stored bytes when available, dense-cache
-    materialization provenance, RLE refresh timestamps, and stale row/component
-    scope
+    `recording_subject_mask_performance_latest`, including dense, bitpacked,
+    and RLE logical bytes, backend-reported stored bytes when available,
+    dense-cache materialization provenance, compact refresh timestamps, and
+    stale row/component scope
   - finalizer attrs include `smart_finalizer_mask_rle_validation_mode` and
     `smart_finalizer_mask_rle_summary`; production cluster runs use invariant
     validation by default, while full dense round-trip validation remains
@@ -674,6 +722,20 @@ This field is intended to support:
 
 It does not by itself imply manual editing; the review payload should carry the
 review method.
+
+## Current Consumer Status
+
+As of 2026-06-20, Crimson's refined subject-mask reader has been smoke-tested
+against a GoodCopBadCop dense refined run using explicit
+`source_crop_row_ids -> crop_runs/<source_crop_run>/roi_coordinates_full`
+placement. That path no longer relies on refined-mask row position matching crop
+row position.
+
+Crimson compact `mask_rle` decode remains pending. Compact-only `rle_v1` runs
+are valid Palette analysis stores when they pass this contract, but external
+viewers should either implement the compact RLE materialization contract or use
+`scripts/py -m fisheye.utils.materialize_refined_subject_mask_store --apply` to
+create a dense `masks_roi` compatibility cache before display/editing.
 
 ## Strict Contract Validation
 
@@ -1001,8 +1063,8 @@ Geometry policy:
 - refined component masks remain the canonical source artifact
 - geometry derived from those masks should carry its own validity flags
 - geometry primitives stored here should be recomputable from
-  the physical mask store (`masks_roi` or compact `mask_rle` through
-  `MaskStore`) plus the documented method/policy attrs
+  the logical mask store (`masks_roi`, compact `mask_bitpacked`, or compact
+  `mask_rle` through `MaskStore`) plus the documented method/policy attrs
 - downstream `analysis/subject_shape_runs` should consume refined masks and/or these
   mask-local primitives, not raw `subject_mask_runs`
 

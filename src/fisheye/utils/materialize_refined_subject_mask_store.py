@@ -14,6 +14,7 @@ import zarr
 from fisheye.shared.mask_store import (
     is_mask_rle_stale,
     materialize_dense_masks_roi_from_store,
+    refresh_bitpacked_mask_store_from_dense,
     refresh_component_rle_mask_store_from_dense,
     update_mask_storage_attrs,
 )
@@ -71,17 +72,26 @@ def materialize_refined_subject_mask_store(
     overwrite: bool = False,
     delete_dense: bool = False,
     refresh_rle: bool = False,
+    refresh_bitpacked: bool = False,
+    components: Sequence[str] | None = None,
+    rows: Sequence[int] | None = None,
     allow_delete_last_mask_store: bool = False,
     chunk_size: int = 256,
 ) -> dict[str, object]:
     """Materialize dense masks, refresh compact RLE, or remove dense caches."""
 
-    if delete_dense and refresh_rle:
-        raise ValueError("--delete-dense and --refresh-rle are mutually exclusive.")
+    action_count = int(bool(delete_dense)) + int(bool(refresh_rle)) + int(bool(refresh_bitpacked))
+    if action_count > 1:
+        raise ValueError("--delete-dense, --refresh-rle, and --refresh-bitpacked are mutually exclusive.")
+    if components and not (refresh_rle or refresh_bitpacked):
+        raise ValueError("--components is only valid with --refresh-rle or --refresh-bitpacked.")
+    if rows and not refresh_bitpacked:
+        raise ValueError("--rows is only valid with --refresh-bitpacked.")
 
     root = open_zarr_root(zarr_path, mode="a" if apply else "r")
     run_name, run_group = _resolve_refined_run(root, refined_run)
     has_dense = _has_child(run_group, "masks_roi")
+    has_bitpacked = _has_child(run_group, "mask_bitpacked")
     has_rle = _has_child(run_group, "mask_rle")
 
     summary: dict[str, object] = {
@@ -90,8 +100,12 @@ def materialize_refined_subject_mask_store(
         "apply": bool(apply),
         "delete_dense": bool(delete_dense),
         "refresh_rle": bool(refresh_rle),
+        "refresh_bitpacked": bool(refresh_bitpacked),
+        "components": [str(value) for value in components] if components else [],
+        "rows": [int(value) for value in rows] if rows else [],
         "overwrite": bool(overwrite),
         "has_dense_before": bool(has_dense),
+        "has_bitpacked": bool(has_bitpacked),
         "has_rle": bool(has_rle),
     }
 
@@ -113,22 +127,47 @@ def materialize_refined_subject_mask_store(
             encode_row_chunk_size=max(1, int(chunk_size)),
             source_path=_run_source_path(run_group),
             clear_stale=True,
+            refresh_components=components,
         )
         summary.update(write_summary)
         summary["has_dense_after"] = True
         summary["has_rle_after"] = True
         return summary
 
+    if refresh_bitpacked:
+        if not has_dense:
+            raise ValueError("Cannot refresh compact mask_bitpacked because refined run has no dense masks_roi source.")
+        if not apply:
+            summary.update(
+                {
+                    "status": "would_refresh_bitpacked" if has_bitpacked else "would_write_bitpacked",
+                    "has_dense_after": True,
+                    "has_bitpacked_after": True,
+                }
+            )
+            return summary
+        write_summary = refresh_bitpacked_mask_store_from_dense(
+            run_group,
+            encode_row_chunk_size=max(1, int(chunk_size)),
+            source_path=_run_source_path(run_group),
+            refresh_components=components,
+            refresh_rows=rows,
+        )
+        summary.update(write_summary)
+        summary["has_dense_after"] = True
+        summary["has_bitpacked_after"] = True
+        return summary
+
     if delete_dense:
         if not has_dense:
             summary.update({"status": "already_absent", "has_dense_after": False})
             return summary
-        if not has_rle and not allow_delete_last_mask_store:
+        if not (has_bitpacked or has_rle) and not allow_delete_last_mask_store:
             raise ValueError(
-                "Refusing to delete masks_roi because no compact mask_rle store exists. "
+                "Refusing to delete masks_roi because no compact mask_bitpacked or mask_rle store exists. "
                 "Pass allow_delete_last_mask_store=True only for destructive repair workflows."
             )
-        if has_rle and is_mask_rle_stale(run_group) and not allow_delete_last_mask_store:
+        if has_rle and not has_bitpacked and is_mask_rle_stale(run_group) and not allow_delete_last_mask_store:
             raise ValueError(
                 "Refusing to delete masks_roi because compact mask_rle is marked stale. "
                 "Run with --refresh-rle --apply first, or pass allow_delete_last_mask_store=True "
@@ -140,7 +179,7 @@ def materialize_refined_subject_mask_store(
         del run_group["masks_roi"]
         run_group.attrs["masks_roi_deleted_at_utc"] = _utc_now()
         run_group.attrs["masks_roi_deleted_reason"] = "materialize_refined_subject_mask_store --delete-dense"
-        update_mask_storage_attrs(run_group, has_dense=False, has_rle=has_rle)
+        update_mask_storage_attrs(run_group, has_dense=False, has_bitpacked=has_bitpacked, has_rle=has_rle)
         summary.update({"status": "deleted", "has_dense_after": False})
         return summary
 
@@ -148,17 +187,17 @@ def materialize_refined_subject_mask_store(
         summary.update({"status": "existing", "has_dense_after": True})
         return summary
 
-    if not has_rle:
+    if not (has_bitpacked or has_rle):
         if has_dense:
             summary.update(
                 {
                     "status": "missing_compact_source",
-                    "reason": "masks_roi exists, but mask_rle is unavailable for refresh",
+                    "reason": "masks_roi exists, but no compact mask_bitpacked or mask_rle source is available",
                     "has_dense_after": True,
                 }
             )
             return summary
-        raise ValueError("Cannot materialize masks_roi because refined run has no mask_rle store.")
+        raise ValueError("Cannot materialize masks_roi because refined run has no mask_bitpacked or mask_rle store.")
 
     if not apply:
         action = "would_refresh" if has_dense else "would_materialize"
@@ -190,6 +229,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Regenerate compact mask_rle from the current dense masks_roi and clear stale compact markers.",
     )
     parser.add_argument(
+        "--refresh-bitpacked",
+        action="store_true",
+        help="Regenerate or update compact mask_bitpacked from the current dense masks_roi.",
+    )
+    parser.add_argument(
+        "--components",
+        nargs="+",
+        help="With --refresh-rle or --refresh-bitpacked, refresh only these mask component names.",
+    )
+    parser.add_argument(
+        "--rows",
+        nargs="+",
+        type=int,
+        help="With --refresh-bitpacked, refresh only these row indices.",
+    )
+    parser.add_argument(
         "--allow-delete-last-mask-store",
         action="store_true",
         help="Allow deleting masks_roi even when no compact mask_rle store exists. Dangerous; default refuses.",
@@ -205,6 +260,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overwrite=bool(args.overwrite),
         delete_dense=bool(args.delete_dense),
         refresh_rle=bool(args.refresh_rle),
+        refresh_bitpacked=bool(args.refresh_bitpacked),
+        components=args.components,
+        rows=args.rows,
         allow_delete_last_mask_store=bool(args.allow_delete_last_mask_store),
         chunk_size=max(1, int(args.chunk_size)),
     )

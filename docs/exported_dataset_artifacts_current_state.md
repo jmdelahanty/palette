@@ -435,7 +435,8 @@ That example opens
 `/groups/anibody/anibody/fish/example_recording/zarr/2026-01-28T21-47-47Z_arena_1_DefaultScreen_analysis.zarr`,
 prints raw/refined subject-mask labels and array shapes, and reads one ROI row
 through `fisheye.shared.mask_store.open_mask_store(...)`, so it works whether
-the refined source stores dense `masks_roi`, compact `mask_rle`, or both.
+the refined source stores dense `masks_roi`, compact editable `mask_bitpacked`,
+compact final/read-mostly `mask_rle`, or a combination.
 
 ### Clipped Training Zarrs
 

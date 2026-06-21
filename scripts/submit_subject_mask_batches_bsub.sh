@@ -141,7 +141,8 @@ Options:
   --finalize-postcompute-num-workers N|auto
                             Postcompute worker count (default: finalizer uses --finalize-num-workers)
   --metric-level LEVEL      cheap|full (default: cheap)
-  --mask-storage MODE       dense_uint8|dense_and_rle|rle_v1 for refined masks
+  --mask-storage MODE       dense_uint8|dense_and_bitpacked|bitpacked_v1|dense_and_rle|rle_v1|dense_bitpacked_and_rle
+                            for refined masks
                             (default: dense_uint8)
   --mask-rle-validation-mode MODE
                             full|invariants|none after writing compact mask_rle
@@ -250,8 +251,8 @@ if [[ "$FINALIZE_POSTCOMPUTE_BACKEND" != "serial" && "$FINALIZE_POSTCOMPUTE_BACK
   echo "--finalize-postcompute-backend must be serial or process_shards." >&2
   exit 2
 fi
-if [[ "$MASK_STORAGE" != "dense_uint8" && "$MASK_STORAGE" != "dense_and_rle" && "$MASK_STORAGE" != "rle_v1" ]]; then
-  echo "--mask-storage must be dense_uint8, dense_and_rle, or rle_v1." >&2
+if [[ "$MASK_STORAGE" != "dense_uint8" && "$MASK_STORAGE" != "dense_and_bitpacked" && "$MASK_STORAGE" != "bitpacked_v1" && "$MASK_STORAGE" != "dense_and_rle" && "$MASK_STORAGE" != "rle_v1" && "$MASK_STORAGE" != "dense_bitpacked_and_rle" ]]; then
+  echo "--mask-storage must be dense_uint8, dense_and_bitpacked, bitpacked_v1, dense_and_rle, rle_v1, or dense_bitpacked_and_rle." >&2
   exit 2
 fi
 if [[ "$MASK_RLE_VALIDATION_MODE" != "full" && "$MASK_RLE_VALIDATION_MODE" != "invariants" && "$MASK_RLE_VALIDATION_MODE" != "none" ]]; then

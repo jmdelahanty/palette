@@ -29,9 +29,10 @@ outputs that should not be stored as mask-review metadata.
 It should consume:
 
 - `refined_subject_masks_runs/<run>` as the canonical mask-pixel authority
-- either dense `refined_subject_masks_runs/<run>/masks_roi` or compact
-  `refined_subject_masks_runs/<run>/mask_rle` via the shared `MaskStore`
-  reader; writers must record which physical store was consumed
+- dense `refined_subject_masks_runs/<run>/masks_roi`, compact editable
+  `refined_subject_masks_runs/<run>/mask_bitpacked`, or compact final
+  `refined_subject_masks_runs/<run>/mask_rle` via the shared `MaskStore` reader;
+  writers must record which physical store was consumed
 - optional refined-subject mask-local geometry primitives
 - optional `refined_keypoints_runs/<run>` or heading/track runs when anatomical
   polarity, body heading, or temporal alignment is required
@@ -141,8 +142,10 @@ An `analysis/subject_shape_runs/<run>` writer should record:
 - `source_mask_labels`
 - `source_mask_label_schema_id`
 - `source_mask_geometry_schema_id` when mask-local geometry was consumed
-- `source_mask_store_encoding`, e.g. `dense_uint8` or `component_rle_v1`
-- `source_mask_storage_surface`, e.g. `masks_roi` or `mask_rle`
+- `source_mask_store_encoding`, e.g. `dense_uint8`, `bitpacked_binary_v1`, or
+  `component_rle_v1`
+- `source_mask_storage_surface`, e.g. `masks_roi`, `mask_bitpacked`, or
+  `mask_rle`
 - `source_mask_store_path`, the exact physical refined-mask store consumed
 - `source_refined_subject_masks/row_revision` when available, so row-local
   refined-mask edits can be detected without silently mutating this analysis
@@ -177,9 +180,9 @@ analysis/subject_shape_runs/
       source_refined_subject_masks_run
       source_mask_labels
       source_mask_label_schema_id
-      source_mask_store_encoding   "dense_uint8" or "component_rle_v1"
-      source_mask_storage_surface  "masks_roi" or "mask_rle"
-      source_mask_store_path       exact `masks_roi` or `mask_rle` source path
+      source_mask_store_encoding   "dense_uint8", "bitpacked_binary_v1", or "component_rle_v1"
+      source_mask_storage_surface  "masks_roi", "mask_bitpacked", or "mask_rle"
+      source_mask_store_path       exact physical source path
       method
       method_version
       created_at_utc

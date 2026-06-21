@@ -29,6 +29,12 @@ def test_parser_accepts_compact_mask_storage_mode() -> None:
     assert args.mask_storage == "rle_v1"
 
 
+def test_parser_accepts_bitpacked_mask_storage_mode() -> None:
+    args = mod._build_parser().parse_args(["/recordings", "--mask-storage", "bitpacked_v1"])
+
+    assert args.mask_storage == "bitpacked_v1"
+
+
 def test_safe_artifact_filename_hashes_long_names() -> None:
     filename = mod._safe_artifact_filename(
         ("recording_analysis", "subject_masks_" + ("very_long_" * 40)),

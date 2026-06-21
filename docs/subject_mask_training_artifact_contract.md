@@ -124,7 +124,8 @@ The audit checks the manifest `selected_sources` rows against source zarrs:
 
 - selected `source_stage_group/source_subject_mask_run` exists
 - selected crop run exists and row-counts match the source physical mask store
-  (`masks_roi` or compact `mask_rle` through `MaskStore`)
+  (`masks_roi`, compact `mask_bitpacked`, or compact `mask_rle` through
+  `MaskStore`)
 - `label_schema_id`, `mask_labels`, `available_channels`, and
   `available_components` agree
 - component review state/intended-use from registry agrees with
@@ -445,11 +446,12 @@ Required source-table arrays:
 - `source_mask_store_encoding`
   - shape: `(M,)`
   - source analysis mask-store encoding used by the exporter, for example
-    `dense_uint8` or `component_rle_v1`
+    `dense_uint8`, `bitpacked_binary_v1`, or `component_rle_v1`
 - `source_mask_storage_surface`
   - shape: `(M,)`
-  - physical source mask surface used by the exporter, currently `masks_roi`
-    for dense sources or `mask_rle` for compact analysis sources
+  - physical source mask surface used by the exporter: `masks_roi` for dense
+    sources, `mask_bitpacked` for compact editable analysis sources, or
+    `mask_rle` for compact final/read-mostly analysis sources
 
 Required attrs:
 

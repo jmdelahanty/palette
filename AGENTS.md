@@ -44,6 +44,21 @@
 - Record both requested and effective worker chunking in provenance when Dask chunk sizes are adjusted for Zarr write safety.
 - See `docs/dask_zarr_write_safety.md` before modifying Dask-backed Zarr writers.
 
+## Subject Mask Direction
+
+- Treat eye-mask-specific stages as legacy compatibility surfaces.
+- For new mask work, prefer `subject_mask_runs` and `refined_subject_masks_runs`.
+- For refined subject-mask pixels, treat the logical store as `MaskStore` over
+  dense `masks_roi`, compact editable `mask_bitpacked`, or compact final/read-mostly
+  `mask_rle`; do not assume `masks_roi` is always physically present.
+- Review/edit paths should materialize or mutate dense `masks_roi`, refresh
+  touched `mask_bitpacked` rows/components when present, and mark compact RLE
+  stale until explicitly refreshed.
+- Do not add new workflows, docs, or model paths that make `eye_masks_runs` or `refined_eye_masks_runs` the primary source of truth.
+- It is acceptable to read, migrate, validate, or materialize eye-mask compatibility data when supporting historical archives or legacy consumers.
+- Canonical manual review/editing for body, swim bladder, and eye components should route through unified refined subject-mask tooling and component review state.
+- Training/export paths should prefer subject-mask contracts; eye-mask training artifacts remain legacy or compatibility-specific unless the user explicitly asks for them.
+
 ## Outside-Sandbox Validation Notes
 
 - CUDA/GPU visibility may be unavailable in Codex sandbox even when available outside it.

@@ -23,7 +23,14 @@ import zarr
 from scipy.ndimage import gaussian_filter1d
 
 from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels, write_reason_columns
-from ..shared.mask_store import MaskStore, MaskStoreError, mark_mask_rle_stale_attrs, materialize_dense_masks_roi_from_store, open_mask_store
+from ..shared.mask_store import (
+    MaskStore,
+    MaskStoreError,
+    mark_mask_rle_stale_attrs,
+    materialize_dense_masks_roi_from_store,
+    open_mask_store,
+    refresh_bitpacked_mask_store_from_dense,
+)
 from ..shared.mask_geometry import batch_mask_spatial_metrics
 from ..shared.provenance_attrs import (
     build_source_crop_snapshot_attrs,
@@ -2264,6 +2271,15 @@ def _finalize_refined_subject_apply(
 
         write_refined_subject_eye_geometry(refined.group, updated_components=updated_components)
     _materialize_refined_eye_compat_if_needed(refined, updated_components=updated_components)
+    if "mask_bitpacked" in refined.group:
+        refresh_bitpacked_mask_store_from_dense(
+            refined.group,
+            component_names=refined.component_names,
+            refresh_components=updated_components,
+            refresh_rows=updated_rows,
+            source_path=f"refined_subject_masks_runs/{refined.run_name}",
+            validation_mode="invariants",
+        )
     mark_mask_rle_stale_attrs(
         refined.group,
         updated_at_utc=updated_at_utc,

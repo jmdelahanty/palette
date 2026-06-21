@@ -304,6 +304,49 @@ def test_finalize_subject_mask_run_can_materialize_component_rle_mask_store(monk
     )
 
 
+def test_finalize_subject_mask_run_can_materialize_bitpacked_mask_store(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_bitpacked",
+        chunk_size=1,
+        mask_storage="dense_and_bitpacked",
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["mask_storage"] == "dense_and_bitpacked"
+    assert summary["mask_bitpacked_summary"]["status"] == "written"
+    assert summary["mask_bitpacked_summary"]["layout"] == "packed_width_array"
+    assert summary["mask_bitpacked_summary"]["roundtrip_validation"] == {
+        "status": "passed",
+        "rows_checked": 2,
+        "channels_checked": 4,
+        "chunks_checked": 2,
+        "row_chunk_size": 1,
+    }
+    assert "write_bitpacked_mask_store" in summary["timing_summary"]["phase_seconds"]
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_bitpacked"]
+    assert run.attrs["mask_storage_encoding"] == "dense_uint8+bitpacked_binary_v1"
+    assert run.attrs["mask_store_encodings"] == ["dense_uint8", "bitpacked_binary_v1"]
+    assert run.attrs["mask_bitpacked_materialized"] is True
+    assert run.attrs["smart_finalizer_mask_bitpacked_summary"]["roundtrip_validation"]["status"] == "passed"
+    assert run["mask_bitpacked"].attrs["schema_id"] == "palette_mask_bitpacked_binary_v1"
+    assert run["mask_bitpacked"].attrs["layout"] == "packed_width_array"
+
+    dense = (np.asarray(run["masks_roi"][:], dtype=np.uint8) > 0).astype(np.uint8)
+    store = open_mask_store(run, prefer="bitpacked")
+    assert store.encoding == "bitpacked_binary_v1"
+    np.testing.assert_array_equal(store.read_dense(), dense)
+    np.testing.assert_array_equal(
+        store.read_dense(rows=[1], channels=["eye_left"]),
+        dense[1:2, 1:2],
+    )
+
+
 def test_finalize_subject_mask_run_reads_compact_source_mask_store(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()
@@ -376,6 +419,42 @@ def test_finalize_subject_mask_run_can_write_rle_only_mask_store(monkeypatch) ->
     assert run.attrs["mask_rle_materialized"] is True
     store = open_mask_store(run, prefer="rle")
     assert store.encoding == "component_rle_v1"
+    assert store.read_dense().shape == (2, 4, 10, 10)
+    assert store.read_dense(rows=[1], channels=["eye_left"]).shape == (1, 1, 10, 10)
+
+
+def test_finalize_subject_mask_run_can_write_bitpacked_only_mask_store(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_smart_bitpacked_only",
+        chunk_size=1,
+        mask_storage="bitpacked_v1",
+        write_eye_geometry=True,
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["mask_storage"] == "bitpacked_v1"
+    assert summary["write_eye_geometry"] is True
+    assert summary["mask_bitpacked_summary"]["status"] == "written"
+    assert summary["mask_bitpacked_summary"]["dense_cache_removed"] is True
+    assert summary["mask_bitpacked_summary"]["roundtrip_validation"]["status"] == "passed"
+    assert summary["mask_bitpacked_summary"]["roundtrip_validation"]["rows_checked"] == 2
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_smart_bitpacked_only"]
+    assert "masks_roi" not in run
+    assert run.attrs["eye_geometry_status"] == "computed"
+    assert "relations/eye_pair/metrics/separation_px" in run
+    assert run.attrs["mask_storage_encoding"] == "bitpacked_binary_v1"
+    assert run.attrs["mask_store_encodings"] == ["bitpacked_binary_v1"]
+    assert run.attrs["masks_roi_materialized"] is False
+    assert run.attrs["mask_bitpacked_materialized"] is True
+    assert run.attrs["mask_rle_materialized"] is False
+    store = open_mask_store(run, prefer="bitpacked")
+    assert store.encoding == "bitpacked_binary_v1"
     assert store.read_dense().shape == (2, 4, 10, 10)
     assert store.read_dense(rows=[1], channels=["eye_left"]).shape == (1, 1, 10, 10)
     validation = validate_run(run, REFINED_SUBJECT_MASKS_SPEC)

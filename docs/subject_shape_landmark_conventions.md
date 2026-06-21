@@ -36,6 +36,8 @@ mask-local caches.
 Examples:
 
 - `masks_roi`
+- `mask_bitpacked`
+- `mask_rle`
 - `components/<component>/contours/{ptr,len,points_xy}`
 - component area, centroid, bbox, mask-present, and simple mask-local QC
 
@@ -360,8 +362,8 @@ mask-derived fields.
 For mask overlays:
 
 - draw mask fills from the `refined_subject_masks_runs` logical mask store
-  (`masks_roi` when dense is present, otherwise compact `mask_rle` through
-  `MaskStore`)
+  (`masks_roi` when dense is present, otherwise compact `mask_bitpacked` or
+  `mask_rle` through `MaskStore`)
 - resolve channels by `mask_labels`
 - use persisted component contours when available
 - fall back to client-side contours when persisted contours are missing

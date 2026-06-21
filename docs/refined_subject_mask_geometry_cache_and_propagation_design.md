@@ -20,7 +20,8 @@ This document connects the boundaries defined in:
 
 - `refined_subject_masks_runs/<run>` is the canonical refined mask-pixel
   authority for subject-mask analysis. Its physical mask store may be dense
-  `masks_roi`, compact `mask_rle`, or both; readers should use `MaskStore`.
+  `masks_roi`, compact editable `mask_bitpacked`, compact final/read-mostly
+  `mask_rle`, or a combination; readers should use `MaskStore`.
 - Component contours are mask-local derived caches, not independent biological
   truth.
 - Component-local scalar metrics and simple QC should be regenerated
@@ -52,8 +53,10 @@ MaskStore(refined_subject_masks_runs/<run>).read_dense(row, channel)[y, x]
 
 This is the editable/refined working artifact. It is the source for downstream
 mask-local geometry and biological analysis. Physical storage may be dense
-`masks_roi` or compact `mask_rle`; manual edit/writeback tools may materialize
-dense `masks_roi` as a compatibility cache before writing row-local edits. The
+`masks_roi`, compact editable `mask_bitpacked`, or compact final/read-mostly
+`mask_rle`; manual edit/writeback tools may materialize dense `masks_roi` as a
+compatibility cache before writing row-local edits, refresh touched bitpacked
+rows/components when present, and mark RLE stale until explicit refresh. The
 refined mask store is distinct from raw model probabilities in
 `subject_mask_runs`, which remain immutable provenance evidence.
 
@@ -325,7 +328,8 @@ A visualization should be explicit about contour source.
 Recommended modes:
 
 - `mask`: compute display contours from the current physical mask store
-  (`masks_roi` or compact `mask_rle` through `MaskStore`).
+  (`masks_roi`, compact `mask_bitpacked`, or compact `mask_rle` through
+  `MaskStore`).
 - `persisted`: draw stored `components/<component>/contours`.
 - `auto`: draw persisted contours when present and source-compatible, otherwise
   compute from the physical mask store.
@@ -530,13 +534,20 @@ part of maintaining the refined mask run's internal consistency.
 
 ## Crimson And Realtime Viewing Implications
 
-Crimson and realtime viewers should treat `masks_roi` as the canonical overlay
-source.
+Crimson and realtime viewers should consume the logical refined subject-mask
+surface, not a specific physical storage array. Dense `masks_roi` remains the
+current compatibility/display path. Compact `mask_bitpacked` runs can be
+decoded directly to dense ROI rows; compact `mask_rle` runs must be materialized
+through the mask-store contract, or materialized to dense `masks_roi`, before
+display/editing until the viewer implements compact decode directly.
 
 Recommended read behavior:
 
 - Use `mask_labels` to resolve semantic channels.
-- Draw fills directly from `masks_roi`.
+- Resolve mask rows through `source_crop_row_ids` and place ROI-local masks with
+  `crop_runs/<source_crop_run>/roi_coordinates_full`.
+- Draw fills from the logical mask surface; this may be dense `masks_roi` or a
+  dense row materialized from compact `mask_bitpacked` or compact `mask_rle`.
 - Use persisted contours when available for efficient contour overlays.
 - Fall back to client-side contours when component contours are missing.
 - Never assume body/swim contours exist just because eye contours exist.

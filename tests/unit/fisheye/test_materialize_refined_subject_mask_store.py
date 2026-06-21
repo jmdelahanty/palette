@@ -9,6 +9,8 @@ import zarr
 from fisheye.shared.mask_store import (
     mark_mask_rle_stale_attrs,
     open_mask_store,
+    refresh_bitpacked_mask_store_from_dense,
+    write_bitpacked_mask_store_from_dense,
     validate_component_rle_mask_store_against_dense,
     validate_component_rle_mask_store_invariants,
     write_component_rle_mask_store_from_dense,
@@ -72,6 +74,163 @@ def test_materialize_refined_subject_mask_store_recreates_dense_cache(tmp_path: 
     assert run.attrs["mask_store_encodings"] == ["dense_uint8", "component_rle_v1"]
     assert run.attrs["mask_storage_encoding"] == "dense_uint8+component_rle_v1"
     assert run.attrs["masks_roi_materialized_from"] == "mask_rle"
+
+
+def test_materialize_refined_subject_mask_store_recreates_dense_cache_from_bitpacked(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    write_bitpacked_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=tuple(str(value) for value in run.attrs["mask_labels"]),
+        encode_row_chunk_size=2,
+        validation_mode="invariants",
+    )
+    del run["mask_rle"]
+    del run["masks_roi"]
+    run.attrs["mask_store_encodings"] = ["bitpacked_binary_v1"]
+    run.attrs["mask_storage_encoding"] = "bitpacked_binary_v1"
+    run.attrs["masks_roi_materialized"] = False
+    run.attrs["mask_rle_materialized"] = False
+
+    summary = materialize_refined_subject_mask_store(zarr_path, apply=True, chunk_size=2)
+
+    assert summary["status"] == "materialized"
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    run = reopened["refined_subject_masks_runs/refined_001"]
+    np.testing.assert_array_equal(np.asarray(run["masks_roi"][:], dtype=np.uint8), expected)
+    assert run.attrs["mask_store_encodings"] == ["dense_uint8", "bitpacked_binary_v1"]
+    assert run.attrs["mask_storage_encoding"] == "dense_uint8+bitpacked_binary_v1"
+    assert run.attrs["masks_roi_materialized_from"] == "mask_bitpacked"
+
+
+def test_refresh_bitpacked_mask_store_updates_only_selected_rows_and_components(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    write_bitpacked_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=labels,
+        encode_row_chunk_size=2,
+        validation_mode="invariants",
+    )
+    bitpacked_before = open_mask_store(run, prefer="bitpacked").read_dense()
+    updated = expected.copy()
+    updated[1, 1] = 0
+    updated[1, 1, 2:10, 2:8] = 1
+    run["masks_roi"][1, 1] = updated[1, 1]
+
+    summary = refresh_bitpacked_mask_store_from_dense(
+        run,
+        component_names=labels,
+        refresh_components=("eye_left",),
+        refresh_rows=(1,),
+        source_path="refined_subject_masks_runs/refined_001",
+        validation_mode="invariants",
+    )
+
+    assert summary["status"] == "bitpacked_refreshed"
+    assert summary["refresh_scope"] == "selection"
+    assert summary["refreshed_component_names"] == ["eye_left"]
+    assert summary["refreshed_rows"] == [1]
+    assert summary["mask_bitpacked_validation"]["status"] == "passed"
+    bitpacked_after = open_mask_store(run, prefer="bitpacked").read_dense()
+    np.testing.assert_array_equal(bitpacked_after[1, 1], updated[1, 1])
+    np.testing.assert_array_equal(bitpacked_after[0], bitpacked_before[0])
+    np.testing.assert_array_equal(bitpacked_after[2], bitpacked_before[2])
+    np.testing.assert_array_equal(bitpacked_after[1, 0], bitpacked_before[1, 0])
+    np.testing.assert_array_equal(bitpacked_after[1, 2:], bitpacked_before[1, 2:])
+
+
+def test_materialize_refined_subject_mask_store_refreshes_scoped_bitpacked_from_dense(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    write_bitpacked_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=labels,
+        encode_row_chunk_size=2,
+        validation_mode="invariants",
+    )
+    bitpacked_before = open_mask_store(run, prefer="bitpacked").read_dense()
+    updated = expected.copy()
+    updated[2, 3] = 0
+    updated[2, 3, 1:11, 4:9] = 1
+    run["masks_roi"][2, 3] = updated[2, 3]
+
+    summary = materialize_refined_subject_mask_store(
+        zarr_path,
+        apply=True,
+        refresh_bitpacked=True,
+        components=("swim_bladder",),
+        rows=(2,),
+        chunk_size=2,
+    )
+
+    assert summary["status"] == "bitpacked_refreshed"
+    assert summary["refresh_scope"] == "selection"
+    assert summary["refreshed_component_names"] == ["swim_bladder"]
+    assert summary["refreshed_rows"] == [2]
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    refreshed = reopened["refined_subject_masks_runs/refined_001"]
+    bitpacked_after = open_mask_store(refreshed, prefer="bitpacked").read_dense()
+    np.testing.assert_array_equal(bitpacked_after[2, 3], updated[2, 3])
+    np.testing.assert_array_equal(bitpacked_after[0], bitpacked_before[0])
+    np.testing.assert_array_equal(bitpacked_after[1], bitpacked_before[1])
+    np.testing.assert_array_equal(bitpacked_after[2, :3], bitpacked_before[2, :3])
+
+
+def test_compact_bitpacked_only_store_can_materialize_edit_and_refresh_bitpacked(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    labels = tuple(str(value) for value in run.attrs["mask_labels"])
+    write_bitpacked_mask_store_from_dense(
+        run,
+        run["masks_roi"],
+        component_names=labels,
+        encode_row_chunk_size=2,
+        validation_mode="invariants",
+    )
+    del run["mask_rle"]
+    del run["masks_roi"]
+    run.attrs["mask_store_encodings"] = ["bitpacked_binary_v1"]
+    run.attrs["mask_storage_encoding"] = "bitpacked_binary_v1"
+    run.attrs["masks_roi_materialized"] = False
+
+    materialized = materialize_refined_subject_mask_store(zarr_path, apply=True, chunk_size=2)
+    reopened = zarr.open_group(str(zarr_path), mode="a")
+    refreshed = reopened["refined_subject_masks_runs/refined_001"]
+    edited = expected.copy()
+    edited[0, 0] = 0
+    edited[0, 0, 0:4, 0:4] = 1
+    refreshed["masks_roi"][0, 0] = edited[0, 0]
+    refresh = materialize_refined_subject_mask_store(
+        zarr_path,
+        apply=True,
+        refresh_bitpacked=True,
+        components=("subject_body",),
+        rows=(0,),
+        chunk_size=2,
+    )
+
+    assert materialized["status"] == "materialized"
+    assert materialized["source_encoding"] == "bitpacked_binary_v1"
+    assert refresh["status"] == "bitpacked_refreshed"
+    final = zarr.open_group(str(zarr_path), mode="r")["refined_subject_masks_runs/refined_001"]
+    bitpacked_after = open_mask_store(final, prefer="bitpacked").read_dense()
+    np.testing.assert_array_equal(bitpacked_after[0, 0], edited[0, 0])
+    np.testing.assert_array_equal(bitpacked_after[1:], expected[1:])
+    np.testing.assert_array_equal(bitpacked_after[0, 1:], expected[0, 1:])
 
 
 def test_component_rle_roundtrip_validation_rejects_mismatched_dense_source(tmp_path: Path) -> None:
@@ -301,6 +460,90 @@ def test_materialize_refined_subject_mask_store_refreshes_rle_from_dense_and_cle
     assert "mask_rle_stale_reason" not in refreshed.attrs
     assert "mask_rle_stale_row_count" not in refreshed.attrs
     assert refreshed.attrs["mask_rle_refreshed_from"] == "masks_roi"
+
+
+def test_materialize_refined_subject_mask_store_refreshes_only_selected_rle_component(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    untouched_group = run["mask_rle/components/02_eye_right"]
+    untouched_before = {
+        name: np.asarray(untouched_group[name][:])
+        for name in ("counts", "indptr", "present", "area_px", "bbox_xyxy")
+    }
+    updated = expected.copy()
+    updated[:, 1] = 0
+    updated[0, 1, 1:9, 1:5] = 1
+    run["masks_roi"][:] = updated
+    mark_mask_rle_stale_attrs(
+        run,
+        reason="component_paint",
+        updated_components=("eye_left",),
+        updated_rows=(0,),
+        updated_at_utc="2026-06-20T00:00:00+00:00",
+    )
+
+    summary = materialize_refined_subject_mask_store(
+        zarr_path,
+        apply=True,
+        refresh_rle=True,
+        components=("eye_left",),
+        chunk_size=1,
+    )
+
+    assert summary["status"] == "rle_refreshed"
+    assert summary["refresh_scope"] == "components"
+    assert summary["refreshed_component_names"] == ["eye_left"]
+    assert summary["refreshed_component_indices"] == [1]
+    assert summary["mask_rle_stale_after"] is False
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    refreshed = reopened["refined_subject_masks_runs/refined_001"]
+    refreshed_untouched = refreshed["mask_rle/components/02_eye_right"]
+    for name, before in untouched_before.items():
+        np.testing.assert_array_equal(np.asarray(refreshed_untouched[name][:]), before)
+    assert refreshed.attrs["mask_rle_stale"] is False
+    assert refreshed.attrs["mask_rle_refreshed_component_names"] == ["eye_left"]
+    np.testing.assert_array_equal(open_mask_store(refreshed, prefer="rle").read_dense(), updated)
+
+
+def test_materialize_refined_subject_mask_store_component_refresh_preserves_remaining_stale_scope(
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "analysis.zarr"
+    expected, root = _build_compact_refined_zarr(zarr_path, keep_dense=True)
+    run = root["refined_subject_masks_runs/refined_001"]
+    updated = expected.copy()
+    updated[0, 1, 0:3, 0:3] = 1
+    run["masks_roi"][:] = updated
+    mark_mask_rle_stale_attrs(
+        run,
+        reason="multi_component_paint",
+        updated_components=("eye_left", "eye_right"),
+        updated_rows=(0, 1),
+        updated_at_utc="2026-06-20T00:00:00+00:00",
+    )
+
+    summary = materialize_refined_subject_mask_store(
+        zarr_path,
+        apply=True,
+        refresh_rle=True,
+        components=("eye_left",),
+        chunk_size=1,
+    )
+
+    assert summary["mask_rle_stale_after"] is True
+    reopened = zarr.open_group(str(zarr_path), mode="r")
+    refreshed = reopened["refined_subject_masks_runs/refined_001"]
+    assert refreshed.attrs["mask_rle_stale"] is True
+    assert refreshed.attrs["mask_rle_stale_component_names"] == ["eye_right"]
+    assert refreshed.attrs["mask_rle_stale_row_count"] == 2
+    with pytest.raises(ValueError, match="mask_rle is marked stale"):
+        open_mask_store(refreshed, prefer="rle")
+    diagnostic_store = open_mask_store(refreshed, prefer="rle", allow_stale_rle=True)
+    diagnostic_dense = diagnostic_store.read_dense()
+    np.testing.assert_array_equal(diagnostic_dense[:, 1], updated[:, 1])
 
 
 def test_materialize_refined_subject_mask_store_refuses_to_delete_dense_when_rle_is_stale(

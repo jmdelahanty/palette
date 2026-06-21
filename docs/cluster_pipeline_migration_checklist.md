@@ -1,7 +1,7 @@
 # Cluster Pipeline Migration Checklist
 <!-- contract-meta
 status: working_checklist
-last_verified: 2026-06-18
+last_verified: 2026-06-20
 purpose: Track what remains to migrate Palette detect, pose, segmentation, and refinement workflows to Janelia cluster execution.
 -->
 
@@ -60,7 +60,7 @@ Palette also has batch utilities for additional stages:
 |---------|--------|-------------|
 | `fisheye.utils.refine_detect_batch` | present | Covered by the chained detect-quality-refine submitter for registry-discovered targets. |
 | `fisheye.utils.refine_keypoints_batch` | present | Covered by `scripts/submit_refine_keypoints_batches_bsub.sh` for file-list or root-discovered analysis zarrs. |
-| `fisheye.utils.run_subject_mask_batch_pipeline` | present | No dedicated LSF submitter yet; artifact/import policy not implemented. |
+| `fisheye.utils.run_subject_mask_batch_pipeline` | present | Covered by `scripts/submit_subject_mask_batches_bsub.sh`; split GPU inference and CPU finalization support local scratch staging, PRFS publish, and optional NRS handoff packages. |
 | subject-mask review/finalization utilities | present | Some tools are operator-driven and need cluster-safe boundaries. |
 | eye-mask refinement | present inside `run_eye_masks_batch --refine` and standalone code | Cluster docs focus on raw eye-mask inference more than refined surfaces. |
 
@@ -783,7 +783,8 @@ Implementation tasks:
 5. Add the shared LSF provenance helper.
 6. Add `submit_refine_detect_batches_bsub.sh`.
 7. Use `submit_refine_keypoints_batches_bsub.sh` for refined-keypoint batches.
-8. Add `submit_subject_mask_batches_bsub.sh`.
+8. Harden `submit_subject_mask_batches_bsub.sh` with more production runs,
+   timing/provenance audits, and registry skip-existing checks.
 9. Add registry discovery/status for refined stages that are missing from the
    first-four-stage DAG.
 10. Run a full-recording registry-scoped detect artifact-quality-refine batch.

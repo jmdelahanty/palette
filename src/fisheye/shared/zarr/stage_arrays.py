@@ -303,19 +303,132 @@ def _validate_refined_subject_mask_rle_component_integrity(
         errors.append(f"{label}: indptr terminates at {int(pointers[-1])}, but counts has {counts_len} values")
 
 
+def _validate_refined_subject_mask_bitpacked_storage(
+    group: zarr.Group,
+    *,
+    errors: List[str],
+) -> bool:
+    bitpacked_group = group.get("mask_bitpacked") if hasattr(group, "get") else None
+    if bitpacked_group is None:
+        return False
+
+    start_error_count = len(errors)
+    label = "refined_subject_masks/mask_bitpacked"
+    if not _is_group_like(bitpacked_group):
+        errors.append(f"{label}: exists but is not a group")
+        return False
+
+    attrs = getattr(bitpacked_group, "attrs", {})
+    required_attrs = (
+        "schema_id",
+        "mask_encoding",
+        "mask_value_semantics",
+        "layout",
+        "logical_shape",
+        "encoded_shape",
+        "component_names",
+        "packed_axis",
+        "packed_bitorder",
+        "packed_width_bytes",
+    )
+    for attr_name in required_attrs:
+        if attr_name not in attrs:
+            errors.append(f"{label}: missing required attr '{attr_name}'")
+    if attrs.get("schema_id") != "palette_mask_bitpacked_binary_v1":
+        errors.append(
+            f"{label}: attr 'schema_id' expected 'palette_mask_bitpacked_binary_v1', "
+            f"got {attrs.get('schema_id')!r}"
+        )
+    if attrs.get("mask_encoding") != "bitpacked_binary_v1":
+        errors.append(
+            f"{label}: attr 'mask_encoding' expected 'bitpacked_binary_v1', "
+            f"got {attrs.get('mask_encoding')!r}"
+        )
+    if attrs.get("layout") != "packed_width_array":
+        errors.append(
+            f"{label}: attr 'layout' expected 'packed_width_array', got {attrs.get('layout')!r}"
+        )
+    if attrs.get("packed_axis") != "width":
+        errors.append(f"{label}: attr 'packed_axis' expected 'width', got {attrs.get('packed_axis')!r}")
+    if attrs.get("packed_bitorder") != "little":
+        errors.append(f"{label}: attr 'packed_bitorder' expected 'little', got {attrs.get('packed_bitorder')!r}")
+
+    raw_logical_shape = attrs.get("logical_shape")
+    raw_encoded_shape = attrs.get("encoded_shape")
+    logical_shape: tuple[int, int, int, int] | None = None
+    encoded_shape: tuple[int, int, int, int] | None = None
+    if not isinstance(raw_logical_shape, (list, tuple)) or len(raw_logical_shape) != 4:
+        errors.append(f"{label}: attr 'logical_shape' must contain [n_rois, n_channels, height, width]")
+    else:
+        logical_shape = tuple(int(value) for value in raw_logical_shape)
+        if min(logical_shape) <= 0:
+            errors.append(f"{label}: attr 'logical_shape' dimensions must be positive, got {logical_shape!r}")
+    if not isinstance(raw_encoded_shape, (list, tuple)) or len(raw_encoded_shape) != 4:
+        errors.append(f"{label}: attr 'encoded_shape' must contain [n_rois, n_channels, height, packed_width]")
+    else:
+        encoded_shape = tuple(int(value) for value in raw_encoded_shape)
+    if logical_shape is not None and encoded_shape is not None:
+        expected_encoded_shape = (
+            int(logical_shape[0]),
+            int(logical_shape[1]),
+            int(logical_shape[2]),
+            int((logical_shape[3] + 7) // 8),
+        )
+        if encoded_shape != expected_encoded_shape:
+            errors.append(
+                f"{label}: attr 'encoded_shape' {encoded_shape!r} does not match expected "
+                f"{expected_encoded_shape!r}"
+            )
+        if int(attrs.get("packed_width_bytes", -1)) != int(expected_encoded_shape[3]):
+            errors.append(
+                f"{label}: attr 'packed_width_bytes' {attrs.get('packed_width_bytes')!r} "
+                f"does not match expected {expected_encoded_shape[3]}"
+            )
+
+    raw_names = attrs.get("component_names")
+    if not isinstance(raw_names, (list, tuple)) or not raw_names:
+        errors.append(f"{label}: attr 'component_names' must be a non-empty list")
+    elif logical_shape is not None and len(raw_names) != int(logical_shape[1]):
+        errors.append(
+            f"{label}: component_names length {len(raw_names)} does not match channel count {logical_shape[1]}"
+        )
+
+    packed = bitpacked_group.get("masks_packed") if hasattr(bitpacked_group, "get") else None
+    if packed is None or not hasattr(packed, "shape"):
+        errors.append(f"{label}: missing required array 'masks_packed'")
+    else:
+        if encoded_shape is not None and tuple(int(value) for value in packed.shape) != encoded_shape:
+            errors.append(
+                f"{label}/masks_packed: shape {tuple(int(value) for value in packed.shape)!r} "
+                f"does not match encoded_shape {encoded_shape!r}"
+            )
+        try:
+            dtype = np.dtype(getattr(packed, "dtype", None))
+        except Exception:
+            dtype = None
+        if dtype != np.dtype("uint8"):
+            errors.append(f"{label}/masks_packed: dtype must be uint8, got {getattr(packed, 'dtype', None)!r}")
+
+    return len(errors) == start_error_count
+
+
 def _validate_refined_subject_mask_storage(
     group: zarr.Group,
     *,
     errors: List[str],
     warnings: List[str],
 ) -> None:
-    """Allow compact mask_rle as the refined-subject mask physical surface."""
+    """Allow compact mask stores as refined-subject mask physical surfaces."""
 
     dense_missing_error = "refined_subject_masks: missing required array 'masks_roi'"
+    has_valid_compact = _validate_refined_subject_mask_bitpacked_storage(group, errors=errors)
     rle_group = group.get("mask_rle") if hasattr(group, "get") else None
     if rle_group is None:
+        if has_valid_compact and dense_missing_error in errors:
+            errors[:] = [message for message in errors if message != dense_missing_error]
         return
 
+    start_error_count = len(errors)
     if not _is_group_like(rle_group):
         errors.append("refined_subject_masks/mask_rle: exists but is not a group")
         return
@@ -371,7 +484,8 @@ def _validate_refined_subject_mask_storage(
             errors=errors,
         )
 
-    if dense_missing_error in errors:
+    has_valid_compact = has_valid_compact or len(errors) == start_error_count
+    if has_valid_compact and dense_missing_error in errors:
         errors[:] = [message for message in errors if message != dense_missing_error]
 
 

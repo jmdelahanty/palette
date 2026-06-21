@@ -228,7 +228,9 @@ Existing analysis outputs already follow this direction:
   the current
   `analysis/detection_comparison_runs/<run>` compatibility surface for
   realtime-vs-offline detection/crop-sufficiency diagnostics. See
-  [`detection_analysis_run_surfaces.md`](detection_analysis_run_surfaces.md).
+  [`detection_analysis_run_surfaces.md`](detection_analysis_run_surfaces.md)
+  and
+  [`spatial_occupancy_zone_summary_design.md`](spatial_occupancy_zone_summary_design.md).
 
 New analysis families should follow the same `analysis/<analysis_type>_runs`
 placement unless there is a clear reason they are an authority rather than a

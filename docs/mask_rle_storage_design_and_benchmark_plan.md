@@ -36,13 +36,24 @@ Implemented surfaces:
 - `fisheye.shared.mask_rle` encodes/decodes exact binary COCO-style RLE with
   typed NumPy arrays.
 - `fisheye.shared.mask_store.open_mask_store(...)` materializes dense masks from
-  either dense `masks_roi` or compact component RLE.
+  dense `masks_roi`, compact fixed-size `mask_bitpacked`, or compact component
+  RLE.
 - `MaskStore.storage_surface` and `MaskStore.storage_path` report the selected
-  physical backing surface (`masks_roi` or `mask_rle`) so exporters, auditors,
-  and provenance writers do not infer this independently from encoding names.
+  physical backing surface (`masks_roi`, `mask_bitpacked`, or `mask_rle`) so
+  exporters, auditors, and provenance writers do not infer this independently
+  from encoding names.
+- `fisheye.shared.mask_store.write_bitpacked_mask_store_from_dense(...)` streams
+  dense masks row chunks into `mask_bitpacked/masks_packed` with
+  `bitpacked_binary_v1` metadata.
 - `fisheye.shared.mask_store.write_component_rle_mask_store_from_dense(...)`
   streams dense masks row chunks into `mask_rle/components/...` without loading
   the full dense tensor into memory.
+- `fisheye.refinement.finalize_subject_masks --mask-storage dense_and_bitpacked`
+  writes the historical dense `masks_roi` plus an additive compact
+  `mask_bitpacked/masks_packed` mirror.
+- `fisheye.refinement.finalize_subject_masks --mask-storage bitpacked_v1`
+  writes the same compact bitpacked store and removes the dense `masks_roi`
+  compatibility cache after finalization/postcompute completes.
 - `fisheye.refinement.finalize_subject_masks --mask-storage dense_and_rle`
   writes the historical dense `masks_roi` plus an additive compact
   `mask_rle/components/...` mirror.
@@ -53,10 +64,25 @@ Implemented surfaces:
   materialize, refresh, or delete the dense `masks_roi` compatibility cache for
   a compact refined-subject run, and can regenerate compact `mask_rle` from the
   current dense cache with `--refresh-rle`.
+- The same materializer can regenerate or scoped-refresh compact bitpacked
+  storage from dense:
+  `--refresh-bitpacked --components eye_left --rows 42 --apply` rewrites only
+  the selected fixed-size packed row/channel cells.
+- The materializer can refresh compact RLE by component:
+  `--refresh-rle --components eye_left --apply` rewrites only the selected
+  `mask_rle/components/<component>/` groups and preserves unrelated component
+  groups. Dense `masks_roi` remains the authoritative review/edit write surface;
+  direct in-place RLE painting is intentionally deferred.
+- Palette-owned refined-subject review/writeback paths now refresh
+  `mask_bitpacked` immediately for touched dense rows/components when the
+  bitpacked mirror exists. They continue to mark `mask_rle` stale because RLE
+  refresh may shift variable-length offsets for later rows and remains an
+  explicit maintenance step.
 - `fisheye.diagnostics.benchmark_mask_rle_storage` uses the same shared writer
   so benchmark layout and production layout stay aligned.
 - Stage-array validation accepts refined-subject-mask runs with either dense
-  `masks_roi` or a valid compact `mask_rle` store.
+  `masks_roi`, a valid compact `mask_bitpacked` store, or a valid compact
+  `mask_rle` store.
 - `fisheye.shared.refined_subject_masks_io.load_refined_subject_masks_run_tables(...)`
   reads dense or compact stores through `MaskStore` and fails early when an
   advertised compact store is stale/unreadable instead of silently returning a
@@ -69,15 +95,117 @@ Implemented surfaces:
   `masks_roi_materialized`, `mask_rle_materialized`, `mask_rle_schema_id`,
   `mask_rle_encoding`, and `mask_rle_layout`.
 
-Current compatibility rule: `dense_uint8` remains the default. `dense_and_rle`
-is the preferred shadow/audit mode. `rle_v1` is available for compact-only
-experiments and consumers that are already audited through the `MaskStore`
-materialization boundary.
+Current compatibility rule: `dense_uint8` remains the default.
+`dense_and_bitpacked` and `dense_and_rle` are additive shadow/audit modes.
+`bitpacked_v1` and `rle_v1` are available for compact-only experiments and
+consumers that are already audited through the `MaskStore` materialization
+boundary.
 
 Validation rule: production batch runs use invariant validation for compact
-RLE. This validates the typed compact store without decoding the entire dense
+stores. This validates the typed compact store without decoding the entire dense
 logical surface. Full dense round-trip validation remains available for targeted
 audits and canaries.
+
+## Next Direction: Three-Tier Mask Storage
+
+The current RLE work clarified an important lifecycle distinction: the best
+storage representation depends on whether masks are still being edited.
+
+Recommended direction:
+
+- `dense_uint8`: use for training artifacts, active painting/review sessions,
+  GPU/model input, and debugging. This remains the easiest and safest write
+  surface because row/channel edits rewrite ordinary fixed-size Zarr chunks.
+- `bitpacked_binary_v1`: add as the compact editable/publish surface for
+  produced analysis masks that may still need review. It stores one bit per
+  binary pixel, so the physical payload is fixed-size and roughly `8x` smaller
+  than dense `uint8` before compression. Unlike COCO RLE, editing one row does
+  not shift offsets for later rows.
+- `component_rle_v1`: keep as the compact final/archive/export surface for
+  stable masks where smallest footprint and read-mostly access matter more than
+  random write locality.
+
+The reason not to use RLE as the live editing intermediate is structural, not
+just implementation maturity. A component RLE store uses one variable-length
+`counts` array plus `indptr`. If row 1 changes length, offsets for later rows in
+that component can shift. Palette currently avoids unsafe in-place mutation by
+refreshing the affected component from dense. That preserves correctness, but it
+is not the right shape for frequent painting.
+
+Bitpacking is the proposed middle tier because it is still chunked/fixed-size:
+changing frame 1, component `eye_left`, rewrites only the containing packed
+physical chunk rather than re-encoding all later rows in the component.
+
+Proposed lifecycle:
+
+1. Cluster finalization writes a local dense working surface while computing
+   geometry and contours.
+2. Publication writes `bitpacked_binary_v1` to PRFS/NRS for reviewable analysis
+   products, with optional dense materialization for immediate consumers.
+3. Review/painting materializes or edits dense chunks, then updates the
+   bitpacked mirror at chunk/row scope.
+4. Final accepted runs may additionally publish `component_rle_v1` or convert to
+   `rle_v1` when the run is stable.
+5. Training/export artifacts remain dense `uint8`, because training code should
+   not pay decode/unpack costs repeatedly once a dataset is frozen for training.
+
+Implemented bitpacked slice:
+
+- Defined `bitpacked_binary_v1` attrs: source logical shape `(N,C,H,W)`,
+  `packed_axis="width"`, `packed_bitorder`, `packed_width_bytes`, component
+  labels, value semantics, and chunk policy.
+- Added `MaskStore` read support that returns dense `uint8` from bitpacked storage.
+- Added writer/materializer helpers that pack/unpack row chunks with
+  `np.packbits`/`np.unpackbits`.
+- Added finalizer `--mask-storage` choices for `dense_and_bitpacked`,
+  `bitpacked_v1`, and `dense_bitpacked_and_rle`.
+- Added stage validation support for compact-only bitpacked refined-subject
+  mask runs.
+- Added batch-wrapper and LSF submitter support for bitpacked storage modes.
+- Added Palette-owned refined-subject review/edit writeback support that
+  refreshes only affected bitpacked row/channel cells after dense edits.
+
+Remaining implementation checklist:
+
+- Benchmark real refined subject-mask runs across dense-compressed,
+  bitpacked-compressed, and component RLE before making bitpacked a production
+  default.
+
+Local benchmark command:
+
+```bash
+scripts/py -m fisheye.diagnostics.benchmark_mask_storage_encodings \
+  /path/to/analysis.zarr \
+  --family refined_subject_masks_runs \
+  --run <run_name-or-latest> \
+  --sample-rows 128 \
+  --json-report /tmp/mask_storage_encoding_benchmark.json \
+  --markdown-report /tmp/mask_storage_encoding_benchmark.md
+```
+
+This diagnostic writes temporary sampled stores for `dense_uint8`,
+`bitpacked_binary_v1_probe`, and `component_rle_v1`, then reports logical bytes,
+stored bytes, and encode/write/decode rates. Its bitpacked probe should remain
+aligned with the production `bitpacked_binary_v1` contract.
+
+Initial local benchmark results from 2026-06-20:
+
+| recording | rows | dense stored | bitpacked stored | RLE stored | bitpacked encode | RLE encode | bitpacked decode | RLE decode |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| January refined subject-mask sample | 128 | 94.0 KiB | 58.5 KiB | 56.5 KiB | 3238 rows/s | 206 rows/s | 9076 rows/s | 732 rows/s |
+| GoodCopBadCop refined subject-mask sample | 128 | 94.3 KiB | 55.4 KiB | 56.9 KiB | 2644 rows/s | 196 rows/s | 7774 rows/s | 725 rows/s |
+| GoodCopBadCop refined subject-mask sample | 512 | 374.6 KiB | 212.3 KiB | 179.6 KiB | 3068 rows/s | 204 rows/s | 8615 rows/s | 738 rows/s |
+
+Interpretation:
+
+- Zarr compression already makes dense sampled masks surprisingly small for
+  these sparse binary masks.
+- Bitpacking still reduces stored bytes by about `1.6-1.8x` versus compressed
+  dense in these samples and is much faster to encode/decode than RLE.
+- RLE can be smaller than bitpacking on larger sparse samples, but its encode
+  and decode rates are roughly an order of magnitude lower.
+- This supports bitpacking as the reviewable/publishable middle tier and RLE as
+  a stable/archive tier, not as the live editing tier.
 
 ## Is Zarr a Poor Fit for RLE?
 
@@ -910,12 +1038,18 @@ Interpretation:
    The SAM subject-prompt visualizer loads optional source body overlays through
    `MaskStore`, so compact raw subject-mask runs can be inspected without
    materializing dense `masks_roi`.
-2. Migrate remaining review UI and Crimson-facing read paths next.
-3. Migrate edit/writeback paths only after read paths are stable; edited compact
-   masks should re-encode the touched row/channel and refresh metrics.
+2. Migrate remaining review UI paths and compact-RLE consumer paths next.
+   Crimson's dense refined-subject-mask reader now resolves the run and places
+   masks through `source_crop_row_ids`; its remaining migration is compact
+   `mask_rle` decode for dense-free `rle_v1` runs.
+3. Migrate edit/writeback paths only after read paths are stable; **implemented
+   for Palette-owned refined-subject dense edits with a `mask_bitpacked`
+   mirror**. The edit path refreshes touched bitpacked row/channel cells from
+   dense immediately and marks compact RLE stale for explicit refresh.
 4. Add a materializer command that can create, refresh, or delete dense
    `masks_roi` compatibility caches from compact masks, and can refresh compact
-   `mask_rle` from the current dense cache after review/edit marks it stale.
+   `mask_rle` or compact `mask_bitpacked` from the current dense cache after
+   review/edit.
    **Implemented for refined-subject runs**:
    `scripts/py -m fisheye.utils.materialize_refined_subject_mask_store`.
    The refined subject-mask contract validator also uses `MaskStore` for
@@ -931,8 +1065,10 @@ Interpretation:
 
 Remaining default-migration blockers:
 
-- Crimson-facing readers must either call Palette's `MaskStore`-equivalent
-  contract or explicitly materialize dense masks before display/edit.
+- Crimson compact-RLE readers must either implement Palette's
+  `MaskStore`-equivalent materialization contract or explicitly materialize
+  dense masks before display/edit. Crimson's dense refined-subject-mask path is
+  no longer a blocker for `dense_uint8` or `dense_and_rle` runs.
 - Legacy eye-mask training/export paths remain dense by design and should not
   be used as proof that refined-subject compact storage is fully deployed.
 - Remaining readme/workflow snippets that index

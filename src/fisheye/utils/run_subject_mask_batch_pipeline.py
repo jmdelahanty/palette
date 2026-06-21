@@ -950,12 +950,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric-level", choices=("cheap", "full"), default="cheap")
     parser.add_argument(
         "--mask-storage",
-        choices=("dense_uint8", "dense_and_rle", "rle_v1"),
+        choices=(
+            "dense_uint8",
+            "dense_and_bitpacked",
+            "bitpacked_v1",
+            "dense_and_rle",
+            "rle_v1",
+            "dense_bitpacked_and_rle",
+        ),
         default="dense_uint8",
         help=(
             "Refined subject-mask physical storage passed to finalize_subject_masks. "
-            "dense_uint8 preserves the historical dense masks_roi surface; dense_and_rle "
-            "writes dense masks plus compact component RLE; rle_v1 writes compact RLE only."
+            "dense_uint8 preserves the historical dense masks_roi surface; dense_and_bitpacked "
+            "writes dense plus editable compact bitpacked masks; bitpacked_v1 writes bitpacked only; "
+            "dense_and_rle writes dense plus compact component RLE; rle_v1 writes compact RLE only; "
+            "dense_bitpacked_and_rle writes all three surfaces for validation/audit runs."
         ),
     )
     parser.add_argument(

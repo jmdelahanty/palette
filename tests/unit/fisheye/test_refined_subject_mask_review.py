@@ -11,7 +11,11 @@ import numpy as np
 import zarr
 
 from fisheye.shared.detect_reason_codec import read_reason_labels
-from fisheye.shared.mask_store import write_component_rle_mask_store_from_dense
+from fisheye.shared.mask_store import (
+    open_mask_store,
+    write_bitpacked_mask_store_from_dense,
+    write_component_rle_mask_store_from_dense,
+)
 from fisheye.shared.subject_mask_chunks import (
     refined_subject_mask_metric_row_chunk,
     refined_subject_mask_storage_chunks,
@@ -938,6 +942,48 @@ def test_save_refined_subject_roi_marks_compact_rle_stale_after_materialized_edi
     assert run.attrs["mask_rle_stale_row_min"] == 0
     assert run.attrs["mask_rle_stale_row_max"] == 0
     assert run.attrs["mask_store_encodings"] == ["dense_uint8", "component_rle_v1"]
+
+
+def test_save_refined_subject_roi_refreshes_scoped_bitpacked_after_dense_edit() -> None:
+    root = _build_subject_review_root()
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    labels = tuple(str(value) for value in refined.group.attrs["mask_labels"])
+    write_bitpacked_mask_store_from_dense(
+        refined.group,
+        refined.group["masks_roi"],
+        component_names=labels,
+        encode_row_chunk_size=1,
+        validation_mode="invariants",
+    )
+    _replace_refined_masks_with_rle(refined.group)
+    refined = mod._open_existing_refined_subject_run(root, "refined_subject_masks_001")  # noqa: SLF001
+    bitpacked_before = open_mask_store(refined.group, prefer="bitpacked").read_dense()
+
+    edited = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited[0, 1:7, 1:7] = 0
+
+    mod.save_refined_subject_roi(
+        source=source,
+        refined=refined,
+        roi_idx=0,
+        edited_masks=edited,
+        component_names=("subject_body",),
+    )
+
+    run = refined.group
+    bitpacked_after = open_mask_store(run, prefer="bitpacked").read_dense()
+    np.testing.assert_array_equal(bitpacked_after[0, 0], np.asarray(run["masks_roi"][0, 0], dtype=np.uint8))
+    np.testing.assert_array_equal(bitpacked_after[0, 1], bitpacked_before[0, 1])
+    np.testing.assert_array_equal(bitpacked_after[1], bitpacked_before[1])
+    assert run.attrs["mask_bitpacked_refreshed_component_names"] == ["subject_body"]
+    assert run.attrs["mask_bitpacked_refresh_row_count"] == 1
+    assert bool(run.attrs["mask_rle_stale"]) is True
+    assert run.attrs["mask_rle_stale_component_names"] == ["subject_body"]
 
 
 def test_save_refined_subject_roi_can_scope_updates_to_requested_component() -> None:

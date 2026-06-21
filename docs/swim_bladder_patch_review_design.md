@@ -190,10 +190,12 @@ Expected attrs to update:
 - `component_review_statuses["swim_bladder"]`
 - parent `refined_subject_mask_review_status` when appropriate
 
-When a refined run is compact-only (`mask_rle` without dense `masks_roi`), the
-review/edit path should use the refined-subject review materialization boundary
-to create a dense `masks_roi` cache before editing. Saves update the dense
-authoring surface and mark compact RLE stale until it is refreshed.
+When a refined run is compact-only (`mask_bitpacked` or `mask_rle` without
+dense `masks_roi`), the review/edit path should use the refined-subject review
+materialization boundary to create a dense `masks_roi` cache before editing.
+Saves update the dense authoring surface, refresh touched bitpacked
+rows/components when present, and mark compact RLE stale until it is explicitly
+refreshed.
 - optional `component_summary_statistics["swim_bladder"]`
 
 ## Geometry Scope

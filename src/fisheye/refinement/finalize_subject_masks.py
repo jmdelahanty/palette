@@ -47,6 +47,8 @@ from ..shared.mask_store import (
     MASK_RLE_VALIDATION_MODES,
     MaskStoreError,
     open_mask_store,
+    update_mask_storage_attrs,
+    write_bitpacked_mask_store_from_dense,
     write_component_rle_mask_store_from_dense,
 )
 from ..shared.subject_mask_chunks import (
@@ -126,7 +128,17 @@ _PROCESS_SHARD_EXECUTION_BACKEND = "process_shards"
 _POSTCOMPUTE_BACKENDS = ("serial", "process_shards")
 _SERIAL_POSTCOMPUTE_BACKEND = "serial"
 _PROCESS_SHARD_POSTCOMPUTE_BACKEND = "process_shards"
-_MASK_STORAGE_CHOICES = ("dense_uint8", "dense_and_rle", "rle_v1")
+_MASK_STORAGE_CHOICES = (
+    "dense_uint8",
+    "dense_and_bitpacked",
+    "bitpacked_v1",
+    "dense_and_rle",
+    "rle_v1",
+    "dense_bitpacked_and_rle",
+)
+_MASK_STORAGES_WITH_BITPACKED = {"dense_and_bitpacked", "bitpacked_v1", "dense_bitpacked_and_rle"}
+_MASK_STORAGES_WITH_RLE = {"dense_and_rle", "rle_v1", "dense_bitpacked_and_rle"}
+_MASK_STORAGES_REMOVE_DENSE = {"bitpacked_v1", "rle_v1"}
 _MASK_RLE_VALIDATION_MODES = MASK_RLE_VALIDATION_MODES
 _COMPONENT_METRICS_SCHEMA_ID = "refined_subject_component_mask_metrics_v1"
 _COMPONENT_METRIC_QC_SCHEMA_ID = "refined_subject_component_metric_qc_reasons_v1"
@@ -3236,7 +3248,8 @@ def finalize_subject_mask_run(
         "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
         "mask_storage": mask_storage,
         "mask_rle_validation_mode": mask_rle_validation_mode,
-        "would_write_mask_rle": mask_storage in {"dense_and_rle", "rle_v1"},
+        "would_write_mask_bitpacked": mask_storage in _MASK_STORAGES_WITH_BITPACKED,
+        "would_write_mask_rle": mask_storage in _MASK_STORAGES_WITH_RLE,
         "postcompute_backend": postcompute_backend,
         "postcompute_chunk_size": normalized_postcompute_chunk_size,
         "postcompute_num_workers": normalized_postcompute_num_workers,
@@ -3736,7 +3749,34 @@ def finalize_subject_mask_run(
             "reason": "no_expensive_postcompute_requested",
         }
 
-    if mask_storage in {"dense_and_rle", "rle_v1"}:
+    if mask_storage in _MASK_STORAGES_WITH_BITPACKED:
+        def _emit_bitpacked_progress(event: str, **payload: object) -> None:
+            progress.emit(str(event), **payload)
+
+        with progress.phase("write_bitpacked_mask_store"):
+            with timing.phase("write_bitpacked_mask_store"):
+                mask_bitpacked_summary = write_bitpacked_mask_store_from_dense(
+                    run_group,
+                    run_group["masks_roi"],
+                    component_names=component_names,
+                    overwrite=True,
+                    encode_row_chunk_size=max(1, min(int(worker_chunk_size), 1024)),
+                    validation_mode=mask_rle_validation_mode,
+                    extra_attrs={
+                        "source_array": "masks_roi",
+                        "source_encoding": "dense_uint8",
+                        "source_run": str(target_run),
+                    },
+                    progress_callback=_emit_bitpacked_progress,
+                )
+    else:
+        mask_bitpacked_summary = {
+            "status": "skipped",
+            "reason": f"mask_storage={mask_storage}",
+            "encoding": "bitpacked_binary_v1",
+        }
+
+    if mask_storage in _MASK_STORAGES_WITH_RLE:
         rle_encode_workers = max(1, int(normalized_num_workers or 1))
         rle_source_zarr_path = zarr_path if zarr_path is not None and rle_encode_workers > 1 else None
         rle_source_run_path = (
@@ -3765,26 +3805,28 @@ def finalize_subject_mask_run(
                     },
                     progress_callback=_emit_rle_progress,
                 )
-        if mask_storage == "rle_v1":
-            del run_group["masks_roi"]
-            run_group.attrs["mask_store_encodings"] = ["component_rle_v1"]
-            run_group.attrs["mask_storage_encoding"] = "component_rle_v1"
-            run_group.attrs["masks_roi_materialized"] = False
-            mask_rle_summary["dense_cache_removed"] = True
-        else:
-            run_group.attrs["masks_roi_materialized"] = True
     else:
-        run_group.attrs["mask_store_encodings"] = ["dense_uint8"]
-        run_group.attrs["mask_storage_encoding"] = "dense_uint8"
-        run_group.attrs["masks_roi_materialized"] = True
-        run_group.attrs["mask_rle_materialized"] = False
         mask_rle_summary = {
             "status": "skipped",
-            "reason": "mask_storage=dense_uint8",
+            "reason": f"mask_storage={mask_storage}",
             "encoding": "component_rle_v1",
         }
+
+    if mask_storage in _MASK_STORAGES_REMOVE_DENSE:
+        if "masks_roi" in run_group:
+            del run_group["masks_roi"]
+        mask_bitpacked_summary["dense_cache_removed"] = mask_storage in _MASK_STORAGES_WITH_BITPACKED
+        mask_rle_summary["dense_cache_removed"] = mask_storage in _MASK_STORAGES_WITH_RLE
+
+    update_mask_storage_attrs(
+        run_group,
+        has_dense="masks_roi" in run_group,
+        has_bitpacked="mask_bitpacked" in run_group,
+        has_rle="mask_rle" in run_group,
+    )
     run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
     run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = mask_rle_validation_mode
+    run_group.attrs["smart_finalizer_mask_bitpacked_summary"] = dict(_json_safe(mask_bitpacked_summary))
     run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
 
     duration_seconds = float(time.perf_counter() - stage_start)
@@ -3821,6 +3863,7 @@ def finalize_subject_mask_run(
     run_group.attrs["smart_finalizer_postcompute_summary"] = dict(_json_safe(postcompute_summary))
     run_group.attrs["smart_finalizer_mask_storage"] = mask_storage
     run_group.attrs["smart_finalizer_mask_rle_validation_mode"] = mask_rle_validation_mode
+    run_group.attrs["smart_finalizer_mask_bitpacked_summary"] = dict(_json_safe(mask_bitpacked_summary))
     run_group.attrs["smart_finalizer_mask_rle_summary"] = dict(_json_safe(mask_rle_summary))
     run_group.attrs["smart_finalizer_execution_backend"] = execution_backend
     run_group.attrs["dask_execution_enabled"] = execution_backend == _DASK_WORKER_EXECUTION_BACKEND
@@ -3847,6 +3890,7 @@ def finalize_subject_mask_run(
             "source_seed_masks_status": "retained" if bool(retain_source_seeds) else "omitted",
             "mask_storage": mask_storage,
             "mask_rle_validation_mode": mask_rle_validation_mode,
+            "mask_bitpacked_summary": dict(_json_safe(mask_bitpacked_summary)),
             "mask_rle_summary": dict(_json_safe(mask_rle_summary)),
             "postcompute_backend": postcompute_backend,
             "postcompute_chunk_size": int(normalized_postcompute_chunk_size),
@@ -4009,9 +4053,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="dense_uint8",
         help=(
             "Physical mask storage to materialize. dense_uint8 preserves the historical masks_roi-only "
-            "surface; dense_and_rle additionally writes mask_rle/components for compact publication and "
-            "selective reads; rle_v1 writes mask_rle/components and removes the dense masks_roi "
-            "compatibility cache after finalization/postcompute completes."
+            "surface; dense_and_bitpacked additionally writes mask_bitpacked for editable compact "
+            "publication; bitpacked_v1 writes mask_bitpacked and removes the dense masks_roi cache; "
+            "dense_and_rle additionally writes mask_rle/components for compact final products and "
+            "selective reads; rle_v1 writes mask_rle/components and removes the dense masks_roi cache; "
+            "dense_bitpacked_and_rle writes all three physical surfaces for validation/audit runs."
         ),
     )
     parser.add_argument(
