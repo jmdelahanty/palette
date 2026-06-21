@@ -525,6 +525,89 @@ def _write_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
     group.create_array(name, data=arr, chunks=_chunks_for(arr), overwrite=True)
 
 
+def _write_spatial_occupancy(
+    run: zarr.Group,
+    result: DetectionOccupancyResult,
+) -> None:
+    if not result.spatial_occupancy:
+        return
+    spatial_parent = run.require_group("spatial_occupancy")
+    spatial_parent.attrs.update(
+        json_attr_safe(
+            {
+                "description": "Detection-derived spatial occupancy summaries by stimulus epoch window.",
+                "schema_id": SPATIAL_OCCUPANCY_SCHEMA_ID,
+                "schema_version": SPATIAL_OCCUPANCY_SCHEMA_VERSION,
+                "row_axis": "stimulus_epoch_windows",
+                "column_axis": "occupancy_zones",
+            }
+        )
+    )
+    for zone_set in result.spatial_occupancy:
+        if zone_set.zone_set_id in spatial_parent:
+            del spatial_parent[zone_set.zone_set_id]
+        group = spatial_parent.create_group(zone_set.zone_set_id)
+        group.attrs.update(
+            json_attr_safe(
+                {
+                    "schema_id": SPATIAL_OCCUPANCY_SCHEMA_ID,
+                    "schema_version": SPATIAL_OCCUPANCY_SCHEMA_VERSION,
+                    "zone_set_id": zone_set.zone_set_id,
+                    "zone_set_source": zone_set.zone_set_source,
+                    "zone_set_source_ref": zone_set.zone_set_source_ref,
+                    "coordinate_frame": zone_set.coordinate_frame,
+                    "coordinate_origin": zone_set.coordinate_origin,
+                    "x_axis_direction": zone_set.x_axis_direction,
+                    "y_axis_direction": zone_set.y_axis_direction,
+                    "source_detection_path": result.source_detection_path,
+                    "source_stimulus_epoch_path": result.source_stimulus_epoch_path,
+                    "detection_selection_policy": zone_set.detection_selection_policy,
+                    "zone_overlap_policy": zone_set.zone_overlap_policy,
+                    "time_basis": zone_set.time_basis,
+                    "width": int(result.width),
+                    "height": int(result.height),
+                    "fps": float(result.fps),
+                }
+            )
+        )
+
+        zone_spec = group.require_group("zone_spec")
+        _write_array(zone_spec, "zone_id", _bytes_array(zone_set.zone_id))
+        _write_array(zone_spec, "label_bytes", _bytes_array(zone_set.label))
+        _write_array(zone_spec, "geometry_type", _bytes_array(zone_set.geometry_type))
+        _write_array(zone_spec, "display_order", zone_set.display_order)
+        _write_array(zone_spec, "bounds_xyxy", zone_set.bounds_xyxy)
+        zone_spec.attrs.update(
+            json_attr_safe(
+                {
+                    "row_axis": "occupancy_zones",
+                    "text_encoding": "null_terminated_utf8_uint8_matrix",
+                    "bounds_xyxy_description": "[x_min, y_min, x_max, y_max]; max bounds are exclusive.",
+                }
+            )
+        )
+
+        summary = group.require_group("summary")
+        _write_array(summary, "frame_count", zone_set.frame_count)
+        _write_array(summary, "time_s", zone_set.time_s)
+        _write_array(summary, "fraction_of_epoch", zone_set.fraction_of_epoch)
+        _write_array(summary, "fraction_of_detected", zone_set.fraction_of_detected)
+        _write_array(summary, "detected_frame_count", zone_set.detected_frame_count)
+        _write_array(summary, "missing_frame_count", zone_set.missing_frame_count)
+        _write_array(summary, "total_span_frames", zone_set.total_span_frames)
+        _write_array(summary, "coverage_pct", zone_set.coverage_pct)
+        summary.attrs.update(
+            json_attr_safe(
+                {
+                    "axis_order": ["window", "zone"],
+                    "frame_count_description": "Selected valid detection frames per epoch window and zone.",
+                    "fraction_of_epoch_description": "frame_count divided by total epoch span frames.",
+                    "fraction_of_detected_description": "frame_count divided by selected detected frames.",
+                }
+            )
+        )
+
+
 def render_occupancy_png(result: DetectionOccupancyResult, *, dpi: int = 150) -> bytes:
     n = len(result.windows)
     fig, axes = plt.subplots(1, n, figsize=(5.2 * n, 4.8), squeeze=False, constrained_layout=True)
@@ -629,6 +712,8 @@ def write_detection_occupancy_run(
             }
         )
 
+        _write_spatial_occupancy(run, result)
+
         git = get_git_info(Path(__file__).resolve().parents[3])
         source_refs = {
             "source_detection_path": result.source_detection_path,
@@ -640,6 +725,7 @@ def write_detection_occupancy_run(
             "bin_size": int(result.bin_size),
             "smooth_sigma": float(result.smooth_sigma),
             "min_score": result.min_score,
+            "spatial_occupancy_zone_sets": [zone_set.zone_set_id for zone_set in result.spatial_occupancy],
         }
         summary = {
             "window_labels": [w.label for w in result.windows],
@@ -647,6 +733,16 @@ def write_detection_occupancy_run(
             "covered_frame_count": result.covered_frame_count.tolist(),
             "total_span_frames": result.total_span_frames.tolist(),
             "coverage_pct": result.coverage_pct.tolist(),
+            "spatial_occupancy_zone_sets": {
+                zone_set.zone_set_id: {
+                    "zone_id": list(zone_set.zone_id),
+                    "frame_count": zone_set.frame_count.tolist(),
+                    "time_s": zone_set.time_s.tolist(),
+                    "fraction_of_epoch": zone_set.fraction_of_epoch.tolist(),
+                    "fraction_of_detected": zone_set.fraction_of_detected.tolist(),
+                }
+                for zone_set in result.spatial_occupancy
+            },
         }
         attrs = {
             "schema_id": SCHEMA_ID,
@@ -749,6 +845,21 @@ def _result_payload(result: DetectionOccupancyResult) -> dict[str, Any]:
             }
             for i, w in enumerate(result.windows)
         ],
+        "spatial_occupancy": [
+            {
+                "zone_set_id": zone_set.zone_set_id,
+                "zone_set_source": zone_set.zone_set_source,
+                "zone_id": list(zone_set.zone_id),
+                "frame_count": zone_set.frame_count.tolist(),
+                "time_s": zone_set.time_s.tolist(),
+                "fraction_of_epoch": zone_set.fraction_of_epoch.tolist(),
+                "fraction_of_detected": zone_set.fraction_of_detected.tolist(),
+                "detected_frame_count": zone_set.detected_frame_count.tolist(),
+                "missing_frame_count": zone_set.missing_frame_count.tolist(),
+                "coverage_pct": zone_set.coverage_pct.tolist(),
+            }
+            for zone_set in result.spatial_occupancy
+        ],
     }
 
 
@@ -805,6 +916,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"detections={int(result.detection_count[i])} "
                 f"coverage={float(result.coverage_pct[i]):.1f}%"
             )
+        for zone_set in result.spatial_occupancy:
+            print(f"spatial_occupancy/{zone_set.zone_set_id}: zones={', '.join(zone_set.zone_id)}")
+            for i, window in enumerate(result.windows):
+                counts = ", ".join(
+                    f"{zone}={int(zone_set.frame_count[i, zone_idx])}"
+                    for zone_idx, zone in enumerate(zone_set.zone_id)
+                )
+                print(f"  {window.label}: {counts}")
         if path:
             print(f"wrote: {path}")
         else:
