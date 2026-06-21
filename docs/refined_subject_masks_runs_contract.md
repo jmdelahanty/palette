@@ -287,6 +287,15 @@ Current implementation note:
 - generated LR eye components record `eyes_union` as the source channel plus
   assignment method/keypoint provenance; the refined-subject finalizer then
   writes the standard eye geometry/QC surface from the generated LR masks
+- current production finalization treats assignment-time eye ellipse fitting as
+  the authoritative refined-subject eye-geometry measurement. When assignment
+  geometry is complete, the finalizer must write
+  `components/eye_left|eye_right/geometry/*` and
+  `relations/eye_pair/metrics/*` from the assignment payload with
+  `eye_geometry_postcompute_backend = "assignment_reuse"` and
+  `eye_geometry_source_measurement =
+  "eyes_union_assignment_measure_mask"`. A second eye-ellipse pass over saved
+  masks is a repair/backfill fallback, not the normal production path.
 - if keypoint lineage is missing or the assignment produces no usable LR rows,
   assembly fails closed instead of creating a misleading refined eye surface
 - it now accepts `refined_subject_masks_runs/<run>` as an explicit component

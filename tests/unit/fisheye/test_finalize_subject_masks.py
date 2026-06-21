@@ -620,6 +620,37 @@ def test_finalize_subject_mask_run_can_write_full_metrics_and_eye_geometry(monke
     assert run["components/subject_body/metrics"].attrs["metric_level"] == "full"
 
 
+def test_finalize_subject_mask_run_writes_assignment_reuse_eye_geometry_without_recompute(monkeypatch) -> None:
+    _patch_refined_subject_provenance(monkeypatch)
+    root = _build_probability_root()
+
+    def _raise_if_fallback_recompute(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("eye geometry fallback recompute should not run when assignment geometry is complete")
+
+    monkeypatch.setattr(mod, "write_refined_subject_eye_geometry", _raise_if_fallback_recompute)
+
+    summary = mod.finalize_subject_mask_run(
+        root,
+        subject_run="subject_probs_001",
+        refined_run="refined_subject_masks_assignment_reuse_geometry",
+        chunk_size=1,
+        write_eye_geometry=True,
+    )
+
+    assert summary["write_eye_geometry"] is True
+    phase_seconds = summary["timing_summary"]["phase_seconds"]
+    assert "write_eye_geometry_from_assignment" in phase_seconds
+    assert "write_eye_geometry" not in phase_seconds
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_assignment_reuse_geometry"]
+    assert run.attrs["eye_geometry_status"] == "computed"
+    assert run.attrs["eye_geometry_postcompute_backend"] == "assignment_reuse"
+    assert run.attrs["eye_geometry_source_measurement"] == "eyes_union_assignment_measure_mask"
+    assert run["components/eye_left/geometry"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
+    assert run["components/eye_right/geometry"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
+    assert run["relations/eye_pair/metrics"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
+
+
 def test_finalize_subject_mask_run_can_write_body_and_swim_contours(monkeypatch) -> None:
     _patch_refined_subject_provenance(monkeypatch)
     root = _build_probability_root()
@@ -666,6 +697,14 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
         write_component_contours=True,
         defer_registry_status=True,
     )
+    postcompute_calls: list[dict[str, object]] = []
+    original_postcompute = mod._run_sharded_refined_subject_postcompute
+
+    def _record_postcompute_call(*args, **kwargs):  # noqa: ANN002, ANN003
+        postcompute_calls.append(dict(kwargs))
+        return original_postcompute(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_run_sharded_refined_subject_postcompute", _record_postcompute_call)
     sharded_summary = mod.finalize_subject_masks(
         zarr_path,
         subject_run="subject_probs_001",
@@ -697,12 +736,17 @@ def test_finalize_subject_masks_can_write_postcompute_with_process_shards(
     assert sharded.attrs["smart_finalizer_postcompute_num_workers"] == 1
     assert sharded.attrs["eye_geometry_status"] == "computed"
     assert sharded.attrs["eye_geometry_postcompute_backend"] == "assignment_reuse"
+    assert sharded.attrs["eye_geometry_source_measurement"] == "eyes_union_assignment_measure_mask"
     assert sharded.attrs["component_contours_status"] == "computed"
     assert sharded.attrs["component_contours_postcompute_backend"] == "process_shards"
     assert "write_eye_geometry_from_assignment" in sharded.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
     assert "postcompute_process_shards" in sharded.attrs["smart_finalizer_timing_summary"]["phase_seconds"]
+    assert postcompute_calls
+    assert postcompute_calls[0]["write_eye_geometry"] is False
+    assert postcompute_calls[0]["write_component_contours"] is True
 
     for component in ("eye_left", "eye_right"):
+        assert sharded[f"components/{component}/geometry"].attrs["source_measurement"] == "eyes_union_assignment_measure_mask"
         np.testing.assert_allclose(
             np.asarray(serial[f"components/{component}/geometry/ellipse_params"][:], dtype=np.float32),
             np.asarray(sharded[f"components/{component}/geometry/ellipse_params"][:], dtype=np.float32),
@@ -1089,6 +1133,7 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     progress_records = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
     aggregate_events = [item for item in progress_records if item["event"] == "process_shards_submitted"]
     shard_events = [item for item in progress_records if item["event"] == "process_shard_submitted"]
+    shard_chunk_events = [item for item in progress_records if item["event"] == "process_shard_chunk_completed"]
     assert aggregate_events
     aggregate = aggregate_events[-1]
     expected_shards = int(aggregate["shard_count"])
@@ -1100,6 +1145,13 @@ def test_finalize_subject_masks_process_shards_writes_disjoint_rows(monkeypatch,
     assert row_ranges[0][0] == 0
     assert row_ranges[-1][1] == masks.shape[0]
     assert all(left[1] == right[0] for left, right in zip(row_ranges, row_ranges[1:]))
+    expected_chunks = sum(int(item["chunk_count"]) for item in shard_events)
+    assert len(shard_chunk_events) == expected_chunks
+    assert all(int(item["chunk_ordinal"]) >= 1 for item in shard_chunk_events)
+    assert all(int(item["chunk_ordinal"]) <= int(item["chunk_count"]) for item in shard_chunk_events)
+    assert all(int(item["rows_completed_in_shard"]) > 0 for item in shard_chunk_events)
+    assert all(int(item["shard_rows_total"]) > 0 for item in shard_chunk_events)
+    assert all(float(item["duration_seconds"]) >= 0.0 for item in shard_chunk_events)
 
 
 def test_finalize_subject_masks_process_shards_can_write_direct_bitpacked(

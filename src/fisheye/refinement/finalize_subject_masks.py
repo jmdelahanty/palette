@@ -140,6 +140,8 @@ _POSTCOMPUTE_BACKENDS = ("serial", "process_shards")
 _SERIAL_POSTCOMPUTE_BACKEND = "serial"
 _PROCESS_SHARD_POSTCOMPUTE_BACKEND = "process_shards"
 _ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND = "assignment_reuse"
+_ASSIGNMENT_REUSE_EYE_GEOMETRY_SOURCE = "eyes_union_assignment_measure_mask"
+_POSTCOMPUTE_EYE_GEOMETRY_SOURCE = "refined_subject_component_mask_measure_mask"
 _MASK_STORAGE_CHOICES = (
     "dense_uint8",
     "dense_and_bitpacked",
@@ -2131,6 +2133,11 @@ def _write_sharded_eye_geometry(
         return {"status": "skipped", "reason": "missing_mask_store", "error": str(exc)}
 
     total_rois = int(mask_store.n_rows)
+    geometry_source = (
+        _ASSIGNMENT_REUSE_EYE_GEOMETRY_SOURCE
+        if str(postcompute_backend) == _ASSIGNMENT_REUSE_POSTCOMPUTE_BACKEND
+        else _POSTCOMPUTE_EYE_GEOMETRY_SOURCE
+    )
     ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros((total_rois, 2), dtype=bool)
     separation_px = np.full((total_rois,), np.nan, dtype=np.float32)
@@ -2155,6 +2162,7 @@ def _write_sharded_eye_geometry(
         geometry_group.attrs["geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
         geometry_group.attrs["geometry_method"] = "fit_ellipse_from_refined_subject_component_mask"
         geometry_group.attrs["source_mask_component"] = component_name
+        geometry_group.attrs["source_measurement"] = geometry_source
         geometry_group.attrs["updated_at_utc"] = _utc_now()
         geometry_group.attrs["postcompute_backend"] = str(postcompute_backend)
         geometry_group.create_array(
@@ -2185,6 +2193,7 @@ def _write_sharded_eye_geometry(
     relation_metrics.attrs["relation_schema_id"] = EYE_PAIR_RELATION_SCHEMA_ID
     relation_metrics.attrs["relation_components"] = list(_EYE_COMPONENTS)
     relation_metrics.attrs["relation_method"] = "ellipse_centroid_distance"
+    relation_metrics.attrs["source_measurement"] = geometry_source
     relation_metrics.attrs["updated_at_utc"] = _utc_now()
     relation_metrics.attrs["postcompute_backend"] = str(postcompute_backend)
     relation_metrics.create_array("separation_px", data=separation_px, chunks=(max(1, int(chunk_rois)),), overwrite=True)
@@ -2196,6 +2205,7 @@ def _write_sharded_eye_geometry(
     )
 
     run_group.attrs["eye_geometry_schema_id"] = EYE_GEOMETRY_SCHEMA_ID
+    run_group.attrs["eye_geometry_source_measurement"] = geometry_source
     run_group.attrs["eye_geometry_updated_at_utc"] = _utc_now()
     run_group.attrs["eye_geometry_status"] = "computed"
     run_group.attrs["eye_geometry_postcompute_backend"] = str(postcompute_backend)
@@ -2204,6 +2214,7 @@ def _write_sharded_eye_geometry(
         "status": "updated",
         "roi_count": total_rois,
         "components": list(_EYE_COMPONENTS),
+        "source_measurement": geometry_source,
         "ellipse_success_count": int(np.count_nonzero(ellipse_success)),
         "pair_success_count": int(np.count_nonzero(separation_valid)),
     }
@@ -3128,11 +3139,20 @@ def _process_and_write_finalizer_shard(
     assignment_keypoint_group: Optional[str],
     assignment_keypoints_run: Optional[str],
     retain_source_seeds: bool,
+    shard_index: int,
+    total_shards: int,
+    worker_count: int,
+    progress_jsonl: Optional[str],
+    progress_start_time: Optional[float],
 ) -> list[dict[str, object]]:
     root = open_zarr_root(zarr_path, mode="a")
     source = _load_source_subject_mask_run(root, subject_run)
     run_group = root["refined_subject_masks_runs"][refined_run]
     component_names = tuple(str(name) for name in component_names)
+    progress = _ProgressJsonlReporter(
+        Path(progress_jsonl).expanduser().resolve() if progress_jsonl else None,
+        start_time=float(progress_start_time) if progress_start_time is not None else time.perf_counter(),
+    )
 
     eye_assignment_context: _EyeAssignmentContext | None = None
     if set(_EYE_COMPONENTS).issubset(component_names):
@@ -3144,21 +3164,60 @@ def _process_and_write_finalizer_shard(
         )
 
     results: list[dict[str, object]] = []
-    for chunk_index, start_row, stop_row in chunk_specs:
-        results.append(
-            _process_and_write_finalizer_chunk_open(
+    rows_completed_in_shard = 0
+    shard_start = int(chunk_specs[0][1]) if chunk_specs else 0
+    shard_stop = int(chunk_specs[-1][2]) if chunk_specs else 0
+    for chunk_ordinal, (chunk_index, start_row, stop_row) in enumerate(chunk_specs, start=1):
+        chunk_start = int(start_row)
+        chunk_stop = int(stop_row)
+        try:
+            chunk_result = _process_and_write_finalizer_chunk_open(
                 source=source,
                 run_group=run_group,
                 component_names=component_names,
                 required_raw_components=required_raw_components,
-                start_row=int(start_row),
-                stop_row=int(stop_row),
+                start_row=chunk_start,
+                stop_row=chunk_stop,
                 chunk_index=int(chunk_index),
                 metric_level=metric_level,
                 eye_assignment_context=eye_assignment_context,
                 retain_source_seeds=retain_source_seeds,
                 execution_backend=_PROCESS_SHARD_EXECUTION_BACKEND,
             )
+        except Exception as exc:
+            progress.emit(
+                "process_shard_chunk_failed",
+                shard_index=int(shard_index),
+                total_shards=int(total_shards),
+                worker_count=int(worker_count),
+                chunk_index=int(chunk_index),
+                chunk_ordinal=int(chunk_ordinal),
+                chunk_count=int(len(chunk_specs)),
+                start_row=chunk_start,
+                stop_row=chunk_stop,
+                shard_start_row=shard_start,
+                shard_stop_row=shard_stop,
+                error=repr(exc),
+            )
+            raise
+        results.append(chunk_result)
+        rows_completed_in_shard += chunk_stop - chunk_start
+        chunk_timing = dict(chunk_result.get("chunk_timing") or {})
+        progress.emit(
+            "process_shard_chunk_completed",
+            shard_index=int(shard_index),
+            total_shards=int(total_shards),
+            worker_count=int(worker_count),
+            chunk_index=int(chunk_index),
+            chunk_ordinal=int(chunk_ordinal),
+            chunk_count=int(len(chunk_specs)),
+            start_row=chunk_start,
+            stop_row=chunk_stop,
+            shard_start_row=shard_start,
+            shard_stop_row=shard_stop,
+            rows_completed_in_shard=int(rows_completed_in_shard),
+            shard_rows_total=int(shard_stop - shard_start),
+            duration_seconds=float(chunk_timing.get("total_seconds") or 0.0),
         )
     return results
 
@@ -3216,6 +3275,11 @@ def _compute_finalizer_process_shards(
                 assignment_keypoint_group=assignment_keypoint_group,
                 assignment_keypoints_run=assignment_keypoints_run,
                 retain_source_seeds=retain_source_seeds,
+                shard_index=int(shard_index),
+                total_shards=int(len(shards)),
+                worker_count=int(worker_count),
+                progress_jsonl=str(progress.path) if progress.path is not None else None,
+                progress_start_time=float(progress.start_time),
             )
             future_to_shard[future] = shard_payload
         completed = 0

@@ -373,9 +373,17 @@ still useful for ranking which repeated work to attack first.
   `eye_left`/`eye_right`. The smart finalizer carries those payloads through serial, Dask, and
   process-shard chunk results and writes the normal refined subject eye-geometry surface through
   the existing sharded geometry writer with `eye_geometry_postcompute_backend="assignment_reuse"`.
-  If assignment geometry shards are incomplete, the code falls back to the previous postcompute
-  path. Component contours for `subject_body` and `swim_bladder` still use the normal postcompute
-  path.
+  The persisted run also records
+  `eye_geometry_source_measurement="eyes_union_assignment_measure_mask"` and each eye geometry
+  group records the same `source_measurement`, so consumers can distinguish the normal reuse path
+  from repair/backfill geometry recomputation. If assignment geometry shards are incomplete, the
+  code falls back to the previous postcompute path. Component contours for `subject_body` and
+  `swim_bladder` still use the normal postcompute path.
+- Invariant pinned by tests: when assignment geometry is complete, finalization must not run the
+  fallback `write_refined_subject_eye_geometry(...)` path, and process-shard postcompute must be
+  called with `write_eye_geometry=false`. Eye geometry is important downstream, so the production
+  contract keeps ellipse fitting inside assignment for now and reuses that single measurement
+  instead of deferring ellipse QC to a separate later pass.
 - Local validation on a 512-row GoodCopBadCop slice with `process_shards`, `num_workers=4`,
   `write_eye_geometry=true`, and `write_component_contours=true` completed successfully:
   - finalizer wall time: 9.75s; reported finalizer duration: 9.66s; ~53 rows/s;
@@ -448,7 +456,11 @@ still useful for ranking which repeated work to attack first.
 - Operational note: `process_shards` now emits one `process_shard_submitted` progress JSONL record
   per planned shard, including `shard_index`, `start_row`, `stop_row`, `chunk_count`,
   `total_shards`, and `worker_count`. This does not change scheduling, but it makes future long
-  cluster jobs interpretable before the first large shard completes.
+  cluster jobs interpretable before the first large shard completes. Workers also emit
+  `process_shard_chunk_completed` records after each row chunk, including `chunk_ordinal`,
+  `rows_completed_in_shard`, `shard_rows_total`, and the chunk duration. These records are
+  best-effort telemetry only; the authoritative merge/failure path remains the driver-level
+  `process_shard_completed` / `process_shard_failed` events.
 
 ### Phase H: direct bitpacked compact output
 
@@ -481,17 +493,57 @@ still useful for ranking which repeated work to attack first.
   - `write_component_contours`: 0.45s;
   - direct bitpacked writes: ~0.08-0.10s per component across the two 256-row chunks;
   - `validate_bitpacked_mask_store`: 0.002s.
-- Next required benchmark: rerun the full-recording cluster canary after deploying this direct
-  compact output slice. The currently running `subject_mask_finalizer_bitpacked_canary_20260621_142426`
-  was submitted before this direct-write patch and is a dense-first compact baseline.
+- Full-recording cluster canary comparisons:
+  - Dense-output baseline (`subject_mask_finalizer_opt_canary_20260621_140111`):
+    120,221 rows in 739.24s, or 162.63 rows/s; final output was dense `masks_roi`.
+  - Dense-first compact baseline (`subject_mask_finalizer_bitpacked_canary_20260621_142426`):
+    submitted before direct-write support, produced compact output only after writing dense masks
+    and converting/deleting them.
+  - 120,221 rows finalized in 1226.87s, or 97.99 rows/s;
+  - final on-disk state is compact-only (`mask_storage=bitpacked_v1`,
+    `mask_storage_encoding=bitpacked_binary_v1`, `masks_roi_materialized=false`);
+  - however, the run still paid dense-first cost: `write_masks_roi_*` was ~141-145s per
+    component in summed attribution, and the late `write_bitpacked_mask_store` phase took
+    490.22s after contour writing.
+  - Direct compact canary (`subject_mask_finalizer_direct_bitpacked_canary_20260621_144037`):
+    120,221 rows in 683.52s, or 175.88 rows/s; final output was compact-only with
+    `mask_storage=bitpacked_v1`, `mask_storage_encoding=bitpacked_binary_v1`,
+    `masks_roi_materialized=false`.
+  - Direct canary evidence: `write_bitpacked_mask_store` was absent; `validate_bitpacked_mask_store`
+    took 0.003s; direct per-component writes appeared as `write_mask_bitpacked_subject_body`
+    49.08s, `write_mask_bitpacked_swim_bladder` 49.30s, `write_mask_bitpacked_eye_left` 48.41s,
+    and `write_mask_bitpacked_eye_right` 48.69s in summed attribution.
+  - Interpretation: direct compact writing solved the dense write + convert/delete regression.
+    The compact-only path is now faster than the dense-output baseline for this canary
+    (175.88 rows/s vs. 162.63 rows/s), with a much smaller final physical surface. Remaining
+    bottlenecks are compute, not compact publication: `process_shard_compute` 561.59s,
+    `eye_assignment` 530.37s, and `write_component_contours` 101.64s.
 
 ### Phase E: contract decision, not optimization
 
 - Decide whether ellipse failure should remain part of assignment status or become a later QC
   status. Moving it out of assignment could make assignment much cheaper, but it changes the
   meaning of `assigned` vs `assigned_needs_review`.
-- Do not change this in the optimization slice. Write a separate contract proposal if we want
-  assignment to mean only "left/right anatomical ownership resolved" while QC means "shape passed".
+- Do not change production behavior in the optimization slice. If we want assignment to mean only
+  "left/right anatomical ownership resolved" while QC means "shape passed", write a separate
+  contract proposal.
+- Diagnostic support now exists: `assign_eyes_union_to_lr(..., measure_ellipses=False)` is opt-in,
+  keeps production defaults unchanged, and is exposed by
+  `fisheye.diagnostics.benchmark_eye_assignment_split` as
+  `standard_assignment_no_ellipse_qc`. Use `--skip-component-fast-path-assignment` when the goal is
+  to benchmark this contract question without also rerunning the disabled component-fast-path
+  candidate.
+- Local real-slice GoodCopBadCop result, 1024 rows from
+  `subject_masks_unet_registry_subject_masks_bitpacked_only_canary_20260621_01` with explicit
+  `refined_keypoints_runs/refined_keypoints_2026-06-18_15-21-37`:
+  - standard assignment: best 2.60s, ~394 rows/s;
+  - no-ellipse-QC assignment: best 1.31s, ~781 rows/s;
+  - masks were byte-identical (`mask_pixels_eye_left=0`, `mask_pixels_eye_right=0`);
+  - semantic delta was exactly the ellipse-QC contract: 5 rows changed from
+    `assigned_needs_review` to `assigned`, and ellipse geometry/success was intentionally absent.
+- Interpretation: deferring ellipse QC could roughly double assignment throughput on the tested
+  slice, but only by changing the meaning of assignment status/reason labels. Treat this as a
+  contract migration, not a hidden performance tweak.
 
 ### Benchmark ladder
 

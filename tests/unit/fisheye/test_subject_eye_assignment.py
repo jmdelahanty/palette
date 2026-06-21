@@ -275,6 +275,48 @@ def test_assign_eyes_union_records_subphase_timings() -> None:
     assert set(result.eye_geometry["contours"]) == {"eye_left", "eye_right"}
 
 
+def test_assign_eyes_union_can_skip_ellipse_measurement_for_diagnostics() -> None:
+    union = np.zeros((2, 32, 32), dtype=np.uint8)
+    union[0, 8:16, 7:15] = 1
+    union[0, 8:16, 18:26] = 1
+    union[1, 10:18, 7:15] = 1
+    union[1, 10:18, 18:26] = 1
+
+    keypoints = np.zeros((2, 5, 2), dtype=np.float32)
+    keypoints[:, 0, :] = np.asarray([11.0, 12.0], dtype=np.float32)
+    keypoints[:, 1, :] = np.asarray([22.0, 12.0], dtype=np.float32)
+    success = np.ones((2,), dtype=bool)
+
+    measured = assign_eyes_union_to_lr(
+        union,
+        keypoints_roi=keypoints,
+        keypoint_success=success,
+        eye_keypoint_indices=(0, 1),
+        split_batch_size=2,
+    )
+    skipped = assign_eyes_union_to_lr(
+        union,
+        keypoints_roi=keypoints,
+        keypoint_success=success,
+        eye_keypoint_indices=(0, 1),
+        split_batch_size=2,
+        measure_ellipses=False,
+    )
+
+    assert measured.summary["ellipse_measurement_requested"] is True
+    assert skipped.summary["ellipse_measurement_requested"] is False
+    assert "measure_ellipse" in measured.phase_seconds
+    assert "measure_ellipse" not in skipped.phase_seconds
+    for component in ("eye_left", "eye_right"):
+        np.testing.assert_array_equal(skipped.masks[component], measured.masks[component])
+        np.testing.assert_array_equal(skipped.reason_labels[component], measured.reason_labels[component])
+    np.testing.assert_array_equal(skipped.assignment_status, measured.assignment_status)
+    assert not np.asarray(skipped.eye_geometry["ellipse_success"], dtype=bool).any()
+    assert np.isnan(np.asarray(skipped.eye_geometry["ellipse_params"], dtype=np.float32)).all()
+    assert all(item is None for item in skipped.eye_geometry["contours"]["eye_left"])
+    assert all(item is None for item in skipped.eye_geometry["contours"]["eye_right"])
+
+
 def test_component_fast_path_assignment_matches_standard_assignment() -> None:
     union = np.zeros((4, 48, 48), dtype=np.uint8)
     union[0, 10:20, 7:17] = 1

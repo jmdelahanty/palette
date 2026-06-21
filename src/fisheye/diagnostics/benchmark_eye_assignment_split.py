@@ -241,6 +241,7 @@ def _run_assignment_once(
     success: np.ndarray,
     *,
     use_component_fast_path: bool,
+    measure_ellipses: bool,
     batch_size: int,
 ):
     keypoints = _assignment_inputs(left, right)
@@ -252,6 +253,7 @@ def _run_assignment_once(
         eye_keypoint_indices=(0, 1),
         split_batch_size=int(batch_size),
         use_component_fast_path=bool(use_component_fast_path),
+        measure_ellipses=bool(measure_ellipses),
     )
     return result, float(time.perf_counter() - started)
 
@@ -264,6 +266,7 @@ def _benchmark_assignment(
     success: np.ndarray,
     *,
     use_component_fast_path: bool,
+    measure_ellipses: bool,
     batch_size: int,
     repeat: int,
 ) -> dict[str, object]:
@@ -276,6 +279,7 @@ def _benchmark_assignment(
             right,
             success,
             use_component_fast_path=bool(use_component_fast_path),
+            measure_ellipses=bool(measure_ellipses),
             batch_size=int(batch_size),
         )
         timings.append(float(seconds))
@@ -289,6 +293,30 @@ def _benchmark_assignment(
         "best_seconds": best,
         "rows_per_second": rows_per_second,
         "summary": summary,
+    }
+
+
+def _assignment_delta(reference: object, candidate: object) -> dict[str, object]:
+    mismatches: dict[str, int] = {}
+    for component in ("eye_left", "eye_right"):
+        mismatches[f"mask_pixels_{component}"] = int(
+            np.count_nonzero(reference.masks[component] != candidate.masks[component])
+        )
+        mismatches[f"reason_labels_{component}"] = int(
+            np.count_nonzero(reference.reason_labels[component] != candidate.reason_labels[component])
+        )
+    mismatches["assignment_status"] = int(np.count_nonzero(reference.assignment_status != candidate.assignment_status))
+    mismatches["ellipse_success"] = int(
+        np.count_nonzero(
+            np.asarray(reference.eye_geometry["ellipse_success"], dtype=bool)
+            != np.asarray(candidate.eye_geometry["ellipse_success"], dtype=bool)
+        )
+    )
+    return {
+        "status": "match" if int(sum(mismatches.values())) == 0 else "semantic_delta",
+        "mismatches": mismatches,
+        "reference_status_counts": dict(reference.summary.get("status_counts") or {}),
+        "candidate_status_counts": dict(candidate.summary.get("status_counts") or {}),
     }
 
 
@@ -355,7 +383,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--assignment-repeat",
         type=int,
         default=0,
-        help="Also benchmark full assignment with and without component fast path.",
+        help="Also benchmark full assignment variants, including no-ellipse-QC diagnostic mode.",
+    )
+    parser.add_argument(
+        "--skip-component-fast-path-assignment",
+        action="store_true",
+        help=(
+            "When --assignment-repeat is set, skip the disabled component-fast-path assignment candidate. "
+            "Useful when benchmarking only the no-ellipse-QC diagnostic path."
+        ),
     )
     return parser
 
@@ -471,20 +507,35 @@ def main(argv: Optional[list[str]] = None) -> int:
             right,
             success,
             use_component_fast_path=False,
+            measure_ellipses=True,
             batch_size=int(args.batch_size),
         )
-        fast_assignment, _fast_seconds = _run_assignment_once(
+        no_ellipse_assignment, _no_ellipse_seconds = _run_assignment_once(
             union,
             left,
             right,
             success,
-            use_component_fast_path=True,
+            use_component_fast_path=False,
+            measure_ellipses=False,
             batch_size=int(args.batch_size),
         )
-        payload["assignment_parity"] = {
-            "component_fast_path": _assignment_parity(standard_assignment, fast_assignment)
+        assignment_parity: dict[str, object] = {}
+        if not bool(args.skip_component_fast_path_assignment):
+            fast_assignment, _fast_seconds = _run_assignment_once(
+                union,
+                left,
+                right,
+                success,
+                use_component_fast_path=True,
+                measure_ellipses=True,
+                batch_size=int(args.batch_size),
+            )
+            assignment_parity["component_fast_path"] = _assignment_parity(standard_assignment, fast_assignment)
+        payload["assignment_parity"] = assignment_parity
+        payload["assignment_deltas"] = {
+            "no_ellipse_qc": _assignment_delta(standard_assignment, no_ellipse_assignment)
         }
-        payload["assignment_benchmarks"] = [
+        assignment_benchmarks = [
             _benchmark_assignment(
                 "standard_assignment",
                 union,
@@ -492,20 +543,38 @@ def main(argv: Optional[list[str]] = None) -> int:
                 right,
                 success,
                 use_component_fast_path=False,
+                measure_ellipses=True,
                 batch_size=int(args.batch_size),
                 repeat=int(args.assignment_repeat),
             ),
             _benchmark_assignment(
-                "component_fast_path_assignment",
+                "standard_assignment_no_ellipse_qc",
                 union,
                 left,
                 right,
                 success,
-                use_component_fast_path=True,
+                use_component_fast_path=False,
+                measure_ellipses=False,
                 batch_size=int(args.batch_size),
                 repeat=int(args.assignment_repeat),
             ),
         ]
+        if not bool(args.skip_component_fast_path_assignment):
+            assignment_benchmarks.insert(
+                1,
+                _benchmark_assignment(
+                    "component_fast_path_assignment",
+                    union,
+                    left,
+                    right,
+                    success,
+                    use_component_fast_path=True,
+                    measure_ellipses=True,
+                    batch_size=int(args.batch_size),
+                    repeat=int(args.assignment_repeat),
+                ),
+            )
+        payload["assignment_benchmarks"] = assignment_benchmarks
     print(json.dumps(json_attr_safe(payload), sort_keys=True, indent=2))
     split_ok = all(str(item.get("status")) == "match" for item in parity.values())
     assignment_ok = True

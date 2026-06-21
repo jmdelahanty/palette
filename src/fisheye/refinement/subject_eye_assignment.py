@@ -383,6 +383,7 @@ def assign_eyes_union_to_lr(
     eye_keypoint_indices: tuple[int, int],
     split_batch_size: int = 32,
     use_component_fast_path: bool = False,
+    measure_ellipses: bool = True,
 ) -> EyesUnionAssignmentResult:
     """Convert raw ``eyes_union`` masks into canonical LR eye component masks.
 
@@ -390,6 +391,10 @@ def assign_eyes_union_to_lr(
     valid left/right eye keypoints. Failed rows emit empty LR masks plus reason
     labels so finalization can still create a reviewable refined run without
     pretending those rows are valid.
+
+    ``measure_ellipses=False`` is a diagnostic/benchmark mode for evaluating a
+    possible future contract where left/right assignment is separated from
+    ellipse-shape QC. Production callers should keep the default.
     """
 
     union = np.asarray(union_masks, dtype=np.uint8)
@@ -514,32 +519,33 @@ def assign_eyes_union_to_lr(
                     left_masks[row_idx] = selected_left.astype(np.uint8, copy=False)
                     right_masks[row_idx] = selected_right.astype(np.uint8, copy=False)
                     tags.append("split_by_keypoint")
-                    phase_start = time.perf_counter()
-                    left_success, _left_ellipse, _left_centroid, _left_contour, left_failure = _measure_mask(
-                        left_masks[row_idx]
-                    )
-                    right_success, _right_ellipse, _right_centroid, _right_contour, right_failure = _measure_mask(
-                        right_masks[row_idx]
-                    )
-                    ellipse_params[row_idx, 0] = np.asarray(_left_ellipse, dtype=np.float32)
-                    ellipse_params[row_idx, 1] = np.asarray(_right_ellipse, dtype=np.float32)
-                    ellipse_success[row_idx, 0] = bool(left_success)
-                    ellipse_success[row_idx, 1] = bool(right_success)
-                    centroids[row_idx, 0] = np.asarray(_left_centroid, dtype=np.float32)
-                    centroids[row_idx, 1] = np.asarray(_right_centroid, dtype=np.float32)
-                    contours["eye_left"][row_idx] = _left_contour
-                    contours["eye_right"][row_idx] = _right_contour
-                    _add_phase(phase_seconds, "measure_ellipse", phase_start)
-                    if not bool(left_success):
-                        tags.append("ellipse_fail_left")
-                        if left_failure:
-                            tags.append(f"{left_failure}_left")
-                    if not bool(right_success):
-                        tags.append("ellipse_fail_right")
-                        if right_failure:
-                            tags.append(f"{right_failure}_right")
-                    if not bool(left_success and right_success):
-                        status = "assigned_needs_review"
+                    if measure_ellipses:
+                        phase_start = time.perf_counter()
+                        left_success, _left_ellipse, _left_centroid, _left_contour, left_failure = _measure_mask(
+                            left_masks[row_idx]
+                        )
+                        right_success, _right_ellipse, _right_centroid, _right_contour, right_failure = _measure_mask(
+                            right_masks[row_idx]
+                        )
+                        ellipse_params[row_idx, 0] = np.asarray(_left_ellipse, dtype=np.float32)
+                        ellipse_params[row_idx, 1] = np.asarray(_right_ellipse, dtype=np.float32)
+                        ellipse_success[row_idx, 0] = bool(left_success)
+                        ellipse_success[row_idx, 1] = bool(right_success)
+                        centroids[row_idx, 0] = np.asarray(_left_centroid, dtype=np.float32)
+                        centroids[row_idx, 1] = np.asarray(_right_centroid, dtype=np.float32)
+                        contours["eye_left"][row_idx] = _left_contour
+                        contours["eye_right"][row_idx] = _right_contour
+                        _add_phase(phase_seconds, "measure_ellipse", phase_start)
+                        if not bool(left_success):
+                            tags.append("ellipse_fail_left")
+                            if left_failure:
+                                tags.append(f"{left_failure}_left")
+                        if not bool(right_success):
+                            tags.append("ellipse_fail_right")
+                            if right_failure:
+                                tags.append(f"{right_failure}_right")
+                        if not bool(left_success and right_success):
+                            status = "assigned_needs_review"
 
         phase_start = time.perf_counter()
         reason = _join_reason_tags(tags)
@@ -564,6 +570,7 @@ def assign_eyes_union_to_lr(
         "component_fast_path_requested": bool(use_component_fast_path),
         "component_fast_path_rows": int(fast_path_rows.size),
         "distance_split_rows": int(fallback_rows.size),
+        "ellipse_measurement_requested": bool(measure_ellipses),
     }
     return EyesUnionAssignmentResult(
         masks={"eye_left": left_masks, "eye_right": right_masks},
