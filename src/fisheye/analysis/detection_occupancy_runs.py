@@ -48,6 +48,9 @@ METHOD = "detection_centroid_epoch_occupancy"
 METHOD_VERSION = "1"
 PARENT_NAME = "detection_occupancy_runs"
 PNG_ARTIFACT_NAME = "detection_occupancy_overview_png"
+SPATIAL_OCCUPANCY_SCHEMA_ID = "palette.spatial_occupancy_zones.v1"
+SPATIAL_OCCUPANCY_SCHEMA_VERSION = 1
+IMAGE_QUADRANTS_ZONE_SET_ID = "image_quadrants_v1"
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,33 @@ class OccupancyWindow:
     start_time_s: float
     end_time_s: float
     duration_s: float
+
+
+@dataclass(frozen=True)
+class SpatialOccupancyZoneSet:
+    zone_set_id: str
+    zone_set_source: str
+    zone_set_source_ref: str
+    coordinate_frame: str
+    coordinate_origin: str
+    x_axis_direction: str
+    y_axis_direction: str
+    detection_selection_policy: str
+    zone_overlap_policy: str
+    time_basis: str
+    zone_id: tuple[str, ...]
+    label: tuple[str, ...]
+    geometry_type: tuple[str, ...]
+    display_order: np.ndarray
+    bounds_xyxy: np.ndarray
+    frame_count: np.ndarray
+    time_s: np.ndarray
+    fraction_of_epoch: np.ndarray
+    fraction_of_detected: np.ndarray
+    detected_frame_count: np.ndarray
+    missing_frame_count: np.ndarray
+    total_span_frames: np.ndarray
+    coverage_pct: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -86,6 +116,7 @@ class DetectionOccupancyResult:
     covered_frame_count: np.ndarray
     total_span_frames: np.ndarray
     coverage_pct: np.ndarray
+    spatial_occupancy: tuple[SpatialOccupancyZoneSet, ...]
 
 
 def utc_run_name(prefix: str = "detection_occupancy") -> str:
@@ -164,6 +195,181 @@ def _read_epoch_windows(epoch_group: zarr.Group) -> tuple[OccupancyWindow, ...]:
     )
 
 
+def _window_frame_bounds(window: OccupancyWindow, *, fps: float, total_frames: int) -> tuple[int, int, int]:
+    start_frame = max(0, int(window.start_frame))
+    requested_end = int(window.end_frame)
+    if total_frames > 0:
+        end_frame = min(max(0, int(total_frames) - 1), requested_end)
+    else:
+        end_frame = requested_end
+    if end_frame < start_frame:
+        end_frame = start_frame
+    span = max(0, end_frame - start_frame + 1)
+    return start_frame, end_frame, span
+
+
+def _select_one_detection_per_frame(
+    frames: np.ndarray,
+    centers: np.ndarray,
+    *,
+    scores: Optional[np.ndarray],
+    width: int,
+    height: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    frame_values = np.asarray(frames, dtype=np.int64).reshape(-1)
+    center_values = np.asarray(centers, dtype=np.float64)
+    if center_values.ndim != 2 or center_values.shape[1] != 2:
+        raise ValueError("Detection centers must have shape (N, 2).")
+    if frame_values.shape[0] != center_values.shape[0]:
+        raise ValueError("Detection frames and centers disagree on row count.")
+
+    score_values: Optional[np.ndarray] = None
+    if scores is not None:
+        score_values = np.asarray(scores, dtype=np.float64).reshape(-1)
+        if score_values.shape[0] != frame_values.shape[0]:
+            raise ValueError("Score array length does not match frame_indices.")
+
+    valid = np.isfinite(center_values).all(axis=1)
+    valid &= center_values[:, 0] >= 0.0
+    valid &= center_values[:, 0] < float(width)
+    valid &= center_values[:, 1] >= 0.0
+    valid &= center_values[:, 1] < float(height)
+
+    selected_by_frame: dict[int, int] = {}
+    for row_idx in np.flatnonzero(valid):
+        frame = int(frame_values[row_idx])
+        if frame not in selected_by_frame:
+            selected_by_frame[frame] = int(row_idx)
+            continue
+        if score_values is None:
+            continue
+        current_idx = selected_by_frame[frame]
+        new_score = float(score_values[row_idx]) if np.isfinite(score_values[row_idx]) else float("-inf")
+        current_score = (
+            float(score_values[current_idx]) if np.isfinite(score_values[current_idx]) else float("-inf")
+        )
+        if new_score > current_score:
+            selected_by_frame[frame] = int(row_idx)
+
+    if not selected_by_frame:
+        return np.zeros(0, dtype=np.int64), np.zeros((0, 2), dtype=np.float64)
+
+    selected_indices = np.asarray(
+        [selected_by_frame[frame] for frame in sorted(selected_by_frame)],
+        dtype=np.int64,
+    )
+    return frame_values[selected_indices], center_values[selected_indices]
+
+
+def _build_image_quadrants_zone_set(
+    *,
+    windows: Sequence[OccupancyWindow],
+    frames: np.ndarray,
+    centers: np.ndarray,
+    scores: Optional[np.ndarray],
+    width: int,
+    height: int,
+    fps: float,
+    total_frames: int,
+) -> SpatialOccupancyZoneSet:
+    selected_frames, selected_centers = _select_one_detection_per_frame(
+        frames,
+        centers,
+        scores=scores,
+        width=width,
+        height=height,
+    )
+    zone_ids = ("top_left", "top_right", "bottom_left", "bottom_right")
+    labels = ("Top left", "Top right", "Bottom left", "Bottom right")
+    geometry_types = ("bounds_xyxy",) * 4
+    mid_x = float(width) / 2.0
+    mid_y = float(height) / 2.0
+    bounds_xyxy = np.asarray(
+        [
+            [0.0, 0.0, mid_x, mid_y],
+            [mid_x, 0.0, float(width), mid_y],
+            [0.0, mid_y, mid_x, float(height)],
+            [mid_x, mid_y, float(width), float(height)],
+        ],
+        dtype=np.float32,
+    )
+    n_windows = len(windows)
+    n_zones = len(zone_ids)
+    frame_count = np.zeros((n_windows, n_zones), dtype=np.int64)
+    detected_frame_count = np.zeros(n_windows, dtype=np.int64)
+    missing_frame_count = np.zeros(n_windows, dtype=np.int64)
+    total_span_frames = np.zeros(n_windows, dtype=np.int64)
+    coverage_pct = np.zeros(n_windows, dtype=np.float32)
+
+    if selected_centers.size:
+        zone_index = ((selected_centers[:, 1] >= mid_y).astype(np.int64) * 2) + (
+            selected_centers[:, 0] >= mid_x
+        ).astype(np.int64)
+    else:
+        zone_index = np.zeros(0, dtype=np.int64)
+
+    for window_idx, window in enumerate(windows):
+        start_frame, end_frame, span = _window_frame_bounds(window, fps=fps, total_frames=total_frames)
+        in_window = (selected_frames >= start_frame) & (selected_frames <= end_frame)
+        selected_zones = zone_index[in_window]
+        if selected_zones.size:
+            frame_count[window_idx] = np.bincount(selected_zones, minlength=n_zones)[:n_zones]
+        detected = int(selected_zones.shape[0])
+        detected_frame_count[window_idx] = detected
+        total_span_frames[window_idx] = int(span)
+        missing_frame_count[window_idx] = max(0, int(span) - detected)
+        coverage_pct[window_idx] = float(detected / span * 100.0) if span else 0.0
+
+    if fps > 0 and np.isfinite(fps):
+        time_s = frame_count.astype(np.float64) / float(fps)
+        time_basis = "frame_count / frame_rate_hz"
+    else:
+        time_s = np.zeros_like(frame_count, dtype=np.float64)
+        time_basis = "frame_count; fps unavailable"
+
+    fraction_of_epoch = np.divide(
+        frame_count,
+        total_span_frames[:, None],
+        out=np.zeros_like(frame_count, dtype=np.float64),
+        where=total_span_frames[:, None] > 0,
+    )
+    fraction_of_detected = np.divide(
+        frame_count,
+        detected_frame_count[:, None],
+        out=np.zeros_like(frame_count, dtype=np.float64),
+        where=detected_frame_count[:, None] > 0,
+    )
+
+    return SpatialOccupancyZoneSet(
+        zone_set_id=IMAGE_QUADRANTS_ZONE_SET_ID,
+        zone_set_source="predefined_spec:quadrants.v1",
+        zone_set_source_ref="palette:predefined_spatial_occupancy/quadrants.v1",
+        coordinate_frame="source_image_px",
+        coordinate_origin="top_left",
+        x_axis_direction="right",
+        y_axis_direction="down",
+        detection_selection_policy=(
+            "one_valid_detection_per_frame; finite source-image centroid; "
+            "highest score if available; first stable source row breaks ties"
+        ),
+        zone_overlap_policy="exclusive_bounds_xyxy; midlines_to_right_or_bottom",
+        time_basis=time_basis,
+        zone_id=zone_ids,
+        label=labels,
+        geometry_type=geometry_types,
+        display_order=np.arange(n_zones, dtype=np.int16),
+        bounds_xyxy=bounds_xyxy,
+        frame_count=frame_count,
+        time_s=time_s.astype(np.float32),
+        fraction_of_epoch=fraction_of_epoch.astype(np.float32),
+        fraction_of_detected=fraction_of_detected.astype(np.float32),
+        detected_frame_count=detected_frame_count,
+        missing_frame_count=missing_frame_count,
+        total_span_frames=total_span_frames,
+        coverage_pct=coverage_pct,
+    )
+
+
 def build_detection_occupancy_result(
     zarr_path: Path,
     *,
@@ -202,6 +408,7 @@ def build_detection_occupancy_result(
         keep = scores >= float(min_score)
         frames = frames[keep]
         centers = centers[keep]
+        scores = scores[keep]
 
     counts_list: list[np.ndarray] = []
     normalized_list: list[np.ndarray] = []
@@ -253,6 +460,18 @@ def build_detection_occupancy_result(
         coverage_values.append(float(coverage))
 
     recording_id = _attr_text(root.attrs, "recording_id", "recording_name") or Path(zarr_path).stem
+    spatial_occupancy = (
+        _build_image_quadrants_zone_set(
+            windows=windows,
+            frames=frames,
+            centers=centers,
+            scores=scores,
+            width=width,
+            height=height,
+            fps=fps,
+            total_frames=total_frames,
+        ),
+    )
     return DetectionOccupancyResult(
         zarr_path=str(zarr_path),
         recording_id=recording_id,
@@ -277,6 +496,7 @@ def build_detection_occupancy_result(
         covered_frame_count=np.asarray(covered_counts, dtype=np.int64),
         total_span_frames=np.asarray(span_counts, dtype=np.int64),
         coverage_pct=np.asarray(coverage_values, dtype=np.float32),
+        spatial_occupancy=spatial_occupancy,
     )
 
 
