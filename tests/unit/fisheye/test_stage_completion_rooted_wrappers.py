@@ -127,6 +127,47 @@ def test_refine_keypoints_status_opens_root_for_ok_run(monkeypatch, tmp_path: Pa
     assert captured["run_name"] == "refined_keypoints_001"
 
 
+def test_refine_keypoints_status_skips_when_registry_writes_disabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from fisheye.refinement import refine_keypoints
+
+    monkeypatch.setenv("PALETTE_DISABLE_REGISTRY_WRITES", "1")
+    monkeypatch.setattr(
+        refine_keypoints,
+        "open_zarr_group_direct",
+        lambda path, mode: (_ for _ in ()).throw(AssertionError("opened zarr root")),
+    )
+    monkeypatch.setattr(
+        refine_keypoints,
+        "Registry",
+        lambda path: (_ for _ in ()).throw(AssertionError("opened registry")),
+    )
+
+    context = refine_keypoints._StatusContext(
+        registry_path=tmp_path / "registry.sqlite",
+        dataset_id="dataset",
+        recording_id="rec",
+        zarr_path=tmp_path / "archive.zarr",
+    )
+    console = _Console()
+
+    wrote = refine_keypoints._emit_refined_keypoint_status(
+        context=context,
+        status="ok",
+        run_name="refined_keypoints_001",
+        method="refine_keypoints",
+        coverage_pct=91.0,
+        review_status_json={"status": "approved"},
+        details={"reason": "present"},
+        console=console,  # type: ignore[arg-type]
+    )
+
+    assert wrote is False
+    assert any("Registry writes disabled" in message for message in console.messages)
+
+
 def test_keypoints_batch_auto_review_sync_opens_root_for_ok_run(monkeypatch, tmp_path: Path) -> None:
     from fisheye.utils import run_keypoints_batch
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -87,6 +88,7 @@ REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
 LEGACY_KEYPOINT_GROUP = "keypoints_refined_runs"
 _STEP_NAME_REFINED_KEYPOINTS = "refined_keypoints"
 _STATUS_SOURCE = "runtime_refine_keypoints"
+_DISABLE_REGISTRY_WRITES_ENV = "PALETTE_DISABLE_REGISTRY_WRITES"
 _TRADITIONAL_HEURISTIC_METHOD = "traditional_pose"
 _TRADITIONAL_FLIP_FAMILY = "traditional_eye_flip_v1"
 _DEFAULT_CONFIDENCE_THRESHOLD = 0.3
@@ -224,6 +226,13 @@ def _resolve_status_dataset_id(
     return f"{session_uuid}:z{path_hash}"
 
 
+def _registry_writes_disabled() -> bool:
+    value = os.environ.get(_DISABLE_REGISTRY_WRITES_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _resolve_status_context(zarr_path: str) -> Optional[_StatusContext]:
     resolved_zarr = Path(zarr_path).expanduser().resolve()
     registry_path = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
@@ -358,6 +367,15 @@ def _emit_refined_keypoint_status(
     details: Dict[str, object],
     console: Optional[Console],
 ) -> bool:
+    if _registry_writes_disabled():
+        if console is not None:
+            console.print(
+                "[yellow]Registry writes disabled:[/yellow] "
+                f"skipping {_STEP_NAME_REFINED_KEYPOINTS} step-status sync for "
+                f"run {run_name or '<none>'!r}"
+            )
+        return False
+
     if context is None:
         return False
 
@@ -1027,9 +1045,17 @@ def create_refined_keypoint_run(
     start_time = time.perf_counter()
 
     root = zarr.open_group(zarr_path, mode="a", use_consolidated=False)
-    status_context = _resolve_status_context_from_root(root, zarr_path)
-    if status_context is None:
-        status_context = _resolve_status_context(zarr_path)
+    if _registry_writes_disabled():
+        status_context = None
+        console.print(
+            "[yellow]Registry writes disabled:[/yellow] "
+            "refined-keypoint run will be written to Zarr only; "
+            "run the batch registry finalizer to sync step status."
+        )
+    else:
+        status_context = _resolve_status_context_from_root(root, zarr_path)
+        if status_context is None:
+            status_context = _resolve_status_context(zarr_path)
     if "keypoints_runs" not in root or root["keypoints_runs"].attrs.get("latest") is None:
         _emit_refined_keypoint_status(
             context=status_context,

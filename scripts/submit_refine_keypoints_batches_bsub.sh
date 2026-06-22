@@ -24,6 +24,12 @@ AUTO_REVIEW_REVIEWER=""
 AUTO_REVIEW_NOTES=""
 AUTO_REVIEW_OVERWRITE=0
 OVERWRITE=0
+DEFER_REGISTRY=1
+SUBMIT_REGISTRY_FINALIZER=1
+REGISTRY_FINALIZER_QUEUE="short"
+REGISTRY_FINALIZER_NCORES=1
+REGISTRY_FINALIZER_MEM_GB=8
+REGISTRY_FINALIZER_WALLTIME="1:00"
 
 LOG_DIR=""
 RUN_ID=""
@@ -53,6 +59,10 @@ Refinement:
   --num-workers N           Worker count override
   --memory-limit VALUE      Worker memory limit override
   --overwrite               Do not skip when a matching refined run already exists
+  --inline-registry         Let each array task write registry status directly.
+                            Default is safer deferred registry finalization.
+  --no-registry-finalizer   With deferred registry writes, do not submit the
+                            dependent serial registry finalizer automatically
 
 Auto-review:
   --auto-review-full-recording
@@ -68,6 +78,14 @@ Resources:
   --mem-gb N                Memory per task in GB (default: 16)
   --walltime H:MM           Wall time per task (default: 1:00)
   --max-active N            Max concurrent array tasks (default: 4)
+  --registry-finalizer-queue NAME
+                            Queue for serial registry finalizer (default: short)
+  --registry-finalizer-ncores N
+                            CPU slots for registry finalizer (default: 1)
+  --registry-finalizer-mem-gb N
+                            Memory for registry finalizer in GB (default: 8)
+  --registry-finalizer-walltime H:MM
+                            Wall time for registry finalizer (default: 1:00)
 
 General:
   --log-dir PATH            Submission log dir (default: <root>/logs/refine_keypoints_batch/bsub_submissions)
@@ -105,6 +123,8 @@ while [[ $# -gt 0 ]]; do
     --num-workers) NUM_WORKERS="$2"; shift 2;;
     --memory-limit) MEMORY_LIMIT="$2"; shift 2;;
     --overwrite) OVERWRITE=1; shift;;
+    --inline-registry) DEFER_REGISTRY=0; shift;;
+    --no-registry-finalizer) SUBMIT_REGISTRY_FINALIZER=0; shift;;
     --auto-review-full-recording) AUTO_REVIEW=1; shift;;
     --auto-review-reviewer) AUTO_REVIEW_REVIEWER="$2"; shift 2;;
     --auto-review-notes) AUTO_REVIEW_NOTES="$2"; shift 2;;
@@ -112,6 +132,10 @@ while [[ $# -gt 0 ]]; do
     --log-dir) LOG_DIR="$2"; shift 2;;
     --run-id) RUN_ID="$2"; shift 2;;
     --repo-dir) REPO_DIR="$2"; shift 2;;
+    --registry-finalizer-queue) REGISTRY_FINALIZER_QUEUE="$2"; shift 2;;
+    --registry-finalizer-ncores) REGISTRY_FINALIZER_NCORES="$2"; shift 2;;
+    --registry-finalizer-mem-gb) REGISTRY_FINALIZER_MEM_GB="$2"; shift 2;;
+    --registry-finalizer-walltime) REGISTRY_FINALIZER_WALLTIME="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2;;
@@ -184,6 +208,7 @@ printf -v REFINE_ARGS_SHELL '%q ' "${REFINE_ARGS[@]}"
 JOB_SCRIPT="${RUN_DIR}/run_refine_keypoints_task.sh"
 REPO_DIR_Q="$(printf '%q' "$REPO_DIR")"
 REGISTRY_Q="$(printf '%q' "$REGISTRY")"
+DEFER_REGISTRY_Q="$(printf '%q' "$DEFER_REGISTRY")"
 cat > "$JOB_SCRIPT" <<JOBSCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
@@ -191,6 +216,7 @@ set -euo pipefail
 RUN_DIR="\$1"
 TARGETS_FILE="\${RUN_DIR}/zarr_paths.txt"
 REGISTRY_PATH=${REGISTRY_Q}
+DEFER_REGISTRY=${DEFER_REGISTRY_Q}
 if [[ -z "\${LSB_JOBINDEX:-}" ]]; then
   echo "LSB_JOBINDEX not set; are you running under bsub array?" >&2
   exit 2
@@ -206,6 +232,12 @@ if [[ -n "\$REGISTRY_PATH" ]]; then
   export PALETTE_REGISTRY_PATH="\$REGISTRY_PATH"
   echo "registry_path=\$PALETTE_REGISTRY_PATH"
 fi
+if [[ "\$DEFER_REGISTRY" == "1" ]]; then
+  export PALETTE_DISABLE_REGISTRY_WRITES=1
+  echo "registry_write_mode=deferred"
+else
+  echo "registry_write_mode=inline"
+fi
 echo "job_id=\${LSB_JOBID:-unknown}"
 echo "job_index=\${LSB_JOBINDEX}"
 echo "host=\$(hostname)"
@@ -220,7 +252,9 @@ chmod +x "$JOB_SCRIPT"
 
 scripts/py - "$RUN_DIR/submission_manifest.json" "$ROOT" "$FILE_LIST" "$PATH_CONTAINS" "$LIMIT" \
   "$target_count" "$QUEUE" "$NCORES" "$MEM_GB" "$WALLTIME" "$MAX_ACTIVE" "$KEYPOINT_RUN" \
-  "$CONFIG" "$AUTO_REVIEW" "$OVERWRITE" "$JOB_SCRIPT" "$TARGETS_FILE" "$REPO_DIR" "$REGISTRY" <<'PY'
+  "$CONFIG" "$AUTO_REVIEW" "$OVERWRITE" "$JOB_SCRIPT" "$TARGETS_FILE" "$REPO_DIR" "$REGISTRY" \
+  "$DEFER_REGISTRY" "$SUBMIT_REGISTRY_FINALIZER" "$REGISTRY_FINALIZER_QUEUE" \
+  "$REGISTRY_FINALIZER_NCORES" "$REGISTRY_FINALIZER_MEM_GB" "$REGISTRY_FINALIZER_WALLTIME" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -245,6 +279,12 @@ from pathlib import Path
     targets_file,
     repo_dir,
     registry,
+    defer_registry,
+    submit_registry_finalizer,
+    registry_finalizer_queue,
+    registry_finalizer_ncores,
+    registry_finalizer_mem_gb,
+    registry_finalizer_walltime,
 ) = sys.argv[1:]
 
 payload = {
@@ -266,6 +306,14 @@ payload = {
     "targets_file": targets_file,
     "repo_dir": repo_dir,
     "registry": registry or None,
+    "registry_write_mode": "deferred" if defer_registry == "1" else "inline",
+    "submit_registry_finalizer": submit_registry_finalizer == "1",
+    "registry_finalizer": {
+        "queue": registry_finalizer_queue,
+        "ncores": int(registry_finalizer_ncores),
+        "mem_gb": int(registry_finalizer_mem_gb),
+        "walltime": registry_finalizer_walltime,
+    },
 }
 Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -298,6 +346,7 @@ echo "Registry: ${REGISTRY:-<default from environment/repo>}"
 echo "Queue: $QUEUE"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB walltime=$WALLTIME"
 echo "Max active: $MAX_ACTIVE"
+echo "Registry write mode: $([[ "$DEFER_REGISTRY" == "1" ]] && echo deferred || echo inline)"
 echo "Per-target command: $REFINE_CMD"
 echo "Submit command: $BSUB_CMD"
 
@@ -311,4 +360,81 @@ if ! command -v bsub >/dev/null 2>&1; then
   exit 2
 fi
 
-bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT" "$RUN_DIR"
+submit_output="$(bsub "${BSUB_ARGS[@]}" bash "$JOB_SCRIPT" "$RUN_DIR")"
+echo "$submit_output"
+array_jobid="$(printf '%s\n' "$submit_output" | sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' | head -1)"
+if [[ -n "$array_jobid" ]]; then
+  echo "array_jobid=${array_jobid}"
+fi
+
+if [[ "$DEFER_REGISTRY" == "1" && "$SUBMIT_REGISTRY_FINALIZER" == "1" ]]; then
+  if [[ -z "$array_jobid" ]]; then
+    echo "Could not parse array job id; not submitting registry finalizer." >&2
+    exit 1
+  fi
+
+  FINALIZER_SCRIPT="${RUN_DIR}/run_registry_finalizer.sh"
+  RUN_DIR_Q="$(printf '%q' "$RUN_DIR")"
+  REGISTRY_Q="$(printf '%q' "$REGISTRY")"
+  KEYPOINT_RUN_Q="$(printf '%q' "$KEYPOINT_RUN")"
+  cat > "$FINALIZER_SCRIPT" <<JOBSCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+
+RUN_DIR=${RUN_DIR_Q}
+REGISTRY_PATH=${REGISTRY_Q}
+KEYPOINT_RUN=${KEYPOINT_RUN_Q}
+JOB_ID="\${LSB_JOBID:-manual_refine_keypoints_registry_finalizer}"
+REPORT_JSON="\${RUN_DIR}/registry_finalizer.\${JOB_ID}.json"
+
+cd ${REPO_DIR_Q}
+unset PALETTE_DISABLE_REGISTRY_WRITES
+if [[ -n "\$REGISTRY_PATH" ]]; then
+  export PALETTE_REGISTRY_PATH="\$REGISTRY_PATH"
+fi
+
+args=(fisheye.utils.finalize_refine_keypoints_batch_registry "\$RUN_DIR" --apply --output-json "\$REPORT_JSON")
+if [[ -n "\$REGISTRY_PATH" ]]; then
+  args+=(--registry "\$REGISTRY_PATH")
+fi
+if [[ -n "\$KEYPOINT_RUN" ]]; then
+  args+=(--keypoint-run "\$KEYPOINT_RUN")
+fi
+
+echo "repo=\$(pwd)"
+echo "host=\$(hostname)"
+echo "job_id=\$JOB_ID"
+echo "run_dir=\$RUN_DIR"
+echo "registry=\${REGISTRY_PATH:-<default>}"
+echo "keypoint_run=\${KEYPOINT_RUN:-<latest matching>}"
+echo "report_json=\$REPORT_JSON"
+
+scripts/py -m "\${args[@]}"
+JOBSCRIPT
+  chmod +x "$FINALIZER_SCRIPT"
+
+  FINALIZER_BSUB_ARGS=(
+    -J "refine_kp_registry_finalizer_${RUN_ID}"
+    -q "$REGISTRY_FINALIZER_QUEUE"
+    -n "$REGISTRY_FINALIZER_NCORES"
+    -W "$REGISTRY_FINALIZER_WALLTIME"
+    -R "rusage[mem=${REGISTRY_FINALIZER_MEM_GB}G]"
+    -oo "${RUN_DIR}/registry_finalizer_%J.out"
+    -eo "${RUN_DIR}/registry_finalizer_%J.err"
+    -w "done(${array_jobid})"
+  )
+  printf -v FINALIZER_BSUB_ARGS_SHELL '%q ' "${FINALIZER_BSUB_ARGS[@]}"
+  echo "Registry finalizer script: $FINALIZER_SCRIPT"
+  echo "Registry finalizer dependency: done(${array_jobid})"
+  echo "Registry finalizer submit command: bsub ${FINALIZER_BSUB_ARGS_SHELL}bash $(printf '%q' "$FINALIZER_SCRIPT")"
+
+  finalizer_submit_output="$(bsub "${FINALIZER_BSUB_ARGS[@]}" bash "$FINALIZER_SCRIPT")"
+  echo "$finalizer_submit_output"
+  finalizer_jobid="$(printf '%s\n' "$finalizer_submit_output" | sed -n 's/.*Job <\([0-9][0-9]*\)>.*/\1/p' | head -1)"
+  if [[ -n "$finalizer_jobid" ]]; then
+    echo "registry_finalizer_jobid=${finalizer_jobid}"
+  fi
+elif [[ "$DEFER_REGISTRY" == "1" ]]; then
+  echo "Registry writes were deferred. Run this finalizer manually after array completion:"
+  echo "  scripts/py -m fisheye.utils.finalize_refine_keypoints_batch_registry $(printf '%q' "$RUN_DIR") --registry $(printf '%q' "$REGISTRY") --keypoint-run $(printf '%q' "$KEYPOINT_RUN") --apply"
+fi
