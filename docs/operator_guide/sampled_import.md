@@ -119,6 +119,51 @@ For example, an 11-hour 30 fps video has about 1,188,000 frames. A target of
 roughly 240 sampled frames gives `frame_step ~= 5000`. This keeps the training
 Zarr comparable in size to short-recording sampled imports.
 
+For batch imports from organized recording directories, prefer target-count
+planning:
+
+```bash
+scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains GoodCopBadCop \
+  --target-sampled-frames 200 \
+  --dry-run
+```
+
+The wrapper writes sibling `zarr/<recording>_training.zarr` stores and computes
+per-recording frame steps from `recording_manifest.json` frame counts. If the
+newer manifest stream inventory is absent, it falls back to Orange external
+recorder summary sidecars. Use a fixed `--frame-step` only when you explicitly
+want the same interval for every recording or as a fallback for recordings with
+no frame-count metadata.
+Use `--recursive` only for genuinely nested recording layouts; for the standard
+`<recordings_root>/<recording>/raw/*.h5` layout, the shallow scan is much faster
+on PRFS.
+Use `--limit 1` for the first wrapper-managed smoke import.
+
+Current sampled imports use the legacy Decord-derived pixel path in
+`capture.import_video`; the stored `raw_video` attrs include
+`decode_contract_status = "legacy_decord_pending_pynvvc_unification"`. Bulk
+`--apply` via the wrapper requires `--allow-legacy-decode-contract` so this
+choice is explicit before creating long-lived training assets.
+
+Current GoodCopBadCop smoke:
+
+```bash
+scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains GoodCopBadCop \
+  --target-sampled-frames 200 \
+  --limit 1 \
+  --import-stimulus \
+  --stimulus-quiet \
+  --register \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --allow-legacy-decode-contract \
+  --apply
+```
+
+Remove `--limit 1` only after the first imported `_training.zarr` and registry
+row have been inspected.
+
 ### Video-only validation checks
 
 After import, check:

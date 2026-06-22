@@ -50,13 +50,19 @@ scripts/py -m fisheye.capture.import_video /path/to/video.mp4 \
   --config configs/fisheye/import_local.yaml \
   --training-data \
   --frame-step 100 \
-  --zarr-path /path/to/output/training_sample.zarr
+  --zarr-path /path/to/recording/zarr/<recording>_training.zarr
 ```
 
 Notes:
 - `--training-data` **requires** `--frame-step`.
 - The import stores `raw_video/original_frame_indices`, mapping sampled frames back to original video indices.
 - Keep the sampled Zarr in the recording’s `zarr/` folder or a dedicated training workspace.
+- Current sampled imports are materialized by `capture.import_video`, which still
+  uses Decord-derived RGB frames and BT.601 RGB-to-gray conversion. The resulting
+  `raw_video` attrs are stamped with
+  `decode_contract_status = "legacy_decord_pending_pynvvc_unification"`. Treat
+  these as explicit legacy-decode training assets until the pynvvc canonical
+  import path lands.
 
 ### Batch import from `recordings/` layout (camera videos)
 If recordings are organized as:
@@ -72,8 +78,7 @@ you can batch import sampled training Zarrs using:
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
-  --recursive \
-  --frame-step 100 \
+  --target-sampled-frames 200 \
   --dry-run
 ```
 
@@ -81,46 +86,81 @@ Apply the imports:
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
-  --recursive \
-  --frame-step 100 \
+  --target-sampled-frames 200 \
+  --register \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --allow-legacy-decode-contract \
   --apply
 ```
+
+`--target-sampled-frames` resolves a per-recording frame step from the source
+frame count, using `recording_manifest.json` when available and external
+recorder summary sidecars as a legacy fallback. For example, a 140k-frame
+recording with `--target-sampled-frames 200 --skip-tail-frames 200` resolves to
+roughly `--frame-step 699`.
+Use `--recursive` only when recordings are nested deeper than
+`<recordings_root>/<recording>/raw/*.h5`; broad recursive scans over PRFS can be
+slow.
+Use `--limit 1` with `--apply` for the first smoke before running a whole batch.
 
 Optional: rich-formatted dry-run output:
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
-  --recursive \
-  --frame-step 100 \
+  --target-sampled-frames 200 \
   --dry-run \
   --rich
 ```
 
 Defaults:
 - Input video: `cams/*.mp4` (camera video).
-- Output Zarr: `zarr/<h5_stem>.zarr`.
+- Output Zarr: `zarr/<recording>_training.zarr`.
 
 Optional registry registration:
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
-  --recursive \
-  --frame-step 100 \
-  --apply \
-  --register
+  --target-sampled-frames 200 \
+  --register \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --allow-legacy-decode-contract \
+  --apply
 ```
 
 Optional: mirror stimulus H5 into the Zarr (when available):
 
 ```bash
 scripts/py -m fisheye.utils.import_recordings_training /nvme1/recordings \
-  --recursive \
-  --frame-step 100 \
-  --apply \
-  --import-stimulus
+  --target-sampled-frames 200 \
+  --import-stimulus \
+  --stimulus-quiet \
+  --register \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --allow-legacy-decode-contract \
+  --apply
 ```
 
 By default, stimulus import is skipped if `analysis/stimulus_runs` already exists. Use `--stimulus-always` to force another run, or `--stimulus-run-name` + `--stimulus-overwrite` to control replacement.
+
+Current GoodCopBadCop smoke:
+
+```bash
+scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains GoodCopBadCop \
+  --target-sampled-frames 200 \
+  --limit 1 \
+  --import-stimulus \
+  --stimulus-quiet \
+  --register \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --allow-legacy-decode-contract \
+  --apply
+```
+
+If the smoke output and registry row look correct, remove `--limit 1` to build
+the full current GoodCopBadCop set. The June 2026 GoodCopBadCop recordings
+resolve to roughly `frame_step=697..700`; the older May 29 batch resolves from
+external-recorder summaries to `frame_step=717`.
 
 ### 2) Run YOLO detection directly on the raw video
 This creates a **detection-only** Zarr with `source_video_path` metadata.

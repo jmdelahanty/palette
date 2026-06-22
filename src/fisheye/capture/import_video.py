@@ -558,6 +558,25 @@ def _setup_video_reader(video_path: Path, use_gpu: bool, force_cpu: bool, consol
     return "cpu", vr
 
 
+def _decode_contract_metadata(device: str) -> Dict[str, Any]:
+    backend = "decord_gpu" if str(device).startswith("cuda") else "decord_cpu"
+    return {
+        "decode_backend": backend,
+        "decode_backend_family": "decord",
+        "decode_contract_status": "legacy_decord_pending_pynvvc_unification",
+        "decode_contract_note": (
+            "Current import_video materializes Decord RGB frames and stores "
+            "BT.601-weighted grayscale uint8 pixels. Future canonical training "
+            "imports are expected to use the pynvvc pixel contract."
+        ),
+        "source_decode_surface": "decord_rgb_uint8",
+        "stored_luma_transform": "rgb_to_gray_bt601_weights",
+        "stored_luma_weights": [0.2989, 0.5870, 0.1140],
+        "stored_luma_color_range": "legacy_decord_rgb_full_range_assumed",
+        "canonical_decode_backend_target": "pynvvc_luma",
+    }
+
+
 def _get_video_metadata(video_path: Path, vr: decord.VideoReader, width: int, height: int, n_frames: int) -> Dict[str, Any]:
     try:
         iio_meta = iio.immeta(str(video_path))
@@ -745,6 +764,11 @@ def import_video(
                     f"[yellow]Frames:[/yellow] {n_import_frames} of {effective_total} "
                     f"({100*n_import_frames/effective_total:.1f}%)"
                 )
+                console.print(
+                    "[yellow]Decode contract:[/yellow] current sampled imports use "
+                    "legacy Decord-derived grayscale pixels, not the future pynvvc "
+                    "canonical pixel contract."
+                )
             else:
                 # Standard full import
                 if skip_tail_frames:
@@ -906,6 +930,9 @@ def import_video(
                 if 'downsampled_rgb' in arrays:
                     arrays['downsampled_rgb'].attrs['format'] = 'rgb'
                     arrays['downsampled_rgb'].attrs['resolution'] = [down_h, down_w, 3]
+                if 'full' in arrays:
+                    arrays['full'].attrs['format'] = 'gray'
+                    arrays['full'].attrs['resolution'] = [full_h, full_w]
 
                 # Build metadata
                 metadata = {
@@ -923,6 +950,7 @@ def import_video(
                     "source_path": str(video_path.absolute()),
                     "import_timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+                metadata.update(_decode_contract_metadata(device))
 
                 # Add training data mode metadata if applicable
                 if training_data_mode and frame_step:
@@ -1004,6 +1032,7 @@ def import_video(
                     "source_path": str(video_path.absolute()),
                     "import_timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+                metadata.update(_decode_contract_metadata(device))
 
                 # Add training data mode metadata if applicable
                 if training_data_mode and frame_step:

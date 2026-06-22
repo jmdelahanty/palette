@@ -4,7 +4,7 @@ Batch import sampled training Zarrs from the recordings layout.
 
 Defaults:
   - Input: camera video in recording_dir/cams/*.mp4
-  - Output Zarr: recording_dir/zarr/<h5_stem>.zarr
+  - Output Zarr: recording_dir/zarr/<recording_dir>_training.zarr
   - Mode: sampled training import (requires --frame-step)
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -52,8 +53,13 @@ class ImportPlan:
     camera_id: Optional[str]
     cam_video: Optional[Path]
     zarr_path: Path
+    frame_step: Optional[int]
     status: str
     reason: Optional[str] = None
+    source_frame_count: Optional[int] = None
+    target_sampled_frames: Optional[int] = None
+    estimated_sampled_frames: Optional[int] = None
+    frame_count_source: Optional[str] = None
     stimulus_present: Optional[bool] = None
     existing_frame_step: Optional[int] = None
     frame_step_mismatch: Optional[bool] = None
@@ -103,6 +109,10 @@ def _find_h5_files(root: Path, recursive: bool) -> List[Path]:
     return sorted(root.glob("*/raw/*.h5"))
 
 
+def _training_zarr_path(recording_dir: Path) -> Path:
+    return recording_dir / "zarr" / f"{recording_dir.name}_training.zarr"
+
+
 def _select_cam_video(recording_dir: Path, camera_id: Optional[str]) -> Tuple[Optional[Path], Optional[str]]:
     cams_dir = recording_dir / "cams"
     if not cams_dir.exists():
@@ -121,19 +131,116 @@ def _select_cam_video(recording_dir: Path, camera_id: Optional[str]) -> Tuple[Op
     return None, "multiple cam videos and no unique match"
 
 
+def _safe_read_json(path: Path) -> Optional[dict]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _coerce_positive_int(value: object) -> Optional[int]:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return None
+    return coerced if coerced > 0 else None
+
+
+def _read_manifest_frame_count(recording_dir: Path) -> Tuple[Optional[int], Optional[str]]:
+    manifest = _safe_read_json(recording_dir / "recording_manifest.json")
+    if not manifest:
+        return None, None
+
+    streams = ((manifest.get("video_streams") or {}).get("streams") or {})
+    if isinstance(streams, dict):
+        for stream_name in ("full", "camera", "crop"):
+            stream = streams.get(stream_name)
+            if isinstance(stream, dict):
+                frame_count = _coerce_positive_int(stream.get("frame_count"))
+                if frame_count is not None:
+                    return frame_count, f"recording_manifest.video_streams.{stream_name}.frame_count"
+
+    files = manifest.get("files") or {}
+    if isinstance(files, dict):
+        for rel_path in files.get("cams") or []:
+            rel_text = str(rel_path)
+            if not rel_text.endswith("_external_summary.json"):
+                continue
+            summary = _safe_read_json(recording_dir / rel_text)
+            if not summary:
+                continue
+            for key in ("frames_encoded", "frames_received", "acks_sent"):
+                frame_count = _coerce_positive_int(summary.get(key))
+                if frame_count is not None:
+                    return frame_count, f"{rel_text}:{key}"
+            ipc = summary.get("ipc_protocol")
+            if isinstance(ipc, dict):
+                frame_count = _coerce_positive_int(
+                    ipc.get("client_finalize_frame_count") or ipc.get("client_drain_first_frame_count")
+                )
+                if frame_count is not None:
+                    return frame_count, f"{rel_text}:ipc_protocol.client_finalize_frame_count"
+
+    return None, None
+
+
+def _estimate_sampled_frames(source_frame_count: int, frame_step: int, skip_tail_frames: int) -> int:
+    effective_total = max(int(source_frame_count) - max(int(skip_tail_frames), 0), 0)
+    if effective_total <= 0:
+        return 0
+    return ((effective_total - 1) // int(frame_step)) + 1
+
+
+def _resolve_frame_step(
+    *,
+    source_frame_count: Optional[int],
+    requested_frame_step: Optional[int],
+    target_sampled_frames: Optional[int],
+    skip_tail_frames: int,
+) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    if target_sampled_frames is not None:
+        if source_frame_count is not None:
+            effective_total = max(source_frame_count - max(skip_tail_frames, 0), 0)
+            if effective_total <= 0:
+                return None, 0, "source frame count is not larger than --skip-tail-frames"
+            frame_step = max(1, math.ceil(effective_total / target_sampled_frames))
+            return frame_step, _estimate_sampled_frames(source_frame_count, frame_step, skip_tail_frames), None
+        if requested_frame_step is None:
+            return None, None, "--target-sampled-frames requires frame-count metadata or --frame-step fallback"
+
+    frame_step = requested_frame_step
+    if frame_step is None:
+        frame_step = 100
+    estimated = (
+        _estimate_sampled_frames(source_frame_count, frame_step, skip_tail_frames)
+        if source_frame_count is not None
+        else None
+    )
+    return frame_step, estimated, None
+
+
 def _build_plans(
     root: Path,
     recursive: bool,
     skip_existing: bool,
     check_stimulus: bool,
-    requested_frame_step: int,
+    requested_frame_step: Optional[int],
+    target_sampled_frames: Optional[int],
+    skip_tail_frames: int,
+    path_contains: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> List[ImportPlan]:
     plans: List[ImportPlan] = []
     for h5_path in _find_h5_files(root, recursive):
+        if limit is not None and len(plans) >= limit:
+            break
         if h5_path.parent.name != "raw":
             continue
         recording_dir = h5_path.parent.parent
-        zarr_path = recording_dir / "zarr" / f"{h5_path.stem}.zarr"
+        if path_contains and path_contains not in str(recording_dir):
+            continue
+        zarr_path = _training_zarr_path(recording_dir)
         try:
             meta = _read_h5_meta(h5_path)
         except Exception as exc:
@@ -144,6 +251,7 @@ def _build_plans(
                     camera_id=None,
                     cam_video=None,
                     zarr_path=zarr_path,
+                    frame_step=None,
                     status="missing",
                     reason=f"failed to read H5: {exc}",
                 )
@@ -154,6 +262,16 @@ def _build_plans(
         status = "ok"
         if cam_video is None:
             status = "missing"
+        source_frame_count, frame_count_source = _read_manifest_frame_count(recording_dir)
+        frame_step, estimated_sampled, frame_step_reason = _resolve_frame_step(
+            source_frame_count=source_frame_count,
+            requested_frame_step=requested_frame_step,
+            target_sampled_frames=target_sampled_frames,
+            skip_tail_frames=skip_tail_frames,
+        )
+        if frame_step is None:
+            status = "missing"
+            reason = frame_step_reason
         elif skip_existing and zarr_path.exists():
             status = "skipped"
             reason = "zarr already exists"
@@ -162,8 +280,8 @@ def _build_plans(
         frame_step_mismatch: Optional[bool] = None
         if zarr_path.exists():
             existing_frame_step = _read_existing_frame_step(zarr_path)
-            if existing_frame_step is not None:
-                frame_step_mismatch = existing_frame_step != requested_frame_step
+            if existing_frame_step is not None and frame_step is not None:
+                frame_step_mismatch = existing_frame_step != frame_step
         if check_stimulus and zarr_path.exists():
             stimulus_present = _stimulus_runs_present(zarr_path)
         plans.append(
@@ -173,8 +291,13 @@ def _build_plans(
                 camera_id=camera_id,
                 cam_video=cam_video,
                 zarr_path=zarr_path,
+                frame_step=frame_step,
                 status=status,
                 reason=reason,
+                source_frame_count=source_frame_count,
+                target_sampled_frames=target_sampled_frames,
+                estimated_sampled_frames=estimated_sampled,
+                frame_count_source=frame_count_source,
                 stimulus_present=stimulus_present,
                 existing_frame_step=existing_frame_step,
                 frame_step_mismatch=frame_step_mismatch,
@@ -195,6 +318,14 @@ def _print_plan(plans: List[ImportPlan]) -> None:
         print(f"  camera_id: {plan.camera_id or 'unknown'}")
         print(f"  cam: {plan.cam_video or 'MISSING'}")
         print(f"  zarr: {plan.zarr_path}")
+        print(f"  frame_step: {plan.frame_step or 'unresolved'}")
+        if plan.source_frame_count is not None:
+            print(
+                f"  source_frame_count: {plan.source_frame_count} "
+                f"({plan.frame_count_source or 'unknown source'})"
+            )
+        if plan.estimated_sampled_frames is not None:
+            print(f"  estimated_sampled_frames: {plan.estimated_sampled_frames}")
         if plan.existing_frame_step is not None:
             mismatch = " (mismatch)" if plan.frame_step_mismatch else ""
             print(f"  existing_frame_step: {plan.existing_frame_step}{mismatch}")
@@ -225,6 +356,8 @@ def _print_plan_rich(plans: List[ImportPlan]) -> None:
     table.add_column("Cam video")
     table.add_column("Zarr")
     table.add_column("Step", justify="right")
+    table.add_column("Frames", justify="right")
+    table.add_column("Sample", justify="right")
     table.add_column("Mismatch", justify="center")
 
     counts = {"ok": 0, "skipped": 0, "missing": 0}
@@ -232,7 +365,9 @@ def _print_plan_rich(plans: List[ImportPlan]) -> None:
         counts[plan.status] = counts.get(plan.status, 0) + 1
         cam_name = plan.cam_video.name if plan.cam_video else "MISSING"
         zarr_name = plan.zarr_path.name
-        step = "-" if plan.existing_frame_step is None else str(plan.existing_frame_step)
+        step = "-" if plan.frame_step is None else str(plan.frame_step)
+        frames = "-" if plan.source_frame_count is None else str(plan.source_frame_count)
+        sample = "-" if plan.estimated_sampled_frames is None else str(plan.estimated_sampled_frames)
         mismatch = "!" if plan.frame_step_mismatch else ""
         table.add_row(
             plan.recording_dir.name,
@@ -241,6 +376,8 @@ def _print_plan_rich(plans: List[ImportPlan]) -> None:
             cam_name,
             zarr_name,
             step,
+            frames,
+            sample,
             mismatch,
         )
 
@@ -254,10 +391,11 @@ def _run_import(
     plan: ImportPlan,
     *,
     config_path: Path,
-    frame_step: int,
     overwrite: bool,
     skip_tail_frames: int,
 ) -> Tuple[bool, int]:
+    if plan.frame_step is None:
+        return False, 2
     plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
@@ -268,7 +406,7 @@ def _run_import(
         str(config_path),
         "--training-data",
         "--frame-step",
-        str(frame_step),
+        str(plan.frame_step),
         "--zarr-path",
         str(plan.zarr_path),
     ]
@@ -414,8 +552,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--frame-step",
         type=int,
-        default=100,
-        help="Import every Nth frame (training_data mode).",
+        help=(
+            "Import every Nth frame (training_data mode). If omitted with no "
+            "--target-sampled-frames, defaults to 100. If used with "
+            "--target-sampled-frames, this is only a fallback when frame-count "
+            "metadata is unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--target-sampled-frames",
+        type=int,
+        help=(
+            "Target sampled frames per recording. The wrapper computes "
+            "frame_step=ceil((source_frame_count-skip_tail_frames)/target)."
+        ),
+    )
+    parser.add_argument(
+        "--path-contains",
+        type=str,
+        help="Only include recordings whose directory path contains this substring.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Limit the number of planned recordings after filtering. Useful for one-recording smokes.",
     )
     parser.add_argument(
         "--skip-tail-frames",
@@ -498,6 +658,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Use rich-formatted console output for dry-run summaries.",
     )
+    parser.add_argument(
+        "--allow-legacy-decode-contract",
+        action="store_true",
+        help=(
+            "Allow apply with the current capture.import_video Decord-derived pixel "
+            "path. Without this flag, --apply fails closed so long-lived training "
+            "assets are not bulk-created before the pynvvc canonical decode "
+            "migration is explicitly acknowledged."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -509,14 +679,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Recordings root not found: {root}")
         return 1
 
-    if args.frame_step < 1:
+    if args.frame_step is not None and args.frame_step < 1:
         print(f"--frame-step must be >= 1 (got {args.frame_step})")
+        return 1
+    if args.target_sampled_frames is not None and args.target_sampled_frames < 1:
+        print(f"--target-sampled-frames must be >= 1 (got {args.target_sampled_frames})")
+        return 1
+    if args.limit is not None and args.limit < 1:
+        print(f"--limit must be >= 1 (got {args.limit})")
         return 1
     if args.skip_tail_frames < 0:
         print(f"--skip-tail-frames must be >= 0 (got {args.skip_tail_frames})")
         return 1
+    if args.apply and not args.allow_legacy_decode_contract:
+        print(
+            "--apply is blocked until the current Decord-derived import pixel "
+            "contract is explicitly acknowledged. Re-run with "
+            "--allow-legacy-decode-contract if these sampled training zarrs are "
+            "acceptable before pynvvc decode unification lands."
+        )
+        return 2
 
     skip_existing = not args.overwrite and not args.no_skip_existing
+    requested_frame_step = args.frame_step
+    if requested_frame_step is None and args.target_sampled_frames is None:
+        requested_frame_step = 100
 
     logger: Optional[JsonLogger] = None
     log_path: Optional[Path] = None
@@ -531,7 +718,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "run_start",
             recordings_root=str(root),
             recursive=bool(args.recursive),
-            frame_step=int(args.frame_step),
+            frame_step=int(requested_frame_step) if requested_frame_step is not None else None,
+            target_sampled_frames=(
+                int(args.target_sampled_frames) if args.target_sampled_frames is not None else None
+            ),
             skip_tail_frames=int(args.skip_tail_frames),
             config=str(args.config),
             dry_run=bool(args.dry_run),
@@ -540,6 +730,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             skip_existing=bool(skip_existing),
             register=bool(args.register),
             import_stimulus=bool(args.import_stimulus),
+            path_contains=args.path_contains,
+            limit=args.limit,
+            legacy_decode_contract_acknowledged=bool(args.allow_legacy_decode_contract),
         )
 
     if args.apply:
@@ -549,7 +742,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.recursive,
         skip_existing=skip_existing,
         check_stimulus=args.import_stimulus,
-        requested_frame_step=args.frame_step,
+        requested_frame_step=requested_frame_step,
+        target_sampled_frames=args.target_sampled_frames,
+        skip_tail_frames=args.skip_tail_frames,
+        path_contains=args.path_contains,
+        limit=args.limit,
     )
 
     if args.dry_run:
@@ -565,6 +762,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     zarr_path=str(plan.zarr_path),
                     status=plan.status,
                     reason=plan.reason,
+                    frame_step=plan.frame_step,
+                    source_frame_count=plan.source_frame_count,
+                    target_sampled_frames=plan.target_sampled_frames,
+                    estimated_sampled_frames=plan.estimated_sampled_frames,
+                    frame_count_source=plan.frame_count_source,
                     existing_frame_step=plan.existing_frame_step,
                     frame_step_mismatch=plan.frame_step_mismatch,
                 )
@@ -604,7 +806,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if plan.frame_step_mismatch:
                 print(
                     f"Warning: existing frame_step={plan.existing_frame_step} "
-                    f"differs from requested {args.frame_step} for {plan.zarr_path}"
+                    f"differs from planned {plan.frame_step} for {plan.zarr_path}"
                 )
             print(f"Skipping (exists): {plan.zarr_path}")
             if logger is not None:
@@ -624,11 +826,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 h5_path=str(plan.h5_path),
                 cam_video=str(plan.cam_video),
                 zarr_path=str(plan.zarr_path),
+                frame_step=plan.frame_step,
+                source_frame_count=plan.source_frame_count,
+                target_sampled_frames=plan.target_sampled_frames,
+                estimated_sampled_frames=plan.estimated_sampled_frames,
+                frame_count_source=plan.frame_count_source,
             )
         success, returncode = _run_import(
             plan,
             config_path=args.config,
-            frame_step=args.frame_step,
             overwrite=args.overwrite,
             skip_tail_frames=args.skip_tail_frames,
         )
@@ -641,27 +847,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                     zarr_path=str(plan.zarr_path),
                     returncode=returncode,
                 )
-            if registry is not None:
-                try:
-                    dataset_id = registry.scan_zarr(plan.zarr_path)
-                    if dataset_id:
-                        print(f"Registered dataset: {dataset_id}")
-                    if logger is not None:
-                        logger.log(
-                            "registry_register",
-                            recording_dir=str(plan.recording_dir),
-                            zarr_path=str(plan.zarr_path),
-                            dataset_id=dataset_id,
-                        )
-                except Exception as exc:
-                    print(f"Registry warning: {exc}")
-                    if logger is not None:
-                        logger.log(
-                            "registry_warning",
-                            recording_dir=str(plan.recording_dir),
-                            zarr_path=str(plan.zarr_path),
-                            error=str(exc),
-                        )
             if args.import_stimulus:
                 stim_present = _stimulus_runs_present(plan.zarr_path)
                 if stim_present and not args.stimulus_always:
@@ -702,6 +887,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                             recording_dir=str(plan.recording_dir),
                             zarr_path=str(plan.zarr_path),
                             returncode=stim_returncode,
+                        )
+            if registry is not None:
+                try:
+                    dataset_id = registry.scan_zarr(plan.zarr_path)
+                    if dataset_id:
+                        print(f"Registered dataset: {dataset_id}")
+                    if logger is not None:
+                        logger.log(
+                            "registry_register",
+                            recording_dir=str(plan.recording_dir),
+                            zarr_path=str(plan.zarr_path),
+                            dataset_id=dataset_id,
+                        )
+                except Exception as exc:
+                    print(f"Registry warning: {exc}")
+                    if logger is not None:
+                        logger.log(
+                            "registry_warning",
+                            recording_dir=str(plan.recording_dir),
+                            zarr_path=str(plan.zarr_path),
+                            error=str(exc),
                         )
         else:
             failed += 1
