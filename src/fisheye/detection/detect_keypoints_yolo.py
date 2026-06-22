@@ -393,6 +393,68 @@ def _normalize_input_mode(value: str) -> str:
     return text
 
 
+def _first_attr(attrs: Any, names: Tuple[str, ...]) -> Any:
+    for name in names:
+        value = attrs.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _resolve_full_image_shape(root: zarr.Group, crop_group: zarr.Group) -> Tuple[Tuple[int, int], Optional[int]]:
+    """Resolve full-frame shape for normalized keypoint coordinates.
+
+    Modern crop-first analysis zarrs may intentionally omit raw_video/images_full.
+    In that case the geometry-only crop run is the authoritative source for the
+    source-video dimensions used to compute roi_coordinates_full.
+    """
+
+    total_frames_attr = (
+        root.attrs.get("total_frames")
+        or root.attrs.get("n_frames")
+        or crop_group.attrs.get("total_frames")
+    )
+    total_frames: Optional[int] = int(total_frames_attr) if total_frames_attr is not None else None
+
+    try:
+        images_full = root["raw_video/images_full"]
+        frame_dim, img_h, img_w = images_full.shape
+        if total_frames is None:
+            total_frames = int(frame_dim)
+        return (int(img_h), int(img_w)), total_frames
+    except KeyError:
+        pass
+
+    width_names = (
+        "video_width",
+        "palette_video_width",
+        "source_full_width",
+        "source_video_width",
+        "width",
+    )
+    height_names = (
+        "video_height",
+        "palette_video_height",
+        "source_full_height",
+        "source_video_height",
+        "height",
+    )
+    img_w = _first_attr(root.attrs, width_names)
+    img_h = _first_attr(root.attrs, height_names)
+    if img_w is None:
+        img_w = _first_attr(crop_group.attrs, width_names)
+    if img_h is None:
+        img_h = _first_attr(crop_group.attrs, height_names)
+
+    if img_w is None or img_h is None:
+        raise ValueError(
+            "Unable to determine full-resolution image dimensions. "
+            "Expected raw_video/images_full, root video_width/video_height attrs, "
+            "or crop-run width/height attrs."
+        )
+    return (int(img_h), int(img_w)), total_frames
+
+
 def _tensor_input_blocker(batch: np.ndarray, *, imgsz: int) -> Optional[str]:
     if batch.ndim != 3:
         return f"expected ROI batch shape (N, H, W), got {batch.shape}"
@@ -673,38 +735,7 @@ def detect_keypoints_yolo(
     if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")
 
-    total_frames_attr = (
-        root.attrs.get("total_frames")
-        or root.attrs.get("n_frames")
-        or crop_group.attrs.get("total_frames")
-    )
-    total_frames: Optional[int] = int(total_frames_attr) if total_frames_attr is not None else None
-
-    try:
-        images_full = root["raw_video/images_full"]
-        frame_dim, img_h, img_w = images_full.shape
-        full_img_shape = (img_h, img_w)
-        if total_frames is None:
-            total_frames = int(frame_dim)
-    except KeyError:
-        img_w = (
-            root.attrs.get("video_width")
-            or root.attrs.get("palette_video_width")
-            or root.attrs.get("source_full_width")
-            or root.attrs.get("source_video_width")
-        )
-        img_h = (
-            root.attrs.get("video_height")
-            or root.attrs.get("palette_video_height")
-            or root.attrs.get("source_full_height")
-            or root.attrs.get("source_video_height")
-        )
-        if img_w is None or img_h is None:
-            raise ValueError(
-                "Unable to determine full-resolution image dimensions. "
-                "Expected raw_video/images_full dataset or root attrs 'video_width'/'video_height'."
-            )
-        full_img_shape = (int(img_h), int(img_w))
+    full_img_shape, total_frames = _resolve_full_image_shape(root, crop_group)
 
     norm_factor = np.array([full_img_shape[1], full_img_shape[0]], dtype="f8")
 
