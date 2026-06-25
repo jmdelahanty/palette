@@ -151,6 +151,9 @@ def test_append_acquisition_crop_video_training_writes_crop_run(tmp_path, monkey
     assert crop["source_crop_local_frame_ids"][:].tolist() == [2, 5]
     assert crop.attrs["source_crop_video_frame_indices_semantics"] == "zero_based_frame_index_in_acquisition_crop_video"
     assert crop.attrs["source_crop_local_frame_ids_semantics"] == "orange_acquisition_local_frame_id_not_video_frame_index"
+    assert crop.attrs["roi_coordinates_full_coordinate_space"] == "source_image_xy"
+    assert crop.attrs["roi_coordinates_full_source"] == "source_crop_xywh[:, :2]"
     np.testing.assert_allclose(crop["source_crop_xywh"][:], [[100.0, 200.0, 20.0, 20.0], [110.0, 210.0, 20.0, 20.0]])
+    np.testing.assert_array_equal(crop["roi_coordinates_full"][:], [[100, 200], [110, 210]])
     np.testing.assert_allclose(crop["bbox_roi_xyxy"][:], [[4.0, 4.0, 12.0, 12.0], [6.0, 8.0, 10.0, 14.0]])
     np.testing.assert_allclose(crop["bbox_norm_coords"][:], [[0.4, 0.4, 0.4, 0.4], [0.4, 0.55, 0.2, 0.3]])

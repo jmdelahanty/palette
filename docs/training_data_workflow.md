@@ -203,6 +203,7 @@ This creates:
 - `crop_runs/<crop_red_scare...>/roi_images` from the acquisition crop video for
   pose-labeling/training.
 - crop lineage arrays including `source_crop_xywh`,
+  `roi_coordinates_full`,
   `source_crop_video_frame_indices`, `source_crop_local_frame_ids`,
   `source_training_row_indices`, and `source_recording_frame_ids`.
 - only crop-video rows with `has_detection=true` and `blank_frame=false`; use
@@ -215,6 +216,20 @@ The crop-video pixel contract is currently `orange_mono_pynvvc_luma_uint8_v1`
 with `frame_format_confirmation_status=pending_orange_confirmation`; Orange
 still needs to confirm the exact frame representation handed to the crop-video
 encoder and future pose model.
+
+If the acquisition crop size differs from the trained model input size, keep the
+training Zarr pixels native and use an explicit model-input transform during
+bootstrap inference. For current RedScare rows, native `384x384` crops can feed
+existing `512x512` pose/mask models with:
+
+```text
+--imgsz 512 --model-input-transform auto               # keypoints
+--model-input-size 512 --model-input-transform auto    # subject masks
+```
+
+The transform pads to model input size and writes predictions back in native
+crop coordinates. Smaller-input models are allowed only when their training and
+registry metadata record the matching input-size/transform policy.
 
 Cluster submitter:
 

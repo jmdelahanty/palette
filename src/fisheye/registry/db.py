@@ -567,6 +567,11 @@ def _extract_session_uuid(root: zarr.Group) -> Optional[str]:
 
 def resolve_dataset_id(root: zarr.Group, zarr_path: Path) -> Tuple[str, Optional[str]]:
     session_uuid = _extract_session_uuid(root)
+    if not session_uuid:
+        manifest = _extract_recording_manifest(zarr_path)
+        session_uuid = _decode_attr(manifest.get("session_uuid")) or _decode_attr(
+            manifest.get("recording_id")
+        )
     dataset_id = session_uuid or f"path-{_compute_path_hash(zarr_path)[:12]}"
     return dataset_id, session_uuid
 
@@ -663,6 +668,21 @@ def _extract_session_context(root: zarr.Group) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _recording_dir_for_zarr_path(zarr_path: Path) -> Path:
+    if zarr_path.parent.name == "zarr":
+        return zarr_path.parent.parent
+    return zarr_path.parent
+
+
+def _extract_recording_manifest(zarr_path: Path) -> Dict[str, Any]:
+    manifest_path = _recording_dir_for_zarr_path(zarr_path) / "recording_manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _extract_recording_context(
     root: zarr.Group,
     zarr_path: Path,
@@ -681,6 +701,7 @@ def _extract_recording_context(
     """
 
     attrs = root.attrs
+    manifest = _extract_recording_manifest(zarr_path)
 
     def first_text(*keys: str) -> Optional[str]:
         for key in keys:
@@ -688,6 +709,9 @@ def _extract_recording_context(
             if value:
                 return str(value)
             value = _decode_attr(context.get(key))
+            if value:
+                return str(value)
+            value = _decode_attr(manifest.get(key))
             if value:
                 return str(value)
         return None
@@ -709,10 +733,7 @@ def _extract_recording_context(
     if not has_explicit_recording_context:
         return {}
 
-    if zarr_path.parent.name == "zarr":
-        recording_path = zarr_path.parent.parent
-    else:
-        recording_path = zarr_path.parent
+    recording_path = _recording_dir_for_zarr_path(zarr_path)
 
     stimulus_runs_available = attrs.get("stimulus_runs_available")
     if stimulus_runs_available is None:

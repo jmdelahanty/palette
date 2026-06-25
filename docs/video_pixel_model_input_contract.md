@@ -1,7 +1,7 @@
 # Video Pixel And Model Input Contract
 <!-- contract-meta
 status: current
-last_verified: 2026-06-05
+last_verified: 2026-06-25
 purpose: Clarify the difference between persisted video/crop pixels and model-input tensors, especially PyNvVideoCodec luma versus NV12-to-RGB detection preprocessing.
 -->
 
@@ -45,12 +45,50 @@ color_conversion: raw NV12 Y/luma plane crop; no RGB reconstruction
 Model-specific tensorization happens later:
 
 - read `[N,H,W] uint8` luma ROI pixels,
-- resize or letterbox to the model input size,
+- apply an explicit reversible model-input transform,
 - replicate luma to three channels when the model expects `3` channels,
 - scale by `/255` and convert to the model dtype/layout.
 
 This keeps crop caches and training Zarrs independent of a specific model input
 shape, engine batch profile, or tensor layout.
+
+### Reversible Model-Input Transforms
+
+Native persisted crop pixels do not need to match a trained model's input size.
+When they differ, inference must use a declared reversible transform and write
+predictions back in native crop coordinates.
+
+Current supported transform modes live in
+`src/fisheye/shared/model_input_transform.py`:
+
+```text
+identity
+  native crop size == model input size
+
+pad_to_size
+  center-pad native crops with zero-valued pixels to the model input size
+  scale remains 1.0
+  keypoints/boxes are mapped back by subtracting [pad_left, pad_top]
+  mask logits/probabilities are cropped back before writing masks_roi/mask_probs_roi
+
+auto
+  identity when sizes match
+  pad_to_size when a larger model input size is requested
+```
+
+For RedScare-style acquisition crop videos, this means native `384x384` crop
+frames can be fed to a model trained at `512x512` by padding to `512x512`, then
+writing keypoints and masks back to the native `384x384` crop coordinate system.
+This is preferred over resizing for bootstrapping labels because it preserves
+pixel scale. The prediction run must record `model_input_transform`,
+`model_input_shape_hw`, and `native_roi_shape_hw`.
+
+Smaller-input models are still a valid optimization target, but they should be
+trained with the same explicit transform used at inference. Do not silently mix
+native `348/384/512` crop images as if they were equivalent model inputs.
+Either train at native size, train with a recorded resize/letterbox/pad policy,
+or export separate model rows whose input contract records the intended shape
+and transform.
 
 ### Detection Inputs
 
@@ -112,6 +150,9 @@ Until a luma-trained detector is accepted:
   a detector explicitly trained and validated for that preprocessing path.
 - Treat normalized CHW tensors, RGB replication, and TensorRT optimization
   profiles as model/runtime artifacts, not persisted crop-cache artifacts.
+- Treat padding/resizing/letterboxing as model-input transforms. Prediction
+  outputs remain in native crop coordinates unless a writer explicitly declares
+  a different output coordinate space.
 
 ## Current Metadata Audit
 

@@ -709,6 +709,7 @@ def _write_output_zarr(
     _create_array(crop_group, "source_crop_video_frame_indices", selection.crop_video_frame_indices.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_local_frame_ids", selection.crop_local_frame_ids.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_xywh", selection.source_crop_xywh.astype(np.float32), chunks=bbox_chunks)
+    _create_array(crop_group, "roi_coordinates_full", selection.source_crop_xywh[:, :2].astype(np.int32), chunks=(bbox_chunks[0], 2))
     _create_array(crop_group, "bbox_roi_xyxy", selection.bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "bbox_norm_coords", selection.bbox_norm_xywh.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "realtime_detection_bbox_roi_xyxy", selection.realtime_detection_bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
@@ -752,6 +753,8 @@ def _write_output_zarr(
         "source_crop_meta_path": str(crop_meta_path),
         "source_analysis_zarr": str(zarr_path),
         "source_crop_xywh_coordinate_space": "source_image_xywh",
+        "roi_coordinates_full_coordinate_space": "source_image_xy",
+        "roi_coordinates_full_source": "source_crop_xywh[:, :2]",
         "source_crop_video_frame_indices_semantics": "zero_based_frame_index_in_acquisition_crop_video",
         "source_crop_local_frame_ids_semantics": "orange_acquisition_local_frame_id_not_video_frame_index",
         "bbox_norm_coords_semantics": "pose_bbox_from_keypoint_extents_xywh_normalized_to_crop_video_frame",

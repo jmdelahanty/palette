@@ -149,6 +149,51 @@ def _json_attr(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _safe_read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _manifest_recording_attrs(recording_dir: Path | None) -> dict[str, Any]:
+    if recording_dir is None:
+        return {}
+    manifest = _safe_read_json(recording_dir / "recording_manifest.json")
+    if not manifest:
+        return {}
+
+    keys = (
+        "recording_id",
+        "session_uuid",
+        "session_id",
+        "recording_name",
+        "recording_type",
+        "recording_subtype",
+        "behavior_mode",
+        "artifact_schema_id",
+        "session_start_iso8601_utc",
+        "rig_id",
+        "arena_id",
+        "camera_id",
+        "canvas_name",
+        "protocol_name",
+        "protocol_name_from_definition",
+        "dish_design",
+    )
+    attrs: dict[str, Any] = {}
+    for key in keys:
+        value = manifest.get(key)
+        if value is None:
+            continue
+        text = str(value).strip() if not isinstance(value, (dict, list)) else ""
+        if text:
+            attrs[key] = value
+    attrs["recording_manifest_path"] = str((recording_dir / "recording_manifest.json").resolve())
+    return attrs
+
+
 def _safe_replace_temp(temp_path: Path, output_path: Path, *, overwrite: bool) -> None:
     if output_path.exists():
         if not overwrite:
@@ -179,14 +224,14 @@ def _write_attrs(
 ) -> None:
     raw_contract = _raw_video_pixel_contract()
     roi_contract = orange_mono_pynvvc_luma_pixel_contract()
-    root.attrs.update(
-        {
-            "zarr_purpose": "training",
-            "zarr_use": "training",
-            "created_at_utc": created_at_utc,
-            "source_video_path": str(source_video_path),
-        }
-    )
+    root_attrs = {
+        "zarr_purpose": "training",
+        "zarr_use": "training",
+        "created_at_utc": created_at_utc,
+        "source_video_path": str(source_video_path),
+    }
+    root_attrs.update(_manifest_recording_attrs(recording_dir))
+    root.attrs.update(root_attrs)
     raw_attrs: dict[str, Any] = {
         "import_method": "pynvvc_luma_sampled_training",
         "import_stage": "complete",

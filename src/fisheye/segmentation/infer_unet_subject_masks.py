@@ -23,6 +23,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from ..pose.schema import resolve_required_keypoint_indices_from_attrs
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
+from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
 from ..shared.provenance_attrs import (
     build_assignment_keypoint_attrs,
     build_source_crop_snapshot_attrs,
@@ -515,6 +516,7 @@ def _write_subject_mask_outputs(
     write_masks_roi: bool,
     async_output: bool,
     output_queue_size: int,
+    model_input_transform: ModelInputTransform,
     show_progress: bool,
     console: Console,
     timing_profiler: Optional[InferenceTimingProfiler],
@@ -645,6 +647,8 @@ def _write_subject_mask_outputs(
                 _sync_cuda("sync_after_h2d", items=batch_count)
                 with profiler.time("input_normalize", items=batch_count):
                     imgs = _normalise_roi_tensor(imgs)
+                with profiler.time("input_transform", items=batch_count):
+                    imgs = model_input_transform.apply_torch_image_batch(imgs)
                 _sync_cuda("sync_after_normalize", items=batch_count)
 
                 amp_module = getattr(torch, "amp", None)
@@ -659,6 +663,7 @@ def _write_subject_mask_outputs(
                 with profiler.time("model_forward", items=batch_count):
                     with autocast_cm:
                         logits = model(imgs)
+                    logits = model_input_transform.crop_torch_output(logits)
                 _sync_cuda("sync_after_forward", items=batch_count)
 
                 _sync_cuda("sync_before_d2h", items=batch_count)
@@ -784,6 +789,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", help="Optional name for the output run.")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size used during inference (default: 256).")
     parser.add_argument("--device", help="Torch device to use (e.g. 'cuda:0', 'cpu').")
+    parser.add_argument(
+        "--model-input-size",
+        type=int,
+        default=None,
+        help="Optional square model input size. When larger than native ROI size, pair with --model-input-transform auto/pad_to_size.",
+    )
+    parser.add_argument(
+        "--model-input-transform",
+        choices=MODEL_INPUT_TRANSFORM_CHOICES,
+        default="auto",
+        help=(
+            "Reversible transform from native ROI crops to model input size. "
+            "'auto' is identity when sizes match and centered zero-padding when --model-input-size is larger."
+        ),
+    )
     parser.add_argument(
         "--roi-cache-policy",
         choices=("never", "auto", "always"),
@@ -967,6 +987,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if total_rois == 0:
         crop_source.close()
         raise ValueError("ROI image array is empty; nothing to segment.")
+    roi_height, roi_width = map(int, crop_source.roi_shape)
+    model_input_size = int(args.model_input_size) if args.model_input_size is not None else max(roi_height, roi_width)
+    model_input_transform = resolve_model_input_transform(
+        (roi_height, roi_width),
+        mode=str(args.model_input_transform),
+        model_hw=(model_input_size, model_input_size),
+    )
     try:
         assignment_keypoint_attrs = _resolve_assignment_keypoint_attrs(
             root,
@@ -1012,6 +1039,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             write_masks_roi=bool(args.write_masks_roi),
             async_output=bool(args.async_output),
             output_queue_size=int(args.output_queue_size),
+            model_input_transform=model_input_transform,
             show_progress=bool(args.progress),
             console=console,
             timing_profiler=timing_profiler,
@@ -1060,6 +1088,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "threshold(mask_probs_roi, threshold=0.5)" if args.write_masks_roi else "not_materialized"
             ),
             "input_format": "gray",
+            "model_input_transform": model_input_transform.to_attrs(),
+            "model_input_transform_name": model_input_transform.name,
+            "model_input_shape_hw": list(model_input_transform.model_shape),
+            "native_roi_shape_hw": list(model_input_transform.native_shape),
             "source_checkpoint": str(checkpoint_path),
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
             "inference_device": str(device),
@@ -1198,6 +1230,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         parameters={
             "batch_size": int(args.batch_size),
             "device": str(device),
+            "model_input_size": int(model_input_size),
+            "model_input_transform": model_input_transform.to_attrs(),
             "label_schema_id": label_schema_id,
             "mask_labels": list(mask_labels),
             "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),

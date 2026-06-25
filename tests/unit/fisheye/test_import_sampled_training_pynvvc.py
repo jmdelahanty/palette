@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,23 @@ class _FakePynvvcReader:
 def test_import_sampled_training_pynvvc_writes_luma_training_zarr(tmp_path: Path) -> None:
     video = tmp_path / "Cam2010093_demo.mp4"
     video.write_bytes(b"placeholder")
+    (tmp_path / "recording_manifest.json").write_text(
+        json.dumps(
+            {
+                "recording_id": "2026-06-23T16-01-09Z_arena_1",
+                "session_uuid": "2026-06-23T16-01-09Z_arena_1",
+                "recording_name": "2026-06-23T16-01-09Z_arena_1_RedScare",
+                "recording_type": "behavior",
+                "recording_subtype": "free",
+                "behavior_mode": "free",
+                "protocol_name": "RedScare",
+                "arena_id": "1",
+                "camera_id": "2010093",
+                "dish_design": "palm1",
+            }
+        ),
+        encoding="utf-8",
+    )
     config = tmp_path / "import.yaml"
     config.write_text(
         """
@@ -63,6 +81,10 @@ import:
     root = zarr.open_group(str(out), mode="r")
     raw = root["raw_video"]
     assert root.attrs["zarr_purpose"] == "training"
+    assert root.attrs["zarr_use"] == "training"
+    assert root.attrs["recording_id"] == "2026-06-23T16-01-09Z_arena_1"
+    assert root.attrs["recording_name"] == "2026-06-23T16-01-09Z_arena_1_RedScare"
+    assert root.attrs["protocol_name"] == "RedScare"
     assert raw.attrs["decode_backend"] == "pynvvc_luma"
     assert raw.attrs["pixel_contract_name"] == ORANGE_MONO_PYNVVC_LUMA_CONTRACT_NAME
     assert raw.attrs["color_range"] == "tv"

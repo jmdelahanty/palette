@@ -184,6 +184,7 @@ def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, mo
     assert crop["roi_images"].shape == (1, 20, 20)
     assert int(crop["roi_images"][0, 0, 0]) == 0
     np.testing.assert_allclose(crop["source_crop_xywh"][:], [[100.0, 200.0, 20.0, 20.0]])
+    np.testing.assert_array_equal(crop["roi_coordinates_full"][:], [[100, 200]])
     np.testing.assert_allclose(crop["bbox_roi_xyxy"][:], [[5.0, 5.0, 15.0, 15.0]])
     np.testing.assert_allclose(crop["bbox_norm_coords"][:], [[0.5, 0.5, 0.5, 0.5]])
     np.testing.assert_allclose(crop["realtime_detection_bbox_roi_xyxy"][:], [[4.0, 4.0, 12.0, 12.0]])
@@ -191,6 +192,8 @@ def test_export_acquisition_crop_pose_training_writes_training_zarr(tmp_path, mo
     assert crop["source_crop_local_frame_ids"][:].tolist() == [5]
     assert crop.attrs["source_crop_video_frame_indices_semantics"] == "zero_based_frame_index_in_acquisition_crop_video"
     assert crop.attrs["source_crop_local_frame_ids_semantics"] == "orange_acquisition_local_frame_id_not_video_frame_index"
+    assert crop.attrs["roi_coordinates_full_coordinate_space"] == "source_image_xy"
+    assert crop.attrs["roi_coordinates_full_source"] == "source_crop_xywh[:, :2]"
     assert keypoints["source_refined_row_ids"][:].tolist() == [10]
     np.testing.assert_allclose(keypoints["keypoints_roi"][:], [[[5.0, 5.0], [15.0, 15.0]]])
     np.testing.assert_allclose(keypoints["keypoints_img"][:], [[[5.0, 5.0], [15.0, 15.0]]])

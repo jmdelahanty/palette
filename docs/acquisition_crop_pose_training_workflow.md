@@ -40,6 +40,7 @@ crop_runs/<acquisition_crop_video_run>/
   frame_indices               same source frame clock as raw_video/original_frame_indices
   source_training_row_indices row indices into raw_video sampled frames
   source_crop_xywh            full-frame crop geometry from crop_meta
+  roi_coordinates_full        full-frame crop top-left xy; equals source_crop_xywh[:, :2]
   source_crop_video_frame_indices
                               zero-based frame ids inside the crop video
   source_crop_local_frame_ids Orange/acquisition-local ids from crop_meta
@@ -80,6 +81,61 @@ The append step resolves:
   `derived/external_crop_recorder/*_crop_external.mp4` fallback.
 - `derived/external_crop_recorder/*_crop_meta.csv`.
 - source frame rows from `raw_video/original_frame_indices`.
+
+The crop run must include `roi_coordinates_full`. Downstream keypoint and mask
+writers use this array to map native crop-local predictions back to full-frame
+coordinates and should fail closed if it is absent.
+
+## Model Input Size
+
+The persisted acquisition crop images remain native crop-video pixels. For
+example, current RedScare crop-video rows are `384x384`. Existing May 2026 pose
+and subject-mask models were trained around `512x512` crops, so bootstrapping
+labels should use an explicit runtime transform instead of pretending the native
+crop is `512x512`.
+
+Preferred bootstrap policy for `384x384 -> 512x512`:
+
+```text
+native crop image: 384x384
+model input image: 512x512
+transform: centered zero padding
+padding: left=64, right=64, top=64, bottom=64
+output coordinate space: native crop coordinates
+```
+
+Keypoints and boxes are unpadded before writing `keypoints_roi` and
+`pose_bbox_xyxy_roi`. Subject-mask logits/probabilities are cropped back before
+writing `mask_probs_roi` and `masks_roi`.
+
+Example keypoint bootstrap command:
+
+```bash
+scripts/py -m fisheye.detection.detect_keypoints_yolo "$TRAINING_ZARR" \
+  --model "$POSE_MODEL" \
+  --crop-run "$CROP_RUN" \
+  --pose-schema traditional_v2 \
+  --imgsz 512 \
+  --input-mode tensor \
+  --model-input-transform auto
+```
+
+Example subject-mask bootstrap command:
+
+```bash
+scripts/py -m fisheye.segmentation.infer_unet_subject_masks "$TRAINING_ZARR" \
+  --resolve-model-from-registry \
+  --registry "$REGISTRY" \
+  --crop-run "$CROP_RUN" \
+  --model-input-size 512 \
+  --model-input-transform auto \
+  --write-masks-roi
+```
+
+Smaller-input models are a valid future speed optimization, but train/export
+metadata must record the model input size and transform. Do not silently mix
+native `348/384/512` crop sizes in one model contract without an explicit
+resize, letterbox, or padding policy.
 
 ## Row Selection
 

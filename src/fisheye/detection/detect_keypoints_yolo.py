@@ -27,6 +27,7 @@ from ..registry.db import RegistryPaths
 from ..registry.inline_refresh import refresh_keypoint_performance_details
 from ..shared.crop_image_source import CropImageSource
 from ..shared.inference_timing import InferenceTimingProfiler
+from ..shared.model_input_transform import MODEL_INPUT_TRANSFORM_CHOICES, ModelInputTransform, resolve_model_input_transform
 from ..shared.provenance_attrs import build_source_crop_snapshot_attrs, build_source_roi_pixel_attrs
 from ..registry.stage_complete import emit_stage_completion
 from ..shared.row_lineage import copy_row_lineage_arrays
@@ -455,16 +456,22 @@ def _resolve_full_image_shape(root: zarr.Group, crop_group: zarr.Group) -> Tuple
     return (int(img_h), int(img_w)), total_frames
 
 
-def _tensor_input_blocker(batch: np.ndarray, *, imgsz: int) -> Optional[str]:
+def _tensor_input_blocker(batch: np.ndarray, *, model_input_transform: ModelInputTransform) -> Optional[str]:
     if batch.ndim != 3:
         return f"expected ROI batch shape (N, H, W), got {batch.shape}"
     _, height, width = batch.shape
     if height != width:
         return f"tensor mode requires square ROIs, got {height}x{width}"
-    if int(imgsz) != int(height):
-        return f"tensor mode requires imgsz={height} to match ROI size, got {imgsz}"
-    if height % 32 or width % 32:
-        return f"tensor mode requires ROI dimensions divisible by 32, got {height}x{width}"
+    if (height, width) != model_input_transform.native_shape:
+        return (
+            "tensor mode requires ROI dimensions to match model input transform native shape "
+            f"{model_input_transform.native_shape}, got {height}x{width}"
+        )
+    model_height, model_width = model_input_transform.model_shape
+    if model_height != model_width:
+        return f"tensor mode requires square model inputs, got {model_height}x{model_width}"
+    if model_height % 32 or model_width % 32:
+        return f"tensor mode requires model input dimensions divisible by 32, got {model_height}x{model_width}"
     return None
 
 
@@ -472,7 +479,7 @@ def _prepare_model_inputs(
     batch: np.ndarray,
     *,
     input_mode: str,
-    imgsz: int,
+    model_input_transform: ModelInputTransform,
     device: Optional[str],
 ) -> Tuple[object, str]:
     """Prepare one ROI batch for Ultralytics prediction.
@@ -483,9 +490,10 @@ def _prepare_model_inputs(
     path; otherwise it falls back to the list path.
     """
     mode = _normalize_input_mode(input_mode)
-    blocker = _tensor_input_blocker(batch, imgsz=imgsz)
+    blocker = _tensor_input_blocker(batch, model_input_transform=model_input_transform)
     if mode == "tensor" and blocker is not None:
         raise ValueError(f"Cannot use keypoint tensor input mode: {blocker}")
+    batch = model_input_transform.apply_numpy_luma_batch(batch)
     if mode == "numpy-list" or blocker is not None:
         return _repeat_to_rgb(batch), "numpy-list"
 
@@ -602,6 +610,25 @@ def _extract_pose_bbox_xyxy_roi(
     return out
 
 
+def _clip_xyxy_to_roi(box_xyxy: np.ndarray, *, roi_height: int, roi_width: int) -> np.ndarray:
+    out = np.asarray(box_xyxy, dtype=np.float32).reshape(-1).copy()
+    if out.size < 4 or not np.all(np.isfinite(out[:4])):
+        return np.full(4, np.nan, dtype=np.float32)
+    max_x = float(max(roi_width - 1, 0))
+    max_y = float(max(roi_height - 1, 0))
+    out[0] = np.clip(out[0], 0.0, max_x)
+    out[2] = np.clip(out[2], 0.0, max_x)
+    out[1] = np.clip(out[1], 0.0, max_y)
+    out[3] = np.clip(out[3], 0.0, max_y)
+    if roi_width > 1 and out[2] <= out[0]:
+        out[2] = min(max_x, out[0] + 1.0)
+    if roi_height > 1 and out[3] <= out[1]:
+        out[3] = min(max_y, out[1] + 1.0)
+    if out[2] <= out[0] or out[3] <= out[1]:
+        return np.full(4, np.nan, dtype=np.float32)
+    return out[:4].astype(np.float32, copy=False)
+
+
 def detect_keypoints_yolo(
     zarr_path: str,
     model_path: str,
@@ -626,6 +653,7 @@ def detect_keypoints_yolo(
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
     input_mode: str = "numpy-list",
+    model_input_transform_mode: str = "auto",
     profile_timings: bool = False,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
@@ -708,6 +736,11 @@ def detect_keypoints_yolo(
         )
 
     imgsz = imgsz or max(roi_h, roi_w)
+    model_input_transform = resolve_model_input_transform(
+        (roi_h, roi_w),
+        mode=model_input_transform_mode,
+        model_hw=(int(imgsz), int(imgsz)),
+    )
     resolved_input_mode = _normalize_input_mode(input_mode)
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
@@ -814,7 +847,7 @@ def detect_keypoints_yolo(
                 model_inputs, effective_input_mode = _prepare_model_inputs(
                     batch_roi_np,
                     input_mode=resolved_input_mode,
-                    imgsz=int(imgsz),
+                    model_input_transform=model_input_transform,
                     device=torch_device,
                 )
             with timing_profiler.time("model_predict", items=batch_count):
@@ -857,6 +890,7 @@ def detect_keypoints_yolo(
                         continue
                     if kp.shape[0] > n_keypoints:
                         kp = kp[:n_keypoints]
+                    kp = model_input_transform.invert_points_xy(kp)
 
                     kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
                     kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
@@ -880,12 +914,18 @@ def detect_keypoints_yolo(
                         kp_conf = getattr(keypoints, "conf", None)
                         det_conf = float(kp_conf[det_idx].detach().cpu().mean()) if kp_conf is not None else 0.0
                     if boxes is not None:
-                        batch_pose_bbox_roi[i] = _extract_pose_bbox_xyxy_roi(
+                        pose_bbox_model = _extract_pose_bbox_xyxy_roi(
                             boxes,
                             det_idx,
-                            roi_height=roi_h,
-                            roi_width=roi_w,
+                            roi_height=model_input_transform.model_height,
+                            roi_width=model_input_transform.model_width,
                         )
+                        if np.all(np.isfinite(pose_bbox_model)):
+                            batch_pose_bbox_roi[i] = _clip_xyxy_to_roi(
+                                model_input_transform.invert_boxes_xyxy(pose_bbox_model),
+                                roi_height=roi_h,
+                                roi_width=roi_w,
+                            )
 
                     batch_conf[i] = det_conf
                     batch_success[i] = True
@@ -1027,6 +1067,7 @@ def detect_keypoints_yolo(
             "roi_cache_staging_policy": roi_cache_staging_policy,
             "input_mode_requested": resolved_input_mode,
             "input_mode_effective": effective_input_mode,
+            "model_input_transform": model_input_transform.to_attrs(),
             # Maintained for API compatibility with pipeline/batch configs.
             "mask_threshold": float(mask_threshold),
         },
@@ -1046,6 +1087,10 @@ def detect_keypoints_yolo(
         "profile_timings_enabled": bool(profile_timings),
         "input_mode_requested": resolved_input_mode,
         "input_mode_effective": effective_input_mode,
+        "model_input_transform": model_input_transform.to_attrs(),
+        "model_input_transform_name": model_input_transform.name,
+        "model_input_shape_hw": list(model_input_transform.model_shape),
+        "native_roi_shape_hw": list(model_input_transform.native_shape),
     })
     if timing_profiler.enabled:
         run_group.attrs["timing_profile"] = timing_profiler.summary(
@@ -1304,6 +1349,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "tensor mode only when ROI geometry is equivalent to the legacy path."
         ),
     )
+    parser.add_argument(
+        "--model-input-transform",
+        choices=MODEL_INPUT_TRANSFORM_CHOICES,
+        default="auto",
+        help=(
+            "Reversible transform from native ROI crops to the requested model input size. "
+            "'auto' is identity when sizes match and centered zero-padding when --imgsz is larger."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -1332,6 +1386,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         roi_cache_source_tier=args.roi_cache_source_tier,
         roi_cache_staged_to_node_scratch=bool(args.roi_cache_staged_to_node_scratch),
         input_mode=args.input_mode,
+        model_input_transform_mode=args.model_input_transform,
         profile_timings=args.profile_timings,
         registry=args.registry,
     )

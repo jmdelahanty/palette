@@ -35,6 +35,7 @@ def test_detect_keypoints_yolo_accepts_mask_threshold() -> None:
     assert "roi_live_acceleration" in params
     assert "roi_live_gpu_chunk_frames" in params
     assert "input_mode" in params
+    assert "model_input_transform_mode" in params
     assert "profile_timings" in params
 
 
