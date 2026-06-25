@@ -447,13 +447,30 @@ def load_stimulus_run_frames(root: zarr.Group, stimulus_run: Optional[str] = Non
     return np.unique(camera_frames)
 
 
+def _resolve_calibration_group(root: zarr.Group) -> Tuple[Optional[zarr.Group], Optional[str]]:
+    """Return the canonical calibration group and its logical path."""
+
+    analysis = root.get("analysis")
+    if analysis is not None:
+        analysis_calibration = analysis.get("calibration")
+        if analysis_calibration is not None:
+            return analysis_calibration, "analysis/calibration"
+
+    calibration = root.get("calibration")
+    if calibration is not None:
+        return calibration, "calibration"
+
+    return None, None
+
+
 def resolve_calibration(root: zarr.Group) -> Tuple[Optional[float], Dict[str, Any]]:
     """Retrieve pixel-to-mm conversion if available."""
 
-    calibration = root.get("calibration")
+    calibration, calibration_path = _resolve_calibration_group(root)
     if calibration is None:
         return None, {
             "has_calibration": False,
+            "calibration_path": None,
             "measured_fps": None,
             "measured_stimulus_fps": None,
             "stimulus_offset_x": None,
@@ -502,6 +519,7 @@ def resolve_calibration(root: zarr.Group) -> Tuple[Optional[float], Dict[str, An
 
     return pixel_to_mm_val, {
         "has_calibration": pixel_to_mm_val is not None,
+        "calibration_path": calibration_path,
         "measured_fps": measured_stimulus_fps_val,
         "measured_stimulus_fps": measured_stimulus_fps_val,
         "stimulus_offset_x": stim_offset_x_val,
