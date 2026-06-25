@@ -508,6 +508,34 @@ def _run_stimulus_import(
     return result.returncode == 0, result.returncode
 
 
+def _run_acquisition_crop_video_append(
+    plan: ImportPlan,
+    *,
+    run_name_prefix: str,
+    overwrite_run: bool,
+    gpu_id: int,
+) -> Tuple[bool, int]:
+    run_name = f"{run_name_prefix}_{plan.recording_dir.name}"
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.utils.append_acquisition_crop_video_training",
+        str(plan.zarr_path),
+        "--recording-dir",
+        str(plan.recording_dir),
+        "--run-name",
+        run_name,
+        "--gpu-id",
+        str(int(gpu_id)),
+        "--apply",
+    ]
+    if overwrite_run:
+        cmd.append("--overwrite-run")
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0, result.returncode
+
+
 def _resolve_root(arg_root: Optional[Path]) -> Path:
     if arg_root is not None:
         return arg_root
@@ -714,6 +742,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             "legacy Decord-derived sampled training imports fail closed."
         ),
     )
+    parser.add_argument(
+        "--include-acquisition-crop-video",
+        action="store_true",
+        help=(
+            "After importing sampled full-frame training images, append sampled "
+            "acquisition crop-video frames into crop_runs/<run> in the same training zarr."
+        ),
+    )
+    parser.add_argument(
+        "--acquisition-crop-run-prefix",
+        default="crop_acquisition_crop_video_training",
+        help="Run-name prefix for --include-acquisition-crop-video.",
+    )
+    parser.add_argument(
+        "--overwrite-acquisition-crop-run",
+        action="store_true",
+        help="Overwrite an existing acquisition crop-video crop run with the generated run name.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -784,6 +830,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             legacy_decode_contract_acknowledged=bool(args.allow_legacy_decode_contract),
             decode_backend=args.decode_backend,
             gpu_id=int(args.gpu_id),
+            include_acquisition_crop_video=bool(args.include_acquisition_crop_video),
+            acquisition_crop_run_prefix=str(args.acquisition_crop_run_prefix),
         )
 
     if args.apply:
@@ -823,6 +871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     frame_step_mismatch=plan.frame_step_mismatch,
                     decode_backend=args.decode_backend,
                     gpu_id=int(args.gpu_id),
+                    include_acquisition_crop_video=bool(args.include_acquisition_crop_video),
                 )
         if args.rich:
             _print_plan_rich(plans)
@@ -897,6 +946,38 @@ def main(argv: Optional[List[str]] = None) -> int:
             gpu_id=int(args.gpu_id),
         )
         if success:
+            if args.include_acquisition_crop_video:
+                if logger is not None:
+                    logger.log(
+                        "acquisition_crop_video_append_start",
+                        recording_dir=str(plan.recording_dir),
+                        zarr_path=str(plan.zarr_path),
+                        run_name_prefix=str(args.acquisition_crop_run_prefix),
+                    )
+                crop_ok, crop_returncode = _run_acquisition_crop_video_append(
+                    plan,
+                    run_name_prefix=str(args.acquisition_crop_run_prefix),
+                    overwrite_run=bool(args.overwrite_acquisition_crop_run),
+                    gpu_id=int(args.gpu_id),
+                )
+                if not crop_ok:
+                    failed += 1
+                    print(f"Acquisition crop-video append failed for {plan.zarr_path}")
+                    if logger is not None:
+                        logger.log(
+                            "acquisition_crop_video_append_failed",
+                            recording_dir=str(plan.recording_dir),
+                            zarr_path=str(plan.zarr_path),
+                            returncode=crop_returncode,
+                        )
+                    continue
+                if logger is not None:
+                    logger.log(
+                        "acquisition_crop_video_append_success",
+                        recording_dir=str(plan.recording_dir),
+                        zarr_path=str(plan.zarr_path),
+                        returncode=crop_returncode,
+                    )
             ok += 1
             if logger is not None:
                 logger.log(

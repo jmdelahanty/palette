@@ -157,6 +157,12 @@ This integration deliberately does not do these things yet:
 
 Those are separate consumers of this recording-level media inventory.
 
+The source-selection rule is explicit: acquisition crop-stream availability is
+not proof that downstream runs used crop-video pixels. Each downstream run must
+declare its actual pixel source (`palette_crop_run`, `acquisition_crop_video`,
+`raw_camera_video`, or equivalent) and carry source-specific lineage. See
+`docs/acquisition_video_stream_source_policy.md`.
+
 ## Future Recommendation
 
 The next clean step is to make acquisition boxes optionally enter Palette as a

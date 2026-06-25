@@ -177,6 +177,23 @@ scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonla
 Remove `--limit 1` only after the first imported `_training.zarr` and registry
 row have been inspected.
 
+Cluster equivalent:
+
+```bash
+scripts/submit_import_recordings_training_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains GoodCopBadCop \
+  --target-sampled-frames 200 \
+  --limit 1
+```
+
+The cluster submitter is dry-run by default and writes
+`recording_dirs.txt`, `plan.json`, `submission_manifest.json`, and the generated
+array task script under
+`<root>/logs/import_recordings_training/bsub_submissions/import_training_<run_id>/`.
+After inspecting those files, rerun with `--submit` from an LSF login node. Each
+array task imports one recording with `--decode-backend pynvvc-luma --gpu-id 0`.
+
 ### Video-only validation checks
 
 After import, check:

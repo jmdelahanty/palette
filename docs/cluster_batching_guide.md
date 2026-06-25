@@ -1181,6 +1181,32 @@ fully submitted.
 
 ---
 
+## Sampled Training Zarr Imports
+
+Use the sampled-training submitter instead of hand-writing `bsub` commands for
+PyNvVC sampled imports:
+
+```bash
+scripts/submit_import_recordings_training_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains GoodCopBadCop \
+  --target-sampled-frames 200 \
+  --limit 1
+```
+
+This is dry-run by default. Inspect the generated
+`plan.json`, `submission_manifest.json`, `recording_dirs.txt`, and
+`run_import_training_task.sh`, then rerun with `--submit` on an LSF login node.
+The default task shape is one recording per GPU array task, `gpu_l4`,
+`-gpu "num=1:mode=exclusive_process"`, `--decode-backend pynvvc-luma`,
+registry registration enabled, and stimulus import enabled.
+
+Remove `--limit 1` only after the first `_training.zarr` has the expected
+`raw_video.attrs["decode_backend"] = "pynvvc_luma"` and
+`pixel_contract_name = "orange_mono_pynvvc_luma_uint8_v1"`.
+
+---
+
 ## How to check which scheduler you have
 
 On a login node:

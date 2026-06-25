@@ -162,6 +162,74 @@ the full current GoodCopBadCop set. The June 2026 GoodCopBadCop recordings
 resolve to roughly `frame_step=697..700`; the older May 29 batch resolves from
 external-recorder summaries to `frame_step=717`.
 
+Cluster PyNvVC import:
+
+```bash
+scripts/submit_import_recordings_training_bsub.sh \
+  --root /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains GoodCopBadCop \
+  --target-sampled-frames 200 \
+  --limit 1
+```
+
+The submitter is dry-run by default. Inspect the generated run directory, then
+add `--submit` on an LSF login node. It submits one GPU array task per recording,
+uses `--decode-backend pynvvc-luma`, imports stimulus, and registers outputs in
+the PRFS registry by default.
+
+### Acquisition crop-video pose training
+External-IPC recordings can include acquisition-time crop videos under
+`derived/external_crop_recorder/`. For pose training that should match Orange's
+runtime crop stream, append sampled crop-video frames into the same
+`<recording>_training.zarr` that stores sampled full-frame detector-training
+frames:
+
+```bash
+scripts/py -m fisheye.utils.import_recordings_training /groups/johnson/johnsonlab/jeremy/recordings \
+  --path-contains RedScare \
+  --target-sampled-frames 200 \
+  --include-acquisition-crop-video \
+  --acquisition-crop-run-prefix crop_red_scare_acquisition_crop_video_training \
+  --import-stimulus \
+  --register \
+  --registry /groups/johnson/johnsonlab/jeremy/registries/palette_registry.sqlite \
+  --apply
+```
+
+This creates:
+
+- `raw_video/images_full` and `raw_video/images_ds` from the full camera video
+  for detector training.
+- `crop_runs/<crop_red_scare...>/roi_images` from the acquisition crop video for
+  pose-labeling/training.
+- crop lineage arrays including `source_crop_xywh`,
+  `source_crop_local_frame_ids`, `source_training_row_indices`, and
+  `source_recording_frame_ids`.
+- only crop-video rows with `has_detection=true` and `blank_frame=false`; use
+  `source_training_row_indices` because crop rows can be fewer than full-frame
+  sampled rows.
+- crop QC boxes (`bbox_roi_xyxy`, `bbox_norm_coords`) from realtime crop-meta
+  detection geometry.
+
+The crop-video pixel contract is currently `orange_mono_pynvvc_luma_uint8_v1`
+with `frame_format_confirmation_status=pending_orange_confirmation`; Orange
+still needs to confirm the exact frame representation handed to the crop-video
+encoder and future pose model.
+
+Cluster submitter:
+
+```bash
+scripts/submit_import_recordings_training_bsub.sh \
+  --path-contains RedScare \
+  --target-sampled-frames 200 \
+  --include-acquisition-crop-video \
+  --acquisition-crop-run-prefix crop_red_scare_acquisition_crop_video_training \
+  --max-active 4 \
+  --submit
+```
+
+Contract reference: `docs/acquisition_crop_pose_training_workflow.md`.
+
 ### 2) Run YOLO detection directly on the raw video
 This creates a **detection-only** Zarr with `source_video_path` metadata.
 

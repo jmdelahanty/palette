@@ -211,6 +211,51 @@ def test_run_import_uses_pynvvc_backend_command(tmp_path: Path, monkeypatch: pyt
     assert "2" in cmd
 
 
+def test_run_acquisition_crop_video_append_uses_recording_scoped_run_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rec = _write_recording(tmp_path, "rec_red_scare_RedScare", frame_count=100)
+    plan = mod._build_plans(
+        tmp_path,
+        recursive=False,
+        skip_existing=True,
+        check_stimulus=False,
+        requested_frame_step=10,
+        target_sampled_frames=None,
+        skip_tail_frames=0,
+        path_contains="RedScare",
+        require_source_frame_count=True,
+    )[0]
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], check: bool = False) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    success, returncode = mod._run_acquisition_crop_video_append(
+        plan,
+        run_name_prefix="crop_red_scare_acquisition_crop_video_training",
+        overwrite_run=True,
+        gpu_id=3,
+    )
+
+    assert success is True
+    assert returncode == 0
+    cmd = calls[0]
+    assert cmd[:3] == [sys.executable, "-m", "fisheye.utils.append_acquisition_crop_video_training"]
+    assert str(rec / "zarr" / "rec_red_scare_RedScare_training.zarr") in cmd
+    assert "--recording-dir" in cmd
+    assert str(rec) in cmd
+    assert "--run-name" in cmd
+    assert "crop_red_scare_acquisition_crop_video_training_rec_red_scare_RedScare" in cmd
+    assert "--gpu-id" in cmd
+    assert "3" in cmd
+    assert "--overwrite-run" in cmd
+
+
 def test_legacy_decord_apply_requires_explicit_ack(tmp_path: Path) -> None:
     _write_recording(tmp_path, "rec_legacy_GoodCopBadCop", frame_count=100)
 
