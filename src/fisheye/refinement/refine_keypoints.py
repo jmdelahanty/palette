@@ -1030,6 +1030,7 @@ def create_refined_keypoint_run(
     config: Optional[Dict[str, Any]] = None,
     console: Optional[Console] = None,
     *,
+    run_name: Optional[str] = None,
     command: Optional[str] = None,
     created_at_utc: Optional[str] = None,
 ) -> str:
@@ -1129,8 +1130,11 @@ def create_refined_keypoint_run(
 
     # Prepare destination group
     kp_refined_root = require_runs_parent(root, REFINED_KEYPOINT_GROUP)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name = f"refined_keypoints_{timestamp}"
+    if run_name is None:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_name = f"refined_keypoints_{timestamp}"
+    if run_name in kp_refined_root:
+        raise ValueError(f"Refined keypoint run already exists: {REFINED_KEYPOINT_GROUP}/{run_name}")
     kp_refined = kp_refined_root.create_group(run_name)
     mark_run_started(kp_refined, run_name=run_name, stage="refined_keypoints")
     note_pending_latest(kp_refined_root, run_name)
@@ -1834,6 +1838,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Keypoint run to refine (defaults to latest in keypoints_runs).",
     )
     parser.add_argument(
+        "--run-name",
+        help="Deterministic refined_keypoints_runs child name to create. Defaults to timestamped name.",
+    )
+    parser.add_argument(
         "--config",
         default="configs/fisheye/default.yaml",
         help="Pipeline configuration file (default: configs/fisheye/default.yaml).",
@@ -1930,6 +1938,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         keypoint_run=args.keypoint_run,
         config=config_to_use,
         console=console,
+        run_name=args.run_name,
     )
 
     console.print(

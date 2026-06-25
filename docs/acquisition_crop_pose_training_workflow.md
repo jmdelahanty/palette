@@ -132,6 +132,27 @@ scripts/py -m fisheye.segmentation.infer_unet_subject_masks "$TRAINING_ZARR" \
   --write-masks-roi
 ```
 
+For cluster execution, use the repo-managed wrapper instead of embedding stage
+handoffs in shell:
+
+```bash
+scripts/submit_training_review_bootstrap_bsub.sh \
+  --zarr "$TRAINING_ZARR" \
+  --crop-run "$CROP_RUN" \
+  --pose-model "$POSE_MODEL" \
+  --registry "$REGISTRY" \
+  --run-id red_scare_training_review_20260625_05 \
+  --keypoint-imgsz 512 \
+  --subject-model-input-size 512 \
+  --model-input-transform auto \
+  --submit
+```
+
+The wrapper calls `fisheye.utils.bootstrap_training_review_surfaces`, which
+assigns deterministic run names and passes the refined keypoint run directly to
+subject-mask inference/finalization. It does not parse `latest` from shell or
+use inline Python snippets.
+
 Smaller-input models are a valid future speed optimization, but train/export
 metadata must record the model input size and transform. Do not silently mix
 native `348/384/512` crop sizes in one model contract without an explicit
