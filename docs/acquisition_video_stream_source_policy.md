@@ -59,7 +59,8 @@ Examples:
   acquisition crop video exists.
 - A crop-video pose training export should record
   `source_pixels=acquisition_crop_video`, the crop-video path, the crop-meta
-  path or zarr array path, `source_crop_xywh`, and crop-local frame IDs.
+  path or zarr array path, `source_crop_xywh`, crop-video frame indices, and
+  acquisition-local frame IDs when available.
 - A full-frame detector run should record `source_pixels=raw_camera_video` or
   the equivalent source-video path and should not claim crop-video lineage.
 
@@ -71,11 +72,18 @@ each output row back to the source recording frame and the source crop geometry:
 ```text
 source_crop_video_path
 source_crop_meta_path or source_crop_meta_array_path
+source_crop_meta_row_indices
+source_crop_video_frame_indices
 source_crop_local_frame_ids
 source_recording_frame_ids
 frame_indices
 source_crop_xywh
 ```
+
+`source_crop_video_frame_indices` are zero-based frame indices into the encoded
+crop video. `source_crop_local_frame_ids` preserve Orange/acquisition-local frame
+IDs when present, but they must not be treated as crop-video frame indices unless
+the source contract explicitly states that they are identical.
 
 `source_crop_xywh` is in full-frame source-image coordinates. It is the
 reversible mapping between crop-video pixel coordinates and full-frame

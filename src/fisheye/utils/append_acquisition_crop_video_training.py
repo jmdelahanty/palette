@@ -54,6 +54,7 @@ class _CropSelection:
     source_training_rows: np.ndarray
     source_frames: np.ndarray
     crop_meta_rows: np.ndarray
+    crop_video_frame_indices: np.ndarray
     crop_local_frame_ids: np.ndarray
     source_recording_frame_ids: np.ndarray
     source_crop_xywh: np.ndarray
@@ -160,6 +161,7 @@ def _select_crop_rows(root: zarr.Group, crop_meta_path: Path) -> tuple[_CropSele
         source_training_rows=selected_train,
         source_frames=source_frames[selected_train].astype(np.int64, copy=False),
         crop_meta_rows=crop_meta.row_indices[selected_crop].astype(np.int64, copy=False),
+        crop_video_frame_indices=crop_meta.video_frame_indices[selected_crop].astype(np.int64, copy=False),
         crop_local_frame_ids=crop_meta.local_frame_ids[selected_crop].astype(np.int64, copy=False),
         source_recording_frame_ids=source_frames[selected_train].astype(np.int64, copy=False) + 1,
         source_crop_xywh=crop_meta.crop_xywh[selected_crop].astype(np.float32, copy=False),
@@ -214,6 +216,7 @@ def _write_crop_run(
     _create_array(crop_group, "source_training_row_indices", selection.source_training_rows.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_recording_frame_ids", selection.source_recording_frame_ids.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_meta_row_indices", selection.crop_meta_rows.astype(np.int64), chunks=vector_chunks)
+    _create_array(crop_group, "source_crop_video_frame_indices", selection.crop_video_frame_indices.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_local_frame_ids", selection.crop_local_frame_ids.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_xywh", selection.source_crop_xywh.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "bbox_roi_xyxy", selection.realtime_detection_bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
@@ -241,6 +244,8 @@ def _write_crop_run(
             "source_training_zarr": str(training_zarr),
             "recording_dir": str(recording_dir),
             "source_crop_xywh_coordinate_space": "source_image_xywh",
+            "source_crop_video_frame_indices_semantics": "zero_based_frame_index_in_acquisition_crop_video",
+            "source_crop_local_frame_ids_semantics": "orange_acquisition_local_frame_id_not_video_frame_index",
             "source_sample_count": int(report.source_sample_count),
             "selected_sample_count": int(report.selected_rows),
             "crop_detection_required": True,
@@ -318,7 +323,7 @@ def append_acquisition_crop_video_training(
     resolved_run_name = run_name or _utc_run_name(DEFAULT_CROP_RUN_PREFIX)
     images = _read_selected_frames(
         resolved_crop_video,
-        selection.crop_local_frame_ids,
+        selection.crop_video_frame_indices,
         reader_factory=reader_factory or PynvvcLumaRgbReader,
         gpu_id=int(gpu_id),
         require_cuda=require_cuda,

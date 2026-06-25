@@ -203,8 +203,8 @@ This creates:
 - `crop_runs/<crop_red_scare...>/roi_images` from the acquisition crop video for
   pose-labeling/training.
 - crop lineage arrays including `source_crop_xywh`,
-  `source_crop_local_frame_ids`, `source_training_row_indices`, and
-  `source_recording_frame_ids`.
+  `source_crop_video_frame_indices`, `source_crop_local_frame_ids`,
+  `source_training_row_indices`, and `source_recording_frame_ids`.
 - only crop-video rows with `has_detection=true` and `blank_frame=false`; use
   `source_training_row_indices` because crop rows can be fewer than full-frame
   sampled rows.

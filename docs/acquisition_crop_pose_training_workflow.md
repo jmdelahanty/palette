@@ -1,8 +1,8 @@
 # Acquisition Crop-Video Pose Training Workflow
 <!-- contract-meta
-version: 1
+version: 2
 status: draft
-last_verified: 2026-06-24
+last_verified: 2026-06-25
 -->
 
 ## Purpose
@@ -40,7 +40,9 @@ crop_runs/<acquisition_crop_video_run>/
   frame_indices               same source frame clock as raw_video/original_frame_indices
   source_training_row_indices row indices into raw_video sampled frames
   source_crop_xywh            full-frame crop geometry from crop_meta
-  source_crop_local_frame_ids frame ids inside the crop video
+  source_crop_video_frame_indices
+                              zero-based frame ids inside the crop video
+  source_crop_local_frame_ids Orange/acquisition-local ids from crop_meta
 ```
 
 Build it in two phases:
@@ -84,6 +86,7 @@ The append step resolves:
 For each sampled source frame in `raw_video/original_frame_indices`:
 
 - `frame_indices` maps to crop metadata by `recording_frame_id - 1`.
+- `source_crop_video_frame_indices` maps to crop MP4 frame order.
 - crop metadata must exist for the source frame.
 - `blank_frame` must be false.
 - `has_detection` must be true.
@@ -110,7 +113,8 @@ crop_runs/<crop_run>/
   source_recording_frame_ids         int64, original 1-based acquisition ids
   source_training_row_indices        int64, row ids into raw_video sampled frames
   source_crop_meta_row_indices       int64
-  source_crop_local_frame_ids        int64, frame numbers inside crop video
+  source_crop_video_frame_indices    int64, zero-based frame indices inside crop video
+  source_crop_local_frame_ids        int64, Orange/acquisition-local ids from crop_meta
   source_crop_xywh                   float32, full-frame crop geometry
   bbox_roi_xyxy                      float32, realtime detection bbox in crop pixels
   bbox_norm_coords                   float32, realtime detection bbox as xywhn
@@ -138,6 +142,13 @@ rejected_blank_crop_frame
 rejected_crop_has_no_detection
 rejected_nonfinite_crop_geometry
 ```
+
+When crop metadata carries an explicit `crop_video_frame_index` column, Palette
+uses it for `source_crop_video_frame_indices`. Current RedScare crop metadata
+does not carry that column, so Palette falls back to `source_crop_meta_row_indices`
+because the encoded crop MP4 has one frame per metadata row. `local_frame_id` is
+retained as `source_crop_local_frame_ids` for provenance only; it is not used to
+decode the crop MP4.
 
 When reviewed/refined keypoints already exist, a separate labeled export can
 also write `keypoints_runs/<run>` with crop-video-local keypoints. That is not

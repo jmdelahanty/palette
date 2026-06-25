@@ -79,6 +79,7 @@ class AcquisitionCropPoseReport:
 @dataclass(frozen=True)
 class _CropMetaTable:
     frame_indices: np.ndarray
+    video_frame_indices: np.ndarray
     local_frame_ids: np.ndarray
     row_indices: np.ndarray
     has_detection: np.ndarray
@@ -109,6 +110,7 @@ class _Selection:
     source_keypoint_rows: np.ndarray
     source_frames: np.ndarray
     crop_meta_rows: np.ndarray
+    crop_video_frame_indices: np.ndarray
     crop_local_frame_ids: np.ndarray
     source_recording_frame_ids: np.ndarray
     source_crop_xywh: np.ndarray
@@ -236,6 +238,7 @@ def inspect_crop_video_stream(recording_dir: Path, crop_meta_path: Path, crop_vi
 
 def load_crop_meta_table(crop_meta_path: Path) -> _CropMetaTable:
     frame_indices: list[int] = []
+    video_frame_indices: list[int] = []
     local_frame_ids: list[int] = []
     row_indices: list[int] = []
     has_detection: list[bool] = []
@@ -251,8 +254,10 @@ def load_crop_meta_table(crop_meta_path: Path) -> _CropMetaTable:
             raise ValueError(f"Crop metadata missing required columns: {missing}")
         for row_index, row in enumerate(reader):
             frame = _safe_int(row.get("recording_frame_id"), default=0) - 1
+            video_frame = _safe_int(row.get("crop_video_frame_index"), default=row_index)
             local_frame = _safe_int(row.get("local_frame_id"), default=row_index)
             frame_indices.append(frame)
+            video_frame_indices.append(video_frame)
             local_frame_ids.append(local_frame)
             row_indices.append(row_index)
             has_detection.append(bool(_safe_int(row.get("has_detection"), default=0)))
@@ -270,6 +275,7 @@ def load_crop_meta_table(crop_meta_path: Path) -> _CropMetaTable:
 
     return _CropMetaTable(
         frame_indices=np.asarray(frame_indices, dtype=np.int64),
+        video_frame_indices=np.asarray(video_frame_indices, dtype=np.int64),
         local_frame_ids=np.asarray(local_frame_ids, dtype=np.int64),
         row_indices=np.asarray(row_indices, dtype=np.int64),
         has_detection=np.asarray(has_detection, dtype=bool),
@@ -516,6 +522,7 @@ def _select_rows(
         source_keypoint_rows=selected_kp,
         source_frames=keypoints.frame_indices[selected_kp].astype(np.int64, copy=False),
         crop_meta_rows=crop_meta.row_indices[selected_crop].astype(np.int64, copy=False),
+        crop_video_frame_indices=crop_meta.video_frame_indices[selected_crop].astype(np.int64, copy=False),
         crop_local_frame_ids=crop_meta.local_frame_ids[selected_crop].astype(np.int64, copy=False),
         source_recording_frame_ids=keypoints.frame_indices[selected_kp].astype(np.int64, copy=False) + 1,
         source_crop_xywh=crop_meta.crop_xywh[selected_crop].astype(np.float32, copy=False),
@@ -604,7 +611,7 @@ def _create_array(group: zarr.Group, name: str, data: np.ndarray, *, chunks: tup
 
 def _read_selected_frames(
     crop_video_path: Path,
-    local_frame_ids: np.ndarray,
+    video_frame_indices: np.ndarray,
     *,
     reader_factory: Callable[..., Any] = PynvvcLumaRgbReader,
     gpu_id: int = 0,
@@ -615,7 +622,7 @@ def _read_selected_frames(
             "Acquisition crop-video export requires CUDA-enabled torch for PyNvVC decode; "
             "current environment reports torch.cuda.is_available() == False."
         )
-    selected = np.asarray(local_frame_ids, dtype=np.int64)
+    selected = np.asarray(video_frame_indices, dtype=np.int64)
     if selected.size == 0:
         raise ValueError("No selected crop-video frames to decode.")
     selected_set = set(int(v) for v in selected.tolist())
@@ -635,7 +642,7 @@ def _read_selected_frames(
                 frames[frame_idx] = luma.to("cpu").numpy().copy()
         missing = [int(v) for v in selected.tolist() if int(v) not in frames]
         if missing:
-            raise RuntimeError(f"Crop video ended before selected local frames were decoded: first missing {missing[:5]}")
+            raise RuntimeError(f"Crop video ended before selected video frames were decoded: first missing {missing[:5]}")
         return np.stack([frames[int(v)] for v in selected.tolist()], axis=0).astype(np.uint8, copy=False)
     finally:
         reader.close()
@@ -699,6 +706,7 @@ def _write_output_zarr(
     _create_array(crop_group, "source_frame_indices", selection.source_frames.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_recording_frame_ids", selection.source_recording_frame_ids.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_meta_row_indices", selection.crop_meta_rows.astype(np.int64), chunks=vector_chunks)
+    _create_array(crop_group, "source_crop_video_frame_indices", selection.crop_video_frame_indices.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_local_frame_ids", selection.crop_local_frame_ids.astype(np.int64), chunks=vector_chunks)
     _create_array(crop_group, "source_crop_xywh", selection.source_crop_xywh.astype(np.float32), chunks=bbox_chunks)
     _create_array(crop_group, "bbox_roi_xyxy", selection.bbox_roi_xyxy.astype(np.float32), chunks=bbox_chunks)
@@ -744,6 +752,8 @@ def _write_output_zarr(
         "source_crop_meta_path": str(crop_meta_path),
         "source_analysis_zarr": str(zarr_path),
         "source_crop_xywh_coordinate_space": "source_image_xywh",
+        "source_crop_video_frame_indices_semantics": "zero_based_frame_index_in_acquisition_crop_video",
+        "source_crop_local_frame_ids_semantics": "orange_acquisition_local_frame_id_not_video_frame_index",
         "bbox_norm_coords_semantics": "pose_bbox_from_keypoint_extents_xywh_normalized_to_crop_video_frame",
         "bbox_roi_xyxy_semantics": "pose_bbox_from_keypoint_extents_crop_video_pixels",
         "frame_format_confirmation_status": "pending_orange_confirmation",
@@ -829,7 +839,7 @@ def export_acquisition_crop_pose_training_zarr(
     start = time.perf_counter()
     images = _read_selected_frames(
         resolved_crop_video,
-        selection.crop_local_frame_ids,
+        selection.crop_video_frame_indices,
         reader_factory=reader_factory,
         gpu_id=int(gpu_id),
         require_cuda=require_cuda,
