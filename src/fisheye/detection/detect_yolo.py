@@ -48,6 +48,7 @@ from fisheye.shared.pynvvc_luma_rgb import preprocess_luma_rgb
 from fisheye.shared.pynvvc_luma_rgb import preprocess_nv12_rgb
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.schema import get_run_group
+from fisheye.shared.zarr.chunk_profiles import create_geometry_preload_array
 from fisheye.shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
@@ -1535,8 +1536,6 @@ def detect_yolo(
     
     preferred_det_chunk = max(1024, max(1, batch_size) * 8)
     det_chunk = max(1, min(max(1, total_detections), preferred_det_chunk, 16384))
-    preferred_count_chunk = max(1024, max(1, batch_size) * 4)
-    counts_chunk = max(1, min(n_frames, preferred_count_chunk, 16384))
     
     # Save to zarr
     zarr_write_start = time.perf_counter()
@@ -1544,8 +1543,8 @@ def detect_yolo(
     detect_group.create_array('bbox_norm_coords', data=bbox_coords, chunks=(det_chunk, 4), overwrite=True)
     detect_group.create_array('scores', data=scores, chunks=(det_chunk,), overwrite=True)
     detect_group.create_array('class_ids', data=class_ids, chunks=(det_chunk,), overwrite=True)
-    detect_group.create_array('n_detections', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
-    detect_group.create_array('frame_counts', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
+    create_geometry_preload_array(detect_group, 'n_detections', data=frame_counts, overwrite=True)
+    create_geometry_preload_array(detect_group, 'frame_counts', data=frame_counts, overwrite=True)
     _record_timing(stage_timings, 'zarr_write_seconds_total', zarr_write_start)
     
     # Calculate statistics

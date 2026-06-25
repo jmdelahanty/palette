@@ -67,6 +67,7 @@ from ..shared.zarr_run_completion import (
     mark_run_started,
     note_pending_latest,
 )
+from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -626,9 +627,9 @@ def _write_optional_detection_row_lineage(
                 "refined_row_ids length "
                 f"{source_refined_row_ids.shape[0]} does not match total detections {total_detections}"
             )
-        crop_group.create_array(
+        create_geometry_preload_array(
+            crop_group,
             "source_refined_row_ids",
-            chunks=(min(1000, total_detections),),
             data=source_refined_row_ids,
             overwrite=True,
         )
@@ -649,9 +650,9 @@ def _write_optional_detection_row_lineage(
                 "source_detect_row_index length "
                 f"{source_detect_row_index.shape[0]} does not match total detections {total_detections}"
             )
-        crop_group.create_array(
+        create_geometry_preload_array(
+            crop_group,
             "source_detect_row_index",
-            chunks=(min(1000, total_detections),),
             data=source_detect_row_index,
             overwrite=True,
         )
@@ -2684,9 +2685,9 @@ def save_crop_metadata(
     )
     
     # Copy frame_indices directly
-    crop_group.create_array(
+    create_geometry_preload_array(
+        crop_group,
         'frame_indices',
-        chunks=(min(1000, len(frame_indices)),),
         data=frame_indices,
         overwrite=True
     )
@@ -2702,9 +2703,9 @@ def save_crop_metadata(
 
     # Create detection_indices mapping (identity w.r.t source detections)
     detection_indices = np.arange(total_detections, dtype='i4')
-    crop_group.create_array(
+    create_geometry_preload_array(
+        crop_group,
         'detection_indices',
-        chunks=(min(1000, total_detections),),
         data=detection_indices,
         overwrite=True
     )

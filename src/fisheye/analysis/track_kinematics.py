@@ -39,6 +39,10 @@ from fisheye.shared.stage_provenance import (
     write_stage_provenance,
 )
 from fisheye.shared.run_lineage_fingerprint import write_best_effort_run_lineage_attrs
+from fisheye.shared.zarr.chunk_profiles import (
+    geometry_preload_chunks_for_shape,
+    stamp_geometry_preload_attrs,
+)
 from fisheye.shared.zarr_run_completion import mark_run_complete, mark_run_started, require_runs_parent
 from fisheye.tracking.single_subject_per_arena import load_tracking_ids
 from fisheye.utils.system import get_git_info, get_environment_info
@@ -83,6 +87,20 @@ SPEED_DERIVATIVE_LEVELS = (
 SPEED_DERIVATIVES_SCHEMA_ID = "palette.track_speed_derivatives.v1"
 SPEED_DERIVATIVE_SCHEMA_ID = "palette.track_speed_derivative.v1"
 DEFAULT_ACCELERATION_SOURCE_SPEED_LEVEL = "speed_smoothed"
+
+
+def _track_preload_chunks(shape: Tuple[int, ...] | Iterable[int]) -> Tuple[int, ...] | None:
+    return geometry_preload_chunks_for_shape(tuple(int(dim) for dim in shape))
+
+
+def _stamp_geometry_preload_tree(group: zarr.Group) -> None:
+    stamp_geometry_preload_attrs(group)
+    for name in list(group.array_keys()):
+        stamp_geometry_preload_attrs(group[name])
+    for name in list(group.group_keys()):
+        _stamp_geometry_preload_tree(group[name])
+
+
 MOVEMENT_SCHEMA_ID = "palette.track_movement.v2"
 MOVEMENT_SPEED_SCHEMA_ID = "palette.track_movement_speed.v2"
 MOVEMENT_SPEED_LEVEL_SCHEMA_ID = "palette.track_movement_speed_level.v2"
@@ -1242,10 +1260,13 @@ def save_track_kinematics_tracks(
     """Persist per-track data beneath the track kinematics run group."""
 
     tracks_parent = run_group.create_group("tracks")
+    stamp_geometry_preload_attrs(run_group)
+    stamp_geometry_preload_attrs(tracks_parent)
     ordered_ids = sorted(int(track_id) for track_id in tracks.keys())
     track_ids_array = np.asarray(ordered_ids, dtype=np.int32)
-    chunks = (min(1024, len(ordered_ids)),) if ordered_ids else (1,)
+    chunks = _track_preload_chunks(track_ids_array.shape) or (1,)
     run_group.create_array("track_ids", data=track_ids_array, chunks=chunks, overwrite=True)
+    stamp_geometry_preload_attrs(run_group["track_ids"])
     track_arena_ids = _ordered_track_arena_ids(ordered_ids, track_id_to_arena_id)
     if track_arena_ids is not None:
         run_group.create_array(
@@ -1254,6 +1275,7 @@ def save_track_kinematics_tracks(
             chunks=chunks,
             overwrite=True,
         )
+        stamp_geometry_preload_attrs(run_group["track_arena_ids"])
 
     manifest: List[Dict[str, float]] = []
     summary_by_id = {int(item["track_id"]): item for item in summaries}
@@ -1264,7 +1286,7 @@ def save_track_kinematics_tracks(
         subgroup = tracks_parent.create_group(f"id_{track_id}")
 
         sample_count = int(data["frame_indices"].size)
-        base_chunk = (min(1024, sample_count),) if sample_count else (1,)
+        base_chunk = _track_preload_chunks(data["frame_indices"].shape) or (1,)
 
         subgroup.create_array("frame_indices", data=data["frame_indices"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("time_seconds", data=data["time_seconds"], chunks=base_chunk, overwrite=True)
@@ -1399,7 +1421,7 @@ def save_track_kinematics_tracks(
         )
 
         seconds = data["second_indices"]
-        sec_chunk = (min(512, seconds.size),) if seconds.size else (1,)
+        sec_chunk = _track_preload_chunks(seconds.shape) or (1,)
         subgroup.create_array("second_indices", data=seconds, chunks=sec_chunk, overwrite=True)
         subgroup.create_array("speed_per_second_px", data=data["speed_per_second_px"], chunks=sec_chunk, overwrite=True)
         subgroup.create_array("speed_per_second_mm", data=data["speed_per_second_mm"], chunks=sec_chunk, overwrite=True)
@@ -1422,6 +1444,7 @@ def save_track_kinematics_tracks(
                 "summary": summary,
             }
         )
+        _stamp_geometry_preload_tree(subgroup)
 
         manifest.append(
             {
@@ -1626,14 +1649,12 @@ def _write_run_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
     """Create or overwrite an array under the track kinematics run group."""
 
     array = np.asarray(data)
-    if array.ndim == 0:
-        chunks = None
-    else:
-        first_dim = array.shape[0] if array.shape[0] > 0 else 1
-        chunk_first = max(1, min(4096, first_dim))
-        chunks = (chunk_first,) + array.shape[1:]
-
-    group.create_array(name, data=array, chunks=chunks, overwrite=True)
+    chunks = _track_preload_chunks(array.shape)
+    kwargs: Dict[str, Any] = {"data": array, "overwrite": True}
+    if chunks is not None:
+        kwargs["chunks"] = chunks
+    group.create_array(name, **kwargs)
+    stamp_geometry_preload_attrs(group[name])
 
 
 def _smooth_series(values: np.ndarray, window: int) -> np.ndarray:
@@ -1944,12 +1965,12 @@ def _mirror_swim_bouts_to_tracks(
             for name in list(subgroup.array_keys()):
                 del subgroup[name]
             for name, array in columns.items():
-                subgroup.create_array(
-                    name,
-                    data=array,
-                    chunks=(max(1, min(4096, array.shape[0])),),
-                    overwrite=True,
-                )
+                chunks = _track_preload_chunks(array.shape)
+                kwargs: Dict[str, Any] = {"data": array, "overwrite": True}
+                if chunks is not None:
+                    kwargs["chunks"] = chunks
+                subgroup.create_array(name, **kwargs)
+                stamp_geometry_preload_attrs(subgroup[name])
             subgroup.attrs.update({**track_subgroup_attrs, "mirrored_fields": list(columns.keys())})
 
         console.print(
@@ -1983,12 +2004,12 @@ def _mirror_swim_bouts_to_tracks(
             for name in list(level_subgroup.array_keys()):
                 del level_subgroup[name]
             for name, array in columns.items():
-                level_subgroup.create_array(
-                    name,
-                    data=array,
-                    chunks=(max(1, min(4096, array.shape[0])),),
-                    overwrite=True,
-                )
+                chunks = _track_preload_chunks(array.shape)
+                kwargs = {"data": array, "overwrite": True}
+                if chunks is not None:
+                    kwargs["chunks"] = chunks
+                level_subgroup.create_array(name, **kwargs)
+                stamp_geometry_preload_attrs(level_subgroup[name])
             level_subgroup.attrs.update(
                 {
                     "speed_level": signal.speed_level,

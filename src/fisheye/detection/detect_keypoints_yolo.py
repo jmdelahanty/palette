@@ -731,6 +731,7 @@ def detect_keypoints_yolo(
         run_group,
         crop_group,
         total_rois=total_rois,
+        use_geometry_preload_profile=True,
     )
     if "detection_indices" not in lineage_result.copied:
         console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")

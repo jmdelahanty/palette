@@ -8,6 +8,10 @@ from typing import Iterable, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
+from fisheye.shared.zarr.chunk_profiles import (
+    CRIMSON_LINEAGE_PRELOAD_ARRAYS,
+    create_geometry_preload_array,
+)
 
 ROW_ALIGNMENT_ARRAYS: Tuple[str, ...] = (
     "frame_indices",
@@ -209,7 +213,12 @@ def _write_array(
     *,
     source_array: object | None,
     overwrite: bool,
+    geometry_preload_names: frozenset[str] | None = None,
 ) -> None:
+    if geometry_preload_names is not None and name in geometry_preload_names:
+        create_geometry_preload_array(target_group, name, data=data, overwrite=overwrite)
+        return
+
     chunks = normalize_chunks_for_data(getattr(source_array, "chunks", None), data.shape)
     if overwrite and name in target_group:
         try:
@@ -233,13 +242,23 @@ def copy_row_lineage_array(
     *,
     total_rois: Optional[int] = None,
     overwrite: bool = True,
+    use_geometry_preload_profile: bool = False,
 ) -> bool:
     payload = _read_array(source_group, name)
     if payload is None:
         return False
     source_array, data = payload
     validate_row_lineage_array(name, data, total_rois=total_rois)
-    _write_array(target_group, name, data, source_array=source_array, overwrite=overwrite)
+    _write_array(
+        target_group,
+        name,
+        data,
+        source_array=source_array,
+        overwrite=overwrite,
+        geometry_preload_names=(
+            CRIMSON_LINEAGE_PRELOAD_ARRAYS if use_geometry_preload_profile else None
+        ),
+    )
     return True
 
 
@@ -250,6 +269,7 @@ def copy_row_lineage_arrays(
     names: Iterable[str] = ROW_LINEAGE_ARRAYS,
     total_rois: Optional[int] = None,
     overwrite: bool = True,
+    use_geometry_preload_profile: bool = False,
 ) -> RowLineageCopyResult:
     copied = []
     missing = []
@@ -260,6 +280,7 @@ def copy_row_lineage_arrays(
             name,
             total_rois=total_rois,
             overwrite=overwrite,
+            use_geometry_preload_profile=use_geometry_preload_profile,
         ):
             copied.append(str(name))
         else:
@@ -274,6 +295,7 @@ def copy_row_lineage_arrays_from_sources(
     names: Iterable[str] = ROW_LINEAGE_ARRAYS,
     total_rois: Optional[int] = None,
     overwrite: bool = True,
+    use_geometry_preload_profile: bool = False,
 ) -> RowLineageCopyResult:
     copied = []
     missing = []
@@ -284,7 +306,16 @@ def copy_row_lineage_arrays_from_sources(
             continue
         data = np.asarray(source_array[:])  # type: ignore[index]
         validate_row_lineage_array(name, data, total_rois=total_rois)
-        _write_array(target_group, name, data, source_array=source_array, overwrite=overwrite)
+        _write_array(
+            target_group,
+            name,
+            data,
+            source_array=source_array,
+            overwrite=overwrite,
+            geometry_preload_names=(
+                CRIMSON_LINEAGE_PRELOAD_ARRAYS if use_geometry_preload_profile else None
+            ),
+        )
         copied.append(str(name))
     return RowLineageCopyResult(copied=tuple(copied), missing=tuple(missing))
 
@@ -297,6 +328,7 @@ def copy_row_lineage_arrays_with_fallback(
     names: Iterable[str] = ROW_LINEAGE_ARRAYS,
     total_rois: Optional[int] = None,
     overwrite: bool = True,
+    use_geometry_preload_profile: bool = False,
 ) -> RowLineageCopyResult:
     copied = []
     missing = []
@@ -316,7 +348,16 @@ def copy_row_lineage_arrays_with_fallback(
             continue
         source_array, data = chosen
         validate_row_lineage_array(name, data, total_rois=total_rois)
-        _write_array(target_group, name, data, source_array=source_array, overwrite=overwrite)
+        _write_array(
+            target_group,
+            name,
+            data,
+            source_array=source_array,
+            overwrite=overwrite,
+            geometry_preload_names=(
+                CRIMSON_LINEAGE_PRELOAD_ARRAYS if use_geometry_preload_profile else None
+            ),
+        )
         copied.append(str(name))
         if primary is None:
             fallback_copied.append(str(name))

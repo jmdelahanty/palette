@@ -735,6 +735,7 @@ def detect_keypoints(
         keypoint_group,
         crop_group,
         total_rois=total_rois,
+        use_geometry_preload_profile=True,
     )
     if "frame_counts" in lineage_result.copied:
         frame_counts_total = keypoint_group["frame_counts"][:].astype("i4", copy=False)

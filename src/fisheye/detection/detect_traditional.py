@@ -21,6 +21,7 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.zarr.chunk_profiles import create_geometry_preload_array
 from ..shared.zarr_run_completion import (
     mark_run_complete,
     mark_run_started,
@@ -391,16 +392,16 @@ def detect_fish(
         # Compute and store frame counts for visualization
         console.print("Computing frame counts for visualization...")
         frame_counts = np.bincount(frame_indices_np, minlength=num_images)
-        detect_group.create_array(
+        create_geometry_preload_array(
+            detect_group,
             'frame_counts',
             data=frame_counts,
-            chunks=(min(chunk_size * 4, num_images),),
             overwrite=True
         )
-        detect_group.create_array(
+        create_geometry_preload_array(
+            detect_group,
             'n_detections',
             data=frame_counts,
-            chunks=(min(chunk_size * 4, num_images),),
             overwrite=True
         )
         
@@ -411,11 +412,10 @@ def detect_fish(
         detect_group.create_array('scores', data=np.empty((0,), dtype=np.float32), overwrite=True)
         detect_group.create_array('class_ids', data=np.empty((0,), dtype=np.int32), overwrite=True)
         frame_counts_empty = np.zeros(num_images, dtype='i4')
-        chunks = (min(chunk_size * 4, num_images),) if num_images else None
-        detect_group.create_array(
+        create_geometry_preload_array(
+            detect_group,
             'frame_counts',
             data=frame_counts_empty,
-            chunks=chunks,
             overwrite=True
         )
 

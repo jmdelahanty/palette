@@ -1211,7 +1211,12 @@ def create_refined_keypoint_run(
     kp_refined.attrs["edge_distance_source"] = edge_source
 
     # Copy row-lineage arrays from the source keypoint run.
-    copy_row_lineage_arrays(kp_refined, kp_source, total_rois=total_rois)
+    copy_row_lineage_arrays(
+        kp_refined,
+        kp_source,
+        total_rois=total_rois,
+        use_geometry_preload_profile=True,
+    )
     if "n_rois" in kp_source:
         _copy_array(kp_source["n_rois"], kp_refined, "n_rois")
 
